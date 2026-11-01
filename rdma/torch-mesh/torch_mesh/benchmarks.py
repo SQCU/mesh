@@ -6,6 +6,7 @@ Preparation occurs before submission; observations do not change execution.
 import json
 from pathlib import Path
 import sys
+import time
 
 from mesh_statistics import now, Observations
 
@@ -104,23 +105,16 @@ def bandwidth(config):
     group.plan([(declarations, calls) for _, _, declarations, calls, _, _ in cases])
     prepared = []
     for binding, useful, _, calls, what, requested in cases:
-        binding.realize(calls)
-        prepared.append((binding, useful, calls, what, requested))
+        from .declarations import execution_sequence
+        execution = execution_sequence((binding,) * calls)
+        execution.realize()
+        prepared.append((execution, useful, calls, what, requested))
     observations = Observations()
     for index, (binding, useful, calls, what, requested) in enumerate(prepared):
-        # each case submitted once this rank's earlier ones have ended: its submission-to-completion time is then its
-        # own, where submitted behind every case still queued it included all of theirs (d4916d1e's "Cumulative",
-        # design/measurement-regressions-2026-10-30.md); a rank whose part of the case before ended early (a
-        # broadcast's root) still starts its next case early.
-        # To whoever edits this next: 546ab766 and 20463ee3 also put a store barrier here (every rank past the case
-        # before) and were reverted (1fdae0b1, b207f2e1) with no reason given; if the store was the objection, this
-        # form has none. What must stay is the wait: mesh_statistics.completed times a function from its submission
-        # (eee4d96b), so a case submitted behind queued ones is timed with them, every case about 35x its own time on
-        # 2026-10-31 (64 MiB all-gather 175,684 us a call against 1,804 compiled, its transfers unchanged). Remove it
-        # only together with a timing that leaves the queue out; the rate per case is what the hourly ledger reads.
-        observations.close()
+        # Cases submit asynchronously. Each record measures its own submission
+        # through completion, including contention from outstanding episodes.
         started = now()
-        binding.enqueue()
+        binding.forward()
         completion = binding.completion()
         observations.put(completion, {'episode': str(index), 'parts': {}, 'graphs': {}, 'proposal': 0,
             'workload': {'collective': what, 'bytes': requested, 'calls': calls}, 'implementation': 'loaded-program',
@@ -128,7 +122,8 @@ def bandwidth(config):
             'report': {'what': what, 'requested_bytes': requested, 'calls': calls,
                        'useful_output_bytes_per_call_rank': useful,
                        'compiled_microseconds_per_call': group._plan.seconds[index] * 1e6}})
-    observations.close()
+    while not observations.close():
+        time.sleep(0)
     checked(rank, outputs)
     dist.destroy_process_group()
 

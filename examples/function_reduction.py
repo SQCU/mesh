@@ -9,12 +9,12 @@ from torch_mesh.declarations import Function
 from torch_mesh.reduction import Reduction
 
 
-def prepare(group, values, destination, *, configuration=None):
+def prepare(group, values, destination, *, topology=None, configuration=None):
     # Each row is one reduction value. This callable is captured here and does
     # not run from a callback while values are being processed.
     combine = Reduction(torch.add, 0, dtype=values.dtype,
                         element_shape=tuple(values.shape[1:]),
-                        reassociate=True, reorder=True, configuration=configuration)
+                        reassociate=True, topology=topology)
 
     def source(x):
         return combine(x, group)

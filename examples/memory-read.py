@@ -1,5 +1,6 @@
 """A complete streamed read using the ordinary library and asynchronous statistics."""
 import argparse
+import time
 import torch
 from torch_mesh import _stream, streamed
 from mesh_statistics import now, Observations
@@ -22,7 +23,8 @@ def main():
         'workload': {'mib': config.mib, 'rounds': config.rounds}, 'implementation': 'loaded-program',
         'started': started, 'rank': 0, 'size': 1, 'useful_work_bytes': count * 16 * config.rounds,
         'report': {'program': 'memory-read', 'kind': 'bandwidth', 'node': list(streamed.node()), 'steps': config.rounds}})
-    observations.close()
+    while not observations.close():
+        time.sleep(0)
 
 
 if __name__ == '__main__':

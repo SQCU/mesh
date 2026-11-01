@@ -475,6 +475,14 @@ def storage_requirement(declared):
     return declared, 0, 1
 
 
+def storage_origin(declarations):
+    """Optional ABI origin, in bytes relative to the first selected value."""
+    origins = {int(value['origin']) for value in declarations if isinstance(value, dict) and 'origin' in value}
+    if len(origins) > 1:
+        raise ValueError('one operand binding must declare one ABI origin')
+    return next(iter(origins)) if origins else None
+
+
 def requirements(value, declarations):
     declarations = [storage_requirement(item)[0] for item in declarations]
     return descriptor(value).requirements([

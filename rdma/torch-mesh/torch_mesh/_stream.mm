@@ -251,6 +251,7 @@ static void checked(int64_t result) {
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
+static MetalTensorPages *tensorPages(const at::Tensor &t);
 
 // One call of a group: its kind, its send and receive tensors (an all-to-all's none where it moves none that way; an
 // all-reduce's, reduce's or broadcast's sends alone where it is in place), its counts (a V call's segment a rank, an
@@ -263,8 +264,8 @@ using Call = std::tuple<int64_t, Tensors, Tensors, std::vector<int64_t>, int64_t
 // A tensor as the library reads it, with ProcessGroupNCCL's dtype semantics: a collective that moves data moves any
 // dtype (one NCCL lacks as its bytes); a reduction reduces a complex tensor as its real view (sum and average) and a bool
 // tensor's sum and product as max and min (its average the library's uint8 average: the sum truncated by the ranks, 1
-// only where every rank holds 1).  `at` is an ncclMeshBuffer (its storage's MTLBuffer and byte offset) on the
-// Metal path and a host pointer on the host path (NULL: none).
+// only where every rank holds 1). `at` names the same bridge page buffer for
+// CPU and Metal frontend views; device labels never select a memory protocol.
 struct Operand {
   const void *at = nullptr;
   size_t count = 0;
@@ -275,16 +276,15 @@ struct Operand {
 // A group's prepared fragments. The shared view lowerer resolves logical page
 // selections and typed record boundaries before these native scalar bindings.
 struct Group {
-  bool metal = false;
   std::deque<ncclMeshBuffer> buffers;
 
   const void *where(const at::Tensor &t) {
-    if (!t.is_mps()) return t.data_ptr();
-    buffers.push_back({(__bridge void *)at::native::mps::getMTLBufferStorage(t), (size_t)(t.storage_offset() * t.element_size())});
+    MetalTensorPages *pages=tensorPages(t);
+    buffers.push_back({(__bridge void *)pages.buffer,pages.origin+(size_t)(t.storage_offset()*t.element_size())});
+    [pages release];
     return &buffers.back();
   }
   const at::Tensor &contiguous(const at::Tensor &t) {
-    TORCH_CHECK(t.is_mps() == metal, "the mesh backend's group takes MPS tensors or CPU tensors, not both");
     TORCH_CHECK(t.is_contiguous(), "the mesh backend's operand is a contiguous region tensor (torch_mesh.empty); a non-contiguous "
                 "one is not copied into one (zero copy: nccl.h Memory)");
     return t;
@@ -407,22 +407,6 @@ static std::vector<MetalReach> collective_views(const std::vector<Issue> &issues
   return views;
 }
 
-// Calls, typed views, and progress bindings are serialized once by the owning
-// communicator plan. A crossing retains only its position and publication mode.
-struct DeclaredGroup {
-  ncclComm_t comm;
-  uint64_t repeat, invocation, frames, stride;
-  uint32_t polls, fused;
-};
-static void declare_group(const DeclaredGroup &head,std::vector<uint8_t> &bytes,std::vector<MetalPlace> &places) {
-  places.push_back({offsetof(DeclaredGroup,comm),MetalRelocationCommunicator});
-  bytes.insert(bytes.end(),(const uint8_t *)&head,(const uint8_t *)(&head+1));
-}
-static DeclaredGroup declared_group(NSData *bytes) {
-  TORCH_CHECK(bytes.length==sizeof(DeclaredGroup),"template: invalid compiled group declaration");
-  DeclaredGroup result;memcpy(&result,bytes.bytes,sizeof result);return result;
-}
-
 // A native host entry (prepare, context, retain, release) as the recorder's host declaration, the storage it reads held
 // with it; `owned`: the caller's reference to its context passes to the operation, else the operation takes its own.
 static MetalHostOperation host_operation(const std::array<uintptr_t,4> &entry, bool owned, std::vector<at::Tensor> held) {
@@ -493,7 +477,7 @@ static int64_t pipeline(const std::string &source, const std::string &name) {
   const std::string function_name = name;
   [device newLibraryWithSource:@(source.c_str()) options:options completionHandler:^(id<MTLLibrary> library, NSError *error) {
     NSError *failed = nil;
-    // design/replay-templates-2026-10-29.md: made from its declaration, which a template names it by
+    // Arithmetic pipeline preparation uses its retained source declaration.
     id<MTLComputePipelineState> state = library ? MetalPipelineMake(library, @(function_name.c_str()), @[], nil, nil, &failed) : nil;
     if (!library) made->error = std::string("kernel source: ") + error.localizedDescription.UTF8String;
     else if (!state) made->error = "kernel pipeline " + function_name + ": " + failed.localizedDescription.UTF8String;
@@ -540,7 +524,7 @@ static void specialize(std::shared_ptr<Library> library, const std::string &name
         dispatch_semaphore_signal(library->done);   /* the library stays ready for every later specialization */
         if (!library->library) made->error = library->error;
         else {
-          // design/replay-templates-2026-10-29.md: each constant [index, MTLDataType, bytes] in the pipeline's declaration
+          // Each constant retains [index, MTLDataType, bytes] in the pipeline declaration.
           NSMutableArray *constants = [NSMutableArray array];
           static const MTLDataType types[4] = {MTLDataTypeBool, MTLDataTypeUInt, MTLDataTypeLong, MTLDataTypeULong};
           for (const auto &[index, type, value] : values) {
@@ -805,7 +789,7 @@ using CommandRecord = std::tuple<int64_t, std::vector<pybind11::object>,
     std::map<uint32_t,pybind11::bytes>, std::array<NSUInteger,3>, std::array<NSUInteger,3>, bool, uint64_t>;
 // A slot's actual selected read/write views are independent of its argument
 // address and full binding layout. Both become the existing command ABI here.
-using CommandReach = std::tuple<uint32_t,uint32_t,pybind11::object>;
+using CommandReach = std::tuple<int32_t,uint32_t,pybind11::object>;
 using CommandReaches = std::vector<std::optional<std::vector<CommandReach>>>;
 // A record (words, constants) is refused short of its declared type; a buffer, holding part of one declared element: an
 // array of none is a ragged share of nothing (a rank given no columns).
@@ -816,39 +800,25 @@ static void fits_binding(id<MTLComputePipelineState> state, NSUInteger index, NS
   TORCH_CHECK(false, "kernel ", name ? name.UTF8String : "(unnamed)", " declares ", declared, " bytes at buffer ", index,
               ", and its dispatch binds ", bound, " bytes of ", record ? "its record" : "a buffer");
 }
-using HostDeclaration=std::tuple<std::string,pybind11::bytes,std::vector<std::pair<size_t,int>>>;
-using CommandHost=std::tuple<size_t,std::array<uintptr_t,4>,std::vector<pybind11::object>,
-  std::vector<pybind11::object>,std::optional<HostDeclaration>>;
+using CommandHost=std::tuple<size_t,std::array<uintptr_t,4>,std::vector<CommandReach>>;
 // Both direct host declarations and mixed command streams retain the same
-// page accesses, native entry and relocation declaration at preparation.
+// page accesses and native entry at preparation.
 struct PreparedHost {
   std::vector<MetalReach> views;
   MetalHostOperation operation;
-  std::string kind,bytes;
-  std::vector<MetalPlace> places;
-  bool declared;
-  PreparedHost(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
-      const std::vector<pybind11::object> &outputs,const std::optional<HostDeclaration> &declaration):declared(declaration.has_value()) {
+  PreparedHost(const std::array<uintptr_t,4> &entry,const std::vector<CommandReach> &reaches) {
     std::vector<at::Tensor> held;
-    auto accesses=[&](const std::vector<pybind11::object> &tensors,uint32_t access) {
-      for(const auto &object:tensors) {
-        const TensorOperand operand(object);const auto &t=operand.storage;held.push_back(t);
-        NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:t.element_size() access:access binding:-1];
-        const auto *spans=(const MetalReach *)data.bytes;
-        views.insert(views.end(),spans,spans+data.length/sizeof *spans);
-      }
-    };
-    accesses(inputs,MetalReachRead);accesses(outputs,MetalReachWritten);
-    if(declaration) {
-      kind=std::get<0>(*declaration);bytes=std::get<1>(*declaration);
-      for(const auto &[at,relocation]:std::get<2>(*declaration))places.push_back({at,(MetalRelocation)relocation});
+    for(const auto &[slot,access,object]:reaches) {
+      const TensorOperand operand(object);const auto &t=operand.storage;held.push_back(t);
+      NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:t.element_size() access:access binding:slot];
+      const auto *spans=(const MetalReach *)data.bytes;
+      views.insert(views.end(),spans,spans+data.length/sizeof *spans);
     }
     operation=[host_operation(entry,false,held) copy];
   }
   ~PreparedHost(){[operation release];}
   void append(MetalSchedule *schedule) {
-    const MetalDeclaration definition{kind.c_str(),bytes.data(),bytes.size(),places.data(),places.size()};
-    MetalScheduleHost(schedule,views.data(),views.size(),declared?&definition:nullptr,operation);
+    MetalScheduleHost(schedule,views.data(),views.size(),operation);
   }
 };
 struct Commands {
@@ -899,7 +869,8 @@ struct Commands {
       }
       if(selected)for(const auto &[slot,mode,value]:*selected) {
         const TensorOperand operand(value);const auto &t=operand.storage;
-        NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:t.element_size() access:MetalReachBinding|mode binding:(int32_t)slot];
+        NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:t.element_size()
+          access:(slot>=0?MetalReachBinding:0)|mode binding:slot];
         const auto *spans=(const MetalReach *)data.bytes;ranges.insert(ranges.end(),spans,spans+data.length/sizeof *spans);
         operands.push_back(t);
       }
@@ -920,8 +891,8 @@ struct Commands {
       TORCH_CHECK(first==end||made,"native command preparation failed");
       replays.push_back(made);first=end;
     };
-    for(const auto &[at,entry,inputs,outputs,definition]:hostRecords) {
-      replay(at);hosts.push_back(std::make_unique<PreparedHost>(entry,inputs,outputs,definition));
+    for(const auto &[at,entry,reaches]:hostRecords) {
+      replay(at);hosts.push_back(std::make_unique<PreparedHost>(entry,reaches));
     }
     replay(descriptions.size());
   }
@@ -941,10 +912,11 @@ struct Commands {
 // the same native schedule; invocation creates no layout or tensor bindings.
 struct Collectives {
   int64_t comm;
-  Group group{true};
+  Group group;
   std::vector<Issue> issues;
   std::vector<at::Tensor> operands;
   Commands before, after;
+  std::vector<uint64_t> occurrences;
   Collectives(const std::vector<Call> &calls, int64_t comm, std::vector<at::Tensor> operands,
               const std::vector<CommandRecord> &inputs, const std::vector<CommandRecord> &outputs)
       : comm(comm), operands(std::move(operands)), before(inputs), after(outputs) {
@@ -954,24 +926,26 @@ struct Collectives {
   }
   std::vector<Schedule> executions;
   size_t next=0;
+  void lower(size_t repetitions=1) {
+    occurrences.resize(repetitions);
+    for(size_t r=0;r<repetitions;r++)
+      checked(ncclMeshCommLower(communicator(comm),0,0,nullptr,nullptr,&occurrences[r]));
+  }
   void append(MetalSchedule *schedule,size_t repetitions=1) {
     const ncclComm_t handle=communicator(comm);
     MetalScheduleCommunicator(schedule,handle);
     const size_t batches=!before.replays.empty()||!after.replays.empty()?repetitions:(size_t)(repetitions!=0);
     const size_t repeat=batches==1?repetitions:1;
-    std::vector<uint8_t> declared;std::vector<MetalPlace> places;
-    declare_group({handle,issues.empty()?0:repeat,0,0,0,0,0},declared,places);
-    const MetalDeclaration declaration{"collectives",declared.data(),declared.size(),places.data(),places.size()};
     const auto views=collective_views(issues,handle);
     for(size_t k=0;k<batches;k++) {
       before.append(schedule);
       const ncclMeshGroup publication{handle,0,issues.empty()?0:repeat};
-      checked(MetalScheduleCross(schedule,views.data(),views.size(),&publication,&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+      checked(MetalScheduleCross(schedule,views.data(),views.size(),&publication,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
         id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
       ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
         .residencySet=(__bridge void *)residency};
       for(size_t r=0;r<repeat;r++) {
-        const int result=(int)ncclMeshCommEncode(handle,&on);
+        const int result=(int)ncclMeshCommEncode(handle,occurrences[k*repeat+r],&on);
         if(result)return result;
       }
       return 0;
@@ -980,6 +954,7 @@ struct Collectives {
     }
   }
   void realize(size_t repetitions=1) {
+    lower(repetitions);
     auto made=prepared_schedule();
     schedule_input_reaches(made.get(),collective_views(issues,communicator(comm)));
     append(made.get(),repetitions);
@@ -1138,11 +1113,14 @@ struct WriteOperand {
 };
 struct WriteOperands {
   std::vector<WriteOperand> writes;
+  std::vector<ncclMeshPageEffect> observations;
+  std::vector<at::Tensor> inputWords;
   std::vector<std::array<uint64_t, 6>> publish, land;
   at::Tensor tileLandings;
   ncclMeshFused records{};
   uint32_t polls = 0;
   ncclComm_t comm = nullptr;
+  uint64_t occurrence=UINT64_MAX;
   void prepare(int64_t comm, int64_t waiting, int64_t repeats, int64_t stride) {
     this->comm=communicator(comm);
     const int channels = physical_channels(communicator(comm));
@@ -1150,6 +1128,35 @@ struct WriteOperands {
     records = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
                (uint32_t)channels, (uint32_t)channels, (uint32_t)repeats, (size_t)stride};
     polls = (uint32_t)waiting;
+  }
+  void lower() {
+    observations.clear();
+    checked(ncclMeshCommLower(comm,0,polls,
+      [](void *context,const ncclMeshPageEffect *effect)->int {
+        try{static_cast<WriteOperands *>(context)->observations.push_back(*effect);return ncclSuccess;}
+        catch(const std::bad_alloc &){return ncclSystemError;}
+      },this,&occurrence));
+  }
+  void source_inputs(const pybind11::list &rows) {
+    std::vector<ncclMeshSourceInput> inputs;std::vector<std::vector<ncclMeshPageEffect>> prior(rows.size());
+    size_t index=0;
+    for(const pybind11::handle &item:rows) {
+      const auto row=pybind11::reinterpret_borrow<pybind11::dict>(item);
+      for(const auto &observed:pybind11::cast<pybind11::list>(row["observations"])) {
+        const auto value=pybind11::reinterpret_borrow<pybind11::dict>(observed);
+        const TensorOperand word(pybind11::reinterpret_borrow<pybind11::object>(value["word"]));
+        const TensorOperand violation(pybind11::reinterpret_borrow<pybind11::object>(value["violation"]));
+        inputWords.push_back(word.storage);inputWords.push_back(violation.storage);
+        ncclMeshPageEffect effect{};effect.kind=ncclMeshPageObserve;
+        effect.word={word.pages.buffer,word.origin};effect.violation={violation.pages.buffer,violation.origin};
+        effect.threshold=value["threshold"].cast<uint64_t>();effect.polls=value["polls"].cast<uint32_t>();
+        effect.channel=value["channel"].cast<uint32_t>();effect.entry=value["entry"].cast<uint64_t>();
+        prior[index].push_back(effect);
+      }
+      inputs.push_back({row["call"].cast<size_t>(),row["first"].cast<size_t>(),row["bytes"].cast<size_t>(),
+        row["frame"].cast<uint32_t>(),prior[index].data(),prior[index].size()});index++;
+    }
+    checked(ncclMeshCommSourceInputs(comm,occurrence,inputs.data(),inputs.size()));
   }
   pybind11::list declarations() const {
     pybind11::list result;int rank=0;checked(ncclCommUserRank(comm,&rank));
@@ -1178,9 +1185,6 @@ static void prepare_fused_writes(MetalSchedule *schedule,WriteOperands &plans) {
   plans.records.publishes=plans.publish.size();plans.records.lands=plans.land.size();
   if(plans.writes.empty()){plans.records.publishes=plans.records.lands=0;return;}
   WriteOperands *p=&plans;
-  std::vector<uint8_t> declared;std::vector<MetalPlace> places;
-  declare_group({plans.comm,1,0,plans.records.repeats,plans.records.stride,plans.polls,1},declared,places);
-  const MetalDeclaration declaration{"collectives",declared.data(),declared.size(),places.data(),places.size()};
   // Fused setup publishes descriptors, not payload values. Its page storage
   // stays resident; the declared publishing/landing kernels own data edges.
   std::vector<MetalReach> views;
@@ -1190,11 +1194,11 @@ static void prepare_fused_writes(MetalSchedule *schedule,WriteOperands &plans) {
       views.push_back({buffer,0,buffer.length,MetalReachResident,-1});
     }
   const ncclMeshGroup publication{plans.comm,0,1};
-  checked(MetalScheduleCross(schedule,views.data(),views.size(),&publication,&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
+  checked(MetalScheduleCross(schedule,views.data(),views.size(),&publication,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
       id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
     ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
       .residencySet=(__bridge void *)residency,.polls=p->polls,.fused=&p->records};
-    return (int)ncclMeshCommEncode(p->comm,&on);
+    return (int)ncclMeshCommEncode(p->comm,p->occurrence,&on);
   }));
 }
 
@@ -1515,6 +1519,7 @@ static void compile_chain(PreparedChain &chain) {
   };
   const auto input = [&](size_t index) {
     WriteOperands &plans = *chain.inputs[index];
+    plans.lower();
     prepare_fused_writes(schedule,plans);
     Dispatch &ready = chain.input_publication;
     ready.words[0] = chain.input_last[index];
@@ -1560,6 +1565,7 @@ static void compile_chain(PreparedChain &chain) {
   for (size_t turn = 0; turn < chunks.size(); turn++) {
     const ChainChunk &chunk = chunks[turn];
     for (size_t j = 0; j < chunk.prefetch_count; j++) input(chunk.prefetch_first + j);
+    chunk.plans->lower();
     prepare_fused_writes(schedule,*chunk.plans);
     binding(previous, false, 0);
     binding(chunk.plans, true, 1);
@@ -1640,6 +1646,17 @@ static std::shared_ptr<WriteOperands> fused_write_operands(const at::Tensor &sen
   }
   return made;
 }
+static std::shared_ptr<WriteOperands> view_write_operands(const std::vector<ViewBinding> &bindings,
+    int64_t comm,int64_t polls) {
+  auto made=std::make_shared<WriteOperands>();made->prepare(comm,polls,1,0);
+  for(const auto &binding:bindings) {
+    const auto &[storage,bits,shape,strides,offset,mapped,runs,source,destination]=binding;
+    size_t elements=1;for(auto extent:shape)elements*=extent;
+    WriteOperand write;write.view=binding;write.bytes=elements*(size_t)bits/8;
+    made->writes.push_back(std::move(write));
+  }
+  return made;
+}
 static std::pair<std::vector<std::vector<uint64_t>>,std::vector<std::vector<uint64_t>>> fused_records(const WriteOperands &made) {
   std::vector<std::vector<uint64_t>> published,landed;
   for(uint32_t k=0;k<made.records.publishes;k++)published.emplace_back(made.publish[k].begin(),made.publish[k].end());
@@ -1661,18 +1678,24 @@ struct ScheduleBinding {
   ScheduleBinding():schedule(prepared_schedule()){}
   explicit ScheduleBinding(MetalSchedule *prepared):schedule(prepared,[](MetalSchedule *){}){}
   std::vector<at::Tensor> operands;
-  std::vector<pybind11::object> compilerOperands;
   void inputs(const std::vector<pybind11::object> &values) {
     for(const auto &value:values)operands.push_back(TensorOperand(value).storage);
     schedule_inputs(schedule.get(),values);
   }
+  void results(const std::vector<std::pair<at::Tensor,uint64_t>> &values) {
+    std::vector<MetalResult> words;words.reserve(values.size());
+    for(const auto &value:values) {
+      const at::Tensor &word=value.first;operands.push_back(word);
+      MetalTensorPages *pages=tensorPages(word);
+      words.push_back({pages.buffer,pages.origin+(NSUInteger)(word.storage_offset()*word.element_size()),value.second});
+      MetalScheduleRetainObject(schedule.get(),pages);[pages release];
+    }
+    MetalScheduleResults(schedule.get(),words.data(),words.size());
+  }
   // Preparation supplies native run/context/retain/release operands. The
   // completion worker neither owns a Python callback nor acquires the GIL.
-  // `declaration` (kind, bytes, places as (offset, relocation)): what the engine makes the operation from again
-  // (design/replay-templates-2026-10-29.md); None: the function makes no template.
-  void host(const std::array<uintptr_t,4> &entry,const std::vector<pybind11::object> &inputs,
-      const std::vector<pybind11::object> &outputs,const std::optional<HostDeclaration> &declaration) { @autoreleasepool {
-    PreparedHost(entry,inputs,outputs,declaration).append(schedule.get());
+  void host(const std::array<uintptr_t,4> &entry,const std::vector<CommandReach> &reaches) { @autoreleasepool {
+    PreparedHost(entry,reaches).append(schedule.get());
   }}
   void copy(const at::Tensor &source,const at::Tensor &destination) {
     TORCH_CHECK(source.is_mps()&&destination.is_mps()&&source.scalar_type()==at::kByte&&
@@ -1703,37 +1726,11 @@ struct ScheduleBinding {
   void enqueue() { MetalScheduleEnqueue(schedule.get()); }
   pybind11::capsule completion() { return schedule_completion(schedule); }
 
-  // design/replay-templates-2026-10-29.md: each bound tensor's storage, as the recorder names it, and its view's byte
-  // offset in that storage, so a template binds any view of the same shape
-  static NSArray *storages(const std::vector<at::Tensor> &bound,NSArray **offsets) {
-    NSMutableArray *buffers=[NSMutableArray array],*at=[NSMutableArray array];
-    for(const auto &t:bound) {
-      [at addObject:@((NSUInteger)(t.storage_offset()*t.element_size()))];
-      if(t.is_mps()){[buffers addObject:at::native::mps::getMTLBufferStorage(t)];continue;}
-      MetalTensorPages *pages=tensorPages(t);[buffers addObject:pages.buffer];[pages release];
-    }
-    *offsets=at;
-    return buffers;
-  }
 };
 
-// A higher-order reducer contributes normal compiler output to the enclosing
-// function. Its Python callable exists only during preparation. Recorded leaves
-// retain page operands and contain neither this object nor a callback lookup.
-struct ReductionBinding {
+// Typed page effects retain their existing region storage through preparation.
+struct PageEffectPages {
   struct Storage {void *buffer;size_t first,bytes;at::Tensor value;};
-  pybind11::object lower;
-  at::ScalarType dtype;
-  std::vector<int64_t> elementShape;
-  ncclRedOp_t operation;
-  std::string error;
-  ReductionBinding(pybind11::object lower,at::ScalarType dtype,std::vector<int64_t> shape,
-      uint32_t flags,int type,int64_t comm):lower(std::move(lower)),dtype(dtype),elementShape(std::move(shape)) {
-    size_t unit=1;for(int64_t extent:elementShape)unit*=(size_t)extent;
-    TORCH_CHECK(unit&&unit<=UINT32_MAX,"a reduction's independent value must fit its declared scalar unit");
-    const ncclMeshReductionFunction declaration{(uint32_t)unit,flags,this,&ReductionBinding::prepare};
-    checked(ncclMeshRedOpCreateFunction(&operation,&declaration,(ncclDataType_t)type,communicator(comm)));
-  }
   static ncclMeshBuffer resolved(ncclMeshBuffer binding) {
     if(!binding.buffer) {
       void *buffer=nullptr;size_t offset=0;
@@ -1748,8 +1745,8 @@ struct ReductionBinding {
       [buffer](void *){[buffer release];},at::TensorOptions().dtype(at::kByte).device(at::kCPU));
     return {binding.buffer,binding.offset,bytes,std::move(base)};
   }
-  at::Tensor page(ncclMeshBuffer binding,std::vector<int64_t> shape,at::ScalarType type,
-      std::vector<Storage> &storages) const {
+  static at::Tensor page(ncclMeshBuffer binding,std::vector<int64_t> shape,at::ScalarType type,
+      std::vector<Storage> &storages) {
     binding=resolved(binding);
     size_t bytes=c10::elementSize(type);for(int64_t extent:shape)bytes*=extent;
     auto found=std::find_if(storages.begin(),storages.end(),[&](const Storage &held){
@@ -1765,188 +1762,24 @@ struct ReductionBinding {
     return found->value.as_strided({(int64_t)(found->bytes/scalar*scalar)},{1},0).view(type)
       .as_strided(shape,strides,(binding.offset-found->first)/scalar);
   }
-  at::Tensor value(ncclMeshBuffer binding,size_t cells,std::vector<Storage> &storages) const {
-    std::vector<int64_t> shape{(int64_t)cells};shape.insert(shape.end(),elementShape.begin(),elementShape.end());
-    return page(binding,std::move(shape),dtype,storages);
-  }
-  static ncclResult_t prepare(void *context,const ncclMeshReductionCell *cell,const ncclMeshStream *stream) {
-    auto &self=*static_cast<ReductionBinding *>(context);
-    pybind11::gil_scoped_acquire gil;
-    @autoreleasepool {
-      try {
-        MetalSchedule *root=MetalEncoderSchedule((id<MTL4ComputeCommandEncoder>)stream->commandEncoder);
-        TORCH_CHECK(root,"a reduction is lowered into its enclosing prepared function");
-        ScheduleBinding schedule(root);
-        pybind11::list sources;
-        std::vector<Storage> storages;
-        std::vector<ncclMeshBuffer> payloads;
-        for(size_t i=0;i<cell->source_count;i++)payloads.push_back(resolved(cell->sources[i]));
-        payloads.push_back(resolved(cell->destination));
-        std::sort(payloads.begin(),payloads.end(),[](const auto &a,const auto &b){
-          return (uintptr_t)a.buffer<(uintptr_t)b.buffer||(a.buffer==b.buffer&&a.offset<b.offset);
-        });
-        const size_t payloadBytes=cell->cells*cell->unit*c10::elementSize(self.dtype);
-        for(size_t first=0;first<payloads.size();) {
-          size_t last=first+1,end=payloads[first].offset+payloadBytes;
-          while(last<payloads.size()&&payloads[last].buffer==payloads[first].buffer&&payloads[last].offset<end) {
-            end=std::max(end,payloads[last].offset+payloadBytes);last++;
-          }
-          storages.push_back(storage(payloads[first],end-payloads[first].offset));first=last;
-        }
-        std::vector<MetalReach> versions;
-        for(size_t i=0;i<cell->source_count;i++) {
-          auto source=self.value(cell->sources[i],cell->cells,storages);
-          sources.append(source);schedule.operands.push_back(source);
-          const uint32_t access=cell->source_access?cell->source_access[i]:MetalReachRead;
-          if(access&MetalReachNext) {
-            TensorOperand operand(pybind11::cast(source));
-            NSData *data=[operand.layout.value reaches:operand.pages.buffer base:0 elementBytes:source.element_size()
-              access:access binding:-1];
-            const auto *ranges=(const MetalReach *)data.bytes;
-            versions.insert(versions.end(),ranges,ranges+data.length/sizeof *ranges);
-          }
-        }
-        auto destination=self.value(cell->destination,cell->cells,storages);
-        schedule.operands.push_back(destination);
-        pybind11::dict effects;
-        pybind11::list observations,publications,rows;
-        for(size_t i=0;i<cell->observation_count;i++) {
-          const auto &item=cell->observations[i];pybind11::dict observation;
-          observation["source"]=item.source;
-          observation["word"]=self.page(item.word,{1},at::kUInt64,storages);
-          observation["violation"]=self.page(item.violation,
-            {(int64_t)(((id<MTLBuffer>)item.violation.buffer).length-item.violation.offset)},at::kByte,storages);
-          observation["polls"]=item.polls;observation["channel"]=item.channel;observation["entry"]=item.entry;
-          observations.append(observation);
-        }
-        for(size_t i=0;i<cell->publication_count;i++) {
-          const auto &item=cell->publications[i];pybind11::dict publication;
-          publication["observation"]=item.observation;
-          publication["word"]=self.page(item.word,{1},at::kUInt64,storages);
-          publications.append(publication);
-        }
-        if(cell->cut_count) {
-          effects["cuts"]=self.page(cell->cuts,{(int64_t)cell->cut_count,(int64_t)(2+cell->observation_count)},at::kUInt64,storages);
-          effects["completion"]=self.page(cell->completion,{(int64_t)(cell->cut_count+1)},at::kUInt32,storages);
-          const auto *cuts=(const uint64_t *)((const char *)((id<MTLBuffer>)cell->cuts.buffer).contents+cell->cuts.offset);
-          for(size_t q=0;q<cell->cut_count;q++) {
-            pybind11::tuple row(2+cell->observation_count);
-            for(size_t k=0;k<2+cell->observation_count;k++)row[k]=cuts[q*(2+cell->observation_count)+k];
-            rows.append(row);
-          }
-        }
-        effects["rows"]=rows;effects["observations"]=observations;effects["publications"]=publications;
-        auto *binding=&schedule;
-        MetalScheduleReadVersions(root,versions.data(),versions.size(),^{
-          self.lower(sources,destination,pybind11::cast(binding,pybind11::return_value_policy::reference),effects);
-        });
-        const auto pages=schedule.operands;
-        id owner=[^{(void)pages;} copy];
-        MetalScheduleRetainObject(root,owner);[owner release];
-        return ncclSuccess;
-      } catch(pybind11::error_already_set &exception) {
-        self.error=exception.what();exception.discard_as_unraisable("compiled reduction preparation");
-      } catch(const std::exception &exception) {
-        self.error=exception.what();
-        fprintf(stderr,"compiled reduction preparation: %s\n",self.error.c_str());
-      }
-      return ncclInternalError;
-    }
-  }
 };
 
-// design/replay-templates-2026-10-29.md: a program's functions as one template in `directory`, `bound` (their inputs,
-// outputs and the weights a later instance replaces) their operands in order, every other storage they name kept by
-// value; the plan their crossings assume is declared once.
-static void save(const std::string &directory,const std::vector<ScheduleBinding *> &functions,const std::vector<at::Tensor> &bound) {
-  std::vector<MetalSchedule *> schedules;
-  for(auto *function:functions)schedules.push_back(function->schedule.get());
-  NSError *error=nil;NSArray *offsets=nil;
-  NSArray *buffers=ScheduleBinding::storages(bound,&offsets);
-  NSDictionary *made=MetalScheduleTemplate(schedules.data(),schedules.size(),buffers,offsets,&error);
-  TORCH_CHECK(made,"template: ",error.localizedDescription.UTF8String);
-  error=MetalTemplateWrite(made,@(directory.c_str()));
-  TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
-}
-
-// The template in `directory` made again: its functions, each a new function after torch's inputs, `bound` their
-// operands in order; `communicators` the instance's, in the order its crossings first named theirs; `host(kind, bytes)`
-// the native entry (run, context, retain, release) a host operation's declaration makes, its context the caller's to pass.
-static pybind11::list load(const std::string &directory,const std::vector<at::Tensor> &bound,
-    const std::vector<int64_t> &communicators,const std::optional<pybind11::function> &host,
-    const std::vector<std::vector<std::pair<int,pybind11::object>>> &reductions) {
-  NSError *error=nil;
-  NSDictionary *read=MetalTemplateRead(at::mps::MPSDevice::getInstance()->device(),@(directory.c_str()),&error);
-  TORCH_CHECK(read,"template ",directory,": ",error.localizedDescription.UTF8String);
-  std::vector<std::unique_ptr<ScheduleBinding>> made;std::vector<MetalSchedule *> schedules;
-  for(NSUInteger f=0;f<[read[@"functions"] count];f++) {
-    made.push_back(std::make_unique<ScheduleBinding>());schedules.push_back(made.back()->schedule.get());
+// Source effects remain typed page operands. This preparation interface never
+// reverse-decodes a backend binding or makes an execution-time address lookup.
+static pybind11::list write_page_effects(const WriteOperands &prepared) {
+  pybind11::list result;std::vector<PageEffectPages::Storage> storages;
+  for(const ncclMeshPageEffect &effect:prepared.observations) {
+    pybind11::dict row;
+    row["kind"]=effect.kind==ncclMeshPagePublish?"publish":"observe";
+    row["call"]=effect.call;row["frame"]=effect.frame;row["first"]=effect.first;row["bytes"]=effect.bytes;
+    row["word"]=PageEffectPages::page(effect.word,{1},at::kUInt64,storages);
+    const ncclMeshBuffer violation=PageEffectPages::resolved(effect.violation);
+    row["violation"]=PageEffectPages::page(violation,
+      {(int64_t)(((id<MTLBuffer>)violation.buffer).length-violation.offset)},at::kByte,storages);
+    row["threshold"]=effect.threshold;row["polls"]=effect.polls;
+    row["channel"]=effect.channel;row["entry"]=effect.entry;result.append(row);
   }
-    NSMutableArray *comms=[NSMutableArray array];
-    for(auto comm:communicators)[comms addObject:[NSValue valueWithPointer:(void *)communicator(comm)]];
-    NSMutableArray *operators=[NSMutableArray array];
-    for(size_t communicatorIndex=0;communicatorIndex<communicators.size();communicatorIndex++) {
-      NSMutableData *bindings=[NSMutableData data];
-      if(communicatorIndex<reductions.size())for(const auto &entry:reductions[communicatorIndex]) {
-        const auto &replacement=entry.second.cast<const ReductionBinding &>();
-        const ncclMeshRedOpBinding binding{(ncclRedOp_t)entry.first,replacement.operation};
-        [bindings appendBytes:&binding length:sizeof binding];
-      }
-      [operators addObject:bindings];
-    }
-    const std::vector<at::Tensor> held=bound;
-    MetalTemplateHost made_host=nil;
-    if(host)made_host=^MetalHostOperation(NSString *kind,NSData *bytes,NSError **failed){
-      try {
-        auto entry=(*host)(std::string(kind.UTF8String),pybind11::bytes((const char *)bytes.bytes,bytes.length)).cast<std::array<uintptr_t,4>>();
-        return host_operation(entry,true,held);
-      } catch(const std::exception &e) {
-        if(failed)*failed=[NSError errorWithDomain:@"mesh.template" code:1 userInfo:@{NSLocalizedDescriptionKey:@(e.what())}];
-        return (MetalHostOperation)nil;
-      }
-    };
-    MetalTemplateCross made_cross=^MetalCrossing(NSString *kind,NSData *bytes,MetalSchedule *schedule,ncclMeshGroup *publication,NSError **failed){
-      if(![kind isEqualToString:@"collectives"]) {
-        if(failed)*failed=[NSError errorWithDomain:@"mesh.template" code:1 userInfo:@{NSLocalizedDescriptionKey:
-          [NSString stringWithFormat:@"no crossing of kind %@",kind]}];
-        return (MetalCrossing)nil;
-      }
-      DeclaredGroup calls;
-      try { calls=declared_group(bytes); } catch(const std::exception &e) {
-        if(failed)*failed=[NSError errorWithDomain:@"mesh.template" code:1 userInfo:@{NSLocalizedDescriptionKey:@(e.what())}];
-        return (MetalCrossing)nil;
-      }
-      MetalScheduleCommunicator(schedule,calls.comm);
-      auto fused=std::make_shared<WriteOperands>();
-      if(calls.fused)fused->prepare((int64_t)(uintptr_t)calls.comm,calls.polls,calls.frames,calls.stride);
-      *publication=ncclMeshGroup{calls.comm,calls.invocation,calls.repeat};
-      MetalCrossing crossing=^int(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,id<MTLResidencySet> residency,
-          NSUInteger,NSUInteger) {
-        ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
-          .residencySet=(__bridge void *)residency,.polls=calls.polls,.fused=calls.fused?&fused->records:nullptr,
-          .invocation=calls.invocation};
-        for(size_t r=0;r<calls.repeat;r++) {
-          const int result=(int)ncclMeshCommEncode(calls.comm,&on);
-          if(result)return result;
-        }
-        return 0;
-      };
-      return [[crossing copy] autorelease];
-    };
-  NSArray *offsets=nil;NSArray *buffers=ScheduleBinding::storages(bound,&offsets);
-  error=MetalScheduleInstantiate(schedules.data(),schedules.size(),read,buffers,offsets,comms,operators,made_host,made_cross);
-  TORCH_CHECK(!error,"template ",directory,": ",error.localizedDescription.UTF8String);
-  // a device of an architecture the template has no pipelines for compiles them from its libraries, and keeps them
-  if((error=MetalTemplateArchive(read,@(directory.c_str()))))
-    TORCH_WARN("template ",directory,": this architecture's pipelines were not kept: ",error.localizedDescription.UTF8String);
-  pybind11::list functions;
-  for(auto &function:made){
-    function->operands=bound;
-    for(const auto &communicator:reductions)for(const auto &binding:communicator)
-      function->compilerOperands.push_back(binding.second);
-    functions.append(pybind11::cast(std::move(function)));
-  }
-  return functions;
+  return result;
 }
 
 // Invocation slots and results are operands. Runtime selects the next prepared
@@ -1972,124 +1805,34 @@ struct Executions {
   pybind11::capsule completion(){return schedule_completion(latest);}
 };
 
-// Compact row geometry and explicit indexed selections lower to one prepared
-// page WRITE. Layout resolution ends before native commands are recorded.
-// a view as a WRITE names it (operand.py TensorView.write_layout): its storage, element bits, shape, strides and offset in
-// elements, whether it is mapped and its runs; then source and destination ranks
-struct ViewWrites {
-  int64_t comm;
-  bool metal;
-  std::vector<ViewBinding> bindings;
-  std::vector<at::Tensor> leases;
-  std::vector<MetalReach> views;
-  // A meta storage declares relay shape/type; CommPlan owns its local pages.
-  ViewWrites(const std::vector<ViewBinding> &given, int64_t handle) : comm(handle), metal(true), bindings(given) {
-    TORCH_CHECK(!bindings.empty(), "view writes require at least one declared delivery");
-    for(const auto &binding:bindings)if(!std::get<0>(binding).is_meta()){metal=std::get<0>(binding).is_mps();break;}
-    for(const auto &binding:bindings)if(!std::get<0>(binding).is_meta())leases.push_back(std::get<0>(binding));
-  }
-  void prepare() {
-    if(!views.empty())return;
-    Group g{metal};
-    int rank=0;checked(ncclCommUserRank(communicator(comm),&rank));
-    for (const auto &[storage, bits, shape, strides, offset, mapped, runs, source, destination] : bindings) {
-      TORCH_CHECK(storage.is_meta() || storage.is_mps() == metal, "view writes require one local device");
-      ncclMeshBuffer pageBinding{};
-      if(!storage.is_meta())pageBinding=*static_cast<const ncclMeshBuffer *>(g.where(storage));
-      if(!storage.is_meta()) {
-        MetalTensorLayout *selected;
-        if(mapped) {
-          NSMutableArray *parts=[NSMutableArray array];
-          for(size_t k=0;k<runs.size();k+=2)[parts addObject:@[@(runs[k]),@(runs[k+1]),@0,@1]];
-          selected=[MetalTensorLayout runs:parts];
-        } else selected=[MetalTensorLayout shape:tensorNumbers(std::vector<NSInteger>(shape.begin(),shape.end()))
-            strides:tensorNumbers(std::vector<NSInteger>(strides.begin(),strides.end())) offset:offset maps:@{} indices:nil];
-        MetalTensorLayout *bitView=[selected components:(NSUInteger)bits];
-        MetalTensorLayout *bytes=[MetalTensorLayout shape:bitView.shape index:@[@"div",@"bit",@8]
-            parameters:@{@"bit":bitView}];
-        const uint32_t access=rank==source?MetalReachRead:rank==destination?MetalReachWritten:MetalReachRead|MetalReachWritten;
-        NSData *reaches=[bytes reaches:(__bridge id<MTLBuffer>)pageBinding.buffer base:pageBinding.offset
-            elementBytes:1 access:access binding:-1];
-        const auto *spans=(const MetalReach *)reaches.bytes;views.insert(views.end(),spans,spans+reaches.length/sizeof *spans);
-      }
-    }
-  }
-  // Each encoded execution is the plan's next invocation, cycling the plan's instances: NFE k+1 writes other pages
-  // than NFE k sends from only where the plan declares more than one (design/pages-and-functions.md, Freeing 7).
-  size_t invocations = 0;
-  std::vector<Schedule> executions;
-  size_t next=0;
-  void append(MetalSchedule *schedule) {
-    TORCH_CHECK(metal,"prepared distributed writes require the Metal backend");
-    MetalScheduleCommunicator(schedule,communicator(comm));
-    prepare();
-    ViewWrites *self=this;
-    const size_t invocation=invocations++;
-    std::vector<uint8_t> declared;std::vector<MetalPlace> places;
-    declare_group({communicator(comm),1,invocation,0,0,0,0},declared,places);
-    const MetalDeclaration declaration{"collectives",declared.data(),declared.size(),places.data(),places.size()};
-    const ncclMeshGroup publication{communicator(comm),invocation,1};
-    checked(MetalScheduleCross(schedule,views.data(),views.size(),&publication,&declaration,^(id<MTL4ComputeCommandEncoder> encoder,id<MTL4ArgumentTable> table,
-        id<MTLResidencySet> residency,NSUInteger,NSUInteger) {
-      ncclMeshStream on={.commandEncoder=(__bridge void *)encoder,.argumentTable=(__bridge void *)table,
-        .residencySet=(__bridge void *)residency};
-      on.invocation=invocation;return (int)ncclMeshCommEncode(communicator(self->comm),&on);
-    }));
-  }
-  void realize() {
-    auto made=prepared_schedule();prepare();schedule_input_reaches(made.get(),views);append(made.get());
-    const auto held=leases;
-    checked(MetalScheduleFinish(made.get(),^(NSError *){(void)held;}));executions.push_back(std::move(made));
-  }
-  void enqueue() { MetalScheduleEnqueue(executions[next++].get()); }
-  pybind11::capsule completion(){return schedule_completion(executions[next-1]);}
-
-};
-
-// a completion's end, once it has ended (MetalScheduleEnd: woken by its last part, its time the GPU's own), the latest
-// of a tuple's, in mesh_statistics.now's clock
+// Observe a whole function without waiting. Tuple observations retain each
+// component and report the latest native end only when all have completed.
 static void completion_schedules(pybind11::handle observation, std::vector<Schedule> &into) {
   if(pybind11::isinstance<pybind11::tuple>(observation)) {
     for(auto item:observation.cast<pybind11::tuple>())completion_schedules(item,into);
     return;
   }
   auto token=pybind11::reinterpret_borrow<pybind11::capsule>(observation);
-  TORCH_CHECK(!strcmp(token.name(),"mesh.prepared-function"),"torch_mesh.completion_end: ",token.name()," is no prepared function's completion");
+  TORCH_CHECK(!strcmp(token.name(),"mesh.prepared-function"),"torch_mesh.completion_observe: ",token.name()," is no prepared function's completion");
   into.push_back(*static_cast<Schedule *>(token.get_pointer()));
 }
-// whether a completion has ended, without waiting (its failure raised)
-static bool completion_ended(pybind11::object observation) {
-  std::vector<Schedule> schedules;
-  completion_schedules(observation,schedules);
-  bool ended=true;
-  for(const Schedule &schedule:schedules) {
-    NSError *error=nil;
-    const int status=MetalScheduleStatus(schedule.get(),&error);
-    TORCH_CHECK(status>=0,"the prepared function failed: ",error.localizedDescription.UTF8String);
-    ended=ended&&status==1;
-  }
-  return ended;
-}
-static double completion_end(pybind11::object observation) {
+static std::optional<double> completion_observe(pybind11::object observation) {
   std::vector<Schedule> schedules;
   completion_schedules(observation,schedules);
   double latest=0;
+  bool pending=false;
   for(const Schedule &schedule:schedules) {
     double ended=0;
     NSError *error=nil;
-    int status;
-    {
-      pybind11::gil_scoped_release unlocked;
-      status=MetalScheduleEnd(schedule.get(),&ended,&error);
-    }
-    TORCH_CHECK(status>0,"the prepared function failed: ",error.localizedDescription.UTF8String);
-    TORCH_CHECK(ended>0,"torch_mesh.completion_end: a completion none of whose parts ran on the GPU or the host");
+    const int status=MetalScheduleEnd(schedule.get(),&ended,&error);
+    TORCH_CHECK(status>=0,"the prepared function failed: ",error.localizedDescription.UTF8String);
+    pending|=status==0;
     latest=std::max(latest,ended);
   }
-  return latest;
+  return pending?std::nullopt:std::optional<double>(latest);
 }
 
-// The module: prepared functions, their collectives (Collectives, ViewWrites) and fused crossings; no collective is
+// The module: prepared functions, declared collectives and fused crossings; no collective is
 // issued at a call (design/eager-execution.md).
 // Every call from Python drains the autorelease pool it pushed: Python's thread has no run loop, so an object
 // autoreleased with no pool of its own goes to the thread's implicit pool, which is popped only at the thread's end, and
@@ -2168,8 +1911,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       return std::array<uint64_t,3>{(uint64_t)(uintptr_t)pages.buffer.contents,pages.buffer.length,pages.origin};
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   }, pybind11::call_guard<Drained>());
-  module.def("completion_ended", &completion_ended, pybind11::call_guard<Drained>());
-  module.def("completion_end", &completion_end, pybind11::call_guard<Drained>());
+  module.def("completion_observe", &completion_observe, pybind11::call_guard<Drained>());
   module.def("pipeline", &pipeline, pybind11::call_guard<Drained>());
   module.def("pipeline_specialized", &pipeline_specialized, pybind11::call_guard<Drained>());
   module.def("index_constant_prelude", [](){return std::string(MetalViewIndexConstantPrelude().UTF8String);}, pybind11::call_guard<Drained>());
@@ -2370,40 +2112,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
         s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());}, pybind11::call_guard<Drained>())
     .def("inputs",&ScheduleBinding::inputs,pybind11::call_guard<Drained>())
+    .def("results",&ScheduleBinding::results,pybind11::call_guard<Drained>())
     .def("copy",&ScheduleBinding::copy,pybind11::call_guard<Drained>())
     .def("compute",&ScheduleBinding::compute, pybind11::call_guard<Drained>())
     .def("writes",&ScheduleBinding::writes, pybind11::call_guard<Drained>())
-    .def("host",&ScheduleBinding::host, pybind11::arg("entry"), pybind11::arg("inputs"), pybind11::arg("outputs"),
-         pybind11::arg("declaration")=pybind11::none(), pybind11::call_guard<Drained>())
+    .def("host",&ScheduleBinding::host, pybind11::arg("entry"), pybind11::arg("reaches"),
+         pybind11::call_guard<Drained>())
     .def("finish",&ScheduleBinding::finish, pybind11::call_guard<Drained>())
     .def("enqueue",&ScheduleBinding::enqueue, pybind11::call_guard<Drained>())
     .def("completion",&ScheduleBinding::completion, pybind11::call_guard<Drained>());
-  pybind11::class_<ReductionBinding>(module,"Reduction")
-    .def(pybind11::init<pybind11::object,at::ScalarType,std::vector<int64_t>,uint32_t,int,int64_t>())
-    .def_property_readonly("operator",[](const ReductionBinding &r){return (int)r.operation;})
-    .def_readonly("error",&ReductionBinding::error);
-  pybind11::class_<ViewWrites, std::shared_ptr<ViewWrites>>(module, "ViewWrites")
-    .def(pybind11::init<const std::vector<ViewBinding> &, int64_t>(), pybind11::call_guard<Drained>())
-    .def("realize", &ViewWrites::realize, pybind11::call_guard<Drained>())
-    .def("append",[](ViewWrites &w,ScheduleBinding &s){w.append(s.schedule.get());
-        s.operands.insert(s.operands.end(),w.leases.begin(),w.leases.end());}, pybind11::call_guard<Drained>())
-    .def("completion", &ViewWrites::completion, pybind11::call_guard<Drained>())
-    .def("enqueue", &ViewWrites::enqueue, pybind11::call_guard<Drained>());
   pybind11::class_<Collectives, std::shared_ptr<Collectives>>(module, "Collectives")
     .def(pybind11::init<const std::vector<Call> &, int64_t, std::vector<at::Tensor>,
                         const std::vector<CommandRecord> &, const std::vector<CommandRecord> &>(),
          pybind11::arg("calls"),pybind11::arg("comm"),pybind11::arg("operands"),
          pybind11::arg("inputs")=std::vector<CommandRecord>{},pybind11::arg("outputs")=std::vector<CommandRecord>{}, pybind11::call_guard<Drained>())
+    .def("lower", &Collectives::lower, pybind11::arg("repetitions")=1, pybind11::call_guard<Drained>())
     .def("realize", &Collectives::realize, pybind11::arg("repetitions")=1, pybind11::call_guard<Drained>())
     .def("append",[](Collectives &c,ScheduleBinding &s,size_t repetitions){c.append(s.schedule.get(),repetitions);
         s.operands.insert(s.operands.end(),c.operands.begin(),c.operands.end());}, pybind11::arg("schedule"),
         pybind11::arg("repetitions")=1, pybind11::call_guard<Drained>())
     .def("completion", &Collectives::completion, pybind11::call_guard<Drained>())
     .def("enqueue", &Collectives::enqueue, pybind11::call_guard<Drained>());
-  module.def("save",&save,pybind11::arg("directory"),pybind11::arg("functions"),pybind11::arg("bound"),pybind11::call_guard<Drained>());
-  module.def("load",&load,pybind11::arg("directory"),pybind11::arg("bound"),
-             pybind11::arg("communicators")=std::vector<int64_t>{},pybind11::arg("host")=pybind11::none(),
-             pybind11::arg("reductions")=std::vector<std::vector<std::pair<int,pybind11::object>>>{},pybind11::call_guard<Drained>());
   pybind11::class_<Executions>(module,"Executions")
     .def(pybind11::init<pybind11::object>(), pybind11::call_guard<Drained>())
     .def("add",&Executions::add, pybind11::call_guard<Drained>())
@@ -2417,8 +2146,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     return physical_channels(communicator(handle));
   }, pybind11::call_guard<Drained>());
   pybind11::class_<WriteOperands,std::shared_ptr<WriteOperands>>(module,"WriteOperands")
-    .def("declarations",&WriteOperands::declarations);
+    .def("lower",&WriteOperands::lower)
+    .def("source_inputs",&WriteOperands::source_inputs)
+    .def("declarations",&WriteOperands::declarations)
+    .def("page_effects",&write_page_effects);
   module.def("write_operands",&fused_write_operands,pybind11::call_guard<Drained>());
+  module.def("view_write_operands",&view_write_operands,pybind11::call_guard<Drained>());
   module.def("chain_slot", &chain_slot, pybind11::call_guard<Drained>());
   module.def("prepare_chain", &prepare_chain, pybind11::call_guard<Drained>());
   module.def("chain_declarations", &chain_declarations, pybind11::call_guard<Drained>());

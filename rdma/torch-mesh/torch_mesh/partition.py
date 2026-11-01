@@ -478,7 +478,8 @@ def _scatter_spans(tensor, dim, sizes, rank, source, group):
         for source_bytes, destination_bytes in imports:
             schedule.copy(source_bytes, destination_bytes)
         if prepared is not None:
-            prepared.append(schedule)
+            from .declarations import execution_sequence
+            execution_sequence((prepared,), result).append(schedule)
         schedule.finish()
         schedule.enqueue()
     return result
@@ -488,7 +489,7 @@ def _follow_spans(placement, local, logical_shape, key, rank, group):
     """Arbitrary regional strides use exact AOT span WRITE bindings."""
     if not hasattr(group, 'prepare_writes'):
         return None
-    from .layout import copies
+    from .layout import copy_declarations
     commands = []
     dim = placement.dim % local.ndim
     old, new = _OPERANDS[placement.key], _OPERANDS[key]
@@ -513,7 +514,7 @@ def _follow_spans(placement, local, logical_shape, key, rank, group):
             count = last - first
             if source == destination:
                 if source == rank:
-                    commands.extend(copies(local.narrow(dim, first - before[source], count),
+                    commands.extend(copy_declarations(local.narrow(dim, first - before[source], count),
                                            result.narrow(dim, first - after[destination], count)))
                 continue
             if rank == source:
@@ -526,9 +527,11 @@ def _follow_spans(placement, local, logical_shape, key, rank, group):
     prepared, calls = group.prepare_writes(deliveries) if deliveries else (None, [])
     with group.configuration([calls]) if calls else contextlib.nullcontext():
         schedule = _stream.Schedule()
-        schedule.append(_stream.Commands(commands))
+        from .declarations import execution_sequence
+        declarations = [dict(commands=tuple(commands), output=result, pages=())]
         if prepared is not None:
-            prepared.append(schedule)
+            declarations.append(prepared)
+        execution_sequence(declarations, result).append(schedule)
         schedule.finish()
         schedule.enqueue()
     return result
@@ -1126,6 +1129,7 @@ def _exchange_domains(x, desired, mesh, ownership=None):
     for step in steps:
         peers = step['peers']
         declarations = {side: [step[side][rank] for rank in peers] for side in ('sources', 'destinations')}
+        declarations['rank'] = step['group'].rank()
         shape = algebra.selection_relation(step['destinations'][held]).shape
         local = select_exchange(local, list(shape), json.dumps(declarations, separators=(',', ':')),
                                 step['group'].group_name)

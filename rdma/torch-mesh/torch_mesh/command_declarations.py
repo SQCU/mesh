@@ -43,10 +43,11 @@ class Commands:
         self.bindings = {name: dict(value, role=True) for name, value in operands.items() if value is not None}
         self.commands = []
 
-    def view(self, name, layout=None, *, dtype=None):
+    def view(self, name, layout=None, *, dtype=None, binding_origin=None, source_domain=None):
         value = self.bindings[name]
         return dict(name=name, dtype=value['dtype'] if dtype is None else dtype,
-                    layout=dense(value['shape']) if layout is None else layout)
+                    layout=dense(value['shape']) if layout is None else layout, binding_origin=binding_origin,
+                    source_domain=source_domain)
 
     def temporary(self, name, shape, dtype, *, initializer=None, requirements=()):
         self.bindings[name] = dict(shape=tuple(shape), dtype=dtype, initializer=initializer,
@@ -68,20 +69,32 @@ class Commands:
                 continue
             name, dtype, source_layout = view['name'], view['dtype'], view['layout']
             binding = self.bindings[name]
-            argument = dict(slot=slot, name=name, dtype=dtype, index_dtype=dtype, binding_origin=None,
+            argument = dict(slot=slot, name=name, dtype=dtype, index_dtype=dtype, binding_origin=view.get('binding_origin'),
                 source=source_layout, source_dtype=dtype, storage_dtype=binding['dtype'],
                 storage_bytes=math.prod(binding['shape']) * binding['dtype'].itemsize,
-                requirements=binding.get('requirements', ()))
+                requirements=binding.get('requirements', ()), source_domain=view.get('source_domain'))
             arguments.append(argument);types[slot] = dtype
             reached = source_layout if access_layouts is None else access_layouts.get(slot, source_layout)
-            relation = algebra.layout(layout_configuration(reached))
-            typed = dict(name=name, dtype=dtype, storage_bytes=argument['storage_bytes'], relation=relation)
+            source_relation = algebra.layout(layout_configuration(source_layout))
             for side, shift in (('reads', 0), ('writes', self.geometry['ACCESS_WRITE_SHIFT'])):
-                if access & (1 << (slot + shift)):
+                if not access & (1 << (slot + shift)):
+                    continue
+                if argument['source_domain'] is not None:
+                    from .operand import iteration_order, relation_layout
+                    relations = [use['group_relation'] for use in dispatch if use['side'] == side and use['slot'] == slot]
+                    positions = relations[0].image(relations[0].domain())
+                    for relation in relations[1:]:
+                        positions = positions.binary(relation.image(relation.domain()), 'union')
+                    order, _ = iteration_order(positions, (source_layout.count,))
+                    local = relation_layout(order, order.shape, source_layout.count)
+                    relation = order.then(source_relation)
+                else:
+                    relation = algebra.layout(layout_configuration(reached))
                     local = (dense(source_layout.shape) if reached is source_layout else
                              reached.rebase(source_layout, dense(source_layout.shape)))
-                    accesses.append(dict(side=side, slot=slot, access=typed, work=relation.domain(), origins=(),
-                                         argument_layout=local.components(dtype.itemsize).reshape((local.count * dtype.itemsize,))))
+                typed = dict(name=name, dtype=dtype, storage_bytes=argument['storage_bytes'], relation=relation)
+                accesses.append(dict(side=side, slot=slot, access=typed, work=relation.domain(), origins=(),
+                                     argument_layout=local.components(dtype.itemsize).reshape((local.count * dtype.itemsize,))))
         self.commands.append(dict(kind='shader', source=prefix + source + instance, function=function,
             arguments=tuple(arguments), types=tuple(types), index_dtype=None,
             index_layouts={} if indices is None else indices,
@@ -116,9 +129,19 @@ def bind(declaration, operands):
         for argument in command['arguments']:
             actual = values[argument['name']]
             description = declaration['bindings'][argument['name']]
-            layout = rebase_typed(argument['source'], argument['source_dtype'].itemsize,
-                dense(description['shape']), description['dtype'].itemsize, actual.layout)
-            views[argument['slot']] = TensorView(actual.storage_as(argument['dtype']), layout, argument['binding_origin'])
+            domain = argument.get('source_domain')
+            if domain is None:
+                layout = rebase_typed(argument['source'], argument['source_dtype'].itemsize,
+                    dense(description['shape']), description['dtype'].itemsize, actual.layout)
+            else:
+                from .operand import layout_configuration, relation_layout
+                algebra = domain.algebra
+                source = algebra.layout(layout_configuration(argument['source']))
+                source = source.subtract_domain(source.domain().binary(domain, 'subtract'))
+                placed = source.then(algebra.layout(layout_configuration(actual.layout)))
+                layout = relation_layout(placed, argument['source'].shape, actual.storage.numel())
+            views[argument['slot']] = TensorView(actual.storage_as(argument['dtype']), layout,
+                actual.binding_origin if argument['binding_origin'] is None else argument['binding_origin'])
         bound = dict(command, operands=tuple(views))
         result.append(dict(bound, reaches=bind_accesses(bound)))
     return tuple(result)

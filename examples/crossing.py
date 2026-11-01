@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A declared dependency chain; statistics observe its ordinary completion."""
 import os
+import time
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as collective
@@ -43,7 +44,8 @@ def main():
         'implementation': 'loaded-program', 'started': started, 'rank': rank, 'size': size,
         'useful_work_bytes': STEPS * CROSSINGS * HIDDEN * x.element_size(),
         'report': {'program': 'crossing', 'steps': STEPS, 'calls': STEPS * CROSSINGS, 'overlap': OVERLAP}})
-    observations.close()
+    while not observations.close():
+        time.sleep(0)
     dist.destroy_process_group()
 
 

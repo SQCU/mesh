@@ -6,8 +6,11 @@ replace that inventory's historical findings.
 
 ## Shared numerical and collective lowering
 
-Supplied reductions now enter the ordinary numerical compiler. A declaration
-holds the combine, identity, value schema and permitted changes in fold order.
+Supplied reductions now enter the ordinary numerical compiler before capture
+and differentiation. A declaration holds the combine, identity, value schema
+and permitted changes in fold order. The selected binary association is source
+visible to automatic differentiation. Its retained tree columns and shares are
+placement operands, including rank-preserving alternatives when order matters.
 Transfer cuts compose with command-to-page relations. Required arrival
 observations and final output publications are emitted inside the commands
 which read and write those pages. See
@@ -48,13 +51,40 @@ its invocation operands and declares individual consumers. Its
 [source contract](../../../metal-microbench/docs/serving-page-operands.md)
 records the remaining service boundaries.
 
-Those boundaries are still material: masked serving collectives need an
+Those serving boundaries are still material: masked serving collectives need an
 activity operand at the crossing, multi-chunk prompt admission remains staged,
 and `Rank.take` still serializes a process-global engine/output lifecycle.
-The supplied reduction interface also does not yet declare distributed
-derivatives or optimize among rank-preserving association trees. Opaque native
-and host-boundary leaves still need dispatch-to-page metadata for transfer
-effect fusion. These are not closed by removing the older competing executors.
+They are separate from the compiler ordering corrected in this pass.
+
+## One lowering order
+
+[The compiler data flow](compiler-data-flow-2026-10-31.md) states the stage
+boundaries. Host instructions, layout copies and native shaders remain unbound
+declarations until transfer lowering has supplied their page effects. Every
+native shader declaration carries its group-to-value relation. CPU and ANE
+entries retain source recipes with exact page accesses. The effect pass emits
+all channels together, then the provider binds that completed source.
+
+`ncclMeshCommLower` returns an occurrence and typed page effects before any
+numerical binding. `ncclMeshCommEncode` consumes that occurrence later. Channel
+counters and predecessor links belong to the occurrence, so lowering another
+one cannot change what the first will record. Microbench lowers all its
+crossings before recording the function.
+
+The custom reduction callback API and its record-time compiler have been
+deleted. Stable partial-summary merges use the same supplied-function source
+interface as other reductions. The separate executable `ViewWrites` class,
+early host binding and early layout-copy binding are also gone. These are
+interface removals and changes in stage order, not annotations attached to
+already-bound executable objects.
+
+Input-only source spans feed the existing transfer presentation. Returned pages
+without a numerical reader feed the shared nonblocking completion observer.
+Neither emits an empty GPU command. Result thresholds already observed by
+numerical work are removed; remaining thresholds share one entry per physical
+word. The frontend has one `completion_observe` operation. Metrics accept late
+results without a drain, and the collective demo no longer stops between
+independent cases just to align their timing.
 
 ## Evidence and limits
 

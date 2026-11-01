@@ -14,7 +14,7 @@
   "cpp_scalar": {
     "id": "cpp_scalar",
     "compiler": "cpp_scalar",
-    "build": {"libraries": ["libsleef.a"], "link_flags": ["-Wl,-undefined,error"]},
+    "build": {"libraries": ["libsleef.a"], "compile_flags": [], "link_flags": ["-Wl,-undefined,error"]},
     "accepts": {
       "interfaces": ["scalar"],
       "arithmetic_types": ["bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float16", "bfloat16", "float32", "float64"]
@@ -42,6 +42,7 @@
   "accelerate_engine": {
     "id": "accelerate_engine",
     "compiler": "accelerate",
+    "build": {"libraries": [], "compile_flags": [], "link_flags": ["-framework", "Accelerate", "-Wl,-undefined,error"]},
     "accepts": {
       "interfaces": ["linear", "ffn"],
       "input_types": ["float16", "bfloat16", "float32"]
@@ -57,6 +58,8 @@
   "ane_engine": {
     "id": "ane_engine",
     "compiler": "coreml",
+    "build": {"libraries": [], "compile_flags": ["-x", "objective-c++", "-fobjc-arc", "-fblocks"],
+              "link_flags": ["-framework", "Foundation", "-Wl,-undefined,error"]},
     "accepts": {
       "interfaces": ["linear", "ffn"],
       "input_types": ["float16", "bfloat16", "float32"]

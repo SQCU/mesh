@@ -396,12 +396,15 @@ optional pure `views` geometry, frames and declared producer/landing operands.
 The shared compiler resolves those operands to page tables, exact masks and
 physical spans. Page masks are compiler data, not a second public WRITE API.
 
-`ncclMeshCommEncode` encodes the next declared group into the existing recorder.
+`ncclMeshCommLower` fixes an occurrence and its typed page effects.
+`ncclMeshCommEncode` records that exact occurrence into the existing recorder.
 There is no separate WRITE handle, execute call, destruction path or serializer.
-Templates serialize the complete communicator declaration once through
-`ncclMeshCommPlanDeclaration`/`Declared`; crossings retain only their position
-and publication-mode metadata. Routes, relays and tile readiness remain in that
-same compiled function. Numerical execution performs no layout reconstruction.
+Captured source is reused through `Function.declare_graph`; each realization
+lowers its current transport occurrence before binding numerical commands.
+The former command-snapshot loader and communicator serialization API are removed:
+stored transport words and cuts cannot describe a new occurrence. Native record
+reuse and arithmetic pipeline caching remain. Persistent source-template save/load
+is not supplied. Numerical execution performs no layout reconstruction.
 
 Matching hand-tuned performance requires retaining both the numerical algorithms and their schedules.
 Operator coverage alone does not establish this. Performance evidence is the canonical committed-main

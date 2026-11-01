@@ -239,7 +239,7 @@ def plan(group, calls, *, production_seconds=None, routing=None):
 
 def merge_partials(out, lse, group=None, root=-1):
     """Every member's attention over its own keys merged into the attention over all of them (split-KV attention's
-    merge, compiled from reduction.partials through torch_mesh::merge_partials):
+    merge, compiled from reduction.partials through its ordinary source graph):
     `out` (rows x dim, any leading shape) and `lse` (each row's logsumexp, -inf where it saw
     no key), the same rows on every member.  Returns (the attention in out's dtype, each row's logsumexp), on every member
     (`root` -1) or at `root`."""
@@ -248,7 +248,7 @@ def merge_partials(out, lse, group=None, root=-1):
 
     from . import backend
     group = group or dist.distributed_c10d._get_default_group()
-    attended, lse = backend.attention(torch.ops.torch_mesh.merge_partials(backend.partial(out, lse), root, group.group_name, []))
+    attended, lse = backend.attention(backend.merge_partials(backend.partial(out, lse), root, group.group_name, []))
     return attended.to(out.dtype), lse
 
 

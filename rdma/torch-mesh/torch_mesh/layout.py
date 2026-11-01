@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import _stream
 from .compilation import operands
-from .operand import TensorView, descriptor, requirements, required_layout, storage_requirement, graph_uses
+from .operand import TensorView, descriptor, requirements, required_layout, storage_requirement, storage_origin, graph_uses
 
 
 def strides(shape):
@@ -168,26 +168,22 @@ def copy_declarations(source, destination):
     return commands
 
 
-def copies(source, destination):
-    """Bind the same declared copy through the common command compiler."""
-    from .native import command_records
-    return list(command_records(copy_declarations(source, destination)))
-
-
-def allocate(layout, dtype, device, *, extent=0, alignment=1):
+def allocate(layout, dtype, device, *, extent=0, alignment=1, binding_origin=None):
     """Assign the declared layout and byte footprint to aligned bridge pages."""
     from . import empty
     width = dtype.itemsize
     first, length = layout.storage_span()
-    origin = -min(0, first)
+    bound = 0 if binding_origin is None else (layout.index(0) * width + binding_origin if layout.count else 0)
+    origin = -min(0, first, bound // width)
     alignment = math.lcm(alignment, width)
-    count = -(-max((first + length + origin) * width, extent + origin * width) // width)
+    count = -(-max((first + length + origin) * width, extent + bound + origin * width) // width)
     reserved = -(-(count * width + alignment - width) // alignment) * (alignment // width)
     storage = empty((reserved,), dtype=dtype, device=device)
     base, _, backing = _stream.page_backing(storage)
     offset = backing.index(0) if backing.count else backing.offset
-    padding = (-(base + offset + origin * width)) % alignment
-    return TensorView(storage, layout.shift(origin + padding // width))
+    padding = (-(base + offset + bound + origin * width)) % alignment
+    return TensorView(storage, layout.shift(origin + padding // width),
+                      None if binding_origin is None else bound + origin * width + padding)
 
 
 def resolve(value, declarations, *, writing=False, device=None):
@@ -200,20 +196,25 @@ def resolve(value, declarations, *, writing=False, device=None):
     contracts = [storage_requirement(declared) for declared in declarations]
     capacity = max((item[1] for item in contracts), default=0)
     alignment = math.lcm(*(item[2] for item in contracts))
+    origin = storage_origin(declarations)
     device = value.device.type if device is None else device
     base, available, backing = _stream.page_backing(value)
     at = backing.index(0) if backing.count else backing.offset
     storage = TensorView.of(value).storage
     first = descriptor(value).index(0) if descriptor(value).count else 0
-    fits = ((base + at) % alignment == 0 and at + capacity <= available
-            and first * value.element_size() + capacity <= storage.untyped_storage().nbytes())
+    bound = first * value.element_size() if origin is None else first * value.element_size() + origin
+    at += bound - first * value.element_size()
+    fits = (bound >= 0 and (base + at) % alignment == 0 and at + capacity <= available
+            and bound + capacity <= storage.untyped_storage().nbytes())
     if descriptor(value) == layout and value.device.type == device and fits:
-        return replace(TensorView.of(value), layout=layout), []
+        return replace(TensorView.of(value), layout=layout,
+                       binding_origin=TensorView.of(value).binding_origin if origin is None else bound), []
     allocation = layout.shift(-(layout.index(0) if layout.count else 0))
     extent = (allocation.index(0) * value.element_size() if allocation.count else 0) + capacity
-    placed = allocate(allocation, value.dtype, device, extent=extent, alignment=alignment)
-    placed = replace(placed, binding_origin=TensorView.of(value).binding_origin)
-    return placed, copies(placed, value) if writing else copies(value, placed)
+    placed = allocate(allocation, value.dtype, device, extent=extent, alignment=alignment, binding_origin=origin)
+    if origin is None:
+        placed = replace(placed, binding_origin=TensorView.of(value).binding_origin)
+    return placed, copy_declarations(placed, value) if writing else copy_declarations(value, placed)
 
 
 def bindings(values, declarations, *, writing=False, binding='indexed', devices=None):

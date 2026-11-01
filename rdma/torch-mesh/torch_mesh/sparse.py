@@ -111,8 +111,40 @@ def _product(a, b, domains, out):
                     3: tiles.stride(), 4: spans.stride()}
     result, = declare('sparse.metal', 'sparse_product_bound', buffers, (2,), (m, k, n), 5,
                       (groups, 1, 1), (geometry[-1] * configuration['SIMD_WIDTH'], 1, 1), instance,
-                      indexed=(), requirements=requirements, prefix=_OPERANDS)
+                      indexed=(), requirements=requirements, prefix=_OPERANDS,
+                      dispatch=_dispatch(records, pieces, groups, geometry[-1], m, k, n))
     return result
+
+
+def _dispatch(records, pieces, groups, simultaneous, rows, inner, columns):
+    """The tile schedule's exact pages, retained before its tensors are bound."""
+    from mesh_relation import Algebra
+    algebra = Algebra()
+    extents = {0: rows*inner, 1: inner*columns, 2: rows*columns, 3: len(records)*4, 4: len(pieces)*2}
+    relations = {('writes' if slot == 2 else 'reads', slot): algebra.map((groups,), (extent,), lambda i,o: ['false'])
+                 for slot, extent in extents.items()}
+    def add(slot, group, equations):
+        side = 'writes' if slot == 2 else 'reads'
+        relation = algebra.map((groups,), (extents[slot],), lambda i,o: [f'{i[0]} = {group}', *equations(o[0])])
+        relations[side, slot] = relations[side, slot].union(relation)
+    def rectangle(slot, group, stride, row, height, column, width):
+        if height and width:
+            add(slot, group, lambda j: [f'{row} <= floor({j}/{stride}) < {row+height}',
+                                       f'{column} <= {j} mod {stride} < {column+width}'])
+    for tile_index, (tile, reduction) in enumerate(zip(records[::2], records[1::2], strict=True)):
+        row, column, height, width = tile
+        group = tile_index // simultaneous
+        add(3, group, lambda j: [f'{tile_index*8} <= {j} < {tile_index*8+8}'])
+        first, end = reduction[:2]
+        add(4, group, lambda j: [f'{first*2} <= {j} < {end*2}'])
+        if not height or not width:
+            continue
+        for at, length in pieces[first:end]:
+            rectangle(0, group, inner, row, height, at, length)
+            rectangle(1, group, columns, at, length, column, width)
+        rectangle(2, group, columns, row, height, column, width)
+
+    return tuple(dict(side=side, slot=slot, group_relation=relation) for (side, slot), relation in relations.items())
 
 
 def _rows(x):

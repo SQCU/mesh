@@ -12,8 +12,8 @@ program): an all-gather and a reduce-scatter are ncclMeshAllGatherV and ncclMesh
 all_to_all_single, gather and scatter are ncclMeshAlltoAllV, MPI_Alltoallv with its counts on the host (a gather and a
 scatter of any sizes the rooted V, MPI's Gatherv and Scatterv: every count 0 but toward or from the root, as NCCL's
 gather and scatter are its forms); a list supplies separate original/final storage bindings to that same collective compiler. Directed transfers are declared writes or sparse counted exchanges on the full physical communicator.
-The partials merge (merge_partials) is an all-reduce,
-reduce or V reduce-scatter by the library's partials operator.
+The partials merge supplies its combine source to the same selected-page graph,
+including its derivative when the enclosing source requests one.
 
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
 store, as ProcessGroupNCCL does, the store's one use), its sessions each on the map the bridges keep when it opens; its
@@ -130,7 +130,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         self._held(rank, size, made[0])
 
     def _held(self, rank, size, comm):
-        self._rank, self._size, self._operators = rank, size, {}
+        self._rank, self._size = rank, size
         # the completions submitted under this group (mesh_statistics.Observations), emitted by its shutdown at the latest
         self.observations = []
         # Completed cohorts and still-missing peers are preparation operands.
@@ -194,8 +194,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def shutdown(self):
         """torch's end of this group (destroy_process_group): the fused crossings' forms on its communicator released,
-        their leases back to the region once the stream has passed them (_stream.mm fused_release), its completions'
-        observations emitted first."""
+        their leases back to the region once the stream has passed them (_stream.mm fused_release).
+        Observe ready reports once. Applications finish pending observations before shutdown."""
         for observations in self.observations:
             observations.close()
         _stream.fused_release(self.handle)
@@ -357,18 +357,20 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def prepare_writes(self, deliveries, *, declarations=None):
         """Bind local source/result geometry into ordinary communicator Calls."""
         from .operand import TensorView
-        bindings, calls = [], []
+        bindings, calls, views = [], [], []
         for value, source, destination in deliveries:
             view = TensorView.of(value)
+            views.append(view)
             geometry = view.write_layout()
             bindings.append((*geometry, int(source), int(destination)))
             sides = tuple(geometry if self.rank() == rank else None for rank in (source, destination))
             calls.append(Call(WRITE, view.numel() * view.element_size(), torch.uint8,
-                              root=source, destination=destination, views=sides))
+                              root=source, destination=destination, views=sides, fused=True))
         if declarations is not None:
-            calls = [declared._replace(views=physical.views)
+            calls = [declared._replace(views=physical.views, fused=True)
                      for declared, physical in zip(declarations, calls, strict=True)]
-        return _stream.ViewWrites(bindings, self.handle), calls
+        return dict(transfer='write', bindings=tuple(bindings), views=tuple(views), calls=tuple(calls), group=self,
+                    before=(), after=()), calls
 
     def exchange_configuration(self, value):
         """Every member's preparation operand through the shared native channel."""
@@ -386,15 +388,16 @@ class ProcessGroupMesh(dist.ProcessGroup):
             raise ValueError('collective views have different logical extents across ranks')
         return sorted(set(cut for row in rows for cut in row))
 
-    def partials_operator(self, width):
-        """The supplied partial-row function uses the same reduction compiler."""
-        if width not in self._operators:
-            from .reduction import partials
-            self._operators[width] = partials(torch.float32, width).operator(self)
-        return self._operators[width]
 
 def prepare_fragments(bindings, group):
     """The common AOT binding for partial blocks and frontend graph crossings."""
+    bindings = list(bindings)
+    if bindings and all(call.kind == WRITE for call, _, _ in bindings):
+        from .operand import TensorView
+        deliveries = [(TensorView.of(source if group.rank() == call.root else destination
+                       if group.rank() == call.destination else source), call.root, call.destination)
+                      for call, source, destination in bindings]
+        return group.prepare_writes(deliveries, declarations=[call for call, _, _ in bindings])
     from .collective_views import lower
     bindings, declarations, before, after = lower(bindings, group)
     # each declaration names the tensors its issue passes, so CommPlan lays and places it for them.
@@ -406,7 +409,8 @@ def prepare_fragments(bindings, group):
         counts = [declaration.count] if declaration.kind in (ALLREDUCE, REDUCE, BROADCAST) else declaration.counts
         calls.append((declaration.kind, [source], [destination], counts or [], code, declaration.root))
         operands.extend(t for t in (source, destination) if t is not None)
-    return _stream.Collectives(calls, group.handle, operands, before, after), declarations
+    return dict(transfer='collective', bindings=tuple(calls), calls=tuple(declarations),
+                operands=tuple(operands), group=group, before=tuple(before), after=tuple(after)), declarations
 
 
 def partial(out, lse):
@@ -433,19 +437,11 @@ def _mesh(group_name, what):
     return group
 
 
-@torch.library.custom_op('torch_mesh::merge_partials', mutates_args=())
-def merge_partials(partials: torch.Tensor, root: int, group_name: str, rows: list[int]) -> torch.Tensor:
-    """The partials merge on the mesh group named `group_name` as a torch operator (torch_mesh.merge_partials):
-    float32 rows of [m, l, O] (partial) merged by their log-sum-exp, on every member (`root` -1) or at `root`."""
-    _mesh(group_name, 'merge_partials')
-    raise RuntimeError('torch_mesh::merge_partials runs inside a prepared function (declarations.Function), whose '
-                       'preparation declares it; an eager collective is not executed (design/eager-execution.md)')
-
-
-@merge_partials.register_fake
-def _(partials, root, group_name, rows):
-    shape = (rows[_mesh(group_name, 'merge_partials').rank()], partials.shape[-1]) if rows else partials.shape
-    return partials.new_empty(shape)
+def merge_partials(values: torch.Tensor, root: int, group_name: str, rows: list[int]) -> torch.Tensor:
+    """The supplied summary combine enters the same source/autograd graph."""
+    from .reduction import partials
+    group = _mesh(group_name, 'merge_partials')
+    return partials(values.dtype, values.shape[-1])(values, group, root=root, counts=rows)
 
 
 @torch.library.custom_op('torch_mesh::all_reduce', mutates_args=())

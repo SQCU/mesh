@@ -1280,7 +1280,9 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_values=None, log=True
             if t % hold == 0:
                 solver.prepare(min(len(X), solver.T))
                 completion = solver.submit(X)
-                G = solver.result(_stream.completion_end(completion))
+                while (ended := _stream.completion_observe(completion)) is None:
+                    time.sleep(0)
+                G = solver.result(ended)
                 mixes = solver.mixes()
                 strat.tick(X, solver.G2, mixes, solver.kappa, ms, True, sample,
                            itimer, solver.Zc, solver.white, solver.Vg)
@@ -1373,7 +1375,9 @@ def bench(reps, rows, T, device, configuration):
         # and service submit this same complete Function.
         solver.prepare(min(len(X), T))
         completion = solver.submit(X)
-        solver.result(_stream.completion_end(completion))
+        while (ended := _stream.completion_observe(completion)) is None:
+            time.sleep(0)
+        solver.result(ended)
         observations.append(solver.previous_function)
     middle = sorted(observations, key=lambda row: row['seconds'])[len(observations) // 2]
     seconds = middle['seconds']
@@ -1418,7 +1422,9 @@ def serve(config):
                 if kind == REQUEST:
                     solver.prepare(min(n, solver.T))
                     completion = solver.submit(np.zeros((n, REQUEST_WIDTH), np.float32))
-                    solver.result(_stream.completion_end(completion))
+                    while (ended := _stream.completion_observe(completion)) is None:
+                        time.sleep(0)
+                    solver.result(ended)
     finally:
         report("solver_finished", rank=world.rank, solves=solver.solves, columns=solver.columns,
                whole_function=solver.previous_function, signal=stopping["signal"])
@@ -1483,7 +1489,7 @@ def relay(config, world, solver, header, stopping, wake):
             completion = solver.submit(X)
             # This host application can receive more frames while numerical
             # work runs. Completion changes no compiled dispatch ordering.
-            while not _stream.completion_ended(completion):
+            while (ended := _stream.completion_observe(completion)) is None:
                 readable, _, _ = select.select([engine, wake], [], [], config['completion_poll_seconds'])
                 if wake in readable:
                     os.read(wake, 64)
@@ -1491,7 +1497,7 @@ def relay(config, world, solver, header, stopping, wake):
                     for node, address, frame in engine.receive():
                         joined.feed(frame)
                         route[OBSERVATION_KIND] = (node, address)
-            G = solver.result(_stream.completion_end(completion))
+            G = solver.result(ended)
             solve_s += solver.previous_function['seconds']
             if trained:
                 ms = bind_match(X)

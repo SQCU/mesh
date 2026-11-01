@@ -3,7 +3,6 @@
 #import <objc/runtime.h>
 #include <stdatomic.h>
 #include <time.h>
-#include <os/os_sync_wait_on_address.h>
 #include <limits.h>
 
 BOOL MetalViewLayoutMatches(const NSUInteger *shape,const NSInteger *strides,const NSInteger *required,size_t rank) {
@@ -1305,6 +1304,8 @@ struct MetalSchedule {
     NSMutableArray *readVersions;
     MetalCapture *declarations;
     NSMutableData *waits;
+    NSMutableData *results;
+    double resultObserved;
     NSMutableDictionary *frontierRead, *frontierWritten, *frontierAtomic, *hostResources;
     MetalQueueAccess *queueAccesses;
     NSMutableArray *parts;
@@ -1312,25 +1313,18 @@ struct MetalSchedule {
     _Atomic int status;
     // the part's end, in the statistics clock (MetalScheduleEnd), stored before its status
     double ended;
-    // the root's: 1 once every part and host task has ended (MetalScheduleArrived), woken for MetalScheduleEnd
+    // the root's: 1 once local work and declared returned pages are complete
     _Atomic uint32_t arrived;
+    _Atomic unsigned completing;
+    int outcome;
+    NSError *completionError;
     _Atomic unsigned references;
     _Atomic unsigned pending;
     NSError *error;
     void (^completed)(NSError *);
     id<MTLBuffer> data;
     NSUInteger used;
-    // design/replay-templates-2026-10-29.md: the calls that built the function, on its root (MetalScheduleTemplate),
-    // and each communicator's plan declaration it last recorded
-    NSMutableArray *script;
-    NSMutableDictionary *plans;
 };
-
-static void MetalScheduleCall(struct MetalSchedule *s,NSDictionary *call) {
-    s=s->root;
-    if(!s->script)s->script=[NSMutableArray new];
-    [s->script addObject:call];
-}
 
 MTLCompileOptions *MetalDeviceCompilerOptions(id<MTLDevice> device) {
     MTLCompileOptions *options=[MTLCompileOptions new];
@@ -1421,32 +1415,10 @@ struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue,enum Meta
     return MetalScheduleCreatePart(queue,form,YES);
 }
 
-// design/replay-templates-2026-10-29.md: the plan `comm`'s crossings assume (ncclMeshCommPlanDeclaration), as a call
-// where it differs from the last one this function recorded: its communicator a place, then its bytes, each binding
-// a place
-static void MetalSchedulePlan(struct MetalSchedule *root,struct ncclComm *comm) {
-    size_t length=0,count=0;
-    if(ncclMeshCommPlanDeclaration(comm,NULL,&length,NULL,&count)||!length)return;
-    NSMutableData *bytes=[NSMutableData dataWithLength:sizeof comm+length],*at=[NSMutableData dataWithLength:count*sizeof(size_t)];
-    if(ncclMeshCommPlanDeclaration(comm,(char *)bytes.mutableBytes+sizeof comm,&length,at.mutableBytes,&count))return;
-    NSData *plan=[bytes subdataWithRange:NSMakeRange(sizeof comm,length)];
-    NSValue *key=[NSValue valueWithPointer:comm];
-    if(!root->plans)root->plans=[NSMutableDictionary new];
-    if([root->plans[key] isEqualToData:plan])return;
-    root->plans[key]=plan;
-    memcpy(bytes.mutableBytes,&comm,sizeof comm);
-    NSMutableData *places=[NSMutableData dataWithLength:(count+1)*sizeof(struct MetalPlace)];
-    struct MetalPlace *into=places.mutableBytes;const size_t *offsets=at.bytes;
-    into[0]=(struct MetalPlace){0,MetalRelocationCommunicator};
-    for(size_t k=0;k<count;k++)into[k+1]=(struct MetalPlace){sizeof comm+offsets[k],MetalRelocationBuffer};
-    MetalScheduleCall(root,@{@"call":@"plan",@"kind":@"plan",@"bytes":bytes,@"places":places});
-}
-
 void MetalScheduleCommunicator(struct MetalSchedule *s,struct ncclComm *comm) {
     s=s->root;
     if(!s->communicators)s->communicators=[NSMutableOrderedSet new];
     [s->communicators addObject:[NSValue valueWithPointer:comm]];
-    MetalSchedulePlan(s,comm);
 }
 
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *s) { return MetalScheduleTail(s)->residency; }
@@ -1460,8 +1432,6 @@ struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *s,const void 
     }
     struct MetalCommandBinding result={s->data,s->used,bytes,index,MetalReachRead,0};
     memcpy((char *)s->data.contents+s->used,data,bytes);s->used+=size;
-    MetalScheduleCall(s,@{@"call":@"data",@"bytes":[NSData dataWithBytes:data length:bytes],@"index":@(index),
-        @"at":[NSString stringWithFormat:@"%p+%lu",(void *)result.buffer,(unsigned long)result.offset]});
     return result;
 }
 
@@ -1535,8 +1505,6 @@ struct MetalSchedule *MetalEncoderSchedule(id<MTL4ComputeCommandEncoder> encoder
 void MetalScheduleCompute(struct MetalSchedule *root,id<MTLComputePipelineState> pipeline,
     const struct MetalCommandBinding *bindings,size_t count,MTLSize groups,MTLSize threads) { @autoreleasepool {
     NSData *bound=[NSData dataWithBytes:bindings length:count*sizeof *bindings];
-    MetalScheduleCall(root,@{@"call":@"compute",@"pipeline":pipeline,@"bindings":bound,
-        @"groups":@[@(groups.width),@(groups.height),@(groups.depth)],@"threads":@[@(threads.width),@(threads.height),@(threads.depth)]});
     NSMutableData *accesses=[NSMutableData data];
     for(size_t k=0;k<count;k++) {
         const struct MetalCommandBinding b=bindings[k];
@@ -1558,21 +1526,9 @@ static int MetalScheduleCrossWork(struct MetalSchedule *root,NSData *accesses,co
     return cross(s->encoder,s->table,s->residency,0,0);
 }
 
-// design/replay-templates-2026-10-29.md: a call with its declaration, its bytes and places copied
-static NSMutableDictionary *MetalScheduleDeclared(NSString *call,const struct MetalDeclaration *declared) {
-    NSMutableDictionary *entry=[NSMutableDictionary dictionaryWithObject:call forKey:@"call"];
-    if(declared) {
-        entry[@"kind"]=@(declared->kind);entry[@"bytes"]=[NSData dataWithBytes:declared->bytes length:declared->length];
-        entry[@"places"]=[NSData dataWithBytes:declared->places length:declared->count*sizeof *declared->places];
-    }
-    return entry;
-}
-
 int MetalScheduleCross(struct MetalSchedule *root,const struct MetalReach *views,size_t count,
-    const ncclMeshGroup *group,const struct MetalDeclaration *declared,MetalCrossing cross) {
+    const ncclMeshGroup *group,MetalCrossing cross) {
     NSData *accesses=[NSData dataWithBytes:views length:count*sizeof *views];
-    NSMutableDictionary *entry=MetalScheduleDeclared(@"cross",declared);entry[@"accesses"]=accesses;
-    MetalScheduleCall(root,entry);
     return MetalScheduleCrossWork(root,accesses,group,cross);
 }
 
@@ -1581,19 +1537,16 @@ static void MetalScheduleHostWork(struct MetalSchedule *root,NSData *views,Metal
     MetalScheduleWork(root,views,nil,operation);
 }
 
-void MetalScheduleHost(struct MetalSchedule *root,const struct MetalReach *views,size_t count,const struct MetalDeclaration *declared,
+void MetalScheduleHost(struct MetalSchedule *root,const struct MetalReach *views,size_t count,
     MetalHostOperation operation) { @autoreleasepool {
     NSData *accesses=[NSData dataWithBytes:views length:count*sizeof *views];
-    NSMutableDictionary *entry=MetalScheduleDeclared(@"host",declared);entry[@"accesses"]=accesses;
-    MetalScheduleCall(root,entry);
     MetalScheduleHostWork(root,accesses,operation);
 }
 }
 
 void MetalEncoderHost(id<MTL4ComputeCommandEncoder> encoder,const struct MetalReach *views,size_t count,
-    const struct MetalDeclaration *declared,MetalHostOperation operation) {
+    MetalHostOperation operation) {
     struct MetalSchedule *root=MetalEncoderSchedule(encoder);
-    (void)declared; // The containing crossing owns the template declaration.
     MetalScheduleHostWork(root->root,[NSData dataWithBytes:views length:count*sizeof *views],operation);
 }
 
@@ -2105,8 +2058,6 @@ NSError *MetalScheduleAppend(struct MetalSchedule *root,struct MetalReplay *repl
     if(marks.count&&(!views||!cross))return MetalReplayFailure(EINVAL,@"crossing marks require their page accesses and encoder");
     NSArray *held=replay?objc_getAssociatedObject(replay->owner,&replayRecordsKey):nil;
     if(replay&&NSMaxRange(invocations)>[held[4] unsignedIntegerValue])return MetalReplayFailure(EINVAL,@"invocations exceed the recorded slots");
-    if(replay)MetalScheduleCall(root,@{@"call":@"append",@"owner":replay->owner,@"buffers":@(replay->buffers),@"memory":@(replay->memory),
-        @"invocations":@[@(invocations.location),@(invocations.length)],@"marks":marks?:@[]});
     NSArray *hosts=replay?objc_getAssociatedObject(replay->owner,&replayHostsKey):nil;
     const NSUInteger n=replay?replay->count:0;
     for(NSUInteger t=invocations.location;t<NSMaxRange(invocations);t++) {
@@ -2142,11 +2093,14 @@ static void MetalScheduleArrived(struct MetalSchedule *root) {
     if(atomic_fetch_sub_explicit(&root->pending,1,memory_order_acq_rel)==1) {
         NSError *failure=nil;
         MetalScheduleStatus(root,&failure);
-        atomic_store_explicit(&root->arrived,1,memory_order_release);
-        os_sync_wake_by_address_all(&root->arrived,sizeof root->arrived,OS_SYNC_WAKE_BY_ADDRESS_NONE);
-        if(root->completed)root->completed(failure);
-        MetalScheduleFree(root);
     }
+}
+
+void MetalScheduleResults(struct MetalSchedule *s,const struct MetalResult *results,size_t count) {
+    struct MetalSchedule *root=s->root;
+    if(!root->results)root->results=[NSMutableData new];
+    [root->results appendBytes:results length:count*sizeof *results];
+    for(size_t i=0;i<count;i++)[root->owners addObject:results[i].buffer];
 }
 
 // a GPU host time (mach_absolute_time's seconds, MTL4CommitFeedback) in the statistics clock, CLOCK_MONOTONIC
@@ -2293,39 +2247,59 @@ int MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *))
 
 int MetalScheduleEnd(const struct MetalSchedule *s,double *ended,NSError **error) {
     struct MetalSchedule *root=s->root;
-    *error=nil;
-    while(!atomic_load_explicit(&root->arrived,memory_order_acquire)) {
-        // woken by the last arrival; each second without it, its communicators' errors read (a lost link's GPU waits
-        // end at their own bounds, and with them the parts)
-        os_sync_wait_on_address_with_timeout(&root->arrived,0,sizeof root->arrived,OS_SYNC_WAIT_ON_ADDRESS_NONE,
-                                             OS_CLOCK_MACH_ABSOLUTE_TIME,1000000000ull);
-        if(MetalScheduleStatus(s,error)<0)return -1;
-    }
+    const int observed=MetalScheduleStatus(s,error);
+    *ended=0;
+    if(observed!=1)return observed;
     double latest=0;
     for(const struct MetalSchedule *part=s;part;part=part->next)if(part->ended>latest)latest=part->ended;
     for(MetalWork *host in root->hosts)if(host->ended>latest)latest=host->ended;
+    if(root->resultObserved>latest)latest=root->resultObserved;
     *ended=latest;
-    return MetalScheduleStatus(s,error);
+    return 1;
 }
 
 int MetalScheduleStatus(const struct MetalSchedule *s,NSError **error) {
     *error=nil;
-    const struct MetalSchedule *root=s->root;
+    struct MetalSchedule *root=s->root;
+    if(atomic_load_explicit(&root->arrived,memory_order_acquire)) {
+        *error=root->completionError;return root->outcome;
+    }
     // A part publishes its status before its arrival. Completion polling must
     // observe the final arrival too, so reading the reported end cannot wait.
-    int result=atomic_load_explicit(&root->arrived,memory_order_acquire)?1:0;
-    for(;s;s=s->next){int state=atomic_load_explicit(&s->status,memory_order_acquire);if(state<0){*error=s->error;return -1;}if(!state)result=0;}
+    int result=atomic_load_explicit(&root->pending,memory_order_acquire)?0:1;
+    for(;s;s=s->next){int state=atomic_load_explicit(&s->status,memory_order_acquire);if(state<0){*error=s->error;result=-1;break;}if(!state)result=0;}
     for(MetalWork *host in root->hosts) {
         int state=atomic_load_explicit(&host->status,memory_order_acquire);
-        if(state<0){*error=host->error;return -1;}if(!state)result=0;
+        if(state<0){*error=host->error;result=-1;break;}if(!state&&result>0)result=0;
     }
     for(NSValue *value in root->communicators) {
         ncclResult_t status=ncclSuccess;
         ncclResult_t call=ncclCommGetAsyncError(value.pointerValue,&status);
         if(call||status!=ncclSuccess) {
             *error=MetalReplayFailure(ENOTCONN,@(ncclGetLastError(value.pointerValue)));
-            return -1;
+            result=-1;break;
         }
+    }
+    if(result>0) {
+        const struct MetalResult *words=root->results.bytes;
+        for(NSUInteger i=0;i<root->results.length/sizeof *words;i++) {
+            const uint64_t seen=__atomic_load_n((uint64_t *)((char *)words[i].buffer.contents+words[i].offset),__ATOMIC_ACQUIRE);
+            if(seen==UINT64_MAX){*error=MetalReplayFailure(ENOTCONN,@"a returned page's link was lost");result=-1;break;}
+            if(seen<words[i].threshold){result=0;break;}
+        }
+    }
+    if(result && !atomic_load_explicit(&root->pending,memory_order_acquire)) {
+        unsigned expected=0;
+        if(atomic_compare_exchange_strong_explicit(&root->completing,&expected,1,memory_order_acq_rel,memory_order_acquire)) {
+            if(root->results.length||(!root->firstSubmission&&!root->hosts.count))
+                root->resultObserved=(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)*1e-9;
+            root->outcome=result;root->completionError=[*error retain];
+            atomic_store_explicit(&root->arrived,1,memory_order_release);
+            if(root->completed)root->completed(*error);
+            MetalScheduleFree(root);
+        } else if(atomic_load_explicit(&root->arrived,memory_order_acquire)) {
+            *error=root->completionError;result=root->outcome;
+        } else result=0;
     }
     return result;
 }
@@ -2368,24 +2342,14 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     [s->hostDependencies release];[s->partDependencies release];
     [s->history release];[s->readVersions release];[s->frontierRead release];[s->frontierWritten release];[s->frontierAtomic release];[s->hostResources release];
     [s->queueAccesses release];[s->parts release];
-    [s->completed release];[s->error release];[s->device release];[s->communicators release];
-    [s->script release];[s->plans release];free(s);
+    [s->completed release];[s->completionError release];[s->error release];[s->device release];[s->communicators release];
+    [s->results release];free(s);
 }
 
 void MetalReplayFree(struct MetalReplay *replay) {
     if (!replay) return;
     MetalReplayDestroy(replay);
     free(replay);
-}
-
-// design/replay-templates-2026-10-29.md: templates
-
-static char pipelineDeclarationKey;
-
-void MetalPipelineDeclare(id<MTLComputePipelineState> pipeline,id<MTLLibrary> library,NSString *function,
-    NSArray<NSArray *> *constants,NSDictionary<NSString *,id> *descriptor) {
-    objc_setAssociatedObject(pipeline,&pipelineDeclarationKey,@{@"library":library,@"function":function,
-        @"constants":constants?:@[],@"descriptor":descriptor?:@{}},OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 static MTLComputePipelineDescriptor *MetalPipelineDescriptor(id<MTLLibrary> library,NSString *function,NSArray *constants,
@@ -2419,516 +2383,6 @@ id<MTLComputePipelineState> MetalPipelineMake(id<MTLLibrary> library,NSString *f
     MTLComputePipelineReflection *reflection=nil;
     id<MTLComputePipelineState> pipeline=[library.device newComputePipelineStateWithDescriptor:descriptor
         options:MTLPipelineOptionBindingInfo|MTLPipelineOptionBufferTypeInfo reflection:&reflection error:error];
-    if(pipeline){MetalPipelineDeclare(pipeline,library,function,constants,fields);MetalPipelineSizes(pipeline,reflection);}
+    if(pipeline)MetalPipelineSizes(pipeline,reflection);
     return pipeline;
-}
-
-// A template names operands by index: a binding or reach its operand (or, for a binding, the command data a data call
-// made), each beside its recorded form with the pointers cleared; -1 where it names none.
-struct MetalTemplateBinding { int32_t operand, data; struct MetalCommandBinding binding; };
-struct MetalTemplateDispatch { uint32_t pipeline; int32_t operands[MESH_BUFFER_BINDINGS], indirectGrid; NSUInteger address; struct MetalRecordedDispatch record; };
-struct MetalTemplateReach { int32_t operand, address; struct MetalReach reach; };
-struct MetalTemplateAddress { int32_t operand, uniform; struct MetalRecordedAddress record; };
-
-static NSArray *MetalTemplateSizes(void) {
-    return @[@(sizeof(struct MetalTemplateDispatch)),@(sizeof(struct MetalTemplateReach)),@(sizeof(struct MetalTemplateBinding)),
-        @(sizeof(struct MetalTemplateAddress))];
-}
-
-// A buffer's operand is its region lease (ncclMeshMemBuffer), so buffers over one lease's bytes are one operand;
-// `delta` is where the buffer starts in it. A buffer outside every lease is its own.
-static id<MTLBuffer> MetalTemplateLease(id<MTLBuffer> buffer,NSUInteger *delta) {
-    void *lease=NULL;size_t offset=0;*delta=0;
-    if(!buffer.contents||ncclMeshMemBuffer(buffer.contents,&lease,&offset))return buffer;
-    *delta=offset;return (id<MTLBuffer>)lease;
-}
-
-// The compile facts a device's libraries take (MetalDeviceCompilerOptions)
-static NSDictionary *MetalTemplateDevice(id<MTLDevice> device) {
-    return @{@"threads":@(device.maxThreadsPerThreadgroup.width),@"bytes":@(device.maxThreadgroupMemoryLength)};
-}
-
-NSDictionary *MetalScheduleTemplate(struct MetalSchedule *const *schedules,size_t count,NSArray<id<MTLBuffer>> *bound,
-    NSArray<NSNumber *> *offsets,NSError **error) {
-    if(!count){if(error)*error=MetalReplayFailure(EINVAL,@"a template of no function");return nil;}
-    struct MetalSchedule *root=schedules[0]->root;
-    NSMutableArray *operands=[NSMutableArray array],*pipelines=[NSMutableArray array],*libraries=[NSMutableArray array],
-        *functions=[NSMutableArray array];
-    NSMutableDictionary *operandAt=[NSMutableDictionary dictionary],*pipelineAt=[NSMutableDictionary dictionary],
-        *libraryAt=[NSMutableDictionary dictionary],*dataAt=[NSMutableDictionary dictionary];
-    // a bound operand's offsets are its lease's; where its buffer starts in the lease (delta) moves them to the buffer
-    // that instantiation binds in its place
-    for(NSUInteger i=0;i<bound.count;i++) {
-        NSUInteger delta=0;NSValue *key=[NSValue valueWithPointer:(void *)MetalTemplateLease(bound[i],&delta)];
-        if(!operandAt[key])operandAt[key]=@(operands.count);
-        [operands addObject:@{@"bound":@(operands.count),@"delta":@(delta+[offsets[i] unsignedIntegerValue])}];
-    }
-    __block NSString *failure=nil;
-    int32_t (^operand)(id<MTLBuffer>,NSUInteger *)=^int32_t(id<MTLBuffer> buffer,NSUInteger *delta){
-        *delta=0;
-        if(!buffer)return -1;
-        id<MTLBuffer> lease=MetalTemplateLease(buffer,delta);
-        NSValue *key=[NSValue valueWithPointer:(void *)lease];
-        NSNumber *at=operandAt[key];
-        if(at)return at.intValue;
-        if(!lease.contents){failure=@"a kept operand is not in shared storage";return -1;}
-        operandAt[key]=at=@(operands.count);
-        [operands addObject:@{@"length":@(lease.length),@"contents":[NSMutableData dataWithBytes:lease.contents length:lease.length]}];
-        return at.intValue;
-    };
-    uint32_t (^pipelineIndex)(id)=^uint32_t(id pipeline){
-        NSValue *key=[NSValue valueWithPointer:(void *)pipeline];
-        NSNumber *at=pipelineAt[key];
-        if(at)return at.unsignedIntValue;
-        NSDictionary *declared=objc_getAssociatedObject(pipeline,&pipelineDeclarationKey);
-        if(!declared){failure=[NSString stringWithFormat:@"pipeline %@ has no declaration",[pipeline label]?:@"(unlabelled)"];return 0;}
-        NSValue *library=[NSValue valueWithPointer:(void *)declared[@"library"]];
-        if(!libraryAt[library]){libraryAt[library]=@(libraries.count);[libraries addObject:declared[@"library"]];}
-        pipelineAt[key]=at=@(pipelines.count);
-        [pipelines addObject:@{@"library":libraryAt[library],@"function":declared[@"function"],
-            @"constants":declared[@"constants"],@"descriptor":declared[@"descriptor"],
-            @"threads":@([pipeline maxTotalThreadsPerThreadgroup])}];
-        return at.unsignedIntValue;
-    };
-    // a reach's operand: its buffer's lease, or (a host view: no buffer, its address its offset) its address's
-    struct MetalTemplateReach (^placed)(struct MetalReach)=^struct MetalTemplateReach(struct MetalReach view){
-        struct MetalTemplateReach made={.operand=-1,.address=0,.reach=view};made.reach.buffer=nil;
-        NSUInteger delta=0;
-        if(view.buffer){made.operand=operand(view.buffer,&delta);made.reach.offset+=delta;}
-        else if(view.offset) {
-            void *lease=NULL;size_t at=0;
-            if(ncclMeshMemBuffer((const void *)view.offset,&lease,&at)){failure=@"a host view outside every lease";return made;}
-            made.operand=operand((id<MTLBuffer>)lease,&delta);made.address=1;made.reach.offset=at+delta;
-        }
-        return made;
-    };
-    // a declaration's places as (place, relocation, operand, offset in the operand), cleared in its bytes
-    NSMutableArray *communicators=[NSMutableArray array];
-    NSDictionary *(^declared)(NSDictionary *)=^NSDictionary *(NSDictionary *call){
-        NSMutableData *bytes=[[call[@"bytes"] mutableCopy] autorelease];NSData *listed=call[@"places"];
-        const struct MetalPlace *places=listed.bytes;NSMutableArray *relocations=[NSMutableArray array];
-        for(NSUInteger k=0;k<listed.length/sizeof *places;k++) {
-            const BOOL buffer=places[k].relocation==MetalRelocationBuffer;
-            if(places[k].at+sizeof(void *)+(buffer?sizeof(size_t):0)>bytes.length){failure=@"a declared place past its bytes";break;}
-            char *field=(char *)bytes.mutableBytes+places[k].at;
-            NSUInteger delta=0;int32_t at=-1;size_t offset=0;
-            if(places[k].relocation==MetalRelocationCommunicator) {
-                void *comm=NULL;memcpy(&comm,field,sizeof comm);
-                if(!comm)continue;
-                NSValue *key=[NSValue valueWithPointer:comm];NSUInteger index=[communicators indexOfObject:key];
-                if(index==NSNotFound){index=communicators.count;[communicators addObject:key];}
-                at=(int32_t)index;memset(field,0,sizeof comm);
-            } else if(!buffer) {
-                void *address=NULL,*lease=NULL;memcpy(&address,field,sizeof address);
-                if(!address)continue;
-                if(ncclMeshMemBuffer(address,&lease,&offset)){failure=@"a declared address outside every lease";break;}
-                at=operand((id<MTLBuffer>)lease,&delta);memset(field,0,sizeof address);
-            } else {
-                id named=nil;memcpy(&named,field,sizeof named);memcpy(&offset,field+sizeof named,sizeof offset);
-                if(!named)continue;
-                at=operand(named,&delta);memset(field,0,sizeof named+sizeof offset);
-            }
-            [relocations addObject:@[@(places[k].at),@(places[k].relocation),@(at),@(offset+delta)]];
-        }
-        return @{@"kind":call[@"kind"],@"bytes":bytes,@"relocations":relocations};
-    };
-    // a plan is the program's: emitted where it differs from the last one emitted for its communicator
-    NSMutableDictionary *planned=[NSMutableDictionary dictionary];
-    for(size_t f=0;f<count&&!failure;f++) {
-    struct MetalSchedule *function=schedules[f]->root;
-    NSMutableArray *script=[NSMutableArray array];
-    [functions addObject:script];[dataAt removeAllObjects];
-    for(NSDictionary *call in function->script) {
-        NSString *kind=call[@"call"];
-        if([kind isEqual:@"data"]) {
-            dataAt[call[@"at"]]=@(dataAt.count);
-            [script addObject:@{@"call":kind,@"bytes":call[@"bytes"],@"index":call[@"index"]}];
-        } else if([kind isEqual:@"compute"]) {
-            NSData *bindings=call[@"bindings"];
-            const struct MetalCommandBinding *source=bindings.bytes;const NSUInteger n=bindings.length/sizeof *source;
-            NSMutableData *made=[NSMutableData dataWithLength:n*sizeof(struct MetalTemplateBinding)];
-            struct MetalTemplateBinding *target=made.mutableBytes;
-            for(NSUInteger k=0;k<n;k++) {
-                NSNumber *data=dataAt[[NSString stringWithFormat:@"%p+%lu",(void *)source[k].buffer,(unsigned long)source[k].offset]];
-                NSUInteger delta=0;
-                target[k]=(struct MetalTemplateBinding){.operand=data?-1:operand(source[k].buffer,&delta),.data=data?data.intValue:-1,.binding=source[k]};
-                target[k].binding.buffer=nil;target[k].binding.offset+=delta;
-            }
-            [script addObject:@{@"call":kind,@"pipeline":@(pipelineIndex(call[@"pipeline"])),@"bindings":made,
-                @"groups":call[@"groups"],@"threads":call[@"threads"]}];
-        } else if([kind isEqual:@"append"]) {
-            id owner=call[@"owner"];
-            NSArray *held=objc_getAssociatedObject(owner,&replayRecordsKey);
-            if([objc_getAssociatedObject(owner,&replayHostsKey) count]){failure=@"a recorded host operation has no declaration";break;}
-            if([call[@"marks"] count]){failure=@"a replay's crossing has no declaration";break;}
-            NSData *records=held[0],*reaches=held[3];
-            const struct MetalRecordedDispatch *commands=records.bytes;const NSUInteger n=records.length/sizeof *commands;
-            NSMutableData *made=[NSMutableData dataWithLength:n*sizeof(struct MetalTemplateDispatch)];
-            struct MetalTemplateDispatch *target=made.mutableBytes;
-            NSMutableData *addresses=[NSMutableData data];
-            NSUInteger deltas[MESH_BUFFER_BINDINGS];
-            const struct MetalReach *views=reaches.bytes;
-            NSMutableData *spans=[NSMutableData dataWithLength:reaches.length/sizeof *views*sizeof(struct MetalTemplateReach)];
-            struct MetalTemplateReach *into=spans.mutableBytes;
-            for(NSUInteger i=0;i<n;i++) {
-                target[i].record=commands[i];target[i].record.pipeline=nil;
-                target[i].record.addresses=NULL;target[i].address=addresses.length/sizeof(struct MetalTemplateAddress);
-                target[i].pipeline=pipelineIndex(commands[i].pipeline);
-                target[i].indirectGrid=-1;target[i].record.indirectGrid=nil;
-                if(commands[i].indirectGrid) {
-                    NSUInteger delta=0;target[i].indirectGrid=operand(commands[i].indirectGrid,&delta);
-                    target[i].record.indirectOffset+=delta;
-                }
-                for(NSUInteger a=0;a<commands[i].addressCount;a++) {
-                    const struct MetalRecordedAddress *source=commands[i].addresses+a;
-                    struct MetalTemplateAddress address={.record=*source};
-                    NSUInteger delta=0;
-                    address.operand=operand(source->value.buffer,&delta);
-                    address.record.value.buffer=nil;address.record.value.origin+=delta;
-                    address.uniform=operand(source->uniform,&delta);
-                    address.record.uniform=nil;address.record.uniformOffset+=delta;
-                    // Only symbolic targets belong in a template. Clear the
-                    // declared pointer words in its saved constant pages,
-                    // preserving every scalar and the live source allocation.
-                    NSMutableData *contents=address.uniform<0?nil:operands[address.uniform][@"contents"];
-                    if(contents) {
-                        const NSUInteger repetitions=[held[4] unsignedIntegerValue];
-                        const NSUInteger slots=!source->uniformStride?1:source->uniformInstances?
-                            MIN(repetitions,source->uniformInstances):repetitions;
-                        for(NSUInteger t=0;t<slots;t++) {
-                            const NSUInteger at=MetalInvocationOffset(address.record.uniformOffset,source->uniformStride,
-                                source->uniformInstances,t,source->uniformInvocation)+source->value.offset;
-                            memset((char *)contents.mutableBytes+at,0,sizeof(uint64_t));
-                        }
-                    }
-                    [addresses appendBytes:&address length:sizeof address];
-                }
-                for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++) {
-                    id<MTLBuffer> buffer=commands[i].buffers[j];
-                    for(NSUInteger a=0;a<commands[i].addressCount;a++)if(commands[i].addresses[a].value.binding==j) {
-                        const struct MetalRecordedAddress *address=commands[i].addresses+a;
-                        buffer=address->uniform;target[i].record.offsets[j]=address->uniformOffset;
-                        target[i].record.lengths[j]=address->uniformLength;target[i].record.strides[j]=address->uniformStride;
-                        target[i].record.instances[j]=address->uniformInstances;target[i].record.invocations[j]=address->uniformInvocation;
-                        break;
-                    }
-                    target[i].operands[j]=operand(buffer,deltas+j);
-                    target[i].record.buffers[j]=nil;target[i].record.offsets[j]+=deltas[j];
-                }
-                for(uint32_t k=0;k<commands[i].reaches;k++) {
-                    struct MetalReach reach=views[commands[i].reach+k];
-                    if((reach.access&MetalReachBinding)&&!(reach.access&MetalReachAddress))for(NSUInteger a=0;a<commands[i].addressCount;a++)
-                        if((int32_t)commands[i].addresses[a].value.binding==reach.binding) {
-                            reach.buffer=commands[i].addresses[a].uniform;
-                            reach.offset+=commands[i].addresses[a].uniformOffset;break;
-                        }
-                    into[commands[i].reach+k]=placed(reach);
-                }
-            }
-            [script addObject:@{@"call":kind,@"records":made,@"reaches":spans,@"addresses":addresses,@"form":held[2],@"repetitions":held[4],
-                @"buffers":call[@"buffers"],@"memory":call[@"memory"],@"invocations":call[@"invocations"]}];
-        } else if(call[@"kind"]&&([kind isEqual:@"host"]||[kind isEqual:@"cross"]||[kind isEqual:@"plan"])) {
-            NSMutableDictionary *entry=[[declared(call) mutableCopy] autorelease];entry[@"call"]=kind;
-            if([kind isEqual:@"plan"]) {
-                NSNumber *comm=[entry[@"relocations"] firstObject][2]?:@(-1);
-                if([planned[comm] isEqual:entry])continue;
-                planned[comm]=entry;
-            }
-            if([kind isEqual:@"host"]||[kind isEqual:@"cross"]) {
-                NSData *views=call[@"accesses"];const struct MetalReach *source=views.bytes;const NSUInteger n=views.length/sizeof *source;
-                NSMutableData *made=[NSMutableData dataWithLength:n*sizeof(struct MetalTemplateReach)];
-                struct MetalTemplateReach *into=made.mutableBytes;
-                for(NSUInteger k=0;k<n;k++)into[k]=placed(source[k]);
-                entry[@"accesses"]=made;
-            }
-            [script addObject:entry];
-        } else failure=[NSString stringWithFormat:@"a %@ call has no declaration",kind];
-        if(failure)break;
-    }
-    }
-    if(failure){if(error)*error=MetalReplayFailure(EINVAL,failure);return nil;}
-    return @{@"format":@2,@"form":@(root->form),@"sizes":MetalTemplateSizes(),@"device":MetalTemplateDevice(root->device),
-        @"libraries":libraries,@"pipelines":pipelines,@"operands":operands,@"communicators":@(communicators.count),
-        @"functions":functions};
-}
-
-// The pipelines of the device its libraries are on, as pipelines.<architecture>.metallib in `directory`
-static NSError *MetalTemplateWriteArchive(NSDictionary *made,NSString *directory) {
-    NSArray *libraries=made[@"libraries"];NSError *error=nil;
-    if(!libraries.count)return nil;
-    id<MTLDevice> device=[libraries[0] device];
-    id<MTLBinaryArchive> archive=[[device newBinaryArchiveWithDescriptor:[[MTLBinaryArchiveDescriptor new] autorelease] error:&error] autorelease];
-    if(!archive)return error;
-    for(NSDictionary *pipeline in made[@"pipelines"]) {
-        MTLComputePipelineDescriptor *descriptor=MetalPipelineDescriptor(libraries[[pipeline[@"library"] unsignedIntegerValue]],
-            pipeline[@"function"],pipeline[@"constants"],pipeline[@"descriptor"],&error);
-        if(!descriptor||![archive addComputePipelineFunctionsWithDescriptor:descriptor error:&error])return error;
-    }
-    NSString *name=[NSString stringWithFormat:@"pipelines.%@.metallib",device.architecture.name];
-    if(![archive serializeToURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:name]] error:&error])return error;
-    return nil;
-}
-
-NSError *MetalTemplateArchive(NSDictionary *made,NSString *directory) {
-    return made[@"archive"]?nil:MetalTemplateWriteArchive(made,directory);
-}
-
-NSError *MetalTemplateWrite(NSDictionary *made,NSString *directory) {
-    NSError *error=nil;
-    if(![NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&error])return error;
-    NSArray *libraries=made[@"libraries"];NSMutableArray *names=[NSMutableArray array];
-    for(NSUInteger i=0;i<libraries.count;i++) {
-        id library=libraries[i];NSString *name=[NSString stringWithFormat:@"library.%lu.metallib",(unsigned long)i];
-        if(![library respondsToSelector:@selector(serializeToURL:error:)])return MetalReplayFailure(ENOTSUP,@"this system's Metal libraries cannot be written");
-        if(![library serializeToURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:name]] error:&error])return error;
-        [names addObject:name];
-    }
-    if((error=MetalTemplateWriteArchive(made,directory)))return error;
-    NSMutableDictionary *listed=[[made mutableCopy] autorelease];
-    listed[@"libraries"]=names;[listed removeObjectForKey:@"archive"];
-    NSData *data=[NSPropertyListSerialization dataWithPropertyList:listed format:NSPropertyListBinaryFormat_v1_0 options:0 error:&error];
-    if(!data||![data writeToFile:[directory stringByAppendingPathComponent:@"template.plist"] options:NSDataWritingAtomic error:&error])return error;
-    return nil;
-}
-
-NSDictionary *MetalTemplateRead(id<MTLDevice> device,NSString *directory,NSError **error) {
-    NSData *data=[NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:@"template.plist"] options:0 error:error];
-    NSDictionary *listed=data?[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:error]:nil;
-    if(!listed)return nil;
-    if(![listed isKindOfClass:NSDictionary.class]||![listed[@"format"] isEqual:@2]||![listed[@"sizes"] isEqual:MetalTemplateSizes()]) {
-        if(error)*error=MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"%@ was not written by this recorder's build",directory]);
-        return nil;
-    }
-    NSMutableDictionary *made=[[listed mutableCopy] autorelease];NSMutableArray *libraries=[NSMutableArray array];
-    for(NSString *name in listed[@"libraries"]) {
-        id<MTLLibrary> library=[device newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:name]] error:error];
-        if(!library)return nil;
-        [libraries addObject:library];[library release];
-    }
-    made[@"libraries"]=libraries;
-    NSString *archived=[directory stringByAppendingPathComponent:[NSString stringWithFormat:@"pipelines.%@.metallib",device.architecture.name]];
-    if([NSFileManager.defaultManager fileExistsAtPath:archived]) {
-        MTLBinaryArchiveDescriptor *descriptor=[[MTLBinaryArchiveDescriptor new] autorelease];
-        descriptor.url=[NSURL fileURLWithPath:archived];
-        id<MTLBinaryArchive> archive=[device newBinaryArchiveWithDescriptor:descriptor error:error];
-        if(!archive)return nil;
-        made[@"archive"]=archive;[archive release];
-    }
-    return made;
-}
-
-// A replay an instantiated function made, freed with it
-@interface MetalTemplateReplay : NSObject { @public struct MetalReplay *replay; }
-@end
-@implementation MetalTemplateReplay
-- (void)dealloc { MetalReplayFree(replay); [super dealloc]; }
-@end
-
-// A template reach on the instance's operands: a buffer's offset, or a host view's address
-static struct MetalReach MetalTemplateReachOf(struct MetalTemplateReach placed,NSArray *buffers,const NSInteger *shifts) {
-    struct MetalReach reach=placed.reach;
-    if(placed.operand<0)return reach;
-    id<MTLBuffer> buffer=buffers[(NSUInteger)placed.operand];
-    const NSUInteger offset=(NSUInteger)((NSInteger)reach.offset+shifts[placed.operand]);
-    if(placed.address){reach.buffer=nil;reach.offset=(NSUInteger)buffer.contents+offset;}
-    else {reach.buffer=buffer;reach.offset=offset;}
-    return reach;
-}
-
-// A declaration's bytes with its places rewritten to the instance's operands; `places` gets those places
-static NSData *MetalTemplatePlaced(NSDictionary *declared,NSArray *buffers,const NSInteger *shifts,NSArray<NSValue *> *communicators,
-    NSMutableData *places) {
-    NSMutableData *bytes=[[declared[@"bytes"] mutableCopy] autorelease];
-    for(NSArray *relocation in declared[@"relocations"]) {
-        const struct MetalPlace place={[relocation[0] unsignedLongValue],(enum MetalRelocation)[relocation[1] intValue]};
-        const NSUInteger at=[relocation[2] unsignedIntegerValue];
-        if(place.relocation==MetalRelocationCommunicator) {
-            void *comm=[communicators[at] pointerValue];
-            memcpy((char *)bytes.mutableBytes+place.at,&comm,sizeof comm);
-            [places appendBytes:&place length:sizeof place];
-            continue;
-        }
-        const size_t offset=(size_t)((NSInteger)[relocation[3] unsignedLongValue]+shifts[at]);
-        id<MTLBuffer> buffer=buffers[at];char *field=(char *)bytes.mutableBytes+place.at;
-        if(place.relocation==MetalRelocationAddress){void *address=(char *)buffer.contents+offset;memcpy(field,&address,sizeof address);}
-        else {memcpy(field,&buffer,sizeof buffer);memcpy(field+sizeof buffer,&offset,sizeof offset);}
-        [places appendBytes:&place length:sizeof place];
-    }
-    return bytes;
-}
-
-// A template's replay, built as MetalReplayCommands builds one: its records' pipelines and operands resolved, its
-// order compiled anew (MetalDataflow)
-static struct MetalReplay *MetalTemplateReplayMake(id<MTLDevice> device,NSDictionary *call,NSArray *pipelines,NSArray *buffers,
-    const NSInteger *shifts) {
-    MetalCapture *capture=[[MetalCapture new] autorelease];
-    NSData *records=call[@"records"],*reaches=call[@"reaches"];
-    NSData *addresses=call[@"addresses"];
-    const struct MetalTemplateAddress *listed=addresses.bytes;
-    NSMutableData *addressData=[NSMutableData dataWithLength:addresses.length/sizeof *listed*sizeof(struct MetalRecordedAddress)];
-    struct MetalRecordedAddress *boundAddresses=addressData.mutableBytes;
-    for(NSUInteger a=0;a<addresses.length/sizeof *listed;a++) {
-        struct MetalRecordedAddress address=listed[a].record;
-        address.value.buffer=buffers[listed[a].operand];address.value.origin+=shifts[listed[a].operand];
-        address.uniform=buffers[listed[a].uniform];address.uniformOffset+=shifts[listed[a].uniform];
-        boundAddresses[a]=address;
-        [capture->resources addObject:address.value.buffer];[capture->owners addObject:address.uniform];
-    }
-    if(addressData.length)[capture->addressRecords addObject:addressData];
-    const struct MetalTemplateDispatch *source=records.bytes;
-    for(NSUInteger i=0;i<records.length/sizeof *source;i++) {
-        struct MetalRecordedDispatch command=source[i].record;
-        command.addresses=command.addressCount?boundAddresses+source[i].address:NULL;
-        command.pipeline=pipelines[source[i].pipeline];[capture->owners addObject:command.pipeline];
-        if(source[i].indirectGrid>=0) {
-            const NSUInteger at=(NSUInteger)source[i].indirectGrid;
-            command.indirectGrid=buffers[at];command.indirectOffset+=shifts[at];
-            [capture->resources addObject:command.indirectGrid];
-        }
-        for(NSUInteger j=0;j<MESH_BUFFER_BINDINGS;j++)if(source[i].operands[j]>=0) {
-            const NSUInteger at=(NSUInteger)source[i].operands[j];
-            command.buffers[j]=buffers[at];command.offsets[j]+=shifts[at];[capture->resources addObject:command.buffers[j]];
-        }
-        [capture->dispatches appendBytes:&command length:sizeof command];
-    }
-    const struct MetalTemplateReach *views=reaches.bytes;
-    for(NSUInteger i=0;i<reaches.length/sizeof *views;i++) {
-        const struct MetalReach reach=MetalTemplateReachOf(views[i],buffers,shifts);
-        if(reach.buffer)[capture->resources addObject:reach.buffer];
-        [capture->reaches appendBytes:&reach length:sizeof reach];
-    }
-    capture->buffers=[call[@"buffers"] unsignedIntegerValue];capture->memory=[call[@"memory"] unsignedIntegerValue];
-    return MetalReplayMade(capture,device,[call[@"repetitions"] unsignedIntegerValue],(enum MetalForm)[call[@"form"] integerValue]);
-}
-
-NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules,size_t count,NSDictionary *made,
-    NSArray<id<MTLBuffer>> *bound,NSArray<NSNumber *> *offsets,NSArray<NSValue *> *communicators,
-    NSArray<NSData *> *operators,MetalTemplateHost host,MetalTemplateCross cross) {
-    NSArray *functions=made[@"functions"];
-    if(!count||functions.count!=count)
-        return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template holds %lu functions, %lu given",
-            (unsigned long)functions.count,(unsigned long)count]);
-    struct MetalSchedule *root=schedules[0]->root;
-    @try {
-        NSDictionary *facts=MetalTemplateDevice(root->device);
-        if(![made[@"device"] isEqual:facts])
-            return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template's kernels were compiled for threadgroups of %@ threads and "
-                "%@ bytes; this device's are %@ and %@",made[@"device"][@"threads"],made[@"device"][@"bytes"],facts[@"threads"],facts[@"bytes"]]);
-        if(communicators.count<[made[@"communicators"] unsignedIntegerValue])
-            return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template names %@ communicators, %lu given",
-                made[@"communicators"],(unsigned long)communicators.count]);
-        NSArray *libraries=made[@"libraries"],*archives=made[@"archive"]?@[made[@"archive"]]:nil;
-        NSMutableArray *pipelines=[NSMutableArray array];
-        for(NSDictionary *declared in made[@"pipelines"]) {
-            NSError *error=nil;
-            id<MTLComputePipelineState> pipeline=MetalPipelineMake(libraries[[declared[@"library"] unsignedIntegerValue]],
-                declared[@"function"],declared[@"constants"],declared[@"descriptor"],archives,&error);
-            if(!pipeline)return error;
-            [pipelines addObject:pipeline];[pipeline release];
-        }
-        // a dispatch's threadgroup was chosen for the recording's pipeline; this device's may take fewer threads
-        NSString *(^fits)(NSUInteger,MTLSize)=^NSString *(NSUInteger p,MTLSize group){
-            const NSUInteger threads=group.width*group.height*group.depth,most=[pipelines[p] maxTotalThreadsPerThreadgroup];
-            return threads<=most?nil:[NSString stringWithFormat:@"pipeline %@ takes %lu threads a threadgroup on this device, its dispatch %lu",
-                made[@"pipelines"][p][@"function"],(unsigned long)most,(unsigned long)threads];
-        };
-        NSMutableArray *buffers=[NSMutableArray array];
-        NSMutableData *moved=[NSMutableData dataWithLength:[made[@"operands"] count]*sizeof(NSInteger)];
-        NSInteger *shifts=moved.mutableBytes;
-        for(NSDictionary *operand in made[@"operands"]) {
-            if(operand[@"bound"]) {
-                const NSUInteger at=[operand[@"bound"] unsignedIntegerValue];
-                if(at>=bound.count)return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"the template binds operand %lu of %lu given",
-                    (unsigned long)at,(unsigned long)bound.count]);
-                NSUInteger delta=0;id<MTLBuffer> lease=MetalTemplateLease(bound[at],&delta);
-                shifts[buffers.count]=(NSInteger)(delta+[offsets[at] unsignedIntegerValue])-[operand[@"delta"] integerValue];
-                [buffers addObject:lease];
-            } else {
-                NSData *contents=operand[@"contents"];
-                id<MTLBuffer> kept=MetalLeaseBuffer(root->device,contents.length);
-                memcpy(kept.contents,contents.bytes,contents.length);
-                for(size_t f=0;f<count;f++)[schedules[f]->root->owners addObject:kept];
-                [buffers addObject:kept];[kept release];
-            }
-        }
-        for(size_t f=0;f<count;f++) {
-        struct MetalSchedule *s=schedules[f],*root=s->root;
-        NSMutableArray *data=[NSMutableArray array];
-        for(NSDictionary *call in functions[f]) {
-            NSString *kind=call[@"call"];
-            if([kind isEqual:@"data"]) {
-                NSData *bytes=call[@"bytes"];
-                const struct MetalCommandBinding binding=MetalScheduleData(s,bytes.bytes,bytes.length,[call[@"index"] unsignedIntValue]);
-                [data addObject:[NSData dataWithBytes:&binding length:sizeof binding]];
-            } else if([kind isEqual:@"compute"]) {
-                NSData *bindings=call[@"bindings"];
-                const struct MetalTemplateBinding *source=bindings.bytes;const NSUInteger n=bindings.length/sizeof *source;
-                NSMutableData *resolved=[NSMutableData dataWithLength:n*sizeof(struct MetalCommandBinding)];
-                struct MetalCommandBinding *target=resolved.mutableBytes;
-                for(NSUInteger k=0;k<n;k++) {
-                    if(source[k].data>=0)target[k]=*(const struct MetalCommandBinding *)[data[(NSUInteger)source[k].data] bytes];
-                    else {
-                        target[k]=source[k].binding;target[k].buffer=buffers[(NSUInteger)source[k].operand];
-                        target[k].offset+=shifts[source[k].operand];
-                    }
-                }
-                NSArray *groups=call[@"groups"],*threads=call[@"threads"];
-                const MTLSize group=MTLSizeMake([threads[0] unsignedIntegerValue],[threads[1] unsignedIntegerValue],[threads[2] unsignedIntegerValue]);
-                NSString *unfit=fits([call[@"pipeline"] unsignedIntegerValue],group);
-                if(unfit)return MetalReplayFailure(EINVAL,unfit);
-                MetalScheduleCompute(s,pipelines[[call[@"pipeline"] unsignedIntegerValue]],target,n,
-                    MTLSizeMake([groups[0] unsignedIntegerValue],[groups[1] unsignedIntegerValue],[groups[2] unsignedIntegerValue]),group);
-            } else if([kind isEqual:@"append"]) {
-                NSData *records=call[@"records"];const struct MetalTemplateDispatch *recorded=records.bytes;
-                for(NSUInteger i=0;i<records.length/sizeof *recorded;i++) {
-                    NSString *unfit=fits(recorded[i].pipeline,recorded[i].record.group);
-                    if(unfit)return MetalReplayFailure(EINVAL,unfit);
-                }
-                MetalTemplateReplay *held=[[MetalTemplateReplay new] autorelease];
-                held->replay=MetalTemplateReplayMake(root->device,call,pipelines,buffers,shifts);
-                [root->owners addObject:held];
-                NSArray *range=call[@"invocations"];
-                NSError *error=MetalScheduleAppend(s,held->replay,NSMakeRange([range[0] unsignedIntegerValue],[range[1] unsignedIntegerValue]),@[],nil,nil);
-                if(error)return error;
-            } else if([kind isEqual:@"plan"]) {
-                // the communicator's plan declared again, its bindings the instance's: before the crossings that follow
-                NSData *bytes=MetalTemplatePlaced(call,buffers,shifts,communicators,[NSMutableData data]);
-                struct ncclComm *comm=NULL;memcpy(&comm,bytes.bytes,sizeof comm);
-                const NSUInteger at=[communicators indexOfObject:[NSValue valueWithPointer:comm]];
-                NSData *bindings=at<operators.count?operators[at]:nil;
-                const ncclResult_t failed=ncclMeshCommPlanDeclared(comm,(const char *)bytes.bytes+sizeof comm,bytes.length-sizeof comm,
-                    bindings.bytes,bindings.length/sizeof(ncclMeshRedOpBinding));
-                if(failed)return MetalReplayFailure(failed,[NSString stringWithFormat:@"the template's plan: %s",ncclGetLastError(comm)]);
-            } else if([kind isEqual:@"host"]||[kind isEqual:@"cross"]) {
-                const BOOL hosted=[kind isEqual:@"host"];
-                if(hosted?!host:!cross)
-                    return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"a %@ %@ call, and no frontend to make it",call[@"kind"],kind]);
-                NSMutableData *places=[NSMutableData data];
-                NSData *bytes=MetalTemplatePlaced(call,buffers,shifts,communicators,places);
-                const struct MetalDeclaration again={[call[@"kind"] UTF8String],bytes.bytes,bytes.length,places.bytes,
-                    places.length/sizeof(struct MetalPlace)};
-                NSError *error=nil;
-                NSData *views=call[@"accesses"];
-                if(!views)return MetalReplayFailure(EINVAL,@"a prepared call has no declared accesses");
-                const struct MetalTemplateReach *source=views.bytes;const NSUInteger n=views.length/sizeof *source;
-                NSMutableData *resolved=[NSMutableData dataWithLength:n*sizeof(struct MetalReach)];
-                struct MetalReach *into=resolved.mutableBytes;
-                for(NSUInteger k=0;k<n;k++)into[k]=MetalTemplateReachOf(source[k],buffers,shifts);
-                if(hosted) {
-                    MetalHostOperation operation=host(call[@"kind"],bytes,&error);
-                    if(!operation)return error?:MetalReplayFailure(EINVAL,@"the frontend made no host operation");
-                    MetalScheduleHost(s,into,n,&again,operation);
-                } else {
-                    ncclMeshGroup group={0};
-                    MetalCrossing crossing=cross(call[@"kind"],bytes,s,&group,&error);
-                    if(!crossing)return error?:MetalReplayFailure(EINVAL,@"the frontend made no crossing");
-                    [root->owners addObject:crossing];
-                    const int failed=MetalScheduleCross(s,into,n,&group,&again,crossing);
-                    if(failed)return MetalReplayFailure(failed,@"the template's crossing could not be encoded");
-                }
-            } else return MetalReplayFailure(EINVAL,[NSString stringWithFormat:@"a template's %@ call",kind]);
-        }
-        }
-    } @catch(NSException *error) { return MetalReplayFailure(EINVAL,error.reason); }
-    return nil;
 }

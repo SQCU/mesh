@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # docs/measurement.md#the-torch-parallel-runs
 import os
+import time
 
 import torch
 import torch.distributed as dist
@@ -127,6 +128,8 @@ def main(configuration_operand=None):
     completion = program.completion()
     record(configuration, completion, started, STEPS * BATCH * SEQ * DIM * x.element_size(),
            {'program': 'tp', 'steps': STEPS, 'parts': configuration['assignment']['parts']['tp']})
+    while not configuration['observations'].close():
+        time.sleep(0)
     dist.destroy_process_group()
     state = next_configuration(configuration['observations'].declaration,
         [*configuration['group'].configuration_observations, *configuration['observations'].poll()],

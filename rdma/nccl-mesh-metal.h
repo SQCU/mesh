@@ -112,9 +112,14 @@ void metal_gate(struct metal_program *, void *violation);
 struct metal_wait;
 /* Preparation supplies the original value's page relation. Its observation,
    when needed, is compiled into the copy body rather than another task. */
-struct metal_copy_relation { const struct metal_wait *ready; uint32_t source_access; };
+struct metal_copy_relation { const struct metal_wait *ready; uint32_t source_access;
+  const struct metal_wait *observations; size_t count; };
 struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset,
                               size_t bytes, const struct metal_copy_relation *);
+/* Repeat a declared byte pattern: the first element's scalar bits, followed by
+   zero elements through unit_bytes. The command has only an exact output reach. */
+struct metal_result metal_fill_pattern(struct metal_program *, void *dst, size_t dst_offset,
+    size_t bytes, uint64_t scalar, size_t element_bytes, size_t unit_bytes);
 /* `type` METAL_MERGE: the partials merge (nccl.h ncclMeshRedOpCreatePartials) of rows of `op` float32 [m, l, O], a row
    with l > 0 rescaled to the greater m and summed, one with none counting for none (two such the row [the least float,
    0, 0]); else `type` an ncclDataType_t and op as nccl-mesh.c combine_into (0 sum, 1 product, 2 max, 3 min) */
@@ -153,9 +158,6 @@ struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_o
    The grid assigns one common landing cell to each threadgroup. */
 struct metal_result metal_zelloth(struct metal_program *, int type, int op, size_t element_bytes, uint32_t sums,
                                   const struct metal_zelloth_sum *sum, uint32_t channel, uint64_t at);
-/* A user combine is compiled onto the same resolved landing cells. */
-struct metal_result metal_reduce_function(struct metal_program *,const ncclMeshReductionFunction *,
-  ncclDataType_t,uint32_t unit,size_t element_bytes,const struct metal_zelloth_sum *,uint32_t channel,uint64_t entry);
 /* The next dispatch reads/writes these prepared page
    ranges. Residency and diagnostic atomic words do not imply data ordering. */
 void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);

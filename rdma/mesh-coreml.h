@@ -38,6 +38,11 @@ void mesh_coreml_release(long model);
    Keep all page roots alive until the binding is released. */
 void *mesh_coreml_bind(long model, const MeshModelView *inputs, size_t inputCount,
                       const MeshModelView *outputs, size_t outputCount);
+/* Bind source already completed by the dependency compiler. The generated
+   submit/completion entries replace the same native entries; no runtime effect
+   interpreter or wrapper is installed. Arguments are copied during binding. */
+int mesh_coreml_entry(void *binding, const char *source, const char *compiler,
+                     const void *arguments, size_t argument_bytes);
 /* Bind one invocation's request, map, completion and resource requirements.
    This is preparation; only the returned task's submit is used during work. */
 const char *mesh_coreml_prepare(void *binding, MeshHostCompletion, void *context, MeshHostTask *);

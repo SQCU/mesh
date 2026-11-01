@@ -309,7 +309,7 @@ def _select_exchange_backward(ctx, gradient):
     from mesh_relation import Algebra
     from .algebra import index_values
     algebra, declaration = Algebra(), json.loads(ctx.selections)
-    rank = dist.distributed_c10d._resolve_process_group(ctx.group_name).rank()
+    rank = declaration['rank']
     selected = [algebra.selection_relation(value) for value in declaration['destinations']]
     domains = [relation.image(relation.domain()) for relation in selected]
     extent = math.prod(declaration['sources'][0]['shape'])
@@ -325,7 +325,7 @@ def _select_exchange_backward(ctx, gradient):
     holes = any(not algebra.selection(value).binary(covered, 'subtract').empty() for value in declaration['sources'])
     zero = gradient.new_zeros((1,)) if holes else None
     result = select_reduce(local, zero, ctx.shape,
-        json.dumps({'sources': compact, 'destinations': declaration['sources']}, separators=(',', ':')), 'sum', ctx.group_name)
+        json.dumps({'sources': compact, 'destinations': declaration['sources'], 'rank': rank}, separators=(',', ':')), 'sum', ctx.group_name)
     return result, None, None, None
 
 
@@ -380,12 +380,16 @@ def _bind_exchange(source, destination, plan, group, *, source_field=None, sourc
 
 
 def effects(nodes):
-    """FX's declared mutation/random effects, shared by selection and partition."""
+    """Declared local and peer effects, shared by selection and partition.
+
+    A selected exchange may return no values on its sender. Its remote write
+    still belongs to the source program when no local result keeps it alive.
+    """
     random_effects = True
     if torch._guards.TracingContext.try_get():
         from torch._inductor import config
         random_effects = config.fallback_random
-    return [i for i, node in enumerate(nodes) if node.is_impure(random_effects)]
+    return [i for i, node in enumerate(nodes) if _bound(node) or node.is_impure(random_effects)]
 
 
 def spans(graph, cuts=()):
@@ -566,19 +570,6 @@ def _collective_declaration(node):
         counts = [int(size) * partition._row(x, args['dim']) for size in args['sizes']]
         calls = [declare(backend.Call(backend.REDUCE_SCATTER, x.numel(), x.dtype, counts=counts, op=_operation(reduction)),
                          x, results[0], source_axis=args['dim'], result_axis=args['dim'])]
-    elif namespace == 'torch_mesh' and name == 'reduce_function':
-        from .reduction import declaration as reduction_declaration
-        reducer = reduction_declaration(node, args)
-        root, cells = args['root'], args['counts']
-        calls = [declare(backend.Call(backend.REDUCE_SCATTER if cells else backend.ALLREDUCE if root < 0 else backend.REDUCE,
-            x.numel(), x.dtype, root=max(0, root), op=reducer.operator(group), element_shape=reducer.element_shape,
-            counts=[count * reducer.unit for count in cells] if cells else None), x, results[0])]
-    elif namespace == 'torch_mesh' and name == 'merge_partials':
-        operator = group.partials_operator(x.shape[-1])
-        root, rows = args['root'], args.get('rows', [])
-        calls = [declare(backend.Call(backend.REDUCE_SCATTER if rows else backend.ALLREDUCE if root < 0 else backend.REDUCE,
-                                     x.numel(), x.dtype, root=max(0, root), op=operator, element_shape=(x.shape[-1],),
-                                     counts=[r * x.shape[-1] for r in rows] if rows else None), x, results[0])]
     elif name in ('all_reduce', 'all_reduce_'):
         calls = [declare(backend.Call(backend.ALLREDUCE, x.numel(), x.dtype, op=_operation(reduction)), x, results[0])]
     elif name in ('broadcast', 'broadcast_'):
@@ -923,6 +914,11 @@ def trace(function, *arguments, parameters=(), source_scope=None, route_scope=No
     result = next(node.args[0] for node in graph.graph.nodes if node.op == 'output')
     graph.meta['mesh_result_types'] = torch.utils._pytree.tree_map(
         lambda value: value.meta.get('mesh_scalar_result') if isinstance(value, torch.fx.Node) else None, result)
+    folds = {}
+    for node in graph.graph.nodes:
+        if 'mesh_fold' in node.meta:
+            folds[id(node.meta['mesh_fold'])] = node.meta['mesh_fold']
+    graph.meta['mesh_fold_choices'] = tuple(folds.values())
     graph.recompile()
     if source_scope is not None:
         from .compilation import source_scope as scoped
@@ -937,6 +933,7 @@ class Execution:
         self.steps, self.output, self.pages = tuple(steps), output, tuple(pages)
         self.initializations, self.inputs = tuple(initializations), tuple(inputs)
         self._initialized = False
+        self.configuration = None
         self.executions = _stream.Executions(output)
         self.forward = self.executions.run
         self.completion = self.executions.completion
@@ -944,12 +941,18 @@ class Execution:
     def append(self, schedule):
         # This is declaration-time state: only the first prepared invocation
         # contains imports. Runtime submits the already recorded schedules.
+        steps = self.steps
         if not self._initialized:
             schedule.inputs([*self.inputs, *(source for source, _ in self.initializations)])
-            for source, destination in self.initializations:
-                schedule.copy(source, destination)
-        for step in self.steps:
-            step.append(schedule)
+            from .layout import copy_declarations
+            imports = tuple(command for source, destination in self.initializations
+                            for command in copy_declarations(source, destination))
+            if imports:
+                steps = (dict(commands=imports, output=None, pages=()), *steps)
+        from .page_effects import prepare
+        from .compilation import bind
+        with bind(self.configuration):
+            prepare(steps, schedule, self.output)
         self._initialized = True
 
     def realize(self, repetitions=1):
@@ -965,7 +968,7 @@ def execution_sequence(steps, output=None, pages=(), initializations=(), inputs=
     return Execution(steps, output, pages, initializations, inputs)
 
 
-_BOUND = {'all_to_all_single', 'merge_partials', 'reduce_function', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange', 'select_reduce',
+_BOUND = {'all_to_all_single', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange', 'select_reduce',
           'reduce_scatter_tensor', 'all_gather_into_tensor', 'all_gather_into_tensor_out',
           'broadcast', 'broadcast_', 'all_reduce_coalesced', 'all_gather_into_tensor_coalesced',
           'reduce_scatter_tensor_coalesced'}
@@ -1149,7 +1152,7 @@ def _boundary_work(section, projection, algebra):
                 equalities=tuple(equalities), requirements=tuple(requirements), commands=tuple(commands))
 
 
-def _local_assignment(prepared, arguments, page_effects=None):
+def _local_assignment(prepared, arguments):
     """Full declared work is one scope of the same selected-page contract."""
     from .ownership import _source_leaves, project_numerical
     graph, algebra = prepared['expression']['graph'], prepared['algebra']
@@ -1163,8 +1166,6 @@ def _local_assignment(prepared, arguments, page_effects=None):
                 values[key] = dict(owners={None: owner})
                 requests[key] = owner
     for section in prepared['sections']:
-        if not section['boundaries']:
-            section['retained'].reserve_bindings(1 if page_effects is not None and page_effects['rows'] else 0)
         outputs = {key: algebra.selection(requests[key]['selection'])
                    for key, value in _source_leaves(section['outputs']) if isinstance(value, torch.Tensor)}
         if section['boundaries']:
@@ -1181,9 +1182,6 @@ def _local_assignment(prepared, arguments, page_effects=None):
                     for effect in section['effects'] for domain in effect['domains']
                     for part in (domain, domain.get('finish')) if part is not None}
             projection = project_numerical(section, outputs, algebra, work=work)
-            if page_effects is not None:
-                from .page_effects import refine
-                projection = refine(section, projection, page_effects, algebra)
         pending.extend(projection['pending'])
         projections.append(projection)
     result = next(node.args[0] for node in graph.graph.nodes if node.op == 'output')
@@ -1192,21 +1190,22 @@ def _local_assignment(prepared, arguments, page_effects=None):
                 projections={None: dict(sections=tuple(projections))}, result=result)
 
 
-class BoundGraph:
-    """Bind declared work and page deliveries once through the shared placement."""
-    def __init__(self, graph, arguments, group, configuration, destinations=None, *, prepared=None, ownership=None,
-                 page_effects=None):
+class LoweredGraph:
+    """Lower source work and deliveries to unbound, placed page declarations."""
+    def __init__(self, graph, arguments, group, configuration, destinations=None, *, prepared=None, ownership=None):
         if configuration and configuration.get('layout_preferences') and graph.meta.get('mesh_program_scope') is None:
             raise ValueError('layout preferences require a declared source_scope')
         if ownership is None:
             from .ownership import prepare_expression
             if prepared is None:
                 prepared = prepare_expression(dict(graph=graph, operands=tuple(arguments)))
-            ownership = _local_assignment(prepared, arguments, page_effects)
+            ownership = _local_assignment(prepared, arguments)
         self.prepared = ownership['prepared']
         self.groups, self.steps = {}, []
-        self.page_effects = page_effects
-        self._bind_sections(ownership, destinations)
+        self._lower_sections(ownership, destinations)
+        self.execution.configuration = dict(self.prepared['configuration'],
+            implementations=self.prepared['implementations'],
+            implementation_assignment=self.prepared['implementation_assignment'])
         from .compilation import layout_choices
         self.layout_choices = layout_choices()
         self.execution.initializations = tuple(graph.meta.get('mesh_initializations', ()))
@@ -1215,8 +1214,8 @@ class BoundGraph:
         self.execution.inputs = tuple(value for value in tree_leaves(ownership['arguments'])
                                       if isinstance(value, (torch.Tensor, TensorView)))
 
-    def _bind_sections(self, ownership, destinations):
-        """Bind explicit work and delivery assignments to the existing recorder."""
+    def _lower_sections(self, ownership, destinations):
+        """Resolve work, placement and relations before native backend binding."""
         from torch.utils import _pytree as tree
         from torch.fx.node import map_arg
         from . import backend
@@ -1228,6 +1227,11 @@ class BoundGraph:
 
         prepared = self.prepared
         algebra = prepared['algebra']
+        have_transfers = bool(ownership['deliveries']) or any(
+            boundary_groups(section) for section in prepared['sections'] if section['boundaries'])
+        for section in prepared['sections']:
+            if not section['boundaries']:
+                section['retained'].reserve_bindings(int(have_transfers))
         coordinate = ownership['coordinate'] if 'coordinate' in ownership else tuple(ownership['mesh'].get_coordinate())
         if ownership['pending']:
             requirements = tuple(dict.fromkeys(item.get('requirement', 'access relation') for item in ownership['pending']))
@@ -1381,8 +1385,8 @@ class BoundGraph:
                 actuals = [plan['storage'][name]['operand'] if name in plan['storage'] else
                            input_actuals.get(name, value)
                            for name, value in zip(section['retained'].graph_inputs, section['operands'], strict=True)]
-                declaration = section['retained'].emit(actuals, **plan)
-                self.steps.append(declaration)
+                self.steps.append(dict(numerical=section['retained'], section=section, projection=projection,
+                                       operands=actuals, placement=plan, algebra=algebra))
                 source = section.get('source_section', section)
                 if id(source) not in declared_sections:
                     for name, calls in lower(section['graph']).items():
@@ -1395,8 +1399,7 @@ class BoundGraph:
                                     equalities=boundary['equalities'], requirements=boundary['requirements'])
                 for command in boundary['commands']:
                     if 'host' in command:
-                        from . import host, _stream
-                        from .native import Program
+                        from . import host
                         uses = plan['uses']
                         source = {name: uses[key]['operand'] for name, key in command['inputs'].items()}
                         target = {name: uses[key]['operand'] for name, key in command['outputs'].items()}
@@ -1405,12 +1408,12 @@ class BoundGraph:
                         after = [copy for side in ('inputs', 'outputs') for key in command[side].values()
                                  for copy in uses[key]['after']]
                         if before:
-                            self.steps.append(Program(_stream.Commands(before), ()))
-                        made = host.prepare_views(command['host'], source, target)
+                            self.steps.append(dict(commands=tuple(before), output=(), pages=()))
+                        made = host.lower_views(command['host'], source, target)
                         if made is not None:
                             self.steps.append(made)
                         if after:
-                            self.steps.append(Program(_stream.Commands(after), ()))
+                            self.steps.append(dict(commands=tuple(after), output=(), pages=()))
                         continue
                     def operand(role):
                         use = command[role]
@@ -1453,10 +1456,6 @@ class BoundGraph:
         self.output = tree.tree_unflatten(values, spec)
         if copied:
             self.steps.append(dict(commands=tuple(copied), output=self.output, pages=()))
-        if self.page_effects is not None:
-            from .page_effects import lower
-            lower([step for step in self.steps if isinstance(step, dict)], self.page_effects)
-        self.steps = [Program.prepare(step) if isinstance(step, dict) else step for step in self.steps]
         self.execution = execution_sequence(self.steps, self.output, owners)
 
 class Function:
@@ -1485,6 +1484,7 @@ class Function:
         self.graph, self.groups, self.run, self.output_spec = None, {}, None, None
         self.execution = None
         self.result_types = None
+        self.fold_choices = ()
 
     def capture(self):
         """Capture the source once, before functionalization, partitioning or fusion."""
@@ -1503,6 +1503,7 @@ class Function:
             self.captured_graph = trace(recorded, *self.arguments, parameters=self.parameters,
                                         source_scope=self.source_scope, route_scope=self.route_scope)
         self.result_types = self.captured_graph.meta['mesh_result_types']
+        self.fold_choices = self.captured_graph.meta['mesh_fold_choices']
         return self
 
     def repeated(self, count, *, first=0):
@@ -1515,6 +1516,7 @@ class Function:
                         source_scope=self.source_scope, route_scope=self.route_scope)
         made.captured_graph = repeat_source(self.captured_graph, count, first)
         made.output_spec, made.result_types = self.output_spec, self.result_types
+        made.fold_choices = self.fold_choices
         return made
 
     def declare(self, group, *, destinations=None):
@@ -1524,6 +1526,7 @@ class Function:
 
     def declare_graph(self, graph, group, *, destinations=None):
         """Lower an existing typed graph, retaining its source identities."""
+        self.fold_choices = graph.meta.get('mesh_fold_choices', ())
         from torch.distributed.tensor import DTensor
         from torch.utils._pytree import tree_leaves
         from .compilation import lift_attributes, bind
@@ -1547,7 +1550,7 @@ class Function:
                 assigned = lower_owned_graph(graph, arguments, ownership)
             graph, arguments = assigned['graph'], assigned['arguments']
         with bind(self.configuration):
-            prepared = BoundGraph(graph, arguments, group, self.configuration, destinations, ownership=assigned)
+            prepared = LoweredGraph(graph, arguments, group, self.configuration, destinations, ownership=assigned)
             from .compilation import layout_choices
             self.layout_choices = layout_choices()
         self.graph, self.groups, self.execution = graph, prepared.groups, prepared.execution

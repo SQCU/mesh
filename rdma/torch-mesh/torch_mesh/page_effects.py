@@ -41,31 +41,39 @@ def _groups(command):
     return group, counts
 
 
-def refine(section, projection, effects, algebra):
-    """Partition CPU work by the supplied output cuts using normal demand flow.
+def refine(section, projection, storage, cuts, algebra):
+    """Refine CPU source domains with the same placed read/write relations.
 
-    Metal expresses these independent tiles as one grid. CPU expresses them
-    as ordinary native tasks. Both select the same scalar producer domains;
-    no host task contains a scheduler or invokes another numerical executor.
+    A cut first selects actual stored bytes. Forward relation images identify
+    affected outputs; ordinary backward projection then includes each complete
+    required fiber. Thus a cut through a reduction input never invents a partial
+    result or duplicates an output. Remaining work appears exactly once.
     """
     from .compilation import implementation_assignment, implementations
     from mesh_compute import assigned_implementation
-    from .ownership import project_numerical
-    if not effects['rows']:
+    from .ownership import project_numerical, binding_uses
+    from .operand import byte_relation
+    if not cuts:
         return projection
     choices, catalog = implementation_assignment()['scalar'], implementations()
     cpu = {item['operation'].get_operation_name() for item in section['retained'].consumer_constraints()
            if catalog[assigned_implementation(item['required'], choices)]['compiler'] == 'cpp_scalar'}
     if not cpu:
         return projection
+    assigned = {id(record['domain']): record['work'] for record in projection['records']}
+    assigned.update({id(record['domain']['finish']): record['finish']['work']
+        for record in projection['records'] if record.get('finish') is not None})
+    placed = {}
+    for name, binding in storage.items():
+        root, _, physical = _physical(binding['operand'], algebra)
+        original = algebra.layout(layout_configuration(binding['source'].components(binding['source_dtype'].itemsize)))
+        placed[name] = root, physical, original
     records = [record for record in projection['records']
                if record['effect']['operation'].get_operation_name() not in cpu]
     seen, finished = {}, {}
-    for first, count, *_ in effects['rows']:
-        domain = algebra.set(f'{{ [i] : {first * effects["unit"]} <= i < {(first + count) * effects["unit"]} }}', 1)
-        demands = {key: positions.binary(domain, 'intersect') for key, positions in projection['outputs'].items()}
-        selected = project_numerical(section, demands, algebra)
-        for record in selected['records']:
+
+    def append(selected):
+        for record in selected:
             if record['effect']['operation'].get_operation_name() not in cpu:
                 continue
             key = id(record['domain'])
@@ -77,13 +85,50 @@ def refine(section, projection, effects, algebra):
                 finished[key] = finish['work'] if key not in finished else finished[key].binary(finish['work'], 'union')
                 finish = dict(finish, work=chosen)
             records.append(dict(record, work=work, finish=finish))
+
+    for cut in cuts:
+        root, _, relation = _physical(cut, algebra)
+        positions = relation.image(relation.domain())
+        affected = {name: original.image(physical.preimage(positions))
+                    for name, (base, physical, original) in placed.items() if base == root}
+        def add(name, positions):
+            affected[name] = positions if name not in affected else affected[name].binary(positions, 'union')
+        for effect in section['effects']:
+            for domain in effect['domains']:
+                for part in (domain, domain.get('finish')):
+                    if part is None:
+                        continue
+                    work = algebra.set('{ [' + ','.join(f'i{k}' for k in range(len(part['work']))) + '] : false }',
+                                       len(part['work']))
+                    for side in ('reads', 'writes'):
+                        for access in part[side].values():
+                            wanted = affected.get(access['name'])
+                            if wanted is None or wanted.empty():
+                                continue
+                            mapping = byte_relation(access)
+                            selected = assigned[id(part)] if mapping is None else mapping.preimage(wanted)
+                            work = work.binary(selected, 'union')
+                    work = work.binary(assigned[id(part)], 'intersect')
+                    for access in part['writes'].values():
+                        mapping = byte_relation(access)
+                        if mapping is not None:
+                            add(access['name'], mapping.image(work))
+        demands = {}
+        for key, binding in binding_uses(section['output_bindings']):
+            if key not in projection['outputs'] or binding['name'] not in affected:
+                continue
+            wanted = byte_relation(binding).preimage(affected[binding['name']]).binary(projection['outputs'][key], 'intersect')
+            demands[key] = wanted if key not in demands else demands[key].binary(wanted, 'union')
+        selected = project_numerical(section, demands, algebra, constraints=assigned)
+        append(selected['records'])
+    append(projection['records'])
     return dict(projection, records=tuple(records))
 
 
 def _group_accesses(command, algebra):
     """Project generated lane/loop coordinates onto physical page bytes."""
     from .operand import relation_layout
-    if command['kind'] == 'cpu':
+    if command['kind'] in ('cpu', 'ane'):
         reached = []
         for slot, mode, value in command['reaches']:
             root, extent, relation = _physical(value, algebra)
@@ -191,15 +236,12 @@ def _metadata_pages(command, first, text):
     return text
 
 
-def _inject_cpu(command, thresholds, contributions, effects, expected, arrivals):
-    """Put a cut's page effects in its existing compiled native task body."""
-    observations = [index for index, threshold in enumerate(thresholds[0]) if threshold]
-    outputs = contributions[0]
-    if not observations and not outputs:
-        return
+def _inject_cpu_many(command, records):
+    """Emit the solved host effects once into the existing numerical entry."""
     from mesh import RDMA
     command['operands'] = list(command['operands'])
     fields, before, after, helpers = [], [], [], []
+
     def operand(value, mode):
         slot, _ = _append(command, value, mode)
         _, _, layout = _stream.page_backing(value)
@@ -207,17 +249,23 @@ def _inject_cpu(command, thresholds, contributions, effects, expected, arrivals)
             dict(slot=slot, kind='pointer', name=f'mesh_effect_{slot}', type='uint8_t*', dtype=torch.uint8))
         fields.append(f'uint8_t* a{slot};')
         return f'(a.a{slot} + {layout.index(0)}ul)'
-    for index in observations:
-        observation = effects['observations'][index]
-        word = operand(observation['word'], 1 | 32)
-        violation = operand(observation['violation'], 1 | 2 | 128)
-        before.append(f'mesh_step_observe((volatile uint64_t *){word}, {thresholds[0][index]}ul, '
-                      f'{violation}, {observation["polls"]}u, {observation["channel"]}u, {observation["entry"]}ul);')
-    if outputs:
+
+    for domain, record in enumerate(records):
+        effects, thresholds, outputs = record['effects'], record['thresholds'][0], record['contributions'][0]
+        for index, threshold in enumerate(thresholds):
+            if not threshold:
+                continue
+            observation = effects['observations'][index]
+            word = operand(observation['word'], 1 | 32)
+            violation = operand(observation['violation'], 1 | 2 | 128)
+            before.append(f'mesh_step_observe((volatile uint64_t *){word}, {threshold}ul, '
+                f'{violation}, {observation["polls"]}u, {observation["channel"]}u, {observation["entry"]}ul);')
+        if not outputs:
+            continue
         cuts = operand(effects['cuts'], 1)
         completion = operand(effects['completion'], 1 | 2 | 128)
-        totals = operand(expected, 1)
-        counters = operand(arrivals, 1 | 2 | 128)
+        totals = operand(record['expected'], 1)
+        counters = operand(record['arrivals'], 1 | 2 | 128)
         members, values, publishes = ['const uint64_t *cuts;'], [f'(const uint64_t *){cuts}'], []
         for index, publication in enumerate(effects['publications']):
             word = operand(publication['word'], 2 | 128)
@@ -225,17 +273,25 @@ def _inject_cpu(command, thresholds, contributions, effects, expected, arrivals)
             values.append(f'(volatile uint64_t *){word}')
             publishes.append(f'mesh_publish(word{index}, cuts[(p - 1) * {2 + len(effects["observations"])}ul '
                              f'+ {2 + publication["observation"]}]);')
-        helpers.append('struct MeshEffectPrefix {' + ''.join(members) +
+        prefix = f'MeshEffectPrefix{domain}'
+        helpers.append('struct ' + prefix + ' {' + ''.join(members) +
                        'void at(uint32_t p) {' + ''.join(publishes) + '} };')
-        after.append('__atomic_thread_fence(__ATOMIC_SEQ_CST);')
-        after.append(f'uint32_t *mesh_settled = (uint32_t *){completion};')
+        after.append(f'{{ uint32_t *mesh_settled = (uint32_t *){completion};')
         for cut in outputs:
             after.append(f'if (__atomic_add_fetch((uint32_t *){counters} + {cut}, 1u, __ATOMIC_ACQ_REL) == '
                          f'((const uint32_t *){totals})[{cut}]) '
                          f'__atomic_store_n(mesh_settled + {cut}, 2u, __ATOMIC_RELEASE);')
-        after.append('MeshEffectPrefix mesh_publish_prefix = {' + ','.join(values) + '};')
+        after.append(prefix + ' mesh_publish_prefix = {' + ','.join(values) + '};')
         count = len(effects['rows'])
-        after.append(f'mesh_graph_settle(mesh_settled, 0, {count}u, mesh_settled + {count}, mesh_publish_prefix);')
+        after.append(f'mesh_graph_settle(mesh_settled, 0, {count}u, mesh_settled + {count}, mesh_publish_prefix); }}')
+    if not before and not after:
+        return
+    if after:
+        after.insert(0, '__atomic_thread_fence(__ATOMIC_SEQ_CST);')
+    if command['kind'] == 'ane':
+        from .host import ane_source
+        command['source'] = ane_source(fields, helpers, before, after)
+        return
     source = command['source']
     structure = source.index('struct MeshCpuArguments {')
     end_structure = source.index('};', structure)
@@ -248,42 +304,49 @@ def _inject_cpu(command, thresholds, contributions, effects, expected, arrivals)
         source[:binding] + ''.join(before) + source[binding:end_entry] + ''.join(after) + source[end_entry:])
 
 
-def _inject(command, thresholds, contributions, effects, expected, arrivals):
-    """Emit actual dependency effects in a numerical command's entry/exit."""
-    if command['kind'] == 'cpu':
-        return _inject_cpu(command, thresholds, contributions, effects, expected, arrivals)
-    observations = [i for i in range(len(effects['observations'])) if any(row[i] for row in thresholds)]
-    publishing = max(map(len, contributions), default=0)
-    if not observations and not publishing:
+def _inject_many(command, records):
+    """Compose all solved page effects before the single source emission.
+
+    Channels keep independent completed-prefix domains. They share the entry's
+    observation fence and publication fence, and one group-indexed metadata row.
+    """
+    records = [record for record in records if any(any(row) for row in record['thresholds'])
+               or any(record['contributions'])]
+    if not records:
         return
+    if command['kind'] in ('cpu', 'ane'):
+        return _inject_cpu_many(command, records)
     command['operands'] = list(command['operands'])
     initial = len(command['operands'])
-    threshold_rows = [[row[i] for i in observations] for row in thresholds]
-    table_rows = [values + [*cuts, *([-1] * (publishing - len(cuts)))]
-                  for values, cuts in zip(threshold_rows, contributions, strict=True)]
-    table = _table(table_rows, torch.int64)
-    _, table_pointer = _append(command, table, 1)
-    stride = len(observations) + publishing
+    rows = [[] for _ in records[0]['thresholds']]
+    domains, stride = [], 0
+    for record in records:
+        observations = [i for i in range(len(record['effects']['observations']))
+                        if any(row[i] for row in record['thresholds'])]
+        publishing = max(map(len, record['contributions']), default=0)
+        domains.append((record, observations, publishing, stride))
+        for row, thresholds, cuts in zip(rows, record['thresholds'], record['contributions'], strict=True):
+            row.extend([*(thresholds[i] for i in observations), *cuts, *([-1] * (publishing - len(cuts)))])
+        stride += len(observations) + publishing
+    _, table = _append(command, _table(rows, torch.int64), 1)
     _, groups = _groups(command)
     group_index = f'(mesh_group.x + {groups[0]}u * (mesh_group.y + {groups[1]}u * mesh_group.z))'
-    before = [f'device const long *mesh_effect_row = (device const long *){table_pointer} + {stride}ul * {group_index};']
-    after, helpers = [], []
-    if observations:
-        before.append('if (mesh_lane == 0) {')
-        for column, index in enumerate(observations):
+    before = [f'device const long *mesh_effect_row = (device const long *){table} + {stride}ul * {group_index};']
+    reads, writes, helpers = [], [], []
+    for domain, (record, observations, publishing, column_start) in enumerate(domains):
+        effects = record['effects']
+        for column, index in enumerate(observations, column_start):
             observation = effects['observations'][index]
             _, word = _append(command, observation['word'], 1 | 32)
             _, violation = _append(command, observation['violation'], 1 | 2 | 128)
-            before.append(f'mesh_step_observe({word}, ulong(mesh_effect_row[{column}]), {violation}, '
-                          f'{observation["polls"]}u, {observation["channel"]}u, {observation["entry"]}ul);')
-        before.append('}\nthreadgroup_barrier(mem_flags::mem_device);')
-        before.append('atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
-                      'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));')
-    if publishing:
+            reads.append(f'mesh_step_observe({word}, ulong(mesh_effect_row[{column}]), {violation}, '
+                         f'{observation["polls"]}u, {observation["channel"]}u, {observation["entry"]}ul);')
+        if not publishing:
+            continue
         _, cuts = _append(command, effects['cuts'], 1)
         _, completion = _append(command, effects['completion'], 1 | 2 | 128)
-        _, totals = _append(command, expected, 1)
-        _, counters = _append(command, arrivals, 1 | 2 | 128)
+        _, totals = _append(command, record['expected'], 1)
+        _, counters = _append(command, record['arrivals'], 1 | 2 | 128)
         fields, values, publishes = ['device const ulong *cuts;'], [f'(device const ulong *){cuts}'], []
         for index, publication in enumerate(effects['publications']):
             _, word = _append(command, publication['word'], 2 | 128)
@@ -291,22 +354,27 @@ def _inject(command, thresholds, contributions, effects, expected, arrivals):
             values.append(f'(volatile coherent(system) device ulong *){word}')
             column = 2 + publication['observation']
             publishes.append(f'mesh_publish(word{index}, cuts[(p - 1) * {2 + len(effects["observations"])}ul + {column}]);')
-        helpers.append('struct mesh_effect_prefix {' + ''.join(fields) +
+        prefix = f'mesh_effect_prefix_{domain}'
+        helpers.append('struct ' + prefix + ' {' + ''.join(fields) +
                        'void at(uint p) {' + ''.join(publishes) + '} };\n')
-        after.append('threadgroup_barrier(mem_flags::mem_device);\nif (mesh_lane == 0) {')
-        after.append('atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
-                     'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));')
-        after.append(f'device atomic_uint *mesh_settled = (device atomic_uint *){completion};')
-        for column in range(publishing):
-            after.append(f'{{ const long cut = mesh_effect_row[{len(observations) + column}]; if (cut >= 0) {{ '
+        writes.append(f'{{ device atomic_uint *mesh_settled = (device atomic_uint *){completion};')
+        for column in range(column_start + len(observations), column_start + len(observations) + publishing):
+            writes.append(f'{{ const long cut = mesh_effect_row[{column}]; if (cut >= 0) {{ '
                 f'uint arrived = atomic_fetch_add_explicit((device atomic_uint *){counters} + cut, 1u, memory_order_relaxed) + 1u; '
                 f'if (arrived == ((device const uint *){totals})[cut]) '
                 'atomic_store_explicit(mesh_settled + cut, 2u, memory_order_relaxed); } }')
-        after.append('mesh_effect_prefix mesh_publish_prefix = {' + ','.join(values) + '};')
+        writes.append(prefix + ' mesh_publish_prefix = {' + ','.join(values) + '};')
         count = len(effects['rows'])
-        after.append(f'mesh_graph_settle(mesh_settled, 0, {count}u, mesh_settled + {count}, mesh_publish_prefix);\n}}')
+        writes.append(f'mesh_graph_settle(mesh_settled, 0, {count}u, mesh_settled + {count}, mesh_publish_prefix); }}')
+    fence = ('atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
+             'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));')
+    if reads:
+        before.extend(('if (mesh_lane == 0) {' + ''.join(reads) + '}',
+                       'threadgroup_barrier(mem_flags::mem_device);', fence))
+    after = ('threadgroup_barrier(mem_flags::mem_device); if (mesh_lane == 0) { ' +
+             fence + ''.join(writes) + ' }') if writes else ''
     combined = _metadata_pages(command, initial, '\n'.join(helpers) + '\n@@BEFORE@@\n' + '\n'.join(before) +
-                               '\n@@AFTER@@\n' + '\n'.join(after))
+                               '\n@@AFTER@@\n' + after)
     helpers, combined = combined.split('\n@@BEFORE@@\n')
     before, after = combined.split('\n@@AFTER@@\n')
     command['source'] = shader_source(command, initial, helpers, before, after)
@@ -315,34 +383,23 @@ def _inject(command, thresholds, contributions, effects, expected, arrivals):
 def shader_source(command, initial, helpers, before, after):
     """Compose effects into retained source; page binding is a separate operand."""
     source = command['source']
-    definition = command['function']
-    instance = re.search(r'host_name\("' + re.escape(definition) + r'"\).*?decltype\((\w+)\s*<', source)
-    if instance is not None:
-        definition = instance.group(1)
-    matches = tuple(re.finditer(r'kernel\s+void\s+' + re.escape(definition) + r'\s*\(', source))
-    if not matches:
-        raise ValueError('the declared shader entry must retain its source definition for page-effect composition')
-    for match in reversed(matches):
-        start, cursor, depth = match.end(), match.end(), 1
-        while depth:
-            depth += (source[cursor] == '(') - (source[cursor] == ')')
-            cursor += 1
-        end = cursor - 1
-        opening = source.index('{', cursor)
-        closing, depth = opening + 1, 1
-        while depth:
-            depth += (source[closing] == '{') - (source[closing] == '}')
-            closing += 1
-        parameters = source[start:end].rstrip()
-        added = f', device uchar *mesh_effect_{initial} [[buffer({initial})]]'
+    from .shader import entries, body_scope
+    def compose(parameters, body):
+        added = (', ' if parameters.strip() else '') + f'device uchar *mesh_effect_{initial} [[buffer({initial})]]'
         aliases = []
         for attribute, target in (('thread_index_in_threadgroup', 'mesh_lane'), ('threadgroup_position_in_grid', 'mesh_group')):
-            declared = re.search(r'\b(uint[123]?)\s+(\w+)\s*\[\[' + attribute + r'\]\]', parameters)
+            declared = re.search(r'\b(uint[123]?|ushort[123]?)\s+(\w+)\s*\[\[' + attribute + r'\]\]', parameters)
             if declared is None:
-                added += f', {"uint" if target == "mesh_lane" else "uint3"} {target} [[{attribute}]]'
+                geometry = re.search(r'\b(uint[123]?|ushort[123]?)\s+\w+\s*\[\[(?:thread_position_in_grid|thread_position_in_threadgroup|threads_per_threadgroup|threads_per_grid)\]\]', parameters)
+                kind = 'uint' if target == 'mesh_lane' else geometry.group(1) if geometry is not None else 'uint3'
+                name = target if target == 'mesh_lane' or kind == 'uint3' else target + '_argument'
+                added += f', {kind} {name} [[{attribute}]]'
+                if name != target:
+                    expression = f'uint3({name}, 0)' if kind.endswith('2') else f'uint3({name})' if kind.endswith('3') else f'uint3({name}, 0, 0)'
+                    aliases.append(f'const auto {target} = {expression};')
             elif declared.group(2) != target:
                 kind, name = declared.groups()
-                expression = name if target == 'mesh_lane' or kind == 'uint3' else f'uint3({name}, 0)' if kind == 'uint2' else f'uint3({name}, 0, 0)'
+                expression = name if target == 'mesh_lane' or kind == 'uint3' else f'uint3({name}, 0)' if kind.endswith('2') else f'uint3({name})' if kind.endswith('3') else f'uint3({name}, 0, 0)'
                 aliases.append(f'const auto {target} = {expression};')
         if command.get('names'):
             pieces = parameters.split(',')
@@ -351,37 +408,40 @@ def shader_source(command, initial, helpers, before, after):
                 if 'coherent(system)' not in pieces[slot]:
                     pieces[slot] = re.sub(r'\bdevice\s+', 'volatile coherent(system) device ', pieces[slot])
             parameters = ','.join(pieces)
-        elif 'MESH_MATRIX_' not in source:
+        elif 'MESH_MATRIX_' not in source or '#define MESH_ENTRY_QUALIFIERS' in source:
             for slot in command.get('observed_slots', set()) | command.get('published_slots', set()):
                 parameters = re.sub(r'\b(device|constant)\s+([^,]*?\[\[buffer\(' + str(slot) + r'\)\]\])',
                     lambda match: 'volatile coherent(system) device ' + ('const ' if match.group(1) == 'constant' else '') + match.group(2), parameters)
-        source = (source[:match.start()] + '#pragma METAL internals : enable\n' + source[match.start():start] +
-                  parameters + added + source[end:opening + 1] + ''.join(aliases) + before +
-                  source[opening + 1:closing - 1] + after + source[closing - 1:])
+        return parameters + added, ''.join(aliases) + before + body_scope(body) + after
+    source = entries(source, command['function'], compose)
     observed = sum(1 << slot for slot in command.get('observed_slots', ()))
-    return f'#define MESH_OBSERVED_BINDINGS {observed}ul\n' + helpers + source
+    published = sum(1 << slot for slot in command.get('published_slots', ()))
+    return (f'#undef MESH_OBSERVED_BINDINGS\n#define MESH_OBSERVED_BINDINGS {observed}ul\n'
+            f'#undef MESH_PUBLISHED_BINDINGS\n#define MESH_PUBLISHED_BINDINGS {published}ul\n' + helpers + source)
 
 
-def lower(programs, effects):
+def lower(programs, effects, *, emit=True):
     """One exact group/page projection for every typed numerical command."""
     if not effects['rows']:
-        return
+        return []
     from mesh_relation import Algebra
     from . import empty
     algebra = Algebra()
     from .native import declared_commands
     for program in programs:
         program['commands'] = tuple(declared_commands(program['commands']))
-    commands = [command for program in programs for command in program['commands']]
+    commands = [(command, program.get('order', 0)) for program in programs for command in program['commands']]
     projected = []
-    for command in commands:
-        if command['kind'] not in ('shader', 'cpu') or command['kind'] == 'shader' and command.get('dispatch') is None:
+    for command, order in commands:
+        if command['kind'] not in ('shader', 'cpu', 'ane') or command['kind'] == 'shader' and command.get('dispatch') is None:
             raise ValueError('page-effect lowering requires the numerical command\'s dispatch-to-page relation')
         count, accesses = _group_accesses(command, algebra)
-        projected.append(dict(command=command, accesses=accesses,
+        projected.append(dict(command=command, accesses=accesses, order=order,
             thresholds=[[0] * len(effects['observations']) for _ in range(count)],
             contributions=[set() for _ in range(count)]))
     for observation_index, observation in enumerate(effects['observations']):
+        if observation.get('publication_only'):
+            continue
         destination = observation['source'] == len(effects['sources'])
         source = TensorView.of(effects['destination'] if destination else
                                effects['sources'][observation['source']])
@@ -392,6 +452,8 @@ def lower(programs, effects):
             root, extent, relation = _physical(selected, algebra)
             remaining = relation.image(relation.domain())
             for program in projected:
+                if program['order'] <= observation.get('after', -1):
+                    continue
                 for access in program['accesses']:
                     if access['root'] != root:
                         continue
@@ -399,28 +461,35 @@ def lower(programs, effects):
                         spans = access['relation'].preimage(remaining).spans()
                         if spans:
                             program['command'].setdefault('observed_slots', set()).add(access['slot'])
-                        for first, width in spans:
-                            for group in range(first, first + width):
+                        for first, width, stride, repeats in spans:
+                            for group in (first + repetition * stride + lane
+                                          for repetition in range(repeats) for lane in range(width)):
                                 program['thresholds'][group][observation_index] = max(
                                     program['thresholds'][group][observation_index], row[2 + observation_index])
                 for access in program['accesses']:
                     if access['root'] == root and access['side'] == 'writes':
                         remaining = remaining.binary(access['positions'], 'subtract')
-    target = TensorView.of(effects['destination'])
     expected = []
-    for cut_index, row in enumerate(effects['rows']):
-        selected = TensorView(target.storage, target.layout.reshape((target.numel(),)).select_runs(
-            0, [(row[0] * effects['unit'], row[1] * effects['unit'])]))
+    targets = effects.get('targets')
+    for cut_index, row in enumerate(effects['rows']) if effects['publications'] else ():
+        target = TensorView.of(effects['destination'] if targets is None else targets[cut_index])
+        selected = (TensorView(target.storage, target.layout.reshape((target.numel(),)).select_runs(
+            0, [(row[0] * effects['unit'], row[1] * effects['unit'])])) if targets is None else target)
         root, extent, relation = _physical(selected, algebra)
         remaining = relation.image(relation.domain())
+        if 'initial_positions' in effects:
+            remaining = remaining.binary(effects['initial_positions'][cut_index], 'subtract')
         for program in reversed(projected):
-            writes = [item for item in program['accesses'] if item['root'] == root and item['side'] == 'writes']
+            if 'producer_before' in effects and program['order'] >= effects['producer_before'][cut_index]:
+                continue
+            writes = [item for item in program['accesses'] if item['root'] == root and item['side'] in ('writes', 'available')]
             for access in writes:
                 spans = access['relation'].preimage(remaining).spans()
                 if spans:
                     program['command'].setdefault('published_slots', set()).add(access['slot'])
-                for first, width in spans:
-                    for group in range(first, first + width):
+                for first, width, stride, repeats in spans:
+                    for group in (first + repetition * stride + lane
+                                  for repetition in range(repeats) for lane in range(width)):
                         program['contributions'][group].add(cut_index)
             for access in writes:
                 remaining = remaining.binary(access['positions'], 'subtract')
@@ -430,6 +499,216 @@ def lower(programs, effects):
     totals = _table([[value] for value in expected], torch.uint32)
     arrivals = empty((len(expected),), dtype=torch.uint32, device='cpu')
     arrivals.zero_()
-    for program in projected:
-        _inject(program['command'], program['thresholds'],
-                [sorted(values) for values in program['contributions']], effects, totals, arrivals)
+    solved = [dict(command=program['command'], thresholds=program['thresholds'],
+        contributions=[sorted(values) for values in program['contributions']],
+        effects=effects, expected=totals, arrivals=arrivals) for program in projected]
+    if emit:
+        for record in solved:
+            _inject_many(record['command'], (record,))
+    return solved
+
+
+def _effect(rows, *, sources=(), destination=None, observations=(), publications=(), completed=(), **extra):
+    from . import empty
+    completion = empty((len(rows) + 1,), dtype=torch.uint32, device='cpu')
+    completion.zero_()
+    if completed:
+        completion.numpy()[list(completed)] = 2
+    return dict(rows=tuple(rows), cuts=_table(rows, torch.uint64), completion=completion,
+                sources=tuple(sources), destination=destination, observations=tuple(observations),
+                publications=tuple(publications), unit=1, **extra)
+
+
+def transfer_effects(programs, records, schedule):
+    """Solve exact produced/received page versions before any kernel is bound.
+
+    Native placement supplies typed page words and selected payload ranges.
+    The same projection used for reductions inserts those effects into their
+    real numerical producers and consumers. External values contribute only
+    their publication/observation boundary, never a staging copy.
+    """
+    from mesh_relation import Algebra
+    from .native import declared_commands
+    from .operand import relation_view
+    algebra = Algebra()
+    for program in programs:
+        program['commands'] = tuple(declared_commands(program['commands']))
+    publishers, observers = {}, {}
+    for record in records:
+        root, _, layout = _stream.page_backing(record['word'])
+        key = root, layout.index(0)
+        if record['kind'] == 'publish':
+            publishers.setdefault(key, []).append(record)
+        else:
+            observers.setdefault((record['order'], record['call'], key), []).append(record)
+
+    accesses = [(program['order'], access) for program in programs for command in program['commands']
+                for access in _group_accesses(command, algebra)[1]]
+    arrivals = sorted((record for group in observers.values() for record in group),
+                      key=lambda record: record['order'], reverse=True)
+    initial_inputs = {}
+
+    # Entry values are descriptor inputs. Earlier WRITE arrivals become those
+    # descriptors' actual prerequisites; no numerical dispatch stands in for
+    # observing and republishing them.
+    for rows in publishers.values():
+        for record in rows:
+            selected = record['selected']
+            root, _, relation = _physical(selected, algebra)
+            missing = relation.image(relation.domain())
+            for order, access in accesses:
+                if order < record['order'] and access['root'] == root and access['side'] == 'writes':
+                    missing = missing.binary(access['positions'], 'subtract')
+            record['initial_positions'] = missing
+            if not missing.empty():
+                domain = relation.preimage(missing)
+                selection = algebra.selection_relation(dict(shape=[selected.numel()], steps=[['select', 0, domain.spans()]]))
+                record['initial_view'] = relation_view(selected, selection, selection.shape)
+                for first, width, stride, repeats in domain.spans():
+                    for repetition in range(repeats):
+                        begin = first + repetition * stride
+                        part = algebra.set(f'{{ [i] : {begin} <= i < {begin + width} }}', 1)
+                        dependencies, remaining = [], relation.image(part)
+                        for arrival in arrivals:
+                            if arrival['order'] >= record['order']:
+                                continue
+                            received_root, _, received = _physical(arrival['selected'], algebra)
+                            if received_root != root:
+                                continue
+                            covered = received.image(received.domain()).binary(remaining, 'intersect')
+                            if not covered.empty():
+                                dependencies.append(arrival)
+                                remaining = remaining.binary(covered, 'subtract')
+                        initial_inputs.setdefault(record['owner'], []).append(dict(call=record['call'],
+                            frame=record['frame'], first=record['first'] + begin,
+                            bytes=width, observations=dependencies))
+    for owner, inputs in initial_inputs.items():
+        owner.source_inputs(inputs)
+    programs.sort(key=lambda program: program['order'])
+    solved = {}
+    def collect(effects):
+        for record in lower(programs, effects, emit=False):
+            solved.setdefault(id(record['command']), []).append(record)
+    for records in publishers.values():
+        records.sort(key=lambda row: row['threshold'])
+        first = records[0]
+        rows = [(0, record['bytes'], record['threshold']) for record in records]
+        effects = _effect(rows, observations=(dict(publication_only=True),),
+            publications=(dict(word=first['word'], observation=0),),
+            targets=tuple(record['selected'] for record in records),
+            producer_before=tuple(record['order'] for record in records),
+            initial_positions=tuple(record['initial_positions'] for record in records),
+            initial_views=tuple(record['initial_view'] for record in records if 'initial_view' in record),
+            completed=tuple(index for index, record in enumerate(records)
+                if record['initial_positions'].equal(_physical(record['selected'], algebra)[2].image(
+                    _physical(record['selected'], algebra)[2].domain()))))
+        collect(effects)
+    for records in observers.values():
+        first = records[0]
+        observation = {key: first[key] for key in ('word', 'violation', 'polls', 'channel', 'entry')}
+        observation.update(source=0, after=first['order'])
+        effects = _effect([(record['first'], record['bytes'], record['threshold']) for record in records],
+            sources=(first['view'],), observations=(observation,))
+        collect(effects)
+    consumed = {}
+    for records in solved.values():
+        command = records[0]['command']
+        prerequisites = {}
+        for record in records:
+            for index, observation in enumerate(record['effects']['observations']):
+                if observation.get('publication_only'):
+                    continue
+                root, _, layout = _stream.page_backing(observation['word'])
+                key = root, layout.index(0)
+                threshold = max((row[index] for row in record['thresholds']), default=0)
+                consumed[key] = max(consumed.get(key, 0), threshold)
+            if any(record['contributions']):
+                for view in record['effects'].get('initial_views', ()):
+                    prerequisites[_stream.physical_layout(view)] = view
+        command['reaches'] = (*command['reaches'], *((-1, 1, view) for view in prerequisites.values()))
+        _inject_many(command, records)
+    # Numerical completion already entails every arrival that its commands
+    # observed. Only terminal words beyond those thresholds remain result
+    # operands, observed by existing nonblocking status, once per physical word.
+    terminal = {}
+    for record in arrivals:
+        root, _, layout = _stream.page_backing(record['word'])
+        key = root, layout.index(0)
+        if record['threshold'] > consumed.get(key, 0):
+            previous = terminal.get(key)
+            if previous is None or previous[1] < record['threshold']:
+                terminal[key] = record['word'], record['threshold']
+    schedule.results(list(terminal.values()))
+    return programs
+
+
+def prepare(steps, schedule, output=None):
+    """Lower transfers, solve page effects, then bind/record the whole function.
+
+    CommLower fixes one declaration-owned occurrence. CommEncode later consumes
+    exactly that occurrence. Numerical code remains source throughout the effect
+    solve; no compiled address record is inspected to recover a page relation.
+    """
+    from .native import Program
+
+    def source_copy(value):
+        # Copy mutable compiler records, retaining their page/source identities.
+        if type(value) is dict:
+            return {key: source_copy(item) for key, item in value.items()}
+        if type(value) is list:
+            return [source_copy(item) for item in value]
+        if type(value) is tuple:
+            return tuple(source_copy(item) for item in value)
+        if type(value) is set:
+            return set(value)
+        return value
+
+    declarations = []
+    for step in steps:
+        if isinstance(step, dict) and 'transfer' in step:
+            if step['before']:
+                declarations.append(dict(commands=step['before'], output=None, pages=()))
+            declarations.append(step)
+            if step['after']:
+                declarations.append(dict(commands=step['after'], output=None, pages=()))
+        else:
+            declarations.append(step)
+    programs, prepared, effects = [], [], []
+    for index, step in enumerate(declarations):
+        order = index * 4
+        if 'numerical' in step:
+            programs.append(dict(step, order=order))
+        elif 'transfer' not in step:
+            program = source_copy(step)
+            program['order'] = order
+            programs.append(program)
+        elif step['transfer'] == 'write':
+            bound = _stream.view_write_operands(step['bindings'], step['group'].handle, 0)
+            bound.lower()
+            prepared.append((order, bound, True))
+            for record in bound.page_effects():
+                view = byte_operand(step['views'][record['call']])
+                selected = TensorView(view.storage, view.layout.reshape((view.numel(),)).select_runs(
+                    0, [(record['first'], record['bytes'])]), view.binding_origin)
+                effects.append(dict(record, order=order, view=view, selected=selected, owner=bound))
+        else:
+            bound = _stream.Collectives(step['bindings'], step['group'].handle, step['operands'])
+            bound.lower()
+            prepared.append((order, bound, False))
+    for index, declaration in enumerate(programs):
+        if 'numerical' not in declaration:
+            continue
+        retained = declaration['numerical']
+        projection = refine(declaration['section'], declaration['projection'], declaration['placement']['storage'],
+                            [record['selected'] for record in effects], declaration['algebra'])
+        retained.select_domains(projection['records'])
+        program = retained.emit(declaration['operands'], **declaration['placement'])
+        programs[index] = dict(program, order=declaration['order'])
+    if effects:
+        programs = transfer_effects(programs, effects, schedule)
+    prepared.extend((program['order'], Program.prepare(program), False) for program in programs)
+    for _, command, write in sorted(prepared, key=lambda item: item[0]):
+        if write:
+            schedule.writes(command)
+        else:
+            command.append(schedule)

@@ -28,8 +28,13 @@ using namespace metal;
 #ifndef MESH_OBSERVED_BINDINGS
 #define MESH_OBSERVED_BINDINGS 0ul
 #endif
+#ifndef MESH_PUBLISHED_BINDINGS
+#define MESH_PUBLISHED_BINDINGS 0ul
+#endif
+template<uint Binding> constexpr bool mesh_published() {return (MESH_PUBLISHED_BINDINGS >> Binding) & 1ul;}
 template<uint Binding> constexpr bool mesh_observed() {return (MESH_OBSERVED_BINDINGS >> Binding) & 1ul;}
 template<uint Binding> constexpr bool mesh_affine();
+template<uint Binding> inline long mesh_index(ulong i);
 template<uint Binding, uint Axis> constexpr long mesh_stride();
 template<uint Binding> inline long mesh_position(ulong i);
 template<uint Binding, uint Axis> constexpr long mesh_matrix_stride() {
@@ -68,6 +73,12 @@ struct mesh_page_read {
         else return values[mesh_index<Binding>(i)];
     }
 };
+template<uint Binding,typename Scalar,typename Value>
+inline void mesh_page_write(device Scalar *values,ulong i,Value value) {
+    if constexpr(mesh_published<Binding>())
+        mesh_step_write<Scalar>((device uchar *)values,mesh_index<Binding>(i),Scalar(value));
+    else values[mesh_index<Binding>(i)]=Scalar(value);
+}
 template <uint Binding,typename Read>
 struct mesh_mapped_value_read {
     Read reader;
@@ -81,7 +92,7 @@ struct mesh_matrix_read {
 
 template <uint Binding, uint Bits>
 inline int mesh_matrix_packed_read(device const uchar *values, ulong logical) {
-    return mesh_matrix_bits<Bits>(uint(values[mesh_index<Binding>(logical)]), uint(mesh_position<Binding>(logical)));
+    return mesh_matrix_bits<Bits>(uint(mesh_page_read<Binding,uchar>{values}.load(logical)), uint(mesh_position<Binding>(logical)));
 }
 
 // Byte positions, bit lanes and quantization positions are independent compiled
@@ -97,7 +108,7 @@ struct mesh_matrix_quantized_read {
     Scalar operator()(int2 at) const {
         const ulong logical = base + ulong(at.y) * columns + at.x;
         return mesh_matrix_scaled<Scalar>(mesh_matrix_packed_read<Binding,Bits>(values,logical),
-            scales[mesh_index<ScaleBinding>(logical)], zeros[mesh_index<ZeroBinding>(logical)]);
+            mesh_page_read<ScaleBinding,float>{scales}.load(logical), mesh_page_read<ZeroBinding,long>{zeros}.load(logical));
     }
 };
 

@@ -6,6 +6,7 @@ Configured product shares select local matrix views at preparation; autograd
 records their collective derivatives in that function's graph.
 """
 import os
+import time
 
 import numpy as np
 import torch
@@ -154,7 +155,9 @@ class World:
             destinations = [self.buffer(value.shape, value.dtype, value.device.type) for value in tensors]
             self.group.plan(function.declare(self.group, destinations=destinations))
             function.prepare(); function.run()
-            _stream.completion_end(function.completion())
+            completion = function.completion()
+            while _stream.completion_observe(completion) is None:
+                time.sleep(0)
             for i, value in zip(slots, destinations, strict=True):
                 leaves[i] = host(value).numpy() if isinstance(leaves[i], np.ndarray) else value
         return tree_unflatten(leaves, spec)

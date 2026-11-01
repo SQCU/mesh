@@ -81,24 +81,64 @@ def equalities(node):
         yield left.storage, left.layout.reshape((left.layout.count,)), right.storage, right.layout.reshape((right.layout.count,))
 
 
-def prepare_views(definition, source, target):
-    """Bind resolved provider uses after semantic aliases have been placed.
+def lower_views(definition, source, target):
+    """Lower provider declarations after placement and before dependency solving.
 
     Alias equations belong to the shared placement solve. A provider's input
     may use a required contiguous copy while a forwarded result keeps the
     original pages; those two API uses need not have the same physical view.
     """
-    from .engines import Cpu, coreml_graph
+    from .engines import Cpu
     if definition['provider'] == 'pages':
         return None
     if definition['provider'] == 'cpu':
-        return Cpu(implementation=definition['implementation']).bind(definition, source, target)
+        return Cpu(implementation=definition['implementation']).declare_views(definition, source, target)
     if definition['provider'] == 'coreml':
         contract = definition['contract']
         if not contract['outputs']:
             return None
         source = {name: source[name] for name in contract['inputs']}
         target = {name: target[name] for name in contract['outputs']}
-        return coreml_graph(definition['compiled'], source, target, configuration=definition['configuration'],
-                            contract=contract, implementation=definition['implementation'])
+        from .operand import byte_operand
+        from .cpu import compilation
+        values = [*source.values(), *target.values()]
+        operands = [byte_operand(value) for value in values]
+        command = dict(kind='ane', provider=definition, source=ane_source((), (), (), ()),
+            operands=operands, source_views=source, target_views=target,
+            argument_specs=(), constants={}, types=tuple(torch.uint8 for _ in values),
+            binding_origins=tuple(value.binding_origin for value in operands),
+            reaches=tuple((slot, 1 if slot < len(source) else 2, value) for slot, value in enumerate(operands)),
+            compiler=compilation(definition['implementation']))
+        return dict(commands=(command,), output=tuple(target.values()), pages=tuple(value.storage for value in operands))
     raise ValueError(f"unknown declared host provider {definition['provider']}")
+
+
+def ane_source(fields, helpers, before, after):
+    """Specialize the common submit/completion recipe before request binding."""
+    from mesh import RDMA
+    def effect(name, statements):
+        if not statements:
+            return f'#define {name}(arguments)\n'
+        body = ' '.join(statements)
+        return (f'#define {name}(arguments) do {{ '
+                'const auto &a = *static_cast<const MeshCpuArguments *>(arguments); '
+                + body + ' } while (0)\n')
+    return (f'#include "{RDMA}/mesh-publication.h"\n' + ''.join(helpers) +
+        'struct MeshCpuArguments {' + ''.join(fields) + '};\n' +
+        effect('MESH_ANE_ENTER', before) + effect('MESH_ANE_LEAVE', after) +
+        f'#include "{RDMA}/mesh-ane-entry.inc"\n')
+
+
+def prepare(command):
+    """Final resource binding; declarations and dependency source are complete."""
+    from . import _stream
+    from .cpu import argument_record
+    from .engines import coreml_graph
+    definition = command['provider']
+    arguments = argument_record(command, {
+        slot: _stream.page_backing(value)[0] for slot, value in enumerate(command['operands'])})
+    return coreml_graph(definition['compiled'], command['source_views'], command['target_views'],
+        configuration=definition['configuration'], contract=definition['contract'],
+        implementation=definition['implementation'],
+        entry=dict(source=command['source'], compiler=command['compiler'], arguments=arguments),
+        reaches=command['reaches'])

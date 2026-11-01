@@ -303,7 +303,32 @@ typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
    frames, and kernels use mesh_step_release/mesh_step_await with that frame's
    index. A zero stride does not establish permission to overwrite live pages. */
 typedef uint64_t ncclMeshBinding[6];
-typedef struct { ncclMeshBinding *publish, *land; uint32_t publishes, lands, repeats; size_t stride; } ncclMeshFused;
+/* Typed preparation output, before backend argument records contain addresses.
+   first/bytes are frame-local logical WRITE coordinates. The compiler consumes
+   these operands before it binds numerical commands. Publications on one word
+   form an ordered prefix: its value advances only through completed source
+   cuts, using the common page-effect completion relation. */
+typedef struct {
+  size_t call,first,bytes;
+  uint32_t kind,frame,channel,polls;
+  ncclMeshBuffer word,violation;
+  uint64_t threshold,entry;
+} ncclMeshPageEffect;
+enum { ncclMeshPagePublish=1, ncclMeshPageObserve=2 };
+/* Portions of a WRITE source supplied by the enclosing function, rather than
+   one of its numerical commands. Prior remote arrivals remain typed word
+   operands on the actual SEND, not separate observation kernels. */
+typedef struct {
+  size_t call,first,bytes;
+  uint32_t frame;
+  const ncclMeshPageEffect* observations;
+  size_t count;
+} ncclMeshSourceInput;
+typedef struct {
+  ncclMeshBinding *publish, *land;
+  uint32_t publishes, lands, repeats;
+  size_t stride;
+} ncclMeshFused;
 typedef struct {
   void *commandEncoder;
   void *argumentTable;
@@ -672,49 +697,9 @@ typedef enum { ncclInt8       = 0, ncclChar       = 0,
                ncclFloat8e5m2 = 11,
                ncclNumTypes   = 12
 } ncclDataType_t;
-/* A reduction is a compiler operand. `lower` runs only while the enclosing
-   function is prepared; it emits ordinary commands into the supplied stream.
-   One independent value is `unit` scalars. Cuts never split that value.
-   Sources are already in the declared fold order. The lowering must load all
-   inputs needed by one value before storing that value into an aliased output.
-   A zero-source relation emits the supplied function's identity. */
-typedef struct {
-  size_t source; /* [0,source_count): input read; source_count: destination write */
-  ncclMeshBuffer word;
-  ncclMeshBuffer violation;
-  uint32_t polls, channel;
-  uint64_t entry; /* observation constants, emitted during preparation */
-} ncclMeshReductionObservation;
-typedef struct {
-  size_t observation; /* the incoming threshold the completed result publishes */
-  ncclMeshBuffer word;
-} ncclMeshReductionPublication;
-typedef struct {
-  ncclMeshBuffer destination;
-  const ncclMeshBuffer *sources;
-  size_t source_count, cells;
-  uint32_t unit;
-  ncclDataType_t type;
-  const uint32_t *source_access; /* page-version access modes, consumed at preparation */
-  const ncclMeshReductionObservation *observations;
-  size_t observation_count;
-  const ncclMeshReductionPublication *publications;
-  size_t publication_count;
-  /* One page-backed uint64 row per cut: first value, value count, then each
-     observation's threshold. Sources and destination cover the full relation.
-     Completion holds uint32[cut_count] settled words followed by its prefix.
-     These are ordinary function-owned operands, not a second task scheduler. */
-  ncclMeshBuffer cuts, completion;
-  size_t cut_count;
-} ncclMeshReductionCell;
-typedef ncclResult_t (*ncclMeshReductionLower)(void *context, const ncclMeshReductionCell *, const ncclMeshStream *);
+/* Source-level fold laws. The graph compiler applies these before capturing
+   numerical functions and their page transfers. */
 enum { ncclMeshReductionReassociate = 1, ncclMeshReductionReorder = 2 };
-typedef struct {
-  uint32_t unit, flags;
-  void *context;
-  ncclMeshReductionLower lower;
-} ncclMeshReductionFunction;
-ncclResult_t ncclMeshRedOpCreateFunction(ncclRedOp_t *, const ncclMeshReductionFunction *, ncclDataType_t, ncclComm_t);
 
 /* ncclScalarResidence_t: Location and dereferencing logic for scalar arguments. */
 typedef enum {
@@ -1095,11 +1080,8 @@ ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table, ncclMeshPageBac
 /* Local base of the prepared page view; creates no backend resource. */
 ncclResult_t ncclMeshPageTableAddress(ncclMeshPageTable_t table, const void** address);
 ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table);
-/* Preparation-only accesses of the next compiled group(s). The communicator's
-   declared order selects each definition. Querying consumes no issue or channel prefix.
-   groups counts actual group calls; a fused group's repetitions are one call.
-   Only active channel/list directions appear. Their progress words order the
-   same physical descriptor lists whose exact spans are bound when encoded. */
+/* Declaration metadata retained by the common command recorder. Accesses
+   belong to individual lowered commands, not an enclosing collective group. */
 typedef struct ncclMeshGroup {
   ncclComm_t comm;
   size_t invocation;
@@ -1110,8 +1092,6 @@ typedef struct ncclMeshGroup {
    commute, so neither peers nor prefix observers acquire a whole-output join. */
 enum { ncclMeshAccessRead = 1, ncclMeshAccessWritten = 2, ncclMeshAccessObserve = 4, ncclMeshAccessNext = 64, ncclMeshAccessAtomic = 128 };
 typedef struct { ncclMeshBuffer storage; size_t bytes; uint32_t access; } ncclMeshAccess;
-/* With accesses NULL return required count; otherwise *count is capacity. */
-ncclResult_t ncclMeshGroupAccesses(const ncclMeshGroup* group, ncclMeshAccess* accesses, size_t* count);
 /* Affine progress table. Tile t of invocation i names
    (i % instances)*instance_stride + (t/columns)*row_stride + (t%columns)*tile_stride.
    All strides are bytes; preparation resolves these indices. */
@@ -1177,10 +1157,34 @@ typedef struct { const char *source, *occurrences, *work; } ncclMeshSource;
 /* form names the retained configured program entry, or UINT32_MAX for the
    solved tree basis. Size bounds choose an initial entry only; explicit reuse
    validates the program's collective/root/member semantics at current extents. */
-typedef struct { uint32_t call, what, type, root, element_bytes, directions, form;
+typedef struct { uint32_t call, what, type, root, element_bytes, directions, laws, form;
                  uint64_t up, down, grain, units; } ncclMeshRouteDemand;
 typedef struct { uint32_t demand, adjustable; double initial, share;
                  uint64_t units, bytes; } ncclMeshRouteTree;
+/* Source-level association operands use the same tree columns and page-range
+   allocation as native reductions. Each segment has its own share simplex.
+   A zero-tree declaration seeds that simplex; preparation retains its columns
+   and adds legal association neighbors. Leaves use rank IDs; binary nodes use
+   nodes + local node index. No execution chooses or traverses this graph. */
+typedef struct {
+  uint32_t nodes,laws,segments,trees;
+  const uint64_t* contributors;
+  const uint32_t* segment;
+  const uint32_t* parents;
+  const double* share;
+} ncclMeshFoldBasis;
+typedef struct { uint32_t left,right,owner,round; } ncclMeshFoldNode;
+typedef struct {
+  ncclMeshFoldBasis basis;
+  const uint64_t* first;
+  const uint64_t* cells;
+  const uint32_t* node_first;
+  const uint32_t* result;
+  const ncclMeshFoldNode* node;
+} ncclMeshFoldTopology;
+ncclResult_t ncclMeshFoldPrepare(const ncclMeshFoldBasis* basis,uint64_t cells,
+  uint32_t element_bytes,uint64_t page,const uint64_t* counts,ncclMeshFoldTopology** out);
+void ncclMeshFoldDrop(ncclMeshFoldTopology* topology);
 /* kind 0 routes a WRITE/all-to-all transaction; kind 1 realizes a collective
    tree edge on physical cables. Zero weight disables a choice, not its path.
    units/bytes sum actual allocations over this group's logical transactions.
@@ -1284,23 +1288,22 @@ typedef struct { uint32_t first, count; uint64_t repeat; } ncclMeshPlanRun;
    count=0 and runs=0 drop the declaration. Every rank supplies the same order. */
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count,
     const ncclMeshPlanRun* order, size_t runs, const ncclMeshPlan** plan);
-/* Record the next declared group into the supplied prepared stream. All page
-   bindings and geometry come from CommPlan; this call supplies no operands. */
-ncclResult_t ncclMeshCommEncode(ncclComm_t comm, cudaStream_t stream);
-/* design/replay-templates-2026-10-29.md: the declaration comm's plan was made from, flat: `length` bytes, and the
-   `count` offsets in them of each binding's ncclMeshBuffer. With bytes and places NULL, only their sizes (0: no plan);
-   else each holds at least as many. */
-ncclResult_t ncclMeshCommPlanDeclaration(ncclComm_t comm, void* bytes, size_t* length, size_t* places, size_t* count);
-/* Dynamic reducer handles belong to one communicator. A saved handle is only
-   an identity within its declaration, never a pointer or a reusable operator.
-   Register the instance's reducers first, then supply every saved dynamic
-   handle's replacement, including replacements with the same numerical ID.
-   Builtin-only declarations supply NULL, 0. This mapping runs at preparation. */
-typedef struct { ncclRedOp_t declared, instance; } ncclMeshRedOpBinding;
-/* ncclMeshCommPlan from a declaration ncclMeshCommPlanDeclaration gave, its
-   page bindings and dynamic reducer bindings explicitly supplied by the caller. */
-ncclResult_t ncclMeshCommPlanDeclared(ncclComm_t comm, const void* bytes, size_t length,
-    const ncclMeshRedOpBinding* operators, size_t count);
+/* Lower the next declared group occurrence before binding numerical programs.
+   CommPlan owns the selected issue, page cuts, word operands and channel
+   predecessor snapshots. The callback consumes typed source/landing effects;
+   no backend encoder, argument table or executable is created here. */
+ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
+    int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
+    uint64_t* occurrence);
+/* Complete the source dependency solve for a lowered occurrence. Input spans
+   use the same logical coordinates as PageEffect. This runs before Encode and
+   extends the occurrence's immutable descriptor prerequisites. */
+ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm, uint64_t occurrence,
+    const ncclMeshSourceInput* inputs, size_t count);
+/* Bind and record exactly that lowered occurrence. All placement, readiness
+   and channel order decisions already belong to its declaration-owned issue.
+   A missing occurrence is a preparation error, never an implicit lowering. */
+ncclResult_t ncclMeshCommEncode(ncclComm_t comm, uint64_t occurrence, cudaStream_t stream);
 /* Compiler-derived useful directed bytes for one entire declared function.
    demand has nranks*nranks entries (source-major); group repeats are included.
    Relay amplification is excluded. Query after configuration, before execution;

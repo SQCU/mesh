@@ -57,6 +57,7 @@ def calls(declarations):
 
 def writes(schedule, declaration):
     """Encode the next declared group and expose its compiled publication records."""
+    declaration.lower()
     publish, land = schedule.writes(declaration)
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 

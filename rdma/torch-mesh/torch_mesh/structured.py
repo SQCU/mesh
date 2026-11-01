@@ -261,26 +261,24 @@ def _piece(commands, reads, writes, signs, extents, *, width, normalization, sig
 
 def prepare_stage(x, signs, width, step, normalization, signed, sources, starts, *, out=None):
     from .placement import output
-    from .native import command_records
     y = output((x.shape[0], signs.shape[0]), torch.float32, x.device, out)
     values = dict(x=x, signs=signs, out=y)
     prepared = declaration(descriptions(values),
         dict(width=width, step=step, normalization=normalization, signed=signed, sources=sources, starts=starts),
         configuration())
-    return y, list(command_records(bind(prepared, values)))
+    return y, list(bind(prepared, values))
 
 
 def prepare_factor(x, *, signs=None, out, width, normalization, signed, sign_type, write_maps, write_complete,
                    read_extents=None):
     """The same factor recipe over selected, already grouped page operands."""
     from .operand import TensorView
-    from .native import command_records
     out = TensorView.of(out)
     values = dict(x=x, signs=signs, out=out)
     prepared = declaration(descriptions(values),
         dict(width=width, normalization=normalization, signed=signed, sign_type=sign_type,
              write_maps=write_maps, write_complete=write_complete, read_extents=read_extents), configuration())
-    return out, list(command_records(bind(prepared, values)))
+    return out, list(bind(prepared, values))
 
 
 def _factor(n, block_width):

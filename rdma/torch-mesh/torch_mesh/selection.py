@@ -182,7 +182,6 @@ def declaration(operands, parameters, configuration):
 def topk(x, k, dim=-1, largest=True, sorted=True, *, outputs=None, write_maps=None, write_complete=None):
     """Values, indices and prepared commands. Views bind without packing."""
     from .placement import output
-    from .native import command_records
     if x.dtype not in _KINDS or not x.ndim:
         raise NotImplementedError('native topk requires a floating tensor with a selection dimension')
     dim %= x.ndim
@@ -195,4 +194,4 @@ def topk(x, k, dim=-1, largest=True, sorted=True, *, outputs=None, write_maps=No
     prepared = declaration(descriptions(bound),
         dict(k=k, dim=dim, largest=largest, sorted=sorted, write_maps=write_maps, write_complete=write_complete),
         configuration())
-    return (values, indices), list(command_records(bind(prepared, bound)))
+    return (values, indices), list(bind(prepared, bound))

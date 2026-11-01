@@ -207,7 +207,7 @@ def graph_family(graph):
         groups.append({
             **{key: route[key] for key in ('nodes', 'calls', 'leaves', 'contributors', 'recipients', 'parents', 'first', 'links', 'scope', 'call_scope')},
             'cable': [{key: c[key] for key in ('wire', 'node')} for c in route['cable']],
-            'demand': [{key: d[key] for key in ('call', 'what', 'type', 'root', 'element_bytes', 'directions', 'form')} for d in route['demand']],
+            'demand': [{key: d[key] for key in ('call', 'what', 'type', 'root', 'element_bytes', 'directions', 'laws', 'form')} for d in route['demand']],
             'tree': [{key: t[key] for key in ('demand', 'adjustable')} for t in route['tree']],
             'path': [{key: p[key] for key in ('kind', 'source', 'destination', 'scope')} for p in route['path']]})
     return {'forms': graph.get('forms', []), 'groups': groups}
@@ -243,7 +243,7 @@ def route_choices(graph):
             scope = route['scope'][route['call_scope'][demand['call']]]
             words = (route['nodes'] + 63) // 64
             identity = {'scope': scope, 'role': role,
-                'demand': {key: demand[key] for key in ('what', 'type', 'root', 'element_bytes', 'directions', 'form')},
+                'demand': {key: demand[key] for key in ('what', 'type', 'root', 'element_bytes', 'directions', 'laws', 'form')},
                 'leaves': route['leaves'][axis * words:(axis + 1) * words],
                 'columns': [route['parents'][i * route['nodes']:(i + 1) * route['nodes']] for i in indices]}
         else:

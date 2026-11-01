@@ -1,4 +1,5 @@
 from typing import NamedTuple
+import time
 
 import numpy as np
 import torch
@@ -341,8 +342,10 @@ class PolicyProgram:
         function.prepare()
         started = now()
         function.run()
-        _stream.completion_end(function.completion())
-        self.measurements[name] = measure(started, now(), plan['useful'], 1)
+        completion = function.completion()
+        while (ended := _stream.completion_observe(completion)) is None:
+            time.sleep(0)
+        self.measurements[name] = measure(started, ended, plan['useful'], 1)
         return tree_unflatten(plan['outputs'][:function.output_spec.num_leaves], function.output_spec)
 
     def initialize_replicas(self):

@@ -126,11 +126,11 @@ Python) returns a base displacement, compact row operands and any irregular span
 values. Reversed and broadcast dimensions retain their mappings. Affine geometry resolves in time bounded by
 dimensions, with no span.
 
-`MeshWork.wait`, `isCompleted` and `getFuture` concern host encoding completion in this adapter. They are not
-a passive GPU completion clock. `_stream.completion()` gives a call's completion; `_stream.completion_ended(token)`
-says whether it has ended without waiting, and `_stream.completion_end(token)` waits for its last part and returns the
-GPU's own end of it (`MTL4CommitFeedback` `GPUEndTime`). The measurement path (`mesh_statistics.Observations`) times
-each call to that end, not to when anything looked.
+Prepared functions return their existing completion through `completion()`.
+`_stream.completion_observe(token)` returns `None` while any part remains pending and returns the latest
+native end timestamp when the whole function completes. It never waits. The measurement path
+(`mesh_statistics.Observations`) uses that same observation; there is no separate blocking timing interface.
+Applications observe results at their host data dependencies and yield at final shutdown until pending reports arrive.
 
 ## Ragged tensors and parallel operations
 

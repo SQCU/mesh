@@ -12,6 +12,31 @@ from torch._inductor import lowering as _native_lowerings
 from .structured import expand as butterfly
 
 
+def concatenate_pages(values, dim=0):
+    """Concatenation's value equation becomes shared page-placement equalities.
+
+    Capture/autograd have already supplied its shape and derivative. This
+    normalization introduces no numerical copy; consumers receive these same
+    pages, with any actual contiguous-operand requirement solved by placement.
+    """
+    from functools import reduce
+    from .host import assemble
+    exemplar = next((value for value in values if value.ndim != 1 or value.numel()), values[0])
+    dim %= exemplar.ndim
+    dtype = reduce(torch.promote_types, (value.dtype for value in values))
+    selected = [value.to(dtype) for value in values if value.ndim != 1 or value.numel()]
+    if not selected:
+        return values[0].to(dtype)
+    shape = list(exemplar.shape)
+    shape[dim] = sum(value.shape[dim] for value in selected)
+    destination = torch.empty(shape, dtype=dtype, device=exemplar.device)
+    pieces, first = [], 0
+    for value in selected:
+        pieces.append((value, destination.narrow(dim, first, value.shape[dim])))
+        first += value.shape[dim]
+    return assemble(pieces)
+
+
 def product_implementation(dtype):
     """The configured numerical equation family for a typed contraction."""
     from mesh_compute import assigned_implementation, implementation_assignment
@@ -306,6 +331,7 @@ for name, root, mean in (('var', False, False), ('std', True, False),
         partition_decompositions[getattr(getattr(torch.ops.aten, name), overload)] = partial(moments, root=root, mean=mean)
 
 decompositions = {**native_decompositions,
+    torch.ops.aten.cat.default: concatenate_pages,
                   **get_decompositions([torch.ops.aten.baddbmm]),
                   torch.ops.aten._scaled_dot_product_attention_math_for_mps.default:
                       native_decompositions[torch.ops.aten._scaled_dot_product_attention_math.default],

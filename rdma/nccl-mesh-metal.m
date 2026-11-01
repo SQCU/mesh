@@ -272,17 +272,36 @@ struct metal_result metal_copy(struct metal_program *program, int mode, void *ds
   const int words = !((dst_offset | src_offset | bytes) & 3);
   if (mode < METAL_PLAIN || mode > METAL_LAND) return metal_failed(EINVAL);
   const struct metal_wait *ready=relation?relation->ready:NULL;
+  const size_t observed=(ready?1:0)+(relation?relation->count:0);
   const ncclMeshAccess uses[]={{{src,src_offset},bytes,ncclMeshAccessRead|(relation?relation->source_access:0)},
     {{dst,dst_offset},bytes,ncclMeshAccessWritten}};
   metal_accesses(program,uses,sizeof uses/sizeof *uses);
   struct args args={.dst=dst_offset,.src=src_offset,.n=words?bytes/4:bytes};
-  if(ready) {
-    const ncclMeshAccess observed={{ready->words,ready->word},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve};
-    metal_accesses(program,&observed,1);
-    args.scalar=ready->target.n;args.aux=ready->word;args.at=ready->at;args.channel=ready->channel;
+  struct metal_bytes table={0};
+  if(observed) {
+    if(argument_pages(program,observed*6*sizeof(uint64_t),&table))return metal_failed(ENOMEM);
+    uint64_t *values=table.contents;
+    for(size_t k=0;k<observed;k++) {
+      const struct metal_wait *wait=ready&&k==0?ready:relation->observations+k-(ready?1:0);
+      values[6*k]=((id<MTLBuffer>)wait->words).gpuAddress+wait->word;
+      values[6*k+1]=wait->target.n;
+      values[6*k+2]=((id<MTLBuffer>)wait->violation).gpuAddress;
+      values[6*k+3]=program->polls;values[6*k+4]=wait->channel;values[6*k+5]=wait->at;
+      const ncclMeshAccess observation={{wait->words,wait->word},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve};
+      metal_accesses(program,&observation,1);metal_resident(program,wait->violation);
+    }
+    args.aux=table.offset;args.count=(uint32_t)observed;
   }
-  return dispatch(program, COPY[!words][mode][ready!=NULL], dst, src, ready?ready->words:NULL, ready?ready->violation:NULL,args,
-                  words ? bytes / 4 : bytes, 0);
+  return dispatch(program,COPY[!words][mode][observed!=0],dst,src,table.buffer,NULL,args,
+                  words?bytes/4:bytes,0);
+}
+
+struct metal_result metal_fill_pattern(struct metal_program *program,void *dst,size_t dst_offset,
+    size_t bytes,uint64_t scalar,size_t element_bytes,size_t unit_bytes) {
+  const ncclMeshAccess output={{dst,dst_offset},bytes,ncclMeshAccessWritten};
+  metal_accesses(program,&output,1);
+  return dispatch(program,KIND_fill_pattern,dst,NULL,NULL,NULL,
+    (struct args){.dst=dst_offset,.n=bytes,.scalar=scalar,.step=unit_bytes,.input=element_bytes},bytes,0);
 }
 
 /* operation `op`'s kernel of `type` (TYPED), KINDS where none is compiled */
@@ -299,7 +318,7 @@ static void native_release(void *opaque) {
 }
 static struct metal_result native_emit(struct metal_program *program,void (^operation)(void)) {
   NSData *accesses=(NSData *)program->accesses;
-  MetalEncoderHost(program->encoder,accesses.bytes,accesses.length/sizeof(struct MetalReach),NULL,
+  MetalEncoderHost(program->encoder,accesses.bytes,accesses.length/sizeof(struct MetalReach),
     ^const char *(MeshHostCompletion complete,void *context,MeshHostTask *out) {
       struct native_task *task=calloc(1,sizeof *task);
       if(!task)return "allocating native command binding";
@@ -504,62 +523,6 @@ static struct metal_result native_zelloth(struct metal_program *program,int op,c
     if(made.status)return made;
   }
   return METAL_DONE;
-}
-
-struct metal_result metal_reduce_function(struct metal_program *program,const ncclMeshReductionFunction *function,
-    ncclDataType_t type,uint32_t unit,size_t element_bytes,const struct metal_zelloth_sum *sum,uint32_t channel,uint64_t entry) {
-  const struct output_observations overwrite=output_observations(sum);
-  const size_t K=sum->inputs,W=overwrite.count,O=K+W;
-  const uint64_t scalarWidth=(uint64_t)MESH_TRANSPORT_ELEMENT_THREADS*MESH_TRANSPORT_VALUES_PER_THREAD;
-  const uint64_t width=MAX(UINT64_C(1),scalarWidth/unit);
-  struct mesh_landing_map maps[K];size_t cursor[K];uint64_t through[K];
-  for(size_t k=0;k<K;k++)maps[k]=(struct mesh_landing_map){sum->in[k].runs,sum->in[k].count,
-    pages_to_word(pages_sub(sum->in[k].target,sum->in[k].packets))};
-  const uint64_t count=mesh_landing_cells(maps,K,width,cursor,through,NULL,NULL);
-  if(!count)return METAL_DONE;
-  struct metal_bytes cuts,completion;
-  if(argument_pages(program,(2+O)*count*sizeof(uint64_t),&cuts)||
-     argument_pages(program,(count+1)*sizeof(uint32_t),&completion))return metal_failed(ENOMEM);
-  struct landing_cells_output output={cuts.contents,K,element_bytes,&overwrite};
-  mesh_landing_cells(maps,K,width,cursor,through,landing_cell,&output);
-  memset(completion.contents,0,(count+1)*sizeof(uint32_t));
-  const uint64_t *last=(const uint64_t *)cuts.contents+(2+O)*(count-1);
-  const size_t values=last[0]+last[1];
-  const int ordered=(function->flags&(ncclMeshReductionReassociate|ncclMeshReductionReorder))!=
-    (ncclMeshReductionReassociate|ncclMeshReductionReorder);
-  const size_t original=ordered?K:0;
-  ncclMeshBuffer sources[K+1];uint32_t modes[K+1];
-  ncclMeshReductionObservation observations[O];
-  ncclMeshReductionPublication publications[K];size_t publishes=0;
-  sources[original]=(ncclMeshBuffer){sum->own,sum->own_offset};
-  modes[original]=sum->own_access?sum->own_access:ncclMeshAccessRead;
-  for(size_t k=0;k<K;k++) {
-    const struct metal_zelloth_input *input=sum->in+k;
-    const size_t source=ordered?k:k+1;
-    sources[source]=(ncclMeshBuffer){input->data,input->data_offset};modes[source]=ncclMeshAccessRead;
-    observations[k]=(ncclMeshReductionObservation){source,{input->words,input->word},
-      {program->violation,0},program->polls,channel,entry};
-    metal_resident(program,input->data);metal_resident(program,input->words);
-    if(input->summed) {
-      metal_resident(program,input->summed);
-      publications[publishes++]=(ncclMeshReductionPublication){k,{input->summed,input->summed_offset}};
-    }
-  }
-  for(size_t k=0;k<W;k++) {
-    const struct metal_wait *wait=overwrite.word+k;
-    observations[K+k]=(ncclMeshReductionObservation){K+1,{wait->words,wait->word},
-      {program->violation,0},program->polls,wait->channel,wait->at};
-    metal_resident(program,wait->words);
-  }
-  metal_resident(program,sum->own);metal_resident(program,sum->out);
-  const ncclMeshStream stream={.commandEncoder=program->encoder,.argumentTable=program->table,
-    .residencySet=program->residency,.polls=program->polls};
-  const ncclMeshReductionCell operands={.destination={sum->out,sum->out_offset},.sources=sources,
-    .source_count=K+1,.cells=values,.unit=unit,.type=type,.source_access=modes,
-    .observations=observations,.observation_count=O,.publications=publications,.publication_count=publishes,
-    .cuts={cuts.buffer,cuts.offset},.completion={completion.buffer,completion.offset},.cut_count=count};
-  const ncclResult_t lowered=function->lower(function->context,&operands,&stream);
-  return lowered?(struct metal_result){EINVAL,"compiling the declared reduction function"}:METAL_DONE;
 }
 
 /* One ordinary command per value version. Each threadgroup has its prepared

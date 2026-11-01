@@ -5,7 +5,8 @@
 extern "C" {
 #endif
 
-/* ISL preparation storage. All objects, including returned strings, belong to
+/* Relation-compiler preparation storage, shared by ISL and fold association.
+   All objects, including returned strings, belong to
    bridge pages. This allocation API is not used by recorded tensor work. */
 void *mesh_isl_malloc(size_t bytes);
 void *mesh_isl_calloc(size_t count, size_t bytes);

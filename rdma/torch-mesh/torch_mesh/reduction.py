@@ -5,35 +5,58 @@ value schema and permitted changes of association/order. The collective compiler
 supplies actual page cells; the numerical compiler emits their combine graph.
 There is no Python callable or reducer dispatch in the running function.
 """
-import itertools
+import json
 import math
-import weakref
 
 import torch
 
 
-_identities = itertools.count()
-_declarations = weakref.WeakValueDictionary()
 
+def fold_topology(group, cells, element_bytes, laws, basis=None, counts=(), root=-1):
+    """Realize source association once, before tracing its derivative.
 
-@torch.library.custom_op('torch_mesh::reduce_function', mutates_args=())
-def operation(value: torch.Tensor, declaration: int, group_name: str, root: int,
-              counts: list[int]) -> torch.Tensor:
-    raise RuntimeError('a reduction function is source for whole-function preparation')
-
-
-@operation.register_fake
-def _(value, declaration, group_name, root, counts):
-    declared = _declarations[declaration]
-    if counts:
-        from .backend import _mesh
-        return value.new_empty((counts[_mesh(group_name, 'reduction').rank()], *declared.element_shape))
-    return torch.empty_like(value)
-
-
-def declaration(node, arguments):
-    """Resolve the captured source operand before collective preparation."""
-    return node.meta.get('mesh_reduction') or _declarations[arguments['declaration']]
+    The retained columns are optimizer operands. Native reduction placement and
+    this source expansion use the same decoder and value-domain allocation.
+    Nothing in the running function traverses this preparation graph.
+    """
+    from mesh import ffi, lib, check
+    size = group.size()
+    basis = {} if basis is None else basis
+    contributors = tuple(basis.get('contributors',
+        tuple((1 << min(64, size - first)) - 1 for first in range(0, size, 64))))
+    segment_count = len(counts) if counts else int(basis.get('segments', 1))
+    parents = tuple(tuple(row) for row in basis.get('parents', ()))
+    segments = tuple(basis.get('segment', (0,) * len(parents)))
+    shares = tuple(basis.get('share', (1.0,) * len(parents)))
+    arrays = [ffi.new('uint64_t[]', contributors), ffi.new('uint32_t[]', segments),
+              ffi.new('uint32_t[]', [rank for row in parents for rank in row]),
+              ffi.new('double[]', shares)]
+    declaration = ffi.new('ncclMeshFoldBasis *', dict(nodes=size, laws=laws,
+        segments=segment_count, trees=len(parents), contributors=arrays[0],
+        segment=arrays[1], parents=arrays[2], share=arrays[3]))
+    page = ffi.new('size_t *')
+    check(lib.ncclMeshCommPage(group.comm, page))
+    output = ffi.new('ncclMeshFoldTopology **')
+    held_counts = ffi.new('uint64_t[]', counts) if counts else ffi.NULL
+    check(lib.ncclMeshFoldPrepare(declaration, cells, element_bytes, page[0], held_counts, output))
+    held = ffi.gc(output[0], lib.ncclMeshFoldDrop)
+    identities = tuple(basis.get('identity_owner', tuple(range(segment_count)) if counts else (max(0, root),) * segment_count))
+    topology = dict(nodes=size, laws=laws, contributors=contributors, segments=segment_count,
+        identity_owner=identities,
+        parents=tuple(tuple(int(held.basis.parents[t * size + r]) for r in range(size))
+                      for t in range(held.basis.trees)),
+        segment=tuple(int(held.basis.segment[t]) for t in range(held.basis.trees)),
+        share=tuple(float(held.basis.share[t]) for t in range(held.basis.trees)))
+    trees = []
+    for t in range(held.basis.trees):
+        if not held.cells[t]:
+            continue
+        nodes = tuple(tuple(int(getattr(held.node[i], name)) for name in ('left', 'right', 'owner', 'round'))
+                      for i in range(held.node_first[t], held.node_first[t + 1]))
+        trees.append(dict(first=int(held.first[t]), cells=int(held.cells[t]),
+                          result=int(held.result[t]), nodes=nodes, column=t,
+                          segment=int(held.basis.segment[t])))
+    return dict(basis=topology, trees=tuple(trees), cells=cells, page=int(page[0]), counts=tuple(counts))
 
 
 class Reduction:
@@ -45,15 +68,14 @@ class Reduction:
     caller. Their defaults preserve the declared rank order and left fold.
     """
     def __init__(self, combine, identity, *, dtype, element_shape=(),
-                 reassociate=False, reorder=False, configuration=None):
+                 reassociate=False, reorder=False, topology=None):
         from torch._subclasses.fake_tensor import FakeTensorMode
         from .declarations import trace
         self.dtype, self.element_shape = dtype, tuple(element_shape)
         self.unit = math.prod(self.element_shape)
         self.flags = int(reassociate) | (int(reorder) << 1)
-        self.configuration = configuration
-        self.identity = next(_identities)
-        _declarations[self.identity] = self
+        self.topology = topology
+        self.fold_choices = {}
         mode = FakeTensorMode(allow_non_fake_inputs=True)
         with mode:
             prototype = torch.empty(self.element_shape, dtype=dtype, device='meta')
@@ -65,74 +87,82 @@ class Reduction:
             value = result.meta['val']
             if tuple(value.shape) != self.element_shape or value.dtype != dtype:
                 raise ValueError('reduction source must return its declared independent-value schema')
-        self.templates = {}
 
     def __call__(self, value, group, *, root=-1, counts=()):
         """Declare this reduction in an ordinary Function source graph."""
-        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot
         if value.dtype != self.dtype or (self.element_shape and tuple(value.shape[-len(self.element_shape):]) != self.element_shape):
             raise ValueError('collective operand does not match the supplied reduction schema')
         if not self.unit:
             return value.reshape((counts[group.rank()], *self.element_shape)) if counts else value
-        result = operation(value, self.identity, group.group_name, root, list(counts))
-        proxy = get_proxy_mode()
-        if proxy is not None:
-            get_proxy_slot(result, proxy.tracer).proxy.node.meta['mesh_reduction'] = self
-        return result
+        cells = value.numel() // self.unit
+        key = (group.size(), cells, tuple(counts), root, json.dumps(self.topology, sort_keys=True))
+        if key not in self.fold_choices:
+            self.fold_choices[key] = fold_topology(group, cells, self.dtype.itemsize * self.unit,
+                                                  self.flags, self.topology, counts, root)
+        return self._source(value, group, self.fold_choices[key], root, tuple(counts))
 
-    def operator(self, group):
-        return self.binding(group).operator
+    def _source(self, value, group, chosen, root, counts):
+        """Emit the chosen fold as ordinary source and selected page transfers.
 
-    def binding(self, group):
-        """Register only a preparation callback, retained by the communicator."""
-        from . import _stream
-        from .backend import TYPES
-        key = ('function', self.identity)
-        if key not in group._operators:
-            group._operators[key] = _stream.Reduction(self.lower, self.dtype, self.element_shape, self.flags,
-                                                      TYPES[self.dtype], group.handle)
-        return group._operators[key]
+        Autograd sees the actual left and right operands of every combine. Its
+        transpose exchanges cotangents; it never substitutes a gradient reduce
+        for the derivative of an arbitrary supplied combine function.
+        """
+        from .declarations import select_exchange
+        from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot
+        rank, size, cells = group.rank(), group.size(), chosen['cells']
+        flat = value.reshape((cells, *self.element_shape))
+        empty = flat[:0]
 
-    def lower(self, sources, destination, schedule, effects):
-        """Bind one resolved collective cell into the existing recorder."""
-        from .compilation import bind
-        from .declarations import BoundGraph, trace
-        from .ownership import prepare_expression
-        cells, count = destination.shape[0], len(sources)
-        supplied = (*sources, destination)
-        identities, starts = {}, {}
-        for value in supplied:
-            storage = value.untyped_storage()._cdata
-            identities.setdefault(storage, len(identities))
-            starts[storage] = min(starts.get(storage, value.storage_offset()), value.storage_offset())
-        aliases = tuple((identities[value.untyped_storage()._cdata],
-                         value.storage_offset() - starts[value.untyped_storage()._cdata]) for value in supplied)
-        key = cells, count, aliases
-        with bind(self.configuration):
-            if key not in self.templates:
-                def fold(*values):
-                    *inputs, output = values
-                    if not count:
-                        result = torch.vmap(self.initializer)(output)
-                    else:
-                        result = inputs[0]
-                        for value in inputs[1:]:
-                            result = torch.vmap(self.combine)(result, value)
-                    output.copy_(result)
-                    return output
-                graph = trace(fold, *supplied)
-                arguments = tuple(node.meta['val'] for node in graph.graph.nodes if node.op == 'placeholder')
-                # This is immutable compiler IR, not retained invocation state.
-                self.templates[key] = dict(graph=graph, operands=arguments)
-            template = self.templates[key]
-            prepared = prepare_expression(template)
-            graph = BoundGraph(template['graph'], supplied, None, self.configuration,
-                               destinations=(destination,), prepared=prepared,
-                               page_effects=dict(effects, sources=sources, destination=destination, unit=self.unit))
-            # These inputs are produced within the enclosing graph. Their
-            # typed prior/next versions come from the collective's source cells.
-            graph.execution.inputs = ()
-            graph.execution.append(schedule)
+        def selection(runs):
+            return dict(shape=[cells * self.unit], steps=[['select', 0,
+                [(first * self.unit, count * self.unit, count * self.unit, 1) for first, count in runs]]])
+
+        def exchange(source, sources, destinations, shape):
+            result = select_exchange(source, list(shape), json.dumps(dict(
+                sources=[selection(runs) for runs in sources],
+                destinations=[selection(runs) for runs in destinations], rank=rank), separators=(',', ':')), group.group_name)
+            proxy = get_proxy_mode()
+            if proxy is not None:
+                get_proxy_slot(result, proxy.tracer).proxy.node.meta['mesh_fold'] = chosen
+            return result
+
+        values, owners = [], [[] for _ in range(size)]
+        for tree in chosen['trees']:
+            first, count = tree['first'], tree['cells']
+            local = flat[first:first + count]
+            operands = [(local if r == rank else empty, r) for r in range(size)]
+            for left, right, owner, _ in tree['nodes']:
+                arguments = []
+                for index in (left, right):
+                    argument, producer = operands[index]
+                    sources, destinations = [[] for _ in range(size)], [[] for _ in range(size)]
+                    sources[producer] = destinations[owner] = [(first, count)]
+                    arguments.append(exchange(argument, sources, destinations,
+                        (count if rank == owner else 0, *self.element_shape)))
+                operands.append((torch.vmap(self.combine)(*arguments), owner))
+            if tree['result'] == (1 << 32) - 1:
+                owner = chosen['basis']['identity_owner'][tree['segment']]
+                result = torch.vmap(self.initializer)(local if rank == owner else empty)
+            else:
+                result, owner = operands[tree['result']]
+            owners[owner].append((first, count))
+            # Zero-width peer results retain the remote edge in the source
+            # derivative. Dropping them would erase that rank's cotangent
+            # exchanges even though its leaf contributed to the remote fold.
+            values.append(result)
+        source = torch.cat(values, dim=0) if values else empty
+        if counts:
+            start = 0
+            destinations = []
+            for count in counts:
+                destinations.append([(start, count)] if count else [])
+                start += count
+            shape = (counts[rank], *self.element_shape)
+        else:
+            destinations = [[(0, cells)] if root < 0 or r == root else [] for r in range(size)]
+            shape = tuple(value.shape) if root < 0 or rank == root else (0, *self.element_shape)
+        return exchange(source, owners, destinations, shape)
 
 
 def sum(dtype, *, element_shape=(), reassociate=False, reorder=False):

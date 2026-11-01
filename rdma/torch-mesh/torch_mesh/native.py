@@ -89,6 +89,8 @@ def command_declaration(declaration, configuration=None):
         return prepare_sampling(kind, operands, parameters, configuration)
     elif kind == 'fwht_stage':
         from .structured import declaration as prepare
+    elif kind == 'kernel':
+        from .kernel import declaration as prepare
     else:
         raise ValueError(f'{kind}: missing numerical command declaration')
     return prepare(operands, parameters, configuration)
@@ -133,7 +135,7 @@ def command_records(declarations, *, with_reaches=False):
 def declared_commands(declarations):
     """Expand shared numerical recipes before page effects or pipeline binding."""
     for declaration in declarations:
-        if isinstance(declaration, dict) and declaration['kind'] in ('product', 'topk', 'cumsum', 'draw', 'retain', 'fwht_stage'):
+        if isinstance(declaration, dict) and declaration['kind'] in ('product', 'topk', 'cumsum', 'draw', 'retain', 'fwht_stage', 'kernel'):
             from .command_declarations import bind
             yield from declared_commands(declaration['before'])
             yield from declared_commands(bind(command_declaration(declaration), declaration['operands']))
@@ -252,15 +254,15 @@ class Program:
     def prepare(cls, declaration):
         recorded, hosts, owners = [], [], []
         for command in declared_commands(declaration['commands']):
-            if isinstance(command, dict) and command['kind'] == 'cpu':
-                from . import cpu
-                host = cpu.prepare(command)
+            if isinstance(command, dict) and command['kind'] in ('cpu', 'ane'):
+                from . import cpu, host as provider
+                host = (cpu if command['kind'] == 'cpu' else provider).prepare(command)
                 owners.append(host)
-                hosts.append((len(recorded), host.entry, host.inputs, host.outputs, host.declaration))
+                hosts.append((len(recorded), host.entry, host.reaches))
             else:
                 recorded.extend(command_records((command,), with_reaches=True))
         return cls(_stream.Commands([record for record, _ in recorded], [reach for _, reach in recorded], hosts),
-                   declaration['output'], declaration['pages'])
+                   declaration['output'], (*declaration['pages'], *owners))
 
 
 def body_accesses(body):
@@ -818,18 +820,6 @@ def prepare_graph(module, metadata, *, materializations=()):
             return (dict(kind='alias', work=work, reads={0: use}, writes={0: use}, reduction=None,
                          finish=None, source=operation.inputs[0], path=tuple(operation.indices)),)
 
-        def atomic(reads, writes):
-            # A registered command is an indivisible work item until its
-            # numerical declaration supplies finer fibers. These are its
-            # actual typed argument views, not scheduler StarDep envelopes.
-            work = (int(any(value['view'].count for value in writes.values())),)
-            def accesses(values):
-                return {slot: dict(value, relation=algebra.map(work, (value['view'].count,),
-                    lambda x, y: []).then(algebra.layout(layout_configuration(value['view']))))
-                    for slot, value in values.items()}
-            return (dict(kind='atomic', work=work, reads=accesses(reads), writes=accesses(writes),
-                         reduction=None, finish=None),)
-
         def product(values, parameters):
             declared = {name: None if value is None else dict(shape=tuple(value['view'].shape), type=value['dtype'])
                         for name, value in values.items()}
@@ -922,8 +912,8 @@ def prepare_graph(module, metadata, *, materializations=()):
             result.append(product({name: uses[slot] for name, slot in declaration['operands'].items()}, declaration['parameters']))
         if result:
             return tuple(result)
-        return atomic({slot: uses[slot] for slot in named['input_slots']},
-                      {slot: uses[slot] for slots in named['output_slots'] for slot in slots})
+        from .kernel import domain as kernel_domain
+        return (kernel_domain(algebra, uses, named, declarations),)
 
     def computed_domains(operation, body, algebra):
         """Address relations and scalar operands from the same prepared body."""
@@ -1200,11 +1190,6 @@ def prepare_graph(module, metadata, *, materializations=()):
 
     class NativeScheduler(Scheduler):
         def codegen_extern_call(self, node):
-            if getattr(node, 'page_atomic', None) is False:
-                node.mark_run()
-                V.graph.wrapper_code.bound_external_results(node.node)
-                self.free_buffers()
-                return
             if not hasattr(node, 'page_plans'):
                 return super().codegen_extern_call(node)
             # This is the ordinary external declaration's preparation boundary.
@@ -2040,8 +2025,9 @@ def prepare_graph(module, metadata, *, materializations=()):
                         domains = declarations[operation.get_operation_name()]['domains']
                         if domains and all(domain.get('kind') == 'alias' for domain in domains):
                             pass
-                        elif domains and all(domain.get('kind') == 'atomic' for domain in domains):
-                            node.page_atomic = any(not request['work'].empty() for request in requests)
+                        elif domains and all(domain.get('kind') == 'dispatch' for domain in domains):
+                            from .kernel import selected as selected_kernel
+                            node.selected_plans = tuple(plan for request in requests for plan in selected_kernel(request))
                         elif domains and all(domain.get('kind') == 'rows' for domain in domains):
                             from .selection import selected_rows
                             node.selected_plans = tuple(plan for request in requests for plan in selected_rows(request))
@@ -2251,7 +2237,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 finally:
                     _records.reset(token)
             for declaration in records:
-                if not isinstance(declaration, dict) or declaration['kind'] not in ('shader', 'cpu'):
+                if not isinstance(declaration, dict) or declaration['kind'] not in ('shader', 'cpu') or 'names' not in declaration:
                     continue
                 # Shader slots retain their source identity and coordinate
                 # units. A portable caller composes this declared relation

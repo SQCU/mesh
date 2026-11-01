@@ -60,7 +60,7 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
     }}
 }}
 '''
-        self.source = source   # compiled where the program is recorded (prepare); a template brings its pipeline
+        self.source = source   # Compiled at preparation; numerical execution only submits records.
         self.parts = None
         self.tiles = [(first, min(args.tile_rows, B - first)) for first in range(0, B, args.tile_rows)]
 
@@ -77,19 +77,6 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
                 self.local.append((ag, bg))
             self.hidden = torch_mesh.empty(B, width)
             self.parts = list(share)
-
-    def bound(self):
-        """design/replay-templates-2026-10-29.md: what a template of the program binds: its input and output, its weight
-        shares and its partial, landing and hidden rows. Its readiness and arrival words are kept by value."""
-        return [self.input, self.x, *(w for pair in self.local for w in pair), *self.partial,
-                *(t for row in self.landing for t in row), self.hidden]
-
-    def load(self, parts, directory):
-        """The program made from its template in `directory`, on this rank's storage, with no recording."""
-        self.storage(parts)
-        schedule, = _stream.load(directory, self.bound(), communicators=[self.group.handle])
-        schedule.finish()
-        self.prepared(schedule)
 
     def prepared(self, schedule):
         self.schedule = schedule
@@ -115,9 +102,10 @@ kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *ou
                 if declaration is not None:
                     crossing = fused.writes(schedule, declaration)
                     words += [w for binding in crossing.land for w in fused._words(binding)]
-                schedule.append(_stream.Commands([
+                from .native import Program
+                Program.prepare(dict(commands=[
                     *product(x, a, hidden, act=True),
-                    *product(hidden, b, partial, ready=ready, arrivals=arrivals)]))
+                    *product(hidden, b, partial, ready=ready, arrivals=arrivals)], output=None, pages=())).append(schedule)
                 inputs = [t for (_, destination), t in zip(self.pairs, landings) if destination == rank]
                 output = len(inputs) + 1
                 schedule.compute(self.fold, [partial, *inputs, result],

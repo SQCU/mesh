@@ -1,4 +1,5 @@
 import json
+import time
 import os
 import sys
 
@@ -107,6 +108,8 @@ def main(config=None):
     summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows,
                    input_width=KIN, width=H, steps=steps, ticks=ticks, latency_ticks=L)
     record(configuration, completion, started, steps * rows * H * torch.half.itemsize, summary)
+    while not configuration['observations'].close():
+        time.sleep(0)
     dist.destroy_process_group()
     state = next_configuration(configuration['observations'].declaration,
         [*configuration['group'].configuration_observations, *configuration['observations'].poll()],

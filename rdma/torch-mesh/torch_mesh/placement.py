@@ -317,7 +317,7 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
     from torch._subclasses.fake_tensor import FakeTensorMode
     from . import _stream
     from .operand import layout_configuration, storage_requirement
-    from .layout import resolve, copies
+    from .layout import resolve, copy_declarations
 
     results, fixed, requirements = tuple(results), tuple(fixed), tuple(requirements)
     domains, widths = dict(projection['storage_bytes']), []
@@ -421,7 +421,7 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
         writing = record['access'] == 'write'
         operand, commands = resolve(value, record['requirements'], writing=writing)
         before = () if writing else tuple(commands)
-        after = tuple(commands) if writing else tuple(copies(operand, value)) if record['access'] == 'readwrite' else ()
+        after = tuple(commands) if writing else tuple(copy_declarations(operand, value)) if record['access'] == 'readwrite' else ()
         owners.append(operand.storage)
         resolved[record['key']] = dict(record, operand=operand, before=before, after=after)
     from .compilation import layout_choice

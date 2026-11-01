@@ -551,18 +551,18 @@ static uint32_t mesh_program_segments(const struct mesh_program *program){
    units / segments each, the first units % segments one quantum longer, the last segment ending at the operand's end
    (q 1: elements / segments each, the first elements % segments one element longer); 0 where the sizes do not sum to
    the operand's elements */
-static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *base,uint64_t *length){
+static uint64_t mesh_cut_next(uint32_t segments,uint64_t elements,const uint64_t *sizes,uint64_t q,uint32_t g,uint64_t *at){
   const uint64_t units=(elements+q-1)/q;
-  uint64_t sum=0;
+  const uint64_t end=q*((g+1)*(units/segments)+(g+1<units%segments?g+1:units%segments));
+  const uint64_t length=sizes?sizes[g]:(end<elements?end:elements)-*at;
+  *at+=length;return length;
+}
+static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *base,uint64_t *length){
+  uint64_t at=0;
   for(uint32_t g=0;g<segments;g++){
-    if(sizes){base[g]=sum;length[g]=sizes[g];sum+=sizes[g];continue;}
-    const uint64_t from=q*(g*(units/segments)+(g<units%segments?g:units%segments));
-    const uint64_t to=q*((g+1)*(units/segments)+(g+1<units%segments?g+1:units%segments));
-    base[g]=from<elements?from:elements;
-    length[g]=(to<elements?to:elements)-base[g];
-    sum+=length[g];
+    base[g]=at;length[g]=mesh_cut_next(segments,elements,sizes,q,g,&at);
   }
-  return sum==elements;
+  return at==elements;
 }
 
 /* Each part's elements of an operand cut by mesh_cut: [lo[p], lo[p] + count[p]), a segment's parts by the program's
@@ -573,17 +573,15 @@ static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,ui
 int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *lo,
                                uint64_t *count){
   const uint32_t segments=mesh_program_segments(program);
-  uint64_t *bases=malloc(2*(size_t)segments*sizeof *bases);
-  if(!bases)return 0;
-  if(!mesh_cut(segments,elements,sizes,q,bases,bases+segments)){free(bases);return 0;}
+  uint64_t next=0;
   for(uint32_t g=0;g<segments;g++){
-    const uint64_t base=bases[g],length=bases[segments+g],units=(length+q-1)/q;
+    const uint64_t base=next,length=mesh_cut_next(segments,elements,sizes,q,g,&next),units=(length+q-1)/q;
     double most=-INFINITY,total=0;
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g && program->log_weight[p]>most)most=program->log_weight[p];
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g)total+=mesh_exp(program->log_weight[p]-most);
     /* A skipped global rank is a zero-length segment, never permission to
        silently discard a caller's nonzero count. */
-    if(program->segments && length && !(total>0)){free(bases);return 0;}
+    if(program->segments && length && !(total>0)){return 0;}
     uint64_t floors=0;
     for(uint32_t p=0;p<program->parts;p++)
       if(program->segment[p]==g)floors+=(uint64_t)floor((double)units*mesh_exp(program->log_weight[p]-most)/total);
@@ -598,8 +596,7 @@ int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,con
       lo[p]=at;count[p]=share;at+=share;
     }
   }
-  free(bases);
-  return 1;
+  return next==elements;
 }
 
 uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,const uint64_t *segments,

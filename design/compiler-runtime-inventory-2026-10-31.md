@@ -134,6 +134,15 @@ The frontier solver at [787](../rdma/metal-recording.m#L787)–804 gives each co
 
 `MetalScheduleFlush` and `MetalScheduleOrder` themselves run during preparation. They should not be described as a runtime JIT scheduler. The emitted event waits, completion counters and barriers remain runtime behavior. GPU-only replay and mixed host/provider execution both use this recorder.
 
+Resolved in the compiler-order integration completed on 2026-11-01: the
+blocking `MetalScheduleEnd` implementation and `completion_end` /
+`completion_ended` bindings were removed. The single frontend observation is
+`completion_observe`, which returns no timestamp while work is pending. It
+reads prepared terminal page words and retains the final result. Observation
+and metric collection never drain execution. Host applications yield at their
+own output-consumption and shutdown boundaries. See the current
+[compiler data flow](compiler-data-flow-2026-10-31.md).
+
 ### Framework and provider execution
 
 | Site | Mechanism and classification |

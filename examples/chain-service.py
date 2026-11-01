@@ -1,4 +1,5 @@
 import json
+import time
 import os
 import sys
 
@@ -83,6 +84,8 @@ def main(config=None):
     summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
                    steps_per_replay=k)
     record(configuration, completion, started, O.numel() * O.element_size(), summary)
+    while not configuration['observations'].close():
+        time.sleep(0)
     dist.destroy_process_group()
     state = next_configuration(configuration['observations'].declaration,
         [*configuration['group'].configuration_observations, *configuration['observations'].poll()],

@@ -85,9 +85,8 @@ def declaration(operands, parameters, configuration):
 
 def cumsum(x, dim, *, dtype=None, out=None, write_maps=None, write_complete=None):
     from .placement import output as bind_output
-    from .native import command_records
     dtype = dtype or (x.dtype if x.is_floating_point() else torch.int64)
     output = TensorView.of(out) if write_maps is not None else bind_output(x.shape, dtype, x.device, out)
     values = dict(x=x, out=output)
     prepared = declaration(descriptions(values), dict(dim=dim, write_maps=write_maps, write_complete=write_complete), configuration())
-    return output, list(command_records(bind(prepared, values)))
+    return output, list(bind(prepared, values))

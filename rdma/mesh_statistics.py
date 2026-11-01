@@ -205,7 +205,8 @@ class Observations:
     earlier submissions. Completion order does not imply execution order. The
     existing GPU/host end timestamp measures each call's own latency; a new
     configuration does not reset or inherit a fictitious service-time clock.
-    ``close`` drains only at the caller's administrative shutdown.
+    ``close`` makes the same nonblocking observation and reports whether all
+    submitted episodes are complete. The application owns shutdown.
     """
 
     def __init__(self, declaration=None):
@@ -224,27 +225,28 @@ class Observations:
 
     def put(self, completion, record):
         self.submitted.append((completion, record))
-        self._emit(False)
+        self._emit()
 
     def close(self):
         self._declare()
-        self._emit(True)
+        self._emit()
+        return not self.submitted
 
     def poll(self):
         """Ready reports for the caller's next preparation; never wait."""
-        self._emit(False)
+        self._emit()
         records, self.records = self.records, []
         return records
 
-    def _emit(self, waiting):
+    def _emit(self):
         from torch_mesh import _stream
         index = 0
         while index < len(self.submitted):
             completion, record = self.submitted[index]
-            if not waiting and not _stream.completion_ended(completion):
+            end = _stream.completion_observe(completion)
+            if end is None:
                 index += 1
                 continue
-            end = _stream.completion_end(completion)
             self.submitted.pop(index)
             result = completed(record, end)
             self.records.append(result)

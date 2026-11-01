@@ -38,6 +38,7 @@ def compilation(implementation):
                              output_dir='MESH_CPU_OUTPUT_DIRECTORY')
         target = builder.get_target_file_path()
         argv = shlex.split(builder.get_command_line())
+        argv[1:1] = build['compile_flags']
     return dict(argv=[('source' if value == 'MESH_CPU_SOURCE' else
                        'output' if value == target else value) for value in argv],
                 source_argument='source', output_argument='output')
@@ -87,9 +88,14 @@ _SCALAR_ABI = dict(bool=ctypes.c_bool, int8_t=ctypes.c_int8, uint8_t=ctypes.c_ui
 
 
 def argument_record(command, pointer_values):
-    """The native entry's fixed ABI and its explicit pointer relocations."""
-    fields, values, places = [], {}, []
-    for slot, spec in enumerate(command['argument_specs']):
+    """Bind the native entry's fixed argument ABI during preparation."""
+    fields, values = [], {}
+    if 'engine_command' in command:
+        from .engines import CpuCommand
+        fields.append(('numerical', CpuCommand))
+        values['numerical'] = CpuCommand.from_buffer_copy(command['engine_command']['arguments'])
+    for spec in command['argument_specs']:
+        slot = spec['slot']
         name = f'a{slot}'
         if spec['kind'] == 'pointer':
             fields.append((name, ctypes.c_void_p))
@@ -99,19 +105,16 @@ def argument_record(command, pointer_values):
             fields.append((name, kind))
             values[name] = command['constants'][slot]
     record = type('CpuArguments', (ctypes.Structure,), {'_fields_': fields})
-    for slot, spec in enumerate(command['argument_specs']):
-        if spec['kind'] == 'pointer':
-            places.append((getattr(record, f'a{slot}').offset, slot))
-    return bytes(record(**values)), tuple(places)
+    return bytes(record(**values))
 
 
 def prepare(command):
     """Bind the final native instruction through the existing CPU program."""
-    from .engines import cpu_native
+    from .engines import cpu_native, cpu_engine, _host_accesses
     from . import _stream
     bindings = {slot: _stream.page_backing(operand)
                 for slot, operand in enumerate(command['operands']) if operand is not None}
-    arguments, pointers = argument_record(command,
+    arguments = argument_record(command,
         {slot: binding[0] for slot, binding in bindings.items()})
     source = PREAMBLE + index_source(command['arguments'], bindings) + command['source']
     reads, writes = [], []
@@ -120,8 +123,16 @@ def prepare(command):
             reads.append(operand)
         if access & 2:
             writes.append(operand)
-    return cpu_native(source, command['compiler'], command['function'], arguments, [(offset, 0) for offset, slot in pointers],
-                      implementation=command['implementation'], inputs=tuple(reads), outputs=tuple(writes))
+    if 'engine_command' in command:
+        return cpu_engine(dict(command['engine_command'], source=source, compiler=command['compiler'],
+            symbol=command['function'], arguments=arguments),
+            implementation=command['implementation'], inputs=tuple(reads), outputs=tuple(writes),
+            accesses=_host_accesses(tuple((value, mode) for _, mode, value in command['reaches'])),
+            reaches=command['reaches'])
+    return cpu_native(source, command['compiler'], command['function'], arguments,
+                      implementation=command['implementation'], inputs=tuple(reads), outputs=tuple(writes),
+            accesses=_host_accesses(tuple((value, mode) for _, mode, value in command['reaches'])),
+            reaches=command['reaches'])
 
 
 def scheduling(storage_layouts, command_accesses, computed_domains, implementation):

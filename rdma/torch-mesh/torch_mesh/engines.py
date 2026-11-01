@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import shutil
-import struct
 from pathlib import Path
 
 import torch
@@ -54,19 +53,6 @@ def _host_address(value):
     return base + (layout.index(0) if layout.count else layout.offset)
 
 
-def _host_bindings(source, target, input_layouts, output_layouts, binding_layout):
-    """CPU and Core ML consume the same resolved operands and copy records."""
-    from . import layout
-    from .operand import TensorView
-    prepared, before, after = [], [], []
-    for values, requirements, writing in ((source, input_layouts, False), (target, output_layouts, True)):
-        devices = {name: 'cpu' if host(TensorView.of(value).storage) is None else value.device.type for name, value in values.items()}
-        placed, commands = layout.bindings(values, requirements, writing=writing, binding=binding_layout, devices=devices)
-        (after if writing else before).extend(commands)
-        prepared.append(placed)
-    return *prepared, before, after
-
-
 _CORE_ML = None
 
 
@@ -84,6 +70,8 @@ def _coreml():
             lib.mesh_coreml_bind.argtypes = [ctypes.c_long, ctypes.POINTER(ModelView), ctypes.c_size_t,
                                              ctypes.POINTER(ModelView), ctypes.c_size_t]
             lib.mesh_coreml_prepare.restype, lib.mesh_coreml_prepare.argtypes = ctypes.c_char_p, [ctypes.c_void_p] * 4
+            lib.mesh_coreml_entry.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+            lib.mesh_coreml_entry.restype = ctypes.c_int
             lib.mesh_coreml_retain.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_unbind.argtypes = [ctypes.c_void_p]
             lib.mesh_coreml_error.restype = ctypes.c_char_p
@@ -225,12 +213,7 @@ class Cpu(Engine):
                     input_layouts=input_layouts, output_layouts=output_layouts, binding_layout='indexed',
                     input_dtype=input_dtype, output_dtype=output_dtype)
 
-    def bind(self, definition, source, target):
-        source, target, before, after = _host_bindings(source, target,
-            definition['input_layouts'], definition['output_layouts'], definition['binding_layout'])
-        native = _coreml()
-        if native is None:
-            raise RuntimeError('CPU commands require the native engine library')
+    def declare_views(self, definition, source, target):
         from . import layout, _stream
         from .operand import TensorView, requirements
         recipe = definition['recipe']
@@ -241,7 +224,11 @@ class Cpu(Engine):
             dense = _stream.TensorLayout(binding['shape'], layout.strides(binding['shape']))
             selected = requirements(dense, binding['requirements'])
             values[name] = layout.allocate(selected, getattr(torch, binding['dtype']), 'cpu')
-        records = []
+        commands = []
+        from .cpu import compilation
+        from .operand import byte_operand
+        from mesh import RDMA
+        compiler = compilation(self.implementation)
         for command in recipe['commands']:
             operands = {role: values[name] for role, name in command['operands'].items()}
             x, w, y = (operands[role] for role in ('input', 'weight', 'output'))
@@ -254,21 +241,24 @@ class Cpu(Engine):
                     _host_address(x), _host_address(w), _host_address(y), _host_address(operands['scratch'])))
             else:
                 raise ValueError(f"unknown declared CPU command {command['kind']}")
-            records.append((*record, _host_accesses(
+            roles = tuple(command['operands'])
+            declared = _cpu_records([(*record, _host_accesses(
                 ((values[name], 1) for name in command['reads']),
-                ((values[name], 2) for name in command['writes']))))
-        reads = dict.fromkeys(name for command in recipe['commands'] for name in command['reads']
-                              if recipe['bindings'][name]['role'])
-        writes = dict.fromkeys(name for command in recipe['commands'] for name in command['writes'])
-        outputs = tuple(values[name] for name in writes)
-        pages = []
-        def workspace(size):
-            from . import empty
-            pages.append(empty(size, dtype=torch.uint8, device='cpu'))
-            return _host_address(pages[-1])
-        binding, address = _cpu_bind(native, _cpu_records(records), workspace, self.implementation)
-        outputs += tuple(pages)
-        return CpuProgram(native, binding, _cpu_declaration(records, address, self.implementation), tuple(values[name] for name in reads), outputs, before, after)
+                ((values[name], 2) for name in command['writes'])))])[0]
+            page_operands = [byte_operand(operands[role]) for role in roles]
+            reaches = tuple((slot, (1 if name in command['reads'] else 0) | (2 if name in command['writes'] else 0),
+                             page_operands[slot]) for slot, name in enumerate(command['operands'].values()))
+            source_code = (f'#include "{RDMA}/mesh-cpu-kernels.h"\n'
+                'struct MeshCpuArguments { MeshCpuCommand numerical; };\n'
+                'extern "C" void mesh_cpu_entry(const void *arguments) {\n'
+                'const auto &a = *static_cast<const MeshCpuArguments *>(arguments);\n'
+                'MESH_CPU_NUMERICAL_BODY(&a.numerical);\n}\n')
+            commands.append(dict(kind='cpu', source=source_code, function='mesh_cpu_entry',
+                argument_specs=(), arguments=(), operands=page_operands, constants={},
+                types=tuple(torch.uint8 for _ in roles), binding_origins=tuple(v.binding_origin for v in page_operands),
+                reaches=reaches, engine_command=declared, implementation=self.implementation, compiler=compiler))
+        return dict(commands=tuple(commands), output=tuple(target.values()),
+                    pages=tuple(value.storage for value in values.values()))
 
 
 def cpu_recipe(operation, operands, *, weights, implementation):
@@ -348,41 +338,42 @@ def _cpu_records(records):
     for kind, command, accesses in records:
         declared = CpuCommand.from_buffer_copy(command)
         declared.run = None
-        declarations.append(dict(kind=kind, arguments=bytes(declared), accesses=accesses,
-            places=tuple((getattr(CpuCommand, name).offset, 0) for name in _CPU_FIELDS)))
+        declarations.append(dict(kind=kind, arguments=bytes(declared), accesses=accesses))
     return declarations
 
 
 def _cpu_bind(native, records, workspace, implementation):
     """Resolve declared entries and argument records once into the native program."""
-    commands, arguments, instructions, needs, accesses = [], [], [], [], []
+    commands, arguments, instructions, needs, accesses = {}, [], [], [], []
     transferred = False
     try:
         for record in records:
+            source, release = record['source'], None
             if 'kind' in record:
                 command = CpuCommand.from_buffer_copy(record['arguments'])
+                commands[len(instructions)] = command
                 if record['kind'] == _CPU_PRODUCT:
                     size = native.mesh_cpu_product_bind(ctypes.byref(command))
                     if size < 0:
                         raise ValueError('CPU matrix views could not be bound to a bulk contraction')
                     if size:
                         needs.append((command, size, len(instructions)))
+                    body = 'mesh_cpu_product_strided_body' if size else 'mesh_cpu_product_body'
                 elif record['kind'] == _CPU_GELU:
-                    command.run = ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p)
+                    command.run = ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p).value
+                    body = 'mesh_cpu_gelu_body'
                 else:
                     raise ValueError(f"unknown declared Accelerate command {record['kind']}")
-                commands.append(command)
-                instructions.append(CpuInstruction(command.run, ctypes.addressof(command), ctypes.sizeof(command),
-                    ctypes.cast(native.mesh_cpu_command_release, ctypes.c_void_p), None, None, None, 0))
-            else:
-                library = native.mesh_cpu_compile(record['source'].encode(),
-                    json.dumps(record['compiler'], separators=(',', ':')).encode())
-                if library is None:
-                    raise RuntimeError(native.mesh_coreml_error().decode())
-                data = ctypes.create_string_buffer(bytes(record['arguments']))
-                arguments.append(data)
-                instructions.append(CpuInstruction(None, ctypes.addressof(data), len(record['arguments']), None,
-                    library, record['symbol'].encode(), None, 0))
+                source = source.replace('MESH_CPU_NUMERICAL_BODY', body)
+                release = ctypes.cast(native.mesh_cpu_command_release, ctypes.c_void_p).value
+            library = native.mesh_cpu_compile(source.encode(),
+                json.dumps(record['compiler'], separators=(',', ':')).encode())
+            if library is None:
+                raise RuntimeError(native.mesh_coreml_error().decode())
+            data = ctypes.create_string_buffer(bytes(record['arguments']))
+            arguments.append(data)
+            instructions.append(CpuInstruction(None, ctypes.addressof(data), len(record['arguments']), release,
+                library, record['symbol'].encode(), None, 0))
             accesses.append(list(record['accesses']))
         addresses = tuple(workspace(size) for _, size, _ in needs)
         for (command, size, index), address in zip(needs, addresses, strict=True):
@@ -390,6 +381,10 @@ def _cpu_bind(native, records, workspace, implementation):
             from . import _stream
             base, _, offset = _stream.host_page_backing(address)
             accesses[index].append((base, offset, size, 2))
+        for index, record in enumerate(records):
+            if 'kind' in record:
+                command = commands[index]
+                ctypes.memmove(arguments[index], ctypes.byref(command), ctypes.sizeof(command))
         held_accesses = [(HostAccess * len(values))(*(HostAccess(*value) for value in values)) for values in accesses]
         for instruction, values in zip(instructions, held_accesses, strict=True):
             instruction.accesses, instruction.access_count = ctypes.addressof(values), len(values)
@@ -401,114 +396,44 @@ def _cpu_bind(native, records, workspace, implementation):
         return binding, addresses
     finally:
         if not transferred:
-            for command in commands:
+            for command in commands.values():
                 native.mesh_cpu_command_release(ctypes.byref(command))
 
 
-_CPU_FIELDS = ('input', 'weight', 'output', 'scratch')
-
-
-def _cpu_declaration(records, workspace, implementation):
-    return _cpu_serialized(_cpu_records(records), workspace, implementation)
-
-
-def _cpu_serialized(records, workspace, implementation):
-    """One replay declaration for static numerical entries and compiled symbols.
-
-    Pointer words remain ordinary relocation places in copied argument records;
-    executable addresses are resolved from declarations during preparation.
-    """
-    metadata = dict(implementation=implementation, instructions=[dict(
-        {key: value for key, value in record.items() if key not in ('arguments', 'places', 'accesses')},
-        argument_bytes=len(record['arguments']), access_count=len(record['accesses'])) for record in records])
-    header = json.dumps(metadata, separators=(',', ':')).encode()
-    data = struct.pack('<QQ', len(header), len(workspace))
-    places = [(len(data) + index * 8, 0) for index in range(len(workspace))]
-    data += struct.pack(f'<{len(workspace)}Q', *workspace) + header
-    for record in records:
-        places.extend((len(data) + offset, relocation) for offset, relocation in record.get('places', ()))
-        data += record['arguments']
-        for access in record['accesses']:
-            places.append((len(data) + HostAccess.pages.offset, 0))
-            data += bytes(HostAccess(*access))
-    return 'cpu', data, places
-
-
-def cpu_native(source, compiler, symbol, arguments, places, *, implementation, inputs=(), outputs=()):
-    """Bind a compiled CPU entry through the existing host program and recorder.
-
-    ``places`` uses MetalDeclaration's (byte offset, relocation kind) records.
-    """
+def cpu_engine(record, *, implementation, inputs, outputs, accesses, reaches):
+    """Bind a declared Accelerate instruction after dependency source emission."""
     native = _coreml()
     if native is None:
         raise RuntimeError('CPU commands require the native engine library')
-    records = [dict(source=source, compiler=compiler, symbol=symbol, arguments=bytes(arguments), places=tuple(places),
-                    accesses=_host_accesses(((value, 1) for value in inputs), ((value, 2) for value in outputs)))]
-    binding, workspace = _cpu_bind(native, records, None, implementation)
-    return CpuProgram(native, binding, _cpu_serialized(records, workspace, implementation),
-                      tuple(inputs), tuple(outputs), (), ())
+    record = dict(record, accesses=accesses)
+    pages = []
+    def workspace(size):
+        from . import empty
+        pages.append(empty(size, dtype=torch.uint8, device='cpu'))
+        return _host_address(pages[-1])
+    binding, _ = _cpu_bind(native, [record], workspace, implementation)
+    from .operand import byte_operand
+    reaches = (*reaches, *((len(reaches) + index, 2, byte_operand(page)) for index, page in enumerate(pages)))
+    return CpuProgram(native, binding, inputs, (*outputs, *pages), reaches)
 
 
-def rebuild(kind, data):
-    """design/replay-templates-2026-10-29.md: the native entry (prepare, context, retain, release) a host declaration makes,
-    its addresses already the instance's; the context's one reference is the caller's."""
+def cpu_native(source, compiler, symbol, arguments, *, implementation, inputs, outputs, accesses, reaches):
+    """Bind a compiled CPU entry through the existing host program and recorder."""
     native = _coreml()
     if native is None:
-        raise RuntimeError('host operations require the native engine library')
-    if kind == 'cpu':
-        length, count = struct.unpack_from('<QQ', data)
-        workspace = iter(struct.unpack_from(f'<{count}Q', data, 16))
-        begin = 16 + count * 8
-        header = json.loads(data[begin:begin + length])
-        at, records = begin + length, []
-        for instruction in header['instructions']:
-            end = at + instruction['argument_bytes']
-            if end > len(data):
-                raise ValueError('CPU replay argument record exceeds its declaration')
-            arguments = data[at:end]
-            at = end
-            end = at + instruction['access_count'] * ctypes.sizeof(HostAccess)
-            accesses = (HostAccess * instruction['access_count']).from_buffer_copy(data[at:end])
-            records.append(dict(instruction, arguments=arguments,
-                accesses=tuple((value.pages, value.offset, value.length, value.access) for value in accesses)))
-            at = end
-        if at != len(data):
-            raise ValueError('CPU replay has bytes outside its declared argument records')
-        binding, _ = _cpu_bind(native, records, lambda size: next(workspace), header['implementation'])
-        return _native_entry(native.mesh_cpu_program_prepare, binding, native.mesh_cpu_program_retain, native.mesh_cpu_program_release)
-    if kind == 'coreml':
-        length, = struct.unpack_from('<Q', data)
-        header = json.loads(data[8:8 + length])
-        if header['implementation']['compiler'] != 'coreml':
-            raise ValueError('model replay requires its declared provider implementation')
-        addresses = struct.unpack_from(f'<{len(header["inputs"]) + len(header["outputs"])}Q', data, _coreml_addresses(length))
-        handle = _load_coreml(native, header['compiled'], header['configuration'])
-        try:
-            views = _model_views(header['inputs'] + header['outputs'], addresses)
-            inputs, outputs = views[:len(header['inputs'])], views[len(header['inputs']):]
-            binding = native.mesh_coreml_bind(handle, (ModelView * len(inputs))(*inputs), len(inputs),
-                                              (ModelView * len(outputs))(*outputs), len(outputs))
-        finally:
-            native.mesh_coreml_release(handle)
-        if not binding:
-            raise RuntimeError(native.mesh_coreml_error().decode())
-        return _native_entry(native.mesh_coreml_prepare, binding, native.mesh_coreml_retain, native.mesh_coreml_unbind)
-    raise ValueError(f'no host operation of kind {kind}')
+        raise RuntimeError('CPU commands require the native engine library')
+    records = [dict(source=source, compiler=compiler, symbol=symbol, arguments=bytes(arguments),
+                    accesses=accesses)]
+    binding, _ = _cpu_bind(native, records, None, implementation)
+    return CpuProgram(native, binding, tuple(inputs), tuple(outputs), reaches)
 
 
 class CpuProgram:
-    def __init__(self, native, binding, declaration, inputs, outputs, before, after):
-        from . import _stream
-        self.native, self.binding, self.declaration = native, binding, declaration
-        self.inputs, self.outputs = inputs, outputs
-        self.before, self.after = _stream.Commands(before), _stream.Commands(after)
+    def __init__(self, native, binding, inputs, outputs, reaches):
+        self.native, self.binding = native, binding
+        self.inputs, self.outputs, self.reaches = inputs, outputs, tuple(reaches)
         self.entry = _native_entry(self.native.mesh_cpu_program_prepare, self.binding,
                                    self.native.mesh_cpu_program_retain, self.native.mesh_cpu_program_release)
-
-    def append(self, schedule):
-        schedule.append(self.before)
-        schedule.host(self.entry, self.inputs, self.outputs, self.declaration)
-        schedule.append(self.after)
 
     def __del__(self):
         if getattr(self, 'binding', None):
@@ -626,30 +551,22 @@ def model_operand(feature, shape, *, device='cpu'):
 
 
 def _model_views(specs, addresses):
-    """Resolve each relocated logical address to its actual bridge-page owner."""
+    """Bind each declared logical address to its actual bridge-page owner."""
     from . import _stream
     return [ModelView(name.encode(), ModelPages(*_stream.host_page_backing(address)),
                       (ctypes.c_int64 * len(shape))(*shape), (ctypes.c_int64 * len(shape))(*strides),
                       len(shape), dtype) for (name, shape, strides, dtype), address in zip(specs, addresses)]
 
 
-def _coreml_addresses(length):
-    """Where a Core ML declaration's addresses start: after its length and JSON header, 8-byte aligned."""
-    return 8 + (length + 7) // 8 * 8
-
-
 class Prediction:
     """One direct ANE invocation's pages, bound before the numerical function."""
-    def __init__(self, native, model, source, target, *, compiled, configuration, contract, implementation):
+    def __init__(self, native, model, source, target, *, compiled, configuration, contract, implementation, entry, reaches):
         from . import _stream
         from .operand import TensorView
         self.native = native
         self.placement = json.loads(native.mesh_coreml_placement(model))
         self.implementation = provider_implementation(implementation, contract, self.placement)
-        input_layouts = model_requirements(contract['inputs'], {name: value.shape for name, value in source.items()})
-        output_layouts = model_requirements(contract['outputs'], {name: value.shape for name, value in target.items()})
-        source, target, before, after = _host_bindings(source, target, input_layouts, output_layouts, configuration['binding_layout'])
-        self.before, self.after = _stream.Commands(before), _stream.Commands(after)
+        self.reaches = tuple(reaches)
         self.inputs, self.outputs = tuple(source.values()), tuple(target.values())
         def specs(values, features):
             made = []
@@ -669,13 +586,7 @@ class Prediction:
         self.binding = native.mesh_coreml_bind(model, inputs, len(inputs), outputs, len(outputs))
         if not self.binding:
             raise RuntimeError(native.mesh_coreml_error().decode())
-        # The compiled model, all load constraints and its views survive replay preparation.
-        header = json.dumps({'compiled': str(compiled), 'configuration': configuration, 'implementation': self.implementation, 'inputs': [v for v, _ in given],
-                             'outputs': [v for v, _ in made]}).encode()
-        at = _coreml_addresses(len(header))
-        addresses = [a for _, a in given + made]
-        data = struct.pack('<Q', len(header)) + header.ljust(at - 8, b' ') + struct.pack(f'<{len(addresses)}Q', *addresses)
-        self.declaration = 'coreml', data, [(at + 8 * k, 0) for k in range(len(addresses))]
+        _bind_coreml_entry(native, self.binding, entry)
         self.entry = _native_entry(native.mesh_coreml_prepare, self.binding,
                                    native.mesh_coreml_retain, native.mesh_coreml_unbind)
 
@@ -683,10 +594,13 @@ class Prediction:
         if getattr(self, 'binding', None):
             self.native.mesh_coreml_unbind(self.binding)
 
-    def append(self, schedule):
-        schedule.append(self.before)
-        schedule.host(self.entry, self.inputs, self.outputs, self.declaration)
-        schedule.append(self.after)
+
+
+def _bind_coreml_entry(native, binding, entry):
+    arguments = ctypes.create_string_buffer(entry['arguments'])
+    if native.mesh_coreml_entry(binding, entry['source'].encode(),
+            json.dumps(entry['compiler'], separators=(',', ':')).encode(), arguments, len(entry['arguments'])):
+        raise RuntimeError(native.mesh_coreml_error().decode())
 
 
 def _load_coreml(native, compiled, configuration):
@@ -706,7 +620,7 @@ def coreml_contract(compiled, configuration):
         native.mesh_coreml_release(handle)
 
 
-def coreml_graph(compiled, inputs, outputs, *, configuration, contract, implementation):
+def coreml_graph(compiled, inputs, outputs, *, configuration, contract, implementation, entry, reaches):
     """Bind a compiled graph with guaranteed caller-owned output pages.
 
     ``configuration`` supplies backend, compute units, function and devices.
@@ -724,7 +638,7 @@ def coreml_graph(compiled, inputs, outputs, *, configuration, contract, implemen
         raise RuntimeError('Core ML graph requires the native shared-memory binding')
     handle = _load_coreml(native, compiled, configuration)
     try:
-        return Prediction(native, handle, inputs, outputs, compiled=compiled, configuration=configuration, contract=contract, implementation=implementation)
+        return Prediction(native, handle, inputs, outputs, compiled=compiled, configuration=configuration, contract=contract, implementation=implementation, entry=entry, reaches=reaches)
     finally:
         native.mesh_coreml_release(handle)
 

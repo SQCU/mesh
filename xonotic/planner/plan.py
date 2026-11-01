@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 
@@ -127,7 +128,8 @@ def main():
         completion = function.completion()
         # The next tick consumes these results. This application boundary
         # observes one whole function; it inserts no numerical dispatch/drain.
-        ended = _stream.completion_end(completion)
+        while (ended := _stream.completion_observe(completion)) is None:
+            time.sleep(0)
         feedback = (previous['proposal'], float(max(times[:len(columns)]))) if previous is not None else None
         switches += int(np.count_nonzero(objectives != picks))
         objectives[...] = picks

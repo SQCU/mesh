@@ -99,21 +99,29 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
         dict(x=layouts['input'], w=layouts['weight'], x1=layouts['input'], bias=layouts['bias']))
     outputs, after = bindings(dict(out=out), dict(out=layouts['output']), writing=True)
     from .command_declarations import descriptions, configuration, bind
-    from .native import command_records
     values = dict(**inputs, out=outputs['out'], ready=ready, arrivals=arrivals)
     declared = declaration(descriptions(values), dict(act=act, alpha=alpha, beta=beta), configuration())
-    return [*before, *command_records(bind(declared, values)), *after]
+    return [*before, *bind(declared, values), *after]
 
 
 def declare(x, w, out):
     """Carry the same product and API constraints through an FX declaration."""
     from .kernel import declare as kernel
-    definitions, buffers, grid, threads = arguments(x, w, out)
+    from .command_declarations import configuration
+    from mesh_relation import Algebra
+    typed = {role: dict(shape=tuple(value.shape), type=DTYPE_TO_METAL[value.dtype])
+             for role, value in dict(x=x, w=w, out=out).items()}
+    recipe = mesh_matrix.product(**typed, **configuration())
+    definitions, grid, threads = recipe['definitions'], recipe['grid'], recipe['threads']
+    values = dict(x=x, w=w, out=out)
+    buffers = [None if role is None else values[role] for role in recipe['bindings']]
+    dispatch = tuple(dict(side=use['side'], slot=recipe['bindings'].index(use['role']), group_relation=use['group_relation'])
+                     for use in mesh_matrix.product_dispatch(Algebra(), recipe, typed))
     layouts = api_layouts('matrix')
     prefix = ''.join(f'#define {key} {value}\n' for key, value in definitions.items())
     prefix += _OPERANDS
     return kernel('matrix.metal', 'product', buffers, (2,), (), 0, grid, threads,
-                  indexed=(), requirements={0: layouts['input'], 1: layouts['weight'], 2: layouts['output']}, prefix=prefix,
+                  indexed=(), requirements={0: layouts['input'], 1: layouts['weight'], 2: layouts['output']}, prefix=prefix, dispatch=dispatch,
                   domains=({'kind': 'product', 'operands': {'x': 0, 'w': 1, 'out': 2},
                             'parameters': {'alpha': 1, 'beta': 1, 'act': False}},))[0]
 
@@ -142,7 +150,6 @@ def _row_group_declaration(operands, requests, configuration):
 def products(requests, *, layouts=None):
     """Prepare product groups using one capability and page-binding contract."""
     from .command_declarations import descriptions, configuration, bind
-    from .native import command_records
     layouts = api_layouts('matrix') if layouts is None else layouts
     configuration = configuration()
     geometry = configuration['geometry']
@@ -158,7 +165,7 @@ def products(requests, *, layouts=None):
                                   {name: layouts['output'] for name in values if name.endswith('_out')}, writing=True)
         bound = dict(inputs, **outputs)
         declared = _row_group_declaration(descriptions(bound), group, configuration)
-        result.extend((*before, *command_records(bind(declared, bound)), *after))
+        result.extend((*before, *bind(declared, bound), *after))
         group.clear();values.clear()
 
     for request in requests:

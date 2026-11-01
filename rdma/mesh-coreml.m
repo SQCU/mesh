@@ -178,23 +178,9 @@ static MeshResourceBinding *host_resources(id declaration) {
 
 /* Prepared CPU numerical commands, on the same shared views as graph shares.
    Weights and scratch are bound by the compiler; execution allocates nothing. */
-void mesh_cpu_product(const void *arguments) {
-      const MeshCpuCommand *c=arguments;
-      cblas_sgemm(CblasRowMajor,c->input_transpose,c->weight_transpose,c->rows,c->columns,c->inner,
-                  1,c->input,c->input_stride,c->weight,c->weight_stride,0,c->output,c->output_stride);
-}
-typedef struct {
-  BNNSNDArrayDescriptor input, weight, output;
-  void *workspace;
-} MeshCpuProduct;
-
-static void mesh_cpu_product_strided(const void *arguments) {
-  const MeshCpuCommand *c=arguments;
-  MeshCpuProduct *p=(MeshCpuProduct *)c->scratch;
-  if(BNNSMatMul(false,true,1,&p->input,&p->weight,&p->output,p->workspace,NULL)) {
-    fputs("mesh: prepared CPU contraction failed\n",stderr);abort();
-  }
-}
+#include "mesh-cpu-kernels.h"
+void mesh_cpu_product(const void *arguments) { mesh_cpu_product_body(arguments); }
+static void mesh_cpu_product_strided(const void *arguments) { mesh_cpu_product_strided_body(arguments); }
 
 /* Preparation chooses a whole-matrix instruction and binds its storage.
    Transposing the result swaps the operands: (X W^T)^T = W X^T. */
@@ -246,15 +232,7 @@ void mesh_cpu_command_release(void *arguments) {
     free(c->scratch);
   }
 }
-void mesh_cpu_gelu(const void *arguments) {
-      const MeshCpuCommand *c=arguments;
-      const int n=c->rows*c->columns;
-      for(int i=0;i<n;i++) {
-        const float x=c->input[i];c->scratch[i]=0.7978845608028654f*(x+0.044715f*x*x*x);
-      }
-      vvtanhf(c->scratch,c->scratch,&n);
-      for(int i=0;i<n;i++)c->output[i]=0.5f*c->input[i]*(1+c->scratch[i])*c->weight[i];
-}
+void mesh_cpu_gelu(const void *arguments) { mesh_cpu_gelu_body(arguments); }
 typedef struct MeshCpuProgram MeshCpuProgram;
 typedef struct {
   void (*run)(const void *);
@@ -665,56 +643,63 @@ void mesh_coreml_release(long handle) {
 @implementation MeshModelInvocation
 @end
 
-static void model_task_release(void *context) { CFRelease(context); }
+#include "mesh-ane-entry.inc"
+static void model_task_release(void *context) { CFRelease(((MeshANEEntry *)context)->owner); }
 
-@interface MeshANEInvocation : MeshModelInvocation
+@interface MeshANEInvocation : MeshModelInvocation { @public
+  void *entry_library;
+  void (*submit)(void *);
+  MeshANEConfigure configure;
+}
+@property NSData *arguments;
 @property long handle;
 @property MeshANEModel *prepared;
 @property NSArray *inputs,*outputs,*inputIndices,*outputIndices;
 @property NSDictionary *surfaces;
 @end
 @implementation MeshANEInvocation
-- (void)dealloc { mesh_coreml_release(_handle); }
+- (void)dealloc { if(entry_library)dlclose(entry_library);mesh_coreml_release(_handle); }
 @end
-@interface MeshANETask : NSObject { @public
-  id client, model, options, request;
-  MeshANEEvaluate evaluate;
-  unsigned qos;
-  MeshHostCompletion complete;
-  void *context;
-}
+@interface MeshANETask : NSObject { @public MeshANEEntry entry; }
 @property MeshANEInvocation *source;
+@property id request;
 @property BOOL mapped;
 @end
 @implementation MeshANETask
 - (void)dealloc {
   MeshANEModel *prepared=_source.prepared;
-  if(_mapped)prepared.unmap(prepared.client,@selector(unmapIOSurfacesWithModel:request:),prepared.model,request);
+  if(_mapped)prepared.unmap(prepared.client,@selector(unmapIOSurfacesWithModel:request:),prepared.model,_request);
 }
 @end
-static void ane_submit(void *context) {
-  MeshANETask *task=(__bridge MeshANETask *)context;NSError *error=nil;
-  if(!task->evaluate(task->client,@selector(evaluateWithModel:options:request:qos:error:),task->model,task->options,task->request,task->qos,&error)) {
-    task->complete(task->context,error.localizedDescription.UTF8String?:"direct ANE submission failed");
-  }
-}
 static const char *ane_prepare(id object,MeshHostCompletion complete,void *context,MeshHostTask *result) {
   MeshANEInvocation *source=object;MeshANEModel *model=source.prepared;
   Class requestClass=NSClassFromString(@"_ANERequest");
-  MeshANETask *task=[MeshANETask new];task.source=source;task->complete=complete;task->context=context;
-  task->client=model.client;task->model=model.model;task->options=model.options;task->evaluate=model.evaluate;task->qos=model.qos;
-  task->request=((id(*)(id,SEL,id,id,id,id,id))objc_msgSend)(requestClass,@selector(requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:),
+  MeshANETask *task=[MeshANETask new];task.source=source;
+  task.request=((id(*)(id,SEL,id,id,id,id,id))objc_msgSend)(requestClass,@selector(requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:),
     source.inputs,source.inputIndices,source.outputs,source.outputIndices,model.contract[@"procedure"]);
-  if(!task->request)return "direct ANE request construction failed";
-  if(!ane_methods(task->request,@[@"setCompletionHandler:"],model.capabilities[@"abi"]))return error_;
-  void (^completed)(BOOL,NSError *)=^(BOOL success,NSError *error) {
-    complete(context,success?NULL:(error.localizedDescription.UTF8String?:"direct ANE execution failed"));
-  };
-  ((void(*)(id,SEL,id))objc_msgSend)(task->request,@selector(setCompletionHandler:),completed);
-  NSError *error=nil;task.mapped=model.map(model.client,@selector(mapIOSurfacesWithModel:request:cacheInference:error:),model.model,task->request,model.cacheMapping,&error);
+  if(!task.request)return "direct ANE request construction failed";
+  if(!ane_methods(task.request,@[@"setCompletionHandler:"],model.capabilities[@"abi"]))return error_;
+  task->entry=(MeshANEEntry){.client=(__bridge void *)model.client,.model=(__bridge void *)model.model,
+    .options=(__bridge void *)model.options,.request=(__bridge void *)task.request,.evaluate=model.evaluate,.qos=model.qos,
+    .complete=complete,.completion_context=context,.arguments=source.arguments.bytes};
+  source->configure(&task->entry);
+  NSError *error=nil;task.mapped=model.map(model.client,@selector(mapIOSurfacesWithModel:request:cacheInference:error:),model.model,task.request,model.cacheMapping,&error);
   if(!task.mapped){snprintf(error_,sizeof error_,"direct ANE page mapping: %s",error.localizedDescription.UTF8String);return error_;}
-  *result=(MeshHostTask){.context=(__bridge_retained void *)task,.submit=ane_submit,.release=model_task_release,
+  task->entry.owner=(__bridge_retained void *)task;
+  *result=(MeshHostTask){.context=&task->entry,.submit=source->submit,.release=model_task_release,
     .resources=model.resources.bytes,.resource_count=model.resources.length/sizeof(MeshHostResource)};return NULL;
+}
+int mesh_coreml_entry(void *binding,const char *source,const char *compiler,const void *arguments,size_t bytes) {
+  const char *path=mesh_cpu_compile(source,compiler);if(!path)return -1;
+  void *library=dlopen(path,RTLD_NOW|RTLD_LOCAL);
+  if(!library){snprintf(error_,sizeof error_,"ANE source library: %s",dlerror());return -1;}
+  void (*submit)(void *)=dlsym(library,"mesh_ane_submit");
+  MeshANEConfigure configure=dlsym(library,"mesh_ane_configure");
+  if(!submit||!configure){snprintf(error_,sizeof error_,"ANE source entry: %s",dlerror());dlclose(library);return -1;}
+  MeshANEInvocation *p=(__bridge MeshANEInvocation *)binding;
+  if(p->entry_library)dlclose(p->entry_library);
+  p->entry_library=library;p->submit=submit;p->configure=configure;
+  p.arguments=[NSData dataWithBytes:arguments length:bytes];return 0;
 }
 static void *ane_bind(long handle,MeshANEModel *model,const MeshModelView *inputs,size_t ni,const MeshModelView *outputs,size_t no) {
   Class surfaceClass=NSClassFromString(@"_ANEIOSurfaceObject"),requestClass=NSClassFromString(@"_ANERequest");
@@ -754,6 +739,7 @@ static void *ane_bind(long handle,MeshANEModel *model,const MeshModelView *input
     }
   }
   MeshANEInvocation *p=[MeshANEInvocation new];p->prepare=ane_prepare;p.handle=handle;p.prepared=model;
+  p->submit=mesh_ane_submit;p->configure=mesh_ane_configure;
   p.inputs=in;p.outputs=out;p.inputIndices=inIndices;p.outputIndices=outIndices;p.surfaces=surfaces;
   @synchronized([MLModel class]){references_[handle]=@([references_[handle] unsignedLongValue]+1);}
   return (__bridge_retained void *)p;

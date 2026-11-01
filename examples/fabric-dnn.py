@@ -1,5 +1,6 @@
 # docs/measurement.md#physical-fabric-dnn
 import json
+import time
 import sys
 from types import SimpleNamespace
 from mesh_statistics import now, next_configuration
@@ -34,6 +35,8 @@ def main(config=None):
     record(configuration, dnn.completion, started, args.rows * args.width * 4,
            {'program': 'fabric-dnn', 'steps': 1, **workload,
             'parts': configuration['assignment']['parts']['ffn']})
+    while not configuration['observations'].close():
+        time.sleep(0)
     dist.destroy_process_group()
     state = next_configuration(configuration['observations'].declaration,
         [*configuration['group'].configuration_observations, *configuration['observations'].poll()],

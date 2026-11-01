@@ -148,14 +148,6 @@ typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4Argum
 struct MetalSchedule;
 struct ncclComm;
 struct ncclMeshGroup;
-// design/replay-templates-2026-10-29.md: what a frontend makes a host operation or a crossing from again, for a
-// template: its kind, its bytes, and the places in them that name a region lease's memory or a communicator. An
-// address place holds a host pointer; a buffer place holds an id<MTLBuffer> and, after it, its byte offset (an
-// ncclMeshBuffer); a communicator place holds a struct ncclComm *. Instantiation rewrites each place to the instance's
-// operand or communicator before the frontend reads the bytes.
-enum MetalRelocation { MetalRelocationAddress, MetalRelocationBuffer, MetalRelocationCommunicator };
-struct MetalPlace { size_t at; enum MetalRelocation relocation; };
-struct MetalDeclaration { const char *kind; const void *bytes; size_t length; const struct MetalPlace *places; size_t count; };
 // The execution context supplies its queue. Preparing invocation slots cannot
 // create more queues; the number of slots is not a hardware resource count.
 struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum MetalForm);
@@ -173,9 +165,8 @@ void MetalScheduleCommunicator(struct MetalSchedule *, struct ncclComm *);
 // Preparation binds each invocation's completion and retained task. Submission
 // never allocates a task and never stands for output completion.
 typedef const char *(^MetalHostOperation)(MeshHostCompletion, void *, MeshHostTask *);
-// A host operation over its declared views; its declaration (NULL: none, and its function makes no template).
-void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t count, const struct MetalDeclaration *,
-    MetalHostOperation);
+// A host operation over its declared page views.
+void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t count, MetalHostOperation);
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *);
 // Preparation-owned page objects live as long as this recorded function.
 void MetalScheduleRetainObject(struct MetalSchedule *, id object);
@@ -228,7 +219,7 @@ void MetalEncoderCompute(id<MTL4ComputeCommandEncoder>, const struct MetalComman
 // Preparation callback's enclosing function, for appending ordinary commands.
 struct MetalSchedule *MetalEncoderSchedule(id<MTL4ComputeCommandEncoder>);
 void MetalEncoderHost(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count,
-    const struct MetalDeclaration *, MetalHostOperation);
+    MetalHostOperation);
 struct MetalReplay *MetalReplayCommands(id<MTLDevice>, const struct MetalCommandDescription *, size_t count, enum MetalForm);
 // docs/kernels.md#collectives: a host operation of a described program, run in each invocation before its command `at`
 // (after those before it). Host operations declare the same read/write views as GPU commands. The
@@ -272,7 +263,7 @@ void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
 // The group supplies active transport progress words before dependency ordering.
 // Templates rebuild that operand after relocation; they never store its raw words.
 int MetalScheduleCross(struct MetalSchedule *, const struct MetalReach *, size_t count,
-    const struct ncclMeshGroup *, const struct MetalDeclaration *, MetalCrossing);
+    const struct ncclMeshGroup *, MetalCrossing);
 // A range of a prepared replay's commands (MetalReplayCommands, MetalReplayDescribed), its first invocation's, as the schedule's
 // next work, in the replay's form and ordered by its recorded reaches.
 void MetalScheduleReplay(struct MetalSchedule *, struct MetalReplay *, NSRange commands);
@@ -286,60 +277,37 @@ NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRan
 // Finish all local parts and exchange their compiled list ends with peers.
 // Returns the collective preparation error, or zero. Enqueue does no exchange.
 int MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error));
+// Returned pages with no local numerical reader contribute result words, not
+// empty dispatches. Completion observation reads these prepared thresholds.
+// A result-bearing function is observed through MetalScheduleStatus/End; its
+// callback runs when that observation sees all results (or a failure).
+struct MetalResult {
+    __unsafe_unretained id<MTLBuffer> buffer;
+    NSUInteger offset;
+    uint64_t threshold;
+};
+void MetalScheduleResults(struct MetalSchedule *, const struct MetalResult *, size_t count);
 void MetalScheduleEnqueue(struct MetalSchedule *);
 // 0 pending, 1 complete, -1 failed.
 int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
-// An enqueued schedule's end, once every part and host task has ended (woken by the last, never polled): *ended the
-// latest GPU end of its parts (MTL4CommitFeedback GPUEndTime) and of its host tasks, in the statistics clock
-// (mesh-statistics.c mesh_statistics_now), 0 where no part ran on either; 1 complete, -1 failed (*error).
+// Nonblocking result observation: 0 pending, 1 complete, -1 failed (*error).
+// Once complete, *ended is the
+// latest GPU end of its parts (MTL4CommitFeedback GPUEndTime), host tasks, and
+// observation of returned remote pages, in the statistics clock
+// (mesh-statistics.c mesh_statistics_now). An empty function records its
+// completion observation, so it has a valid end after its submission.
 int MetalScheduleEnd(const struct MetalSchedule *, double *ended, NSError **error);
 void MetalScheduleFree(struct MetalSchedule *);
 // A replay MetalReplayCommands or MetalReplayDescribed returned, destroyed and freed.
 void MetalReplayFree(struct MetalReplay *);
 
-// design/replay-templates-2026-10-29.md. A pipeline's declaration: the library it is specialized from, its function,
+// An arithmetic pipeline's declaration: the library it is specialized from, its function,
 // its function-constant values ([index, MTLDataType, bytes] each) and its descriptor's fields (label; threads, the most
 // threads a threadgroup holds; multiple, a threadgroup size a multiple of the execution width; indirect, support for
-// indirect commands). MetalPipelineMake makes the pipeline a declaration names, from `archives` where they hold it,
-// and declares it; the caller owns the result. A frontend that makes its pipelines otherwise declares each.
+// indirect commands). MetalPipelineMake consumes these preparation operands,
+// using `archives` where available. The caller owns the pipeline.
 id<MTLComputePipelineState> MetalPipelineMake(id<MTLLibrary> library, NSString *function, NSArray<NSArray *> *constants,
     NSDictionary<NSString *, id> *descriptor, NSArray<id<MTLBinaryArchive>> *archives, NSError **error);
-void MetalPipelineDeclare(id<MTLComputePipelineState> pipeline, id<MTLLibrary> library, NSString *function,
-    NSArray<NSArray *> *constants, NSDictionary<NSString *, id> *descriptor);
-// A program's template: the calls that built each of its `count` functions (schedules), `bound` their first operands
-// in order, every other buffer they name kept by value, shared by them all; a plan the functions' crossings assume is
-// declared once where it is the same plan. A single function is a program of one. Pipelines are their declarations.
-// A bound operand is a view: its buffer and the byte offset of the
-// view in it (`offsets`, nil: 0), so an instance's view elsewhere moves every use of that operand's lease with it.
-// Its device's compile facts and each pipeline's thread limits are kept, since its libraries are compiled for them.
-// Nil, with the reason, where a pipeline, host operation or crossing has no declaration.
-NSDictionary *MetalScheduleTemplate(struct MetalSchedule *const *schedules, size_t count, NSArray<id<MTLBuffer>> *bound,
-    NSArray<NSNumber *> *offsets, NSError **error);
-// A template in `directory`: template.plist, each library as library.<i>.metallib and the pipelines of the device that
-// wrote it as pipelines.<architecture>.metallib.
-NSError *MetalTemplateWrite(NSDictionary *, NSString *directory);
-// A template read from `directory` for `device`: its libraries loaded, and its pipelines for this device's
-// architecture where they were written.
-NSDictionary *MetalTemplateRead(id<MTLDevice>, NSString *directory, NSError **error);
-// This device's pipelines added to the template in `directory`, where it was read without them.
-NSError *MetalTemplateArchive(NSDictionary *, NSString *directory);
-// A template's calls made on `schedule`, `bound` its first operands; its kept operands are leased anew, and its
-// communicators are `communicators` (each a struct ncclComm * as an NSValue), in the order its crossings first named
-// theirs. A host operation's or crossing's declaration, its places rewritten to the instance's, is made again by the
-// frontend's `host` or `cross` (nil, with the reason, where it cannot be), which returns an autoreleased block that
-// lives as long as `schedule`.
-typedef MetalHostOperation (^MetalTemplateHost)(NSString *kind, NSData *bytes, NSError **error);
-typedef MetalCrossing (^MetalTemplateCross)(NSString *kind, NSData *bytes, struct MetalSchedule *schedule, struct ncclMeshGroup *group, NSError **error);
-// A template made where the device's compile facts differ, or where a dispatch's threadgroup holds more threads than
-// this device's pipeline takes, fails as a value naming them.
-// operators follows communicators: each NSData is an array of ncclMeshRedOpBinding
-// from saved dynamic IDs to reducers registered on that instance's communicator.
-// Empty entries (or nil for builtin-only templates) contain no dynamic bindings.
-// These operands are used before rebuilding each plan; they are not serialized.
-NSError *MetalScheduleInstantiate(struct MetalSchedule *const *schedules, size_t count, NSDictionary *,
-    NSArray<id<MTLBuffer>> *bound, NSArray<NSNumber *> *offsets, NSArray<NSValue *> *communicators,
-    NSArray<NSData *> *operators, MetalTemplateHost host, MetalTemplateCross cross);
-
 #ifdef __cplusplus
 }
 #endif

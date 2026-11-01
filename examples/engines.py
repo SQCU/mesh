@@ -5,6 +5,7 @@ Shapes, engine options and shares are configuration. Every call uses the
 prepared spans; observations arrive through the ordinary whole-function module.
 """
 import os
+import time
 import json
 from pathlib import Path
 
@@ -80,4 +81,5 @@ for proposal, start in enumerate(range(0, steps, every)):
         'implementation': implementation, 'started': began, 'rank': 0, 'size': 1,
         'useful_work_bytes': rows * k * calls * 2,
         'report': {'program': 'engines', 'steps': calls, 'rows': rows, 'parts': assigned['parts']}})
-observations.close()
+while not observations.close():
+    time.sleep(0)

@@ -308,7 +308,11 @@ order, so another call's end is never subtracted to invent a service time or que
 same whole-function interval; it is not an isolated kernel rate or an additive rate across overlapping calls. Rank
 cohorts report the maximum rank latency and retain each rank's original timestamps, without comparing clocks across
 machines. Pending records and late peer records can coexist; observing them does not halt a subsequent function.
-Only administrative shutdown drains remaining records after submission ends.
+`Observations.close` also makes one nonblocking observation and returns whether all records have arrived.
+The application yields at shutdown until its pending records are complete. A host action which consumes a result
+observes that result before reading its pages. Neither boundary inserts a numerical command or a peer barrier.
+The collective bandwidth demo submits its cases without a completion gate between them. Its reported intervals
+include contention and queue residence from outstanding cases; they are not isolated-case service times.
 
 Records contain whole-call time and useful bytes together. Relays do not increase the useful byte count. The hourly
 runner uses committed main and the same library functions as the examples. Its scripts supply configuration operands.

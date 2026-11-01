@@ -149,19 +149,17 @@ def prepare_draw(z, keys, cutoff, seed, first, *, out=None, write_maps=None, wri
     from .placement import output
     from .operand import TensorView
     from .command_declarations import descriptions, configuration, bind
-    from .native import command_records
     ids = TensorView.of(out) if write_maps is not None else output((z.shape[0],), torch.int64, z.device, out)
     values = dict(z=z, keys=keys, cutoff=cutoff, ids=ids)
     prepared = declaration('draw', descriptions(values),
         dict(seed=seed, first=first, write_maps=write_maps, write_complete=write_complete), configuration())
-    return ids, list(command_records(bind(prepared, values)))
+    return ids, list(bind(prepared, values))
 
 
 def prepare_retain(z, keys, seed, head, tail, *, outputs=None, write_maps=None, write_complete=None):
     from .placement import output
     from .operand import TensorView
     from .command_declarations import descriptions, configuration, bind
-    from .native import command_records
     rows = z.shape[0]
     ids, kept, log_z = ([TensorView.of(value) for value in outputs] if write_maps is not None else
                        [output(shape, dtype, z.device, out) for shape, dtype, out in
@@ -171,4 +169,4 @@ def prepare_retain(z, keys, seed, head, tail, *, outputs=None, write_maps=None, 
     values = dict(z=z, keys=keys, ids=ids, kept=kept, log_z=log_z)
     prepared = declaration('retain', descriptions(values),
         dict(seed=seed, head=head, tail=tail, write_maps=write_maps, write_complete=write_complete), configuration())
-    return (ids, kept, log_z), list(command_records(bind(prepared, values)))
+    return (ids, kept, log_z), list(bind(prepared, values))
