@@ -1151,7 +1151,9 @@ def _local_assignment(prepared, arguments):
     graph, algebra = prepared['expression']['graph'], prepared['algebra']
     values, requests, projections, pending = {}, {}, [], []
     for node in graph.graph.nodes:
-        if node.op == 'output':
+        # A node with no value (a collective written into its out operand, as allgatherv_out into the LSTM's h)
+        # declares no result field, as in prepare_expression's field map.
+        if node.op == 'output' or 'val' not in node.meta:
             continue
         for key, value in _source_leaves((node,)):
             if isinstance(value, torch.Tensor):
