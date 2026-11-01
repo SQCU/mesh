@@ -1636,7 +1636,10 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   }
   mesh_say("bridge","link %u (%s): child's windows ended",port->index,port->name);
   if(held>0)lanes_flush(port,clock_ns()+MESH_PLATFORM_NS);
-  exit(0);
+  /* _exit, not exit: exit runs the RDMA library's teardown at exit, a wait of 10-13 s with nothing posted (2026-11-01:
+     children reaped 12.3-13.0 s after it, those ended by SIGKILL inside it reaped 0.1 s after); its lanes flushed,
+     the kernel releases the device's objects itself */
+  _exit(0);
 }
 static void child_command(struct port *port,const struct child_message *heard){
   struct link *l=&port->link;
