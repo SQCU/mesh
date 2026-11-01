@@ -75,12 +75,17 @@ def main(config=None):
     algebra = Algebra()
     unit = Function(tick.stepper(X, O, 1), t, configuration=compiler, algebra=algebra,
                     source_scope={'program': 'lstm_sequence', 'phase': 'step'}).capture()
-    functions, first = [], 0
-    for count in chunks:
-        function = unit.repeated(count, first=first)
+    # One declaration for each distinct chunk length, replayed for every chunk of that length: the chunks differ only
+    # in the steps they run, which t (on the GPU) selects. Restored by the LSTM demonstration session from the form
+    # before eee4d96b, which declared each of the steps / k chunks with its own occurrence offset: 256 compilations of
+    # the same 16-step function at 4096 steps, each about as long as the last (about 1.3 s a step on the workstation,
+    # 2026-11-01), so preparation never finished. What must stay: a chunk length is compiled once.
+    functions = {}
+    for count in dict.fromkeys(chunks):
+        function = unit.repeated(count)
         function.declare(group)
-        functions.append(function)
-        first += count
+        functions[count] = function
+    functions = [functions[count] for count in chunks]
     initial = [Function(tick.starting, s, X[s], configuration=compiler, algebra=algebra,
                         source_scope={'program': 'lstm_sequence', 'phase': 'starting', 'step': s}) for s in range(L - 1)]
     for function in initial:

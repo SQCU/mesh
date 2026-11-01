@@ -824,11 +824,20 @@ def boundary_projection(section, outputs, algebra, *, ranks=None):
             read_relations, write_relations = _collective_relations(declaration, mathematical, algebra)
             call = mathematical['call']
             result_fields = bindings(mathematical['result'], output_fields)
+            # A result written into one of the section's own operands rather than into a value it outputs (an out=
+            # collective into state, as the LSTM's gather into h, which the next step reads) is an effect on that
+            # operand: its pages are the result's, and every position it writes is required on every rank.
+            written = () if result_fields else tuple(bindings(mathematical['result'], input_fields))
             source_fields = bindings(mathematical['source'], input_fields)
             total = _domains(call, at, group.size())[0]
             required = algebra.set('{ [i] : false }', 1)
             requested = {}
             for rank, relation in write_relations.items():
+                if written:
+                    terms = relation.domain()
+                    required = required.binary(terms, 'union')
+                    join(requested, rank, terms)
+                    continue
                 if rank not in requests:
                     pending.append(dict(boundary=source_nodes.get(node, node), group=group_name, rank=rank,
                                         result=mathematical['result'], relation=relation, requirement='peer_outputs'))
@@ -858,9 +867,10 @@ def boundary_projection(section, outputs, algebra, *, ranks=None):
                     join(group_inputs.setdefault(rank, {}), key, positions)
                     if rank == at:
                         join(inputs, key, positions)
-            if not result_fields:
+            if not result_fields and not written:
                 pending.append(dict(boundary=source_nodes.get(node, node), result=mathematical['result'],
                                     outputs=outputs, requirement='result_field'))
+            result_fields = result_fields or list(written)
             contributors = tuple(read_relations) if call.contributors is None else tuple(call.contributors)
             divisor = (len(contributors) if call.op in (dist.ReduceOp.AVG, backend.LIB.ncclAvg)
                        and not mathematical['initialization'] else None)
@@ -1164,7 +1174,9 @@ def _local_assignment(prepared, arguments):
     graph, algebra = prepared['expression']['graph'], prepared['algebra']
     values, requests, projections, pending = {}, {}, [], []
     for node in graph.graph.nodes:
-        if node.op == 'output':
+        # A node with no value (a collective written into its out operand, as allgatherv_out into the LSTM's h)
+        # declares no result field, as in prepare_expression's field map.
+        if node.op == 'output' or 'val' not in node.meta:
             continue
         for key, value in _source_leaves((node,)):
             if isinstance(value, torch.Tensor):

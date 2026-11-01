@@ -83,23 +83,13 @@ def prepare_source(gm, example_inputs):
         graph = module.graph
         order = {n: i for i, n in enumerate(graph.nodes)}
         products = [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear.default]
+        from mesh_graph import independent
         above = {}
-
-        def ancestors(n):
-            if n not in above:
-                seen, stack = set(), list(n.all_input_nodes)
-                while stack:
-                    m = stack.pop()
-                    if m not in seen:
-                        seen.add(m)
-                        stack.extend(m.all_input_nodes)
-                above[n] = seen
-            return above[n]
         i = 0
         while i < len(products):
             group = [products[i]]
             for m in products[i + 1:compiler_operands()['BUFFER_BINDINGS'] // 3 + i]:
-                if any(g in ancestors(m) for g in group) or any(order[u] < order[m] for g in group for u in g.users):
+                if not independent(lambda n: n.all_input_nodes, lambda n: n.users, order, group, m, above):
                     break
                 group.append(m)
             if len(group) > 1:
@@ -170,6 +160,11 @@ def prepare_source(gm, example_inputs):
               for node, value in zip((n for n in lifted.graph.nodes if n.op == 'placeholder'), operands, strict=True)]
     with mode:
         lowered = functionalize_source(lifted, inputs, select_decomp_table() | decompositions)
+    # The section's interface is its operands' leaves, as returned below and as native lowering runs it: an operand
+    # can be a list (a host declaration's results, whose getitem lies in this section), and make_fx then gives the
+    # trace a pytree codegen whose output unflattening fails in GraphLowering.run (lstm-service's [x, h] product after
+    # its concatenation's host declaration, 2026-11-01). The placeholders and the output are already flat.
+    lowered.graph._codegen = torch.fx.graph.CodeGen()
     output = next(node for node in lowered.graph.nodes if node.op == 'output')
     if not isinstance(output.args[0], (tuple, list)):
         output.args = ((output.args[0],),)

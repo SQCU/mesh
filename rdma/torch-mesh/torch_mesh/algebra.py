@@ -22,6 +22,7 @@ def concatenate_pages(values, dim=0):
     """
     from functools import reduce
     from .host import assemble
+    from .operand import TensorView
     exemplar = next((value for value in values if value.ndim != 1 or value.numel()), values[0])
     dim %= exemplar.ndim
     dtype = reduce(torch.promote_types, (value.dtype for value in values))
@@ -30,10 +31,16 @@ def concatenate_pages(values, dim=0):
         return values[0].to(dtype)
     shape = list(exemplar.shape)
     shape[dim] = sum(value.shape[dim] for value in selected)
-    destination = torch.empty(shape, dtype=dtype, device=exemplar.device)
+    # Each piece's target is a TensorView over the destination itself, as convolution's and _page_tensor's are.
+    # Changed by the LSTM demonstration session (the bc2f34de form passed destination.narrow views): inside the
+    # normalizer's dispatch a view has no _base, so operand.signature took the first narrowed piece (offset 0) for
+    # the storage root and the concatenation's result was its first operand (lstm-service's [x, h] became x, every
+    # rank, 2026-11-01). What must stay: the targets carry the destination as their storage, so the result handle is
+    # the whole destination.
+    destination = TensorView.of(torch.empty(shape, dtype=dtype, device=exemplar.device))
     pieces, first = [], 0
     for value in selected:
-        pieces.append((value, destination.narrow(dim, first, value.shape[dim])))
+        pieces.append((value, destination.slice(dim, first, value.shape[dim])))
         first += value.shape[dim]
     return assemble(pieces, output=destination)
 
