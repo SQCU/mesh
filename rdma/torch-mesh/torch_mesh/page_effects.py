@@ -447,8 +447,12 @@ def lower(programs, effects, *, emit=True):
                                effects['sources'][observation['source']])
         side = 'writes' if destination else 'reads'
         for cut_index, row in enumerate(effects['rows']):
+            # a run is (first, width, step, count) (mesh-index-relation.h, since 5ef65ac2): one contiguous range is
+            # (first, width, width, 1); the two-number form these three selections were written in (ebd8bd24,
+            # bc2f34de) indexed past each run, and every WRITE's preparation raised (the chain's first distribute,
+            # 2026-11-01)
             selected = TensorView(source.storage, source.layout.reshape((source.numel(),)).select_runs(
-                0, [(row[0] * effects['unit'], row[1] * effects['unit'])]))
+                0, [(row[0] * effects['unit'], row[1] * effects['unit'], row[1] * effects['unit'], 1)]))
             root, extent, relation = _physical(selected, algebra)
             remaining = relation.image(relation.domain())
             for program in projected:
@@ -474,7 +478,7 @@ def lower(programs, effects, *, emit=True):
     for cut_index, row in enumerate(effects['rows']) if effects['publications'] else ():
         target = TensorView.of(effects['destination'] if targets is None else targets[cut_index])
         selected = (TensorView(target.storage, target.layout.reshape((target.numel(),)).select_runs(
-            0, [(row[0] * effects['unit'], row[1] * effects['unit'])])) if targets is None else target)
+            0, [(row[0] * effects['unit'], row[1] * effects['unit'], row[1] * effects['unit'], 1)])) if targets is None else target)
         root, extent, relation = _physical(selected, algebra)
         remaining = relation.image(relation.domain())
         if 'initial_positions' in effects:
@@ -689,7 +693,7 @@ def prepare(steps, schedule, output=None):
             for record in bound.page_effects():
                 view = byte_operand(step['views'][record['call']])
                 selected = TensorView(view.storage, view.layout.reshape((view.numel(),)).select_runs(
-                    0, [(record['first'], record['bytes'])]), view.binding_origin)
+                    0, [(record['first'], record['bytes'], record['bytes'], 1)]), view.binding_origin)
                 effects.append(dict(record, order=order, view=view, selected=selected, owner=bound))
         else:
             bound = _stream.Collectives(step['bindings'], step['group'].handle, step['operands'])

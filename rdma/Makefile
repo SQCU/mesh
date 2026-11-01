@@ -161,6 +161,22 @@ clean:
 # installed libraries it loads (make install puts them in rdma/; this target installs nothing, so it never stops the
 # bridge: design/transport.md)
 PYTHON ?= $(HOME)/.venv-mesh-uv/bin/python
-mesh-c: mesh_c_build.py ../etc/bridge/layout.h mesh-plan.h mesh-fabric.h nccl.h mesh-write-compiler.h mesh-statistics.h
-	$(PYTHON) mesh_c_build.py
-.PHONY: mesh-c
+# the interpreter's extension suffix, read once a make: a module is a file, so an up-to-date one is an mtime read and
+# the preparation that finds nothing to build costs milliseconds, not each builder's interpreter start (0.75 s and 0.55
+# s a node, every deploy and every hour, before 2026-11-01)
+EXT_SUFFIX := $(shell $(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))' 2>/dev/null)
+MESH_C = _mesh_c$(EXT_SUFFIX)
+$(MESH_C): mesh_c_build.py ../etc/bridge/layout.h mesh-plan.h mesh-fabric.h nccl.h mesh-write-compiler.h mesh-statistics.h
+	$(PYTHON) mesh_c_build.py && touch $@
+mesh-c: $(MESH_C)
+# torch_mesh's extension: its sources, every header of this directory and the configurations it includes (setup.py's
+# include_dirs), and setup.py; the libraries it links are found by install name at load, so their rebuild needs none.
+# make decides; build_ext is forced, since its own check reads the two sources alone and would keep an extension
+# built against changed headers
+STREAM = torch-mesh/torch_mesh/_stream$(EXT_SUFFIX)
+$(STREAM): torch-mesh/setup.py torch-mesh/torch_mesh/_stream.mm torch-mesh/torch_mesh/allocator.mm \
+  $(wildcard torch-mesh/torch_mesh/*.h) $(wildcard *.h) $(wildcard ../etc/compute/*) $(wildcard ../etc/bridge/*.h)
+	cd torch-mesh && $(PYTHON) setup.py -q build_ext --inplace --force --build-temp ../.build/torch-mesh && touch ../$@
+# the Python modules (mesh_nodes node prepare, after `make all install`)
+modules: $(MESH_C) $(STREAM)
+.PHONY: mesh-c modules

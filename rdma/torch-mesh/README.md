@@ -17,8 +17,8 @@ partials merge is a reduction by the library's partials operator.
 
 ## Install
 
-A mesh checkout holds the library and this package, built in place (rdma/NCCL.md "Build and run": `make install`,
-`rdma/mesh_c_build.py`, `setup.py build_ext --inplace` here), and a program run with the user's torch environment,
+A mesh checkout holds the library and this package, built in place (rdma/NCCL.md "Build and run": `make install`, then
+`make -C rdma modules`, which runs `rdma/mesh_c_build.py` and `setup.py build_ext --inplace` here where their inputs changed), and a program run with the user's torch environment,
 `~/.venv-mesh-uv` (`bin/mesh-user.sh`: `rdma/requirements.txt`, torch 2.14.0 on CPython 3.12.14), imports `mesh`,
 `torch_mesh` and the mesh's modules from it by path (`PYTHONPATH=<checkout>/rdma:<checkout>/rdma/torch-mesh`).
 

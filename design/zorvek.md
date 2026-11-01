@@ -134,19 +134,23 @@ what of the block takes its place. The order is forced: each later one guards a 
    bridge's walk_take copy): the bridge walks each call's laid tables, linked at the call's place (zinth, below), its
    walk the executor of zirrup and zirrupel, which its entry word already is.
 7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
-   The copies bandwidth.py makes, counted on all five (MESH_COPIES_TRACE, 2026-10-31): only the out-of-place
-   reduce-scatter's, 5 a call (its whole operand into its operand area, segment by segment, before it publishes).
-   plan_direct refuses it at a REDUCE step over a range an earlier one partly wrote (m5ult2: [104857, 209714) at
-   1 MiB, spans_meet -1), the pool's rule: the first combine wrote send op piece and the later ones accumulated, so a
-   range part written could not say where its own operand was. zelloth reads a sum's own page from the send view
-   where its steps are fresh (zabbadoo_plan `own`), else from the sum's target, which the copy fills. The partial
-   overlaps are relay cuts: one contribution cut, another whole, over one segment. Its form: every REDUCE piece of a
-   rank's buffer cut at the others' bounds (mesh-routed.c refine_pieces, as relays' cuts already are), so each sum
-   is one range (zsum_same), each step wholly fresh or wholly written, and the call direct, its copy gone. The
-   in-place all-reduce and broadcast make no copy (their operand is their result); plan_direct refuses them for the
-   overlap all the same.
-   The landing gate is deleted (design/zorvek.md "Instances"): the communicator's gate word, gate_of, a landing
-   entry's word, and the bridge's wait on it.
+   - Done: the landing gate (f1f4122e: the communicator's gate word, gate_of, a landing entry's word, the bridge's wait
+     on it).
+   - Done: the out-of-place reduce-scatter's copies, the only ones bandwidth.py made (5 a call on all five, counted
+     2026-10-31 with MESH_COPIES_TRACE: its whole operand into its operand area before it published). plan_direct had
+     refused it at a REDUCE step over a range an earlier step partly wrote, the pool's rule, under which a part-written
+     range could not say where its own operand lay. Since ec69f367 each run of a sum names where its own pages lie
+     (struct metal_zelloth_own, zsum_owns splitting runs at earlier writes), so the call is direct: no copy, 178 to
+     145 us at 1 MiB.
+   - Done: the in-place all-reduce and broadcast, refused for an overlap measured at the reduce-scatter's offset, read
+     their operand where it lies (d83cebd3: each collective compared at its own in-place offset).
+   - Open: the premultiplier (ncclAvg on a floating type, a PreMulSum scalar). metal_premultiply writes the scaled
+     operand into a source generation before any SEND, a whole pass and a second operand. Its form: SENDs read the
+     operand where it lies, and zelloth scales each contribution it reads that is an original operand (its own, a
+     peer's direct SEND), not a sum already scaled. No demonstration measures it yet: bandwidth.json reduces by max
+     alone, so the measurement needs an all-reduce average beside its max.
+   - Open: operand_copies' remaining forms, a copy within the region where a send view overlaps its result without
+     being it (`overlap && !same`), and a scratch's copy.
 
 ## zinth: a call's tables linked to the bridge (item 6)
 

@@ -155,8 +155,10 @@ def prepare_source(gm, example_inputs):
     # Functionalization receives every tensor as an operand, including
     # weights and prebound outputs. It can then lower out= operations
     # while retaining their writes to those exact destinations.
-    from .compilation import functionalize_source, lift_attributes
-    lifted, operands = lift_attributes(gm, example_inputs)
+    from .compilation import functionalize_source, lift_state
+    # every attribute bound where it lies: a region tensor by its producer (any MPS tensor: torch's MPS allocator is
+    # the region's; torch_mesh.empty), never imported into the region by a copy
+    lifted, operands = lift_state(gm, example_inputs)
     described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
     mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
     from .operand import TensorView

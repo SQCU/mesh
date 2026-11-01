@@ -113,7 +113,7 @@ Needs storage identity, element offset and element bits. All are in torch or num
 4. _stream.mm `prepare_chain`/append 1393-1405: per-step offsets = base + t×pitch
 5. _stream.mm `tensorPages` 677-683: storage().data_ptr().get(), or the MTLBuffer
 6. _stream.mm `address` 990-1000: contents + storage_offset×element_size, checked with ncclMeshMemBuffer
-7. _stream.mm `import_attributes` 1037-1039: raw from/to pointers for the import copy
+7. _stream.mm `import_attributes` 1037-1039: raw from/to pointers for the import copy (deleted 2026-11-01 with the importer)
 8. _stream.mm `fused_writes_impl`/framed 1531-1538: byte offset bounds checked against storage nbytes
 9. _stream.mm `workspace` 131-139: scratch MTLBuffer handed to the library
 10. backend.py `_binding` 87-94: MPS untyped_storage().data_ptr() used as the MTLBuffer id, plus byte offset; CPU data_ptr()
@@ -147,7 +147,7 @@ Needs shape, strides, element offset and element bits. All are known at declarat
 15. _stream.mm `Commands` ctor 733-741: {buffer, offset×element_size, count×element_size} plus reaches
 16. _stream.mm `ScheduleBinding::host` 1609-1616
 17. _stream.mm `TensorLayout` "spans" 1821-1825
-18. _stream.mm `import_attributes` 1016-1026, 1045-1052
+18. _stream.mm `import_attributes` 1016-1026, 1045-1052 (deleted 2026-11-01 with the importer)
 19. _stream.mm `ViewWrites::prepare` 1671-1686
 20. _stream.mm `fused_allocate_ring` 1241-1249: slot stride in bytes
 21. _stream.mm `prepare_chain` 1371-1381: stride in bytes

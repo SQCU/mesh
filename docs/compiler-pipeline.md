@@ -337,9 +337,9 @@ weight types are independent. Backward writes each gradient in its declared type
 without whole-operand casts. API layout requirements come from the matrix
 declaration in `metal-apis.json`; the shader's stride constants come from the
 placed views, not the earlier traced storage. Output placement uses the same
-`kernel.declare` interface. Schedule tensors are built outside numerical tracing
-and enter the ordinary attribute importer; tracing their construction had left
-CPU copies in the graph. A change in support is a new compiled operand, not a
+`kernel.declare` interface. Schedule tensors are built outside numerical tracing,
+as region tensors written in place (sparse.py `_product`), read by the kernel where
+they lie; tracing their construction had left CPU copies in the graph. A change in support is a new compiled operand, not a
 device-side mask discovery step. There is no separate sparse eager executor.
 
 The native frontend carries the same kind of producer facts explicitly.

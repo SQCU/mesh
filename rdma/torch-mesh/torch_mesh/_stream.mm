@@ -1028,62 +1028,6 @@ static uint64_t address(const at::Tensor &t) {
   return (uint64_t)(uintptr_t)at;
 }
 
-// Import frontend attributes once, before recording the function.
-// Existing bridge operands retain their pages. Aliases of foreign storage
-// share one region allocation and retain their typed views of the same bytes.
-static std::pair<std::vector<at::Tensor>,std::vector<std::pair<at::Tensor,at::Tensor>>> import_attributes(const std::vector<at::Tensor> &values) {
-  struct Import {
-    std::vector<size_t> members;
-    std::vector<std::pair<size_t,size_t>> spans;
-    size_t low=std::numeric_limits<size_t>::max(),high=0,alignment=1;
-  };
-  std::map<const c10::StorageImpl *,Import> groups;
-  std::vector<at::Tensor> result=values;
-  std::vector<std::pair<at::Tensor,at::Tensor>> copies;
-  for(size_t i=0;i<values.size();i++) {
-    const auto &value=values[i];
-    if(address(value))continue;
-    TORCH_CHECK(value.is_cpu()||value.is_mps(),"attribute import requires declared CPU or MPS storage");
-    auto &group=groups[value.storage().unsafeGetStorageImpl()];group.members.push_back(i);
-    const size_t width=value.element_size();group.alignment=std::lcm(group.alignment,width);
-    NSData *data=[TensorLayout::tensor(value).value orderedSpans];
-    const auto *spans=(const MetalTensorSpan *)data.bytes;
-    for(size_t j=0;j<data.length/sizeof *spans;j++) {
-      const size_t first=spans[j].offset*width,last=first+spans[j].count*width;
-      group.spans.emplace_back(first,last);group.low=std::min(group.low,first);group.high=std::max(group.high,last);
-    }
-  }
-  for(auto &[key,group]:groups) {
-    const auto &source=values[group.members.front()];
-    const size_t low=group.spans.empty()?0:group.low/group.alignment*group.alignment;
-    const size_t bytes=group.spans.empty()?0:(group.high-low+group.alignment-1)/group.alignment*group.alignment;
-    at::Tensor storage=region_empty({(int64_t)bytes},at::empty({0},at::TensorOptions().dtype(at::kByte)),source.is_mps());
-    // the source storage's bytes as a tensor over it, its spans' merged runs copied by torch on its device (a private
-    // MPS buffer has no host view; no address is read)
-    const at::Tensor from=at::empty({0},source.options().dtype(at::kByte)).set_(source.storage(),0,{(int64_t)source.storage().nbytes()},{1});
-    std::sort(group.spans.begin(),group.spans.end());
-    size_t first=0,last=0;
-    const auto copy=[&](size_t a,size_t b){if(b>a) {
-      auto input=from.narrow(0,(int64_t)a,(int64_t)(b-a));
-      auto output=storage.narrow(0,(int64_t)(a-low),(int64_t)(b-a));
-      if(source.is_cpu())memcpy(output.data_ptr(),input.data_ptr(),b-a);
-      else copies.emplace_back(std::move(input),std::move(output));
-    }};
-    for(const auto &span:group.spans) {
-      if(span.first<=last){last=std::max(last,span.second);continue;}
-      copy(first,last);
-      first=span.first;last=span.second;
-    }
-    copy(first,last);
-    for(size_t i:group.members) {
-      const auto &value=values[i];const size_t width=value.element_size();
-      const size_t offset=storage.storage_offset()+(value.numel()?value.storage_offset()*width-low:0);
-      result[i]=storage.view(value.scalar_type()).as_strided(value.sizes(),value.strides(),offset/width);
-    }
-  }
-  return {std::move(result),std::move(copies)};
-}
-
 // Fused crossings bind the same immutable communicator Call declarations.
 // GPU bindings name physical channels, including every parallel cable and
 // compiled relay path. Producers publish source ranges; consumers observe
@@ -1847,6 +1791,15 @@ struct Drained {
 };
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  // An Objective-C exception from any binding reaches Python as a ValueError naming its reason. Without it, pybind
+  // reports a binding with no @catch of its own as "Caught an unknown exception!" (the chain's first distribute on
+  // main, 2026-11-01, TensorLayout select_runs), its cause gone. A C++ exception leaves this translator for pybind's own.
+  pybind11::register_exception_translator([](std::exception_ptr raised) {
+    @try { if (raised) std::rethrow_exception(raised); }
+    @catch (NSException *error) {
+      PyErr_SetString(PyExc_ValueError, [NSString stringWithFormat:@"%@: %@", error.name, error.reason].UTF8String);
+    }
+  });
   module.def("scalar_read",&scalar_read,pybind11::arg("source"),pybind11::arg("source_type"),
     pybind11::arg("output_type"),pybind11::arg("offsets"),pybind11::arg("bits")=0,
     pybind11::arg("signed")=true,pybind11::arg("scales")=std::nullopt,pybind11::arg("zeros")=std::nullopt,
@@ -1894,7 +1847,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       result["accepted"]=accepted;result["conflicts"]=conflicts;return std::move(result);
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   },pybind11::call_guard<Drained>());
-  module.def("import_attributes",&import_attributes, pybind11::call_guard<Drained>());
   module.def("page_backing",[](const pybind11::object &value) {
     TensorOperand operand(value);
     return std::make_tuple((uint64_t)(uintptr_t)operand.pages.buffer.contents,

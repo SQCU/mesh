@@ -928,10 +928,9 @@ def trace(function, *arguments, parameters=(), source_scope=None, route_scope=No
 
 class Execution:
     """Configuration which appends every numerical span and crossing to one native function."""
-    def __init__(self, steps, output=None, pages=(), initializations=(), inputs=()):
+    def __init__(self, steps, output=None, pages=(), inputs=()):
         from . import _stream
-        self.steps, self.output, self.pages = tuple(steps), output, tuple(pages)
-        self.initializations, self.inputs = tuple(initializations), tuple(inputs)
+        self.steps, self.output, self.pages, self.inputs = tuple(steps), output, tuple(pages), tuple(inputs)
         self._initialized = False
         self.configuration = None
         self.executions = _stream.Executions(output)
@@ -939,20 +938,14 @@ class Execution:
         self.completion = self.executions.completion
 
     def append(self, schedule):
-        # This is declaration-time state: only the first prepared invocation
-        # contains imports. Runtime submits the already recorded schedules.
-        steps = self.steps
+        # declaration-time state: the first prepared invocation declares the inputs; runtime submits the recorded
+        # schedules
         if not self._initialized:
-            schedule.inputs([*self.inputs, *(source for source, _ in self.initializations)])
-            from .layout import copy_declarations
-            imports = tuple(command for source, destination in self.initializations
-                            for command in copy_declarations(source, destination))
-            if imports:
-                steps = (dict(commands=imports, output=None, pages=()), *steps)
+            schedule.inputs(list(self.inputs))
         from .page_effects import prepare
         from .compilation import bind
         with bind(self.configuration):
-            prepare(steps, schedule, self.output)
+            prepare(self.steps, schedule, self.output)
         self._initialized = True
 
     def realize(self, repetitions=1):
@@ -964,8 +957,8 @@ class Execution:
             self.executions.add(schedule)
 
 
-def execution_sequence(steps, output=None, pages=(), initializations=(), inputs=()):
-    return Execution(steps, output, pages, initializations, inputs)
+def execution_sequence(steps, output=None, pages=(), inputs=()):
+    return Execution(steps, output, pages, inputs)
 
 
 _BOUND = {'all_to_all_single', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange', 'select_reduce',
@@ -1208,7 +1201,6 @@ class LoweredGraph:
             implementation_assignment=self.prepared['implementation_assignment'])
         from .compilation import layout_choices
         self.layout_choices = layout_choices()
-        self.execution.initializations = tuple(graph.meta.get('mesh_initializations', ()))
         from torch.utils._pytree import tree_leaves
         from .operand import TensorView
         self.execution.inputs = tuple(value for value in tree_leaves(ownership['arguments'])
@@ -1529,8 +1521,8 @@ class Function:
         self.fold_choices = graph.meta.get('mesh_fold_choices', ())
         from torch.distributed.tensor import DTensor
         from torch.utils._pytree import tree_leaves
-        from .compilation import lift_attributes, bind
-        graph, arguments = lift_attributes(graph, self.arguments)
+        from .compilation import lift_state, bind
+        graph, arguments = lift_state(graph, self.arguments)
         self.source_graph = graph
         self.result_types = graph.meta.get('mesh_result_types', self.result_types)
         ownership = self.ownership

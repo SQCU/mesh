@@ -20,7 +20,7 @@ Later the same night:
 - the pointer lowering (design/pointer-lowering-2026-10-28.md);
 - the mesh backend registered on import (04dac936);
 - one placement proposal on every member (c3451281);
-- device-copied attribute import (bb4c7b34).
+- device-copied attribute import (bb4c7b34). Deleted 2026-11-01: attributes are bound where they lie.
 - Across-files 1, in part (33504a46): `_stream.mm`'s `_c10d_functional` MPS kernels, a run-time copy of
   declarations.py's op mapping, are deleted. A sweep found no hourly workload reaching them on real tensors.
   `ProcessGroupMesh`'s per-call methods, `_issue` and `submit` (with R17's drain) stay, because they carry
