@@ -1135,6 +1135,33 @@ static BOOL TensorHasGeneral(id expression) {
 // divided by the component count. nil where the components are not each at the first's next address, a factor or the
 // origin is not a whole number of elements, or a coordinate is a piecewise term; elements: then composes the relation.
 static MetalTensorLayout *TensorClosedElements(MetalTensorLayout *layout,NSUInteger count,NSArray *shape) {
+    if(layout.indexShape.count==1&&![layout.shape isEqual:layout.indexShape]) {
+        // One index axis (placement's united pages: a mapped run of bytes reshaped into pages): the components'
+        // adjacency and the elements' addresses are that axis's addresses at each position's coordinate, read as
+        // integers. Added by the LSTM demonstration session: the general form below sliced the 32768-entry map once
+        // per component, 7.25 s of a one-step LSTM lowering on the workstation for one call (2026-11-01).
+        NSData *map=layout.maps[@0];const NSInteger *values=map.bytes,step=[layout.strides[0] integerValue];
+        id coordinate=layout.coordinates[0];const NSUInteger n=layout.count/count;
+        NSMutableData *firsts=[NSMutableData dataWithLength:n*sizeof(NSInteger)];NSInteger *out=firsts.mutableBytes;
+        for(NSUInteger x=0;x<n;x++) {
+            NSInteger at=0;
+            for(NSUInteger k=0;k<count;k++) {
+                const NSInteger digit=TensorEvaluate(coordinate,x*count+k),address=values?values[digit]:digit*step;
+                if(!k)at=address;
+                else if(address!=at+(NSInteger)k)return nil;
+            }
+            out[x]=at;
+        }
+        const NSInteger first=out[0],origin=layout.offset+first;
+        if(origin%(NSInteger)count)return nil;
+        for(NSUInteger x=0;x<n;x++) {
+            if((out[x]-first)%(NSInteger)count)return nil;
+            out[x]=(out[x]-first)/(NSInteger)count;
+        }
+        MetalTensorLayout *flat=[MetalTensorLayout shape:@[@(n)] strides:@[@(step/(NSInteger)count)] offset:origin/(NSInteger)count
+                                                    maps:@{@0:firsts} indices:nil];
+        return [flat reshape:shape];
+    }
     MetalTensorLayout *factors=layout.factored&&[layout.indexShape.lastObject unsignedIntegerValue]==count?[layout reshape:layout.indexShape]:layout;
     const NSUInteger last=factors.shape.count-1;
     MetalTensorLayout *base=[factors element:last at:0];
