@@ -475,6 +475,14 @@ def _scatter_spans(tensor, dim, sizes, rank, source, group):
             execution_sequence((prepared,), result).append(schedule)
         schedule.finish()
         schedule.enqueue()
+        # TEST (not for main): the scatter completed before anything after it is prepared or run
+        import os, sys, time
+        if os.environ.get('MESH_SCATTER_COMPLETE'):
+            done, began = schedule.completion(), time.time()
+            while _stream.completion_observe(done) is None and time.time() - began < 8:
+                time.sleep(0.0005)
+            print(f'scatter-test: complete={_stream.completion_observe(done) is not None} after {time.time() - began:.3f} s',
+                  file=sys.stderr, flush=True)
     return result
 
 
