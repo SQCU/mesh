@@ -89,6 +89,15 @@ def _empty(shape, like, group=None, dtype=None):
     return empty(tuple(shape), dtype=dtype or like.dtype, device=like.device.type)
 
 
+# Restored (ebd8bd24 removed this definition and kept its two uses, at RaggedShard's local view and _scatter_spans:
+# the chain service's weight scatter failed with NameError on main). What it says must stay: a contiguous tensor
+# in the region is read where it lies.
+def _in_region(y):
+    """Whether contiguous `y` lies in the region already (torch_mesh.address), so a collective reads it where it lies."""
+    from . import address
+    return y.is_contiguous() and address(y) != 0
+
+
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, repeats: int = 1) -> torch.Tensor:
     """A graph declaration; the compiler binds each multi-rank occurrence."""
