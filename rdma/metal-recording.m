@@ -1980,6 +1980,8 @@ static void MetalScheduleEmit(struct MetalSchedule *root,NSArray *batch) {
 
 static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
     NSArray *nodes=[[root->work copy] autorelease];[root->work removeAllObjects];
+    if(getenv("MESH_PUBLISH_TRACE")){NSUInteger declared=0;for(MetalWork *w in nodes)declared+=w->declaredCommand!=0;
+      fprintf(stderr,"publish-trace flush %p: %lu works, %lu declared\n",(void *)root,(unsigned long)nodes.count,(unsigned long)declared);}
     if(!nodes.count)return;
     if(root->declarations) {
         // One shared capture/residency/ICB storage for all transport commands,
@@ -2143,6 +2145,8 @@ static void MetalScheduleOrder(struct MetalSchedule *root) {
         if(s->commands)[remaining addIndex:s->ordinal];else [done addIndex:s->ordinal];
     }
     root->firstSubmission=root->lastSubmission=NULL;
+    if(getenv("MESH_PUBLISH_TRACE")){NSUInteger n=0;for(struct MetalSchedule *q=root;q;q=q->next)n++;
+      fprintf(stderr,"publish-trace order %p: %lu parts, %lu with commands\n",(void *)root,(unsigned long)n,(unsigned long)remaining.count);}
     while(remaining.count) {
         __block NSUInteger selected=NSNotFound,cost=NSNotFound;
         [remaining enumerateIndexesUsingBlock:^(NSUInteger i,BOOL *stop){
@@ -2308,6 +2312,8 @@ void MetalScheduleEnqueue(struct MetalSchedule *s) {
         // before commit returns. Read the compiled successor before commit.
         struct MetalSchedule *next=s->submit;
         atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed);
+        if(getenv("MESH_PUBLISH_TRACE"))fprintf(stderr,"publish-trace enqueue %p part %lu: %lu commands, %lu waits\n",(void *)root,
+            (unsigned long)s->ordinal,(unsigned long)s->commands,(unsigned long)(s->waits.length/sizeof(struct MetalScheduleWait)));
         const struct MetalScheduleWait *waits=s->waits.bytes;
         for(NSUInteger i=0;i<s->waits.length/sizeof *waits;i++)[s->queue waitForEvent:waits[i].event value:waits[i].value];
         [s->queue commit:&s->command count:1 options:s->options];
