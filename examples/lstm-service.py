@@ -91,7 +91,18 @@ def main(config=None):
     for function in initial:
         function.declare(group)
     ordered = [*initial, *functions]
-    groups = [calls for function in ordered for calls in function.groups.get(group.group_name, [])]
+    # Each function's groups in their order; consecutive replays of one single-group declaration as (calls, n), which
+    # the plan repeats without expanding their calls (torch_mesh.plan). At one step a replay the flat list was 4096
+    # copies of the step's gather, and planning them held every rank for most of a minute (2026-11-01).
+    groups = []
+    for function in ordered:
+        own = function.groups.get(group.group_name, [])
+        if len(own) == 1 and groups and isinstance(groups[-1], tuple) and groups[-1][0] is own[0]:
+            groups[-1] = (own[0], groups[-1][1] + 1)
+        elif len(own) == 1:
+            groups.append((own[0], 1))
+        else:
+            groups.extend(own)
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
