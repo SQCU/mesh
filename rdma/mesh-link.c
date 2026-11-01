@@ -870,6 +870,7 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
     atomic_store_explicit(&link->bandwidth,port->bandwidth,memory_order_relaxed);
     atomic_fetch_add_explicit(&link->pairings,1,memory_order_relaxed);
     link_set(port,port->peer,MESH_PAIRED,0);
+    mesh_say("bridge","link %u (%s): paired toward node %u",port->index,port->name,port->peer);
     /* a port newly paired is sent every record the map holds, this node's first */
     for(uint64_t i=0;port->greeted && i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node!=M->node)
       port_say(port,(struct message){.kind=RECORD},mesh_records(M)+i,sizeof(struct mesh_record));
@@ -1621,6 +1622,7 @@ static void lanes_flush(struct port *port,uint64_t until){
 static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
   const int held=port->link.job?0:guard_raise(port);
+  mesh_say("bridge","link %u (%s): child leaving (asked %d), its guard %s",port->index,port->name,asked,held>0?"raised":"none");
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
   atomic_store_explicit(&port->closing,1,memory_order_release);
@@ -1632,6 +1634,7 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
     struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
     nanosleep(&rest,NULL);
   }
+  mesh_say("bridge","link %u (%s): child's windows ended",port->index,port->name);
   if(held>0)lanes_flush(port,clock_ns()+MESH_PLATFORM_NS);
   exit(0);
 }
@@ -1996,8 +1999,10 @@ int main(int argc,char **argv){
      once IOKit's registry is quiet (no termination in its course: XNU's waitForState, its deadline MESH_PLATFORM_NS),
      else as they stand at the bound */
   terminations_watch(1);
+  mesh_say("bridge","start: region open; IOKit's registry awaited quiet");
   mach_timespec_t quiet={(unsigned)(MESH_PLATFORM_NS/1000000000u),(clock_res_t)(MESH_PLATFORM_NS%1000000000u)};
   IOKitWaitQuiet(kIOMainPortDefault,&quiet);
+  mesh_say("bridge","start: registry quiet; ports found next");
   ports_find();
   uint64_t liveness=0;
   while(!stop){
@@ -2102,6 +2107,7 @@ int main(int argc,char **argv){
      MESH_PLATFORM_NS more.  One the kernel holds in its exit past that stays named in the region's holder table (struct
      mesh_holder: its pid, device and start), so no later launch's child opens its device while it lives
      (child_elsewhere), and it is named here.  Each exit heard on a queue of the children's exits alone (EVFILT_PROC) */
+  mesh_say("bridge","stop: windows held to their end; children asked to end");
   for(uint32_t p=0;p<port_count;p++)child_send(ports+p,(struct child_message){.kind=CHILD_END});
   const int exits=kqueue();
   for(uint32_t p=0;exits>=0 && p<port_count;p++)if(ports[p].child){
@@ -2113,7 +2119,7 @@ int main(int argc,char **argv){
     uint32_t left=0;
     for(uint32_t p=0;p<port_count;p++)if(ports[p].child){
       if(!waitpid(ports[p].child,NULL,WNOHANG))left++;
-      else ports[p].child=0;
+      else {mesh_say("bridge","stop: link %u (%s): child %d reaped",ports[p].index,ports[p].name,(int)ports[p].child);ports[p].child=0;}
     }
     const uint64_t at=clock_ns();
     if(!left)break;
