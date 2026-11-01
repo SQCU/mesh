@@ -83,23 +83,13 @@ def prepare_source(gm, example_inputs):
         graph = module.graph
         order = {n: i for i, n in enumerate(graph.nodes)}
         products = [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear.default]
+        from mesh_graph import independent
         above = {}
-
-        def ancestors(n):
-            if n not in above:
-                seen, stack = set(), list(n.all_input_nodes)
-                while stack:
-                    m = stack.pop()
-                    if m not in seen:
-                        seen.add(m)
-                        stack.extend(m.all_input_nodes)
-                above[n] = seen
-            return above[n]
         i = 0
         while i < len(products):
             group = [products[i]]
             for m in products[i + 1:compiler_operands()['BUFFER_BINDINGS'] // 3 + i]:
-                if any(g in ancestors(m) for g in group) or any(order[u] < order[m] for g in group for u in g.users):
+                if not independent(lambda n: n.all_input_nodes, lambda n: n.users, order, group, m, above):
                     break
                 group.append(m)
             if len(group) > 1:

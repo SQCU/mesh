@@ -245,3 +245,25 @@ def cycles(graph):
     for v in graph:
         visit(v, [])
     return found
+
+
+def ancestors(inputs, value, known):
+    """Every vertex ``value`` reads, directly or through others: ``inputs(v)`` gives v's direct inputs, and ``known``
+    (a dict) keeps each answer for later queries of the same graph."""
+    if value not in known:
+        seen, stack = set(), list(inputs(value))
+        while stack:
+            v = stack.pop()
+            if v not in seen:
+                seen.add(v)
+                stack.extend(inputs(v))
+        known[value] = seen
+    return known[value]
+
+
+def independent(inputs, users, order, group, value, known):
+    """Whether ``value`` can join ``group`` in one dispatch at ``value``'s place in ``order``: it reads no member's
+    result, directly or through others, and no member's result is used before it (``users(v)`` gives v's direct
+    users)."""
+    return (not any(member in ancestors(inputs, value, known) for member in group)
+            and not any(order[u] < order[value] for member in group for u in users(member)))
