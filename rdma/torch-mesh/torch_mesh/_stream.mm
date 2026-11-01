@@ -1,3 +1,4 @@
+#include <spawn.h>
 #include "mesh-write-compiler.h"
 #include "mesh-plan.h"
 #include "layout.h"
@@ -1581,6 +1582,14 @@ static void prepare_chain(int64_t index, int64_t kernel, int64_t input_kernel, c
 }
 
 static void compile_chain(PreparedChain &chain) {
+  if (const char *dir = getenv("MESH_RECORD_SAMPLE")) {
+    char pid[16], file[512];
+    snprintf(pid, sizeof pid, "%d", (int)getpid()); snprintf(file, sizeof file, "%s/record-%d.txt", dir, (int)getpid());
+    char *argv[] = {(char *)"sample", pid, (char *)"2", (char *)"-file", file, nullptr};
+    pid_t sampler = 0;
+    posix_spawn(&sampler, "/usr/bin/sample", nullptr, nullptr, argv, nullptr);
+    usleep(200000);
+  }
   chain.schedule=schedule_after_inputs();
   MetalSchedule *schedule=chain.schedule.get();
   Dispatch &d = chain.dispatch;

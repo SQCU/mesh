@@ -210,7 +210,7 @@ class Observations:
 
     def __init__(self, declaration=None):
         self.submitted, self.records = [], []
-        self.declaration = copy.deepcopy(declaration or {})
+        self.declaration = declaration or {}  # the preparation's own record, which nothing writes after (configuration.bind)
         # The declaration's line (megabytes: its graphs and layouts) is written at the first report, after the
         # program it declares has started, never between a prepared program and its start: there it took 1 to 6 s
         # of a pipe's time a rank (chain service, 2026-10-31), longer than a peer's GPU wait is bounded, so the ranks
