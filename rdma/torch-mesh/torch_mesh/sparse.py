@@ -93,11 +93,12 @@ def _product(a, b, domains, out):
     geometry = tuple(configuration['MATRIX_' + key] for key in ('ROWS', 'COLUMNS', 'INNER')) + (
         configuration['MATRIX_ROW_GROUPS'] * configuration['MATRIX_COLUMN_GROUPS'],)
     records, pieces, groups = product_schedule(domains, geometry)
-    # Schedule construction is preparation. Capture the completed values as
-    # attributes; tracing torch.tensor itself would add per-call CPU copies.
+    # Schedule construction is preparation, outside tracing (traced, torch.tensor would add per-call CPU copies). Its
+    # tables are made in the region and written there, read by the kernel where they lie: no importer copies them in.
+    from . import empty
     with disable_proxy_modes_tracing(), unset_fake_temporarily():
-        tiles = torch.tensor(records, dtype=torch.int32).reshape(-1, 4)
-        spans = torch.tensor(pieces, dtype=torch.int32).reshape(-1, 2)
+        tiles, spans = empty((len(records), 4), dtype=torch.int32, device='cpu'), empty((len(pieces), 2), dtype=torch.int32, device='cpu')
+        tiles.numpy()[...], spans.numpy()[...] = records, pieces
     result = torch.empty((m, n), dtype=out, device=a.device)
     rm, cn, inner, _ = geometry
     output_tiles = [tile for tile in records[::2] if tile[2] and tile[3]]

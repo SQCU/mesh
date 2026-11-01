@@ -1101,14 +1101,14 @@ The compiler lifts tensor attributes before splitting a function around its
 collectives. Every numerical span then receives the same bound operands. This
 preserves aliases and state shared across those spans.
 
-Attributes already in bridge pages keep their storage. Foreign attributes are
-imported once during preparation. Aliases of one source allocation share one
-destination allocation, with their shapes, strides and relative byte positions
-intact. Only referenced source ranges are copied. Foreign MPS setup work is
-completed before that host copy reads its initial values; page-backed attributes
-need no import wait or copy. Neither action is part of recorded invocation.
+Every attribute is bound where it lies: a region tensor made by its producer
+(any MPS tensor, torch's MPS allocator being the region's; torch_mesh.empty for
+CPU state). Nothing imports an attribute into the region by a copy: an attribute
+outside it is its producer's defect, raised where the library binds it. (The
+importer that copied foreign attributes once a preparation, with its
+initialization copies in the first invocation, was deleted 2026-11-01.)
 
-Imported contents remain ordinary data. Compiled work can read and write them
+Attribute contents remain ordinary data. Compiled work can read and write them
 through its declared page operands. Lifting an attribute does not turn its
 contents, such as indices, into constant compiler metadata.
 
@@ -1134,7 +1134,7 @@ result type without separate casts. Affine stride constants come from the shared
 layout declaration after placement. The generic kernel binder emits these along
 with index expressions for every operand, so a sparse consumer no longer forces
 its producer to retain the strides seen during tracing. Schedule construction
-stays outside the numerical graph; its tables use the ordinary attribute importer.
+stays outside the numerical graph; its tables are region tensors written at preparation.
 
 Preparation on 2026-10-28 compiled sparse products and both gradients with mixed
 types, changed input strides, mapped destinations and partial sparse tiles. Each

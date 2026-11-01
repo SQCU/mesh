@@ -165,33 +165,6 @@ def lift_state(module, arguments):
     return lifted, [*arguments, *values]
 
 
-def lift_attributes(module, arguments):
-    """Bind source state to page operands before splitting numerical spans."""
-    import torch
-    lifted, operands = lift_state(module, arguments)
-    from torch.distributed.tensor import DTensor
-    values = operands[len(arguments):]
-    sources = [value._local_tensor if isinstance(value, DTensor) else value for value in values]
-    imported, copies = _stream.import_attributes(sources)
-    # Foreign GPU storage remains an explicit initializer operand until its
-    # prepared copy completes. CPU initializers have already been copied during
-    # preparation. Every numerical use names the function's imported pages;
-    # the original attribute remains its source for other function declarations.
-    lifted.meta['mesh_initializations'] = (*lifted.meta.get('mesh_initializations', ()), *copies)
-    bound = []
-    with torch.no_grad():
-        for value, source, made in zip(values, sources, imported, strict=True):
-            if made is source:
-                bound.append(value)
-                continue
-            made.requires_grad_(source.requires_grad)
-            if isinstance(value, DTensor):
-                from .partition import _wrap
-                made = _wrap(made, value._spec, value.requires_grad)
-            bound.append(made)
-    return lifted, [*operands[:len(arguments)], *bound]
-
-
 def source_expression(function, *arguments):
     """Capture a value declaration and its exact tensor-state producer edges.
 
