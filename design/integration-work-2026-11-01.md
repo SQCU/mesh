@@ -145,6 +145,11 @@ points rather than the enclosing kernel's boundary. Shared operand loads and
 stores retain the corresponding coherency qualifiers, including vector uses.
 The CPU declaration now supplies its source before resource binding; binding
 consumes the chosen recipe without choosing another numerical body.
+CPU source-local cells now use the same phase and contribution indices as
+Metal cells. Uniform observation thresholds lower to constants for either
+backend. GPU cells declare lane, SIMD-group or threadgroup participants;
+source-local effects do not add a whole-threadgroup barrier to a smaller scope.
+Generated CPU and Metal site source compiles without numerical execution.
 The bridge, collective/CoreML libraries, CFFI binding, PyTorch extension and
 generated Metal kernels build with these shared changes. Native recipe and
 provider consumers remain in progress; this build did not execute payloads.

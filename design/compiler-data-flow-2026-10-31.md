@@ -95,6 +95,15 @@ one set of required visibility fences; they do not cause repeated source
 wrapping or one numerical dispatch per link. Independent publication prefixes
 retain their own completion domains.
 
+A retained function may declare source-local cells inside its numerical loops.
+Those cells use the same page relations as the entry. CPU and Metal source
+emission places each cell's effects at that cell, using its supplied index.
+GPU participant scope is explicit: one lane, one SIMD group, or one threadgroup.
+Only those participants take part in its required visibility operation. Smaller
+subsets can declare individual lane cells with exact accesses. A CPU cell is
+an iteration owned by its native invocation. An opaque ANE request declares its
+whole invocation's entry and result effects according to its provider contract.
+
 The native declaration has two preparation steps. `ncclMeshCommLower` selects
 one occurrence, lays its transfers, fixes channel counters and predecessor
 links, and returns typed page effects. The enclosing compiler uses those

@@ -108,7 +108,7 @@ MetalPageAccess *MetalPageImportAccess(isl_ctx *context,NSDictionary *declaratio
 - (void)dealloc { [buffer release];[groups release];[bytes release];[super dealloc]; }
 @end
 @implementation MetalPageCommand
-@synthesize coherentAccesses, argumentNames;
+@synthesize coherentAccesses, argumentNames, frame;
 + (instancetype)order:(NSUInteger)o groups:(NSUInteger)g backend:(enum MetalPageBackend)b source:(NSString *)s
     function:(NSString *)f grid:(MTLSize)d metadataSlot:(NSUInteger)slot accesses:(NSArray<MetalPageAccess *> *)a {
     MetalPageCommand *v=[[[self alloc] init] autorelease];v->order=o;v->groups=g;v->backend=b;
@@ -116,7 +116,7 @@ MetalPageAccess *MetalPageImportAccess(isl_ctx *context,NSDictionary *declaratio
 }
 - (void)dealloc { [source release];[function release];[accesses release];[argumentNames release];[sites release];[super dealloc]; }
 @end
-void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger cells,BOOL collective,
+void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger cells,enum MetalPageSiteScope scope,
     NSArray<MetalPageAccess *> *accesses) {
     NSMutableArray *joined=[command->accesses mutableCopy];
     for(MetalPageAccess *access in accesses) {
@@ -131,7 +131,7 @@ void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger ce
     }
     [command->accesses release];command->accesses=joined;
     NSArray *sites=[(command->sites?:@[]) arrayByAddingObject:@{@"name":name,@"first":@(command->groups),
-        @"count":@(cells),@"collective":@(collective)}];
+        @"count":@(cells),@"scope":@(scope)}];
     [command->sites release];command->sites=[sites copy];command->groups+=cells;
 }
 @implementation MetalPageTransfer
@@ -475,6 +475,7 @@ static NSString *PageMetalSource(MetalPageCommand *command,NSString *helpers,NSS
         NSString *parameters=[source substringWithRange:NSMakeRange(opening+1,end-opening-1)];
         NSMutableString *arguments=[[parameters mutableCopy] autorelease],*aliases=[NSMutableString string];
         for(NSArray *item in @[@[@"thread_index_in_threadgroup",@"mesh_lane",@"uint"],@[@"threadgroup_position_in_grid",@"mesh_group",@"uint3"]]) {
+            if([before rangeOfString:item[1]].location==NSNotFound&&[after rangeOfString:item[1]].location==NSNotFound)continue;
             NSTextCheckingResult *found=[PageRegex([NSString stringWithFormat:@"\\b(uint[123]?|ushort[123]?)\\s+(\\w+)\\s*\\[\\[%@\\]\\]",item[0]])
                 firstMatchInString:parameters options:0 range:NSMakeRange(0,parameters.length)];
             if(found) {
@@ -522,38 +523,50 @@ static NSString *PageMetalSource(MetalPageCommand *command,NSString *helpers,NSS
     return [NSString stringWithFormat:@"#pragma METAL internals : enable\n#undef MESH_OBSERVED_BINDINGS\n#define MESH_OBSERVED_BINDINGS %lluul\n#undef MESH_PUBLISHED_BINDINGS\n#define MESH_PUBLISHED_BINDINGS %lluul\n%@",(unsigned long long)reads,(unsigned long long)writes,source];
 }
 
+/* One site relation and body for either target. The backend supplies only its
+   participant visibility operation and address-space spelling. Host cells are
+   source iterations within one native invocation, not a task scheduler. */
+static NSString *PageSites(MetalPageCommand *command,NSMutableString *declarations,
+    NSArray<NSString *> *before,NSArray<NSString *> *after) {
+    if(!command->sites.count)return @"";
+    const BOOL gpu=command->backend==MetalPageMetal;
+    NSString *pointer=gpu?@"device unsigned char *":@"unsigned char *";
+    NSMutableString *source=[NSMutableString stringWithString:gpu?MetalPageSitesPrelude():@MESH_PAGE_HOST_SITES_SOURCE];
+    NSUInteger phase=0;for(NSDictionary *site in command->sites) {phase++;
+        NSString *name=site[@"name"];
+        [source appendFormat:@"MESH_PAGE_SITE(%@)\ntemplate<> struct mesh_page_site<mesh_page_site_%@> {static inline void enter(%@,unsigned long,unsigned int); static inline void leave(%@,unsigned long,unsigned int);};\n",name,name,pointer,pointer];
+        for(NSString *side in @[@"enter",@"leave"]) {
+            NSString *body=[side isEqual:@"enter"]?before[phase]:after[phase];
+            [declarations appendFormat:@"inline void mesh_page_site<mesh_page_site_%@>::%@(%@mesh_effects, unsigned long cell, unsigned int lane) { const unsigned long mesh_effect_group=%@ul+cell;\n",name,side,pointer,site[@"first"]];
+            enum MetalPageSiteScope scope=(enum MetalPageSiteScope)[site[@"scope"] unsignedIntegerValue];
+            NSString *visibility=gpu?@"atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));":@"";
+            NSString *barrier=scope==MetalPageSiteSimdgroup?@"simdgroup_barrier(mem_flags::mem_device);":@"threadgroup_barrier(mem_flags::mem_device);";
+            if(!body.length)[declarations appendString:@"(void)mesh_effects;(void)mesh_effect_group;(void)lane;\n"];
+            else if(gpu&&scope!=MetalPageSiteLane) {
+                if([side isEqual:@"enter"])[declarations appendFormat:@"if(lane==0){%@}%@%@\n",body,barrier,visibility];
+                else [declarations appendFormat:@"%@if(lane==0){%@%@}\n",barrier,visibility,body];
+            } else [declarations appendFormat:@"(void)lane;%@%@\n",visibility,body];
+            [declarations appendString:@"}\n"];
+        }
+    }
+    return source;
+}
+
 NSString *MetalPageEffectsCompose(MetalPageCommand *command,NSString *declarations,NSArray<NSString *> *before,NSArray<NSString *> *after,
     NSIndexSet *observed,NSIndexSet *published) {
     NSString *enter=before[0],*leave=after[0];
+    NSMutableString *siteDeclarations=[[declarations mutableCopy] autorelease];
+    NSString *siteSource=PageSites(command,siteDeclarations,before,after);
     if(command->backend==MetalPageMetal) {
-        NSMutableString *siteSource=[NSMutableString string],*siteDeclarations=[declarations mutableCopy];
-        if(command->sites.count) {
-            [siteSource appendString:MetalPageSitesPrelude()];
-            NSUInteger phase=0;for(NSDictionary *site in command->sites) {phase++;
-                NSString *name=site[@"name"];
-                [siteSource appendFormat:@"MESH_PAGE_SITE(%@)\ntemplate<> struct mesh_page_site<mesh_page_site_%@> {static inline void enter(device unsigned char *,unsigned long,unsigned int); static inline void leave(device unsigned char *,unsigned long,unsigned int);};\n",name,name];
-                for(NSString *side in @[@"enter",@"leave"]) {
-                NSString *function=[NSString stringWithFormat:@"mesh_page_site<mesh_page_site_%@>::%@",name,side];
-                NSString *body=[side isEqual:@"enter"]?before[phase]:after[phase];
-                [siteDeclarations appendFormat:@"inline void %@(device uchar *mesh_effects, ulong cell, uint lane) { const ulong mesh_effect_group=%@ul+cell;\n",function,site[@"first"]];
-                BOOL collective=[site[@"collective"] boolValue];
-                NSString *visibility=@"atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));";
-                if(!body.length)[siteDeclarations appendString:@"(void)mesh_effects;(void)mesh_effect_group;(void)lane;\n"];
-                else if(collective) {
-                    if([side isEqual:@"enter"])[siteDeclarations appendFormat:@"if(lane==0){%@}threadgroup_barrier(mem_flags::mem_device);%@\n",body,visibility];
-                    else [siteDeclarations appendFormat:@"threadgroup_barrier(mem_flags::mem_device);if(lane==0){%@%@}\n",visibility,body];
-                } else [siteDeclarations appendFormat:@"(void)lane;%@%@\n",visibility,body];
-                [siteDeclarations appendString:@"}\n"];
-            }}
-        }
-        NSString *group=[NSString stringWithFormat:@"const ulong mesh_effect_group=mesh_group.x+%luul*(mesh_group.y+%luul*mesh_group.z);\n",(unsigned long)command->grid.width,(unsigned long)command->grid.height];
+        BOOL indexed=[enter rangeOfString:@"mesh_effect_group"].location!=NSNotFound||[leave rangeOfString:@"mesh_effect_group"].location!=NSNotFound;
+        NSString *group=indexed?[NSString stringWithFormat:@"const ulong mesh_effect_group=mesh_group.x+%luul*(mesh_group.y+%luul*mesh_group.z);\n",(unsigned long)command->grid.width,(unsigned long)command->grid.height]:@"";
         NSString *visibility=@"atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));";
         NSString *starts=enter.length?[NSString stringWithFormat:@"%@if(mesh_lane==0){%@}threadgroup_barrier(mem_flags::mem_device);%@\n",group,enter,visibility]:group;
         NSString *ends=leave.length?[NSString stringWithFormat:@"threadgroup_barrier(mem_flags::mem_device);if(mesh_lane==0){%@%@}\n",visibility,leave]:@"";
         NSString *result=PageMetalSource(command,siteDeclarations,starts,ends,observed,published);
-        [siteDeclarations release];return [siteSource stringByAppendingString:result];
+        return [siteSource stringByAppendingString:result];
     } else if(command->backend==MetalPageANE) {
-        return [NSString stringWithFormat:@"#include \"mesh-publication.h\"\n%@\nstruct MeshCpuArguments {uint8_t *mesh_effects;};\n#define MESH_ANE_ENTER(arguments) do {const auto &a=*static_cast<const MeshCpuArguments *>(arguments);%@} while(0)\n#define MESH_ANE_LEAVE(arguments) do {const auto &a=*static_cast<const MeshCpuArguments *>(arguments);%@} while(0)\n#include \"mesh-ane-entry.inc\"\n",declarations,PageSub(enter,@"\\n",@" "),PageSub(leave,@"\\n",@" ")];
+        return [NSString stringWithFormat:@"#include \"mesh-publication.h\"\n%@\nstruct MeshCpuArguments {uint8_t *mesh_effects;};\n#define MESH_ANE_ENTER(arguments) do {const auto &a=*static_cast<const MeshCpuArguments *>(arguments);[[maybe_unused]] auto *mesh_effects=a.mesh_effects;[[maybe_unused]] const unsigned long mesh_effect_group=0;%@} while(0)\n#define MESH_ANE_LEAVE(arguments) do {const auto &a=*static_cast<const MeshCpuArguments *>(arguments);[[maybe_unused]] auto *mesh_effects=a.mesh_effects;[[maybe_unused]] const unsigned long mesh_effect_group=0;%@} while(0)\n#include \"mesh-ane-entry.inc\"\n",declarations,PageSub(enter,@"\\n",@" "),PageSub(leave,@"\\n",@" ")];
     } else {
         NSString *source=command->source;NSRange structure=[source rangeOfString:@"struct MeshCpuArguments {"];
         if(structure.location==NSNotFound)PageFailure(@"CPU source requires its declared MeshCpuArguments ABI");
@@ -562,7 +575,9 @@ NSString *MetalPageEffectsCompose(MetalPageCommand *command,NSString *declaratio
         NSRange entry=[source rangeOfString:@"extern \"C\" void mesh_cpu_entry("];if(entry.location==NSNotFound)PageFailure(@"CPU source requires its declared numerical entry");
         NSUInteger opening=[source rangeOfString:@"{" options:0 range:NSMakeRange(NSMaxRange(entry),source.length-NSMaxRange(entry))].location;
         NSUInteger close=PageClose(source,opening,'{','}'),binding=NSMaxRange([source rangeOfString:@";" options:0 range:NSMakeRange(opening,close-opening)]);
-        return [NSString stringWithFormat:@"#include \"mesh-publication.h\"\n%@\n%@%@%@%@%@",declarations,[source substringToIndex:binding],enter,[source substringWithRange:NSMakeRange(binding,close-binding)],leave,[source substringFromIndex:close]];
+        NSString *numerical=PageNumericalScope([[source substringWithRange:NSMakeRange(binding,close-binding)]
+            stringByReplacingOccurrencesOfString:@"MESH_PAGE_OPERAND" withString:@"mesh_effects"]);
+        return [NSString stringWithFormat:@"%@#include \"mesh-publication.h\"\n%@\n%@\n[[maybe_unused]] auto *mesh_effects=a.mesh_effects;[[maybe_unused]] const unsigned long mesh_effect_group=0;\n%@%@%@%@",siteSource,siteDeclarations,[source substringToIndex:binding],enter,numerical,leave,[source substringFromIndex:close]];
     }
 }
 
@@ -582,9 +597,11 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
             MetalPageTransfer *t=domain->rows[0];
             NSString *word=PageWordField(fields,t->effect.word,MetalReachRead|MetalReachObserve);
             NSString *violation=PageViolationField(fields,t->effect.violation),*threshold;
-            if(gpu) {
+            BOOL uniform=YES;for(NSUInteger g=1;g<command->groups;g++)uniform&=thresholds[g]==thresholds[0];
+            if(!uniform) {
                 id<MTLBuffer> table=PageData(device,values);
-                threshold=[NSString stringWithFormat:@"((device const ulong *)%@)[mesh_effect_group]",PageField([fields add:table offset:0 bytes:values.length access:MetalReachRead])];
+                threshold=[NSString stringWithFormat:gpu?@"((device const ulong *)%@)[mesh_effect_group]":@"((const uint64_t *)%@)[mesh_effect_group]",
+                    PageField([fields add:table offset:0 bytes:values.length access:MetalReachRead])];
             } else threshold=[NSString stringWithFormat:@"%lluul",(unsigned long long)thresholds[0]];
             NSString *fragment=[NSString stringWithFormat:@"mesh_step_observe(%@%@, %@, %@, %uu, %uu, %lluul);\n",
                 gpu?@"":@"(volatile uint64_t *)",word,threshold,violation,t->effect.polls,t->effect.channel,(unsigned long long)t->effect.entry];
@@ -610,12 +627,15 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
         [helpers appendFormat:gpu?@"struct %@ { device const ulong *cuts; volatile coherent(system) device ulong *word; void at(uint p) {mesh_publish(word,cuts[p-1]);} };\n":
             @"struct %@ { const uint64_t *cuts; volatile uint64_t *word; void at(uint32_t p) {mesh_publish(word,cuts[p-1]);} };\n",prefix];
         NSMutableString *fragment=[NSMutableString stringWithString:@"{\n"];
-        if(gpu) {
+        NSString *indices=nil;
+        if(gpu||command->groups>1) {
             NSMutableData *table=[NSMutableData dataWithLength:command->groups*width*sizeof(int64_t)];memset(table.mutableBytes,0xff,table.length);
             for(NSUInteger g=0;g<cuts.count;g++){__block NSUInteger c=0;[cuts[g] enumerateIndexesUsingBlock:^(NSUInteger value,BOOL *stop){
                 (void)stop;((int64_t *)table.mutableBytes)[g*width+c++]=(int64_t)value;}];}
             id<MTLBuffer> operand=PageData(device,table);
-            NSString *indices=PageField([fields add:operand offset:0 bytes:table.length access:MetalReachRead]);
+            indices=PageField([fields add:operand offset:0 bytes:table.length access:MetalReachRead]);
+        }
+        if(gpu) {
             [fragment appendFormat:@"device atomic_uint *state=(device atomic_uint *)%@;\n",state];
             for(NSUInteger c=0;c<width;c++)[fragment appendFormat:
                 @"{ const long cut=((device const long *)%@)[mesh_effect_group*%luul+%luul]; if(cut>=0) { uint n=atomic_fetch_add_explicit((device atomic_uint *)%@+cut,1u,memory_order_relaxed); if(n+1u==((device const uint *)%@)[cut]) atomic_store_explicit(state+cut,2u,memory_order_relaxed); } }\n",
@@ -623,7 +643,10 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
             [fragment appendFormat:@"%@ prefix={(device const ulong *)%@,(volatile coherent(system) device ulong *)%@};mesh_graph_settle(state,0,%luu,state+%luu,prefix);\n",prefix,thresholds,word,(unsigned long)count,(unsigned long)count];
         } else {
             [fragment appendFormat:@"uint32_t *state=(uint32_t *)%@;\n",state];
-            for(NSNumber *cut in PageIndices(cuts[0]))[fragment appendFormat:
+            if(indices)for(NSUInteger c=0;c<width;c++)[fragment appendFormat:
+                @"{const int64_t cut=((const int64_t *)%@)[mesh_effect_group*%luul+%luul];if(cut>=0&&__atomic_add_fetch((uint32_t *)%@+cut,1u,__ATOMIC_ACQ_REL)==((const uint32_t *)%@)[cut])__atomic_store_n(state+cut,2u,__ATOMIC_RELEASE);}\n",
+                indices,(unsigned long)width,(unsigned long)c,counters,totals];
+            else for(NSNumber *cut in PageIndices(cuts[0]))[fragment appendFormat:
                 @"if(__atomic_add_fetch((uint32_t *)%@+%@ul,1u,__ATOMIC_ACQ_REL)==((const uint32_t *)%@)[%@ul]) __atomic_store_n(state+%@ul,2u,__ATOMIC_RELEASE);\n",counters,cut,totals,cut,cut];
             [fragment appendFormat:@"%@ prefix={(const uint64_t *)%@,(volatile uint64_t *)%@};mesh_graph_settle(state,0,%luu,state+%luu,prefix);\n",prefix,thresholds,word,(unsigned long)count,(unsigned long)count];
         }
@@ -643,10 +666,11 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
         }
     }
     result->observedSlots=[PageIndices(observed) copy];result->publishedSlots=[PageIndices(published) copy];
-    if(!fields->fields.count){result->source=[command->source copy];result->reaches=[[NSData alloc] init];return result;}
+    if(!fields->fields.count){result->source=[(command->backend==MetalPageCPU&&command->sites.count?
+        [@MESH_PAGE_HOST_SITES_SOURCE stringByAppendingString:command->source]:command->source) copy];result->reaches=[[NSData alloc] init];return result;}
     result->metadata=[[fields compose] retain];result->metadataOffset=fields->composedOffset;
     result->owners=[fields->owners copy];result->reaches=[fields->reaches copy];
-    NSString *base=gpu?@"mesh_effects":@"a.mesh_effects";
+    NSString *base=@"mesh_effects";
     NSString *declarations=PageReplaceFields(helpers,fields,base);
     for(NSUInteger phase=0;phase<before.count;phase++) {
         before[phase]=PageReplaceFields(before[phase],fields,base);after[phase]=PageReplaceFields(after[phase],fields,base);

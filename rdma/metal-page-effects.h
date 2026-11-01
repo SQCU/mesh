@@ -8,6 +8,7 @@ typedef struct isl_ctx isl_ctx;
    relation ranges are byte positions in that root, not virtual addresses.
    No object declared in this header is consumed by numerical execution. */
 enum MetalPageBackend { MetalPageMetal, MetalPageCPU, MetalPageANE };
+enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPageSiteSimdgroup };
 
 @interface MetalPageAccess : NSObject {
 @public
@@ -39,6 +40,7 @@ enum MetalPageBackend { MetalPageMetal, MetalPageCPU, MetalPageANE };
 @interface MetalPageCommand : NSObject {
 @public
     NSUInteger order, groups, metadataSlot;
+    uint32_t frame;                    /* retained source instance within the enclosing occurrence */
     enum MetalPageBackend backend;
     BOOL coherentAccesses;             /* retained body already uses shared coherent load/store helpers */
     NSArray<NSString *> *argumentNames; /* source pointer names indexed by binding slot; empty entries are not pointers */
@@ -48,6 +50,7 @@ enum MetalPageBackend { MetalPageMetal, MetalPageCPU, MetalPageANE };
     NSArray<NSDictionary *> *sites;    /* named source-local cell domains; preparation only */
 }
 @property(nonatomic) BOOL coherentAccesses;
+@property(nonatomic) uint32_t frame;
 @property(nonatomic, copy) NSArray<NSString *> *argumentNames;
 /* Source is the retained numerical entry, before page effects and backend
    binding. CPU entries name MeshCpuArguments and mesh_cpu_entry; ANE entries
@@ -132,11 +135,13 @@ MetalPageEffects *MetalPageEffectsSolve(NSArray<MetalPageCommand *> *commands,
    relations as an entry dispatch. Each cell is reached once by the source's
    declared iteration/ownership relation; its execution order may depend on
    ordinary index pages. The source declares MESH_PAGE_SITE(name) and calls
-   MESH_PAGE_ENTER/LEAVE(name,metadata,cell,lane). collective=YES means that cell's lanes cooperate;
-   NO means one lane performs the complete cell. This is not a possible-address
+   MESH_PAGE_ENTER/LEAVE(name,metadata,cell,lane). Scope names the participating
+   lanes; lane is local to that scope. CPU source cells are owned by one native
+   invocation. GPU subgroups smaller than a SIMD group declare individual lane
+   cells with their exact access relations. This is not a possible-address
    union and does not assert coverage for an arbitrary duplicate scatter. */
 void MetalPageCommandSite(MetalPageCommand *, NSString *name, NSUInteger cells,
-    BOOL collective, NSArray<MetalPageAccess *> *accesses);
+    enum MetalPageSiteScope scope, NSArray<MetalPageAccess *> *accesses);
 /* Resource analysis and a wholly local site's empty effects use this same
    source ABI. Final specialization replaces these macros with compiled calls. */
 NSString *MetalPageSitesPrelude(void);
