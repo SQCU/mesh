@@ -209,6 +209,71 @@ static NSInteger TensorEvaluate(id expression,NSUInteger logical) {
     if([op isEqual:@"mul"])return value*scale;
     NSInteger q=TensorFloor(value,scale);return [op isEqual:@"div"]?q:value-q*scale;
 }
+// TensorEvaluate's expression as one flat postfix program over the same operations, so a caller that reads an
+// expression at every position of a large layout walks no objects: built once, then evaluated with integers only.
+// Both arms of a select are evaluated (every scale is a constant, so neither arm can fail).
+enum TensorProgramOp { ProgramPushConstant, ProgramPushPosition, ProgramSum, ProgramMultiply, ProgramDivide, ProgramModulo,
+    ProgramSelect, ProgramMinimum, ProgramMaximum, ProgramEqual, ProgramAtMost, ProgramBelow, ProgramAtLeast, ProgramAbove,
+    ProgramBoth, ProgramEither };
+struct TensorProgramStep { enum TensorProgramOp op; NSInteger value; };
+static void TensorCompile(id expression,NSMutableData *program) {
+    struct TensorProgramStep step={ProgramPushConstant,0};
+    if(TensorConstant(expression)){step.value=[expression integerValue];[program appendBytes:&step length:sizeof step];return;}
+    if([expression isEqual:@"i"]){step.op=ProgramPushPosition;[program appendBytes:&step length:sizeof step];return;}
+    NSString *op=expression[0];const NSUInteger arity=[expression count];
+    if([op isEqual:@"select"]) {
+        for(NSUInteger k=1;k<4;k++)TensorCompile(expression[k],program);
+        step.op=ProgramSelect;[program appendBytes:&step length:sizeof step];return;
+    }
+    if([op isEqual:@"add"]) {
+        for(NSUInteger k=1;k<arity;k++)TensorCompile(expression[k],program);
+        step.op=ProgramSum;step.value=(NSInteger)arity-1;[program appendBytes:&step length:sizeof step];return;
+    }
+    if([op isEqual:@"mul"]||[op isEqual:@"div"]||[op isEqual:@"mod"]) {
+        TensorCompile(expression[1],program);
+        step.op=[op isEqual:@"mul"]?ProgramMultiply:[op isEqual:@"div"]?ProgramDivide:ProgramModulo;
+        step.value=[expression[2] integerValue];[program appendBytes:&step length:sizeof step];return;
+    }
+    NSDictionary *ops=@{@"min":@(ProgramMinimum),@"max":@(ProgramMaximum),@"eq":@(ProgramEqual),@"le":@(ProgramAtMost),
+                        @"lt":@(ProgramBelow),@"ge":@(ProgramAtLeast),@"gt":@(ProgramAbove),@"and":@(ProgramBoth),@"or":@(ProgramEither)};
+    if(!ops[op])[NSException raise:NSInvalidArgumentException format:@"unknown index term %@",op];
+    TensorCompile(expression[1],program);
+    for(NSUInteger k=2;k<arity;k++) {
+        TensorCompile(expression[k],program);step.op=(enum TensorProgramOp)[ops[op] intValue];
+        [program appendBytes:&step length:sizeof step];
+    }
+}
+static NSInteger TensorRun(const struct TensorProgramStep *program,NSUInteger length,NSInteger position,NSInteger *stack) {
+    NSUInteger top=0;
+    for(NSUInteger k=0;k<length;k++) {
+        const struct TensorProgramStep step=program[k];
+        switch(step.op) {
+        case ProgramPushConstant: stack[top++]=step.value; break;
+        case ProgramPushPosition: stack[top++]=position; break;
+        case ProgramSum: {NSInteger sum=0;for(NSInteger j=0;j<step.value;j++)sum+=stack[--top];stack[top++]=sum;} break;
+        case ProgramMultiply: stack[top-1]*=step.value; break;
+        case ProgramDivide: stack[top-1]=TensorFloor(stack[top-1],step.value); break;
+        case ProgramModulo: stack[top-1]-=TensorFloor(stack[top-1],step.value)*step.value; break;
+        case ProgramSelect: {NSInteger no=stack[--top],yes=stack[--top],condition=stack[--top];stack[top++]=condition?yes:no;} break;
+        default: {
+            NSInteger right=stack[--top],left=stack[top-1],result=0;
+            switch(step.op) {
+            case ProgramMinimum: result=MIN(left,right); break;
+            case ProgramMaximum: result=MAX(left,right); break;
+            case ProgramEqual: result=left==right; break;
+            case ProgramAtMost: result=left<=right; break;
+            case ProgramBelow: result=left<right; break;
+            case ProgramAtLeast: result=left>=right; break;
+            case ProgramAbove: result=left>right; break;
+            case ProgramBoth: result=left&&right; break;
+            default: result=left||right; break;
+            }
+            stack[top-1]=result;
+        }
+        }
+    }
+    return stack[0];
+}
 struct TensorExpressionRange { NSInteger low,high; };
 static struct TensorExpressionRange TensorRangeBetween(id expression,NSUInteger first,NSUInteger end) {
     if(TensorConstant(expression)){NSInteger v=[expression integerValue];return (struct TensorExpressionRange){v,v};}
@@ -1141,12 +1206,17 @@ static MetalTensorLayout *TensorClosedElements(MetalTensorLayout *layout,NSUInte
         // integers. Added by the LSTM demonstration session: the general form below sliced the 32768-entry map once
         // per component, 7.25 s of a one-step LSTM lowering on the workstation for one call (2026-11-01).
         NSData *map=layout.maps[@0];const NSInteger *values=map.bytes,step=[layout.strides[0] integerValue];
-        id coordinate=layout.coordinates[0];const NSUInteger n=layout.count/count;
+        // The coordinate (piecewise: the pages' runs) compiled once and read at each position with integers (the five
+        // ranks' pages are millions of bytes, where walking the expression at each one took most of a minute).
+        NSMutableData *compiled=[NSMutableData data];TensorCompile(layout.coordinates[0],compiled);
+        const struct TensorProgramStep *program=compiled.bytes;const NSUInteger length=compiled.length/sizeof *program;
+        NSMutableData *scratch=[NSMutableData dataWithLength:(length+1)*sizeof(NSInteger)];NSInteger *stack=scratch.mutableBytes;
+        const NSUInteger n=layout.count/count;
         NSMutableData *firsts=[NSMutableData dataWithLength:n*sizeof(NSInteger)];NSInteger *out=firsts.mutableBytes;
         for(NSUInteger x=0;x<n;x++) {
             NSInteger at=0;
             for(NSUInteger k=0;k<count;k++) {
-                const NSInteger digit=TensorEvaluate(coordinate,x*count+k),address=values?values[digit]:digit*step;
+                const NSInteger digit=TensorRun(program,length,(NSInteger)(x*count+k),stack),address=values?values[digit]:digit*step;
                 if(!k)at=address;
                 else if(address!=at+(NSInteger)k)return nil;
             }
