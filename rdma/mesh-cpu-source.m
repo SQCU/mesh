@@ -166,12 +166,22 @@ static void mesh_cpu_product_strided(const void *arguments) { mesh_cpu_product_s
 
 /* Preparation chooses a whole-matrix instruction and binds its storage.
    Transposing the result swaps the operands: (X W^T)^T = W X^T. */
-int64_t mesh_cpu_product_bind(MeshCpuCommand *c) {
-  if(c->input_column<=0||c->input_stride<=0||c->weight_column<=0||c->weight_stride<=0||
-     c->output_column<=0||c->output_stride<=0)return -1;
-  if(((c->input_column==1&&c->input_stride>=c->inner)||(c->input_stride==1&&c->input_column>=c->rows)) &&
+#define CPU_ENTRY(name) "#include \"mesh-cpu-kernels.h\"\n" \
+  "struct MeshCpuArguments {MeshCpuCommand command;};\n" \
+  "extern \"C\" void mesh_cpu_entry(const void *arguments) {\n" \
+  "const auto &a=*static_cast<const MeshCpuArguments *>(arguments);\n" #name "(&a.command);\n}\n"
+enum { MeshCpuDenseProduct,MeshCpuStridedProduct,MeshCpuGelu };
+MeshCpuDeclaration mesh_cpu_product_declare(const MeshCpuCommand *c) {
+  BOOL dense=((c->input_column==1&&c->input_stride>=c->inner)||(c->input_stride==1&&c->input_column>=c->rows)) &&
      ((c->weight_column==1&&c->weight_stride>=c->inner)||(c->weight_stride==1&&c->weight_column>=c->columns)) &&
-     ((c->output_column==1&&c->output_stride>=c->columns)||(c->output_stride==1&&c->output_column>=c->rows))) {
+     ((c->output_column==1&&c->output_stride>=c->columns)||(c->output_stride==1&&c->output_column>=c->rows));
+  return (MeshCpuDeclaration){dense?MeshCpuDenseProduct:MeshCpuStridedProduct,
+    dense?CPU_ENTRY(mesh_cpu_product_body):CPU_ENTRY(mesh_cpu_product_strided_body)};
+}
+MeshCpuDeclaration mesh_cpu_gelu_declare(void) {return (MeshCpuDeclaration){MeshCpuGelu,CPU_ENTRY(mesh_cpu_gelu_body)};}
+int64_t mesh_cpu_command_bind(MeshCpuCommand *c,uint32_t kind) {
+  if(kind==MeshCpuGelu){c->run=mesh_cpu_gelu;return 0;}
+  if(kind==MeshCpuDenseProduct) {
     if(!(c->output_column==1&&c->output_stride>=c->columns)) {
       int n=c->rows;c->rows=c->columns;c->columns=n;
       float *p=c->input;c->input=c->weight;c->weight=p;
@@ -215,6 +225,7 @@ void mesh_cpu_command_release(void *arguments) {
   }
 }
 void mesh_cpu_gelu(const void *arguments) { mesh_cpu_gelu_body(arguments); }
+#undef CPU_ENTRY
 typedef struct MeshCpuProgram MeshCpuProgram;
 typedef struct {
   void (*run)(const void *);

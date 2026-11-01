@@ -91,6 +91,19 @@ and the actual page prerequisites still remain. This is not completion of
 item 2. The bridge, collective library and CoreML library build with this
 change; there is no new numerical or performance result.
 
+The remaining host/device ordering has a specific missing handoff.
+`MetalPageEffectsSolve` currently emits observations and publications for
+transfer effects. Local numerical dependencies also reach the recorder, but
+`MetalScheduleBindHost` turns GPU predecessors into `MetalSchedulePublication`
+queue events. Submission waits for host events through the same queue-wide
+interface. Exact input page relations therefore still produce a wider hardware
+ordering scope. Removing those events alone would lose required visibility.
+The shared source solve must also carry local cross-backend page dependencies
+through emission and provider binding, using the same page effects; the
+recorder must consume that result. Source-local sites are part of this handoff,
+but their presence alone does not complete it. Actual provider resource and
+visibility constraints remain explicit compilation operands.
+
 The next source pass has replaced the Python-only effect solver with a binding
 to `metal-page-effects.h`. The common library, CoreML library, CFFI binding and
 PyTorch extension build with that connection. This is source/build evidence;
@@ -126,6 +139,17 @@ A source-only capture confirmed that the retained relations use that context.
 This establishes preparation dataflow, not numerical or performance evidence.
 
 The common access contract still needs dynamic index and activity operands.
+Named source-local sites now retain fixed cell domains in that same contract.
+The solver places a site's observations and publications at its enter/leave
+points rather than the enclosing kernel's boundary. Shared operand loads and
+stores retain the corresponding coherency qualifiers, including vector uses.
+The CPU declaration now supplies its source before resource binding; binding
+consumes the chosen recipe without choosing another numerical body.
+The bridge, collective/CoreML libraries, CFFI binding, PyTorch extension and
+generated Metal kernels build with these shared changes. Native recipe and
+provider consumers remain in progress; this build did not execute payloads.
+
+Dynamic index and activity values still need complete coverage.
 Its fixed group-to-byte relations cannot by themselves describe a group whose
 selected pages depend on another function's index-page outputs. Reads, writes,
 transfer prerequisites and contribution coverage must retain those same index

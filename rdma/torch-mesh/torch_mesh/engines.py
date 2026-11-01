@@ -104,8 +104,12 @@ def _cpu():
         lib.mesh_cpu_program_prepare.restype = ctypes.c_char_p
         lib.mesh_cpu_program_retain.argtypes = [ctypes.c_void_p]
         lib.mesh_cpu_program_release.argtypes = [ctypes.c_void_p]
-        lib.mesh_cpu_product_bind.argtypes = [ctypes.POINTER(CpuCommand)]
-        lib.mesh_cpu_product_bind.restype = ctypes.c_int64
+        lib.mesh_cpu_product_declare.argtypes = [ctypes.POINTER(CpuCommand)]
+        lib.mesh_cpu_product_declare.restype = CpuDeclaration
+        lib.mesh_cpu_gelu_declare.argtypes = []
+        lib.mesh_cpu_gelu_declare.restype = CpuDeclaration
+        lib.mesh_cpu_command_bind.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_uint32]
+        lib.mesh_cpu_command_bind.restype = ctypes.c_int64
         lib.mesh_cpu_product_workspace.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_void_p]
         lib.mesh_cpu_command_release.argtypes = [ctypes.POINTER(CpuCommand)]
         lib.mesh_cpu_error.restype = ctypes.c_char_p
@@ -241,7 +245,6 @@ class Cpu(Engine):
         commands = []
         from .cpu import compilation
         from .operand import byte_operand
-        from mesh import RDMA
         compiler = compilation(self.implementation)
         for command in recipe['commands']:
             operands = {role: values[name] for role, name in command['operands'].items()}
@@ -262,11 +265,11 @@ class Cpu(Engine):
             page_operands = [byte_operand(operands[role]) for role in roles]
             reaches = tuple((slot, (1 if name in command['reads'] else 0) | (2 if name in command['writes'] else 0),
                              page_operands[slot]) for slot, name in enumerate(command['operands'].values()))
-            source_code = (f'#include "{RDMA}/mesh-cpu-kernels.h"\n'
-                'struct MeshCpuArguments { MeshCpuCommand numerical; };\n'
-                'extern "C" void mesh_cpu_entry(const void *arguments) {\n'
-                'const auto &a = *static_cast<const MeshCpuArguments *>(arguments);\n'
-                'MESH_CPU_NUMERICAL_BODY(&a.numerical);\n}\n')
+            native = _cpu()
+            selected = (native.mesh_cpu_product_declare(ctypes.byref(record[1]))
+                        if record[0] == _CPU_PRODUCT else native.mesh_cpu_gelu_declare())
+            declared['recipe'] = selected.kind
+            source_code = selected.source.decode()
             commands.append(dict(kind='cpu', source=source_code, function='mesh_cpu_entry',
                 argument_specs=(), arguments=(), operands=page_operands, constants={},
                 types=tuple(torch.uint8 for _ in roles), binding_origins=tuple(v.binding_origin for v in page_operands),
@@ -352,6 +355,10 @@ class CpuCommand(ctypes.Structure):
     _fields_ += [(name, ctypes.c_int) for name in ('input_transpose', 'weight_transpose')]
 
 
+class CpuDeclaration(ctypes.Structure):
+    _fields_ = [('kind', ctypes.c_uint32), ('source', ctypes.c_char_p)]
+
+
 class CpuInstruction(ctypes.Structure):
     _fields_ = [('run', ctypes.c_void_p), ('arguments', ctypes.c_void_p), ('argument_bytes', ctypes.c_size_t),
                 ('release_arguments', ctypes.c_void_p), ('library', ctypes.c_char_p), ('symbol', ctypes.c_char_p),
@@ -405,19 +412,11 @@ def _cpu_bind(native, records, workspace, implementation):
             if 'kind' in record:
                 command = CpuCommand.from_buffer_copy(record['arguments'])
                 commands[len(instructions)] = command
-                if record['kind'] == _CPU_PRODUCT:
-                    size = native.mesh_cpu_product_bind(ctypes.byref(command))
-                    if size < 0:
-                        raise ValueError('CPU matrix views could not be bound to a bulk contraction')
-                    if size:
-                        needs.append((command, size, len(instructions)))
-                    body = 'mesh_cpu_product_strided_body' if size else 'mesh_cpu_product_body'
-                elif record['kind'] == _CPU_GELU:
-                    command.run = ctypes.cast(native.mesh_cpu_gelu, ctypes.c_void_p).value
-                    body = 'mesh_cpu_gelu_body'
-                else:
-                    raise ValueError(f"unknown declared Accelerate command {record['kind']}")
-                source = source.replace('MESH_CPU_NUMERICAL_BODY', body)
+                size = native.mesh_cpu_command_bind(ctypes.byref(command), record['recipe'])
+                if size < 0:
+                    raise ValueError('CPU declared matrix resources could not be bound')
+                if size:
+                    needs.append((command, size, len(instructions)))
                 release = ctypes.cast(native.mesh_cpu_command_release, ctypes.c_void_p).value
             library = native.mesh_cpu_compile(source.encode(),
                 json.dumps(record['compiler'], separators=(',', ':')).encode())

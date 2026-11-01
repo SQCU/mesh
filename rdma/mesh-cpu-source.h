@@ -14,9 +14,14 @@ typedef struct MeshCpuCommand {
   int input_transpose, weight_transpose;
 } MeshCpuCommand;
 
-/* Returns the required workspace bytes, or a negative preparation error.
-   Supplying a non-null workspace keeps BNNS from allocating during execution. */
-int64_t mesh_cpu_product_bind(MeshCpuCommand *command);
+typedef struct { uint32_t kind; const char *source; } MeshCpuDeclaration;
+/* Pure source/layout selection. These declarations allocate or bind nothing. */
+MeshCpuDeclaration mesh_cpu_product_declare(const MeshCpuCommand *layout);
+MeshCpuDeclaration mesh_cpu_gelu_declare(void);
+/* Final resource binding consumes that already-selected declaration kind.
+   Returns the required workspace bytes, or a negative preparation error.
+   Supplying that workspace keeps BNNS from allocating during execution. */
+int64_t mesh_cpu_command_bind(MeshCpuCommand *command, uint32_t kind);
 void mesh_cpu_product_workspace(MeshCpuCommand *command, void *workspace);
 void mesh_cpu_command_release(void *command);
 void mesh_cpu_gelu(const void *command);

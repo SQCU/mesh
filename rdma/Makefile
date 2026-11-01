@@ -78,7 +78,7 @@ NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitR
 KERNEL_FILES = metallib binarchive
 # the build tool (nccl-mesh-kernels.m), the kernels' text it writes (rdma/mesh.metal's primitives, then
 # nccl-mesh-kernels.h's) and the kernels' SHA-256
-.build/nccl-mesh-kernels: nccl-mesh-kernels.m nccl-mesh-kernels.h nccl-mesh-metal.h .build/mesh_metal.h Makefile
+.build/nccl-mesh-kernels: nccl-mesh-kernels.m nccl-mesh-kernels.h mesh-page-sites.h nccl-mesh-metal.h .build/mesh_metal.h Makefile
 	cc -O2 $(WARN) -I .build -o $@ nccl-mesh-kernels.m -framework Metal -framework Foundation
 .build/libnccl-mesh.metal: .build/nccl-mesh-kernels
 	.build/nccl-mesh-kernels $@
@@ -131,7 +131,7 @@ $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .b
 .build/mesh-cpu-source.o: mesh-cpu-source.m mesh-cpu-source.h mesh-cpu-kernels.h mesh-host.h Makefile .build/metal-environment
 	mkdir -p .build
 	cc -fobjc-arc -fblocks -O2 $(WARN) -c mesh-cpu-source.m -o $@
-.build/libnccl-mesh.dylib: .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h metal-page-effects.m metal-page-effects.h mesh-host.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-index-relation.m mesh-index-relation.h mesh-isl-memory.c mesh-isl-memory.h mesh-sparse.c mesh-sparse.h $(ISL_ARCHIVE) mesh-span-plan.h mesh-landing.h mesh-fold.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h mesh-publication.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-graph.h mesh-write-compiler.h \
+.build/libnccl-mesh.dylib: .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h metal-page-effects.m metal-page-effects.h mesh-page-sites.h mesh-host.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-index-relation.m mesh-index-relation.h mesh-isl-memory.c mesh-isl-memory.h mesh-sparse.c mesh-sparse.h $(ISL_ARCHIVE) mesh-span-plan.h mesh-landing.h mesh-fold.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h mesh-publication.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-graph.h mesh-write-compiler.h \
   metal-scope-plan.inc mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h mesh-fabric.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
 	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -DMESH_ISL_SLAB_BYTES=$(MESH_ISL_SLAB_BYTES) -dynamiclib $(ISL_HEADERS) -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \

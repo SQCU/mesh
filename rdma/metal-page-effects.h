@@ -14,6 +14,7 @@ enum MetalPageBackend { MetalPageMetal, MetalPageCPU, MetalPageANE };
     id root;
     NSInteger slot;
     uint32_t access;
+    NSUInteger phase;                 /* entry, then declared source-local continuations */
     isl_map *relation;                 /* flat dispatch group -> physical byte */
 }
 + (instancetype)root:(id)root slot:(NSInteger)slot access:(uint32_t)access relation:(isl_map *)relation;
@@ -44,6 +45,7 @@ enum MetalPageBackend { MetalPageMetal, MetalPageCPU, MetalPageANE };
     NSString *source, *function;
     MTLSize grid;
     NSArray<MetalPageAccess *> *accesses;
+    NSArray<NSDictionary *> *sites;    /* named source-local cell domains; preparation only */
 }
 @property(nonatomic) BOOL coherentAccesses;
 @property(nonatomic, copy) NSArray<NSString *> *argumentNames;
@@ -105,10 +107,6 @@ extern "C" {
 id MetalPageRegionRoot(void);
 isl_map *MetalPageRegionRelation(isl_map *local, id<MTLBuffer> buffer);
 isl_map *MetalPageRegionSelection(isl_ctx *context, id<MTLBuffer> buffer, MetalTensorLayout *bytes);
-/* Relabel a source access by an explicit finite new-group -> old-group
-   relation. Both layouts have the same domain; neither is numerical data. */
-MetalPageAccess *MetalPageAccessGroups(MetalPageAccess *access,
-    MetalTensorLayout *oldLabels, MetalTensorLayout *newGroups);
 /* Project a retained work-coordinate access onto the target dispatch groups.
    axes has one entry per work dimension: 0,1,2 selects that launch axis and -1
    leaves it inside the group. Reduction dimensions also stay inside a group.
@@ -116,6 +114,13 @@ MetalPageAccess *MetalPageAccessGroups(MetalPageAccess *access,
 isl_map *MetalPageGroupRelation(isl_map *access, const NSUInteger threads[3],
     const NSUInteger counts[3], const NSInteger *axes, NSUInteger axisCount,
     const NSUInteger *reductions, NSUInteger reductionCount);
+/* Persistent source import: the declaration contains the serialized logical
+   relation and its grouped/active/reductions operands. Parse once into the
+   enclosing context, project with the target launch, then compose its selected
+   byte view and physical page mapping. In-process clients pass relations above. */
+MetalPageAccess *MetalPageImportAccess(isl_ctx *context, NSDictionary *declaration,
+    id<MTLBuffer> buffer, MetalTensorLayout *bytes, const NSUInteger threads[3],
+    const NSUInteger counts[3]);
 
 // Public adapters hold the ordinary enclosing preparation context without
 // importing vendor headers. Objects are released before their context.
@@ -123,6 +128,18 @@ isl_ctx *isl_ctx_alloc(void);
 void isl_ctx_free(isl_ctx *);
 MetalPageEffects *MetalPageEffectsSolve(NSArray<MetalPageCommand *> *commands,
     NSArray<MetalPageTransfer *> *transfers);
+/* A source-local continuation uses the same fixed cell domain and exact page
+   relations as an entry dispatch. Each cell is reached once by the source's
+   declared iteration/ownership relation; its execution order may depend on
+   ordinary index pages. The source declares MESH_PAGE_SITE(name) and calls
+   MESH_PAGE_ENTER/LEAVE(name,metadata,cell,lane). collective=YES means that cell's lanes cooperate;
+   NO means one lane performs the complete cell. This is not a possible-address
+   union and does not assert coverage for an arbitrary duplicate scatter. */
+void MetalPageCommandSite(MetalPageCommand *, NSString *name, NSUInteger cells,
+    BOOL collective, NSArray<MetalPageAccess *> *accesses);
+/* Resource analysis and a wholly local site's empty effects use this same
+   source ABI. Final specialization replaces these macros with compiled calls. */
+NSString *MetalPageSitesPrelude(void);
 // Place one retained source block into the complete function's order. Equal
 // local positions stay equal; no command or relation is reconstructed.
 void MetalPageEffectsOrder(NSArray<MetalPageCommand *> *commands,
@@ -159,8 +176,8 @@ extern "C" {
 MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects, NSUInteger command,
     id<MTLDevice> device);
 /* Source-only stage; the fragments already use fixed metadata offsets. */
-NSString *MetalPageEffectsCompose(MetalPageCommand *command, NSString *helpers, NSString *before,
-    NSString *after, NSIndexSet *observedSlots, NSIndexSet *publishedSlots);
+NSString *MetalPageEffectsCompose(MetalPageCommand *command, NSString *helpers, NSArray<NSString *> *before,
+    NSArray<NSString *> *after, NSIndexSet *observedSlots, NSIndexSet *publishedSlots);
 #ifdef __cplusplus
 }
 #endif

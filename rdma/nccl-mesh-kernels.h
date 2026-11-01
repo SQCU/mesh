@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "nccl-mesh-metal.h"
 #include "mesh-graph.h"
+#include "mesh-page-sites.h"
 #include "nccl.h"
 
 #define STR(...) #__VA_ARGS__
@@ -35,6 +36,7 @@
    The enclosing function fails; it never selects a replacement executor. */
 static NSString *const STEPS =
   @"\nusing namespace metal;\n"
+  MESH_PAGE_SITES_SOURCE
   XSTR(ARGS(mesh_args, ulong, uint)) ";\n"
   "struct mesh_step_binding { device uchar *d; device uchar *s; constant mesh_args *p; device uchar *a; device uchar *v; device ulong *progress; };\n"
   "static inline bool mesh_step_enter(constant mesh_args &p, device uchar *vb, device ulong *progress, bool first) { "

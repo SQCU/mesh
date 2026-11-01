@@ -80,7 +80,13 @@ inline void mesh_store4(device T *p, ulong i, V value) {
 }
 template<uint B, typename P> struct mesh_operand {
     P p; long first;
-    auto operator[](ulong i) const -> decltype(p[0]) { return p[mesh_index<B>(first+long(i))]; }
+    decltype(auto) operator[](ulong i) const {
+        const long at = mesh_index<B>(first + long(i));
+        if constexpr (mesh_observed<B>() || mesh_published<B>()) {
+            using Value = typename remove_reference<decltype(p[0])>::type;
+            return ((volatile coherent(system) device Value *)p)[at];
+        } else return p[at];
+    }
     mesh_operand operator-(long offset) const { return {p, first-offset}; }
 };
 template<uint B, typename P> inline mesh_operand<B,P> mesh_view(P p, long first=0) { return {p,first}; }
@@ -237,7 +243,7 @@ struct streamed_plain {
     typedef device float *partials;
     template <typename P, typename S>
     void after(P, S, device atomic_uint *, streamed_dims, uint, uint, uint, threadgroup float *, uint,
-               uint) constant {}
+               uint, device uchar *) constant {}
 };
 
 // The GELU of a gate value times an up value (tanh form, its inner term clamped to [-20, 20]).
@@ -278,14 +284,22 @@ template <typename V, typename P> inline V streamed_four(P p, ulong i) {
     return *(typename streamed_vector_pointer<V, P>::type)(p + i);
 }
 template <typename V, uint B, typename P> inline V streamed_four(mesh_operand<B, P> p, ulong i) {
-    if (mesh_vector4<B>()) return streamed_four<V>(p.p, mesh_index<B>(p.first + long(i)));
+    if (mesh_vector4<B>()) {
+        if constexpr (mesh_observed<B>())
+            return mesh_step_read<V>((device const uchar *)(p.p + mesh_index<B>(p.first + long(i))), 0);
+        else return streamed_four<V>(p.p, mesh_index<B>(p.first + long(i)));
+    }
     else return V(p[i], p[i+1], p[i+2], p[i+3]);
 }
 template <typename V, typename P> inline void streamed_store_four(P p, ulong i, V value) {
     *(device V *)(p + i) = value;
 }
 template <typename V, uint B, typename P> inline void streamed_store_four(mesh_operand<B, P> p, ulong i, V value) {
-    if (mesh_vector4<B>()) streamed_store_four(p.p, mesh_index<B>(p.first + long(i)), value);
+    if (mesh_vector4<B>()) {
+        if constexpr (mesh_published<B>())
+            mesh_step_write<V>((device uchar *)(p.p + mesh_index<B>(p.first + long(i))), 0, value);
+        else streamed_store_four(p.p, mesh_index<B>(p.first + long(i)), value);
+    }
     else { p[i] = value.x; p[i+1] = value.y; p[i+2] = value.z; p[i+3] = value.w; }
 }
 
@@ -606,7 +620,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         const float value = rowScale[mesh_index<13>(output)] * total;
         ys[mesh_index<11>(ulong(n) * d.stride + ulong(mesh_position<12>(output)))] = Output(streamed_capped(value, d.cap));
     }
-    if (OUT == 0) epilogue.after(mesh_view<E::input_binding>(mesh_partial_input<E>(stores,consumer)), mesh_view<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32);
+    if (OUT == 0) epilogue.after(mesh_view<E::input_binding>(mesh_partial_input<E>(stores,consumer)), mesh_view<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32, MESH_PAGE_OPERAND);
 }
 
 // The gate and up products of up to R input rows together, GELU(gate) * up between them (the study's gate_up_mm): a
@@ -1324,7 +1338,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
             stores[mesh_index<5>(ulong(group.y) * d.split + n * d.outputs + (group.x * BANDS + which) * 32 + r)] = total;
         }
     }
-    epilogue.after(mesh_view<E::input_binding>(mesh_partial_input<E>(stores,consumer)), mesh_view<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32);
+    epilogue.after(mesh_view<E::input_binding>(mesh_partial_input<E>(stores,consumer)), mesh_view<13>(rowScale), arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32, MESH_PAGE_OPERAND);
 }
 
 // The right-input and destination element maps of matmul2d<M, 32, 32> at one simdgroup (fp16 operands, fp32
