@@ -1639,6 +1639,11 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   /* _exit, not exit: exit runs the RDMA library's teardown at exit, a wait of 10-13 s with nothing posted (2026-11-01:
      children reaped 12.3-13.0 s after it, those ended by SIGKILL inside it reaped 0.1 s after); its lanes flushed,
      the kernel releases the device's objects itself */
+  {
+    const uint64_t t0=clock_ns();uint32_t n=0;
+    for(uint32_t e=0;e<port->device.extents;e++)if(port->device.extent_mrs && port->device.extent_mrs[e]){ibv_dereg_mr(port->device.extent_mrs[e]);n++;}
+    mesh_say("bridge","link %u (%s): child deregistered %u extents in %.3f s",port->index,port->name,n,(double)(clock_ns()-t0)/1e9);
+  }
   _exit(0);
 }
 static void child_command(struct port *port,const struct child_message *heard){
