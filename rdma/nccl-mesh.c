@@ -4322,6 +4322,9 @@ static ncclResult_t present_publish(struct metal_program *program, struct channe
     if(m->dep_h==UINT32_MAX)source_accesses(program,m);
     last = m;
   }
+  if(getenv("MESH_PUBLISH_TRACE"))fprintf(stderr,"publish-trace channel publish: last %d, writes word %llu (offset %zu in its buffer), tables wait on %llu, value %llu\n",
+      last!=NULL,(unsigned long long)(last?lease_offset(address_of(p->ready)):0),p->ready.offset,(unsigned long long)p->ready_word,
+      (unsigned long long)(last?pages_to_word(last->laid):0));
   if (last) {
     const struct metal_release release = {p->ready.buffer, p->ready.offset, last->laid, p->each[0]};
     const struct metal_result made = metal_publish(program, &release);
