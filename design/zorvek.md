@@ -115,6 +115,14 @@ what of the block takes its place. The order is forced: each later one guards a 
    zumbled.
 5. The encoder barriers between groups and the metal_boundary frontier (zilbos): with no transport on the GPU and no
    page shared between calls, a call's functions order after what they read in stream order alone (zumble).
+   The barriers a group takes today (nccl-mesh-metal.m metal_order, read 2026-10-31): one before its link stores
+   (metal_link: the first store only), one before zelloth (its sums' one dispatch), none before zelloq's spins
+   (metal_spins), one before each later direct dispatch (a complement copy, the epilogue). zelloth's header gives
+   spinning presents as its barrier's reason; the presents are deleted (item 6), and its reason now is the link
+   store's: zelloth's threadgroups, one a core, spin on landings, so they must not start before the store that lets
+   the bridge post those receives has run. That one stays with the link store's. The barrier between groups is the
+   next group's first, before its link: what it orders after is the caller's (metal_boundary), which item 5 replaces
+   by stream order.
 6. Done: the GPU presents and the descriptor rings (zarpers: MESH_STREAM_ENTRIES, `taken` as ring room, the
    bridge's walk_take copy): the bridge walks each call's laid tables, linked at the call's place (zinth, below), its
    walk the executor of zirrup and zirrupel, which its entry word already is.
