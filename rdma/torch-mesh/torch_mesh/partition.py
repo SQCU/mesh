@@ -348,9 +348,9 @@ class RaggedShard(Shard):
     def _shard_tensor(self, tensor, mesh, mesh_dim, src_data_rank=0):
         """Realize an exact-count scatter of the declared blocks at configuration.
 
-        Mesh ranks bind exact original/final strided views. A foreign initial
-        allocation is imported once into registered storage; regional inputs
-        are never packed. Other distributed backends retain their scatter API.
+        Mesh ranks bind exact original/final strided views of the source, which
+        lies in the region (its producer's region tensor, torch_mesh.empty); nothing
+        is imported or packed. Other distributed backends retain their scatter API.
         """
         coordinate = mesh.get_coordinate()
         if coordinate is None:
@@ -367,7 +367,7 @@ class RaggedShard(Shard):
         out, blocks = _empty((counts[rank],), tensor, group), None
         if rank == src_data_rank:
             pieces = self._split_tensor(tensor, n, contiguous=False)[0]
-            if self.dim == 0 and tensor.is_contiguous() and _in_region(tensor):
+            if self.dim == 0 and tensor.is_contiguous():
                 blocks = list(tensor.reshape(-1).split(counts))
             else:
                 staged = _empty((at[-1],), tensor, group)
@@ -446,19 +446,14 @@ def _configuration_exchange(group, outgoing, incoming, dtype, matrix=None):
 
 
 def _scatter_spans(tensor, dim, sizes, rank, source, group):
-    """Initial input-domain import, then the same exact native span WRITE plan."""
+    """The exact native span WRITE plan of the source's own views: the source is a region tensor (torch_mesh.empty),
+    read where it lies, never imported into the region by a copy."""
     if not hasattr(group, 'prepare_writes'):
         return None
     from . import _stream
-    imports = []
     dim %= tensor.ndim
     offsets = list(itertools.accumulate(sizes, initial=0))
     original = tensor
-    if rank == source and not _in_region(tensor):
-        # Native DMA addresses currently belong to the registered region. This
-        # is one input-domain import, independent of destination count/layout.
-        imported, imports = _stream.import_attributes([tensor])
-        original = imported[0]
     shape = list(tensor.shape)
     shape[dim] = sizes[rank]
     result = (original.narrow(dim, offsets[rank], sizes[rank]) if rank == source
@@ -475,8 +470,6 @@ def _scatter_spans(tensor, dim, sizes, rank, source, group):
     prepared, calls = group.prepare_writes(deliveries) if deliveries else (None, [])
     with group.configuration([calls]) if calls else contextlib.nullcontext():
         schedule = _stream.Schedule()
-        for source_bytes, destination_bytes in imports:
-            schedule.copy(source_bytes, destination_bytes)
         if prepared is not None:
             from .declarations import execution_sequence
             execution_sequence((prepared,), result).append(schedule)
@@ -542,8 +535,7 @@ def follow(*tensors):
     """Realize changed shard assignments through typed final page views.
 
     Mesh deliveries become bound communicator Calls; local relocations use the
-    shared layout-copy commands in the same prepared schedule. Original input
-    imports are exact byte copies in that schedule. Other distributed backends
+    shared layout-copy commands in the same prepared schedule. Other distributed backends
     retain their existing staging adapter until their function compiler is
     connected to the same page declarations.
     """

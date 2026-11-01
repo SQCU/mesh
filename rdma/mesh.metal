@@ -63,10 +63,25 @@ __attribute__((always_inline)) static inline T mesh_payload(volatile coherent(sy
 // The SDK's public atomic overload fixes device coherence and device scope;
 // its underlying primitive also takes the system coherence/scope needed here.
 // The target declares ulong atomic min/max support (Apple8 macOS, Apple9+).
+// The primitive's arity is the OS compiler's: macOS 27's takes a fifth operand, its memory flags; 26's takes four (both
+// at language 4.0, where neither predefines a macro that tells them apart: tools probed on m5ult1-3 at 27.0 and the
+// Mini at 26.5.1, 2026-11-01). Overload resolution picks the form the compiler declares, at compile time: the first
+// exists only where five operands are accepted. Restored to compile on every node by the bandwidth/overhead session:
+// ebd8bd24 wrote the four-operand call alone, and every kernel including this file failed to build on the Studios.
+// What must stay: both forms, the five-operand one preferred (its `int` against the other's `long`).
+template <typename A, typename V>
+__attribute__((always_inline)) static inline auto mesh_atomic_max(A word, V value, int)
+    -> decltype(__metal_atomic_max_explicit(word, value, 0, 0, __METAL_MEMORY_FLAGS_NONE__), void()) {
+    __metal_atomic_max_explicit(word, value, int(metal::memory_order_relaxed), MESH_SYSTEM_THREAD_SCOPE, __METAL_MEMORY_FLAGS_NONE__);
+}
+template <typename A, typename V>
+__attribute__((always_inline)) static inline void mesh_atomic_max(A word, V value, long) {
+    __metal_atomic_max_explicit(word, value, int(metal::memory_order_relaxed), MESH_SYSTEM_THREAD_SCOPE);
+}
 __attribute__((always_inline)) static inline void mesh_publish(volatile coherent(system) device ulong *cell, ulong value) {
     metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
     volatile coherent(system) device metal::atomic_ulong *word = (volatile coherent(system) device metal::atomic_ulong *)cell;
-    __metal_atomic_max_explicit(&word->__s, value, int(metal::memory_order_relaxed), MESH_SYSTEM_THREAD_SCOPE);
+    mesh_atomic_max(&word->__s, value, 0);
 }
 
 // FP8 E4M3 (fn: no infinity, S.1111.111 NaN) and, with e5, E5M2 (IEEE-like) [OCP 8-bit floating point, 2023]: a byte's

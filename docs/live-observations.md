@@ -8,7 +8,8 @@ feedback collector, and an unfinished later call does not hide an earlier comple
 The hourly (`rdma/mesh_hourly.py`, every node's `io.mesh.hourly` job) runs each program of metal-microbench's
 `tools/mesh/hourly/workloads.json` as anyone runs it. Its record is the program's own output, in the job's log on each
 node, `/usr/local/mesh/log/user/io.mesh.hourly.log` (newsyslog rotates it past 4 MB, two kept): a line naming the
-program and the nodes before each run, the program's records and diagnostics, and a line with its exit status after.
+program, the nodes and the commits of the node's two checkouts before each run (the hourly runs the git state the node
+holds and moves no checkout), the program's records and diagnostics, and a line with its exit status after.
 
 A program emits its own records, each call timed to its GPU end (`rdma/mesh_statistics.py` `Observations`); no
 placement reads them back before a run (placement is an operand). Live connectivity
