@@ -15,6 +15,7 @@
 /* Completion service cadence, independent of queue capacity and link use. */
 #define MESH_POST_QUANTUM 64u
 #define MESH_COMPLETION_BATCH 64
+#define MESH_FLUSH_QUIET_NS UINT64_C(500000000)
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
 #define MESH_PREPARATION_NS UINT64_C(12000000000)

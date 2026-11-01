@@ -1,5 +1,12 @@
 # zorvek
 
+Historical design and investigation record. The later 2026-10-31 integration
+replaced the blanket encoder frontier and core-sized reduction launch described
+below with exact command/page dependencies and prepared value cells. Its link
+publications retain their actual data relationships; no mandatory whole-group
+barrier was restored. Current source changes and remaining limits are recorded
+in [the compiler integration](compiler-integration-2026-10-31.md).
+
 The structure of a group's encode and of the functions it runs, in pseudowords. Code that implements it uses these
 names for its functions and its data, and C's own keywords as C's. The key below is the only translation; code cites
 this file rather than restating it, so no idiom from another design is carried into the implementation.
@@ -115,6 +122,14 @@ what of the block takes its place. The order is forced: each later one guards a 
    zumbled.
 5. The encoder barriers between groups and the metal_boundary frontier (zilbos): with no transport on the GPU and no
    page shared between calls, a call's functions order after what they read in stream order alone (zumble).
+   The barriers a group takes today (nccl-mesh-metal.m metal_order, read 2026-10-31): one before its link stores
+   (metal_link: the first store only), one before zelloth (its sums' one dispatch), none before zelloq's spins
+   (metal_spins), one before each later direct dispatch (a complement copy, the epilogue). zelloth's header gives
+   spinning presents as its barrier's reason; the presents are deleted (item 6), and its reason now is the link
+   store's: zelloth's threadgroups, one a core, spin on landings, so they must not start before the store that lets
+   the bridge post those receives has run. That one stays with the link store's. The barrier between groups is the
+   next group's first, before its link: what it orders after is the caller's (metal_boundary), which item 5 replaces
+   by stream order.
 6. Done: the GPU presents and the descriptor rings (zarpers: MESH_STREAM_ENTRIES, `taken` as ring room, the
    bridge's walk_take copy): the bridge walks each call's laid tables, linked at the call's place (zinth, below), its
    walk the executor of zirrup and zirrupel, which its entry word already is.

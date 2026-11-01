@@ -1586,23 +1586,33 @@ static void child_tell(struct child_message said){ message_send(3,&said); }
    Under the port's guard (child_leave): no progress thread posts or polls meanwhile */
 static void lanes_flush(struct port *port,uint64_t until){
   struct link *l=&port->link;
-  uint64_t left=0;
+  uint64_t left[2]={0,0};
   uint32_t moved=0;
   for(uint32_t k=0;k<MESH_LINK_LANES;k++){
     const struct lane_state *s=l->lane+k;
     struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
     if((s->sent!=s->done || s->posted!=s->got) && l->plan>>k&1 && !ibv_modify_qp(l->provider.queues[k].pair,&error,IBV_QP_STATE)){
-      moved|=UINT32_C(1)<<k;left+=s->sent-s->done+s->posted-s->got;
+      moved|=UINT32_C(1)<<k;left[0]+=s->sent-s->done;left[1]+=s->posted-s->got;
     }
   }
-  const uint64_t held=left;
-  struct ibv_wc done[16];
-  for(int n=0,c=0;left && n>=0 && clock_ns()<until;c^=1){
-    n=l->provider.poll(c?l->provider.sent:l->provider.completion,16,done);
-    for(int i=0;i<n;i++)if(left && moved>>link_lane(l,done[i].qp_num)&1)left--;
+  const uint64_t held[2]={left[0],left[1]};
+  if(held[0]||held[1])mesh_say("bridge","link %u (%s): its child leaves with %llu SENDs and %llu receives outstanding on lanes %#x: "
+                               "moved to the error state",port->index,port->name,(unsigned long long)held[0],(unsigned long long)held[1],moved);
+  struct ibv_wc done[MESH_COMPLETION_BATCH];
+  /* c 0 the receive queue's completions, 1 the send queue's; taken until all are or none has come for MESH_FLUSH_QUIET_NS
+     (the provider flushed 687 requests in 0.41 s, and gives none for a SEND its peer's credit held: 1024 of 2048 at
+     each exit, 2026-10-31), at most until `until` */
+  uint64_t heard=clock_ns();
+  for(int n=0,c=0;(left[0]||left[1]) && n>=0;c^=1){
+    const uint64_t at=clock_ns();
+    if(at>=until || at-heard>=MESH_FLUSH_QUIET_NS)break;
+    n=l->provider.poll(c?l->provider.sent:l->provider.completion,MESH_COMPLETION_BATCH,done);
+    if(n>0)heard=at;
+    for(int i=0;i<n;i++)if(left[c?0:1] && moved>>link_lane(l,done[i].qp_num)&1)left[c?0:1]--;
   }
-  if(held)mesh_say("bridge","link %u (%s): its child leaves with %llu work requests outstanding on lanes %#x: moved to the "
-                   "error state, %llu flushed",port->index,port->name,(unsigned long long)held,moved,(unsigned long long)(held-left));
+  if(held[0]||held[1])mesh_say("bridge","link %u (%s): its child's flush took %llu of %llu SENDs and %llu of %llu receives",port->index,
+                               port->name,(unsigned long long)(held[0]-left[0]),(unsigned long long)held[0],(unsigned long long)(held[1]-left[1]),
+                               (unsigned long long)held[1]);
 }
 /* the child's end, asked (its parent's word, or a signal that ends a process: SIGTERM, SIGINT, SIGHUP) or not (its
    parent's loss): its progress threads held at the port's guard (none where a job of the port's is out), its lanes

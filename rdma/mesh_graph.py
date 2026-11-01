@@ -245,4 +245,3 @@ def cycles(graph):
     for v in graph:
         visit(v, [])
     return found
-
