@@ -10,7 +10,7 @@ import copy
 from pathlib import Path
 
 
-EXECUTED = ('configuration', 'episode', 'proposal', 'parts', 'domains', 'operands', 'graphs', 'layouts', 'workload', 'implementation', 'family', 'importance')
+EXECUTED = ('configuration', 'episode', 'proposal', 'parts', 'domains', 'operands', 'graphs', 'layouts', 'choices', 'workload', 'implementation', 'family', 'importance')
 
 class _Value(ctypes.Structure):
     _fields_ = [('seconds', ctypes.c_double), ('useful_gigabytes_per_second', ctypes.c_double),
@@ -51,10 +51,9 @@ def completed(record, ended):
     Other submissions may overlap it. Neither their completion order nor their
     end timestamps establish when this function began executing.
 
-    A caller that submits several functions back to back on one queue times each
-    with every one queued ahead of it, so a caller that reports a rate per function
-    (torch_mesh.benchmarks.bandwidth, the hourly ledger's rates) submits each once
-    its earlier ones have ended; see the note there.
+    A caller that submits several functions back to back measures each with its
+    actual queue residence and contention. Observation adds no start barrier or
+    completion gate between submissions.
     """
     measured = measure(record['started'], ended, record['useful_work_bytes'], record['report'].get('steps', 0))
     seconds = measured['seconds']
@@ -115,9 +114,16 @@ def cohorts(records):
             pending.extend(members.values())
             continue
         seconds = max(row['seconds'] for row in members.values())
+        # Callers report the logical output of the complete function, not wire
+        # amplification or a per-rank byte sum. It is fixed by this workload.
+        useful = first['useful_output_bytes']
+        if any(row['useful_output_bytes'] != useful for row in members.values()):
+            raise ValueError(f'{episode}: ranks disagree on whole-function useful work')
         complete.append({**{key: copy.deepcopy(first[key]) for key in EXECUTED if key in first},
                          'scope': 'function', 'complete': True, 'size': first['size'],
                          'seconds': seconds, 'latency_seconds': seconds,
+                         'useful_output_bytes': useful,
+                         'useful_gigabytes_per_second': measure(0, seconds, useful)['useful_gigabytes_per_second'],
                          'timing_scope': 'maximum rank submission-to-completion latency',
                          'ranks': [members[rank] for rank in range(first['size'])]})
     return complete, pending
@@ -160,7 +166,7 @@ def next_configuration(declaration, observations, *, family):
     family's member/routing/layout basis. No future completion is implied and
     no proposal is solved here; the next ordinary preparation does that.
     """
-    return {'placement': {key: declaration[key] for key in ('parts', 'operands', 'graphs', 'layouts')},
+    return {'placement': {key: declaration[key] for key in ('parts', 'operands', 'graphs', 'layouts', 'choices')},
             'observations': list(observations), 'proposal': declaration['proposal'] + 1, 'family': family}
 
 

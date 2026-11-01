@@ -106,7 +106,8 @@ def bandwidth(config):
     prepared = []
     for binding, useful, _, calls, what, requested in cases:
         from .declarations import execution_sequence
-        execution = execution_sequence((binding,) * calls)
+        from mesh_relation import Algebra
+        execution = execution_sequence((binding,) * calls, algebra=Algebra())
         execution.realize()
         prepared.append((execution, useful, calls, what, requested))
     observations = Observations()

@@ -257,7 +257,11 @@ require an optional list of per-operation costs. The affine envelope estimates w
 coefficient variances retain uncertainty where the completed calls cannot distinguish two resource costs.
 
 The historical equal-finish solver rounds the fitted allocation. Whole-call finite differences move all compute
-and route coordinates together. Compiler parameters use the same vector. An explicit proposal ordinal advances
+and route coordinates together. Compiler parameters, backend/source-region invocation choices and source-fold
+column shares use the same vector. Backend invocations have their declared one-unit grain; fold columns divide
+independent values within each declared segment. Source identities retain their scope and occurrence, and backend
+identities also retain the member and typed requirements. The actual executed choices travel with every observation.
+An explicit proposal ordinal advances
 the paired perturbations; retaining only a bounded history cannot freeze their direction or radius. Each compute
 or route axis carries its realization grain, so a perturbation can still cross a compiler rounding boundary. No result is accepted or
 rejected as a candidate. There is no saved controller or hidden solver lifecycle to restore. The saved data is what
@@ -265,6 +269,10 @@ ran, its actual operands, and its measured completion interval.
 
 This is an empirical local solver. A small residual, a compiled plan, or a capacity prior does not establish a global
 optimum. The required evidence remains lower whole-function elapsed time and higher useful output per second.
+Each workload fixes its logical useful-output count, so these are the same objective over the same interval.
+Changing a backend can change which lower-level coordinate blocks exist. The residual fit centers each conditional
+block on episodes where it is present, while comparing shared source choices across the same source revision.
+It does not invent a zero value for an absent block or give every backend its own unconstrained cost baseline.
 
 The compiler retains the newest configured number of observations by proposal ordinal. Arrival order cannot
 rename an old proposal or turn it into the next finite difference. Regression weights combine the observation's
@@ -336,11 +344,10 @@ There is no per-transfer byte ledger, trace observer, timing event, or timing-on
 `ncclMeshTrace*`, `ncclMeshCommSample`, and LSTM split-timing interfaces were removed. Their bookkeeping ran on
 transfers even when no trace was requested. Historical trace analysis does not belong in the execution path.
 
-The record contains commit IDs, installed node IDs, and these completion measurements. Observations are emitted, a
-log of the execution, and are never an input to a placement: nothing makes a collective the same machines, capabilities
-or fabric from one execution to the next, so every placement is solved afresh, and a bad fresh fit is the solver's
-defect to fix, not one to hide behind history (the operator, 2026-10-30). A caller that wants a good fit again passes
-it as the placement operand.
+The record contains commit IDs, installed node IDs, executed configuration operands, and these completion measurements.
+The caller explicitly supplies available observations to a later preparation. Their family names the source,
+members and workload; each coordinate retains its full semantic domain. Changed members or code are not silently
+treated as the same experiment. The solver consumes these operands afresh; it does not restore an execution controller.
 
 ## Roofline
 

@@ -51,6 +51,7 @@ def placement(mesh, name, workload, seed=None, *, parameters, observations, prop
     capacities = [report['capacity'] for report in reports]
     graphs = copy.deepcopy(seed.get('graphs', {}))
     layouts = copy.deepcopy(seed.get('layouts', []))
+    choices = copy.deepcopy(seed.get('choices', []))
     declared_family = {'source': copy.deepcopy(family), 'members': [report['member'] for report in reports],
                        'workload': copy.deepcopy(workload)}
     operand = partition.operand(mesh, name)
@@ -59,7 +60,7 @@ def placement(mesh, name, workload, seed=None, *, parameters, observations, prop
     parameters = {key: {**value, 'value': seed.get('operands', {}).get(key, value['value'])}
                   for key, value in parameters.items()}
     work = decisions
-    decisions = assignment.domains(work, graphs, parameters, layouts=layouts)
+    decisions = assignment.domains(work, graphs, parameters, layouts=layouts, choices=choices)
     for choice, parts in seed.get('parts', {}).items():
         if choice not in decisions or len(parts) != len(decisions[choice]['parts']) or not math.isclose(sum(parts), sum(decisions[choice]['parts'])):
             raise ValueError(f'{choice}: seed parts do not fit the declared choice domain')
@@ -73,6 +74,7 @@ def placement(mesh, name, workload, seed=None, *, parameters, observations, prop
     agreed = group.broadcast_configuration({'assignment': operands, 'configuration': key} if rank == 0 else None)
     operands, key = agreed['assignment'], agreed['configuration']
     operands['operands']['layout_preferences'] = assignment.layout_operands(operands['parts'], layouts)
+    operands['operands']['source_preferences'] = assignment.source_operands(operands['parts'], choices)
     partition._attach(mesh, name, operands['parts'][name])
     # every member leaves together, each having waited for rank 0's proposal; the fit is named, to be passed again
     emit({'phase': 'placed', 'unix': time.time(), 'configuration': key, 'proposal': proposal,
@@ -80,16 +82,15 @@ def placement(mesh, name, workload, seed=None, *, parameters, observations, prop
     return {'mesh': mesh, 'name': name, 'group': group, 'rank': rank, 'size': size,
             'key': key, 'workload': workload, 'records': records, 'family': declared_family,
             'work': work, 'parameters': parameters, 'decisions': decisions, 'assignment': operands,
-            'graphs': graphs, 'layouts': layouts, 'forms': list(forms),
+            'graphs': graphs, 'layouts': layouts, 'choices': choices, 'forms': list(forms),
             'implementation': revision(Path(assignment.__file__).resolve().parents[1]), 'sequence': 0}
 
 
 def bind(configuration, groups, prepare):
     """Bind one proposal and retain its executed operands for the next call.
 
-    ``prepare`` returns ``{'layouts': [...]}`` from the Function declarations
-    it realized, or an explicit empty list for a declaration with no layout
-    choices. The returned seed is accepted by :func:`placement` unchanged.
+    ``prepare`` returns layout and source choices from the Function declarations
+    it realized. The returned seed is accepted by :func:`placement` unchanged.
     """
     c = configuration
     mesh, name, group = c['mesh'], c['name'], c['group']
@@ -103,22 +104,25 @@ def bind(configuration, groups, prepare):
     graph = {**assignment.graph(group.comm, group._plan), 'production_seconds': list(production_seconds), 'forms': c['forms']}
     emit({'phase': 'installed', 'unix': time.time()})
     report = prepare()
-    layouts = [choice for report in group.exchange_configuration(report) for choice in report['layouts']]
+    reports = group.exchange_configuration(report)
+    layouts = [choice for report in reports for choice in report['layouts']]
+    choices = assignment.source_axes([choice for report in reports for choice in report['choices']])
     emit({'phase': 'prepared', 'unix': time.time()})
     work = {key: {**value, 'parts': c['assignment']['parts'][key]} for key, value in c['work'].items()}
     parameters = {key: {**value, 'value': c['assignment']['operands'][key]} for key, value in c['parameters'].items()}
-    decisions = assignment.domains(work, {name: graph}, parameters, layouts=layouts)
+    decisions = assignment.domains(work, {name: graph}, parameters, layouts=layouts, choices=choices)
     parts = {key: value['parts'] for key, value in decisions.items()}
-    operands = {**c['assignment']['operands'], 'layout_preferences': assignment.layout_operands(parts, layouts)}
-    c.update(decisions=decisions, graphs={name: graph}, layouts=layouts,
+    operands = {**c['assignment']['operands'], 'layout_preferences': assignment.layout_operands(parts, layouts),
+                'source_preferences': assignment.source_operands(parts, choices)}
+    c.update(decisions=decisions, graphs={name: graph}, layouts=layouts, choices=choices,
              assignment={**c['assignment'], 'parts': parts, 'domains': assignment.choice_domains(decisions), 'operands': operands})
     # Built here, every value of it, and nothing writes into it after: shared, not copied (two deep copies of the plan's
     # graphs took 0.9 s of every rank's preparation, 2026-10-31).
-    c['prepared'] = {'parts': parts, 'operands': operands, 'graphs': c['graphs'], 'layouts': layouts}
+    c['prepared'] = {'parts': parts, 'operands': operands, 'graphs': c['graphs'], 'layouts': layouts, 'choices': choices}
     c['observations'] = Observations(declaration={
         'configuration': c['key'], 'proposal': c['assignment']['proposal'],
         'parts': c['assignment']['parts'], 'domains': c['assignment']['domains'], 'operands': c['assignment']['operands'],
-        'graphs': c['graphs'], 'layouts': c['layouts'], 'family': c['family'], 'workload': c['workload'],
+        'graphs': c['graphs'], 'layouts': c['layouts'], 'choices': choices, 'family': c['family'], 'workload': c['workload'],
         'implementation': c['implementation'], 'rank': c['rank'], 'size': c['size']})
     group.observations.append(c['observations'])
     return c['prepared']

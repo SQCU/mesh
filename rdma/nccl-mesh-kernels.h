@@ -108,17 +108,10 @@ static NSString *const KERNELS =
   "#define HEAD(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]], uint l [[thread_position_in_threadgroup]], uint t [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, progress, i, g, l, t, tg); } static void body_##name(PARAMS)\n"
   "#define GROUP(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, progress, i, g, i, g, tg); } static void body_##name(PARAMS)\n"
   "#define LOOP for (ulong k = i; k < p.n; k += g)\n"
-  "template<typename W,bool Land,bool Observe> static void copy_body(PARAMS) { ENTER(i == 0) "
-  "if constexpr(Observe) { if(l == 0) { device const ulong *observed=(device const ulong *)(a+p.aux); "
-  "for(uint j=0;j<p.count;j++) { device const ulong *w=observed+6*j; mesh_step_observe((device uchar *)w[0],w[1],(device uchar *)w[2],uint(w[3]),uint(w[4]),w[5]); } } "
-  "threadgroup_barrier(mem_flags::mem_device); atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); } "
+  "template<typename W> static void copy_body(PARAMS) { ENTER(i == 0) "
   "volatile coherent(system) device W *x=(volatile coherent(system) device W *)(d+p.dst); "
-  "LOOP { if constexpr(Land) x[k]=mesh_step_read<W>(s+p.src,k); else x[k]=((device const W *)(s+p.src))[k]; } }\n"
-  "#define COPY(Z, W) "
-  "HEAD(copy_plain_##Z) { copy_body<W,false,false>(d,s,p,a,vb,progress,i,g,l,t,tg); } "
-  "HEAD(copy_land_##Z) { copy_body<W,true,false>(d,s,p,a,vb,progress,i,g,l,t,tg); } "
-  "HEAD(copy_ready_plain_##Z) { copy_body<W,false,true>(d,s,p,a,vb,progress,i,g,l,t,tg); } "
-  "HEAD(copy_ready_land_##Z) { copy_body<W,true,true>(d,s,p,a,vb,progress,i,g,l,t,tg); }\n"
+  "LOOP x[k]=mesh_step_read<W>(s+p.src,k); }\n"
+  "#define COPY(Z, W) HEAD(copy_##Z) { copy_body<W>(d,s,p,a,vb,progress,i,g,l,t,tg); }\n"
   "COPY(4, uint)\n"
   "COPY(1, uchar)\n"
   "HEAD(fill_pattern) { volatile coherent(system) device uchar *out=(volatile coherent(system) device uchar *)(d+p.dst); "
@@ -159,13 +152,13 @@ static NSString *const KERNELS =
   "zelloth_publish publish = {z, K}; mesh_graph_settle(state, 0, uint(z[1]), prefix, publish); "
   "} }\n"
   "#define INTEGER(name, T, SIGNED) ZELLOTH(name, T, op_int<T>) "
-  "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(mesh_payload((volatile coherent(system) device const T *)(a + p.aux))); LOOP x[k] = T(ulong(y[k]) * c); } "
+  "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); ulong c = ulong(mesh_payload((volatile coherent(system) device const T *)(a + p.aux))); LOOP x[k] = T(ulong(mesh_payload(y + k)) * c); } "
   "HEAD(truncdiv_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP { T v = mesh_payload(y + k); bool negative = SIGNED && v < T(0); "
   "ulong m = negative ? 0UL - ulong(v) : ulong(v), q = m / p.scalar; x[k] = negative ? T(0UL - q) : T(q); } }\n"
   "#define FLOATING(name, T) ZELLOTH(name, T, op_float<T>) "
-  "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); float c = float(mesh_payload((volatile coherent(system) device const T *)(a + p.aux))); LOOP x[k] = T(float(y[k]) * c); }\n"
+  "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); float c = float(mesh_payload((volatile coherent(system) device const T *)(a + p.aux))); LOOP x[k] = T(float(mesh_payload(y + k)) * c); }\n"
   "#define FLOAT8(name, E5) ZELLOTH(name, uchar, op_f8<E5>) "
-  "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); float c = f8_to(mesh_payload((volatile coherent(system) device const uchar *)(a + p.aux)), E5); LOOP x[k] = f8_from(f8_to(y[k], E5) * c, E5); }\n"
+  "HEAD(premul_##name) { ENTER(i == 0) volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); float c = f8_to(mesh_payload((volatile coherent(system) device const uchar *)(a + p.aux)), E5); LOOP x[k] = f8_from(f8_to(mesh_payload(y + k), E5) * c, E5); }\n"
   "INTEGER(i8, char, true)\n"
   "INTEGER(u8, uchar, false)\n"
   "INTEGER(i32, int, true)\n"
@@ -178,7 +171,6 @@ static NSString *const KERNELS =
   "FLOAT8(e4m3, false)\n"
   "FLOAT8(e5m2, true)\n"
   "GROUP(publish) { ENTER_G mesh_step_release(p, d, i); }\n"
-  "GROUP(spin) { ENTER_G if (i == 0) mesh_step_counts(p, d, vb); }\n"
   "constant float PARTIAL_NONE = -3.4028234663852886e38f;\n"
   "template <bool Same> static inline void merge_row(volatile coherent(system) device float *x, volatile coherent(system) device const float *xs, volatile coherent(system) device const float *y, uint u) { "
   "const float m = mesh_payload(y), ly = mesh_payload(y + 1), mx = mesh_payload(xs), lx = mesh_payload(xs + 1); const bool mine = lx > 0.0f, theirs = ly > 0.0f; "
@@ -195,12 +187,11 @@ static NSString *const KERNELS =
    them by are deleted with it (design/zorvek.md "The pool's last users") */
 #define REDUCTION_KINDS(X, T) X(zelloth_##T##_sum) X(zelloth_##T##_prod) X(zelloth_##T##_max) X(zelloth_##T##_min)
 #define KINDS_OF(X) \
-  X(fill_pattern) X(copy_plain_4) X(copy_land_4) X(copy_plain_1) X(copy_land_1) \
-  X(copy_ready_plain_4) X(copy_ready_land_4) X(copy_ready_plain_1) X(copy_ready_land_1) \
+  X(fill_pattern) X(copy_4) X(copy_1) \
   X(premul_i8) X(truncdiv_i8) X(premul_u8) X(truncdiv_u8) X(premul_i32) X(truncdiv_i32) X(premul_u32) X(truncdiv_u32) \
   X(premul_i64) X(truncdiv_i64) X(premul_u64) X(truncdiv_u64) \
   X(premul_f16) X(premul_f32) X(premul_bf16) X(premul_e4m3) X(premul_e5m2) \
-  X(publish) X(spin) \
+  X(publish) \
   REDUCTION_KINDS(X,i8) REDUCTION_KINDS(X,u8) REDUCTION_KINDS(X,i32) REDUCTION_KINDS(X,u32) REDUCTION_KINDS(X,i64) REDUCTION_KINDS(X,u64) \
   REDUCTION_KINDS(X,f16) REDUCTION_KINDS(X,f32) REDUCTION_KINDS(X,bf16) REDUCTION_KINDS(X,e4m3) REDUCTION_KINDS(X,e5m2) \
   X(zelloth_merge)

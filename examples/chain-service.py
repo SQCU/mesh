@@ -76,7 +76,7 @@ def main(config=None):
     torch_mesh.check_memory()
     def prepare():
         sequence.prepare(operands)
-        return {'layouts': []}
+        return {'layouts': [], 'choices': []}
     bind(configuration, groups, prepare)
     completion = _stream.chain_completion(operands[0])
     started = now()

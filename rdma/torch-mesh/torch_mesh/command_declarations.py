@@ -39,6 +39,8 @@ def rows(view, axis):
 
 class Commands:
     def __init__(self, operands, *, geometry, capabilities):
+        from .compilation import relations
+        self.algebra = relations()
         self.geometry, self.capabilities = geometry, capabilities
         self.bindings = {name: dict(value, role=True) for name, value in operands.items() if value is not None}
         self.commands = []
@@ -56,10 +58,10 @@ class Commands:
 
     def shader(self, source, function, operands, *, grid, threadgroup, access,
                constants=None, definitions=None, indices=None, instance='', thread_grid=False,
-               threadgroup_policy=None, limits=None, access_layouts=None, dispatch=None):
+               threadgroup_policy=None, limits=None, access_layouts=None, dispatch=None, coherent_accesses=False):
         from mesh_relation import Algebra
         from .operand import layout_configuration
-        algebra = Algebra()
+        algebra = self.algebra
         prefix = ''.join(f'#define {key} {value}\n' for key, value in (definitions or {}).items())
         constants = {} if constants is None else constants
         count = max([len(operands), *(slot + 1 for slot in constants)], default=0)
@@ -96,7 +98,7 @@ class Commands:
                 accesses.append(dict(side=side, slot=slot, access=typed, work=relation.domain(), origins=(),
                                      argument_layout=local.components(dtype.itemsize).reshape((local.count * dtype.itemsize,))))
         self.commands.append(dict(kind='shader', source=prefix + source + instance, function=function,
-            arguments=tuple(arguments), types=tuple(types), index_dtype=None,
+            arguments=tuple(arguments), types=tuple(types), index_dtype=None, coherent_accesses=coherent_accesses,
             index_layouts={} if indices is None else indices,
             binding_origins=tuple(origins), constants=constants, access=access, accesses=tuple(accesses),
             grid=tuple(grid), threadgroup=None if threadgroup is None else tuple(threadgroup),

@@ -86,7 +86,7 @@ def declaration(kind, operands, parameters, configuration):
     shift = geometry['ACCESS_WRITE_SHIFT']
     from mesh_relation import Algebra
     from .operand import layout_configuration
-    algebra = Algebra()
+    algebra = commands.algebra
     def dispatch(blocks, bindings, modes):
         accesses = []
         for slot, (view, mode) in enumerate(zip(bindings, modes, strict=True)):

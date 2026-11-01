@@ -88,7 +88,7 @@ def route_resolution(comm, nodes):
 
 
 
-def domains(decisions, graphs, parameters=None, *, layouts=()):
+def domains(decisions, graphs, parameters=None, *, layouts=(), choices=()):
     """Work and retained native choices in one whole-function numerical vector."""
     result = {k: {'model': 'affine', 'identity': {'work': k}, 'total': sum(v['parts']), **v}
               for k, v in decisions.items()}
@@ -111,6 +111,13 @@ def domains(decisions, graphs, parameters=None, *, layouts=()):
             result[f'layout:{index}'] = {'parts': [v / total for v in values],
                 'grain': 0, 'low': [0] * len(values), 'high': [1] * len(values), 'model': 'residual', 'total': 1,
                 'identity': {'layout': choice['family']}}
+    for index, choice in enumerate(source_axes(choices)):
+        values = choice['weights']
+        total = sum(values)
+        result[f'source:{index}'] = dict(parts=[value / total for value in values],
+            grain=choice['grain'], quantum=choice.get('quantum', choice['grain']),
+            low=[0] * len(values), high=choice.get('high', [1] * len(values)),
+            model='residual', total=1, identity={'source_choice': choice['family']})
     return result
 
 
@@ -311,6 +318,31 @@ def layout_family(choices):
     return [choice['family'] for choice in layout_axes(choices)]
 
 
+def source_axes(choices):
+    """Exact source alternatives, including their invocation granularity.
+
+    A fold column owns independent values. An indivisible provider invocation
+    owns one unit. Both use the same bounded simplex as routing and work shares.
+    Repeated declarations of one source decision retain one coordinate block.
+    """
+    result, known = [], {}
+    for raw in choices:
+        choice = json.loads(json.dumps(raw, sort_keys=True, allow_nan=False))
+        token = json.dumps(choice['family'], sort_keys=True, separators=(',', ':'))
+        if token in known:
+            if known[token] != choice:
+                raise ValueError('one source choice family has conflicting executed operands')
+        else:
+            known[token] = choice
+            result.append(choice)
+    return result
+
+
+def source_operands(parts, choices):
+    return [dict(family=choice['family'], weights=list(parts[f'source:{index}']))
+            for index, choice in enumerate(source_axes(choices))]
+
+
 def window(observations):
     """Bound fit storage by proposal order, never by asynchronous arrival order."""
     return sorted(observations, key=lambda row: (row['proposal'], str(row.get('episode', ''))))[-NUMERICS['observation_window']:]
@@ -319,7 +351,9 @@ def window(observations):
 def assign(decisions, observations, *, step, family):
     """Pure preparation: explicit proposal ordinal, executed operands and observations.
 
-    Complete-call durations fit the affine stage envelope even when no isolated
+    A family fixes the logical useful work. Minimizing complete-call duration
+    therefore maximizes useful throughput over the identical interval; there
+    is no second bandwidth score or per-transfer objective. Durations fit the affine stage envelope even when no isolated
     resource timings exist. A ridge fit of its residual moves every coordinate,
     including routes and compiler operands. No observed candidate is gated.
     """
@@ -375,6 +409,7 @@ def assign(decisions, observations, *, step, family):
     values = np.zeros((len(rows), at))
     available = np.zeros((len(rows), at), dtype=bool)
     observed = np.zeros((len(rows), width))
+    observed_columns = np.zeros((len(rows), width), dtype=bool)
     contexts = []
     for i, row in enumerate(rows):
         present = {}
@@ -386,11 +421,12 @@ def assign(decisions, observations, *, step, family):
                 raise ValueError('invalid executed coordinate domain')
             present[token] = data / domain['total']
             observed[i, columns[token]] = present[token]
+            observed_columns[i, columns[token]] = True
         for key in names:
             if tokens[key] in present:
                 values[i, offsets[key]] = present[tokens[key]]
                 available[i, offsets[key]] = True
-        contexts.append((str(row['implementation']), tuple(sorted(present))))
+        contexts.append(str(row['implementation']))
     if any(not math.isfinite(o['seconds']) or o['seconds'] <= 0 for o in rows):
         raise ValueError('whole-function durations must be finite and positive')
     scale = float(np.median([o['seconds'] for o in rows])) if rows else 1.0
@@ -446,8 +482,9 @@ def assign(decisions, observations, *, step, family):
     fitted = initial
     uncertainty = np.full(len(initial), 1 / prior_scale ** 2)
     if rows and count:
-        # Separate implementation and conditional-basis offsets from the shared
-        # fixed/work-dependent model. An offset may be positive or negative.
+        # A source revision has its own intercept. A changed conditional domain
+        # is a consequence of the selected backend/fold, not a new intercept:
+        # absorbing it there would erase the very cost the shared choice learns.
         origin = np.r_[initial, np.zeros(len(versions))]
         def residual(parameters, jacobian=False):
             costs, derivatives = zip(*(envelope(v, parameters[:2 * count]) for v in values))
@@ -488,15 +525,22 @@ def assign(decisions, observations, *, step, family):
         target = np.zeros(len(rows))
         for revision in versions:
             indices = [i for i, context in enumerate(contexts) if context == revision]
-            active = np.array([i for token in revision[1] for i in range(columns[token].start, columns[token].stop)], dtype=int)
-            w, v = weights[indices], observed[np.ix_(indices, active)]
+            w = weights[indices]
             w = w / w.sum()
             y = np.array([rows[i]['seconds'] / scale - prior(values[i]) for i in indices])
             root = np.sqrt(w * len(indices))
-            # Zero denotes no deviation for a structurally absent block, not a
-            # fabricated execution value. Historical-only axes remain nuisance
-            # columns, so their changes are not attributed to compute shares.
-            design[np.ix_(indices, active)] = (v - w @ v) * root[:, None]
+            # Center each conditional coordinate on episodes that declare it.
+            # An absent coordinate contributes no deviation, never a fabricated
+            # zero share. Shared selecting axes can therefore learn the cost of
+            # changing a backend even when it changes the lowered graph's axes.
+            for column in range(width):
+                selected = np.flatnonzero(observed_columns[indices, column])
+                if not len(selected):
+                    continue
+                members = np.asarray(indices)[selected]
+                local = w[selected] / w[selected].sum()
+                values_here = observed[members, column]
+                design[members, column] = (values_here - local @ values_here) * root[selected]
             target[indices] = (y - w @ y) * root
         fitted_gradient = design.T @ np.linalg.solve(design @ design.T + np.eye(len(rows)) * prior_scale ** 2, target)
         for key in names:

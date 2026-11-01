@@ -28,7 +28,7 @@ def main(config=None):
     dnn = DNN(args, group, group.fabric, source_scope={'program': 'fabric-dnn'})
     def prepare():
         dnn.prepare({'compute': partition.split(mesh, 'ffn', args.expansion)})
-        return {'layouts': []}
+        return {'layouts': [], 'choices': []}
     bind(configuration, dnn.declare(), prepare)
     started = now()
     dnn.run()

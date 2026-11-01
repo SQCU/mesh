@@ -16,7 +16,8 @@ from .compilation import operands as compiler_operands
 from .operand import TensorView, descriptor, rebase_typed
 
 _records = ContextVar('mesh_native_commands')
-_ALLOC_ADAPTERS = {'torch.ops.torch_mesh.linear.default': 'linear',
+_ALLOC_ADAPTERS = {'torch.ops.torch_mesh.product_pages.default': 'product_pages',
+                   'torch.ops.torch_mesh.linear.default': 'linear',
                    'torch.ops.torch_mesh.linears.default': 'linears',
                    'torch.ops.aten.topk.default': 'topk',
                    'torch.ops.aten.sort.default': 'sort',
@@ -137,8 +138,14 @@ def declared_commands(declarations):
     for declaration in declarations:
         if isinstance(declaration, dict) and declaration['kind'] in ('product', 'topk', 'cumsum', 'draw', 'retain', 'fwht_stage', 'kernel'):
             from .command_declarations import bind
+            from .compilation import implementations
             yield from declared_commands(declaration['before'])
-            yield from declared_commands(bind(command_declaration(declaration), declaration['operands']))
+            selected = declaration['parameters']['implementation'] if declaration['kind'] == 'product' else None
+            if selected is not None and implementations()[selected]['compiler'] == 'accelerate':
+                from .engines import product_commands
+                yield from product_commands(declaration['operands'], declaration['parameters'])
+            else:
+                yield from declared_commands(bind(command_declaration(declaration), declaration['operands']))
             yield from declared_commands(declaration['after'])
         else:
             yield declaration
@@ -161,6 +168,9 @@ def linears(xs, ws, biases, acts, x1s, *, outputs=None):
 def product(x, w, out, *, before=(), after=(), declaration=None, **parameters):
     roles = dict(x=x, w=w, out=out)
     roles.update((name, parameters.pop(name)) for name in ('x1', 'bias') if name in parameters)
+    if 'implementation' not in parameters:
+        from .algebra import product_implementation
+        parameters['implementation'] = product_implementation(x, w, out.dtype)
     _records.get().append(dict(kind='product', operands=roles, parameters=parameters,
                               before=tuple(before), after=tuple(after), declaration=declaration))
 
@@ -654,7 +664,8 @@ def prepare_graph(module, metadata, *, materializations=()):
     from torch.utils._pytree import tree_flatten, tree_unflatten
     from torch.fx.node import map_arg
     from .placement import Placements, same_view
-    from .compilation import implementations, implementation_assignment
+    from .compilation import implementations, implementation_assignment, relations
+    compilation_algebra = relations()
     from contextlib import contextmanager
     from mesh_compute import hardware
 
@@ -821,6 +832,22 @@ def prepare_graph(module, metadata, *, materializations=()):
                          finish=None, source=operation.inputs[0], path=tuple(operation.indices)),)
 
         def product(values, parameters):
+            from .algebra import product_requirements_from_types
+            from mesh_compute import assigned_implementation, select_implementation
+            x, w, out = (values[name] for name in ('x', 'w', 'out'))
+            shape = list(x['view'].shape)
+            if values.get('x1') is not None:
+                shape[-1] += values['x1']['view'].shape[-1]
+            required = product_requirements_from_types(shape, x['dtype'], w['view'].shape, w['dtype'], out['dtype'])
+            choice = parameters.get('implementation') or assigned_implementation(required, implementation_choices['product'])
+            selected = select_implementation(required, implementation_catalog.values(), choice)
+            parameters = dict(parameters, implementation=selected['id'])
+            if parameters.get('implementation') is not None and implementation_catalog[parameters['implementation']]['compiler'] == 'accelerate':
+                # The bulk CPU API consumes actual matrix pages. Keep scalar
+                # producers in the ordinary graph; placement solves its declared
+                # strided-layout requirement before that invocation is bound.
+                values = {name: None if value is None else {key: item for key, item in value.items() if key != 'reader'}
+                          for name, value in values.items()}
             declared = {name: None if value is None else dict(shape=tuple(value['view'].shape), type=value['dtype'])
                         for name, value in values.items()}
             domains = mesh_matrix.product_domains(algebra, **declared)
@@ -844,7 +871,7 @@ def prepare_graph(module, metadata, *, materializations=()):
         if not isinstance(operation, ir.FallbackKernel):
             return ()
         adapter = _ALLOC_ADAPTERS.get(operation.get_kernel_name())
-        if adapter not in ('linear', 'linears', 'kernel', 'topk', 'sort', 'cumsum', 'draw', 'retain', 'fwht_stage'):
+        if adapter not in ('linear', 'linears', 'product_pages', 'kernel', 'topk', 'sort', 'cumsum', 'draw', 'retain', 'fwht_stage'):
             return ()
         args, keywords = operation.unflatten_args(operation.inputs, operation.constant_args)
         named = {field.name: args[i] if i < len(args) else keywords.get(field.name, field.default_value)
@@ -1113,7 +1140,7 @@ def prepare_graph(module, metadata, *, materializations=()):
             name = f'mesh_kernel_{wrapper.next_kernel_suffix()}'
             types = tuple(V.graph.get_dtype(argument) for argument in arguments)
             from mesh_relation import Algebra
-            algebra, accesses = Algebra(), []
+            algebra, accesses = compilation_algebra, []
             for node in node_schedule:
                 if not isinstance(node, SchedulerNode):
                     continue
@@ -1226,7 +1253,7 @@ def prepare_graph(module, metadata, *, materializations=()):
                 if plan is None:
                     return False
                 from mesh_relation import Algebra
-                algebra = Algebra()
+                algebra = compilation_algebra
                 regions = {id(piece): self.fusion_regions(piece, algebra)
                            for pair in plan for piece in pair if piece is not None}
                 # A fused cell runs its left producer before its right consumer.
@@ -1541,7 +1568,7 @@ def prepare_graph(module, metadata, *, materializations=()):
             from mesh_relation import Algebra, flat
             from .layout import strides
             from .operand import access_domain, byte_relation, layout_configuration, symbolic_index
-            algebra = Algebra()
+            algebra = compilation_algebra
             nodes = self.declaration_nodes
             producers = {value.get_name(): op for op in self.operations for value in op.get_outputs()}
             protected = self.never_reuse_buffers | {value.get_name() for value in self.graph_outputs}
@@ -1795,15 +1822,24 @@ def prepare_graph(module, metadata, *, materializations=()):
                 for access in (*accesses['reads'], *accesses['writes']):
                     required.add(self.get_dtype(access['name']))
                 requirement = dict(interfaces=['scalar'], input_types=[],
-                    arithmetic_types=sorted(str(dtype).removeprefix('torch.') for dtype in required), constants=[])
+                    arithmetic_types=sorted(str(dtype).removeprefix('torch.') for dtype in required), constants=[],
+                    parameters=dict(iteration_rank=len(body.iter_vars), reduction_rank=len(body.reduce_vars),
+                        **{f'iteration{axis}': int(size) for axis, size in enumerate(body.sizes[0])},
+                        **{f'reduction{axis}': int(size) for axis, size in enumerate(body.sizes[1])}))
+                assigned = {origin.meta['mesh_implementation'] for origin in operation.get_origins()
+                            if 'mesh_implementation' in origin.meta}
+                if len(assigned) > 1:
+                    raise ValueError('one retained numerical body crosses different source implementation assignments')
                 declarations.append(dict(operation=operation, required=requirement,
+                    implementation=next(iter(assigned)) if assigned else None,
                     candidates=tuple(eligibility(requirement, candidate)
                                      for candidate in implementation_catalog.values())))
             return tuple(declarations)
 
         def select_implementations(self, records=None):
             """Resolve explicit choices against the retained typed requirements."""
-            from mesh_compute import assigned_implementation, select_implementation
+            from mesh_compute import select_implementation
+            from .compilation import implementation_choice, source_records
             choices = []
             for declaration in self.consumer_constraints():
                 operation = declaration['operation']
@@ -1811,9 +1847,13 @@ def prepare_graph(module, metadata, *, materializations=()):
                     if record['effect']['operation'] is operation and
                     (not record['work'].empty() or record['finish'] is not None and not record['finish']['work'].empty())))
                 for record in requests:
+                    explicit = (record['implementation'] if record is not None and 'implementation' in record else
+                                declaration['implementation'])
+                    source = sorted((entry for origin in operation.get_origins() for entry in source_records(origin)), key=str)
+                    selected = explicit or implementation_choice(declaration['required'], implementation_choices['scalar'],
+                        source=source)['implementation']
                     implementation = select_implementation(declaration['required'], implementation_catalog.values(),
-                        record['implementation'] if record is not None and 'implementation' in record else
-                        assigned_implementation(declaration['required'], implementation_choices['scalar']))
+                        selected)
                     if implementation['compiler'] not in scalar_compilers:
                         raise NotImplementedError(f"retained scalar emission has no compiler for {implementation['compiler']}")
                     choices.append(dict(operation=operation, domain=None if record is None else record['domain'],
@@ -1893,7 +1933,7 @@ def prepare_graph(module, metadata, *, materializations=()):
             finally:
                 self.operations = operations
             physical = []
-            algebra = Algebra()
+            algebra = compilation_algebra
             for stage in stages:
                 stage.origins = operation.get_origins()
                 declaration = self.declaration(stage)
@@ -1910,6 +1950,7 @@ def prepare_graph(module, metadata, *, materializations=()):
 
         def select_domains(self, records):
             """Apply owner-selected work to this IR's existing scalar bodies."""
+            from torch.utils._ordered_set import OrderedSet
             import copy
             from torch._inductor import dependencies
             from torch._inductor.loop_body import LoopBody
@@ -2015,7 +2056,8 @@ def prepare_graph(module, metadata, *, materializations=()):
                             node.__dict__.pop('page_pieces', None)
                         else:
                             node.page_pieces = tuple(pieces)
-                        rw = dependencies.ReadWrites.merge_list([piece.read_writes for piece in pieces])
+                        rw = (dependencies.ReadWrites.merge_list([piece.read_writes for piece in pieces]) if pieces else
+                              dependencies.ReadWrites(OrderedSet(), OrderedSet(), OrderedSet()))
                     elif isinstance(node, NopKernelSchedulerNode):
                         # The retained IR declares no command. Its result
                         # storage still passes through the ordinary binder.
@@ -2032,8 +2074,18 @@ def prepare_graph(module, metadata, *, materializations=()):
                             from .selection import selected_rows
                             node.selected_plans = tuple(plan for request in requests for plan in selected_rows(request))
                         elif domains:
-                            node.selected_plans = tuple(dict(plan, adapter='product') for request in requests for plan in mesh_matrix.selected_products(
-                                request['domain'], request['work'], request['finish']['work'], requirements=product_requirements))
+                            def requirements(domain):
+                                selected = domain['parameters'].get('implementation')
+                                if selected is None or implementation_catalog[selected]['compiler'] != 'accelerate':
+                                    return product_requirements
+                                cpu_layouts = api_layouts('cpu_matrix')
+                                return {name: (cpu_layouts[role],) for name, role in
+                                    dict(x='input', w='weight', out='output').items()}
+                            node.selected_plans = tuple(dict(call, adapter='product') for request in requests
+                                for plan in mesh_matrix.selected_products(request['domain'], request['work'],
+                                    request['finish']['work'], requirements=requirements(request['domain']))
+                                for call in mesh_matrix.product_invocations(plan,
+                                    batch_dimensions=implementation_catalog[plan['parameters']['implementation']]['batch_dimensions']))
                         else:
                             undeclared.add(operation.get_operation_name())
                         rw = node.declared_read_writes
@@ -2086,7 +2138,9 @@ def prepare_graph(module, metadata, *, materializations=()):
                                                  read_relation.union(selected_relation))
                             binding = accesses[0]
                             count = int(binding['storage_bytes']) // binding['dtype'].itemsize
-                            layout = _stream.TensorLayout.runs(positions.spans()).elements(binding['dtype'].itemsize)
+                            width = binding['dtype'].itemsize
+                            selected_bytes = _stream.TensorLayout.runs(positions.spans())
+                            layout = selected_bytes.reshape((selected_bytes.count // width, width)).elements(width)
                             relation = algebra.layout(layout_configuration(layout))
                             key = (name, index, role, slot)
                             uses.append(dict(key=key, binding=binding, relation=relation, shape=relation.shape,
@@ -2283,7 +2337,7 @@ def prepare_graph(module, metadata, *, materializations=()):
             """
             from torch.utils._pytree import tree_map
             from mesh_relation import Algebra
-            algebra = Algebra() if algebra is None else algebra
+            algebra = compilation_algebra if algebra is None else algebra
 
             def value_type(name):
                 value = self.get_buffer(name)

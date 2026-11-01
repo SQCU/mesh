@@ -118,10 +118,10 @@ def main(configuration_operand=None):
     function = Function(lambda: step(model, x), parameters=model.parameters(),
                         configuration=configuration['assignment']['operands'],
                         source_scope={'program': 'transformer_forward_backward'})
-    program = execution_sequence([function] * STEPS)
+    program = execution_sequence([function] * STEPS, algebra=function.algebra)
     def prepare():
         program.realize()
-        return {'layouts': list(function.layout_choices)}
+        return {'layouts': list(function.layout_choices), 'choices': list(function.choices)}
     bind(configuration, lambda: function.declare(mesh.get_group('tp')), prepare)
     started = now()
     program.forward()

@@ -264,16 +264,20 @@ CPU core classes and GPU counts come from `mesh_compute.hardware`; counts are no
 
 ```python
 from torch_mesh import engines
+from torch_mesh import empty
+from mesh_relation import Algebra
 from torch_mesh.declarations import execution_sequence
 pool = engines.Engines(["mps", "cpu", "ane"], ane=configuration["ane"])
 ffn = engines.FFN(gate, up, down, engines=pool, name="ffn")
 key = ffn.declare(x.shape[0], x.dtype, capacities=configuration["work_rates"])
-assigned = engines.placement(pool, [], step=0)
-call = ffn.prepare(x, parts=assigned["parts"][key])
-program = execution_sequence([call] * invocations, call.output)
+assigned = engines.placement(pool, [], step=0, family=configuration["family"])
+algebra = Algebra()
+y = empty((x.shape[0], ffn.width), dtype=x.dtype)
+call = ffn.function(x, parts=assigned["parts"][key], output=y, algebra=algebra,
+                    configuration=assigned["operands"])
+program = execution_sequence([call] * invocations, y, algebra=algebra)
 program.realize()
 program.forward()
-y = call.output
 ```
 
 - Operations: `Linear` shares its output features (they concatenate), `FFN` its intermediate neurons (each engine a

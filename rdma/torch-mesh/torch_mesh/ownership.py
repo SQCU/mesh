@@ -339,97 +339,108 @@ def source_uses(module, replacements, results, *, scopes=None, coordinate=None):
                 materializations=tuple(bound[node] for node in module.graph.nodes if node in scope_results)), ports, bound
 
 
-def prepare_expression(expression):
+def prepare_expression(expression, *, algebra):
     """Retain one numerical IR per section of an already captured expression.
 
     Collective and provider sections remain their original declarations. A
     section's source inputs/results keep their tensor-field identities while
     the common numerical compiler performs its ordinary source rewrites.
     """
-    from .compilation import operands as compiler_operands, implementations, implementation_assignment, normalize_source
-    configuration = dict(compiler_operands())
-    import copy
-    available = copy.deepcopy(implementations())
-    assigned = copy.deepcopy(implementation_assignment())
-    if ('prepared' in expression and expression['prepared']['configuration'] == configuration
-            and expression['prepared']['implementations'] == available
-            and expression['prepared']['implementation_assignment'] == assigned):
-        return expression['prepared']
-    import torch
-    from torch.fx.node import map_arg
-    from mesh_relation import Algebra
-    from . import host, prepare_source
-    from .declarations import _bound, normalize_edges, sections
-    from .native import prepare_graph
-    from .algebra import decompositions
-    original = expression['graph']
-    aliases = expression.setdefault('aliases', {})
-    source_nodes = tuple(dict.fromkeys((*original.graph.nodes, *aliases)))
-    module = normalize_source(original, decompositions)
-    aliases.update(normalize_edges(module))
-    def current(node):
-        while node in aliases:
-            node = aliases[node]
-        return node
-    algebra = expression.get('algebra') or Algebra()
-    arguments = dict(zip((node for node in module.graph.nodes if node.op == 'placeholder'),
-                         expression['operands'], strict=True))
-    order = {node: index for index, node in enumerate(module.graph.nodes)}
-    fields = {}
-    results = module.meta.get('mesh_source_results', {})
-    for node in source_nodes:
-        if 'val' not in node.meta:
-            continue
-        result = results.get(node, results.get(current(node), current(node)))
-        for key, value in _source_leaves((node,)):
-            if isinstance(value, torch.Tensor):
-                fields[key] = ((current(result), key[1]) if isinstance(result, torch.fx.Node)
-                               else (current(pytree.key_get(result, key[1])), ()))
+    from .compilation import bind
+    with bind(None, algebra=algebra):
+        from .compilation import operands as compiler_operands, implementations, implementation_assignment, normalize_source, assign_regions
+        configuration = dict(compiler_operands())
+        import copy
+        available = copy.deepcopy(implementations())
+        assigned = copy.deepcopy(implementation_assignment())
+        from .compilation import source_preferences, source_choices, retain_source_choices
+        preferences = copy.deepcopy(source_preferences())
+        if ('prepared' in expression and expression['prepared']['configuration'] == configuration
+                and expression['prepared']['algebra'] is algebra
+                and expression['prepared']['implementations'] == available
+                and expression['prepared']['implementation_assignment'] == assigned
+                and expression['prepared']['source_preferences'] == preferences):
+            retain_source_choices(expression['prepared']['source_choices'])
+            return expression['prepared']
+        import torch
+        from torch.fx.node import map_arg
+        from mesh_relation import Algebra
+        from . import host, prepare_source
+        from .declarations import _bound, normalize_edges, sections
+        from .native import prepare_graph
+        from .algebra import decompositions
+        original = expression['graph']
+        aliases = expression.setdefault('aliases', {})
+        source_nodes = tuple(dict.fromkeys((*original.graph.nodes, *aliases)))
+        module = assign_regions(original, materializations=expression.get('materializations', ()), cuts=expression.get('cuts', ()))
+        module = normalize_source(module, decompositions)
+        aliases.update(normalize_edges(module))
+        def current(node):
+            while node in aliases:
+                node = aliases[node]
+            return node
+        arguments = dict(zip((node for node in module.graph.nodes if node.op == 'placeholder'),
+                             expression['operands'], strict=True))
+        order = {node: index for index, node in enumerate(module.graph.nodes)}
+        fields = {}
+        results = module.meta.get('mesh_source_results', {})
+        for node in source_nodes:
+            if 'val' not in node.meta:
+                continue
+            result = results.get(node, results.get(current(node), current(node)))
+            for key, value in _source_leaves((node,)):
+                if isinstance(value, torch.Tensor):
+                    fields[key] = ((current(result), key[1]) if isinstance(result, torch.fx.Node)
+                                   else (current(pytree.key_get(result, key[1])), ()))
 
-    def generated(node):
-        declared = tuple(fields[key][0] for key, value in _source_leaves((node,))
-                         if isinstance(value, torch.Tensor)) if 'val' in node.meta else (current(node),)
-        introduced = module.meta.get('mesh_source_operations', {}).get(node, declared) if module is not original else declared
-        return tuple(dict.fromkeys(current(value) for value in introduced if current(value) in order))
+        def generated(node):
+            declared = tuple(fields[key][0] for key, value in _source_leaves((node,))
+                             if isinstance(value, torch.Tensor)) if 'val' in node.meta else (current(node),)
+            introduced = module.meta.get('mesh_source_operations', {}).get(node, declared) if module is not original else declared
+            return tuple(dict.fromkeys(current(value) for value in introduced if current(value) in order))
 
-    cuts = {at for node, index in order.items() if _bound(node) or host.bound(node) for at in (index, index + 1)}
-    materializations = tuple(dict.fromkeys(fields[key][0]
-        for node in expression.get('materializations', ()) for key, value in _source_leaves((node,))
-        if isinstance(value, torch.Tensor)))
-    cuts.update(order[node] + 1 for node in materializations)
-    cuts.update((min(order[value] for value in generated(node)) if side == 'before'
-                 else max(order[value] for value in generated(node)) + 1)
-                for node, side in expression.get('cuts', ()))
-    spans = []
-    for fragment, inputs, outputs in sections(module, sorted(cuts), requested_outputs=materializations):
-        boundary = tuple(node for node in fragment.graph.nodes if _bound(node) or host.bound(node))
-        span = dict(graph=fragment, inputs=inputs, outputs=outputs, boundaries=boundary)
-        if not boundary:
-            actual = tuple(arguments[node] if node in arguments else node.meta['val'] for node in inputs)
-            lowered, metadata, operands = prepare_source(fragment, actual)
-            results = next(node.args[0] for node in lowered.graph.nodes if node.op == 'output')
-            materializations = [value for value in pytree.tree_leaves(map_arg(results, lambda node: node.meta['val']))
-                                if isinstance(value, torch.Tensor)]
-            retained = prepare_graph(lowered, metadata, materializations=materializations)
-            input_values = pytree.tree_leaves(tuple(retained.source_values[node] for node in lowered.graph.nodes
-                                                   if node.op == 'placeholder'))
-            output_values = pytree.tree_leaves(retained.graph_outputs)
-            def bindings(original, values):
-                return {key: (declared_binding(retained.value_binding(value, algebra)),)
-                        for (key, described), value in zip(_source_leaves(original), values, strict=True)
-                        if isinstance(described, torch.Tensor)}
-            span.update(lowered=lowered, metadata=metadata, operands=operands, retained=retained,
-                        input_bindings=bindings(inputs, input_values), output_bindings=bindings(outputs, output_values),
-                        source_values={node: map_arg(tree, retained.source_values.__getitem__)
-                                       for node, tree in lowered.meta.get('mesh_source_results', {}).items()},
-                        effects=retained.effects(algebra))
-        spans.append(span)
-    normalized = dict(expression, graph=module)
-    normalized.pop('prepared', None)
-    prepared = dict(expression=normalized, algebra=algebra, aliases=aliases, fields=fields, sections=tuple(spans),
-                    configuration=configuration, implementations=available, implementation_assignment=assigned)
-    expression['prepared'] = prepared
-    return prepared
+        cuts = {at for node, index in order.items() if _bound(node) or host.bound(node) for at in (index, index + 1)}
+        materializations = tuple(dict.fromkeys(fields[key][0]
+            for node in expression.get('materializations', ()) for key, value in _source_leaves((node,))
+            if isinstance(value, torch.Tensor)))
+        materializations = tuple(dict.fromkeys((*materializations,
+            *(current(value) for node in module.meta.get('mesh_implementation_boundaries', ())
+              for value in pytree.tree_leaves(results.get(node, node)) if isinstance(value, torch.fx.Node)))))
+        cuts.update(order[node] + 1 for node in materializations)
+        cuts.update((min(order[value] for value in generated(node)) if side == 'before'
+                     else max(order[value] for value in generated(node)) + 1)
+                    for node, side in expression.get('cuts', ()))
+        spans = []
+        for fragment, inputs, outputs in sections(module, sorted(cuts), requested_outputs=materializations):
+            boundary = tuple(node for node in fragment.graph.nodes if _bound(node) or host.bound(node))
+            span = dict(graph=fragment, inputs=inputs, outputs=outputs, boundaries=boundary)
+            if not boundary:
+                actual = tuple(arguments[node] if node in arguments else node.meta['val'] for node in inputs)
+                lowered, metadata, operands = prepare_source(fragment, actual)
+                results = next(node.args[0] for node in lowered.graph.nodes if node.op == 'output')
+                materializations = [value for value in pytree.tree_leaves(map_arg(results, lambda node: node.meta['val']))
+                                    if isinstance(value, torch.Tensor)]
+                retained = prepare_graph(lowered, metadata, materializations=materializations)
+                input_values = pytree.tree_leaves(tuple(retained.source_values[node] for node in lowered.graph.nodes
+                                                       if node.op == 'placeholder'))
+                output_values = pytree.tree_leaves(retained.graph_outputs)
+                def bindings(original, values):
+                    return {key: (declared_binding(retained.value_binding(value, algebra)),)
+                            for (key, described), value in zip(_source_leaves(original), values, strict=True)
+                            if isinstance(described, torch.Tensor)}
+                span.update(lowered=lowered, metadata=metadata, operands=operands, retained=retained,
+                            input_bindings=bindings(inputs, input_values), output_bindings=bindings(outputs, output_values),
+                            source_values={node: map_arg(tree, retained.source_values.__getitem__)
+                                           for node, tree in lowered.meta.get('mesh_source_results', {}).items()},
+                            effects=retained.effects(algebra))
+            spans.append(span)
+        normalized = dict(expression, graph=module)
+        normalized.pop('prepared', None)
+        prepared = dict(expression=normalized, algebra=algebra, aliases=aliases, fields=fields, sections=tuple(spans),
+                        configuration=configuration, implementations=available, implementation_assignment=assigned,
+                        source_preferences=preferences, source_choices=source_choices())
+        expression['prepared'] = prepared
+        return prepared
 
 
 def source_ports(prepared, ports):
@@ -535,7 +546,7 @@ def prepare_sources(sources, algebra):
         results.extend(node for node in pytree.tree_leaves(mapping[source['expression']['result']])
                        if isinstance(node, torch.fx.Node))
     joined.update(algebra=algebra, cuts=tuple(cuts), materializations=tuple(results))
-    prepared = prepare_expression(joined)
+    prepared = prepare_expression(joined, algebra=algebra)
     normalized = source_ports(prepared, ports)
     spans = [[] for _ in sources]
     for section in prepared['sections']:

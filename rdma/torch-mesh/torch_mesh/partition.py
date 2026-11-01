@@ -472,7 +472,8 @@ def _scatter_spans(tensor, dim, sizes, rank, source, group):
         schedule = _stream.Schedule()
         if prepared is not None:
             from .declarations import execution_sequence
-            execution_sequence((prepared,), result).append(schedule)
+            from mesh_relation import Algebra
+            execution_sequence((prepared,), result, algebra=Algebra()).append(schedule)
         schedule.finish()
         schedule.enqueue()
     return result
@@ -483,6 +484,8 @@ def _follow_spans(placement, local, logical_shape, key, rank, group):
     if not hasattr(group, 'prepare_writes'):
         return None
     from .layout import copy_declarations
+    from mesh_relation import Algebra
+    algebra = Algebra()
     commands = []
     dim = placement.dim % local.ndim
     old, new = _OPERANDS[placement.key], _OPERANDS[key]
@@ -508,7 +511,7 @@ def _follow_spans(placement, local, logical_shape, key, rank, group):
             if source == destination:
                 if source == rank:
                     commands.extend(copy_declarations(local.narrow(dim, first - before[source], count),
-                                           result.narrow(dim, first - after[destination], count)))
+                                           result.narrow(dim, first - after[destination], count), algebra=algebra))
                 continue
             if rank == source:
                 view = local.narrow(dim, first - before[source], count)
@@ -524,7 +527,7 @@ def _follow_spans(placement, local, logical_shape, key, rank, group):
         declarations = [dict(commands=tuple(commands), output=result, pages=())]
         if prepared is not None:
             declarations.append(prepared)
-        execution_sequence(declarations, result).append(schedule)
+        execution_sequence(declarations, result, algebra=algebra).append(schedule)
         schedule.finish()
         schedule.enqueue()
     return result
@@ -719,7 +722,7 @@ def _local_redistribute(local, current, target, async_op=False):
         zero_view = TensorView(zero, _stream.TensorLayout((absent.count,), (0,)))
         flat = TensorView.of(out).reshape((math.prod(shape),))
         target_view = TensorView(out, absent.rebase(_stream.TensorLayout((math.prod(shape),), (1,)), flat.layout))
-        local = assemble(((local, selected), (zero_view, target_view)))
+        local = assemble(((local, selected), (zero_view, target_view)), output=out)
     for axis, (source, destination) in enumerate(zip(current.placements, target.placements, strict=True)):
         if axis not in sparse and destination.is_partial() and not _same((source,), (destination,)):
             local = destination._partition_value(local, mesh, axis)
@@ -1141,7 +1144,7 @@ def _page_tensor(value):
         return value.tensor()
     from .host import assemble
     target = torch.empty(value.shape, dtype=value.dtype, device=value.device)
-    return assemble([(value, TensorView.of(target))])
+    return assemble([(value, TensorView.of(target))], output=target)
 
 
 def _coordinates(mesh):
@@ -1475,7 +1478,8 @@ def lower_owned_graph(graph, arguments, configuration):
                               sorted(cuts, key=lambda item: nodes.index(item[0])))))
         if variants:
             expression['algebra'] = next(iter(variants.values()))['algebra']
-        prepared = prepare_expression(expression)
+        from .compilation import relations
+        prepared = prepare_expression(expression, algebra=relations())
         normalized_ports = source_ports(prepared, ports)
         variants[rank] = dict(prepared, sections=tuple(bind_ports(section, normalized_ports, prepared['algebra'])
                                                  for section in prepared['sections']),
@@ -1554,7 +1558,7 @@ def lower_owned_graph(graph, arguments, configuration):
             bindings = {(argument, ()): dict(field=source, selection=owners[coordinate]['selection'], selections=selecting),
                         (output, ()): dict(field=result, selection=owners[coordinate]['selection'], selections=selecting)}
             expression = dict(graph=module, operands=tuple(operands), algebra=algebra)
-            captured = prepare_expression(expression)
+            captured = prepare_expression(expression, algebra=algebra)
             normalized = source_ports(captured, bindings)
             captured = dict(captured, sections=tuple(dict(bind_ports(span, normalized, algebra), group_axes=group_axes)
                                                      for span in captured['sections']))

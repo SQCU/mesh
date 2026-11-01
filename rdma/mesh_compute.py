@@ -32,25 +32,72 @@ def eligibility(required, implementation):
     """
     missing = []
     for field, admitted in implementation['accepts'].items():
-        values = [value for value in required[field] if value not in admitted]
+        values = [value for value in required.get(field, ()) if value not in admitted]
         if values:
             missing.append(dict(field=field, relation='accepts', values=values))
     for field, necessary in implementation['requires'].items():
-        values = [value for value in necessary if value not in required[field]]
+        values = [value for value in necessary if value not in required.get(field, ())]
         if values:
             missing.append(dict(field=field, relation='requires', values=values))
+    for field, relation in implementation.get('constraints', {}).items():
+        if not matches(required, {field: relation}):
+            missing.append(dict(field=field, relation='constraints', values=relation))
     return dict(implementation=implementation, required=required, missing=missing)
 
 
-def assigned_implementation(required, assignment):
-    """Resolve the configured typed domains before assigning any runtime work."""
+def matches(required, conditions):
+    """Evaluate declared type/shape domains during preparation.
+
+    Sets use intersection as before. Named scalar parameters use equal/min/max
+    and multiple_of relations; this is configuration data, not Python eval or
+    a payload-dependent implementation choice.
+    """
+    for field, admitted in conditions.items():
+        if field == 'parameters':
+            for name, relation in admitted.items():
+                if name not in required.get(field, {}):
+                    return False
+                value = required[field][name]
+                if not isinstance(relation, dict):
+                    if value != relation:
+                        return False
+                    continue
+                for kind, bound in relation.items():
+                    if kind == 'equal':
+                        good = value == bound
+                    elif kind == 'min':
+                        good = value >= bound
+                    elif kind == 'max':
+                        good = value <= bound
+                    elif kind == 'multiple_of':
+                        if bound <= 0:
+                            raise ValueError('shape divisibility requires a positive divisor')
+                        good = value % bound == 0
+                    else:
+                        raise ValueError(f'unknown declared parameter relation {kind}')
+                    if not good:
+                        return False
+        elif not set(required.get(field, ())).intersection(admitted):
+            return False
+    return True
+
+
+def assignment_rule(required, assignment):
+    """The explicit typed policy and its declared empirical alternatives."""
     if isinstance(assignment, str):
+        return dict(implementation=assignment)
+    if 'implementation' in assignment:
         return assignment
-    matches = [rule['implementation'] for rule in assignment['domains']
-               if all(set(required[field]).intersection(values) for field, values in rule['when'].items())]
-    if len(set(matches)) > 1:
-        raise ValueError(f'implementation assignment has overlapping typed domains: {matches}')
-    return matches[0] if matches else assignment['otherwise']
+    selected = [rule for rule in assignment['domains']
+                if matches(required, rule['when'])]
+    if len(selected) > 1:
+        raise ValueError(f'implementation assignment has overlapping typed domains: {selected}')
+    return selected[0] if selected else assignment_rule(required, assignment['otherwise'])
+
+
+def assigned_implementation(required, assignment):
+    """Resolve the configured initial choice before assigning runtime work."""
+    return assignment_rule(required, assignment)['implementation']
 
 
 def select_implementation(required, catalog, selected=None):

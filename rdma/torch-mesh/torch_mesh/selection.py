@@ -145,7 +145,7 @@ def declaration(operands, parameters, configuration):
                    limits={'threadgroup_memory_bytes': memory})
     from mesh_relation import Algebra
     from .operand import layout_configuration
-    algebra = Algebra()
+    algebra = commands.algebra
     def dispatch(bindings, modes):
         result = []
         for slot, (view, mode) in enumerate(zip(bindings, modes, strict=True)):

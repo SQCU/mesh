@@ -8,6 +8,18 @@ _bound = ContextVar('mesh_compilation_operands', default=None)
 _layouts = ContextVar('mesh_compilation_layouts', default=None)
 _implementations = ContextVar('mesh_compilation_implementations', default=None)
 _assignment = ContextVar('mesh_compilation_implementation_assignment', default=None)
+_relations = ContextVar('mesh_compilation_relations', default=None)
+_choices = ContextVar('mesh_compilation_choices', default=None)
+_source_capture = ContextVar('mesh_compilation_source_capture', default=None)
+_choice_member = ContextVar('mesh_compilation_choice_member', default=None)
+
+
+def relations():
+    """The explicit relation context of the function being prepared."""
+    value = _relations.get()
+    if value is None:
+        raise ValueError('page relation construction requires a compilation context')
+    return value
 
 
 def operands():
@@ -30,13 +42,20 @@ def implementation_assignment():
 
 
 @contextmanager
-def bind(configuration):
+def bind(configuration, *, algebra=None):
     values = dict(operands())
-    preferences = ()
+    previous_layouts = _layouts.get()
+    preferences = () if previous_layouts is None else previous_layouts['preferences']
     available = implementations()
     assigned = implementation_assignment()
+    relation_context = _relations.get() if algebra is None else algebra
+    previous_choices = _choices.get()
+    choice_preferences = () if previous_choices is None else previous_choices['preferences']
     if configuration is not None:
         for key, value in configuration.items():
+            if key == 'source_preferences':
+                choice_preferences = value
+                continue
             if key == 'layout_preferences':
                 preferences = value
                 continue
@@ -52,16 +71,115 @@ def bind(configuration):
                 raise ValueError(f'{key}: compiler operand must be a positive integer')
             values[key] = value
     token = _bound.set(values)
-    layouts = _layouts.set(dict(preferences=preferences, choices=[]))
+    layouts = _layouts.set(previous_layouts if configuration is None and previous_layouts is not None
+                           else dict(preferences=preferences, choices=[]))
     candidates = _implementations.set(available)
     assignments = _assignment.set(assigned)
+    relations_token = _relations.set(relation_context)
+    choice_token = _choices.set(previous_choices if configuration is None and previous_choices is not None
+        else dict(preferences=choice_preferences, records=[]))
     try:
         yield values
     finally:
+        _choices.reset(choice_token)
+        _relations.reset(relations_token)
         _assignment.reset(assignments)
         _implementations.reset(candidates)
         _layouts.reset(layouts)
         _bound.reset(token)
+
+
+@contextmanager
+def capture_choices(scope):
+    """Source occurrences are preparation identity, never runtime dispatch."""
+    token = _source_capture.set(dict(scope=scope, fold=0))
+    try:
+        yield
+    finally:
+        _source_capture.reset(token)
+
+
+def fold_occurrence():
+    capture = _source_capture.get()
+    if capture is None:
+        return None
+    ordinal = capture['fold']
+    capture['fold'] += 1
+    return None if capture['scope'] is None else dict(scope=capture['scope'], occurrence=ordinal)
+
+
+def source_choice(family, weights, *, grain, high=None, quantum=None):
+    """Consume and retain the executed simplex through ordinary preparation."""
+    import json
+    from allocate import project, simplex
+    family = json.loads(json.dumps(family, sort_keys=True, allow_nan=False))
+    held = _choices.get()
+    matches = [] if held is None else [record for record in held['preferences'] if record['family'] == family]
+    if len(matches) > 1:
+        raise ValueError('one source choice has multiple supplied operands')
+    values = list(matches[0]['weights'] if matches else weights)
+    high = [1] * len(values) if high is None else list(high)
+    total = sum(values)
+    values = [value / total for value in values]
+    values = (project(values, 1, grain, [0] * len(values), high) if grain else
+              simplex(values, 1, [0] * len(values), high))
+    record = dict(family=family, weights=values, grain=grain, high=high)
+    if quantum is not None:
+        record['quantum'] = quantum
+    if held is not None:
+        held['records'].append(record)
+    return record
+
+
+def source_choices():
+    from assignment import source_axes
+    held = _choices.get()
+    return source_axes(()) if held is None else source_axes(held['records'])
+
+
+def source_preferences():
+    held = _choices.get()
+    return () if held is None else held['preferences']
+
+
+def retain_source_choices(records):
+    held = _choices.get()
+    if held is not None:
+        held['records'].extend(records)
+
+
+@contextmanager
+def choice_member(member):
+    token = _choice_member.set(member)
+    try:
+        yield
+    finally:
+        _choice_member.reset(token)
+
+
+def implementation_choice(required, assignment, *, source, region=False):
+    """Realize configured backend alternatives before source/placement lowering.
+
+    Each candidate is a complete invocation of this retained source domain.
+    Its unit granularity is explicit; selected page domains can already divide
+    a larger function into independently assigned invocations.
+    """
+    from mesh_compute import assignment_rule, eligibility
+    rule = assignment_rule(required, assignment)
+    options = rule.get('alternatives', [dict(implementation=rule['implementation'],
+        **({'configuration': rule['configuration']} if 'configuration' in rule else {}))])
+    catalog = implementations()
+    high = []
+    for option in options:
+        candidate = catalog[option['implementation']]
+        typed = dict(required, interfaces=['scalar']) if region and candidate['compiler'] in ('metal_scalar', 'cpp_scalar') else required
+        high.append(int(not eligibility(typed, candidate)['missing']))
+    initial = [int(option['implementation'] == rule['implementation']) for option in options]
+    if not source:
+        return options[initial.index(1)]
+    record = source_choice(dict(kind='backend', member=_choice_member.get(), source=source, required=required,
+        alternatives=options), initial, grain=1, high=high)
+    return options[record['weights'].index(1)]
 
 
 def layout_preferences(family, supplied=None):
@@ -262,7 +380,7 @@ def _source_origins(node, graph, before):
     current = before.next
     while current is not graph._root:
         current.meta.setdefault('mesh_source_nodes', origins)
-        for field in ('mesh_source_records', 'mesh_route_scope'):
+        for field in ('mesh_source_records', 'mesh_route_scope', 'mesh_implementation'):
             if field in node.meta:
                 current.meta.setdefault(field, node.meta[field])
         created.append(current)
@@ -507,3 +625,143 @@ def normalize_source(module, decompositions, *, preserve=()):
                            mesh_source_operations=operations)
     normalized.recompile()
     return normalized
+
+
+def assign_regions(module, *, materializations=(), cuts=()):
+    """Lower configured captured source regions before page placement.
+
+    Regions are source operands, not runtime tasks. Collective boundaries and
+    explicit source cuts delimit them. Selection uses retained source names and
+    declared types/shapes; changing tensor/index/mask values are never read.
+    The original captured graph (including its derivative) remains the source
+    of every replacement and its returned-field identities.
+    """
+    rules = implementation_assignment().get('regions', ())
+    if not rules or module.meta.get('mesh_regions_lowered'):
+        return module
+    import torch
+    from torch.fx.node import map_arg
+    from torch.utils import _pytree as pytree
+    from mesh_compute import matches, select_implementation
+    from . import host
+    from .declarations import _bound, sections
+    from .engines import graph_source
+    from .algebra import decompositions
+    nodes = list(module.graph.nodes)
+    order = {node: i for i, node in enumerate(nodes)}
+    names = {node.name: node for node in nodes}
+    requested = tuple(dict.fromkeys((*materializations,
+        *(node for node in nodes if 'mesh_ownership' in node.meta))))
+    boundaries = {at for node, i in order.items() if _bound(node) or host.bound(node) for at in (i, i + 1)}
+    boundaries.update(order[node] + (side == 'after') for node, side in cuts)
+    for rule in rules:
+        selected = rule.get('nodes')
+        if selected is not None:
+            missing = set(selected) - names.keys()
+            if missing:
+                raise ValueError(f'provider region names absent source nodes: {sorted(missing)}')
+            selected = set(selected)
+            prior = False
+            for i, node in enumerate(nodes):
+                inside = node.name in selected
+                if inside != prior:
+                    boundaries.add(i)
+                prior = inside
+            if prior:
+                boundaries.add(len(nodes))
+    graph, bound = torch.fx.Graph(), {}
+    for node in nodes:
+        if node.op == 'placeholder':
+            made = graph.node_copy(node, bound.__getitem__);made.meta = node.meta.copy();bound[node] = made
+    owners, decisions, implementation_boundaries = list(module.meta.get('mesh_provider_owners', ())), [], []
+    operations = {}
+    for fragment, inputs, outputs in sections(module, sorted(boundaries), requested_outputs=requested):
+        source_nodes = tuple(node for node in fragment.graph.nodes if node.op not in ('placeholder', 'get_attr', 'output'))
+        actual_names = {node.name for node in source_nodes}
+        tensor_inputs = [value for node in inputs for value in pytree.tree_leaves(node.meta['val']) if isinstance(value, torch.Tensor)]
+        tensor_outputs = [value for node in outputs for value in pytree.tree_leaves(node.meta['val']) if isinstance(value, torch.Tensor)]
+        parameters = {'operations': len(source_nodes), 'inputs': len(inputs), 'outputs': len(outputs)}
+        for side, values in (('input', tensor_inputs), ('output', tensor_outputs)):
+            for index, value in enumerate(values):
+                parameters[f'{side}{index}.rank'] = value.ndim
+                parameters[f'{side}{index}.elements'] = value.numel()
+                parameters.update((f'{side}{index}.dim{axis}', int(size)) for axis, size in enumerate(value.shape))
+        required = dict(interfaces=['graph'],
+            input_types=sorted({str(value.dtype).removeprefix('torch.') for value in tensor_inputs}),
+            arithmetic_types=sorted({str(value.dtype).removeprefix('torch.') for node in source_nodes
+                for value in pytree.tree_leaves(node.meta.get('val')) if isinstance(value, torch.Tensor)}),
+            input_kinds=sorted({'tensor' if isinstance(node.meta['val'], torch.Tensor) else 'compound' for node in inputs}),
+            output_kinds=sorted({'tensor' if isinstance(node.meta['val'], torch.Tensor) else 'compound' for node in outputs}),
+            constants=[], source_nodes=sorted(actual_names),
+            operations=sorted({str(node.target) for node in source_nodes}), parameters=parameters)
+        choices = [] if any(_bound(node) or host.bound(node) for node in source_nodes) else [rule for rule in rules
+            if ('nodes' not in rule or actual_names.issubset(rule['nodes'])) and matches(required, rule.get('when', {}))]
+        if len(choices) > 1:
+            raise ValueError(f'provider source region has overlapping assignments: {sorted(actual_names)}')
+        replacement = fragment
+        if choices:
+            rule, = choices
+            selected = implementation_choice(required, rule,
+                source=tuple(record for node in source_nodes for record in source_records(node)), region=True)
+            implementation = implementations()[selected['implementation']]
+            if implementation['compiler'] in ('metal_scalar', 'cpp_scalar'):
+                # The retained scalar compiler already consumes independently
+                # assigned domains. Normalize products to their value equation
+                # within this selected scalar region, then retain the choice.
+                assignment = dict(implementation_assignment(), product='scalar_contraction', regions=[])
+                with bind(dict(implementation_assignment=assignment)):
+                    replacement = normalize_source(fragment, decompositions)
+                for node in replacement.graph.nodes:
+                    if node.op not in ('placeholder', 'get_attr', 'output'):
+                        node.meta['mesh_implementation'] = implementation['id']
+            else:
+                implementation = select_implementation(required, implementations().values(), implementation['id'])
+                replacement, owner, declaration = graph_source(fragment,
+                    tuple(node.meta['val'] for node in inputs), implementation=implementation,
+                    configuration=selected['configuration'])
+                owners.append(owner)
+                implementation = declaration['definition']['implementation']
+            decisions.append(dict(required=required, implementation=implementation,
+                source=tuple(record for node in source_nodes for record in source_records(node)),
+                assignment=rule, selected=selected))
+        copied = {}
+        for node, original in zip((n for n in replacement.graph.nodes if n.op == 'placeholder'), inputs, strict=True):
+            if original not in bound:
+                made = graph.node_copy(original, bound.__getitem__);made.meta = original.meta.copy();bound[original] = made
+            copied[node] = bound[original]
+        before = graph._root.prev
+        returned = graph.graph_copy(replacement.graph, copied)
+        returned = tuple(returned) if isinstance(returned, (tuple, list)) else (returned,)
+        introduced = []
+        at = before.next
+        while at is not graph._root:
+            introduced.append(at);at = at.next
+        for original, result in zip(outputs, returned, strict=True):
+            bound[original] = result
+            if isinstance(result, torch.fx.Node):
+                value = result.meta.get('val', original.meta['val'])
+                result.meta.update(original.meta, val=value)
+                if choices and implementation['compiler'] in ('metal_scalar', 'cpp_scalar'):
+                    result.meta['mesh_implementation'] = implementation['id']
+            operations[original] = tuple(introduced)
+            if choices and isinstance(result, torch.fx.Node):
+                implementation_boundaries.append(result)
+        # Compose the retained node map. Names select configuration regions;
+        # they never establish value identity between compiler graphs.
+        for original, tree in replacement.meta.get('mesh_source_results', {}).items():
+            if original in order and all(node in copied for node in pytree.tree_leaves(tree) if isinstance(node, torch.fx.Node)):
+                bound.setdefault(original, map_arg(tree, copied.__getitem__))
+        for original, tree in fragment.meta.get('mesh_source_results', {}).items():
+            if original in order and any(node in source_nodes for node in pytree.tree_leaves(tree) if isinstance(node, torch.fx.Node)):
+                operations[original] = tuple(introduced)
+    output = next(node for node in nodes if node.op == 'output')
+    graph.output(map_arg(output.args[0], bound.__getitem__))
+    graph.lint()
+    made = torch.fx.GraphModule(module, graph)
+    source_results = {source: map_arg(tree, bound.__getitem__) for source, tree in module.meta.get('mesh_source_results', {}).items()
+                      if all(node in bound for node in pytree.tree_leaves(tree) if isinstance(node, torch.fx.Node))}
+    source_results.update(bound)
+    made.meta = dict(module.meta, mesh_source_results=source_results, mesh_source_operations=operations,
+                     mesh_regions_lowered=True, mesh_provider_owners=tuple(owners), mesh_implementation_regions=tuple(decisions),
+                     mesh_implementation_boundaries=tuple(implementation_boundaries))
+    return made

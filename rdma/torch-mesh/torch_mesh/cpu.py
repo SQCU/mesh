@@ -38,7 +38,7 @@ def compilation(implementation):
                              output_dir='MESH_CPU_OUTPUT_DIRECTORY')
         target = builder.get_target_file_path()
         argv = shlex.split(builder.get_command_line())
-        argv[1:1] = build['compile_flags']
+        argv[1:1] = [*build['compile_flags'], '-I', str(RDMA)]
     return dict(argv=[('source' if value == 'MESH_CPU_SOURCE' else
                        'output' if value == target else value) for value in argv],
                 source_argument='source', output_argument='output')
@@ -99,7 +99,7 @@ def argument_record(command, pointer_values):
         name = f'a{slot}'
         if spec['kind'] == 'pointer':
             fields.append((name, ctypes.c_void_p))
-            values[name] = pointer_values[slot]
+            values[name] = pointer_values[slot] + spec.get('byte_offset', 0)
         else:
             kind = _SCALAR_ABI[spec['type'].removeprefix('const ')]
             fields.append((name, kind))
@@ -223,7 +223,8 @@ def scheduling(storage_layouts, command_accesses, computed_domains, implementati
                        'extern "C" void mesh_cpu_entry(const void *arguments) {\n'
                        '  const auto &a = *static_cast<const MeshCpuArguments *>(arguments);\n'
                        '  mesh_cpu_kernel(' + ', '.join(f'a.a{slot}' for slot in range(len(specs))) + ');\n}\n')
-            algebra, accesses = Algebra(), []
+            from .compilation import relations
+            algebra, accesses = relations(), []
             for node in nodes:
                 if not isinstance(node, SchedulerNode):
                     continue

@@ -99,7 +99,30 @@ class Reduction:
         if key not in self.fold_choices:
             self.fold_choices[key] = fold_topology(group, cells, self.dtype.itemsize * self.unit,
                                                   self.flags, self.topology, counts, root)
-        return self._source(value, group, self.fold_choices[key], root, tuple(counts))
+        chosen = self.fold_choices[key]
+        from .compilation import fold_occurrence, source_choice
+        occurrence = fold_occurrence()
+        if occurrence is not None:
+            basis = chosen['basis']
+            family = dict(kind='fold', source=occurrence, dtype=str(self.dtype), element_shape=self.element_shape,
+                combine=self.combine.code, identity=self.initializer.code, root=root, counts=tuple(counts),
+                basis={name: data for name, data in basis.items() if name != 'share'})
+            shares, choices = list(basis['share']), []
+            for segment in range(basis['segments']):
+                columns = [i for i, part in enumerate(basis['segment']) if part == segment]
+                if not columns:
+                    continue
+                units = counts[segment] if counts else cells
+                record = source_choice(dict(family, segment=segment, columns=columns),
+                    [shares[i] for i in columns], grain=0, quantum=1 / units if units else 0)
+                for column, share in zip(columns, record['weights'], strict=True):
+                    shares[column] = share
+                choices.append(record)
+            if tuple(shares) != basis['share']:
+                chosen = fold_topology(group, cells, self.dtype.itemsize * self.unit,
+                    self.flags, dict(basis, share=shares), counts, root)
+            chosen = dict(chosen, choices=choices)
+        return self._source(value, group, chosen, root, tuple(counts))
 
     def _source(self, value, group, chosen, root, counts):
         """Emit the chosen fold as ordinary source and selected page transfers.

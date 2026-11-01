@@ -10,6 +10,7 @@ from torch._inductor.decomposition import decompositions as native_decomposition
 # tracing (for example, pooling's offsets declaration).
 from torch._inductor import lowering as _native_lowerings
 from .structured import expand as butterfly
+from . import matrix as _matrix_declarations
 
 
 def concatenate_pages(values, dim=0):
@@ -34,14 +35,27 @@ def concatenate_pages(values, dim=0):
     for value in selected:
         pieces.append((value, destination.narrow(dim, first, value.shape[dim])))
         first += value.shape[dim]
-    return assemble(pieces)
+    return assemble(pieces, output=destination)
 
 
-def product_implementation(dtype):
+def product_requirements_from_types(left_shape, left_dtype, right_shape, right_dtype, out_dtype):
+    return dict(interfaces=['product'], input_types=[str(left_dtype).removeprefix('torch.'),
+        str(right_dtype).removeprefix('torch.')],
+        arithmetic_types=[str(out_dtype).removeprefix('torch.')], constants=[],
+        parameters=dict(rows=int(left_shape[-2]), inner=int(left_shape[-1]), columns=int(right_shape[-1]),
+                        batches=math.prod(left_shape[:-2]), rank=len(left_shape)))
+
+
+def product_requirements(left, right, out_dtype=None):
+    return product_requirements_from_types(left.shape, left.dtype, right.shape, right.dtype, out_dtype or left.dtype)
+
+
+def product_implementation(left, right, out_dtype=None):
     """The configured numerical equation family for a typed contraction."""
-    from mesh_compute import assigned_implementation, implementation_assignment
-    return assigned_implementation(dict(arithmetic_types=[str(dtype).removeprefix('torch.')]),
-                                   implementation_assignment()['product'])
+    from torch.fx.traceback import get_current_meta
+    from .compilation import implementation_assignment, implementation_choice
+    return implementation_choice(product_requirements(left, right, out_dtype), implementation_assignment()['product'],
+        source=get_current_meta().get('mesh_source_records', ()))['implementation']
 
 
 def real_components(value):
@@ -83,13 +97,62 @@ def contraction(left, right, out_dtype=None):
 
 
 def matrix_product(left, right, out_dtype=None):
-    if product_implementation(left.dtype) == 'metal_product':
+    selected = product_implementation(left, right, out_dtype)
+    if selected == 'metal_product':
         return NotImplemented
+    if selected != 'scalar_contraction':
+        from mesh_compute import select_implementation
+        from .compilation import implementations
+        from .engines import product_source
+        implementation = select_implementation(product_requirements(left, right, out_dtype),
+                                                implementations().values(), selected)
+        return product_source(left, right, out_dtype=out_dtype, implementation=implementation)
     return contraction(left, right, out_dtype)
 
 
+def declared_product(inputs, input_slots, output_slots, output_strides, shapes, dtypes, devices, operands):
+    """Resolve a page product's source choice at the same phase as ATen mm.
+
+    An explicit backend is already a compiler operand. An unspecified backend
+    stays an equation until this pass has the original source identity.
+    """
+    import json
+    from . import matrix
+    from .operand import bind, fake_outputs
+    from .host import assemble
+    declarations = json.loads(operands)
+    if all(domain['parameters'].get('implementation') is not None for domain in declarations['domains']):
+        return NotImplemented
+    outputs = fake_outputs(shapes, output_strides, dtypes, devices)
+    slots = dict(zip(input_slots, inputs, strict=True))
+    slots.update((slot, value) for value, indices in zip(outputs, output_slots, strict=True) for slot in indices)
+    views = {slot: bind(value, declarations[str(slot)]) for slot, value in slots.items()}
+    parts = []
+    for domain in declarations['domains']:
+        x, w, out = (views[domain['operands'][name]] for name in ('x', 'w', 'out'))
+        selected = domain['parameters'].get('implementation') or product_implementation(x, w, out.dtype)
+        if selected == 'metal_product':
+            result = matrix.declare(x, w, out, implementation=selected)
+            parts.append((bind(result, declarations[str(domain['operands']['out'])]), out))
+        else:
+            def tensor(value):
+                target = torch.empty(value.shape, dtype=value.dtype, device=value.device)
+                return assemble(((value, target),), output=target)
+            left, right = tensor(x), tensor(w)
+            if selected == 'scalar_contraction':
+                result = contraction(left, right, out.dtype)
+            else:
+                from .engines import product_source
+                from .compilation import implementations
+                result = product_source(left, right, out_dtype=out.dtype, implementation=implementations()[selected])
+            parts.append((result, out))
+    return [assemble(tuple((source, target) for source, target in parts if target.storage is output), output=output)
+            for output in outputs]
+
+
 def matrix_add(bias, left, right, out_dtype=None, beta=1, alpha=1):
-    if product_implementation(left.dtype) == 'metal_product':
+    selected = product_implementation(left, right, out_dtype)
+    if selected == 'metal_product':
         return NotImplemented
     if left.dtype.is_complex:
         real, imag = component_scale(*component_product(left, right), alpha)
@@ -99,23 +162,24 @@ def matrix_add(bias, left, right, out_dtype=None, beta=1, alpha=1):
             real, imag = real + br, imag + bi
         scalar = types.corresponding_real_dtype(left.dtype if out_dtype is None else out_dtype)
         return complex_components(torch.stack((real.to(scalar), imag.to(scalar)), -1))
-    product = contraction(left, right, out_dtype)
+    product = matrix_product(left, right, out_dtype)
     # beta=0 does not read bias (including its NaNs), as the source declares.
     return product * alpha if beta == 0 else product * alpha + bias * beta
 
 
 def declared_linear(x, w, bias=None, act=0, x1=None):
-    if product_implementation(x.dtype) == 'metal_product':
-        return NotImplemented
     source = x if x1 is None else torch.cat((x, x1), -1)
-    result = contraction(source, w.t())
+    if product_implementation(source, w.t()) == 'metal_product':
+        return NotImplemented
+    result = matrix_product(source, w.t())
     if bias is not None:
         result = result + bias
     return result.tanh() if act else result
 
 
 def declared_linears(xs, ws, biases, acts, x1s):
-    if all(product_implementation(x.dtype) == 'metal_product' for x in xs):
+    if all(product_implementation(x if x1 is None else torch.cat((x, x1), -1), w.t()) == 'metal_product'
+           for x, w, x1 in zip(xs, ws, x1s, strict=True)):
         return NotImplemented
     return [torch.ops.torch_mesh.linear.default(x, w, bias, act, x1)
             for x, w, bias, act, x1 in zip(xs, ws, biases, acts, x1s, strict=True)]
@@ -261,16 +325,17 @@ def view_dtype(self, dtype):
     extent = self.untyped_storage().nbytes() // unit * unit
     source = self.as_strided((extent // self.dtype.itemsize,), (1,), 0)
     target = torch.empty((extent // dtype.itemsize,), dtype=dtype, device=self.device)
-    storage = assemble(((source, target),))
+    storage = assemble(((source, target),), output=target)
     return storage.as_strided(described.shape, described.stride(), described.storage_offset())
 
 
 def convolution(input, weight, bias, stride, padding, dilation, transposed, output_padding, groups):
     """Declare the shared window relation to the existing indexed product."""
-    from mesh_relation import Algebra, convolution_domain
+    from mesh_relation import convolution_domain
+    from .compilation import relations
     from .operand import TensorView, relation_view
     from .matrix import declare
-    domain = convolution_domain(Algebra(), tuple(input.shape), tuple(weight.shape), stride=stride,
+    domain = convolution_domain(relations(), tuple(input.shape), tuple(weight.shape), stride=stride,
         padding=padding, dilation=dilation, transposed=transposed, output_padding=output_padding, groups=groups)
     source, count = input, input.numel()
     if domain['input_neutral']:
@@ -279,7 +344,7 @@ def convolution(input, weight, bias, stride, padding, dilation, transposed, outp
         joined = torch.empty((count + 1,), dtype=input.dtype, device=input.device)
         destination = TensorView.of(joined)
         source = assemble([(TensorView.of(input).reshape((count,)), destination.slice(0, 0, count)),
-                           (TensorView.of(zero), destination.slice(0, count, 1))])
+                           (TensorView.of(zero), destination.slice(0, count, 1))], output=joined)
     left = relation_view(source, domain['canonical_accesses']['input'], domain['matrix_shapes'][0])
     def transform(value, steps):
         view = TensorView.of(value)
@@ -297,6 +362,7 @@ def convolution(input, weight, bias, stride, padding, dilation, transposed, outp
 # table. Lowering to scalar prims before partitioning would erase the tensor
 # operations whose ownership relations the distributed frontend consumes.
 partition_decompositions = {
+    torch.ops.torch_mesh.product_pages.default: declared_product,
     torch.ops.aten.mm.default: matrix_product,
     torch.ops.aten.bmm.default: matrix_product,
     torch.ops.aten.addmm.default: matrix_add,

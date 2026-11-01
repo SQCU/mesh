@@ -1,25 +1,11 @@
-"""torch.distributed's "mesh" backend: a ProcessGroup (torch's Python form of one, as
-torch/testing/_internal/distributed/multi_threaded_pg.py's) whose every collective is one NCCL group of
-../../libnccl-mesh.dylib (nccl.h on the bridges' prepared transfers), issued by one path, _stream.mm's `issue`: a list
-of calls, each a kind, its tensors, counts, operator and root.  MPS tensors take the library's Metal path: the group is
-encoded on torch's MPS stream, each tensor passed as its storage's MTLBuffer and byte offset (ncclMeshBuffer), so the
-work is ordered with torch's own and the call returns at once (an async op issued and not completed: a Work whose wait
-completes it on torch's stream).  CPU tensors take the host path, complete where the call returns.  A non-contiguous
-tensor fails as a value (_stream.mm Group): nothing is copied to make it one.
+"""PyTorch declarations for the shared page-based collective compiler.
 
-One form a collective, the library's V call where it has one (the library takes equal segments as its equal
-program): an all-gather and a reduce-scatter are ncclMeshAllGatherV and ncclMeshReduceScatterV; all_to_all,
-all_to_all_single, gather and scatter are ncclMeshAlltoAllV, MPI_Alltoallv with its counts on the host (a gather and a
-scatter of any sizes the rooted V, MPI's Gatherv and Scatterv: every count 0 but toward or from the root, as NCCL's
-gather and scatter are its forms); a list supplies separate original/final storage bindings to that same collective compiler. Directed transfers are declared writes or sparse counted exchanges on the full physical communicator.
-The partials merge supplies its combine source to the same selected-page graph,
-including its derivative when the enclosing source requests one.
-
-A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
-store, as ProcessGroupNCCL does, the store's one use), its sessions each on the map the bridges keep when it opens; its
-pg_options are not read.  What its ranks agree before a function runs (exchange_configuration) crosses the
-communicator's configuration channel (ncclMeshCommConfigGather).
-The silent-link bound is the library's (nccl.h)."""
+A ProcessGroup owns the physical communicator and preparation configuration.
+Call bindings, page views, routes and numerical source are declared before
+execution. The common source-effect pass composes numerical work with the
+collective's page dependencies; the native recorder then binds that result.
+Execution consumes those prepared commands through the shared schedule.
+"""
 import collections
 import contextlib
 import math
@@ -36,7 +22,7 @@ from routing import Fabric
 ffi, LIB, check = mesh.ffi, mesh.lib, mesh.check
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
-# a call's kind (_stream.mm Kind)
+# Frontend call kinds map to the shared declaration ABI below.
 ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL = range(6)
 WRITE = 8
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
@@ -92,16 +78,14 @@ def op(reduce_op):
 
 
 def typed(dtype, reduces):
-    """A dtype as _stream.mm's Group passes a tensor of it (moving, reducing): its NCCL type and that type's elements an
-    element (a complex reduction's two; a type NCCL lacks moved as its bytes)."""
+    """Declared scalar type and scalar units per logical collective element."""
     if reduces and dtype.is_complex:
         return TYPES[dtype.to_real()], 2
     return (TYPES[dtype], 1) if dtype in TYPES else (LIB.ncclUint8, torch.empty(0, dtype=dtype).element_size())
 
 
 def _binding(tensor):
-    """A tensor as an issue passes it (_stream.mm Group::where; nccl.h ncclMeshCall bindings): an MPS one its storage's
-    MTLBuffer and byte offset, a CPU one {NULL, its address}, None {NULL, 0}."""
+    """Resolve a declared tensor binding during preparation."""
     if tensor is None:
         return (ffi.NULL, 0)
     if tensor.is_mps:
@@ -143,6 +127,13 @@ class ProcessGroupMesh(dist.ProcessGroup):
         # Keep this communicator's topology snapshot for configuration lowering;
         # migrations neither rediscover it nor guess route state from an address.
         try:
+            import json
+            from .compilation import implementations, implementation_assignment
+            from .cpu import compilation
+            implementation = implementations()[implementation_assignment()['collective_cpu']]
+            check(LIB.ncclMeshCommCompiler(comm,
+                json.dumps(compilation(implementation), separators=(',', ':')).encode(),
+                json.dumps(implementation['resources'], separators=(',', ':')).encode()))
             self.fabric = Fabric.of(comm)
         except Exception:
             LIB.ncclCommDestroy(comm)
@@ -360,7 +351,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         bindings, calls, views = [], [], []
         for value, source, destination in deliveries:
             view = TensorView.of(value)
-            views.append(view)
+            views.append((view, view))
             geometry = view.write_layout()
             bindings.append((*geometry, int(source), int(destination)))
             sides = tuple(geometry if self.rank() == rank else None for rank in (source, destination))
@@ -403,13 +394,12 @@ def prepare_fragments(bindings, group):
     # each declaration names the tensors its issue passes, so CommPlan lays and places it for them.
     # design/eager-execution.md#what-follows
     declarations = [d._replace(bindings=(source, destination)) for d, source, destination in bindings]
-    calls, operands = [], []
+    from .operand import TensorView
+    views, operands = [], []
     for declaration, source, destination in bindings:
-        code = declaration.op if isinstance(declaration.op, int) else op(declaration.op)
-        counts = [declaration.count] if declaration.kind in (ALLREDUCE, REDUCE, BROADCAST) else declaration.counts
-        calls.append((declaration.kind, [source], [destination], counts or [], code, declaration.root))
+        views.append(tuple(None if value is None else TensorView.of(value) for value in (source, destination)))
         operands.extend(t for t in (source, destination) if t is not None)
-    return dict(transfer='collective', bindings=tuple(calls), calls=tuple(declarations),
+    return dict(transfer='collective', views=tuple(views), calls=tuple(declarations),
                 operands=tuple(operands), group=group, before=tuple(before), after=tuple(after)), declarations
 
 

@@ -71,7 +71,9 @@ def main(config=None):
     group = mesh.get_group('tp')
     full, rest = divmod(steps, k)
     chunks = [k] * full + [rest] * bool(rest)
-    unit = Function(tick.stepper(X, O, 1), t, configuration=compiler,
+    from mesh_relation import Algebra
+    algebra = Algebra()
+    unit = Function(tick.stepper(X, O, 1), t, configuration=compiler, algebra=algebra,
                     source_scope={'program': 'lstm_sequence', 'phase': 'step'}).capture()
     functions, first = [], 0
     for count in chunks:
@@ -79,7 +81,7 @@ def main(config=None):
         function.declare(group)
         functions.append(function)
         first += count
-    initial = [Function(tick.starting, s, X[s], configuration=compiler,
+    initial = [Function(tick.starting, s, X[s], configuration=compiler, algebra=algebra,
                         source_scope={'program': 'lstm_sequence', 'phase': 'starting', 'step': s}) for s in range(L - 1)]
     for function in initial:
         function.declare(group)
@@ -96,10 +98,11 @@ def main(config=None):
         work=_stream.TensorLayout((X.numel() * X.element_size(),), (1,)), route_scope=source)
     # the broadcast's lowered fragments, each with the tensors it is issued with (design/eager-execution.md#what-follows)
     inputs, declared = prepare_fragments([(broadcast, X, X)], group)
-    program = execution_sequence([inputs, *ordered], O)
+    program = execution_sequence([inputs, *ordered], O, algebra=algebra)
     def prepare():
         program.realize()
-        return {'layouts': [choice for function in ordered for choice in function.layout_choices]}
+        return {'layouts': [choice for function in ordered for choice in function.layout_choices],
+                'choices': [choice for function in ordered for choice in function.choices]}
     bind(configuration, [declared, *groups], prepare)
     started = now()
     program.forward()

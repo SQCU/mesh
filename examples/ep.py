@@ -70,10 +70,10 @@ def main(configuration_operand=None):
         model = MoE(mesh)
         function = Function(model, configuration=configuration['assignment']['operands'],
                             source_scope={'program': 'moe_dispatch_experts_combine'})
-        program = execution_sequence([function] * STEPS)
+        program = execution_sequence([function] * STEPS, algebra=function.algebra)
         def prepare():
             program.realize()
-            return {'layouts': list(function.layout_choices)}
+            return {'layouts': list(function.layout_choices), 'choices': list(function.choices)}
         bind(configuration, lambda: function.declare(mesh.get_group("ep")), prepare)
         started = now()
         program.forward()

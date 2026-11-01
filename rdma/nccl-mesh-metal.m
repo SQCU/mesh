@@ -10,6 +10,10 @@
 #include "mesh-fabric.h"
 #include "mesh-graph.h"
 #include "mesh-publication.h"
+#import "metal-page-effects.h"
+#import "mesh-index-relation.h"
+#include "mesh-cpu-source.h"
+#include <isl/ctx.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -32,10 +36,8 @@ static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
   KIND_zelloth_i64_##op,KIND_zelloth_u64_##op,KIND_zelloth_f16_##op,KIND_zelloth_f32_##op,KINDS, \
   KIND_zelloth_bf16_##op,KIND_zelloth_e4m3_##op,KIND_zelloth_e5m2_##op}
 static const uint8_t REDUCTIONS[4][ncclNumTypes]={REDUCTION_TYPES(sum),REDUCTION_TYPES(prod),REDUCTION_TYPES(max),REDUCTION_TYPES(min)};
-/* a copy's kind by its width (0 words of 4 bytes, 1 bytes) and its loads (METAL_PLAIN, METAL_LAND) */
-static const uint8_t COPY[2][METAL_LAND + 1][2] = {
-  {{KIND_copy_plain_4,KIND_copy_ready_plain_4},{KIND_copy_land_4,KIND_copy_ready_land_4}},
-  {{KIND_copy_plain_1,KIND_copy_ready_plain_1},{KIND_copy_land_1,KIND_copy_ready_land_1}}};
+/* The width is a compiled copy operand; every source uses the page accessor. */
+static const uint8_t COPY[2]={KIND_copy_4,KIND_copy_1};
 
 ARGS(args, uint64_t, uint32_t);
 /* Kernel lookup is shared; compiled argument pages, pieces of the region (nccl-mesh.c metal_piece_hold), belong to
@@ -49,13 +51,82 @@ struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[KIN
   struct metal_bytes page;
   size_t bytes, used, count, room;
   void **held;
+  NSMutableArray *sources;
 }
 @end
 @implementation MeshArgumentPages
-- (void)dealloc { for (size_t k = 0; k < count; k++) metal_piece_give(held[k]); free(held); [super dealloc]; }
+- (void)dealloc { for (size_t k = 0; k < count; k++) metal_piece_give(held[k]); free(held);[sources release];[super dealloc]; }
 @end
 static char argumentPagesKey;
 _Static_assert(sizeof(struct args) <= RECORD, "an argument record");
+
+@interface MeshCollectiveCommand : NSObject {
+@public
+  MetalPageCommand *source;
+  NSData *bindings,*reaches,*arguments;
+  uint32_t kind;
+  MTLSize grid,threads;
+  BOOL threadGrid;
+}
+@end
+@implementation MeshCollectiveCommand
+- (void)dealloc { [source release];[bindings release];[reaches release];[arguments release];[super dealloc]; }
+@end
+@interface MeshCollectiveHost : NSObject { @public void *program; }
+@end
+@implementation MeshCollectiveHost
+- (void)dealloc { mesh_cpu_program_release(program);[super dealloc]; }
+@end
+
+static MetalPageAccess *group_access(struct metal_program *program,id<MTLBuffer> buffer,NSUInteger offset,
+    NSUInteger bytes,NSInteger slot,uint32_t access,NSString *relation) {
+  isl_ctx *ctx=program->relation_context;
+  isl_map *groups=isl_map_read_from_str(ctx,relation.UTF8String);
+  (void)offset;(void)bytes;
+  isl_map *physical=MetalPageRegionRelation(groups,buffer);isl_map_free(groups);
+  if(!physical)[NSException raise:NSInvalidArgumentException format:@"invalid collective group/page relation"];
+  MetalPageAccess *made=[MetalPageAccess root:MetalPageRegionRoot() slot:slot access:access relation:physical];
+  isl_map_free(physical);return made;
+}
+/* Ordinary cyclic element loops have one fixed relation from dispatch groups
+   to bytes. This covers arbitrary widths without enumerating their elements. */
+static void element_access(struct metal_program *program,void *buffer,size_t offset,size_t count,size_t width,
+    NSInteger slot,uint32_t access,NSUInteger grid,NSUInteger threads) {
+  if(!count)return;
+  NSString *relation=[NSString stringWithFormat:
+    @"{ [g] -> [b] : exists k : 0 <= k < %lu and %lu + %lu*k <= b < %lu + %lu*(k+1) and g = floor((k mod %lu)/%lu) }",
+    (unsigned long)count,(unsigned long)offset,(unsigned long)width,(unsigned long)offset,(unsigned long)width,
+    (unsigned long)grid,(unsigned long)threads];
+  [(NSMutableArray *)program->group_accesses addObject:group_access(program,(id<MTLBuffer>)buffer,offset,count*width,slot,access,relation)];
+}
+static void loop_access(struct metal_program *program,void *buffer,size_t offset,size_t count,size_t width,
+    NSInteger slot,uint32_t access) {
+  [(NSMutableArray *)program->loop_accesses addObject:@[(id<MTLBuffer>)buffer,@(offset),@(count),@(width),@(slot),@(access)]];
+}
+static void cell_access(struct metal_program *program,void *buffer,size_t offset,size_t bytes,NSInteger slot,
+    uint32_t access,const uint64_t *cells,size_t count,size_t stride,size_t width) {
+  NSMutableString *relation=[NSMutableString stringWithString:@"{ [g] -> [b] : "];
+  for(size_t k=0;k<count;k++) {
+    [relation appendFormat:@"%@(g = %lu and %llu <= b < %llu)",k?@" or ":@"",(unsigned long)k,
+      (unsigned long long)(offset+cells[k*stride]*width),(unsigned long long)(offset+(cells[k*stride]+cells[k*stride+1])*width)];
+  }
+  if(!count)[relation appendString:@"false"];
+  [relation appendString:@" }"];
+  [(NSMutableArray *)program->group_accesses addObject:group_access(program,(id<MTLBuffer>)buffer,offset,bytes,slot,access,relation)];
+}
+void metal_page_selection(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,const ncclMeshSpan *spans,size_t count) {
+  if(!count)return;
+  NSMutableArray *runs=[NSMutableArray array];
+  for(size_t k=0;k<count;k++)[runs addObject:@[@(spans[k].offset),@(spans[k].bytes),@0,@1]];
+  MetalTensorLayout *layout=[MetalTensorLayout runs:runs];
+  isl_map *selection=MetalPageRegionSelection(program->relation_context,(id<MTLBuffer>)payload,layout);
+  MetalPageTransfer *transfer=[MetalPageTransfer owner:[NSValue valueWithPointer:program] order:[(NSArray *)program->commands count]+(effect->kind==ncclMeshPagePublish)
+    effect:*effect root:MetalPageRegionRoot() selection:selection payload:(id<MTLBuffer>)payload layout:layout];
+  [(NSMutableArray *)program->transfers addObject:transfer];isl_map_free(selection);
+}
+void metal_page_effect(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,size_t offset,size_t bytes) {
+  if(bytes){const ncclMeshSpan span={offset,bytes};metal_page_selection(program,effect,payload,&span,1);}
+}
 
 static id<MTLDevice> device_;
 static NSMutableDictionary *kernels_;
@@ -147,25 +218,16 @@ void metal_release(void *object) { [(id)object release]; }
 void *metal_retain(void *object) { return [(id)object retain]; }
 /* The occurrence already owns its effective observation budget. Binding does
    not reinterpret configuration or start any observation. */
-struct metal_program *metal_begin(struct metal_program *program, void *encoder, void *table, void *residency, void *violation, uint32_t polls,
-                                  const char **message) {
-  if (!kernels_of(((id<MTLResidencySet>)residency).device, message)) return NULL;
-  *program = (struct metal_program){0};
-  program->encoder = [(id<MTL4ComputeCommandEncoder>)encoder retain];
-  program->table = [(id<MTL4ArgumentTable>)table retain];
-  program->residency = [(id<MTLResidencySet>)residency retain];
-  program->violation = [(id<MTLBuffer>)violation retain];
-  program->polls = polls;
-  program->accesses = [NSMutableData new];
-  metal_resident(program, violation);
-  return program;
+struct metal_program *metal_prepare(struct metal_program *program,struct isl_ctx *context,void *violation,uint32_t polls) {
+  *program=(struct metal_program){0};program->violation=[(id<MTLBuffer>)violation retain];program->polls=polls;
+  program->accesses=[NSMutableData new];program->commands=[NSMutableArray new];program->transfers=[NSMutableArray new];
+  program->group_accesses=[NSMutableArray new];program->loop_accesses=[NSMutableArray new];program->resources=[NSMutableSet new];
+  program->relation_context=context;metal_resident(program,violation);return program;
 }
 
 
-void metal_resident(struct metal_program *program, void *buffer) {
-  if (!program->residency || !buffer || [program->residency containsAllocation:(id<MTLBuffer>)buffer]) return;
-  [program->residency addAllocation:(id<MTLBuffer>)buffer];
-  program->added = 1;
+void metal_resident(struct metal_program *program,void *buffer) {
+  if(buffer)[(NSMutableSet *)program->resources addObject:(id<MTLBuffer>)buffer];
 }
 
 void metal_gate(struct metal_program *program, void *violation) {
@@ -177,13 +239,14 @@ void metal_gate(struct metal_program *program, void *violation) {
 }
 
 /* All argument tables and records use these function-owned pages. */
+static MeshArgumentPages *argument_owner(struct metal_program *program) {
+  MeshArgumentPages *pages=program->arguments;
+  if(!pages){pages=[MeshArgumentPages new];pages->sources=[NSMutableArray new];program->arguments=pages;}
+  return pages;
+}
+
 static int argument_pages(struct metal_program *program,size_t bytes,struct metal_bytes *made) {
-  MeshArgumentPages *pages=objc_getAssociatedObject(program->residency,&argumentPagesKey);
-  if(!pages) {
-    pages=[MeshArgumentPages new];
-    objc_setAssociatedObject(program->residency,&argumentPagesKey,pages,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [pages release];
-  }
+  MeshArgumentPages *pages=argument_owner(program);
   const size_t size=(bytes+RECORD-1)/RECORD*RECORD;
   if(!pages->count||size>pages->bytes-pages->used) {
     if(pages->count==pages->room) {
@@ -226,24 +289,54 @@ static struct metal_result record4(struct metal_program *program,id<MTLBuffer> d
 
 /* Transport leaves enter the same prepared command graph as numerical leaves.
    Bindings carry storage; accesses name the exact data relation. */
-static void command_emit(struct metal_program *program,id<MTLComputePipelineState> pipeline,
+static void command_emit(struct metal_program *program,uint32_t kind,
     const struct MetalCommandBinding *bindings,MTLSize grid,MTLSize threads,BOOL threadGrid) {
   NSMutableData *accesses=(NSMutableData *)program->accesses;
-  const struct MetalCommandDescription command={.pipeline=pipeline,.bindings=bindings,.bindingCount=6,
-    .reaches=accesses.bytes,.reachCount=accesses.length/sizeof(struct MetalReach),
-    .groups=grid,.threads=threads,.threadGrid=threadGrid};
-  MetalEncoderCompute(program->encoder,&command);
+  NSMutableArray *relations=program->group_accesses;
+  const NSUInteger groups=threadGrid?(grid.width+threads.width-1)/threads.width:grid.width*grid.height*grid.depth;
+  const struct MetalReach *uses=accesses.bytes;
+  for(NSUInteger k=0;!program->administrative&&k<accesses.length/sizeof *uses;k++) {
+    const struct MetalReach use=uses[k];if(!use.length||!use.buffer)continue;
+    for(uint32_t mode=MetalReachRead;mode<=MetalReachWritten;mode<<=1)if(use.access&mode) {
+      NSString *relation=[NSString stringWithFormat:@"{ [g] -> [b] : 0 <= g < %lu and %lu <= b < %lu }",
+        (unsigned long)groups,(unsigned long)use.offset,(unsigned long)(use.offset+use.length)];
+      MetalPageAccess *all=group_access(program,use.buffer,use.offset,use.length,use.binding,mode,relation);
+      isl_set *remaining=isl_map_range(isl_map_copy(all->relation));
+      for(MetalPageAccess *known in relations)if(known->access&mode)
+        remaining=isl_set_subtract(remaining,isl_map_range(isl_map_copy(known->relation)));
+      isl_map *unassigned=isl_map_intersect_range(isl_map_copy(all->relation),remaining);
+      if(!isl_map_is_empty(unassigned))[relations addObject:[MetalPageAccess root:MetalPageRegionRoot() slot:use.binding access:mode relation:unassigned]];
+      isl_map_free(unassigned);
+    }
+  }
+  /* Keep one numerical body. The explicit entry is the common source
+     compiler's entry, including builtin kernels defined with macros. */
+  NSString *source=[NSString stringWithFormat:@"%@%@\nkernel void mesh_prepared_leaf(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]], uint l [[thread_position_in_threadgroup]], uint t [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_%s(d,s,p,a,vb,progress,i,g,l,t,tg); }\n",
+    @(metal_prelude()),KERNELS,NAME[kind]];
+  MeshCollectiveCommand *command=[[[MeshCollectiveCommand alloc] init] autorelease];
+  command->source=[[MetalPageCommand order:[(NSArray *)program->commands count]+1 groups:groups backend:MetalPageMetal
+    source:source function:@"mesh_prepared_leaf" grid:MTLSizeMake(groups,1,1) metadataSlot:6 accesses:relations] retain];
+  command->source->coherentAccesses=YES;
+  command->bindings=[[NSData alloc] initWithBytes:bindings length:6*sizeof *bindings];
+  command->reaches=[accesses copy];command->kind=kind;
+  command->grid=grid;command->threads=threads;command->threadGrid=threadGrid;
+  [(NSMutableArray *)program->commands addObject:command];
+  [relations removeAllObjects];
   [accesses setLength:0];
 }
 
-static struct metal_result dispatch4(struct metal_program *program,id<MTLComputePipelineState> state,id<MTLBuffer> d,id<MTLBuffer> s,
+static struct metal_result dispatch4(struct metal_program *program,uint32_t kind,id<MTLBuffer> d,id<MTLBuffer> s,
     id<MTLBuffer> a,id<MTLBuffer> words,struct args p,uint64_t units,int group) {
   uint64_t bound[6];struct MetalCommandBinding bindings[6];
   const struct metal_result recorded=record4(program,d,s,a,words,p,bound,bindings);
   if(recorded.status)return recorded;
   const NSUInteger most=group?MESH_TRANSPORT_GROUP_THREADS:MESH_TRANSPORT_ELEMENT_THREADS;
-  const NSUInteger width=MIN(state.maxTotalThreadsPerThreadgroup,most);
-  command_emit(program,state,bindings,MTLSizeMake(group?1:MIN(units,MESH_TRANSPORT_GRID_THREADS),1,1),
+  const NSUInteger width=most;
+  for(NSArray *use in (NSArray *)program->loop_accesses)
+    element_access(program,use[0],[use[1] unsignedLongValue],[use[2] unsignedLongValue],[use[3] unsignedLongValue],
+      [use[4] integerValue],[use[5] unsignedIntValue],MIN(units,MESH_TRANSPORT_GRID_THREADS),width);
+  [(NSMutableArray *)program->loop_accesses removeAllObjects];
+  command_emit(program,kind,bindings,MTLSizeMake(group?1:MIN(units,MESH_TRANSPORT_GRID_THREADS),1,1),
     MTLSizeMake(width,1,1),!group);
   return METAL_DONE;
 }
@@ -256,48 +349,25 @@ static struct metal_result dispatch(struct metal_program *program, uint32_t kind
                                     uint64_t units, int group) {
   if (kind >= KINDS) return (struct metal_result){EINVAL, "no kernel of this operation and data type (nccl-mesh-metal.m TYPED)"};
   if (!units) return METAL_DONE;
-  const char *message = NULL;
-  struct kernels *k = program_kernels(program, &message);
-  if (!k) return (struct metal_result){EINVAL, message};
-  id<MTLComputePipelineState> state = k->pipelines[kind];
   @autoreleasepool {
-    return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, group);
+    return dispatch4(program,kind,(id<MTLBuffer>)d,(id<MTLBuffer>)s,(id<MTLBuffer>)a,(id<MTLBuffer>)v,p,units,group);
   }
 }
 
-struct metal_result metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset,
-                              size_t bytes,const struct metal_copy_relation *relation) {
-  const int words = !((dst_offset | src_offset | bytes) & 3);
-  if (mode < METAL_PLAIN || mode > METAL_LAND) return metal_failed(EINVAL);
-  const struct metal_wait *ready=relation?relation->ready:NULL;
-  const size_t observed=(ready?1:0)+(relation?relation->count:0);
-  const ncclMeshAccess uses[]={{{src,src_offset},bytes,ncclMeshAccessRead|(relation?relation->source_access:0)},
-    {{dst,dst_offset},bytes,ncclMeshAccessWritten}};
-  metal_accesses(program,uses,sizeof uses/sizeof *uses);
-  struct args args={.dst=dst_offset,.src=src_offset,.n=words?bytes/4:bytes};
-  struct metal_bytes table={0};
-  if(observed) {
-    if(argument_pages(program,observed*6*sizeof(uint64_t),&table))return metal_failed(ENOMEM);
-    uint64_t *values=table.contents;
-    for(size_t k=0;k<observed;k++) {
-      const struct metal_wait *wait=ready&&k==0?ready:relation->observations+k-(ready?1:0);
-      values[6*k]=((id<MTLBuffer>)wait->words).gpuAddress+wait->word;
-      values[6*k+1]=wait->target.n;
-      values[6*k+2]=((id<MTLBuffer>)wait->violation).gpuAddress;
-      values[6*k+3]=program->polls;values[6*k+4]=wait->channel;values[6*k+5]=wait->at;
-      const ncclMeshAccess observation={{wait->words,wait->word},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve};
-      metal_accesses(program,&observation,1);metal_resident(program,wait->violation);
-    }
-    args.aux=table.offset;args.count=(uint32_t)observed;
-  }
-  return dispatch(program,COPY[!words][mode][observed!=0],dst,src,table.buffer,NULL,args,
-                  words?bytes/4:bytes,0);
+struct metal_result metal_copy(struct metal_program *program,void *dst,size_t dst_offset,void *src,size_t src_offset,size_t bytes) {
+  const int words=!((dst_offset|src_offset|bytes)&3);
+  const ncclMeshAccess uses[]={{{src,src_offset},bytes,ncclMeshAccessRead},{{dst,dst_offset},bytes,ncclMeshAccessWritten}};
+  metal_accesses(program,uses,2);
+  loop_access(program,src,src_offset,words?bytes/4:bytes,words?4:1,1,MetalReachRead);
+  loop_access(program,dst,dst_offset,words?bytes/4:bytes,words?4:1,0,MetalReachWritten);
+  return dispatch(program,COPY[!words],dst,src,NULL,NULL,(struct args){.dst=dst_offset,.src=src_offset,.n=words?bytes/4:bytes},words?bytes/4:bytes,0);
 }
 
 struct metal_result metal_fill_pattern(struct metal_program *program,void *dst,size_t dst_offset,
     size_t bytes,uint64_t scalar,size_t element_bytes,size_t unit_bytes) {
   const ncclMeshAccess output={{dst,dst_offset},bytes,ncclMeshAccessWritten};
   metal_accesses(program,&output,1);
+  loop_access(program,dst,dst_offset,bytes,1,0,MetalReachWritten);
   return dispatch(program,KIND_fill_pattern,dst,NULL,NULL,NULL,
     (struct args){.dst=dst_offset,.n=bytes,.scalar=scalar,.step=unit_bytes,.input=element_bytes},bytes,0);
 }
@@ -307,23 +377,19 @@ static uint32_t typed(int op, int type) { return (unsigned)type <= METAL_MERGE ?
 
 /* CPU arithmetic is another prepared leaf over the same region pages. The
    recorder owns dependencies, submission and completion for every backend. */
-struct native_task { void (^operation)(void); MeshHostCompletion complete; void *context; };
-static void native_submit(void *opaque) {
-  struct native_task *task=opaque;task->operation();task->complete(task->context,NULL);
-}
-static void native_release(void *opaque) {
-  struct native_task *task=opaque;[task->operation release];free(task);
-}
-static struct metal_result native_emit(struct metal_program *program,void (^operation)(void)) {
-  NSData *accesses=(NSData *)program->accesses;
-  MetalEncoderHost(program->encoder,accesses.bytes,accesses.length/sizeof(struct MetalReach),
-    ^const char *(MeshHostCompletion complete,void *context,MeshHostTask *out) {
-      struct native_task *task=calloc(1,sizeof *task);
-      if(!task)return "allocating native command binding";
-      task->operation=[operation copy];task->complete=complete;task->context=context;
-      *out=(MeshHostTask){.context=task,.submit=native_submit,.release=native_release};return NULL;
-    });
-  [(NSMutableData *)program->accesses setLength:0];
+static struct metal_result native_emit(struct metal_program *program,NSString *text,const void *arguments,size_t bytes) {
+  NSData *reaches=program->accesses;const struct MetalReach *uses=reaches.bytes;
+  NSMutableArray *relations=[NSMutableArray array];
+  for(NSUInteger k=0;k<reaches.length/sizeof *uses;k++)if(uses[k].length&&(uses[k].access&(MetalReachRead|MetalReachWritten))) {
+    NSString *relation=[NSString stringWithFormat:@"{ [g] -> [b] : g = 0 and %lu <= b < %lu }",
+      (unsigned long)uses[k].offset,(unsigned long)(uses[k].offset+uses[k].length)];
+    [relations addObject:group_access(program,uses[k].buffer,uses[k].offset,uses[k].length,uses[k].binding,uses[k].access,relation)];
+  }
+  MeshCollectiveCommand *command=[[[MeshCollectiveCommand alloc] init] autorelease];
+  command->source=[[MetalPageCommand order:[(NSArray *)program->commands count]+1 groups:1 backend:MetalPageCPU
+    source:text function:@"mesh_cpu_entry" grid:MTLSizeMake(1,1,1) metadataSlot:0 accesses:relations] retain];
+  command->reaches=[reaches copy];command->arguments=[[NSData alloc] initWithBytes:arguments length:bytes];
+  [(NSMutableArray *)program->commands addObject:command];[(NSMutableData *)program->accesses setLength:0];
   return METAL_DONE;
 }
 
@@ -342,8 +408,12 @@ struct metal_result metal_premultiply(struct metal_program *program,int type,voi
     double *out=(double *)((char *)metal_contents(dst)+dst_offset);
     const double *input=(const double *)((const char *)metal_contents(src)+src_offset);
     const double *factor=(const double *)((const char *)metal_contents(scalar.buffer)+scalar.offset);
-    return native_emit(program,^{const double value=*factor;for(size_t k=0;k<n;k++)out[k]=input[k]*value;});
+    const struct { double *out;const double *input,*factor; } arguments={out,input,factor};
+    NSString *source=[NSString stringWithFormat:@"#include <stdint.h>\nstruct MeshCpuArguments { double *out; const double *input,*factor; };\nextern \"C\" void mesh_cpu_entry(const void *arguments) { const auto &a=*static_cast<const MeshCpuArguments *>(arguments); const double value=*a.factor; for(unsigned long k=0;k<%luul;k++)a.out[k]=a.input[k]*value; }\n",(unsigned long)n];
+    return native_emit(program,source,&arguments,sizeof arguments);
   }
+  loop_access(program,src,src_offset,n,element_bytes,1,MetalReachRead);
+  loop_access(program,dst,dst_offset,n,element_bytes,0,MetalReachWritten);
   return dispatch(program,typed(OP_PREMUL,type),dst,src,scalar.buffer,NULL,
     (struct args){.dst=dst_offset,.src=src_offset,.n=n,.aux=scalar.offset},n,0);
 }
@@ -352,6 +422,8 @@ struct metal_result metal_truncdiv(struct metal_program *program, int type, void
                                    size_t element_bytes, uint64_t divisor) {
   const ncclMeshAccess uses[]={{{src,src_offset},n*element_bytes,ncclMeshAccessRead},{{dst,dst_offset},n*element_bytes,ncclMeshAccessWritten}};
   metal_accesses(program,uses,sizeof uses/sizeof *uses);
+  loop_access(program,src,src_offset,n,element_bytes,1,MetalReachRead);
+  loop_access(program,dst,dst_offset,n,element_bytes,0,MetalReachWritten);
   return dispatch(program, typed(OP_TRUNCDIV, type), dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor},
                   n, 0);
 }
@@ -433,29 +505,8 @@ static void landing_cell(void *context,uint64_t first,uint64_t elements,const ui
     (struct mesh_graph_span){first*out->element_bytes,(first+elements)*out->element_bytes},output_observation_met,&meet);
   out->at+=2+out->inputs+out->observations->count;
 }
-typedef void (*native_fold)(double *,const double *,const double *const *,size_t,size_t,size_t);
-#define NATIVE_FOLD(name,expression) \
-static void native_##name(double *out,const double *own,const double *const *inputs,size_t K,size_t first,size_t count) { \
-  for(size_t j=first;j<first+count;j++){double value=own[j];for(size_t k=0;k<K;k++){const double next=inputs[k][j];value=(expression);}out[j]=value;} \
-}
-NATIVE_FOLD(sum,value+next)
-NATIVE_FOLD(product,value*next)
-NATIVE_FOLD(maximum,fmax(value,next))
-NATIVE_FOLD(minimum,fmin(value,next))
-#undef NATIVE_FOLD
-/* Concurrent cells publish a monotone prefix to the ordered wire. The state
-   records only completed values; it never assigns or chooses numerical work. */
-static void native_prefix(uint32_t *state,uint32_t *prefix,uint32_t count,uint32_t cell,
-    const uint64_t *cells,size_t K,size_t observations,uint64_t *const *words) {
-  __atomic_store_n(state+cell,2,__ATOMIC_RELEASE);
-  const uint32_t at=mesh_graph_prefix(state,0,count,prefix);
-  if(!at)return;
-  const uint64_t *through=cells+(2+observations)*(at-1)+2;
-  for(size_t k=0;k<K;k++)if(words[k])mesh_publish(words[k],through[k]);
-}
 static struct metal_result native_zelloth(struct metal_program *program,int op,const struct metal_zelloth_sum *sum,
     uint32_t channel,uint64_t entry) {
-  static native_fold const folds[]={native_sum,native_product,native_maximum,native_minimum};
   const struct output_observations observations=output_observations(sum);
   const size_t K=sum->inputs,W=observations.count,O=K+W;
   struct mesh_landing_map maps[K];size_t cursor[K];uint64_t through[K];
@@ -490,7 +541,7 @@ static struct metal_result native_zelloth(struct metal_program *program,int op,c
   const struct metal_wait *overwrite=waits.contents;
   const double *own=(const double *)((const char *)metal_contents(sum->own)+sum->own_offset);
   double *out=(double *)((char *)metal_contents(sum->out)+sum->out_offset);
-  native_fold fold=folds[op];metal_resident(program,table.buffer);
+  metal_resident(program,table.buffer);
   for(uint32_t q=0;q<count;q++) {
     const uint64_t *cell=cells+(2+O)*q;const size_t first=cell[0],elements=cell[1],offset=first*sizeof(double),bytes=elements*sizeof(double);
     const ncclMeshAccess uses[]={{{sum->own,sum->own_offset+offset},bytes,ncclMeshAccessRead},
@@ -512,12 +563,24 @@ static struct metal_result native_zelloth(struct metal_program *program,int op,c
       {table.buffer,table.offset+words*sizeof(uint64_t)},(count+1)*sizeof(uint32_t),
       ncclMeshAccessRead|ncclMeshAccessWritten|ncclMeshAccessAtomic};
     metal_accesses(program,&completion,1);
-    struct metal_result made=native_emit(program,^{
-      for(size_t k=0;k<K;k++)mesh_step_observe(ready[k],cell[2+k],violation,polls,channel,entry);
-      for(size_t k=0;k<W;k++)if(cell[2+K+k])mesh_step_observe(ready[K+k],cell[2+K+k],violation,polls,overwrite[k].channel,overwrite[k].at);
-      fold(out,own,inputs,K,first,elements);
-      native_prefix(state,prefix,count,q,cells,K,O,progress);
-    });
+    const struct { double *out;const double *own;const double *const *inputs;uint64_t **ready,**progress;
+      const uint64_t *cells;uint32_t *state,*prefix;const struct metal_wait *overwrite;void *violation;
+    } arguments={out,own,inputs,ready,progress,cells,state,prefix,overwrite,violation};
+    static NSString *const expression[]={@"value+next",@"value*next",@"fmax(value,next)",@"fmin(value,next)"};
+    NSString *text=[NSString stringWithFormat:
+      @"#include <math.h>\n#include \"mesh-publication.h\"\n#include \"nccl-mesh-metal.h\"\n"
+       "struct MeshCpuArguments { double *out; const double *own; const double *const *inputs; uint64_t **ready,**progress; const uint64_t *cells; uint32_t *state,*prefix; const metal_wait *overwrite; void *violation; };\n"
+       "extern \"C\" void mesh_cpu_entry(const void *arguments) { const auto &a=*static_cast<const MeshCpuArguments *>(arguments); "
+       "const uint64_t *cell=a.cells+%luul; "
+       "for(unsigned long k=0;k<%luul;k++)mesh_step_observe(a.ready[k],cell[2+k],a.violation,%uu,%uu,%lluul); "
+       "for(unsigned long k=0;k<%luul;k++)if(cell[2+%luul+k])mesh_step_observe(a.ready[%luul+k],cell[2+%luul+k],a.violation,%uu,a.overwrite[k].channel,a.overwrite[k].at); "
+       "for(unsigned long j=%luul;j<%luul;j++){double value=a.own[j];for(unsigned long k=0;k<%luul;k++){const double next=a.inputs[k][j];value=(%@);}a.out[j]=value;} "
+       "__atomic_store_n(a.state+%uu,2u,__ATOMIC_RELEASE);const uint32_t at=mesh_graph_prefix(a.state,0,%uu,a.prefix);"
+       "if(at){const uint64_t *through=a.cells+%luul*(at-1)+2;for(unsigned long k=0;k<%luul;k++)if(a.progress[k])mesh_publish(a.progress[k],through[k]);} }\n",
+      (unsigned long)((2+O)*q),(unsigned long)K,polls,channel,(unsigned long long)entry,
+      (unsigned long)W,(unsigned long)K,(unsigned long)K,(unsigned long)K,polls,
+      (unsigned long)first,(unsigned long)(first+elements),(unsigned long)K,expression[op],q,count,(unsigned long)(2+O),(unsigned long)K];
+    struct metal_result made=native_emit(program,text,&arguments,sizeof arguments);
     if(made.status)return made;
   }
   return METAL_DONE;
@@ -532,14 +595,10 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
     for(uint32_t s=0;s<S;s++){struct metal_result made=native_zelloth(program,op,sums+s,channel,at);if(made.status)return made;}
     return METAL_DONE;
   }
-  const char *message=NULL;
-  struct kernels *kernels=program_kernels(program,&message);
-  if(!kernels)return (struct metal_result){EINVAL,message};
   const uint32_t kind=type==METAL_MERGE?KIND_zelloth_merge:
     (unsigned)type<ncclNumTypes&&(unsigned)op<4?REDUCTIONS[op][type]:KINDS;
   if(kind>=KINDS)return metal_failed(EINVAL);
-  id<MTLComputePipelineState> pipeline=kernels->pipelines[kind];
-  const uint64_t width=MIN(pipeline.maxTotalThreadsPerThreadgroup,MESH_TRANSPORT_GROUP_THREADS);
+  const uint64_t width=MESH_TRANSPORT_GROUP_THREADS;
   const uint64_t block=(type==METAL_MERGE?1:MESH_TRANSPORT_VALUES_PER_THREAD)*width;
   for(uint32_t s=0;s<S;s++) {
     const struct metal_zelloth_sum *sum=sums+s;
@@ -569,6 +628,8 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
     const ncclMeshAccess own[]={{{sum->own,sum->own_offset},bytes,ncclMeshAccessRead},
       {{sum->out,sum->out_offset},bytes,ncclMeshAccessWritten}};
     metal_accesses(program,own,2);
+    cell_access(program,sum->own,sum->own_offset,bytes,-1,MetalReachRead,z+cells,blocks,2+O,element_bytes);
+    cell_access(program,sum->out,sum->out_offset,bytes,0,MetalReachWritten,z+cells,blocks,2+O,element_bytes);
     for(size_t k=0;k<K;k++) {
       const struct metal_zelloth_input *input=sum->in+k;
       z[8+3*k]=((id<MTLBuffer>)input->data).gpuAddress+input->data_offset;
@@ -578,6 +639,7 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
         {{input->words,input->word},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve},
         {{input->summed,input->summed_offset},input->summed?sizeof(uint64_t):0,ncclMeshAccessWritten|ncclMeshAccessAtomic}};
       metal_accesses(program,uses,3);
+      cell_access(program,input->data,input->data_offset,bytes,-1,MetalReachRead,z+cells,blocks,2+O,element_bytes);
     }
     for(size_t k=0;k<W;k++) {
       const struct metal_wait *wait=observations.word+k;
@@ -592,7 +654,7 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
     const struct metal_result recorded=record4(program,(id<MTLBuffer>)sum->out,(id<MTLBuffer>)table.buffer,nil,
       program->violation,args,bound,bindings);
     if(recorded.status)return recorded;
-    command_emit(program,pipeline,bindings,MTLSizeMake(blocks,1,1),MTLSizeMake(width,1,1),NO);
+    command_emit(program,kind,bindings,MTLSizeMake(blocks,1,1),MTLSizeMake(width,1,1),NO);
   }
   return METAL_DONE;
 }
@@ -602,12 +664,6 @@ struct metal_result metal_open_gate(struct metal_program *program, void *words, 
   return dispatch(program, KIND_publish, words, NULL, NULL, NULL, (struct args){.scalar = value, .aux = word}, 1, 1);
 }
 
-struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
-  const ncclMeshAccess uses[]={{{w->words,w->word},sizeof(uint64_t),ncclMeshAccessRead|ncclMeshAccessObserve},
-    {{w->data,w->data_offset},w->bytes,ncclMeshAccessWritten}};
-  metal_accesses(program,uses,sizeof uses/sizeof *uses);
-  return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
-}
 /* Deferred steps retain their compiled records through the function's residency set. */
 struct metal_result metal_send_deferred(struct metal_program *program, void *operand, size_t offset, const struct metal_release *r, uint64_t bound[6]) {
   return record4(program, (id<MTLBuffer>)operand, nil, (id<MTLBuffer>)r->words, nil, release_args(r, offset), bound, NULL);
@@ -633,9 +689,110 @@ const char *metal_prelude(void) {
   return text.UTF8String;
 }
 
-void metal_end(struct metal_program *program) {
-  if (program->added) [program->residency commit];
-  [(id)program->accesses release];
-  [program->encoder release]; [program->table release]; [program->residency release]; [program->violation release];
+size_t metal_command_count(const struct metal_program *program) { return [(NSArray *)program->commands count]; }
+const ncclMeshSources *metal_sources(struct metal_program *program) {
+  if(!program->declaration.commands) {
+    NSMutableArray *sources=[NSMutableArray array];
+    for(MeshCollectiveCommand *command in (NSArray *)program->commands)[sources addObject:command->source];
+    program->declaration.commands=[sources copy];program->declaration.transfers=program->transfers;
+  }
+  return &program->declaration;
 }
-
+void metal_command_accesses(struct metal_program *program,size_t index,const ncclMeshAccess *uses,size_t count) {
+  MeshCollectiveCommand *command=((NSArray *)program->commands)[index];
+  metal_accesses(program,uses,count);
+  NSMutableData *reaches=[[command->reaches mutableCopy] autorelease];[reaches appendData:program->accesses];
+  [command->reaches release];command->reaches=[reaches copy];[(NSMutableData *)program->accesses setLength:0];
+}
+struct metal_result metal_specialize(struct metal_program *program,void *sources) {
+  NSArray *made=sources;
+  if(program->sources)return (struct metal_result){EINVAL,"a numerical source program is specialized once"};
+  if(made.count!=[(NSArray *)program->commands count])return (struct metal_result){EINVAL,"specialization must cover every retained numerical declaration"};
+  program->sources=[made copy];
+  /* Relation operands end at specialization. Runtime ownership retains the
+     completed source and its page operands, never the enclosing ISL context. */
+  for(MeshCollectiveCommand *command in (NSArray *)program->commands) {
+    [command->source->accesses release];command->source->accesses=nil;
+  }
+  [(id)program->declaration.commands release];program->declaration.commands=NULL;
+  [(id)program->transfers release];program->transfers=NULL;program->declaration.transfers=NULL;
+  return METAL_DONE;
+}
+struct metal_result metal_record(struct metal_program *program,const ncclMeshStream *on) {
+  if(!program->sources)return (struct metal_result){EINVAL,"complete the whole-function source solve before recording"};
+  program->encoder=(id<MTL4ComputeCommandEncoder>)on->commandEncoder;
+  program->table=(id<MTL4ArgumentTable>)on->argumentTable;
+  program->residency=(id<MTLResidencySet>)on->residencySet;
+  NSMutableArray *held=objc_getAssociatedObject(program->residency,&argumentPagesKey);
+  if(!held){held=[NSMutableArray array];objc_setAssociatedObject(program->residency,&argumentPagesKey,held,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+  [held addObject:argument_owner(program)];
+  struct metal_result result=METAL_DONE;
+  @try {
+    NSArray<MeshCollectiveCommand *> *commands=program->commands;
+    for(NSUInteger i=0;i<commands.count&&!result.status;i++) {
+      MeshCollectiveCommand *command=commands[i];
+      MetalPageSource *source=((NSArray *)program->sources)[i];
+      [argument_owner(program)->sources addObject:source];
+      id<MTLComputePipelineState> pipeline=nil;
+      NSMutableData *bindings=[[command->bindings mutableCopy] autorelease];
+      NSMutableData *reaches=[[command->reaches mutableCopy] autorelease];
+      [reaches appendData:source->reaches];
+      if(command->source->backend==MetalPageCPU) {
+        if(!program->cpu_compiler||!program->cpu_resources) {
+          result=(struct metal_result){EINVAL,"CPU collective source requires its declared compiler and resource operands"};break;
+        }
+        const char *artifact=mesh_cpu_compile(source->source.UTF8String,program->cpu_compiler);
+        if(!artifact){result=(struct metal_result){EINVAL,say("collective CPU source: %s",mesh_cpu_error())};break;}
+        NSMutableData *arguments=[[command->arguments mutableCopy] autorelease];
+        if(source->metadata) {
+          void *metadata=(char *)source->metadata.contents+source->metadataOffset;
+          [arguments appendBytes:&metadata length:sizeof metadata];
+        }
+        const struct MetalReach *uses=reaches.bytes;
+        NSMutableData *hostAccesses=[NSMutableData dataWithLength:reaches.length/sizeof *uses*sizeof(MeshHostAccess)];
+        MeshHostAccess *host=hostAccesses.mutableBytes;
+        for(NSUInteger k=0;k<reaches.length/sizeof *uses;k++)host[k]=(MeshHostAccess){uses[k].buffer.contents,uses[k].offset,uses[k].length,uses[k].access};
+        const MeshCpuInstruction instruction={.arguments=arguments.bytes,.argument_bytes=arguments.length,
+          .library=artifact,.symbol="mesh_cpu_entry",.accesses=host,.access_count=hostAccesses.length/sizeof *host};
+        MeshCollectiveHost *bound=[[[MeshCollectiveHost alloc] init] autorelease];
+        bound->program=mesh_cpu_program_create(&instruction,1,program->cpu_resources);
+        if(!bound->program){result=(struct metal_result){EINVAL,say("collective CPU binding: %s",mesh_cpu_error())};break;}
+        [argument_owner(program)->sources addObject:bound];
+        MetalEncoderHost(program->encoder,reaches.bytes,reaches.length/sizeof(struct MetalReach),
+          ^const char *(MeshHostCompletion complete,void *context,MeshHostTask *out) {
+            return mesh_cpu_program_prepare(bound->program,complete,context,out);
+          });
+        continue;
+      }
+      if(source->metadata) {
+        NSError *error=nil;
+        id<MTLLibrary> library=[[program->residency.device newLibraryWithSource:source->source
+          options:MetalDeviceCompilerOptions(program->residency.device) error:&error] autorelease];
+        pipeline=library?[MetalPipelineMake(library,command->source->function,@[],@{},@[],&error) autorelease]:nil;
+        if(!pipeline){result=(struct metal_result){EINVAL,say("collective source preparation: %s",error.localizedDescription.UTF8String)};break;}
+        const struct MetalCommandBinding metadata={.buffer=source->metadata,.offset=source->metadataOffset,
+          .length=source->metadata.length-source->metadataOffset,.index=command->source->metadataSlot,.access=MetalReachRead};
+        [bindings appendBytes:&metadata length:sizeof metadata];
+      }
+      if(!pipeline) {
+        const char *message=NULL;struct kernels *compiled=program_kernels(program,&message);
+        if(!compiled){result=(struct metal_result){EINVAL,message};break;}
+        pipeline=compiled->pipelines[command->kind];
+      }
+      const struct MetalCommandDescription emitted={.pipeline=pipeline,.bindings=bindings.bytes,
+        .bindingCount=bindings.length/sizeof(struct MetalCommandBinding),.reaches=reaches.bytes,
+        .reachCount=reaches.length/sizeof(struct MetalReach),.groups=command->grid,
+        .threads=command->threads,.threadGrid=command->threadGrid};
+      MetalEncoderCompute(program->encoder,&emitted);
+    }
+  } @catch(NSException *failure) { result=(struct metal_result){EINVAL,say("collective page lowering: %s",failure.reason.UTF8String)}; }
+  for(id<MTLBuffer> buffer in (NSSet *)program->resources)
+    if(![program->residency containsAllocation:buffer])[program->residency addAllocation:buffer];
+  [program->residency commit];return result;
+}
+void metal_end(struct metal_program *program) {
+  [(id)program->accesses release];[(id)program->commands release];[(id)program->transfers release];
+  [(id)program->group_accesses release];[(id)program->loop_accesses release];
+  [(id)program->arguments release];[(id)program->resources release];[(id)program->sources release];
+  [(id)program->declaration.commands release];[program->violation release];
+}

@@ -10,11 +10,12 @@ import json
 from pathlib import Path
 
 import torch
-from torch_mesh import engines
+from torch_mesh import engines, empty
 from torch_mesh.compilation import parameters
 from mesh_statistics import now, Observations
-from assignment import window
+from assignment import window, domains, choice_domains, source_axes, source_operands, layout_operands
 from mesh_source import revision
+from mesh_relation import Algebra
 
 env = lambda key, default: int(os.environ.get(key, default))
 rows, k, n, steps, every, layers = env('ROWS', 1024), env('K', 3840), env('N', 3456), env('STEPS', 40), env('EVERY', 1), env('LAYERS', 4)
@@ -51,32 +52,40 @@ for layer in range(layers):
 keys = [operation.declare(rows, x.dtype, capacities=capacities) for operation in shared]
 observations = Observations()
 from torch_mesh.declarations import Function, execution_sequence
-history = []
+history, choices, layouts = [], [], []
 implementation = revision(Path(__file__).resolve().parents[1])
 for proposal, start in enumerate(range(0, steps, every)):
     calls = min(every, steps - start)
     family = {'program': 'engines', 'engines': names.split(','), 'hardware': pool.hardware,
               'kind': kind, 'rows': rows, 'k': k, 'n': n, 'layers': layers, 'calls': calls}
     history = window(history + observations.poll())
-    assigned = engines.placement(pool, history, step=proposal, family=family)
-    spans, source = [], x
+    assigned = engines.placement(pool, history, step=proposal, family=family, choices=choices, layouts=layouts)
+    spans, source, algebra = [], x, Algebra()
     for layer, (projection, operation, key) in enumerate(zip(projections, shared, keys, strict=True)):
-        normalized = torch.empty_like(x)
+        normalized = empty(x.shape, dtype=x.dtype, device=x.device)
         def project(source=source, projection=projection, normalized=normalized):
             return normalized.copy_(torch.nn.functional.rms_norm(torch.nn.functional.linear(source, projection), (k,), eps=1e-6))
-        project = Function(project, configuration=assigned['operands'],
+        project = Function(project, configuration=assigned['operands'], algebra=algebra,
                            source_scope=dict(scope=source_scope, operation=['projection', layer]))
         project.declare(None)
-        work = operation.prepare(normalized, parts=assigned['parts'][key])
+        output = empty((rows, operation.width), dtype=x.dtype)
+        work = operation.function(normalized, parts=assigned['parts'][key], output=output, algebra=algebra,
+                                  configuration=assigned['operands'])
         spans.extend((project, work))
-        source = work.output
-    program = execution_sequence(spans * calls, source)
+        source = output
+    program = execution_sequence(spans * calls, source, algebra=algebra)
     program.realize()
+    choices = source_axes([choice for function in spans for choice in function.choices])
+    layouts = [choice for function in spans for choice in function.layout_choices]
+    executed = domains(pool.decisions, {}, pool.parameters, choices=choices, layouts=layouts)
+    assigned.update(parts={key: value['parts'] for key, value in executed.items()}, domains=choice_domains(executed))
+    assigned['operands']['source_preferences'] = source_operands(assigned['parts'], choices)
+    assigned['operands']['layout_preferences'] = layout_operands(assigned['parts'], layouts)
     began = now()
     program.forward()
     completion = program.completion()
     observations.put(completion, {'episode': str(start), 'parts': assigned['parts'], 'proposal': assigned['proposal'], 'graphs': {},
-        'family': family, 'domains': assigned['domains'],
+        'family': family, 'domains': assigned['domains'], 'choices': choices, 'layouts': layouts, 'operands': assigned['operands'],
         'workload': {'layers': layers, 'kind': kind, 'rows': rows, 'k': k, 'n': n},
         'implementation': implementation, 'started': began, 'rank': 0, 'size': 1,
         'useful_work_bytes': rows * k * calls * 2,

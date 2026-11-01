@@ -36,18 +36,20 @@ def declare(inputs, outputs, definition, *, input_layouts, output_layouts, bindi
     return {name: slots[i] for i, name in enumerate(outputs, len(inputs))}
 
 
-def assemble(pieces):
+def assemble(pieces, *, output):
     """One result whose declared slices are the original source pages.
 
+    The complete result operand is explicit; slices never imply its extent.
     Each piece is (source view, result view). Placement resolves the equalities;
     preparation emits no host operation or numerical copy for this declaration.
     """
+    pieces = tuple(pieces)
     sources = {str(i): source for i, (source, _) in enumerate(pieces)}
-    targets = {str(i): target for i, (_, target) in enumerate(pieces)}
+    targets = {'result': output, **{str(i): target for i, (_, target) in enumerate(pieces)}}
     indexed = {name: 'indexed' for name in sources}
-    result = declare(sources, targets, {'provider': 'pages', 'output_aliases': {name: name for name in targets}},
-                     input_layouts=indexed, output_layouts=indexed, binding_layout='indexed')
-    return next(iter(result.values()))
+    result = declare(sources, targets, {'provider': 'pages', 'output_aliases': {name: name for name in sources}},
+                     input_layouts=indexed, output_layouts={name: 'indexed' for name in targets}, binding_layout='indexed')
+    return result['result']
 
 
 def bound(node):

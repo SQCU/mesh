@@ -42,7 +42,7 @@ def declaration(operands, parameters, configuration):
     if not all(operands['out']['shape']):
         return commands.declaration()
     from mesh_relation import Algebra
-    algebra = Algebra()
+    algebra = commands.algebra
     logical_accesses = mesh_matrix.product_dispatch(algebra, recipe,
         {name: value for name, value in descriptions.items() if name in ('x', 'w', 'out', 'x1', 'bias')})
     dispatch = []
@@ -88,7 +88,7 @@ def declaration(operands, parameters, configuration):
     from .native import shader_source
     source = _OPERANDS + shader_source(''.join(sources.values())) + Path(__file__).with_suffix('.metal').read_text()
     commands.shader(source, recipe['function'], views, definitions=definitions,
-        indices=indices, access_layouts=access_layouts, grid=recipe['grid'], threadgroup=recipe['threads'], access=access, dispatch=tuple(dispatch))
+        indices=indices, access_layouts=access_layouts, grid=recipe['grid'], threadgroup=recipe['threads'], access=access, dispatch=tuple(dispatch), coherent_accesses=True)
     return commands.declaration()
 
 
@@ -104,26 +104,35 @@ def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=
     return [*before, *bind(declared, values), *after]
 
 
-def declare(x, w, out):
-    """Carry the same product and API constraints through an FX declaration."""
-    from .kernel import declare as kernel
-    from .command_declarations import configuration
-    from mesh_relation import Algebra
-    typed = {role: dict(shape=tuple(value.shape), type=DTYPE_TO_METAL[value.dtype])
-             for role, value in dict(x=x, w=w, out=out).items()}
-    recipe = mesh_matrix.product(**typed, **configuration())
-    definitions, grid, threads = recipe['definitions'], recipe['grid'], recipe['threads']
-    values = dict(x=x, w=w, out=out)
-    buffers = [None if role is None else values[role] for role in recipe['bindings']]
-    dispatch = tuple(dict(side=use['side'], slot=recipe['bindings'].index(use['role']), group_relation=use['group_relation'])
-                     for use in mesh_matrix.product_dispatch(Algebra(), recipe, typed))
-    layouts = api_layouts('matrix')
-    prefix = ''.join(f'#define {key} {value}\n' for key, value in definitions.items())
-    prefix += _OPERANDS
-    return kernel('matrix.metal', 'product', buffers, (2,), (), 0, grid, threads,
-                  indexed=(), requirements={0: layouts['input'], 1: layouts['weight'], 2: layouts['output']}, prefix=prefix, dispatch=dispatch,
-                  domains=({'kind': 'product', 'operands': {'x': 0, 'w': 1, 'out': 2},
-                            'parameters': {'alpha': 1, 'beta': 1, 'act': False}},))[0]
+@torch.library.custom_op('torch_mesh::product_pages', mutates_args=(),
+    schema='(Tensor[] inputs, int[] input_slots, int[][] output_slots, int[][] output_strides, '
+           'int[][] shapes, str[] dtypes, str[] devices, str operands) -> Tensor[]')
+def operation(inputs: list[torch.Tensor], input_slots: list[int], output_slots: list[list[int]],
+              output_strides: list[list[int]], shapes: list[list[int]], dtypes: list[str], devices: list[str],
+              operands: str) -> list[torch.Tensor]:
+    raise RuntimeError('product page declarations require whole-function preparation')
+
+
+@operation.register_fake
+def _shape(inputs, input_slots, output_slots, output_strides, shapes, dtypes, devices, operands):
+    from .operand import fake_outputs
+    return fake_outputs(shapes, output_strides, dtypes, devices)
+
+
+def declare(x, w, out, *, implementation=None):
+    """Retain the product equation and page views, before backend selection.
+
+    Both product compilers consume this mathematical domain. No shader, host
+    task or provider invocation is bound at this source declaration boundary.
+    """
+    import json
+    from .operand import signature, TensorView
+    values = signature((x, w, out), (2,), {slot: ('indexed',) for slot in range(3)})
+    declared = json.loads(values['operands'])
+    declared['domains'] = [dict(kind='product', operands=dict(x=0, w=1, out=2),
+        parameters=dict(alpha=1, beta=1, act=False, implementation=implementation))]
+    values['operands'] = json.dumps(declared, separators=(',', ':'))
+    return operation(**values)[0]
 
 
 def _row_group_declaration(operands, requests, configuration):
@@ -134,7 +143,7 @@ def _row_group_declaration(operands, requests, configuration):
              for name, value in operands.items()}
     recipe = mesh_matrix.row_product_group(typed, requests, **configuration)
     from mesh_relation import Algebra
-    algebra, dispatch = Algebra(), []
+    algebra, dispatch = commands.algebra, []
     for prefix, part, start in recipe['products']:
         shapes = {name[len(prefix):]: value for name, value in typed.items() if name.startswith(prefix)}
         for use in mesh_matrix.product_dispatch(algebra, part, shapes, offset=start,
@@ -143,7 +152,7 @@ def _row_group_declaration(operands, requests, configuration):
                                  group_relation=use['group_relation']))
     commands.shader(_OPERANDS + recipe['source'], recipe['function'],
         [commands.view(name) for name in recipe['bindings']], grid=recipe['grid'],
-        threadgroup=recipe['threads'], access=recipe['access'], dispatch=tuple(dispatch))
+        threadgroup=recipe['threads'], access=recipe['access'], dispatch=tuple(dispatch), coherent_accesses=True)
     return commands.declaration()
 
 

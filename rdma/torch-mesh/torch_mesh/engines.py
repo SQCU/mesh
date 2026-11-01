@@ -1,6 +1,6 @@
 """Compute-share declarations for the common whole-function compiler.
 
-Declare shapes and choose shares before execution. ``Operation.prepare`` binds
+Declare shapes and choose shares before execution. ``Operation.function`` declares
 weights, outputs and host views through one ``declarations.Function`` graph.
 Host shares lower to the native recorder's host producer/consumer records. Only result
 consumers depend on host completion. No operation times itself, chooses shares,
@@ -81,22 +81,36 @@ def _coreml():
             lib.mesh_coreml_contract.argtypes = [ctypes.c_long]
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-            lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuInstruction), ctypes.c_size_t, ctypes.c_char_p]
-            lib.mesh_cpu_program_create.restype = ctypes.c_void_p
-            lib.mesh_cpu_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-            lib.mesh_cpu_compile.restype = ctypes.c_char_p
-            lib.mesh_cpu_program_prepare.argtypes = [ctypes.c_void_p] * 4
-            lib.mesh_cpu_program_prepare.restype = ctypes.c_char_p
-            lib.mesh_cpu_program_retain.argtypes = [ctypes.c_void_p]
-            lib.mesh_cpu_program_release.argtypes = [ctypes.c_void_p]
-            lib.mesh_cpu_product_bind.argtypes = [ctypes.POINTER(CpuCommand)]
-            lib.mesh_cpu_product_bind.restype = ctypes.c_int64
-            lib.mesh_cpu_product_workspace.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_void_p]
-            lib.mesh_cpu_command_release.argtypes = [ctypes.POINTER(CpuCommand)]
             _CORE_ML = lib
         except OSError:
             _CORE_ML = False
     return _CORE_ML or None
+
+
+_CPU = None
+
+
+def _cpu():
+    """The common CPU source/provider library, independent of Core ML."""
+    global _CPU
+    if _CPU is None:
+        from mesh import RDMA
+        lib = ctypes.CDLL(os.path.join(os.environ.get('MESH_LIBDIR', RDMA), 'libnccl-mesh.dylib'))
+        lib.mesh_cpu_program_create.argtypes = [ctypes.POINTER(CpuInstruction), ctypes.c_size_t, ctypes.c_char_p]
+        lib.mesh_cpu_program_create.restype = ctypes.c_void_p
+        lib.mesh_cpu_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        lib.mesh_cpu_compile.restype = ctypes.c_char_p
+        lib.mesh_cpu_program_prepare.argtypes = [ctypes.c_void_p] * 4
+        lib.mesh_cpu_program_prepare.restype = ctypes.c_char_p
+        lib.mesh_cpu_program_retain.argtypes = [ctypes.c_void_p]
+        lib.mesh_cpu_program_release.argtypes = [ctypes.c_void_p]
+        lib.mesh_cpu_product_bind.argtypes = [ctypes.POINTER(CpuCommand)]
+        lib.mesh_cpu_product_bind.restype = ctypes.c_int64
+        lib.mesh_cpu_product_workspace.argtypes = [ctypes.POINTER(CpuCommand), ctypes.c_void_p]
+        lib.mesh_cpu_command_release.argtypes = [ctypes.POINTER(CpuCommand)]
+        lib.mesh_cpu_error.restype = ctypes.c_char_p
+        _CPU = lib
+    return _CPU
 
 
 def _gelu(x):
@@ -292,6 +306,45 @@ def cpu_recipe(operation, operands, *, weights, implementation):
     return dict(bindings=bindings, commands=commands)
 
 
+def product_source(left, right, *, out_dtype=None, implementation):
+    """A selected product is ordinary source plus the shared provider recipe.
+
+    Casts and selected/strided input views remain tensor edges. Each hardware
+    invocation receives its compiled matrix domain. The shared product domain
+    is projected before placement and task binding.
+    """
+    if implementation['compiler'] != 'accelerate':
+        raise ValueError(f"product source compiler {implementation['compiler']} has no declared product recipe")
+    dtype = left.dtype if out_dtype is None else out_dtype
+    shape = (*left.shape[:-2], left.shape[-2], right.shape[-1])
+    # These are the empty product's equations, not another numerical provider.
+    if not all(shape) or left.shape[-1] == 0:
+        return torch.zeros(shape, dtype=dtype, device=left.device)
+    source_type, result_type = (getattr(torch, implementation[key]) for key in ('input_type', 'output_type'))
+    from .matrix import declare
+    a, b = left.to(source_type), right.to(source_type)
+    out = torch.empty(shape, dtype=result_type, device=left.device)
+    return declare(a, b, out, implementation=implementation['id']).to(dtype)
+
+
+def product_commands(operands, parameters):
+    """Bind the same selected product domains to the shared Accelerate recipe."""
+    from .compilation import implementations, api_layouts
+    from .operand import TensorView
+    implementation = implementations()[parameters['implementation']]
+    layouts = api_layouts('cpu_matrix')
+    x, w, output = (TensorView.of(operands[name]) for name in ('x', 'w', 'out'))
+    a, b, target = x, w.permute((1, 0)), output
+    uses = dict(input=a, weight0=b, output=target)
+    described = {name: dict(shape=list(value.shape), dtype=str(value.dtype).removeprefix('torch.'),
+        requirements=[layouts[dict(input='input',weight0='weight',output='output')[name]]], role=True)
+        for name, value in uses.items()}
+    recipe = cpu_recipe('linear', described, weights=['weight0'], implementation=implementation)
+    lowered = Cpu(implementation=implementation).declare_views(dict(recipe=recipe),
+        dict(input=a,weight0=b),dict(output=target))
+    return lowered['commands']
+
+
 class CpuCommand(ctypes.Structure):
     _fields_ = [('run', ctypes.c_void_p)] + [(name, ctypes.c_int) for name in ('rows', 'columns', 'inner', 'input_stride', 'weight_stride', 'output_stride',
                                                                           'input_column', 'weight_column', 'output_column')] \
@@ -314,8 +367,8 @@ def _host_accesses(*groups):
     """Exact prepared byte runs for each native instruction's named page uses."""
     from . import _stream
     from .operand import layout_configuration
-    from mesh_relation import Algebra
-    algebra, result = Algebra(), []
+    from .compilation import relations
+    algebra, result = relations(), []
     for group in groups:
         for value, access in group:
             base, _, layout = _stream.page_backing(value)
@@ -369,7 +422,7 @@ def _cpu_bind(native, records, workspace, implementation):
             library = native.mesh_cpu_compile(source.encode(),
                 json.dumps(record['compiler'], separators=(',', ':')).encode())
             if library is None:
-                raise RuntimeError(native.mesh_coreml_error().decode())
+                raise RuntimeError(native.mesh_cpu_error().decode())
             data = ctypes.create_string_buffer(bytes(record['arguments']))
             arguments.append(data)
             instructions.append(CpuInstruction(None, ctypes.addressof(data), len(record['arguments']), release,
@@ -391,7 +444,7 @@ def _cpu_bind(native, records, workspace, implementation):
         bound = (CpuInstruction * len(instructions))(*instructions)
         binding = native.mesh_cpu_program_create(bound, len(bound), json.dumps(implementation['resources'], separators=(',', ':')).encode())
         if not binding:
-            raise RuntimeError(native.mesh_coreml_error().decode())
+            raise RuntimeError(native.mesh_cpu_error().decode())
         transferred = True
         return binding, addresses
     finally:
@@ -402,9 +455,7 @@ def _cpu_bind(native, records, workspace, implementation):
 
 def cpu_engine(record, *, implementation, inputs, outputs, accesses, reaches):
     """Bind a declared Accelerate instruction after dependency source emission."""
-    native = _coreml()
-    if native is None:
-        raise RuntimeError('CPU commands require the native engine library')
+    native = _cpu()
     record = dict(record, accesses=accesses)
     pages = []
     def workspace(size):
@@ -419,9 +470,7 @@ def cpu_engine(record, *, implementation, inputs, outputs, accesses, reaches):
 
 def cpu_native(source, compiler, symbol, arguments, *, implementation, inputs, outputs, accesses, reaches):
     """Bind a compiled CPU entry through the existing host program and recorder."""
-    native = _coreml()
-    if native is None:
-        raise RuntimeError('CPU commands require the native engine library')
+    native = _cpu()
     records = [dict(source=source, compiler=compiler, symbol=symbol, arguments=bytes(arguments),
                     accesses=accesses)]
     binding, _ = _cpu_bind(native, records, None, implementation)
@@ -728,11 +777,17 @@ def page_state_program(program, pairs):
     flat = ModuleCallSignature(user_inputs, user_outputs,
         tree_structure((tuple(None for _ in user_inputs), {})),
         tree_structure(tuple(None for _ in user_outputs)))
-    prepared = ExportedProgram(program.graph_module, graph, signature,
-        {name: value for name, value in program.state_dict.items() if name in captured},
-        copy.deepcopy(program.range_constraints), [ModuleCallEntry('', flat)],
-        constants={name: value for name, value in program.constants.items() if name in captured},
-        verifiers=program.verifiers)
+    from torch._guards import detect_fake_mode
+    from torch._subclasses.fake_tensor import unset_fake_temporarily
+    from contextlib import nullcontext
+    with unset_fake_temporarily():
+        mode = detect_fake_mode([node.meta['val'] for node in graph.nodes if 'val' in node.meta])
+    with unset_fake_temporarily(), mode if mode is not None else nullcontext():
+        prepared = ExportedProgram(program.graph_module, graph, signature,
+            {name: value for name, value in program.state_dict.items() if name in captured},
+            copy.deepcopy(program.range_constraints), [ModuleCallEntry('', flat)],
+            constants={name: value for name, value in program.constants.items() if name in captured},
+            verifiers=program.verifiers)
     return prepared, inputs, outputs, aliases, weights
 
 
@@ -745,10 +800,19 @@ def export_coreml_graph(program, *, directory, configuration):
     ``weights`` supplies returned captures through the existing weight operands.
     """
     implementation = configuration['implementation']
+    # Export's functional ATen graph preserves captured derivative work while
+    # making mutation/state results explicit for every provider.
+    program = program.run_decompositions({})
     import copy
     import coremltools as ct
     from coremltools.converters.mil.frontend.torch.utils import TORCH_DTYPE_TO_MIL_DTYPE
-    from torch.export.graph_signature import InputKind
+    from torch.export.graph_signature import InputKind, OutputKind
+    source_inputs = tuple(configuration['state_pairs'].get(spec.arg.name, {}).get('input', spec.arg.name)
+                          for spec in program.graph_signature.input_specs if spec.kind == InputKind.USER_INPUT)
+    mutations = tuple((spec.target, configuration['state_pairs'][spec.target]['output'])
+                      for spec in program.graph_signature.output_specs if spec.kind == OutputKind.USER_INPUT_MUTATION)
+    original_inputs = tuple(spec.arg.name for spec in program.graph_signature.input_specs if spec.kind == InputKind.USER_INPUT)
+    user_outputs = tuple(spec.arg.name for spec in program.graph_signature.output_specs if spec.kind == OutputKind.USER_OUTPUT)
     program, inputs, outputs, aliases, weights = page_state_program(program, configuration['state_pairs'])
     nodes = {node.name: node for node in program.graph.nodes}
     sources = [spec for spec in program.graph_signature.input_specs if spec.kind == InputKind.USER_INPUT]
@@ -758,9 +822,14 @@ def export_coreml_graph(program, *, directory, configuration):
                                if pair['output'] not in aliases}
     source_names, result_names = [spec.arg.name for spec in sources], [spec.arg.name for spec in results]
     if provider['backend'] == 'ane':
-        symbols = provider['ane']['symbols']
-        symbols['inputs'] = {name: symbols['inputs'][name] for name in source_names}
-        symbols['outputs'] = {name: symbols['outputs'][name] for name in result_names}
+        ane = provider['ane']
+        if 'symbol_names' in ane:
+            ane['symbols'] = {side: {name: ane['symbol_names'][side].format(name=name) for name in names}
+                              for side, names in (('inputs', source_names), ('outputs', result_names))}
+        else:
+            symbols = ane['symbols']
+            symbols['inputs'] = {name: symbols['inputs'][name] for name in source_names}
+            symbols['outputs'] = {name: symbols['outputs'][name] for name in result_names}
     contract, compiled = {'inputs': {}, 'outputs': {}}, None
     if results:
         native = _coreml()
@@ -791,7 +860,48 @@ def export_coreml_graph(program, *, directory, configuration):
                                contract=contract, implementation=provider_implementation(implementation, contract),
                                output_aliases=aliases, state_pairs=configuration['state_pairs']),
                 input_layouts=input_layouts, output_layouts=output_layouts, binding_layout=configuration['binding_layout'],
-                input_meta=inputs, output_meta=outputs, weights=weights)
+                input_meta=inputs, output_meta=outputs, weights=weights, source_inputs=source_inputs,
+                user_outputs=user_outputs,
+                mutations=tuple((original_inputs.index(name), output) for name, output in mutations))
+
+
+def graph_source(module, arguments, *, implementation, configuration):
+    """Compile one assigned source region, then capture its ordinary page call.
+
+    The module is the already captured numerical source, including any supplied
+    derivative work. Runtime sees the same host declaration as other providers.
+    Artifact ownership belongs to that source graph and ends with preparation's
+    retained graph; there is no persistent shape cache or runtime file access.
+    """
+    import tempfile
+    from torch.fx.experimental.proxy_tensor import make_fx
+    from .host import declare
+    if implementation['compiler'] != 'coreml':
+        raise ValueError(f"graph provider {implementation['compiler']} has no source exporter")
+    program = torch.export.export(module, tuple(arguments), strict=False)
+    owner = tempfile.TemporaryDirectory(prefix='mesh-provider-')
+    try:
+        declaration = export_coreml_graph(program, directory=owner.name,
+                                          configuration=dict(configuration, implementation=implementation))
+        # State effects and forwarded captures are explicit in the exporter.
+        # They are bound by name, never recovered from a runtime address.
+        def call(*values):
+            given = dict(zip(declaration['source_inputs'], values, strict=True), **declaration['weights'])
+            source = {name: given[name] for name in declaration['input_meta']}
+            targets = {name: torch.empty_strided(tuple(value.shape), tuple(value.stride()),
+                       dtype=value.dtype, device=value.device) for name, value in declaration['output_meta'].items()}
+            outputs = declare(source, targets, declaration['definition'],
+                input_layouts=declaration['input_layouts'], output_layouts=declaration['output_layouts'],
+                binding_layout=declaration['binding_layout'])
+            for index, name in declaration['mutations']:
+                values[index].copy_(outputs[name])
+            return tuple(outputs[name] for name in declaration['user_outputs'])
+        captured = make_fx(call, decomposition_table={}, tracing_mode='fake',
+                           _allow_non_fake_inputs=True)(*arguments)
+        return captured, owner, declaration
+    except BaseException:
+        owner.cleanup()
+        raise
 
 
 def coreml_units(units):
@@ -919,9 +1029,9 @@ class Engines:
 class Operation:
     """An operation declaration. Shares and shapes are configuration operands.
 
-    ``prepare`` binds an input, its final output and every engine's scratch and
-    model. The returned call uses those bindings; it never chooses or loads a
-    shard. Placement changes require preparing the next whole function.
+    ``function`` declares the supplied input and output pages plus each
+    engine's operands. It returns the ordinary captured Function. Placement
+    changes require preparing that function with the new assignment.
     """
     kind = combine = None
 
@@ -950,28 +1060,18 @@ class Operation:
             identity=dict(scope=self.engines.source_scope, operation=self.name, interface=self.kind))
         return key
 
-    def prepare(self, x, *, parts, output=None):
+    def function(self, x, *, parts, output, algebra, configuration=None):
+        """Declare assigned shares as one ordinary Function over supplied pages."""
         if self.name is None or self.engines.source_scope is None:
             raise ValueError('engine preparation requires a declared operation name and source_scope')
-        return Prepared(self, x, parts, output)
-
-    def finish(self, y, first=0):
-        return y
-
-
-class Prepared:
-    """One declared graph for all engine shares, casts and their consumers."""
-    def __init__(self, op, x, parts, output=None):
-        self.op, self.x = op, x
+        op = self
         rows, dtype = x.shape[0], x.dtype
         if len(parts) != len(op.engines.engines) or sum(parts) != op.units or min(parts) < 0:
             raise ValueError('engine shares must partition the declared units')
-        from . import empty
-        self.output = empty((rows, op.width), dtype=dtype) if output is None else output
-        if self.output.shape != (rows, op.width) or self.output.dtype != dtype:
+        if output.shape != (rows, op.width) or output.dtype != dtype:
             raise ValueError('output must match the declared shape and dtype')
-        output_device = self.output.device
-        configuration = {k: p['value'] for k, p in op.engines.parameters.items()}
+        output_device = output.device
+        configuration = {k: p['value'] for k, p in op.engines.parameters.items()} | (configuration or {})
         shares, start = [], 0
         sum_types = [engine.sum_dtype(dtype) for engine, count in zip(op.engines.engines, parts) if count]
         from functools import reduce
@@ -1020,14 +1120,16 @@ class Prepared:
 
         from .declarations import Function
         from .operand import TensorView
-        destinations = ([TensorView.of(self.output).slice(1, first, end - first) for _, _, first, end, _ in shares]
-                        if op.combine == 'concat' else [self.output])
-        self.function = Function(function, x, configuration=configuration,
-                                 source_scope=dict(scope=op.engines.source_scope, operation=op.name))
-        self.function.declare(None, destinations=destinations)
+        destinations = ([TensorView.of(output).slice(1, first, end - first) for _, _, first, end, _ in shares]
+                        if op.combine == 'concat' else [output])
+        function = Function(function, x, configuration=configuration, algebra=algebra,
+                            source_scope=dict(scope=op.engines.source_scope, operation=op.name))
+        function.declare(None, destinations=destinations)
 
-    def append(self, schedule):
-        self.function.append(schedule)
+        return function
+
+    def finish(self, y, first=0):
+        return y
 
 
 class Linear(Operation):
@@ -1060,14 +1162,16 @@ class FFN(Operation):
         return ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).reshape(*x.shape[:-1], -1)
 
 
-def placement(engines, observations, *, step, family):
+def placement(engines, observations, *, step, family, choices=(), layouts=()):
     # design/whole-function.md#numerical-operands
-    from assignment import assign, domains
+    from assignment import assign, domains, source_operands, layout_operands
     decisions = engines.decisions
-    assigned = assign(domains(decisions, {}, engines.parameters), observations, step=step, family=family)
+    assigned = assign(domains(decisions, {}, engines.parameters, choices=choices, layouts=layouts), observations, step=step, family=family)
     for key, parts in assigned['parts'].items():
         if key in engines.decisions:
             engines.decisions[key]['parts'] = parts
     for key, value in assigned['operands'].items():
         engines.parameters[key]['value'] = value
+    assigned['operands']['source_preferences'] = source_operands(assigned['parts'], choices)
+    assigned['operands']['layout_preferences'] = layout_operands(assigned['parts'], layouts)
     return assigned

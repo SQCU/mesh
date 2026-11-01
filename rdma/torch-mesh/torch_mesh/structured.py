@@ -233,7 +233,7 @@ def _piece(commands, reads, writes, signs, extents, *, width, normalization, sig
     instantiated = f'\ntemplate [[host_name("butterfly")]] [[kernel]] decltype({instance}) {instance};'
     from mesh_relation import Algebra
     from .operand import layout_configuration
-    algebra = Algebra()
+    algebra = commands.algebra
     output = algebra.map((groups,), (groups * width,),
         lambda g, i: [f'{g[0]} * {width} <= {i[0]} < ({g[0]} + 1) * {width}'])
     if write_map is not None:

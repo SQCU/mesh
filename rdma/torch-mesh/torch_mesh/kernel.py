@@ -33,7 +33,7 @@ def _word(value, k):
     return value & 0xffffffff
 
 
-def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements, dispatch, indices=None, prefix='', domains=()):
+def declare(source, name, buffers, outputs, words, constant_slot, grid, threads, instance='', *, indexed, requirements, dispatch, indices=None, prefix='', domains=(), coherent_accesses=False):
     """Carry each use's layout and requirement across FX's tensor schema.
 
     The serialized operand descriptions contain only compiler metadata. Values,
@@ -50,6 +50,7 @@ def declare(source, name, buffers, outputs, words, constant_slot, grid, threads,
         declarations['prefix'] = prefix
     if domains:
         declarations['domains'] = domains
+    declarations['coherent_accesses'] = coherent_accesses
     declarations['dispatch'] = [dict(side=use['side'], slot=use['slot'], relation=str(use['group_relation']))
                                 for use in dispatch]
     operands['operands'] = json.dumps(declarations, separators=(',', ':'))
@@ -92,7 +93,7 @@ def prepare(inputs, input_slots, output_slots, output_strides, shapes, dtypes, d
     parameters = dict(source=source, name=name, instance=instance,
         words=words, constant_slot=constant_slot, grid=tuple(grid), threads=tuple(threads),
         prefix=declarations.get('prefix', ''), indices=declarations.get('indices', {}),
-        dispatch=declarations['dispatch'])
+        dispatch=declarations['dispatch'], coherent_accesses=declarations['coherent_accesses'])
     values = {str(slot): value for slot, value in addresses.items()}
     commands.append(dict(kind='kernel', operands=values, parameters=parameters, before=(), after=()))
     return results, commands + after
@@ -162,7 +163,7 @@ def declaration(operands, parameters, configuration):
             source_domain=parameters.get('source_domains', {}).get(slot))
     dispatch = parameters['dispatch']
     if dispatch and 'relation' in dispatch[0]:
-        dispatch = dispatch_relations(Algebra(), dispatch, math.prod(parameters['grid']))
+        dispatch = dispatch_relations(commands.algebra, dispatch, math.prod(parameters['grid']))
     shift = configuration['geometry']['ACCESS_WRITE_SHIFT']
     access = sum(1 << (use['slot'] + (shift if use['side'] == 'writes' else 0))
                  for use in { (item['side'], item['slot']): item for item in dispatch }.values())
@@ -186,7 +187,7 @@ def declaration(operands, parameters, configuration):
     if 'run' in parameters:
         source = selected_source(source, parameters['name'], parameters['original_grid'], parameters['run'])
     commands.shader(source, parameters['name'], views, grid=parameters['grid'], threadgroup=parameters['threads'],
-        constants=constants, indices=parameters.get('vacant'), access=access, access_layouts=access_layouts, dispatch=dispatch)
+        constants=constants, indices=parameters.get('vacant'), access=access, access_layouts=access_layouts, dispatch=dispatch, coherent_accesses=parameters['coherent_accesses'])
     return commands.declaration()
 
 
@@ -216,7 +217,7 @@ def domain(algebra, operands, named, declarations):
         use['sides'].add(side)
         use['side'] = 'readwrite' if len(use['sides']) == 2 else 'read' if side == 'reads' else 'write'
     parameters = {key: named[key] for key in ('source', 'name', 'instance', 'words', 'constant_slot', 'grid', 'threads')}
-    parameters.update(prefix=declarations.get('prefix', ''), indices=declarations.get('indices', {}))
+    parameters.update(prefix=declarations.get('prefix', ''), indices=declarations.get('indices', {}), coherent_accesses=declarations['coherent_accesses'])
     return dict(kind='dispatch', work=work, reads=reads, writes=writes, reduction=None, finish=None,
                 uses=uses, parameters=parameters)
 

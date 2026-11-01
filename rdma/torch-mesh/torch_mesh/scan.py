@@ -54,7 +54,7 @@ def declaration(operands, parameters, configuration):
         grid, group = (blocks, count, 1), (threads, 1, 1)
         from mesh_relation import Algebra
         from .operand import layout_configuration
-        algebra = Algebra()
+        algebra = commands.algebra
         cells = algebra.map((blocks * count,), (count * extent,),
             lambda g, i: [f'floor({i[0]}/{extent}) = floor({g[0]}/{blocks})',
                           f'({g[0]} mod {blocks}) * {threads} <= {i[0]} mod {extent} < (({g[0]} mod {blocks}) + 1) * {threads}'])

@@ -10,13 +10,40 @@
         "implementation": "cpp_scalar"
       }
     ],
-    "otherwise": "metal_scalar"
+    "otherwise": {
+      "implementation": "metal_scalar",
+      "alternatives": [
+        {
+          "implementation": "metal_scalar"
+        },
+        {
+          "implementation": "cpp_scalar"
+        }
+      ]
+    }
   },
   "product": {
     "domains": [
       {
-        "when": {"arithmetic_types": ["float16", "bfloat16", "float32"]},
-        "implementation": "metal_product"
+        "when": {
+          "arithmetic_types": [
+            "float16",
+            "bfloat16",
+            "float32"
+          ]
+        },
+        "implementation": "metal_product",
+        "alternatives": [
+          {
+            "implementation": "metal_product"
+          },
+          {
+            "implementation": "accelerate_product"
+          },
+          {
+            "implementation": "scalar_contraction"
+          }
+        ]
       }
     ],
     "otherwise": "scalar_contraction"
@@ -24,5 +51,7 @@
   "result_ownership": {
     "layout": "flat",
     "mesh_axes": "all"
-  }
+  },
+  "regions": [],
+  "collective_cpu": "cpp_scalar"
 }

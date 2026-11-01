@@ -22,8 +22,8 @@ The source follows these boundaries:
 | Capture | `Function.capture`, supplied reduction source | Typed graph and chosen fold relations |
 | Ownership and placement | `partition`, `ownership`, `placement` | Selected work domains and page views |
 | Command lowering | `LoweredGraph`, `host.lower_views`, `kernel`, `layout.copy_declarations` | Unbound commands with exact accesses |
-| Transfer lowering | `ncclMeshCommLower` | Occurrence index, cuts, page words and thresholds |
-| Effect solve and source emission | `page_effects.transfer_effects`, `_inject_many` | Numerical source containing all of its required effects |
+| Transfer lowering | `ncclMeshCommLower`, `ncclMeshCommSources` | Occurrence index, native numerical source, exact transfer selections and page effects |
+| Effect solve and source emission | `MetalPageEffectsSolve`, `MetalPageEffectsSource` | Numerical source containing all of its required effects |
 | Binding and recording | `Program.prepare`, provider binders, `ncclMeshCommEncode` | Native commands and their dependency graph |
 | Submission | The prepared execution | Page values and completion observations |
 
@@ -59,6 +59,10 @@ exact read/write relations. A CPU recipe expands into its constituent
 instructions. A native shader retains its dispatch-to-element relation. An
 opaque hardware invocation states the accesses of that indivisible request.
 None of these becomes an executable object yet.
+
+All participating relations use the function's explicit ISL context. Shared
+page mapping converts local buffer selections to bridge-region coordinates.
+Two views of the same page therefore describe the same storage in this solve.
 
 Transfer declarations retain their source/destination selections and the chosen
 route and fold. The transport planner determines packet cuts, landing pages,
@@ -112,13 +116,19 @@ SEND cuts, so each part observes the word for the values it actually copies.
 These words and thresholds are compiler operands; execution neither allocates
 nor resets them.
 
+`ncclMeshCommSources` exposes the occurrence's retained numerical declarations
+and complete transfer selections. Native copies and reductions join the same
+solve as frontend numerical work. `ncclMeshCommSpecialize` installs their emitted
+source. Encoding consumes that result; it does not run a separate dependency
+solve for native numerical work.
+
 `ncclMeshCommSourceInputs` adds exact initial source spans to that lowered
 occurrence. Earlier arrivals are prerequisites of the corresponding DMA send.
-The existing presentation command releases the leading initial prefix; later
-initial spans are already complete in the same prefix relation used by
-numerical producers. Source-preservation copies consume those same incoming
-observations. This step binds inputs to the chosen transfer; it does not add a
-numerical command to stand in for an input.
+Preparation fixes the leading initial prefix. The command that exposes its
+transfer descriptors names the entry pages it reads; prior arrivals remain
+exact SEND prerequisites. Later producers share the same solved publication
+domain. Source-preservation copies consume those incoming observations too.
+This step creates no numerical command to stand in for an input.
 
 ## 5. Bind and record
 

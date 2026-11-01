@@ -128,7 +128,7 @@ def _copy_source():
     return Path(__file__).with_suffix('.metal').read_text()
 
 
-def copy_declarations(source, destination):
+def copy_declarations(source, destination, *, algebra=None):
     """Retain a necessary copy's shared source and exact group/page relation."""
     import torch
     from mesh_relation import Algebra
@@ -146,7 +146,8 @@ def copy_declarations(source, destination):
     units = source.element_size() // width
     dtype, kind = {1: (torch.uint8, 'uchar'), 2: (torch.uint16, 'ushort'),
                    4: (torch.uint32, 'uint'), 8: (torch.uint64, 'ulong')}[width]
-    algebra = Algebra()
+    from .compilation import relations
+    algebra = relations() if algebra is None else algebra
     for origin, size in _stream.view_tiles(source.shape, limit):
         left, right = source, destination
         for axis, (first, count) in enumerate(zip(origin, size)):

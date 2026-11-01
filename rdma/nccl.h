@@ -7,10 +7,10 @@
 
 /* libnccl-mesh: NCCL's API over the mesh's Thunderbolt 5 RDMA bridges.
 
-   This is NVIDIA/nccl master 12df1a1 src/nccl.h.in (NCCL 2.32.3) with its CUDA includes removed, its version filled in,
-   and only the functions libnccl-mesh.dylib exports declared (each also as its pnccl profiling name).  Every type,
-   enum, config struct and initializer is NCCL's, member for member, so code written against nccl.h compiles against
-   this one.  Installing, linking and running it: rdma/NCCL.md.  The mesh's own calls (ncclMesh*) are last.
+   Communicator, datatype and reduction declarations derive from NVIDIA/nccl master
+   12df1a1 src/nccl.h.in (NCCL 2.32.3). The NCCL-style communicator functions retain
+   their profiling aliases. Tensor work is declared through ncclMeshCommPlan and
+   lowered with the complete function; eager collective/group entry points are absent.  Installing, linking and running it: rdma/NCCL.md.  The mesh's own calls (ncclMesh*) are last.
 
    A rank is a process on a node, a client of its node's resident bridge (mesh-flow): the rank asks, the bridge does.
    It passes no region, map file, silent bound or queue-pair count, and keeps no step executor of its own: every
@@ -73,10 +73,9 @@
    bridge alone cuts into SENDs).  The communicator's configuration names other forms of a collective ahead of these
    (ncclMeshCommForms, below: the packed trees, the two-phase all-reduce, chunked pipelining, each below a size bound),
    compiled first in the same table.  A call runs its table's first program of its collective (and root) whose size
-   bound its operand is under; nothing about it is decided where it runs, no price chooses it, and
-   ncclCollConfig_t.algSelection is not read.  Every member compiles the same programs from the same map and the same
-   operands (every rank passes the same paths, programs and forms), so nothing is compared at run time.  A group
-   (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps_cut: the
+   bound its operand is under; these choices are resolved during declaration preparation.  Every member compiles the same programs from the same map and the same
+   operands (every rank passes the same paths, programs and forms), so nothing is compared at run time.  A declared group
+   walks each call's program (mesh_program_steps_cut: the
    program's typed cuts and declared WRITE endpoints), lowered to explicit physical cable/range
    records on its communicator's channels: one holding per cable, each transfer one entry of its send
    list or landing list of immutable exact byte spans. Each direction has one
@@ -89,59 +88,16 @@
    raises the holding's `ready` past the entry; a landing is awaited on its `landed`.
    The data program owns source/relay lifetimes; there are no `sent` waits (design/pages-and-functions.md, Freeing 6-7).  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
    payload is checked, so calls that do not pair (unequal counts, different collectives or orders) are the caller's
-   error and are not detected.  Uneven segments are their own calls
-   (ncclMeshAllGatherV, ncclMeshReduceScatterV, below), whose count vector every rank passes alike.
+   error and are not detected. Uneven segments are declared by the same collective kinds
+   with an explicit count vector shared by the ranks.
 
-   Host path: a NULL stream.  Buffers are host pointers into this node's region (a lease's: Memory, below), sent from
-   and landed in in place; a group runs as the Metal path's group in a Metal 4 command buffer of its communicator's own
-   queue, its buffers as their leases' Metal buffers, committed and awaited before its call returns (a float64 reduction fails
-   as it does there); every call returns once its publications
-   and required landings have run; outgoing buffer lifetimes remain the caller's.  Metal path: a stream that
-   is an ncclMeshStream.  The group is encoded into its Metal 4 encoder (the caller commits it), every buffer argument an
-   ncclMeshBuffer (an id<MTLBuffer> and a byte offset into it: an MPS tensor's storage and offset) of any type, a
-   crossing's over a lease (Memory, below); float64 moves as its bytes, and a float64 reduction there fails as a value
-   (Apple GPUs have no float64 arithmetic).  The kernels go into its open compute encoder, left open with nothing
-   signalled at the group's end; the library asks for no workspace (a call that crosses no link makes its result
-   in recvbuff, and what a crossing sends from or lands in that is not the caller's is the communicator's: Memory),
-   and the caller orders any later host-path group after the stream's work.  The calls of one group name one encoder
-   (the group's dispatches are one program); their bound is the greatest of their polls.  The calls of one group name
-   one communicator (ncclInvalidUsage otherwise).  A group completes at once; a host-path group waits only for its own
-   communicator's GPU work, until its command buffer completes (an error status,
-   which the platform's watchdog gives a command buffer that overruns, fails the group, and one not yet committed fails
-   it at once, ncclInvalidUsage), a revoke or a holding's end.  A group waits for room in its bridge's lists until the
-   bridge takes its entries, a revoke or its holding's end.  A host-path group spins on
-   its landings, never parks, and holds no lock another communicator's groups take; its waits end at their counts, a
-   count's ~0, its holding's end or a revoke.  Each of these waits has a deadline, MESH_PLATFORM_NS from its start,
-   past which the program ends (design/eager-execution.md, assumption A4).  A group whose entries lie on one channel completes as
-   plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
-   (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
-   reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands
-   in pages the stream's earlier work still reads. Its end does not await outgoing SEND completion.  A SEND reads the
-   caller's bytes as given (a send buffer read in place, an operand given in place, an all-to-all's segments) as the
-   NIC sees them, and the library stores none of them again: their producer stores them system-coherent, or its
-   command buffer has ended before the group publishes, since a plain store reaches the NIC only once its command
-   buffer ends (metal-microbench docs/facts.md, 10-24); a WRITE's or a fused crossing's producer stores so itself
-   (mesh_step_write).
-   A wait is a kernel polling its holding's required `landed` count, and nothing else (rdma/mesh.metal mesh_wait_bounded), which the bridge sets ~0 where the link is
-   lost; every wait is bounded: the stream's `polls` is the most loads of a count a wait makes,
-   the caller's bound for the group's crossings, which it derives from its plan (the lag it expects at them, over the
-   period of one load on the node's GPU: rdma/NCCL.md "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is
-   NCCL_MESH_POLLS, resolved once during declaration lowering. A group's budget
-   uses its calls' greatest effective limit. Its counter starts at the
-   first executed observation, not when the program is prepared. A wait that reaches its
-   bound or reads a lost link records its
-   cause, entry and channel in its communicator's failure words, on which no kernel halts (every later dispatch runs as
-   encoded, a later wait on those words ending at once, one under way within 2^10 loads: nccl-mesh-kernels.h
-   mesh_step_failed), read by the host after its command buffer (ncclCommGetAsyncError, or the communicator's next
-   group): exhausting the load budget ends the program. Its report names the
-   load count, not an inferred wall-clock duration. A lost link, or a bound
-   reached after a revoke, fails the group as a value.
-   The stream is Metal 4's alone: commandEncoder an id<MTL4ComputeCommandEncoder>, argumentTable an
-   id<MTL4ArgumentTable> and residencySet an id<MTLResidencySet>, all three required.  The group is encoded as compute
-   dispatches between the encoder's commands before and after it, bound through the caller's argument table (at least 6
-   buffer bindings; each dispatch's arguments a record of the library's ring), on pipelines of the residency set's
-   device, every buffer of the library's it touches added to the caller's residency set (committed where one was
-   added), which the caller's command buffer uses; nothing is committed or signalled.
+   Recording. ncclMeshCommPlan declares a complete function's collective calls and bindings.
+   ncclMeshCommLower selects an occurrence's pages and transfers. ncclMeshCommSources
+   exposes its numerical source and exact page relations to the enclosing function's
+   common dependency solve. ncclMeshCommSpecialize retains those emitted sources;
+   ncclMeshCommEncode records only that prepared result into the function's recorder.
+   CPU and Metal numerical leaves use the same source/effect contract. No collective
+   call takes new payload bindings or compiles a different execution path at recording.
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
@@ -308,18 +264,22 @@ typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
    index. A zero stride does not establish permission to overwrite live pages. */
 typedef uint64_t ncclMeshBinding[6];
 /* Typed preparation output, before backend argument records contain addresses.
-   first/bytes are frame-local logical WRITE coordinates. The compiler consumes
+   operand names the declaration's source or destination binding. first/bytes
+   are frame-local logical bytes in that binding: a gathered source and a
+   scattered result start at zero on their owning rank. WRITE masks retain
+   their selected-byte coordinates. The compiler consumes
    these operands before it binds numerical commands. Publications on one word
    form an ordered prefix: its value advances only through completed source
    cuts, using the common page-effect completion relation. */
 typedef struct {
   size_t call,first,bytes;
-  uint32_t kind,frame,channel,polls;
+  uint32_t kind,frame,channel,polls,operand;
   ncclMeshBuffer word,violation;
   uint64_t threshold,entry;
 } ncclMeshPageEffect;
 enum { ncclMeshPagePublish=1, ncclMeshPageObserve=2 };
-/* Portions of a WRITE source supplied by the enclosing function, rather than
+enum { ncclMeshPageSource=0, ncclMeshPageDestination=1, ncclMeshPageInternal=2 };
+/* Portions of a declared source supplied by the enclosing function, rather than
    one of its numerical commands. Prior remote arrivals remain typed word
    operands on the actual SEND, not separate observation kernels. */
 typedef struct {
@@ -342,9 +302,6 @@ typedef struct {
   /* Each declared binding uses (invocation + displacement) % instances. */
   size_t invocation;
 } ncclMeshStream;
-
-/* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
-typedef void *cudaEvent_t;
 
 /* Opaque handle to communicator */
 typedef struct ncclComm* ncclComm_t;
@@ -465,82 +422,6 @@ typedef struct ncclConfig_v23100 {
   NCCL_CONFIG_UNDEF_INT,                    /* nvlsHostMode */          \
 }
 
-/* A single vendor-specific option expressed as a key-value pair. Multiple options can be
- * chained into a non-circular linked list through the next pointer and attached to a ncclCollConfig_t
- * via its ext member. The official NCCL library ignores every extension; a vendor library
- * should assign a unique value to key.vendorId to avoid collision among vendor libraries.
- * It can usually be done by picking a random number.
- * Vendors should choose a non-zero vendorId (less than 2^24) that is unlikely to collide
- * with other vendor libraries. The list is unordered and must not contain duplicate keys. */
-typedef struct ncclConfigExt {
-  struct ncclConfigExt* next;       /* next option in the list, or NULL to terminate */
-  struct {
-    int vendorId;                   /* vendor choose their own unique value as vendorId */
-    int optionId;                   /* vendor-defined id distinguishing options within a vendor */
-  } key;
-  union {
-    int i;                          /* integer value */
-    const char* s;                  /* C-style string value */
-    void* raw;                      /* opaque pointer-sized value */
-  } val;
-} ncclConfigExt_t;
-
-/* Per-collective configuration. Users assign values to attributes to customize an
- * individual collective call issued through one of the nccl*Config() entry points.
- * Like ncclConfig_t, this is a versioned, append-only struct: in the future, any new
- * members will be added at the end, and existing members will never be removed or
- * reordered. The user owns the storage and must keep the struct (and any linked ncclConfigExt_t)
- * valid for the duration of every call that uses it. The same configuration must be
- * set on every rank; NCCL validates it only locally. */
-typedef struct ncclCollConfig_v23200 {
-  /* attributes that users should never touch. */
-  size_t size;
-  unsigned int magic;
-  unsigned int version;
-  /* non-circular linked list of vendor-specific extension options, or NULL. */
-  ncclConfigExt_t* ext;
-  /* resource tuning (NCCL_CONFIG_UNDEF_INT == unset; NCCL picks). */
-  int minCTAs;          /* lower bound on channels/CTAs */
-  int maxCTAs;          /* upper bound on channels/CTAs, must be <= comm->maxCTAs */
-  int nvlsCTAs;         /* NVLS-pool-specific channel cap */
-  int cgaClusterSize;   /* CUDA thread-block-cluster size (Hopper+), should be the same for all
-                           collectives in the same Group. Inconsistent cgaClusterSize in a Group
-                           is undefined behavior. */
-  /* algorithm selection: filter which algorithm(s) this call may use. */
-  const char* algSelection;   /* selection string; NULL/UNDEF/"" == automatic */
-  int forceAlgSelection;      /* default 1 (true): unsatisfiable selection is an error */
-  int CTAPolicy;              /* NCCL_CTA_POLICY_* bitmask; UNDEF == inherit comm-level CTAPolicy */
-  /* user-provided profiler tag: an opaque value delivered verbatim to profiler plugins with this
-   * call's profiler events. Default to 0 as untagged. It does not affect execution. NCCL reserves
-   * profiler-tag values with the most-significant bit set (>= 0x8000000000000000) for possible future
-   * predefined tags; applications should use values with the MSB clear. */
-  uint64_t userProfilerTag;
-  /* Caller-owned, rank-local CUDA event recorded at collective kernel launch completion.
-   * Create it with cudaEventDisableTiming; interprocess and interop events are unsupported.
-   * Every rank must provide a non-NULL event or every rank must provide NULL. Keep the event
-   * alive through all queued waits and captured-graph executions. At most one non-NULL event
-   * per communicator is supported in a group. CUDA < 12.3 records it before launch. */
-  cudaEvent_t launchCompletionEvent;
-} ncclCollConfig_t;
-
-/* NCCL_COLLCONFIG_INITIALIZER must be used to initialize a ncclCollConfig_t when it is
- * created. An uninitialized config will result in a NCCL error. */
-#define NCCL_COLLCONFIG_INITIALIZER {                                 \
-  sizeof(ncclCollConfig_t),                 /* size */                \
-  NCCL_API_MAGIC,                           /* magic */               \
-  NCCL_VERSION_CODE,                        /* version */             \
-  NCCL_CONFIG_UNDEF_PTR,                    /* ext */                 \
-  NCCL_CONFIG_UNDEF_INT,                    /* minCTAs */             \
-  NCCL_CONFIG_UNDEF_INT,                    /* maxCTAs */             \
-  NCCL_CONFIG_UNDEF_INT,                    /* nvlsCTAs */            \
-  NCCL_CONFIG_UNDEF_INT,                    /* cgaClusterSize */      \
-  NCCL_CONFIG_UNDEF_PTR,                    /* algSelection */        \
-  1,                                        /* forceAlgSelection */   \
-  NCCL_CONFIG_UNDEF_INT,                    /* CTAPolicy */           \
-  0,                                        /* userProfilerTag */     \
-  NCCL_CONFIG_UNDEF_PTR,                    /* launchCompletionEvent */ \
-}
-
 /* NCCL malloc and free function for all types of NCCL optimizations
  * (e.g. user buffer registration). The actual allocated size might
  * be larger than requested due to granularity requirement. */
@@ -573,7 +454,7 @@ ncclResult_t pncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId 
  * Each rank is associated to a CUDA device, which has to be set before calling
  * ncclCommInitRank.
  * ncclCommInitRank implicitly syncronizes with other ranks, so it must be
- * called by different threads/processes or use ncclGroupStart/ncclGroupEnd. */
+ * called by different threads/processes. */
 ncclResult_t  ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
 ncclResult_t pncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
 
@@ -739,238 +620,6 @@ ncclResult_t pncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataTy
 ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm);
 ncclResult_t pncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm);
 
-/*
- * Collective communication operations
- *
- * Collective communication operations must be called separately for each
- * communicator in a communicator clique.
- *
- * They return when operations have been enqueued on the CUDA stream.
- *
- * Since they may perform inter-CPU synchronization, each call has to be done
- * from a different thread or process, or need to use Group Semantics (see
- * below).
- */
-
-/*
- * Reduce
- *
- * Reduces data arrays of length count in sendbuff into recvbuff using op
- * operation.
- * recvbuff may be NULL on all calls except for root device.
- * root is the rank (not the CUDA device) where data will reside after the
- * operation is complete.
- *
- * In-place operation will happen if sendbuff == recvbuff.
- */
-ncclResult_t  ncclReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
-
-/*
- * (deprecated) Broadcast (in-place)
- *
- * Copies count values from root to all other devices.
- * root is the rank (not the CUDA device) where data resides before the
- * operation is started.
- *
- * This operation is implicitely in place.
- */
-ncclResult_t  ncclBcast(void* buff, size_t count, ncclDataType_t datatype, int root,
-    ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclBcast(void* buff, size_t count, ncclDataType_t datatype, int root,
-    ncclComm_t comm, cudaStream_t stream);
-
-/*
- * Broadcast
- *
- * Copies count values from root to all other devices.
- * root is the rank (not the CUDA device) where data resides before the
- * operation is started.
- *
- * In-place operation will happen if sendbuff == recvbuff.
- */
-ncclResult_t  ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
-    ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
-    ncclComm_t comm, cudaStream_t stream);
-
-/*
- * All-Reduce
- *
- * Reduces data arrays of length count in sendbuff using op operation, and
- * leaves identical copies of result on each recvbuff.
- *
- * In-place operation will happen if sendbuff == recvbuff.
- */
-ncclResult_t  ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
-
-/*
- * Reduce-Scatter
- *
- * Reduces data in sendbuff using op operation and leaves reduced result
- * scattered over the devices so that recvbuff on rank i will contain the i-th
- * block of the result.
- * Assumes sendcount is equal to nranks*recvcount, which means that sendbuff
- * should have a size of at least nranks*recvcount elements.
- *
- * In-place operations will happen if recvbuff == sendbuff + rank * recvcount.
- */
-ncclResult_t  ncclReduceScatter(const void* sendbuff, void* recvbuff,
-    size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
-    cudaStream_t stream);
-ncclResult_t pncclReduceScatter(const void* sendbuff, void* recvbuff,
-    size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
-    cudaStream_t stream);
-
-/*
- * All-Gather
- *
- * Each device gathers sendcount values from other GPUs into recvbuff,
- * receiving data from rank i at offset i*sendcount.
- * Assumes recvcount is equal to nranks*sendcount, which means that recvbuff
- * should have a size of at least nranks*sendcount elements.
- *
- * In-place operations will happen if sendbuff == recvbuff + rank * sendcount.
- */
-ncclResult_t  ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
-    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
-    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-
-/*
- * All-to-All
- *
- * Each device sends count values to all other devices and receives count values
- * from all other devices. Data to send to destination rank j is taken from
- * sendbuff+j*count and data received from source rank i is placed at
- * recvbuff+i*count.
- */
-ncclResult_t  ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-
-/*
- * Gather
- *
- * Each rank sends count elements from sendbuff to the root rank.
- * On the root rank, data from rank i is placed at recvbuff + i*count.
- * On non-root ranks, recvbuff is not used.
- * root is the rank where data will be gathered.
- *
- * In-place operations will happen if sendbuff == recvbuff + root * count.
- */
-ncclResult_t  ncclGather(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclGather(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-
-/*
- * Scatter
- *
- * On the root rank, count elements from sendbuff+i*count are sent to rank i.
- * On non-root ranks, sendbuff is not used.
- * Each rank receives count elements into recvbuff.
- * root is the rank that will distribute the data.
- *
- * In-place operations will happen if recvbuff == sendbuff + root * count.
- */
-ncclResult_t  ncclScatter(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclScatter(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-
-/* nccl*Config: per-collective-config variant of every collective. It takes a trailing
- * ncclCollConfig_t describing per-call customization. Initialize the config with
- * NCCL_COLLCONFIG_INITIALIZER and set it identically on every rank. config == NULL is
- * equivalent to the plain API. */
-ncclResult_t  ncclAllReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclAllReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-
-ncclResult_t  ncclBroadcastConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclBroadcastConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-
-ncclResult_t  ncclReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-
-ncclResult_t  ncclAllGatherConfig(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype,
-    ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclAllGatherConfig(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype,
-    ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-
-ncclResult_t  ncclReduceScatterConfig(const void* sendbuff, void* recvbuff, size_t recvcount, ncclDataType_t datatype,
-    ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclReduceScatterConfig(const void* sendbuff, void* recvbuff, size_t recvcount, ncclDataType_t datatype,
-    ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-
-ncclResult_t  ncclAlltoAllConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclAlltoAllConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-
-ncclResult_t  ncclGatherConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclGatherConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-
-ncclResult_t  ncclScatterConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclScatterConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-
-/*
- * Group semantics
- *
- * When managing multiple GPUs from a single thread, and since NCCL collective
- * calls may perform inter-CPU synchronization, we need to "group" calls for
- * different ranks/devices into a single call.
- *
- * Grouping NCCL calls as being part of the same collective operation is done
- * using ncclGroupStart and ncclGroupEnd. ncclGroupStart will enqueue all
- * collective calls until the ncclGroupEnd call, which will wait for all calls
- * to be complete. Note that for collective communication, ncclGroupEnd only
- * guarantees that the operations are enqueued on the streams, not that
- * the operation is effectively done.
- *
- * Both collective communication and ncclCommInitRank can be used in conjunction
- * of ncclGroupStart/ncclGroupEnd, but not together.
- *
- * Group semantics also allow to fuse multiple operations on the same device
- * to improve performance (for aggregated collective calls), or to permit
- * concurrent progress of the declared collective/WRITE fragments.
- */
-
-/*
- * Group Start
- *
- * Start a group call. All calls to NCCL until ncclGroupEnd will be fused into
- * a single NCCL operation. Nothing will be started on the CUDA stream until
- * ncclGroupEnd.
- */
-ncclResult_t  ncclGroupStart(void);
-ncclResult_t pncclGroupStart(void);
-
-/*
- * Group End
- *
- * End a group call. Start a fused NCCL operation consisting of all calls since
- * ncclGroupStart. Operations on the CUDA stream depending on the NCCL operations
- * need to be called after ncclGroupEnd.
- */
-ncclResult_t  ncclGroupEnd(void);
-ncclResult_t pncclGroupEnd(void);
-
 /* A communicator over a program's own operands, made as ncclCommInitRank makes one (Communicators, above): NCCL's
    bootstrap at `commId`, the root's host:port (ncclGetUniqueId, or NCCL_COMM_ID's form; the root listens on that host
    alone where it is an IPv6 address), which the caller hands every rank, its two gathers holding the communicator's
@@ -1116,11 +765,10 @@ typedef struct { uint32_t element_bits, rank; const uint64_t* shape; const int64
    ncclMeshCallReduce, ncclMeshCallReduceScatter, ncclMeshCallAllGather, ncclMeshCallAlltoAllV or ncclMeshCallWrite:
    the first five the planner's mesh-plan.h MESH_*), its `peer` (a
    send's or a receive's, a reduce's or a broadcast's root), `count` as its call takes it (a reduce-scatter's
-   recvcount, an all-gather's sendcount), `counts` (NULL: none; read for these alone) a V form's (ncclMeshAllGatherV's
-   and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type` (a WRITE's
+   recvcount, an all-gather's sendcount), `counts` (NULL: none; read for these alone) uneven segments (all-gather
+   and reduce-scatter: a rank's count each; all-to-all: sendcounts then recvcounts), `type` (a WRITE's
    `count` of it is the WRITE's bytes, all a WRITE moves: its values' type is its producer's and consumer's), `op` (a
-   reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
-   outside one its own group). ncclMeshPlanRun supplies their invocation order. `fused` (not 0) gives explicit WRITE calls a producer/consumer record sink
+   reduction's), and `group`: consecutive declarations of one number form one prepared group. ncclMeshPlanRun supplies their invocation order. `fused` (not 0) gives explicit WRITE calls a producer/consumer record sink
    (ncclMeshStream fused). Numerical collectives always enter the common command
    graph. All calls in a WRITE group share its sink and frame count. It uses the same physical striping and routed-write
    representation as other calls; fusion changes publication/consumption encoding, not available cables. */
@@ -1298,6 +946,11 @@ typedef struct { uint32_t first, count; uint64_t repeat; } ncclMeshPlanRun;
    count=0 and runs=0 drop the declaration. Every rank supplies the same order. */
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count,
     const ncclMeshPlanRun* order, size_t runs, const ncclMeshPlan** plan);
+/* Local source compiler operands, installed before preparing numerical leaves.
+   compiler is the CPU implementation's explicit build JSON; resources is its
+   declared resource array (including [] when empty). Execution never reads
+   these strings. A CPU leaf has no inferred compiler or provider defaults. */
+ncclResult_t ncclMeshCommCompiler(ncclComm_t comm,const char* compiler,const char* resources);
 /* Lower the next declared group occurrence before binding numerical programs.
    CommPlan owns the selected issue, page cuts, word operands and channel
    predecessor snapshots. The callback consumes typed source/landing effects;
@@ -1305,6 +958,16 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int co
 ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
     int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
     uint64_t* occurrence);
+struct isl_ctx;
+/* Borrowed preparation arrays of MetalPageCommand and MetalPageTransfer.
+   They use the enclosing compiler's relation context and retain local source
+   order. The enclosing compiler places that order in its whole function,
+   solves all page effects together, and returns one MetalPageSource per
+   command in this array. The occurrence owns these objects until plan release. */
+typedef struct { void* commands; void* transfers; } ncclMeshSources;
+ncclResult_t ncclMeshCommSources(ncclComm_t comm,uint64_t occurrence,
+    struct isl_ctx* context,const ncclMeshSources** sources);
+ncclResult_t ncclMeshCommSpecialize(ncclComm_t comm,uint64_t occurrence,void* sources);
 /* Complete the source dependency solve for a lowered occurrence. Input spans
    use the same logical coordinates as PageEffect. This runs before Encode and
    extends the occurrence's immutable descriptor prerequisites. */
@@ -1388,39 +1051,13 @@ ncclResult_t ncclMeshCommPage(ncclComm_t comm, size_t* bytes);
    client reads in its own error path, after a lease or communicator failed, to free what it holds of that region, or
    end, before it leases again.  ncclInvalidArgument where expired is NULL. */
 ncclResult_t ncclMeshRegionExpired(int* expired);
-/* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks entries, the same on
-   every rank, any of them 0), the segments packed in rank order, so rank r's lies after the segments of the ranks
-   before it.  ncclMeshAllGatherV sends counts[rank] elements of sendbuff and leaves every segment in recvbuff (in place
-   where sendbuff is rank's segment of recvbuff); ncclMeshReduceScatterV reduces sendbuff's segments (the sum of counts
-   elements) by op and leaves rank's in recvbuff, counts[rank] elements.  Equal counts are ncclAllGather and
-   ncclReduceScatter; others are one program, the communicator's all-gather or reduce-scatter (its table's, by the
-   operand's bytes), its operand cut into those segments (mesh-plan.h mesh_program_steps_cut): one tree program over
-   unequal segments, not a rooted call a rank.  Both paths, every type and operator of the equal calls.  Every rank
-   passes the same counts: the program's steps on every rank are cut by them, and a rank whose counts differ from its
-   peers' lays other entries (the calls do not pair: ncclInvalidUsage, as unequal counts to the equal calls are).  A
-   segment that does not start on a page in its buffer fails the call as a value (Memory, above). */
-ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclComm_t comm,
-                                cudaStream_t stream);
-ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
-                                    ncclComm_t comm, cudaStream_t stream);
-/* MPI_Alltoallv with counts on the host: rank r sends sendcounts[q] elements to rank q, its segments packed in rank order
-   in sendbuff, and receives recvcounts[q] elements from rank q into recvbuff, packed in rank order (rank r's
-   sendcounts[q] is rank q's recvcounts[r], else the calls do not pair: ncclInvalidUsage; its own segment copied, the
-   lesser of sendcounts[rank] and recvcounts[rank] elements).  Its counts known to both ends, no count crosses, and each pair's
-   elements move as one entry of their size, in one group, from and into its segment's place: each segment starts on a
-   page of its buffer, else the call fails as a value (Memory, above).  ncclAlltoAll is
-   it with every count `count`, and ncclGather and ncclScatter its rooted forms (every count 0 but toward or from the
-   root), so recvbuff off a gather's root and sendbuff off a scatter's are not read and may be NULL.  Both paths. */
-ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* sendcounts, void* recvbuff, const size_t* recvcounts, ncclDataType_t datatype,
-                               ncclComm_t comm, cudaStream_t stream);
 /* The partials merge, a reduction operator made as ncclRedOpCreatePreMulSum makes one (an operator of comm's, freed by
    ncclRedOpDestroy): split-KV attention partials merged by their log-sum-exp [Dao et al. 2023, Flash-Decoding;
    FlashInfer's state merge].  Its operand is rows of 2 + `dim` elements of `datatype` (ncclFloat32), a row [m, l, O:
    dim] (a row's maximum score, its sum of exponentials and its unnormalized output); two rows merge to the greater m,
    with each one's l and O rescaled by e^(its m - that) and summed, a row whose l is not above 0 counting for none (two
    such merge to [the least float, 0, 0]), so the result's O / l is the attention over every member's positions and the
-   result is itself a partial a later merge takes.  Every reducing collective takes it, on either path, inside a group
-   or not, each count (a reduce-scatter's, each of ncclMeshReduceScatterV's) whole rows (ncclInvalidArgument else): it
+   result is itself a partial a later merge takes.  Every declared reducing collective takes it, with each segment count containing whole rows (ncclInvalidArgument else): it
    runs the communicator's program of that collective (its table's, by the operand's bytes) with a row for an element,
    one group, each row merged up its tree where a sum adds an element, every step's piece whole rows, of any width
    (the program's own cuts on whole rows and pages: mesh-plan.h mesh_program_steps_cut). */

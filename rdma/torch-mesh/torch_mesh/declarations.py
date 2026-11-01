@@ -273,9 +273,9 @@ def _select_reduce_fake(x, zero, shape, selections, reduce_op, group_name):
 def _reduce_plan(node, named):
     """Partition exact contributor sets with the shared native relation cover."""
     if 'mesh_selection_reductions' not in node.meta:
-        from mesh_relation import Algebra
+        from .compilation import relations
         from . import _stream
-        declaration, algebra = json.loads(named['selections']), Algebra()
+        declaration, algebra = json.loads(named['selections']), relations()
         sources = [algebra.selection_relation(value) for value in declaration['sources']]
         targets = [algebra.selection_relation(value) for value in declaration['destinations']]
         sets = [relation.image(relation.domain()) for relation in [*sources, *targets]]
@@ -306,9 +306,9 @@ def _select_exchange_context(ctx, inputs, output):
 
 
 def _select_exchange_backward(ctx, gradient):
-    from mesh_relation import Algebra
+    from .compilation import relations
     from .algebra import index_values
-    algebra, declaration = Algebra(), json.loads(ctx.selections)
+    algebra, declaration = relations(), json.loads(ctx.selections)
     rank = declaration['rank']
     selected = [algebra.selection_relation(value) for value in declaration['destinations']]
     domains = [relation.image(relation.domain()) for relation in selected]
@@ -885,6 +885,7 @@ def trace(function, *arguments, parameters=(), source_scope=None, route_scope=No
     from torch.fx.experimental.proxy_tensor import make_fx
     from torch._guards import detect_fake_mode
     from torch._subclasses.fake_tensor import FakeTensorMode
+    from .compilation import capture_choices
     parameters = tuple(parameters)
     gradients = [parameter.grad for parameter in parameters]
     mode = detect_fake_mode(arguments) or FakeTensorMode(allow_non_fake_inputs=True)
@@ -898,7 +899,7 @@ def trace(function, *arguments, parameters=(), source_scope=None, route_scope=No
             return source.outputs(output)
 
     try:
-        with mode:
+        with mode, capture_choices(source_scope):
             for parameter in parameters:
                 source.value(parameter).grad = None
             graph = make_fx(recorded, decomposition_table={}, tracing_mode='fake',
@@ -928,9 +929,10 @@ def trace(function, *arguments, parameters=(), source_scope=None, route_scope=No
 
 class Execution:
     """Configuration which appends every numerical span and crossing to one native function."""
-    def __init__(self, steps, output=None, pages=(), inputs=()):
+    def __init__(self, steps, output=None, pages=(), inputs=(), *, algebra):
         from . import _stream
         self.steps, self.output, self.pages, self.inputs = tuple(steps), output, tuple(pages), tuple(inputs)
+        self.algebra = algebra
         self._initialized = False
         self.configuration = None
         self.executions = _stream.Executions(output)
@@ -940,12 +942,23 @@ class Execution:
     def append(self, schedule):
         # declaration-time state: the first prepared invocation declares the inputs; runtime submits the recorded
         # schedules
+        inputs = list(self.inputs)
+        declarations = []
+        for step in self.steps:
+            if isinstance(step, Function):
+                source = step.execution
+                if source is None:
+                    raise ValueError('declare every function before preparing its sequence')
+                inputs.extend(source.inputs)
+                declarations.extend(dict(value, configuration=source.configuration) for value in source.steps)
+            else:
+                declarations.append(dict(step, configuration=self.configuration))
         if not self._initialized:
-            schedule.inputs(list(self.inputs))
+            schedule.inputs(inputs)
         from .page_effects import prepare
         from .compilation import bind
-        with bind(self.configuration):
-            prepare(self.steps, schedule, self.output)
+        with bind(self.configuration, algebra=self.algebra):
+            prepare(declarations, schedule, self.output)
         self._initialized = True
 
     def realize(self, repetitions=1):
@@ -957,8 +970,8 @@ class Execution:
             self.executions.add(schedule)
 
 
-def execution_sequence(steps, output=None, pages=(), inputs=()):
-    return Execution(steps, output, pages, inputs)
+def execution_sequence(steps, output=None, pages=(), inputs=(), *, algebra):
+    return Execution(steps, output, pages, inputs, algebra=algebra)
 
 
 _BOUND = {'all_to_all_single', 'reduce_scatterv', 'allgatherv', 'allgatherv_out', 'select_exchange', 'select_reduce',
@@ -1191,7 +1204,8 @@ class LoweredGraph:
         if ownership is None:
             from .ownership import prepare_expression
             if prepared is None:
-                prepared = prepare_expression(dict(graph=graph, operands=tuple(arguments)))
+                from .compilation import relations
+                prepared = prepare_expression(dict(graph=graph, operands=tuple(arguments)), algebra=relations())
             ownership = _local_assignment(prepared, arguments)
         self.prepared = ownership['prepared']
         self.groups, self.steps = {}, []
@@ -1228,7 +1242,7 @@ class LoweredGraph:
         if ownership['pending']:
             requirements = tuple(dict.fromkeys(item.get('requirement', 'access relation') for item in ownership['pending']))
             raise ValueError('function preparation needs declared ' + ', '.join(requirements))
-        available, owners = {}, []
+        available, owners = {}, list(prepared['expression']['graph'].meta.get('mesh_provider_owners', ()))
 
         def original(key):
             node, path = key
@@ -1448,7 +1462,7 @@ class LoweredGraph:
         self.output = tree.tree_unflatten(values, spec)
         if copied:
             self.steps.append(dict(commands=tuple(copied), output=self.output, pages=()))
-        self.execution = execution_sequence(self.steps, self.output, owners)
+        self.execution = execution_sequence(self.steps, self.output, owners, algebra=algebra)
 
 class Function:
     """One numerical callable and its framework-derived AOT declaration.
@@ -1465,7 +1479,9 @@ class Function:
     into the same page operands and commands as the other declarations.
     """
     def __init__(self, function, *arguments, parameters=(), configuration=None, ownership=None,
-                 source_scope=None, route_scope=None):
+                 source_scope=None, route_scope=None, algebra=None):
+        from mesh_relation import Algebra
+        self.algebra = Algebra() if algebra is None else algebra
         self.function, self.parameters = function, tuple(parameters)
         self.arguments = arguments
         self.configuration = configuration
@@ -1477,12 +1493,14 @@ class Function:
         self.execution = None
         self.result_types = None
         self.fold_choices = ()
+        self.implementation_regions = ()
+        self.choices = ()
 
     def capture(self):
         """Capture the source once, before functionalization, partitioning or fusion."""
         from torch.utils._pytree import tree_flatten
         from torch.distributed.tensor import DTensor
-        from .compilation import bind
+        from .compilation import bind, source_choices
 
         def recorded(*arguments):
             output = self.function(*arguments)
@@ -1491,9 +1509,10 @@ class Function:
                          for p in self.parameters]
             return (*values, *gradients)
 
-        with bind(self.configuration):
+        with bind(self.configuration, algebra=self.algebra):
             self.captured_graph = trace(recorded, *self.arguments, parameters=self.parameters,
                                         source_scope=self.source_scope, route_scope=self.route_scope)
+            self.choices = tuple(source_choices())
         self.result_types = self.captured_graph.meta['mesh_result_types']
         self.fold_choices = self.captured_graph.meta['mesh_fold_choices']
         return self
@@ -1505,10 +1524,11 @@ class Function:
             self.capture()
         made = Function(self.function, *self.arguments, parameters=self.parameters,
                         configuration=self.configuration, ownership=self.ownership,
-                        source_scope=self.source_scope, route_scope=self.route_scope)
+                        source_scope=self.source_scope, route_scope=self.route_scope, algebra=self.algebra)
         made.captured_graph = repeat_source(self.captured_graph, count, first)
         made.output_spec, made.result_types = self.output_spec, self.result_types
         made.fold_choices = self.fold_choices
+        made.choices = self.choices
         return made
 
     def declare(self, group, *, destinations=None):
@@ -1521,7 +1541,7 @@ class Function:
         self.fold_choices = graph.meta.get('mesh_fold_choices', ())
         from torch.distributed.tensor import DTensor
         from torch.utils._pytree import tree_leaves
-        from .compilation import lift_state, bind
+        from .compilation import lift_state, bind, choice_member
         graph, arguments = lift_state(graph, self.arguments)
         self.source_graph = graph
         self.result_types = graph.meta.get('mesh_result_types', self.result_types)
@@ -1538,13 +1558,19 @@ class Function:
         assigned = None
         if ownership is not None:
             from .partition import lower_owned_graph
-            with bind(self.configuration):
+            with choice_member(None if group is None else group.rank()), bind(self.configuration, algebra=self.algebra):
                 assigned = lower_owned_graph(graph, arguments, ownership)
+                from .compilation import source_choices
+                self.choices = (*self.choices, *source_choices())
             graph, arguments = assigned['graph'], assigned['arguments']
-        with bind(self.configuration):
+        with choice_member(None if group is None else group.rank()), bind(self.configuration, algebra=self.algebra):
             prepared = LoweredGraph(graph, arguments, group, self.configuration, destinations, ownership=assigned)
-            from .compilation import layout_choices
+            from .compilation import layout_choices, source_choices
             self.layout_choices = layout_choices()
+            self.implementation_regions = prepared.prepared['expression']['graph'].meta.get('mesh_implementation_regions', ())
+            from assignment import source_axes
+            self.choices = tuple(source_axes((*self.choices, *source_choices(),
+                *(choice for fold in self.fold_choices for choice in fold.get('choices', ())))))
         self.graph, self.groups, self.execution = graph, prepared.groups, prepared.execution
         self.run = self.execution.forward
         self.completion = self.execution.completion

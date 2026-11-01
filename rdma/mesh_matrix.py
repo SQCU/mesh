@@ -243,6 +243,27 @@ def selected_products(domain, work, finish, *, requirements):
     return tuple(plans)
 
 
+
+def product_invocations(plan, *, batch_dimensions):
+    """Apply a provider's declared batch rank before operand placement."""
+    import itertools
+    output = plan['operands']['out']['shape']
+    split = max(0, len(output) - 2 - batch_dimensions)
+    if not split:
+        return (plan,)
+    calls = []
+    for fixed in itertools.product(*(range(size) for size in output[:split])):
+        operands = {}
+        for role, use in plan['operands'].items():
+            axes = min(split, max(0, len(use['shape']) - 2))
+            shape = use['shape'][axes:]
+            relation = use['relation']
+            selected = relation.algebra.map(shape, use['shape'], lambda x, y: [
+                f'{target} = {value}' for target, value in zip(y, (*fixed[:axes], *x), strict=True)])
+            operands[role] = dict(use, shape=shape, relation=selected.then(relation))
+        calls.append(dict(plan, operands=operands))
+    return tuple(calls)
+
 def row_product_group(operands, requests, geometry, capabilities):
     """Emit independent row products from the same typed product contract."""
     recipes = {}

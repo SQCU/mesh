@@ -11,6 +11,7 @@
 #include <string.h>
 #include "mesh.h"
 #include "nccl.h"
+#include "mesh-write-compiler.h"
 #include "metal-capabilities.h"
 /* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, Three kinds of source: the interface table) */
 #pragma GCC visibility push(hidden)
@@ -30,8 +31,6 @@ static inline int pages_lost(mesh_pages a) { return a.n == UINT64_MAX; }
 static inline uint64_t pages_to_word(mesh_pages a) { return a.n; }
 static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){word}; }
 
-/* a copy's loads: plain, or coherent (METAL_LAND: bytes the NIC may have landed in the same command buffer) */
-enum { METAL_PLAIN, METAL_LAND };
 /* Fixed encoding operands live in the caller's frame. Objective-C sees the
    Metal handle types; the C half only passes the same pointer fields back. */
 #ifdef __OBJC__
@@ -51,6 +50,13 @@ struct metal_program {
   struct kernels *kernels;
   /* Preparation-owned exact accesses for the next typed command. */
   void *accesses;
+  /* Retained numerical declarations. The shared page-effect pass completes
+     their sources before any command is bound to the recorder. */
+  void *commands, *transfers, *group_accesses, *loop_accesses, *relation_context;
+  void *arguments,*resources,*sources;
+  ncclMeshSources declaration;
+  int administrative;
+  const char *cpu_compiler,*cpu_resources;
 };
 #undef METAL_HANDLE
 /* A step's result and its message beside it (design/rubrics.md, Strings are messages): `status` 0, or an errno, and
@@ -102,21 +108,28 @@ void *metal_retain(void *object);
    through the id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits bounded by `polls`
    (0: NCCL_MESH_POLLS).  NULL where memory runs out or the device's kernels cannot be made, *message then what
    failed. */
-struct metal_program *metal_begin(struct metal_program *, void *encoder, void *table, void *residency, void *violation, uint32_t polls,
-                                  const char **message);
+struct metal_program *metal_prepare(struct metal_program *,struct isl_ctx *,void *violation,uint32_t polls);
+size_t metal_command_count(const struct metal_program *);
+const ncclMeshSources *metal_sources(struct metal_program *);
+void metal_command_accesses(struct metal_program *,size_t command,const ncclMeshAccess *,size_t count);
+struct metal_result metal_specialize(struct metal_program *,void *sources);
+struct metal_result metal_record(struct metal_program *,const ncclMeshStream *);
 /* A buffer of the program's made resident through its residency set. */
 void metal_resident(struct metal_program *, void *buffer);
+/* Local numerical leaves and their selected DMA values enter the same source
+   dependency solve as caller numerical leaves. These are preparation operands. */
+void metal_page_effect(struct metal_program *, const ncclMeshPageEffect *,
+                       void *payload, size_t offset, size_t bytes);
+void metal_page_selection(struct metal_program *,const ncclMeshPageEffect *,
+                          void *payload,const ncclMeshSpan *,size_t count);
 /* The program's failure words from here on, `violation` (made resident): those of the communicator whose group is
    encoded next, in which every dispatch naming none of its own records a failed wait (nccl-mesh.c complete,
    issue_group, retire), so one communicator's failure is recorded as its own and no other's. */
 void metal_gate(struct metal_program *, void *violation);
 struct metal_wait;
-/* Preparation supplies the original value's page relation. Its observation,
-   when needed, is compiled into the copy body rather than another task. */
-struct metal_copy_relation { const struct metal_wait *ready; uint32_t source_access;
-  const struct metal_wait *observations; size_t count; };
-struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset,
-                              size_t bytes, const struct metal_copy_relation *);
+/* The source compiler attaches observations and publications to this retained
+   numerical copy, before it becomes an execution record. */
+struct metal_result metal_copy(struct metal_program *,void *dst,size_t dst_offset,void *src,size_t src_offset,size_t bytes);
 /* Repeat a declared byte pattern: the first element's scalar bits, followed by
    zero elements through unit_bytes. The command has only an exact output reach. */
 struct metal_result metal_fill_pattern(struct metal_program *, void *dst, size_t dst_offset,
@@ -127,7 +140,7 @@ struct metal_result metal_fill_pattern(struct metal_program *, void *dst, size_t
 #define METAL_MERGE 12
 /* dst = with op src, n elements of an ncclDataType_t: landed bytes (src, loaded system-coherent) combined with an
    operand read in place (`with`: a lease's send buffer, nccl.h ncclMeshMemBuffer), the first combine of a range no step
-   wrote, after a wait (metal_spin) */
+   wrote, after its declared input observation */
 struct metal_scalar { void *buffer; size_t offset; uint64_t bits; };
 struct metal_result metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                       size_t element_bytes, struct metal_scalar scalar);
@@ -166,7 +179,6 @@ void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);
    number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
 /* the wait alone (a COPY's landing in place), one threadgroup */
-struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
 struct mesh_landing_run;
 /* a publication and a landing run by the caller's kernel (nccl.h ncclMeshFused): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
