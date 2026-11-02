@@ -332,3 +332,136 @@ phase. Source bindings do not choose a declaration by a hash or guessed shape.
 The bridge, collective/CoreML libraries, CFFI binding, PyTorch extension and
 generated Metal kernels build with this connection. No preparation speedup or
 whole-function performance result has been measured for it yet.
+
+## Active handoff — 2026-11-02 03:02:55 UTC
+
+This is the next pass after mesh `d1d503e9` (merged as `b951ab72`) and
+microbench `2ecca438`. Record a step's purpose and intended handoff here before
+starting it. Update its written/build/commit status as evidence arrives. These
+entries describe the current work; they do not replace items 1–7 above.
+
+### C1. Consume conditional writer relations in the shared solve
+
+Owner: `fallback_inventory`. Goal items: 1 and 2.
+
+Why: the solver still subtracts every later possible write range as if that
+writer always ran. That can hide an earlier conditional producer. Counting
+possible writers also counts work that the numerical source never performs.
+
+Scope: `rdma/metal-page-effects.h` and `.m`. Consume the original source-cell
+selection, its cell-to-activity-page relation, and its value generation. A final
+write demand must distinguish an earlier writer from a later active overwrite;
+an earlier reader still consumes its earlier generation. Repeated targets need
+the source's actual assignment/reduction semantics. Do not guess those semantics
+from the address union.
+
+The numerical source already chooses whether a site runs. Its activity typing
+must not add a second runtime predicate around that site. Count and active
+outputs must be ordinary source equations, with their actual producer boundary
+available to transport declaration before packetization. An earlier writer must
+not wait for a later-produced mask merely to decide whether it contributes.
+
+Status: contract/design work; no shared-source changes in this pass yet.
+Completion evidence: source masks and generations affect solved dependencies
+and contributor counts, both frontend adapters consume that contract, and the
+old unconditional subtraction/counting behavior has no authority over masked
+writers. Source compilation precedes any payload run.
+
+### C2. Bind every native invocation before solving
+
+Owner: `fallback_inventory`; implementation handed back to the parent.
+Goal item: 2.
+
+Why: standalone `MetalProgram.bind(invocations:)` solved base declarations and
+then relocated numerical operands during replay. Activity/effect pages could
+therefore keep the first invocation's binding. Inspection corrected an earlier
+inventory claim: `MeshRankPrepare` already solves its complete invocation
+sequence once. Splitting that solve would lose cross-invocation dependencies.
+
+Scope: microbench `matrix_operations.swift`, `mesh_rank.h`, `docs/kernels.md`.
+The written change binds each declared invocation, including indirect-grid
+phase, before one complete graph solve. It preserves MeshRank's existing
+whole-function solve and adds no cache identity or execution wrapper.
+
+Status: written, uncommitted; Engine Swift typecheck passed
+(`/tmp/mesh-native-binding-sourcecheck.log`). Parent still needs the joined
+build/review and commit. Numerical execution has not been run.
+
+### C3. Retain the provider's original writer-domain program
+
+Owner: `barrier_inventory`. Goal items: 1, 3 and 6.
+
+Why: the retained convolution fields do not describe every final store. MPP
+uses tile-rounded guards, and fused epilogues can change the destination view.
+A buffer's capacity or a guessed formula cannot provide the writer count.
+
+Scope: microbench's pinned LiteRT source patches, `prepared_export.mm`,
+`litert_prepared.h`, `litert_program.m`, and its provider closure note. Factor
+the original guard/iteration/coordinate generation once and retain it through
+fusion. Numerical stores and ordinary selected-index/activity outputs must use
+that same source program. C1 consumes the resulting relations; C5 makes them
+available before transport planning. Do not create a separate provider-only
+expression evaluator or numerical-source parser.
+
+Status: source seams identified; the next writer-domain implementation has not
+been written. The earlier clipped MPP read-site work is committed as microbench
+`69a469b5`. Complete this step when exact writer domains replace the independent
+`provider_dispatch` description for their consumers; do not claim all provider
+recipes are covered merely because one recipe exports the new contract.
+
+### C4. Make direct cache writers consume the shared selector
+
+Owner: `schedule_equivalence`. Goal items: 1 and 5.
+
+Why: direct fused heads still repeated the page-table lookup already computed
+by `cache_select` for standalone writers. Their source-site metadata also lost
+activity/join information during fused-slot remapping.
+
+Scope: microbench native recipes and `streamed_weights.swift`; the shared
+`rdma/torch-mesh/torch_mesh/streamed.metal` head's output operand. Reuse the same
+`CacheSelection` pages. Keep the existing arithmetic once. Publish the exact
+head-sized output run at its existing participant boundary, rather than adding
+an atomic publication for every scalar store.
+
+Status: written, uncommitted; Engine typecheck and retained Metal compilation
+passed. Composed fused-source checking and provenance documentation are in
+progress. Ordinary session construction gives injective active cache targets;
+arbitrary repeated descriptor targets have no declared overwrite policy yet.
+That missing semantic input must remain explicit.
+
+### C5. Declare numerical sources before transport planning
+
+Owner: parent (`root`). Goal items: 1 and 6.
+
+Why: MeshRank currently obtains numerical declarations in `MeshRankPrepare`,
+after `MeshRankPlan` has packetized transfers. At that point it is too late for
+the source's conditional output domains to supply early coverage operands.
+
+Scope: microbench `mesh_rank.m` and its interface documentation. Retain the
+actual invocation declarations before `ncclMeshCommPlan`, in one enclosing
+relation context. Preparation must consume those same declarations, rather
+than calling the source producer again. Preserve the complete function order,
+including its declared epilogue, and release preparation relations after the
+joined solve/binding.
+
+Status: inspected, not yet written. Completion evidence: source/selector facts
+exist before packetization; their original declaration identities reach the
+joined solve; no second declaration traversal reconstructs them. This ordering
+change is necessary for C1/C3 coverage consumption, but does not itself generate
+that coverage.
+
+### Next handoff and validation
+
+Keep C1 and C5 coordinated at the early coverage boundary. C3 and C4 supply
+original source facts to that same boundary. C2 can be built and committed
+independently once reviewed. The broader host-event/visibility replacement,
+flat bridge posting, complete serving graphs and whole-function performance
+evidence remain open under the original seven items.
+
+Use the existing builds: mesh `make -C rdma .build/mesh-flow
+.build/libnccl-mesh.dylib .build/libmesh-coreml.dylib modules kernels`, then the
+microbench native libraries and Swift Engine with `MESH_RDMA` and `MESH_LIBDIR`
+pointing at that build. Use Xcode 26.4.1 and `SDKROOT=macosx`. Do not substitute
+synthetic timing, private executors or payload runs for the unfinished source
+handoffs. Commit only owned changes; microbench's scheduled-task lock and
+unrelated `serving_state.swift` edits remain outside this work.
