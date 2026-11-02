@@ -2133,6 +2133,22 @@ static double MetalMonotonic(CFTimeInterval host) {
     const uint64_t uptime=clock_gettime_nsec_np(CLOCK_UPTIME_RAW),monotonic=clock_gettime_nsec_np(CLOCK_MONOTONIC);
     return host+(double)(int64_t)(monotonic-uptime)*1e-9;
 }
+/* Each GPU part's completion, one JSON line in MESH_PREPARE_RECORD's directory (none where it is unset): its ordinal
+   among its schedule's parts, its dispatches, its GPU start and end on the statistics clock (MetalMonotonic), and its
+   schedule. A log of execution for people, written from Metal's completion thread, read by nothing in the program.
+   Added for the LSTM demonstration, whose first complete runs took 80 to 135 ms a step on five ranks against 31.5 us on
+   one Studio with plain Metal (2026-11-01), with nothing to say where. */
+static void MetalScheduleCompletedRecord(const struct MetalSchedule *s,double started,double ended) {
+    static FILE *out;static dispatch_once_t once;
+    dispatch_once(&once,^{
+        const char *dir=getenv("MESH_PREPARE_RECORD");char path[1024];
+        if(dir&&snprintf(path,sizeof path,"%s/parts-%d.jsonl",dir,(int)getpid())<(int)sizeof path)out=fopen(path,"w");
+    });
+    if(!out)return;
+    fprintf(out,"{\"schedule\":\"%p\",\"part\":%lu,\"dispatches\":%lu,\"gpu_start\":%.9f,\"gpu_end\":%.9f}\n",
+            (const void *)s->root,(unsigned long)s->ordinal,(unsigned long)s->commands,started,ended);
+    fflush(out);
+}
 static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error,double ended) {
     s->error=[error retain];
     s->ended=ended;
@@ -2156,6 +2172,7 @@ static void MetalScheduleFinishPart(struct MetalSchedule *s) {
     [s->command endCommandBuffer];
     s->options=[MTL4CommitOptions new];
     [s->options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback){
+        MetalScheduleCompletedRecord(s,MetalMonotonic(feedback.GPUStartTime),MetalMonotonic(feedback.GPUEndTime));
         MetalScheduleCompleted(s,feedback.error,MetalMonotonic(feedback.GPUEndTime));
     }];
 }
