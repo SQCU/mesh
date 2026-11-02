@@ -116,6 +116,48 @@ static isl_pw_aff *IndexLeaf(isl_ctx *ctx, NSInteger value, NSUInteger first, NS
 // Compile each branch on the positions where its condition holds. Index
 // terms are pure values; constructing an unreachable arm cannot add meaning,
 // and rebuilding every arm over the full domain duplicates relation work.
+static isl_pw_aff *IndexExpression(isl_ctx *ctx,id expression,isl_set *domain);
+/* A condition's positions in the domain where it holds and where it does not, each set from its own comparison (lt's
+   negation is ge's set, and's is the union of its terms' negations), so no set is subtracted from the domain and no
+   complement taken. Changed by the layout algebra session: a select's arm domains were the condition's set and the
+   domain minus it, and comparisons were isl_set_indicator_function, whose complement had isl compute the divisions of
+   every mod in the condition; composing a view with a written pair quotient (MetalTensorPairQuotient) spent its time
+   there (2026-11-01). What must stay: the same function on the same domain. */
+static BOOL IndexComparison(id expression) {
+    if(![expression isKindOfClass:NSArray.class]||[expression count]!=3)return NO;
+    NSString *op=expression[0];
+    return [op isEqual:@"eq"]||[op isEqual:@"le"]||[op isEqual:@"lt"]||[op isEqual:@"ge"]||[op isEqual:@"gt"];
+}
+static void IndexCompare(NSString *op,isl_pw_aff *a,isl_pw_aff *b,isl_set **yes,isl_set **no) {
+    isl_pw_aff *c=isl_pw_aff_copy(a),*d=isl_pw_aff_copy(b);
+    if([op isEqual:@"eq"]){*yes=isl_pw_aff_eq_set(a,b);*no=isl_pw_aff_ne_set(c,d);}
+    else if([op isEqual:@"le"]){*yes=isl_pw_aff_le_set(a,b);*no=isl_pw_aff_gt_set(c,d);}
+    else if([op isEqual:@"lt"]){*yes=isl_pw_aff_lt_set(a,b);*no=isl_pw_aff_ge_set(c,d);}
+    else if([op isEqual:@"ge"]){*yes=isl_pw_aff_ge_set(a,b);*no=isl_pw_aff_lt_set(c,d);}
+    else {*yes=isl_pw_aff_gt_set(a,b);*no=isl_pw_aff_le_set(c,d);}
+}
+static void IndexCondition(isl_ctx *ctx,id expression,isl_set *domain,isl_set **yes,isl_set **no) {
+    if(IndexComparison(expression)) {
+        IndexCompare(expression[0],IndexExpression(ctx,expression[1],domain),IndexExpression(ctx,expression[2],domain),yes,no);
+        return;
+    }
+    if([expression isKindOfClass:NSArray.class]&&([expression[0] isEqual:@"and"]||[expression[0] isEqual:@"or"])) {
+        const BOOL both=[expression[0] isEqual:@"and"];
+        IndexCondition(ctx,expression[1],domain,yes,no);
+        for(NSUInteger k=2;k<[expression count];k++) {
+            isl_set *y=NULL,*n=NULL;IndexCondition(ctx,expression[k],domain,&y,&n);
+            if(both){*yes=isl_set_intersect(*yes,y);*no=isl_set_union(*no,n);}
+            else {*yes=isl_set_union(*yes,y);*no=isl_set_intersect(*no,n);}
+        }
+        return;
+    }
+    isl_pw_aff *value=IndexExpression(ctx,expression,domain);
+    *yes=isl_pw_aff_non_zero_set(isl_pw_aff_copy(value));*no=isl_pw_aff_zero_set(value);
+}
+// 1 where the condition holds, 0 where it does not: two disjoint pieces
+static isl_pw_aff *IndexIndicator(isl_ctx *ctx,isl_set *yes,isl_set *no) {
+    return isl_pw_aff_add_disjoint(isl_pw_aff_val_on_domain(yes,isl_val_one(ctx)),isl_pw_aff_val_on_domain(no,isl_val_zero(ctx)));
+}
 static isl_pw_aff *IndexExpression(isl_ctx *ctx,id expression,isl_set *domain) {
     if([expression isKindOfClass:NSNumber.class])
         return isl_pw_aff_val_on_domain(isl_set_copy(domain),IndexValue(ctx,[expression integerValue]));
@@ -123,6 +165,18 @@ static isl_pw_aff *IndexExpression(isl_ctx *ctx,id expression,isl_set *domain) {
         return isl_pw_aff_intersect_domain(isl_pw_aff_var_on_domain(
             isl_local_space_from_space(isl_set_get_space(domain)),isl_dim_set,0),isl_set_copy(domain));
     NSString *op=expression[0];
+    if([op isEqual:@"select"]) {
+        isl_set *yes=NULL,*no=NULL;IndexCondition(ctx,expression[1],domain,&yes,&no);
+        isl_pw_aff *left=isl_set_is_empty(yes)==isl_bool_true?
+            isl_pw_aff_val_on_domain(isl_set_copy(yes),isl_val_zero(ctx)):IndexExpression(ctx,expression[2],yes);
+        isl_pw_aff *right=isl_set_is_empty(no)==isl_bool_true?
+            isl_pw_aff_val_on_domain(isl_set_copy(no),isl_val_zero(ctx)):IndexExpression(ctx,expression[3],no);
+        isl_set_free(yes);isl_set_free(no);
+        return isl_pw_aff_add_disjoint(left,right);
+    }
+    if([op isEqual:@"and"]||[op isEqual:@"or"]||IndexComparison(expression)) {
+        isl_set *yes=NULL,*no=NULL;IndexCondition(ctx,expression,domain,&yes,&no);return IndexIndicator(ctx,yes,no);
+    }
     isl_pw_aff *a=IndexExpression(ctx,expression[1],domain);
     if([op isEqual:@"mul"]||[op isEqual:@"div"]||[op isEqual:@"mod"]) {
         isl_pw_aff *b=IndexExpression(ctx,expression[2],domain);
@@ -131,32 +185,18 @@ static isl_pw_aff *IndexExpression(isl_ctx *ctx,id expression,isl_set *domain) {
         isl_pw_aff *q=isl_pw_aff_floor(isl_pw_aff_div(isl_pw_aff_copy(a),isl_pw_aff_copy(b)));
         return isl_pw_aff_sub(a,isl_pw_aff_mul(q,b));
     }
-    if([op isEqual:@"select"]) {
-        isl_set *yes=isl_pw_aff_non_zero_set(a),*no=isl_set_subtract(isl_set_copy(domain),isl_set_copy(yes));
-        isl_pw_aff *left=isl_set_is_empty(yes)==isl_bool_true?
-            isl_pw_aff_val_on_domain(isl_set_copy(yes),isl_val_zero(ctx)):IndexExpression(ctx,expression[2],yes);
-        isl_pw_aff *right=isl_set_is_empty(no)==isl_bool_true?
-            isl_pw_aff_val_on_domain(isl_set_copy(no),isl_val_zero(ctx)):IndexExpression(ctx,expression[3],no);
-        isl_set_free(yes);isl_set_free(no);
-        return isl_pw_aff_add_disjoint(left,right);
-    }
     for(NSUInteger k=2;k<[expression count];k++) {
         isl_pw_aff *b=IndexExpression(ctx,expression[k],domain);
         if([op isEqual:@"add"])a=isl_pw_aff_add(a,b);
-        else if([op isEqual:@"min"])a=isl_pw_aff_min(a,b);
-        else if([op isEqual:@"max"])a=isl_pw_aff_max(a,b);
-        else {
-            isl_set *condition=NULL;
-            if([op isEqual:@"eq"])condition=isl_pw_aff_eq_set(a,b);
-            else if([op isEqual:@"le"])condition=isl_pw_aff_le_set(a,b);
-            else if([op isEqual:@"lt"])condition=isl_pw_aff_lt_set(a,b);
-            else if([op isEqual:@"ge"])condition=isl_pw_aff_ge_set(a,b);
-            else if([op isEqual:@"gt"])condition=isl_pw_aff_gt_set(a,b);
-            else if([op isEqual:@"and"])condition=isl_set_intersect(isl_pw_aff_non_zero_set(a),isl_pw_aff_non_zero_set(b));
-            else if([op isEqual:@"or"])condition=isl_set_union(isl_pw_aff_non_zero_set(a),isl_pw_aff_non_zero_set(b));
-            else [NSException raise:NSInvalidArgumentException format:@"unknown index term %@",op];
-            a=isl_pw_aff_intersect_domain(isl_set_indicator_function(condition),isl_set_copy(domain));
-        }
+        else if([op isEqual:@"min"]||[op isEqual:@"max"]) {
+            // min: a where a <= b, else b (max: where a >= b), each side from its own comparison
+            isl_set *yes=NULL,*no=NULL;
+            IndexCompare([op isEqual:@"min"]?@"le":@"ge",isl_pw_aff_copy(a),isl_pw_aff_copy(b),&yes,&no);
+            a=isl_pw_aff_add_disjoint(isl_pw_aff_intersect_domain(a,yes),isl_pw_aff_intersect_domain(b,no));
+        } else if(IndexComparison(@[op,@0,@0])) {
+            // a chained comparison: the earlier comparison's 0 or 1 against the next term
+            isl_set *yes=NULL,*no=NULL;IndexCompare(op,a,b,&yes,&no);a=IndexIndicator(ctx,yes,no);
+        } else [NSException raise:NSInvalidArgumentException format:@"unknown index term %@",op];
     }
     return a;
 }
