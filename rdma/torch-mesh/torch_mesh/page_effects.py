@@ -53,58 +53,67 @@ def _spans(operand, access):
 
 
 def assign_pages(descriptions, invocation_of, spaces):
-    """The run's page assignment (design/page-maps-2026-11-02.md, "The run's page assignment, in order").
+    """The run's page assignment by the run's solve (mesh-page-map.h mesh_run_solve; design/page-maps-2026-11-02.md,
+    "The run's solve, each choice and its ground").
 
-    type: (descriptions, each command's accesses with their space root and byte runs, in their run order;
-    invocation_of(order) -> the command's run invocation; spaces, serial -> ValueSpace) -> dict(edges, arena, places,
-    pinned, items): the solve's ordered edges between commands (mesh_graph.frontier_edges), the arena's page count,
-    each arena item's first arena page, each pinned item's lease runs, and each (space serial, invocation)'s item key.
-    An item is a (space, invocation), or for a state one version: (out, i) and (in, i + 1) are one item. A state's
-    first and last versions are pinned to the caller's lease; every other item is packed in the arena, a page passing
-    from k to l only where k's last command is an ancestor of l's first over the edges (settled), never by run order.
-    A lease-backed space is its own constant map and makes no item."""
-    from mesh_graph import frontier_edges, ancestors
+    type: (descriptions, each command's accesses with their space root and byte runs; invocation_of(order) -> the
+    command's run invocation; spaces, serial -> ValueSpace) -> dict(edges, bins, places, items, arena):
+    - an event is a command, in the run's order (description order, then index); an item is a (space, invocation),
+      or for a state one version, (out, i) and (in, i + 1) being one item;
+    - a state's first version is pinned at the start of its lease's bin, live from before the run, and its last
+      version likewise, live past it; each such lease is one bin, and the arena is the last;
+    - an item is contiguous where a command reaches it through a contiguous operand type: a TensorView, one storage and
+      an affine layout, is contiguous_input and contiguous_output; an access marked `paged` reaches its pages through
+      the value's page table (design/page-maps-2026-11-02.md, "The run's solve", 15);
+    - edges are the solve's (earlier command, later command, kind); places, each item key's runs (first position,
+      pages); bins, each (first, pages, owner), owner ('state', state) or 'arena'; items, each (space serial,
+      invocation)'s key; arena, the arena's pages in use.
+    A lease-backed space is its caller's own storage at every invocation and makes no item."""
     order = sorted(range(len(descriptions)), key=lambda i: (descriptions[i]['order'], i))
-    position = {command: at for at, command in enumerate(order)}
-    edges = frontier_edges([(c, a['root'], a['spans'], a['access']) for c in order
-                            for a in descriptions[c]['accesses'] if a.get('root') is not None and a.get('spans')])
-    inputs = {}
-    for earlier, later in edges:
-        inputs.setdefault(later, []).append(earlier)
-    known = {}
-    items, keys, versions = {}, {}, {}
-    for c in order:
+    keys, index, pages, contiguous, accesses, versions, leases = {}, {}, [], [], [], {}, {}
+    for event, c in enumerate(order):
         invocation = invocation_of(descriptions[c]['order'])
         for access in descriptions[c]['accesses']:
             root = access.get('root')
-            if root is None or spaces[root].lease:
+            if root is None or not access.get('spans') or spaces[root].lease:
                 continue
             space = spaces[root]
             if space.state is not None:
                 state, side = space.state
                 key = ('state', state, invocation if side == 'in' else invocation + 1)
                 versions.setdefault(state, set()).add(key[2])
+                if space.pins:
+                    leases[state] = space.pins
             else:
                 key = ('space', root, invocation)
             keys[root, invocation] = key
-            item = items.setdefault(key, dict(pages=space.pages, first=c, last=c, pins=space.pins))
-            item['last'], item['pages'] = c, max(item['pages'], space.pages)
-    pinned = {}
+            if key not in index:
+                index[key] = len(pages)
+                pages.append(space.pages)
+                contiguous.append(0)
+            item = index[key]
+            pages[item] = max(pages[item], space.pages)
+            contiguous[item] |= 0 if access.get('paged') else 1
+            accesses.extend((event, event, access['access'], item, lo, hi - lo) for lo, hi in access['spans'] if hi > lo)
+    page_bytes = next(iter(spaces.values())).page_bytes if spaces else 1
+    bins, first = [], 0
+    pin, lives = [_stream.RUN_FREE] * len(pages), [0] * len(pages)
     for state, seen in versions.items():
-        for version in (min(seen), max(seen)):
-            key = ('state', state, version)
-            if items[key]['pins']:
-                pinned[key] = items[key]['pins']
-    packed = [key for key in items if key not in pinned]
-    sizes = [items[key]['pages'] for key in packed]
-    begins = [position[items[key]['first']] for key in packed]
-    ends = [position[items[key]['last']] + 1 for key in packed]
-    def settled(done, next_):
-        last, first = items[packed[done]]['last'], items[packed[next_]]['first']
-        return last in ancestors(lambda v: inputs.get(v, ()), first, known)
-    places = _stream.interval_pack(sizes, begins, ends, max(1, sum(sizes)), settled) if packed else []
-    arena = max((place + size for place, size in zip(places, sizes)), default=0)
-    return dict(edges=edges, arena=arena, places=dict(zip(packed, places)), pinned=pinned, items=keys)
+        if state not in leases:
+            continue
+        held = sum(count for _, count, _ in leases[state])
+        bins.append((first, held, ('state', state)))
+        for version, life in ((min(seen), _stream.RUN_BEFORE), (max(seen), _stream.RUN_AFTER)):
+            item = index['state', state, version]
+            pin[item], lives[item] = first, lives[item] | life
+        first += held
+    # the arena's bound is every item's pages, so the bound itself never refuses; the region refuses at its lease
+    bins.append((first, max(1, sum(pages)), 'arena'))
+    solved = _stream.run_solve(page_bytes, len(order), accesses, [], list(zip(pages, pin, lives, contiguous)),
+                               [(at, held) for at, held, _ in bins])
+    return dict(edges=[(order[f], order[t], kind) for f, t, kind, *_ in solved['edges']], bins=bins,
+                places={key: tuple(solved['runs'][item]) for key, item in index.items()}, items=keys,
+                arena=solved['arena'])
 
 
 def _through(relation, physical):

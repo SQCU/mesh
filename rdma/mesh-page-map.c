@@ -240,7 +240,8 @@ static int run_items_apart(const void *context, size_t k, size_t l) {
 int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t accesses,
                    const struct mesh_graph_access *access, size_t links, const uint32_t (*link)[2], size_t items,
                    const struct mesh_run_item *item, size_t bins, const struct mesh_run_bin *bin,
-                   struct mesh_run_plan *plan) {
+                   const struct mesh_run_history *history, struct mesh_run_plan *plan) {
+  (void)history; /* the later passes' operand, stubbed (mesh-page-map.h) */
   memset(plan, 0, sizeof *plan);
   if (!bins || !space->page_bytes || (items && items > SIZE_MAX / items)) return EINVAL;
   for (size_t b = 0; b < bins; b++)
@@ -262,17 +263,17 @@ int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t 
   const size_t m = found + spans + links, n = events;
   plan->edge = malloc((m + 1) * sizeof *plan->edge);
   plan->order = malloc((n + 1) * sizeof *plan->order);
-  plan->place = malloc((items + 1) * sizeof *plan->place);
+  plan->run_first = malloc((items + 1) * sizeof *plan->run_first);
   size_t *first = calloc(n + 2, sizeof *first), *cursor = malloc((n + 1) * sizeof *cursor),
          *by_item = calloc(items + 2, sizeof *by_item), *of_item = malloc((accesses + 1) * sizeof *of_item);
   uint32_t *head = malloc((m + 1) * sizeof *head), *indegree = malloc((n + 1) * sizeof *indegree),
            *ordinal = malloc((n + 1) * sizeof *ordinal), *ends = malloc((accesses + 1) * sizeof *ends),
            *begins = malloc((accesses + 1) * sizeof *begins);
   uint64_t *size = malloc((items + 1) * sizeof *size), *key = malloc((items + 1) * sizeof *key),
-           (*bounds)[2] = malloc((bins + 1) * sizeof *bounds);
-  unsigned char *pinned = malloc(items + 1), *before = calloc((items * items + 7) / 8 + 1, 1);
-  int result = plan->edge && plan->order && plan->place && first && cursor && by_item && of_item && head && indegree &&
-               ordinal && ends && begins && size && key && bounds && pinned && before ? 0 : ENOMEM;
+           *pin = malloc((items + 1) * sizeof *pin), (*bounds)[2] = malloc((bins + 1) * sizeof *bounds);
+  unsigned char *contiguous = malloc(items + 1), *before = calloc((items * items + 7) / 8 + 1, 1);
+  int result = plan->edge && plan->order && plan->run_first && first && cursor && by_item && of_item && head && indegree &&
+               ordinal && ends && begins && size && key && pin && bounds && contiguous && before ? 0 : ENOMEM;
   /* the edges: the dependences, each access's own span, the transport's links; duplicates once */
   if (!result && mesh_graph_dependences(accesses, access, plan->edge, found) != found) result = ENOMEM;
   size_t e = found;
@@ -312,12 +313,12 @@ int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t 
     for (size_t b = 0; b < items; b++)
       if ((item[a].lives & MESH_RUN_AFTER) || (item[b].lives & MESH_RUN_BEFORE))
         before[(a * items + b) / 8] &= (unsigned char)~(1u << ((a * items + b) % 8));
-  /* place: pins, then greedy by size; an item with no access, pin or life holds no page */
+  /* place: pins, contiguous items, then the rest page by page; an item with no access, pin or life holds no page */
   for (size_t k = 0; !result && k < items; k++) {
     const int touched = by_item[k + 1] > by_item[k];
-    pinned[k] = item[k].pin != MESH_RUN_FREE;
-    size[k] = touched || pinned[k] || item[k].lives ? item[k].pages : 0;
-    plan->place[k] = pinned[k] ? item[k].pin : 0;
+    pin[k] = item[k].pin;
+    contiguous[k] = item[k].contiguous != 0;
+    size[k] = touched || pin[k] != MESH_RUN_FREE || item[k].lives ? item[k].pages : 0;
     key[k] = UINT64_MAX;
     for (size_t x = by_item[k]; x < by_item[k + 1]; x++)
       if (ordinal[access[of_item[x]].begin] < key[k]) key[k] = ordinal[access[of_item[x]].begin];
@@ -325,18 +326,17 @@ int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t 
   for (size_t b = 0; !result && b < bins; b++) { bounds[b][0] = bin[b].first; bounds[b][1] = bin[b].pages; }
   const struct run_before relation = {before, items};
   if (!result)
-    result = mesh_graph_place(items, size, key, pinned, bins, (const uint64_t (*)[2])bounds, plan->place,
-                              run_items_apart, &relation);
-  for (size_t k = 0; !result && k < items; k++)
-    if (plan->place[k] != MESH_RUN_FREE && plan->place[k] >= bin[bins - 1].first &&
-        plan->place[k] + size[k] - bin[bins - 1].first > plan->arena)
-      plan->arena = plan->place[k] + size[k] - bin[bins - 1].first;
+    result = mesh_graph_place(items, size, key, contiguous, pin, bins, (const uint64_t (*)[2])bounds, run_items_apart,
+                              &relation, plan->run_first, &plan->runs);
+  for (size_t r = 0; !result && r < plan->run_first[items]; r++)
+    if (plan->runs[r][0] >= bin[bins - 1].first && plan->runs[r][0] + plan->runs[r][1] - bin[bins - 1].first > plan->arena)
+      plan->arena = plan->runs[r][0] + plan->runs[r][1] - bin[bins - 1].first;
   free(first); free(cursor); free(by_item); free(of_item); free(head); free(indegree); free(ordinal); free(ends);
-  free(begins); free(size); free(key); free(bounds); free(pinned); free(before);
+  free(begins); free(size); free(key); free(pin); free(bounds); free(contiguous); free(before);
   if (result) mesh_run_plan_free(plan);
   return result;
 }
 void mesh_run_plan_free(struct mesh_run_plan *plan) {
-  free(plan->edge); free(plan->order); free(plan->place);
+  free(plan->edge); free(plan->order); free(plan->run_first); free(plan->runs);
   memset(plan, 0, sizeof *plan);
 }

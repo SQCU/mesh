@@ -1032,8 +1032,15 @@ static int place_by_size(void *context, const void *left, const void *right) {
   if (r->key[a] != r->key[b]) return r->key[a] < r->key[b] ? -1 : 1;
   return (a > b) - (a < b);
 }
-/* the first placed item (ascending by first unit) that would share a unit of [at, at + size) with `item` and is not
-   apart from it, or SIZE_MAX: only the placed items that can reach `at` are visited (`widest`, the largest placed) */
+/* by key, then by number */
+static int place_by_key(void *context, const void *left, const void *right) {
+  const struct place_rank *r = context;
+  const size_t a = *(const size_t *)left, b = *(const size_t *)right;
+  if (r->key[a] != r->key[b]) return r->key[a] < r->key[b] ? -1 : 1;
+  return (a > b) - (a < b);
+}
+/* the first placed run (ascending by first position) that would share a position of [at, at + size) with `item` and
+   is not apart from it, or SIZE_MAX: only the runs that can reach `at` are visited (`widest`, the largest placed) */
 static size_t place_conflict(const struct placed_item *placed, size_t count, uint64_t widest, uint64_t at, uint64_t size,
                              size_t item, int (*apart)(const void *context, size_t k, size_t l), const void *context) {
   size_t lo = 0, hi = count;
@@ -1043,48 +1050,116 @@ static size_t place_conflict(const struct placed_item *placed, size_t count, uin
     if (placed[y].first + placed[y].size > at && !apart(context, placed[y].item, item)) return y;
   return SIZE_MAX;
 }
-static void place_insert(struct placed_item *placed, size_t *count, struct placed_item item) {
-  size_t y = *count;
-  while (y > 0 && placed[y - 1].first > item.first) { placed[y] = placed[y - 1]; y--; }
-  placed[y] = item;
-  (*count)++;
+/* the placement's state: placed runs ascending by first position, and every run taken, by item at the end */
+struct item_run { size_t item; uint64_t first, pages; };
+struct placing { struct placed_item *placed; size_t count, room; uint64_t widest; struct item_run *taken; size_t takes, take_room; };
+static int item_run_order(const void *left, const void *right) {
+  const struct item_run *a = left, *b = right;
+  if (a->item != b->item) return a->item < b->item ? -1 : 1;
+  return (a->first > b->first) - (a->first < b->first);
 }
-int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const unsigned char *pinned, size_t bins,
-                     const uint64_t (*bin)[2], uint64_t *place, int (*apart)(const void *context, size_t k, size_t l),
-                     const void *context) {
-  struct placed_item *placed = malloc((n + 1) * sizeof *placed);
-  size_t *order = malloc((n + 1) * sizeof *order), count = 0, free_items = 0;
-  if (!placed || !order) { free(placed); free(order); return ENOMEM; }
-  uint64_t widest = 0;
-  int result = 0;
+static int place_take(struct placing *p, size_t item, uint64_t first, uint64_t pages) {
+  if (p->takes == p->take_room) {
+    const size_t grown = p->take_room ? 2 * p->take_room : 64;
+    struct item_run *more = realloc(p->taken, grown * sizeof *more);
+    if (!more) return ENOMEM;
+    p->taken = more; p->take_room = grown;
+  }
+  p->taken[p->takes++] = (struct item_run){item, first, pages};
+  return 0;
+}
+static int place_insert(struct placing *p, const struct item_run *r) {
+  if (p->count == p->room) {
+    const size_t grown = p->room ? 2 * p->room : 64;
+    struct placed_item *more = realloc(p->placed, grown * sizeof *more);
+    if (!more) return ENOMEM;
+    p->placed = more; p->room = grown;
+  }
+  size_t y = p->count;
+  while (y > 0 && p->placed[y - 1].first > r->first) { p->placed[y] = p->placed[y - 1]; y--; }
+  p->placed[y] = (struct placed_item){r->first, r->pages, r->item};
+  p->count++;
+  if (r->pages > p->widest) p->widest = r->pages;
+  return 0;
+}
+int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const unsigned char *contiguous,
+                     const uint64_t *pin, size_t bins, const uint64_t (*bin)[2],
+                     int (*apart)(const void *context, size_t k, size_t l), const void *context, size_t *run_first,
+                     uint64_t (**runs)[2]) {
+  struct placing p = {0};
+  size_t *order = malloc((n + 1) * sizeof *order), whole = 0, paged = 0;
+  *runs = NULL;
+  int result = order ? 0 : ENOMEM;
+  /* order: the contiguous items, then the others; pins are neither */
   for (size_t k = 0; !result && k < n; k++) {
-    if (!size[k]) { place[k] = UINT64_MAX; continue; }
-    if (!(pinned && pinned[k])) { order[free_items++] = k; continue; }
+    if (!size[k] || pin[k] != UINT64_MAX) continue;
+    if (contiguous && contiguous[k]) order[whole++] = k;
+  }
+  for (size_t k = 0; !result && k < n; k++)
+    if (size[k] && pin[k] == UINT64_MAX && !(contiguous && contiguous[k])) order[whole + paged++] = k;
+  /* pins: one run each, inside one bin, apart from every pin it meets */
+  for (size_t k = 0; !result && k < n; k++) {
+    if (!size[k] || pin[k] == UINT64_MAX) continue;
     size_t b = 0;
-    while (b < bins && !(bin[b][0] <= place[k] && place[k] - bin[b][0] <= bin[b][1] && size[k] <= bin[b][1] - (place[k] - bin[b][0]))) b++;
+    while (b < bins && !(bin[b][0] <= pin[k] && pin[k] - bin[b][0] <= bin[b][1] && size[k] <= bin[b][1] - (pin[k] - bin[b][0]))) b++;
     if (b == bins) { result = EINVAL; break; }
-    if (place_conflict(placed, count, widest, place[k], size[k], k, apart, context) != SIZE_MAX) { result = EBUSY; break; }
-    place_insert(placed, &count, (struct placed_item){place[k], size[k], k});
-    if (size[k] > widest) widest = size[k];
+    if (place_conflict(p.placed, p.count, p.widest, pin[k], size[k], k, apart, context) != SIZE_MAX) { result = EBUSY; break; }
+    result = place_take(&p, k, pin[k], size[k]);
+    if (!result) result = place_insert(&p, p.taken + p.takes - 1);
   }
   struct place_rank rank = {size, key};
-  if (!result) qsort_r(order, free_items, sizeof *order, &rank, place_by_size);
-  for (size_t x = 0; !result && x < free_items; x++) {
+  if (!result) {
+    qsort_r(order, whole, sizeof *order, &rank, place_by_size);
+    qsort_r(order + whole, paged, sizeof *order, &rank, place_by_key);
+  }
+  /* contiguous items: one range in the first bin where every run it meets is apart from it */
+  for (size_t x = 0; !result && x < whole; x++) {
     const size_t l = order[x];
     int found = 0;
     for (size_t b = 0; !found && b < bins; b++) {
       if (size[l] > bin[b][1]) continue;
       const uint64_t last = bin[b][0] + (bin[b][1] - size[l]);
       for (uint64_t at = bin[b][0]; at <= last;) {
-        const size_t y = place_conflict(placed, count, widest, at, size[l], l, apart, context);
-        if (y == SIZE_MAX) { place[l] = at; found = 1; break; }
-        at = placed[y].first + placed[y].size;
+        const size_t y = place_conflict(p.placed, p.count, p.widest, at, size[l], l, apart, context);
+        if (y == SIZE_MAX) { found = 1; result = place_take(&p, l, at, size[l]); break; }
+        at = p.placed[y].first + p.placed[y].size;
       }
     }
-    if (!found) { result = ENOMEM; break; }
-    place_insert(placed, &count, (struct placed_item){place[l], size[l], l});
-    if (size[l] > widest) widest = size[l];
+    if (!result && !found) result = ENOMEM;
+    if (!result) result = place_insert(&p, p.taken + p.takes - 1);
   }
-  free(placed); free(order);
+  /* every other item: the lowest free positions, page by page, joined into runs within a bin */
+  for (size_t x = whole; !result && x < whole + paged; x++) {
+    const size_t l = order[x], mine = p.takes;
+    uint64_t need = size[l];
+    for (size_t b = 0; !result && need && b < bins; b++) {
+      const uint64_t end = bin[b][0] + bin[b][1];
+      for (uint64_t at = bin[b][0]; !result && need && at < end;) {
+        const size_t y = place_conflict(p.placed, p.count, p.widest, at, 1, l, apart, context);
+        if (y != SIZE_MAX) { at = p.placed[y].first + p.placed[y].size; continue; }
+        const uint64_t start = at;
+        while (need && at < end && place_conflict(p.placed, p.count, p.widest, at, 1, l, apart, context) == SIZE_MAX) {
+          at++; need--;
+        }
+        result = place_take(&p, l, start, at - start);
+      }
+    }
+    if (!result && need) result = ENOMEM;
+    for (size_t r = mine; !result && r < p.takes; r++) result = place_insert(&p, p.taken + r);
+  }
+  /* each item's runs, by item and position */
+  if (!result) {
+    qsort(p.taken, p.takes, sizeof *p.taken, item_run_order);
+    *runs = malloc((p.takes + 1) * sizeof **runs);
+    if (!*runs) result = ENOMEM;
+  }
+  for (size_t k = 0; !result && k <= n; k++) run_first[k] = 0;
+  for (size_t r = 0; !result && r < p.takes; r++) {
+    run_first[p.taken[r].item + 1]++;
+    (*runs)[r][0] = p.taken[r].first; (*runs)[r][1] = p.taken[r].pages;
+  }
+  for (size_t k = 0; !result && k < n; k++) run_first[k + 1] += run_first[k];
+  if (result) { free(*runs); *runs = NULL; }
+  free(p.placed); free(p.taken); free(order);
   return result;
 }

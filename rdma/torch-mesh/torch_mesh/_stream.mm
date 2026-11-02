@@ -1266,14 +1266,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   // the region's page size: a chooser's figure for its virtual spaces (design/page-maps-2026-11-02.md)
   // mesh-page-map.h mesh_run_solve, the run's one allocator and scheduler (design/page-maps-2026-11-02.md, "The run's
   // solve, each choice and its ground"), integers in and out: accesses (begin, end, mode, item, first byte, bytes) in
-  // the declared order, links (from, to), items (pages, pin or RUN_FREE, lives), bins (first, pages) with the arena
-  // last -> dict(edges [(from, to, kind, item, first, bytes)], order, place, arena). Raises with the solve's failure, a
-  // compile-time one.
+  // the declared order, links (from, to), items (pages, pin or RUN_FREE, lives, contiguous), bins (first, pages) with
+  // the arena last -> dict(edges [(from, to, kind, item, first, bytes)], order, runs [[(first, pages)] an item],
+  // arena). Raises with the solve's failure, a compile-time one.
   module.attr("RUN_FREE") = pybind11::int_(MESH_RUN_FREE);
+  module.attr("RUN_BEFORE") = pybind11::int_((int)MESH_RUN_BEFORE);
+  module.attr("RUN_AFTER") = pybind11::int_((int)MESH_RUN_AFTER);
   module.def("run_solve", [](uint64_t page_bytes, uint32_t events,
                              const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t>> &accesses,
                              const std::vector<std::pair<uint32_t, uint32_t>> &links,
-                             const std::vector<std::tuple<uint64_t, uint64_t, uint32_t>> &items,
+                             const std::vector<std::tuple<uint64_t, uint64_t, uint32_t, uint32_t>> &items,
                              const std::vector<std::pair<uint64_t, uint64_t>> &bins) {
     std::vector<mesh_graph_access> access;
     for (const auto &a : accesses)
@@ -1281,14 +1283,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     std::vector<uint32_t> link;
     for (const auto &l : links) { link.push_back(l.first); link.push_back(l.second); }
     std::vector<mesh_run_item> item;
-    for (const auto &i : items) item.push_back({std::get<0>(i), std::get<1>(i), std::get<2>(i)});
+    for (const auto &i : items) item.push_back({std::get<0>(i), std::get<1>(i), std::get<2>(i), std::get<3>(i)});
     std::vector<mesh_run_bin> bin;
     for (const auto &b : bins) bin.push_back({b.first, b.second});
     const mesh_page_space space{page_bytes, 0};
     mesh_run_plan plan;
     const int status = mesh_run_solve(&space, events, access.size(), access.data(), links.size(),
                                       reinterpret_cast<const uint32_t (*)[2]>(link.data()), item.size(), item.data(),
-                                      bin.size(), bin.data(), &plan);
+                                      bin.size(), bin.data(), nullptr, &plan);
     TORCH_CHECK(!status, "run_solve: ", status == ENOMEM ? "the run's live set exceeds its bins" :
                 status == EBUSY ? "two pinned items meet while both are live" :
                 "an access outside its item or events, unordered bins, a pin in no bin, or a cycle in the edges",
@@ -1301,7 +1303,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     pybind11::dict out;
     out["edges"] = edges;
     out["order"] = std::vector<uint32_t>(plan.order, plan.order + events);
-    out["place"] = std::vector<uint64_t>(plan.place, plan.place + item.size());
+    pybind11::list runs;
+    for (size_t k = 0; k < item.size(); k++) {
+      pybind11::list own;
+      for (size_t r = plan.run_first[k]; r < plan.run_first[k + 1]; r++) own.append(pybind11::make_tuple(plan.runs[r][0], plan.runs[r][1]));
+      runs.append(own);
+    }
+    out["runs"] = runs;
     out["arena"] = plan.arena;
     mesh_run_plan_free(&plan);
     return out;

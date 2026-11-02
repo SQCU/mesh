@@ -121,8 +121,10 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
 enum { MESH_RUN_BEFORE = 1, MESH_RUN_AFTER = 2 }; /* an item live from before the run starts, or past its end */
 #define MESH_RUN_FREE UINT64_MAX
 /* an item: a value at an invocation, a state's version, a collective's own value, or a coexisting buffer (pinned, with
-   `lives`): its pages, and its first position where it is pinned (else MESH_RUN_FREE) */
-struct mesh_run_item { uint64_t pages, pin; uint32_t lives; };
+   `lives`): its pages; its first position where it is pinned (else MESH_RUN_FREE); `contiguous` where a function typed
+   contiguous_input or contiguous_output reads or writes it, so it gets one range in one bin. Every other item's pages
+   are any positions in any bins: every other function takes arbitrary views of arbitrarily placed pages. */
+struct mesh_run_item { uint64_t pages, pin; uint32_t lives, contiguous; };
 /* positions [first, first + pages) of one lease; the last bin is the arena, `pages` its most */
 struct mesh_run_bin { uint64_t first, pages; };
 /* the solve's result, owned by the caller after mesh_run_solve until mesh_run_plan_free */
@@ -130,21 +132,25 @@ struct mesh_run_plan {
   size_t edges;
   struct mesh_graph_dependence *edge; /* every ordering the effectors realize: the dependences and LINK edges */
   uint32_t *order;                    /* the events in issue order, each agent's order its subsequence */
-  uint64_t *place;                    /* each item's first position, MESH_RUN_FREE where it holds none */
+  size_t *run_first;                  /* item k's runs are runs[run_first[k] .. run_first[k + 1]), none where it holds no page */
+  uint64_t (*runs)[2];                /* (first position, pages), ascending within an item, each inside one bin */
   uint64_t arena;                     /* positions of the last bin in use: the arena's pages, held from load */
 };
+/* The last k solutions and their measured per-case rates, for the later passes (design/page-maps-2026-11-02.md, "The
+   run's solve", 11). Stubbed: its type is not written yet, and the solve reads none; pass NULL. */
+struct mesh_run_history;
 /* type: (Space, events, [Access] in the declared order, [(from, to)] links, [Item], [Bin]) -> Plan with:
    - edges: mesh_graph_dependences over the accesses, each access's begin -> end where they differ, and the links;
    - order: the least-numbered ready event first (mesh_graph_order), so the declared order where the edges leave it;
-   - place: two items share a position only where every access of one happens before every access of the other over
-     the edges (an item live before the run has nothing before it; one live past it has nothing after); pinned items at
-     their pins; greedy by size (mesh_graph_place).
+   - runs: two items share a position only where every access of one happens before every access of the other over
+     the edges (an item live before the run has nothing before it; one live past it has nothing after); pinned items
+     at their pins, contiguous items one range each, the others page by page (mesh_graph_place).
    No edge is added for reuse. 0; EINVAL for an access outside its item or its events, unordered bins, a pin in no bin,
    or a cycle in the edges; EBUSY where two pins meet; ENOMEM where the run's live set exceeds its bins. */
 int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t accesses,
                    const struct mesh_graph_access *access, size_t links, const uint32_t (*link)[2], size_t items,
                    const struct mesh_run_item *item, size_t bins, const struct mesh_run_bin *bin,
-                   struct mesh_run_plan *plan);
+                   const struct mesh_run_history *history, struct mesh_run_plan *plan);
 void mesh_run_plan_free(struct mesh_run_plan *plan);
 
 #ifdef __cplusplus

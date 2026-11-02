@@ -264,16 +264,23 @@ size_t mesh_graph_dependences(size_t n, const struct mesh_graph_access *access, 
 int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                           const void *context, size_t sets, const size_t *source_first, const uint32_t *source,
                           const size_t *target_first, const uint32_t *target, unsigned char *precedes);
-/* type: n x (size, key), pins, bins [first, first + pages) ascending and disjoint, apart -> place[n]: each item within
-   one bin, a pinned item at its given place, and every two items sharing a unit apart. apart(k, l) is symmetric: one's
-   accesses all happen before the other's. Greedy by size: pins first; then the largest item first, ties by key (a
-   topological order of first accesses), each at the lowest unit of the first bin where every placed item it would
-   share a unit with is apart from it (Pisarchyk and Lee 2020; the exclusion graph of Desnos et al. 2013). Zero-size
-   items are placed nowhere. 0; EINVAL where a pin lies in no bin; EBUSY where two pins meet unapart; ENOMEM where an
-   item fits no bin: compile-time failures. Consumer: the run's solve (mesh-page-map.h). */
-int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const unsigned char *pinned, size_t bins,
-                     const uint64_t (*bin)[2], uint64_t *place, int (*apart)(const void *context, size_t k, size_t l),
-                     const void *context);
+/* type: n x (size, key, contiguous, pin), bins [first, first + pages) ascending and disjoint, apart -> each item's runs
+   (first position, pages), item k's at runs[run_first[k] .. run_first[k + 1]) ascending, *runs the callee's (free it):
+   - a pinned item (pin[k] != UINT64_MAX) is one run at its pin, inside one bin;
+   - a contiguous item (a contiguous_input or contiguous_output function reads or writes it) is one run in one bin;
+   - every other item takes any free positions, one page at a time, in any bins: no function addresses it but
+     through its pages;
+   and no two items not apart share a position. apart(k, l) is symmetric: one's accesses all happen before the
+   other's. Pins first; then contiguous items greedy by size (the largest first, ties by key: Pisarchyk and Lee 2020),
+   each at the lowest free range of the first bin it fits; then the others in key order (a topological order of first
+   accesses), page by page from the lowest free position. Page by page leaves no external fragmentation, so the
+   hardness of dynamic storage allocation touches the contiguous items alone. The exclusion relation is Desnos et
+   al.'s (2013). Zero-size items get no run. 0; EINVAL where a pin lies in no bin; EBUSY where two pins meet unapart;
+   ENOMEM where the bins cannot hold an item: compile-time failures. Consumer: the run's solve (mesh-page-map.h). */
+int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const unsigned char *contiguous,
+                     const uint64_t *pin, size_t bins, const uint64_t (*bin)[2],
+                     int (*apart)(const void *context, size_t k, size_t l), const void *context, size_t *run_first,
+                     uint64_t (**runs)[2]);
 
 #ifdef __cplusplus
 }
