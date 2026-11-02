@@ -7469,21 +7469,31 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
   struct mesh_page_runs physical={0};
   const void **owners=NULL;size_t owner_count=0,owner_room=0,bytes=0,page=0;
   int error=0;void *view=MAP_FAILED;struct ncclMeshPageTable *table=NULL;
+  /* which selection and which condition refused it, in the failure's message (the LSTM's metadata composition was
+     refused with EINVAL alone, 2026-11-01) */
+  const char *why="";size_t which=0;
   pthread_mutex_lock(&attach_lock);
   for(size_t k=0;!error&&k<count;k++) {
     const ncclMeshPageSelection selection=selections[k];ncclMeshPageTable_t source=selection.storage;
-    if(!source||selection.first>source->pages||selection.count>source->pages-selection.first){error=EINVAL;break;}
+    if(!source||selection.first>source->pages||selection.count>source->pages-selection.first){
+      error=EINVAL;which=k;why=!source?"no table":"pages past its table's";break;
+    }
     if(!selection.count)continue;
     struct attach *held=NULL;struct lease *lease=lease_at(address_of(source->base),&held);
     if(!lease||lease->returned||(attachment&&attachment!=held)||(comm&&comm->attach!=held)||
-       (page&&page!=source->page_bytes)||alignment%source->page_bytes){error=EINVAL;break;}
+       (page&&page!=source->page_bytes)||alignment%source->page_bytes){
+      error=EINVAL;which=k;
+      why=!lease?"its storage is no lease (a stream page or an unregistered buffer)":lease->returned?"its lease was returned":
+          (attachment&&attachment!=held)||(comm&&comm->attach!=held)?"another region's":"a page width unlike the others'";
+      break;
+    }
     attachment=held;page=source->page_bytes;
     if(selection.count>(SIZE_MAX-bytes)/page){error=EOVERFLOW;break;}
     const size_t size=(size_t)selection.count*page,first=(size_t)selection.first*page;
     struct mesh_page_runs selected={0};
     for(size_t at=0;!error&&at<size;) {
       const struct mesh_page_run *run=mesh_page_run_at(&source->storage,first+at);
-      if(!run){error=EINVAL;break;}
+      if(!run){error=EINVAL;which=k;why="a page its table has no run for";break;}
       const size_t remaining=run->end-first-at,length=size-at<remaining?size-at:remaining;
       error=mesh_page_run_add(&physical,bytes+at,length,run->offset+first+at-run->first);
       if(!error&&lease->owners_count)
@@ -7514,7 +7524,7 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
     }
     free(selected.at);
   }
-  if(!error&&!bytes)error=EINVAL;
+  if(!error&&!bytes){error=EINVAL;why="no pages selected";}
   if(!error&&bytes>SIZE_MAX-(alignment-page))error=EOVERFLOW;
   if(!error) {
     const size_t reserved=bytes+alignment-page;
@@ -7532,7 +7542,7 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
     mach_vm_address_t at=(uintptr_t)view+run.first;vm_prot_t current,maximum;
     const kern_return_t mapped=mach_vm_remap(mach_task_self(),&at,run.end-run.first,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,
       mach_task_self(),(uintptr_t)attachment->context.M+run.offset,FALSE,&current,&maximum,VM_INHERIT_NONE);
-    if(mapped!=KERN_SUCCESS)error=mapped==KERN_NO_SPACE||mapped==KERN_RESOURCE_SHORTAGE?ENOMEM:EINVAL;
+    if(mapped!=KERN_SUCCESS){error=mapped==KERN_NO_SPACE||mapped==KERN_RESOURCE_SHORTAGE?ENOMEM:EINVAL;which=k;why="its remap";}
   }
   if(!error) {
     table=calloc(1,sizeof *table);
@@ -7557,7 +7567,8 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
     if(view!=MAP_FAILED)munmap(view,bytes);
     free(physical.at);free(owners);
     if(table){free(table->storage.at);free(table);}
-    return fail(error==EINVAL?ncclInvalidArgument:ncclSystemError,"composing page operands: %s",strerror(error));
+    return fail(error==EINVAL?ncclInvalidArgument:ncclSystemError,"composing page operands: %s (selection %zu of %zu: %s)",
+                strerror(error),which,count,why);
   }
   if(metal) {
     ncclMeshBuffer binding={0};ncclResult_t status=ncclMeshPageTableBinding(table,&binding);
