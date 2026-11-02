@@ -1350,6 +1350,53 @@ static NSArray *PageSourceIncidence(MetalPageEffects *effects) {
     }
     return compiled;
 }
+/* A list's observations, those of one word one wait at each group's greatest threshold: a landed count only grows, so
+   the greatest threshold a group waits for on a word implies every smaller one. Observations with coverage keep their
+   own fragments, and a list is never merged with another (a later phase's threshold may wait on this command's own
+   output). Changed by the LSTM demonstration session: a fragment each domain, and each LSTM product's prologue spun
+   on 48 domains' thresholds over a few words, one after another, all of them already landed but the last (the
+   generated sources, 2026-11-01). What must stay: every group waits until each word reaches the greatest threshold
+   any of the list's observations sets it. */
+static NSString *PageObservations(NSArray<NSNumber *> *ordinals,NSDictionary *observations,NSDictionary *plain,
+    MetalPageCommand *command,NSUInteger index,id<MTLDevice> device,MetalPageFields *fields,BOOL gpu) {
+    NSMutableString *text=[NSMutableString string];
+    NSMutableDictionary<NSNumber *,NSMutableArray<NSNumber *> *> *byWord=[NSMutableDictionary dictionary];
+    NSMutableArray<NSNumber *> *words=[NSMutableArray array];
+    for(NSNumber *ordinal in ordinals) {
+        NSArray *parts=plain[ordinal];
+        if(!parts){[text appendString:observations[ordinal]?:@""];continue;}
+        NSMutableArray *same=byWord[parts[0]];if(!same){byWord[parts[0]]=same=[NSMutableArray array];[words addObject:parts[0]];}
+        [same addObject:ordinal];
+    }
+    for(NSNumber *key in words) {
+        NSArray<NSNumber *> *same=byWord[key];
+        if(same.count==1){[text appendString:observations[same[0]]];continue;}
+        const NSUInteger groups=command->groups;
+        NSMutableData *greatest=[NSMutableData dataWithLength:groups*sizeof(uint64_t)];uint64_t *top=greatest.mutableBytes;
+        NSArray *chosen=plain[same[0]];uint64_t best=0;
+        for(NSNumber *ordinal in same) {
+            NSArray *parts=plain[ordinal];MetalPageDomain *domain=parts[1];MetalPageTransfer *t=parts[4];
+            const uint64_t *thresholds=domain->thresholds[index].bytes;const int64_t *rows=domain->observationRows[index].bytes;
+            for(NSUInteger g=0;g<groups;g++)if(rows[g]>=0&&thresholds[g]>top[g])top[g]=thresholds[g];
+            if(t->effect.threshold>=best){best=t->effect.threshold;chosen=parts;}
+        }
+        BOOL uniform=YES;for(NSUInteger g=1;g<groups;g++)uniform&=top[g]==top[0];
+        MetalPageTransfer *t=chosen[4];
+        const NSUInteger count=uniform?1:groups;
+        NSMutableData *record=[NSMutableData dataWithLength:(3+count)*sizeof(uint64_t)];
+        uint64_t *data=record.mutableBytes;data[0]=t->effect.polls;data[1]=t->effect.channel;data[2]=t->effect.entry;
+        memcpy(data+3,top,count*sizeof(uint64_t));
+        id<MTLBuffer> table=PageData(device,record);
+        NSString *operand=PageField([fields add:table offset:0 bytes:record.length access:MetalReachRead]);
+        NSString *array=[NSString stringWithFormat:gpu?@"((device const ulong *)%@)":@"((const uint64_t *)%@)",operand];
+        NSString *threshold=[NSString stringWithFormat:@"%@[3ul%@]",array,uniform?@"":@"+mesh_effect_group"];
+        NSString *fragment=[NSString stringWithFormat:@"mesh_step_observe(%@%@, %@, %@, (unsigned int)%@[0], (unsigned int)%@[1], %@[2]);\n",
+            gpu?@"":@"(volatile uint64_t *)",chosen[2],threshold,chosen[3],array,array,array];
+        if(!uniform)fragment=[NSString stringWithFormat:@"if(%@){%@}\n",threshold,fragment];
+        [text appendString:fragment];
+    }
+    return text;
+}
 MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger index,id<MTLDevice> device) {
     MetalPageCommand *command=effects->commands[index];const BOOL gpu=command->backend==MetalPageMetal;
     MetalPageSource *result=[[[MetalPageSource alloc] init] autorelease];
@@ -1357,6 +1404,8 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
     NSMutableString *helpers=[NSMutableString string];NSMutableArray *before=[NSMutableArray array],*after=[NSMutableArray array];
     for(NSUInteger phase=0;phase<=command->sites.count;phase++){[before addObject:[NSMutableString string]];[after addObject:[NSMutableString string]];}
     NSMutableDictionary *observations=[NSMutableDictionary dictionary];
+    // each observation without coverage: its word, domain, word field, violation field and transfer (PageObservations)
+    NSMutableDictionary *plain=[NSMutableDictionary dictionary];
     NSMutableIndexSet *observed=[NSMutableIndexSet indexSet],*published=[NSMutableIndexSet indexSet];
     NSUInteger ordinal=0;
     for(NSUInteger domainIndex=0;domainIndex<effects->domains.count;domainIndex++) {
@@ -1395,6 +1444,7 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
             }
             if(!uniform)fragment=[NSString stringWithFormat:@"if(%@){%@}\n",threshold,fragment];
             observations[@(domainIndex)]=fragment;
+            if(!t->coverage)plain[@(domainIndex)]=@[PageWord(t->effect.word),domain,word,violation,t];
             continue;
         }
         [published addIndexes:domain->publishedSlots[index]];
@@ -1412,12 +1462,11 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
             bytes:sizeof(uint32_t) access:MetalReachRead]);
         activityPredicate=[NSString stringWithFormat:gpu?@"mesh_payload((volatile coherent(system) device const uint *)%@)!=0":
             @"__atomic_load_n((const uint32_t *)%@,__ATOMIC_ACQUIRE)!=0",mask];
-        for(NSNumber *ordinal in effects->solved[index][@"activity"])
-            [activityInputs appendString:observations[ordinal]];
+        [activityInputs appendString:PageObservations(effects->solved[index][@"activity"],observations,plain,command,index,device,fields,gpu)];
     }
     NSArray *phases=effects->solved[index][@"phases"];
     for(NSUInteger phase=0;phase<before.count;phase++)
-        for(NSNumber *ordinal in phases[phase])[before[phase] appendString:observations[ordinal]];
+        [before[phase] appendString:PageObservations(phases[phase],observations,plain,command,index,device,fields,gpu)];
     result->observedSlots=[PageIndices(observed) copy];result->publishedSlots=[PageIndices(published) copy];
     if(!fields->fields.count){result->source=[(command->backend==MetalPageCPU&&command->sites.count?
         [@MESH_PAGE_HOST_SITES_SOURCE stringByAppendingString:command->source]:command->source) copy];result->reaches=[[NSData alloc] init];return result;}
