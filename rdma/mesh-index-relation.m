@@ -3,6 +3,8 @@
 #include <isl/id.h>
 #include <isl/ilp.h>
 #include <isl/val.h>
+#include <isl/point.h>
+#include <isl/constraint.h>
 #include "mesh-isl-memory.h"
 #include <string.h>
 
@@ -217,6 +219,89 @@ static isl_set *SetAbsorbIntervals(isl_set *set) {
     }
     isl_basic_set_list_free(parts);isl_set_free(intervals);isl_set_free(set);return result;
 }
+/* A one-dimensional basic set without divisions is an interval, read from its constraints (a x + k >= 0 and the
+   equalities). */
+struct SetBounds { int64_t low,high; BOOL lower,upper,empty,general; };
+static isl_stat SetBound(isl_constraint *constraint,void *user) {
+    struct SetBounds *b=user;
+    isl_val *a=isl_constraint_get_coefficient_val(constraint,isl_dim_set,0),*k=isl_constraint_get_constant_val(constraint);
+    if(!isl_val_is_int(a)||!isl_val_is_int(k))b->general=YES;
+    else {
+        const int64_t x=isl_val_get_num_si(a),c=isl_val_get_num_si(k);
+        if(isl_constraint_is_equality(constraint)) {
+            if(!x){if(c)b->empty=YES;}
+            else if(c%x)b->empty=YES;
+            else {const int64_t v=-c/x;b->low=b->lower?MAX(b->low,v):v;b->high=b->upper?MIN(b->high,v):v;b->lower=b->upper=YES;}
+        } else if(x>0) {
+            const int64_t v=(-c>=0?(-c+x-1)/x:-(c/x));b->low=b->lower?MAX(b->low,v):v;b->lower=YES;
+        } else if(x<0) {
+            const int64_t y=-x,v=(c>=0?c/y:-((-c+y-1)/y));b->high=b->upper?MIN(b->high,v):v;b->upper=YES;
+        } else if(c<0)b->empty=YES;
+    }
+    isl_val_free(a);isl_val_free(k);isl_constraint_free(constraint);return isl_stat_ok;
+}
+static int SetIntervalOrder(const void *a,const void *b) { const int64_t *x=a,*y=b;return x[0]<y[0]?-1:x[0]>y[0]; }
+/* the set's elements as sorted, merged intervals [low, high] into `out` where every basic set is division-free (read
+   from its constraints) or where the set spans at most SET_POINT_SPAN positions (its points enumerated into a bitmap):
+   no set is built or subtracted, so no division is eliminated. NO otherwise. */
+#define SET_POINT_SPAN (UINT64_C(1)<<22)
+static isl_stat SetPoint(isl_point *point,void *user) {
+    uint64_t **bits=user;isl_val *v=isl_point_get_coordinate_val(point,isl_dim_set,0);
+    const int64_t at=isl_val_get_num_si(v)-(int64_t)bits[1][0];isl_val_free(v);isl_point_free(point);
+    bits[0][at/64]|=UINT64_C(1)<<(at%64);return isl_stat_ok;
+}
+static BOOL SetIntervals(isl_set *set,NSMutableData *out) {
+    if(isl_set_dim(set,isl_dim_set)!=1||isl_set_dim(set,isl_dim_param)!=0)return NO;
+    isl_basic_set_list *parts=isl_set_get_basic_set_list(set);
+    const isl_size count=isl_basic_set_list_size(parts);
+    NSMutableData *raw=[NSMutableData data];BOOL plain=YES;
+    for(isl_size i=0;plain&&i<count;i++) {
+        isl_basic_set *part=isl_basic_set_list_get_at(parts,i);struct SetBounds b={0};
+        if(isl_basic_set_dim(part,isl_dim_div)!=0)plain=NO;
+        else if(isl_basic_set_foreach_constraint(part,SetBound,&b)<0||b.general||(!b.empty&&(!b.lower||!b.upper)))plain=NO;
+        else if(!b.empty&&b.low<=b.high){const int64_t iv[2]={b.low,b.high};[raw appendBytes:iv length:sizeof iv];}
+        isl_basic_set_free(part);
+    }
+    isl_basic_set_list_free(parts);
+    if(!plain) {
+        [raw setLength:0];
+        if(isl_set_is_empty(set)==isl_bool_true)return YES;
+        isl_val *lo=isl_set_dim_min_val(isl_set_copy(set),0),*hi=isl_set_dim_max_val(isl_set_copy(set),0);
+        const BOOL bounded=isl_val_is_int(lo)&&isl_val_is_int(hi);
+        const int64_t low=bounded?isl_val_get_num_si(lo):0,high=bounded?isl_val_get_num_si(hi):-1;
+        isl_val_free(lo);isl_val_free(hi);
+        if(!bounded||high<low||(uint64_t)(high-low)+1>SET_POINT_SPAN)return NO;
+        const uint64_t span=(uint64_t)(high-low)+1,words=(span+63)/64;
+        uint64_t *map=calloc(words,sizeof *map),origin=(uint64_t)low,*bits[2]={map,&origin};
+        if(!map||isl_set_foreach_point(set,SetPoint,bits)<0){free(map);return NO;}
+        for(uint64_t at=0;at<span;) {
+            if(!(map[at/64]>>(at%64)&1)){at++;continue;}
+            uint64_t end=at;while(end+1<span&&(map[(end+1)/64]>>((end+1)%64)&1))end++;
+            const int64_t iv[2]={low+(int64_t)at,low+(int64_t)end};[raw appendBytes:iv length:sizeof iv];at=end+1;
+        }
+        free(map);[out appendData:raw];return YES;
+    }
+    int64_t *iv=raw.mutableBytes;const size_t n=raw.length/(2*sizeof(int64_t));
+    qsort(iv,n,2*sizeof(int64_t),SetIntervalOrder);
+    for(size_t k=0;k<n;k++) {
+        int64_t *last=out.length?(int64_t *)out.mutableBytes+out.length/sizeof(int64_t)-2:NULL;
+        if(last&&iv[2*k]<=last[1]+1){if(iv[2*k+1]>last[1])last[1]=iv[2*k+1];}
+        else [out appendBytes:iv+2*k length:2*sizeof(int64_t)];
+    }
+    return YES;
+}
+/* sorted disjoint maximal intervals as (first, width, step, repeats) runs: each run an interval and the next ones of
+   its width at its step, the peel's own form */
+static void SetRunsOfIntervals(const int64_t *iv,size_t n,NSMutableData *runs) {
+    for(size_t k=0;k<n;) {
+        const int64_t first=iv[2*k],width=iv[2*k+1]-iv[2*k]+1;
+        int64_t step=k+1<n?iv[2*(k+1)]-first:0;size_t m=k+1;
+        while(m<n&&iv[2*m]==first+(int64_t)(m-k)*step&&iv[2*m+1]-iv[2*m]+1==width)m++;
+        const int64_t repeats=(int64_t)(m-k);if(repeats==1)step=0;
+        const int64_t run[4]={first,width,step,repeats};[runs appendBytes:run length:sizeof run];k=m;
+    }
+}
+
 int64_t *MeshIndexSetRuns(isl_set *set,size_t *count) { @autoreleasepool {
     *count=0;
     // Projection can leave many overlapping descriptions of the same bytes.
@@ -226,6 +311,17 @@ int64_t *MeshIndexSetRuns(isl_set *set,size_t *count) { @autoreleasepool {
     remaining=SetAbsorbIntervals(remaining);
     remaining=isl_set_coalesce(isl_set_detect_equalities(remaining));
     NSMutableData *runs=[NSMutableData data];
+    /* its intervals read whole where they can be (SetIntervals), the runs formed from them; the peel below subtracts each
+       run from what remains and eliminates the set's divisions each time, past 60 s for the LSTM's h stored units first
+       in placement's layout union (2026-11-01). Changed by the LSTM demonstration session. What must stay: the same
+       positions, as runs. */
+    NSMutableData *intervals=[NSMutableData data];
+    if(SetIntervals(remaining,intervals)) {
+        SetRunsOfIntervals(intervals.bytes,intervals.length/(2*sizeof(int64_t)),runs);
+        isl_set_free(remaining);
+        int64_t *result=mesh_isl_malloc(runs.length?runs.length:1);if(!result)return NULL;
+        *count=runs.length/(4*sizeof(int64_t));if(runs.length)memcpy(result,runs.bytes,runs.length);return result;
+    }
     while(isl_set_is_empty(remaining)==isl_bool_false) {
         NSInteger first=SetEdge(remaining,NO),end=SetEdge(remaining,YES)+1;
         isl_set *holes=isl_set_subtract(SetInterval(ctx,first,end),isl_set_copy(remaining));

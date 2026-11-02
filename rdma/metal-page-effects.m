@@ -337,56 +337,9 @@ static void PageGroupsRecord(isl_set *groups,size_t count,uint64_t started) {
             (unsigned long long)calls,total,text?text:"");
     mesh_isl_free(text);fflush(out);
 }
-/* A one-dimensional basic set without divisions is an interval, read from its constraints: the bounds a x + k >= 0
-   (and equalities) give. NO where it has divisions, parameters or an unbounded side. */
-struct PageBounds { int64_t low,high; BOOL lower,upper,empty,general; };
-static isl_stat PageBound(isl_constraint *constraint,void *user) {
-    struct PageBounds *b=user;
-    isl_val *a=isl_constraint_get_coefficient_val(constraint,isl_dim_set,0),*k=isl_constraint_get_constant_val(constraint);
-    if(!isl_val_is_int(a)||!isl_val_is_int(k)){b->general=YES;}
-    else {
-        const int64_t x=isl_val_get_num_si(a),c=isl_val_get_num_si(k);
-        if(isl_constraint_is_equality(constraint)) {
-            if(!x){if(c)b->empty=YES;}
-            else if(c%x){b->empty=YES;}
-            else {const int64_t v=-c/x;b->low=b->lower?MAX(b->low,v):v;b->high=b->upper?MIN(b->high,v):v;b->lower=b->upper=YES;}
-        } else if(x>0) {
-            const int64_t v=(-c>=0?(-c+x-1)/x:-((c)/x));b->low=b->lower?MAX(b->low,v):v;b->lower=YES;
-        } else if(x<0) {
-            const int64_t y=-x,v=(c>=0?c/y:-((-c+y-1)/y));b->high=b->upper?MIN(b->high,v):v;b->upper=YES;
-        } else if(c<0)b->empty=YES;
-    }
-    isl_val_free(a);isl_val_free(k);isl_constraint_free(constraint);return isl_stat_ok;
-}
-static int PageIntervalOrder(const void *a,const void *b) {
-    const int64_t *x=a,*y=b;return x[0]<y[0]?-1:x[0]>y[0];
-}
-/* the set's elements as merged intervals, where every basic set is a division-free interval: one pass over its
-   constraints, no isl set built or subtracted (MeshIndexSetRuns peels runs with both, 2.4 ms for one interval) */
-static BOOL PageIntervalsEach(isl_set *set,void (^each)(NSUInteger)) {
-    if(isl_set_dim(set,isl_dim_set)!=1||isl_set_dim(set,isl_dim_param)!=0)return NO;
-    isl_basic_set_list *parts=isl_set_get_basic_set_list(set);
-    const isl_size count=isl_basic_set_list_size(parts);
-    int64_t *intervals=malloc(2*sizeof(int64_t)*(size_t)(count>0?count:1));size_t made=0;BOOL plain=intervals!=NULL;
-    for(isl_size i=0;plain&&i<count;i++) {
-        isl_basic_set *part=isl_basic_set_list_get_at(parts,i);
-        struct PageBounds b={0};
-        if(isl_basic_set_dim(part,isl_dim_div)!=0)plain=NO;
-        else if(isl_basic_set_foreach_constraint(part,PageBound,&b)<0||b.general||(!b.empty&&(!b.lower||!b.upper)))plain=NO;
-        else if(!b.empty&&b.low<=b.high){intervals[2*made]=b.low;intervals[2*made+1]=b.high;made++;}
-        isl_basic_set_free(part);
-    }
-    isl_basic_set_list_free(parts);
-    if(plain) {
-        qsort(intervals,made,2*sizeof(int64_t),PageIntervalOrder);
-        int64_t next=INT64_MIN;
-        for(size_t k=0;k<made;k++)for(int64_t v=MAX(intervals[2*k],next);v<=intervals[2*k+1];v++){each((NSUInteger)v);next=v+1;}
-    }
-    free(intervals);return plain;
-}
 static void PageGroups(isl_set *groups,void (^each)(NSUInteger)) {
     const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if(PageIntervalsEach(groups,each)){PageGroupsRecord(groups,0,started);return;}
+    /* MeshIndexSetRuns reads a division-free or bounded set's intervals whole (mesh-index-relation.m SetIntervals) */
     size_t count=0;int64_t *runs=MeshIndexSetRuns(groups,&count);
     PageGroupsRecord(groups,count,started);
     if(!runs&&!PageEmpty(groups))PageFailure(@"cannot lower dispatch selection");
