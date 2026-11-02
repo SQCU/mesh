@@ -143,8 +143,9 @@ FOUNDATION_EXPORT NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger c
 FOUNDATION_EXPORT MetalTensorLayout * _Nullable MetalTensorFactored(MetalTensorLayout *layout);
 // The quotient of ordinals [0, count) identifying each removed(x) + shift with kept(x) (the two views of one value),
 // written in closed form: @[the compact domain, the classes of ordinals [first, first + extent) as a layout of that
-// extent]. nil unless every kept value lies below every removed position and removed is a factored injection with
-// positive strides (kept may repeat). Classes follow their least ordinals, as MeshIndexUnion's and MetalTensorIdentify's.
+// extent]. nil unless every kept value lies below every removed position and removed is a factored injection (strides
+// of either sign, axes in any order; kept may repeat). Classes follow their least ordinals, as MeshIndexUnion's and
+// MetalTensorIdentify's.
 FOUNDATION_EXPORT NSArray<MetalTensorLayout *> * _Nullable MetalTensorPairQuotient(NSUInteger count,
     MetalTensorLayout *kept, MetalTensorLayout *removed, NSInteger shift, NSUInteger first, NSUInteger extent);
 // MeshIndexUnion's three results at once, the joint domain and the source and target roots' maps into it, from one

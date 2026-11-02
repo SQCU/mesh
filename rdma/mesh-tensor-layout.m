@@ -1562,8 +1562,9 @@ static MetalTensorLayout *TensorProbed(MetalTensorLayout *layout) {
 MetalTensorLayout *MetalTensorFactored(MetalTensorLayout *layout) {
     return layout.factored&&!layout.maps.count?layout:TensorProbed(layout);
 }
-// One axis of a pairing's common index refinement: its storage strides in both views, extent and flat weight.
-struct TensorPairAxis { NSInteger removed,kept,extent,weight; };
+// One axis of a pairing's common index refinement: its storage strides in both views, extent and flat weight, and
+// whether the removed view reads it backward (its stride negative, here the stride's magnitude).
+struct TensorPairAxis { NSInteger removed,kept,extent,weight; BOOL reversed; };
 static int TensorPairAxisOrder(const void *a,const void *b) {
     const NSInteger x=((const struct TensorPairAxis *)a)->removed,y=((const struct TensorPairAxis *)b)->removed;
     return x<y?-1:x>y;
@@ -1610,13 +1611,16 @@ static void *TensorPairAll(void *c,void *const *conditions,size_t count) {
 }
 static void *TensorPairSelect(void *c,void *condition,void *yes,void *no){(void)c;return @[@"select",(id)condition,(id)yes,(id)no];}
 static void *TensorPairKept(void *c,void *const *digits,size_t m) {
-    const struct TensorPairTerms *pair=c;NSMutableArray *value=[NSMutableArray array];
+    const struct TensorPairTerms *pair=c;NSMutableArray *value=[NSMutableArray array],*logical=[NSMutableArray array];
+    // the view's own digit along each axis: the lattice's digit, or extent - 1 - it where the axis is read backward
+    for(size_t k=0;k<m;k++)[logical addObject:pair->axes[k].reversed?
+        TensorSum(@[@(pair->axes[k].extent-1),TensorScale((id)digits[k],-1)]):(id)digits[k]];
     if(pair->factored) {
         [value addObject:@(pair->factored.offset)];
-        for(size_t k=0;k<m;k++)[value addObject:TensorScale((id)digits[k],pair->axes[k].kept)];
+        for(size_t k=0;k<m;k++)[value addObject:TensorScale(logical[k],pair->axes[k].kept)];
     } else {
         NSMutableArray *index=[NSMutableArray array],*flat=[NSMutableArray arrayWithObject:@(pair->kept.offset)];
-        for(size_t k=0;k<m;k++)[index addObject:TensorScale((id)digits[k],pair->axes[k].weight)];
+        for(size_t k=0;k<m;k++)[index addObject:TensorScale(logical[k],pair->axes[k].weight)];
         NSArray *coordinates=pair->kept.coordinates;
         for(NSUInteger d=0;d<coordinates.count;d++)[flat addObject:TensorScale(coordinates[d],[pair->kept.strides[d] integerValue])];
         [value addObject:TensorSubstitute(TensorSum(flat),TensorSum(index))];
@@ -1643,20 +1647,26 @@ NSArray<MetalTensorLayout *> *MetalTensorPairQuotient(NSUInteger count,MetalTens
         if(chain)bounds=joint;else A=nil;
     }
     NSArray *weights=[bounds.allObjects sortedArrayUsingSelector:@selector(compare:)];
-    NSMutableData *storage=[NSMutableData data];
+    NSMutableData *storage=[NSMutableData data];NSInteger reversal=0;
     for(NSUInteger k=0;k+1<weights.count;k++) {
         const NSInteger w=[weights[k] integerValue];
-        const struct TensorPairAxis axis={TensorStrideAt(B,w),A?TensorStrideAt(A,w):0,[weights[k+1] integerValue]/w,w};
-        if(axis.removed<=0)return nil;
+        struct TensorPairAxis axis={TensorStrideAt(B,w),A?TensorStrideAt(A,w):0,[weights[k+1] integerValue]/w,w,NO};
+        /* an axis read backward is the same positions read forward from its last one: the removed lattice takes the
+           stride's magnitude and an origin moved by the axis' span, the kept side the digit extent - 1 - x. Changed by
+           the layout algebra session: the closed form refused every negative stride, and the LSTM's row-major h with its
+           layer axis reversed went to the isl quotient, a lexmin over a 32768-point permutation past 8 s on every rank
+           (d-rec2, 2026-11-02). */
+        if(!axis.removed)return nil;
+        if(axis.removed<0){reversal+=axis.removed*(axis.extent-1);axis.removed=-axis.removed;axis.reversed=YES;}
         [storage appendBytes:&axis length:sizeof axis];
     }
     // a single removed position is one axis of extent 1
-    if(!storage.length){const struct TensorPairAxis point={1,0,1,1};[storage appendBytes:&point length:sizeof point];}
+    if(!storage.length){const struct TensorPairAxis point={1,0,1,1,NO};[storage appendBytes:&point length:sizeof point];}
     struct TensorPairAxis *axes=storage.mutableBytes;const NSUInteger m=storage.length/sizeof *axes;
     qsort(axes,m,sizeof *axes,TensorPairAxisOrder);
     // a lattice: each axis' stride at least the span of those below
     for(NSUInteger k=0;k+1<m;k++)if(axes[k+1].removed<axes[k].removed*axes[k].extent)return nil;
-    const NSInteger origin=B.offset+shift;
+    const NSInteger origin=B.offset+shift+reversal;
     NSInteger high=0;
     if(A){high=A.offset;for(NSUInteger k=0;k<m;k++)high+=MAX(0,axes[k].kept*(axes[k].extent-1));}
     else {
