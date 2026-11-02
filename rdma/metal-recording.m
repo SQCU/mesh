@@ -1325,6 +1325,10 @@ struct MetalSchedule {
     NSMutableArray *parts;
     NSUInteger commands, ordinal;
     NSUInteger encoderScope, scopeCount;
+    // a part's GPU timestamps around each replayed dispatch, where the preparation record is on (MetalStamp)
+    id<MTL4CounterHeap> stamps;
+    NSUInteger stamped;
+    NSMutableArray<NSString *> *stampNames;
     _Atomic int status;
     // the part's end, in the statistics clock (MetalScheduleEnd), stored before its status
     double ended;
@@ -1567,6 +1571,22 @@ void MetalEncoderHost(id<MTL4ComputeCommandEncoder> encoder,const struct MetalRe
     MetalScheduleHostWork(root->root,[NSData dataWithBytes:views length:count*sizeof *views],operation);
 }
 
+/* a GPU timestamp in the part's counter heap, named where it opens a dispatch, where MESH_PREPARE_RECORD is set: a
+   measurement for people (MetalScheduleCompletedRecord resolves them), precise, so it orders the dispatches it brackets.
+   Added for the LSTM demonstration, whose step's 100 ms was waiting with nothing to say in which dispatch (2026-11-01). */
+static BOOL MetalStamping(void) { static int on=-1;if(on<0)on=getenv("MESH_PREPARE_RECORD")!=NULL;return on; }
+static void MetalStamp(struct MetalSchedule *s,id<MTL4ComputeCommandEncoder> encoder,NSString *name) {
+    if(!s->stamps) {
+        MTL4CounterHeapDescriptor *descriptor=[MTL4CounterHeapDescriptor new];
+        descriptor.type=MTL4CounterHeapTypeTimestamp;descriptor.count=8192;
+        s->stamps=[s->root->device newCounterHeapWithDescriptor:descriptor error:nil];[descriptor release];
+        s->stampNames=[NSMutableArray new];
+    }
+    if(!s->stamps||s->stamped>=s->stamps.count)return;
+    [encoder writeTimestampWithGranularity:MTL4TimestampGranularityPrecise intoHeap:s->stamps atIndex:s->stamped++];
+    if(name)[s->stampNames addObject:name];
+}
+
 static void MetalScheduleRangeNow(struct MetalSchedule *root,struct MetalReplay *replay,NSUInteger t,NSUInteger from,NSUInteger to) {
     struct MetalSchedule *s=MetalScheduleWritable(root);
     if(!replay||from==to)return;
@@ -1590,6 +1610,8 @@ static void MetalScheduleRangeNow(struct MetalSchedule *root,struct MetalReplay 
     id<MTL4ComputeCommandEncoder> encoder=s->encoder;
     for(NSUInteger c=t*n+from;c<t*n+to;c++) @autoreleasepool {
         const struct MetalRecordedDispatch *source=records+c%n;
+        const BOOL stamping=MetalStamping();
+        if(stamping)MetalStamp(s,encoder,[NSString stringWithFormat:@"%@#%lu",source->pipeline.label?:@"dispatch",(unsigned long)(c%n)]);
         if(made==MetalFormEncoded||source->indirectGrid) {
             MetalReplayDispatch4(encoder,s->table,replay,source,t);
         } else {
@@ -1597,6 +1619,7 @@ static void MetalScheduleRangeNow(struct MetalSchedule *root,struct MetalReplay 
                 [encoder executeCommandsInBuffer:segment withRange:local];
             });
         }
+        if(stamping)MetalStamp(s,encoder,nil);
     }
 }
 
@@ -2145,8 +2168,20 @@ static void MetalScheduleCompletedRecord(const struct MetalSchedule *s,double st
         if(dir&&snprintf(path,sizeof path,"%s/parts-%d.jsonl",dir,(int)getpid())<(int)sizeof path)out=fopen(path,"w");
     });
     if(!out)return;
-    fprintf(out,"{\"schedule\":\"%p\",\"part\":%lu,\"dispatches\":%lu,\"gpu_start\":%.9f,\"gpu_end\":%.9f}\n",
+    fprintf(out,"{\"schedule\":\"%p\",\"part\":%lu,\"dispatches\":%lu,\"gpu_start\":%.9f,\"gpu_end\":%.9f",
             (const void *)s->root,(unsigned long)s->ordinal,(unsigned long)s->commands,started,ended);
+    /* each stamped dispatch: its kernel, its start after the part's first stamp and its duration, in microseconds */
+    NSData *stamps=s->stamps&&s->stamped?[s->stamps resolveCounterRange:NSMakeRange(0,s->stamped)]:nil;
+    if(stamps.length>=s->stamped*sizeof(MTL4TimestampHeapEntry)) {
+        const MTL4TimestampHeapEntry *entry=stamps.bytes;
+        const double tick=1e6/(double)[s->root->device queryTimestampFrequency];
+        fprintf(out,",\"stamped\":[");
+        for(NSUInteger k=0;2*k+1<s->stamped&&k<s->stampNames.count;k++)
+            fprintf(out,"%s[\"%s\",%.2f,%.2f]",k?",":"",s->stampNames[k].UTF8String,
+                    (double)(entry[2*k].timestamp-entry[0].timestamp)*tick,(double)(entry[2*k+1].timestamp-entry[2*k].timestamp)*tick);
+        fprintf(out,"]");
+    }
+    fprintf(out,"}\n");
     fflush(out);
 }
 static void MetalScheduleCompleted(struct MetalSchedule *s,NSError *error,double ended) {
@@ -2380,7 +2415,7 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     [s->declarations release];
     [s->hostDependencies release];[s->partDependencies release];
     [s->history release];[s->readVersions release];[s->frontierRead release];[s->frontierWritten release];[s->frontierAtomic release];[s->hostResources release];
-    [s->queueAccesses release];[s->parts release];
+    [s->queueAccesses release];[s->parts release];[s->stamps release];[s->stampNames release];
     [s->completed release];[s->completionError release];[s->error release];[s->device release];[s->communicators release];
     [s->fenceStages release];[s->results release];free(s);
 }
