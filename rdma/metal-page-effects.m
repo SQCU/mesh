@@ -4,6 +4,8 @@
 #include "mesh-page-sites.h"
 #include <isl/val.h>
 #include <isl/space.h>
+#include <isl/point.h>
+#include <isl/constraint.h>
 
 id MetalPageRegionRoot(void) { return @"mesh-region"; }
 
@@ -272,14 +274,75 @@ static void PageGroupsRecord(isl_set *groups,size_t count,uint64_t started) {
             (unsigned long long)calls,total,text?text:"");
     mesh_isl_free(text);fflush(out);
 }
+/* A one-dimensional basic set without divisions is an interval, read from its constraints: the bounds a x + k >= 0
+   (and equalities) give. NO where it has divisions, parameters or an unbounded side. */
+struct PageBounds { int64_t low,high; BOOL lower,upper,empty,general; };
+static isl_stat PageBound(isl_constraint *constraint,void *user) {
+    struct PageBounds *b=user;
+    isl_val *a=isl_constraint_get_coefficient_val(constraint,isl_dim_set,0),*k=isl_constraint_get_constant_val(constraint);
+    if(!isl_val_is_int(a)||!isl_val_is_int(k)){b->general=YES;}
+    else {
+        const int64_t x=isl_val_get_num_si(a),c=isl_val_get_num_si(k);
+        if(isl_constraint_is_equality(constraint)) {
+            if(!x){if(c)b->empty=YES;}
+            else if(c%x){b->empty=YES;}
+            else {const int64_t v=-c/x;b->low=b->lower?MAX(b->low,v):v;b->high=b->upper?MIN(b->high,v):v;b->lower=b->upper=YES;}
+        } else if(x>0) {
+            const int64_t v=(-c>=0?(-c+x-1)/x:-((c)/x));b->low=b->lower?MAX(b->low,v):v;b->lower=YES;
+        } else if(x<0) {
+            const int64_t y=-x,v=(c>=0?c/y:-((-c+y-1)/y));b->high=b->upper?MIN(b->high,v):v;b->upper=YES;
+        } else if(c<0)b->empty=YES;
+    }
+    isl_val_free(a);isl_val_free(k);isl_constraint_free(constraint);return isl_stat_ok;
+}
+static int PageIntervalOrder(const void *a,const void *b) {
+    const int64_t *x=a,*y=b;return x[0]<y[0]?-1:x[0]>y[0];
+}
+/* the set's elements as merged intervals, where every basic set is a division-free interval: one pass over its
+   constraints, no isl set built or subtracted (MeshIndexSetRuns peels runs with both, 2.4 ms for one interval) */
+static BOOL PageIntervalsEach(isl_set *set,void (^each)(NSUInteger)) {
+    if(isl_set_dim(set,isl_dim_set)!=1||isl_set_dim(set,isl_dim_param)!=0)return NO;
+    isl_basic_set_list *parts=isl_set_get_basic_set_list(set);
+    const isl_size count=isl_basic_set_list_size(parts);
+    int64_t *intervals=malloc(2*sizeof(int64_t)*(size_t)(count>0?count:1));size_t made=0;BOOL plain=intervals!=NULL;
+    for(isl_size i=0;plain&&i<count;i++) {
+        isl_basic_set *part=isl_basic_set_list_get_at(parts,i);
+        struct PageBounds b={0};
+        if(isl_basic_set_dim(part,isl_dim_div)!=0)plain=NO;
+        else if(isl_basic_set_foreach_constraint(part,PageBound,&b)<0||b.general||(!b.empty&&(!b.lower||!b.upper)))plain=NO;
+        else if(!b.empty&&b.low<=b.high){intervals[2*made]=b.low;intervals[2*made+1]=b.high;made++;}
+        isl_basic_set_free(part);
+    }
+    isl_basic_set_list_free(parts);
+    if(plain) {
+        qsort(intervals,made,2*sizeof(int64_t),PageIntervalOrder);
+        int64_t next=INT64_MIN;
+        for(size_t k=0;k<made;k++)for(int64_t v=MAX(intervals[2*k],next);v<=intervals[2*k+1];v++){each((NSUInteger)v);next=v+1;}
+    }
+    free(intervals);return plain;
+}
 static void PageGroups(isl_set *groups,void (^each)(NSUInteger)) {
     const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if(PageIntervalsEach(groups,each)){PageGroupsRecord(groups,0,started);return;}
     size_t count=0;int64_t *runs=MeshIndexSetRuns(groups,&count);
     PageGroupsRecord(groups,count,started);
     if(!runs&&!PageEmpty(groups))PageFailure(@"cannot lower dispatch selection");
     for(size_t i=0;i<count;i++)for(int64_t r=0;r<runs[4*i+3];r++)for(int64_t j=0;j<runs[4*i+1];j++)
         each((NSUInteger)(runs[4*i]+r*runs[4*i+2]+j));
     mesh_isl_free(runs);
+}
+/* every (input, output) pair of a map from one integer to one integer, its points read once */
+struct PagePairsUser { void (^each)(NSUInteger,NSUInteger); };
+static isl_stat PagePairPoint(isl_point *point,void *user) {
+    isl_val *a=isl_point_get_coordinate_val(point,isl_dim_set,0),*b=isl_point_get_coordinate_val(point,isl_dim_set,1);
+    ((struct PagePairsUser *)user)->each((NSUInteger)isl_val_get_num_si(a),(NSUInteger)isl_val_get_num_si(b));
+    isl_val_free(a);isl_val_free(b);isl_point_free(point);return isl_stat_ok;
+}
+static void PagePairs(isl_map *map,void (^each)(NSUInteger,NSUInteger)) {
+    struct PagePairsUser user={each};
+    isl_set *pairs=isl_set_flatten(isl_map_wrap(isl_map_copy(map)));
+    if(isl_set_foreach_point(pairs,PagePairPoint,&user)<0)PageFailure(@"cannot enumerate a group's cuts");
+    isl_set_free(pairs);
 }
 static isl_set *PageInterval(isl_set *domain,NSUInteger first,NSUInteger bytes) {
     isl_set *v=isl_set_universe(isl_set_get_space(domain));
@@ -366,6 +429,18 @@ static void PageCoverageAnnouncements(NSArray<MetalPageCommand *> *commands,Meta
         words=isl_map_intersect_domain(words,selected);
         isl_set *remaining=PageRange(words);
         NSMutableArray *target=kind?domain->activity:domain->announcements;
+        /* this coverage's rows at this order, by their cut, once. Changed by the LSTM demonstration session: each
+           group of each writing access fixed its group in the map, took its range's runs and scanned every row for
+           every cut, groups x rows of isl and of scans (776515 group sets on rank 0 in the 64-step plan, 2026-11-01).
+           Now a map's (group, cut) pairs are its points, read once (PagePairs). What must stay: the same rows added
+           to the same groups. */
+        NSMutableDictionary<NSNumber *,NSMutableIndexSet *> *byCut=[NSMutableDictionary dictionary];
+        for(NSUInteger row=0;row<domain->rows.count;row++) {
+            MetalPageTransfer *r=domain->rows[row];
+            if(![r->coverage isEqual:coverage]||r->order!=order.unsignedIntegerValue)continue;
+            NSMutableIndexSet *rows=byCut[@(r->coverageCut)];if(!rows)byCut[@(r->coverageCut)]=rows=[NSMutableIndexSet indexSet];
+            [rows addIndex:row];
+        }
         for(NSUInteger c=commands.count;c-->0;) {
             MetalPageCommand *command=commands[c];if(command->order>=order.unsignedIntegerValue)continue;
             for(NSUInteger phase=command->sites.count+1;phase-->0;) {
@@ -375,13 +450,8 @@ static void PageCoverageAnnouncements(NSArray<MetalPageCommand *> *commands,Meta
                     isl_map *cuts=MeshIndexCompose(writes,isl_map_reverse(isl_map_copy(words)));
                     isl_set *groups=isl_map_domain(isl_map_copy(cuts));
                     if(!PageEmpty(groups)&&access->slot>=0)[domain->publishedSlots[c] addIndex:(NSUInteger)access->slot];
-                    PageGroups(groups,^(NSUInteger group) {
-                        isl_map *selected=isl_map_fix_val(isl_map_copy(cuts),isl_dim_in,0,isl_val_int_from_ui(context,group));
-                        isl_set *range=isl_map_range(selected);
-                        PageGroups(range,^(NSUInteger cut){
-                            for(NSUInteger row=0;row<domain->rows.count;row++)
-                                if([domain->rows[row]->coverage isEqual:coverage]&&domain->rows[row]->order==order.unsignedIntegerValue&&domain->rows[row]->coverageCut==cut)[target[c][group] addIndex:row];
-                        });isl_set_free(range);
+                    PagePairs(cuts,^(NSUInteger group,NSUInteger cut){
+                        NSIndexSet *rows=byCut[@(cut)];if(rows)[target[c][group] addIndexes:rows];
                     });
                     isl_set_free(groups);isl_map_free(cuts);
                 }
@@ -392,15 +462,9 @@ static void PageCoverageAnnouncements(NSArray<MetalPageCommand *> *commands,Meta
             for(MetalPageAnnouncement *announcement in command->announcements) {
                 if(![announcement->coverage isEqual:coverage]||!(announcement->flags&(kind?4u:1u)))continue;
                 NSUInteger first=announcement->phase?[command->sites[announcement->phase-1][@"first"] unsignedIntegerValue]:0;
-                isl_set *groups=isl_map_domain(isl_map_copy(announcement->relation));
-                PageGroups(groups,^(NSUInteger group) {
-                    isl_map *selected=isl_map_fix_val(isl_map_copy(announcement->relation),isl_dim_in,0,isl_val_int_from_ui(context,group));
-                    isl_set *range=isl_map_range(selected);
-                    PageGroups(range,^(NSUInteger cut) {
-                        for(NSUInteger row=0;row<domain->rows.count;row++)
-                            if([domain->rows[row]->coverage isEqual:coverage]&&domain->rows[row]->order==order.unsignedIntegerValue&&domain->rows[row]->coverageCut==cut)[target[c][first+group] addIndex:row];
-                    });isl_set_free(range);
-                });isl_set_free(groups);
+                PagePairs(announcement->relation,^(NSUInteger group,NSUInteger cut){
+                    NSIndexSet *rows=byCut[@(cut)];if(rows)[target[c][first+group] addIndexes:rows];
+                });
                 isl_map *reached=MeshIndexCompose(isl_map_copy(announcement->relation),isl_map_copy(words));
                 remaining=isl_set_subtract(remaining,PageRange(reached));isl_map_free(reached);
             }
