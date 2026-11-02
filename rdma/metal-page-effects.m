@@ -523,11 +523,25 @@ NSArray<NSArray<MetalPageTransfer *> *> *MetalPagePublicationDomains(NSArray<Met
    (MetalPageEffectsSolve under PageObservationGroups, the whole of rank 0's sample in the 64-step plan, 2026-11-01).
    Once nothing remains no later access meets it and nothing is subtracted, so the walk ends there with the same
    groups. What must stay: commands visited in order until the transfer's pages are all overwritten. */
-static void PageObservationGroups(NSArray<MetalPageCommand *> *commands,MetalPageTransfer *t,
+/* A command reads the latest arrival of each page: an arrival's pages are observed only until a later arrival into the
+   same pages (`arrivals`, ascending by order) precedes the command, as a command's write ends them. Changed by the LSTM
+   demonstration session: later arrivals were not subtracted, so every product kernel waited on every earlier tick's
+   16 gather fragments as well as its own, a mesh_step_observe each (the 8-step LSTM's last product held 16 x 8 of
+   them, its source 208 KB against the first's 43 KB, 2026-11-01). What must stay: an arrival observed by every reader
+   of its pages before they are overwritten, by a command or by a later arrival. */
+static void PageObservationGroups(NSArray<MetalPageCommand *> *commands,MetalPageTransfer *t,NSArray<MetalPageTransfer *> *arrivals,
     void (^each)(NSUInteger,NSUInteger,MetalPageAccess *,isl_set *)) {
     isl_set *remaining=PageRange(t->selection);
+    const BOOL superseded=(t->observeAccess&MetalReachRead)&&arrivals;
+    NSUInteger next=0;
     for(NSUInteger c=0;c<commands.count&&!PageEmpty(remaining);c++) {
         MetalPageCommand *command=commands[c];if(command->order<=t->order)continue;
+        for(;superseded&&next<arrivals.count&&arrivals[next]->order<command->order;next++) {
+            MetalPageTransfer *later=arrivals[next];
+            if(later!=t&&later->order>t->order&&[later->root isEqual:t->root])
+                remaining=isl_set_subtract(remaining,PageRange(later->selection));
+        }
+        if(PageEmpty(remaining))break;
         for(NSUInteger phase=0;phase<=command->sites.count&&!PageEmpty(remaining);phase++) {
             for(MetalPageAccess *access in command->accesses)
                 if(access->phase==phase&&[access->root isEqual:t->root]&&(access->access&t->observeAccess)) {
@@ -551,14 +565,23 @@ static isl_set *PageActivityRange(MetalPageTransfer *t) {
    single solve, including a mask which arrives under another declared mask.
    Subtracting retained reads makes this finite over the declared mask pages;
    no runtime metadata discovery or polling scheduler is introduced. */
+/* the transfers whose arrivals readers observe, ascending by order (PageObservationGroups' later arrivals) */
+static NSArray<MetalPageTransfer *> *PageArrivals(NSArray<MetalPageTransfer *> *transfers) {
+    NSMutableArray *arrivals=[NSMutableArray array];
+    for(MetalPageTransfer *t in transfers)if(t->effect.kind==ncclMeshPageObserve&&(t->observeAccess&MetalReachRead))[arrivals addObject:t];
+    return PageSorted(arrivals,^NSComparisonResult(MetalPageTransfer *a,MetalPageTransfer *b){
+        return a->order<b->order?NSOrderedAscending:a->order>b->order?NSOrderedDescending:NSOrderedSame;
+    });
+}
 static void PageObservationMasks(NSArray<MetalPageCommand *> *commands,NSArray<MetalPageTransfer *> *transfers) {
+    NSArray<MetalPageTransfer *> *ordered=PageArrivals(transfers);
     BOOL changed;
     do {
         __block BOOL added=NO;
         for(MetalPageTransfer *t in transfers)if(t->effect.kind==ncclMeshPageObserve&&t->coverage) {
             isl_set *mask=PageActivityRange(t);
             NSMutableArray *extras=[NSMutableArray array];for(NSUInteger c=0;c<commands.count;c++)[extras addObject:[NSMutableArray array]];
-            PageObservationGroups(commands,t,^(NSUInteger c,NSUInteger phase,MetalPageAccess *use,isl_set *groups) {
+            PageObservationGroups(commands,t,ordered,^(NSUInteger c,NSUInteger phase,MetalPageAccess *use,isl_set *groups) {
                 (void)use;MetalPageCommand *command=commands[c];
                 isl_map *relation=isl_map_from_domain_and_range(isl_set_copy(groups),isl_set_copy(mask));
                 for(MetalPageAccess *known in command->accesses)
@@ -689,6 +712,7 @@ MetalPageEffects *MetalPageEffectsSolve(NSArray<MetalPageCommand *> *given,NSArr
         domain->initial=[inputs copy];[domains addObject:domain];
     }
     NSMutableDictionary *consumed=[NSMutableDictionary dictionary];
+    NSArray<MetalPageTransfer *> *ordered=PageArrivals(transfers);
     for(id key in observers) {
         MetalPageDomain *domain=[[[MetalPageDomain alloc] init] autorelease];domain->rows=[observers[key] copy];
         domain->thresholds=[[NSMutableArray alloc] initWithCapacity:commands.count];
@@ -701,7 +725,7 @@ MetalPageEffects *MetalPageEffectsSolve(NSArray<MetalPageCommand *> *given,NSArr
         }
         for(NSUInteger row=0;row<domain->rows.count;row++) {
             MetalPageTransfer *t=domain->rows[row];
-            PageObservationGroups(commands,t,^(NSUInteger c,NSUInteger phase,MetalPageAccess *access,isl_set *groups) {
+            PageObservationGroups(commands,t,ordered,^(NSUInteger c,NSUInteger phase,MetalPageAccess *access,isl_set *groups) {
                 (void)phase;
                 if(access->slot>=0)[domain->observedSlots[c] addIndex:(NSUInteger)access->slot];
                 uint64_t *thresholds=domain->thresholds[c].mutableBytes;
