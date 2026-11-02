@@ -291,6 +291,11 @@ its region, the stepper's capture alone), 2026-11-01.
 - Realization is 130-170 ms a step after 2c647fc1 and 29b4c255 (56 s before). It is paid at every occurrence, as
   replay-templates-2026-10-29.md requires. At 4,096 steps that is about 9 minutes, whatever steps_per_replay is.
   transfer_effects solves page effects again for every command of each occurrence, but only the effect words
-  differ between occurrences: the accesses, groups, relations and reaches repeat. One solve per declaration,
-  with each occurrence's words as an operand of that solve (absolute, prepared before execution, as 9ba0e43c
-  keeps them), is what lets a 4,096-step program prepare within the operator's 8 s bound.
+  differ between occurrences: the accesses, groups, relations and reaches repeat.
+  The merged numerical-source change `e8d20c52` now emits a declaration once
+  per preparation and copies its emitted source for each occurrence; the reuse
+  identity includes all source operands, including configuration. This removes
+  repeated numerical selection/emission, while the page-effect solve still repeats.
+  The remaining work is one page-effect solve per declaration, with each
+  occurrence's absolute words bound as operands before execution. This checkpoint
+  has not established the required 8 s preparation bound for the 4,096-step program.

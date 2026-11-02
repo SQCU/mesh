@@ -344,7 +344,8 @@ def prepare(steps, schedule, output=None):
     for index, declaration in enumerate(programs):
         if 'numerical' not in declaration:
             continue
-        key = tuple(id(declaration[name]) for name in ('numerical', 'section', 'projection', 'placement', 'operands'))
+        key = tuple(id(declaration[name]) for name in
+                    ('numerical', 'section', 'projection', 'placement', 'operands', 'configuration'))
         if key not in emitted:
             with bind(declaration['configuration'], algebra=algebra):
                 retained = declaration['numerical']
