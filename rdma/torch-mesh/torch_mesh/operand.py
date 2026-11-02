@@ -56,6 +56,26 @@ class TensorValue:
         """type: a layout over the same space -> a value of it (same identity of pages)."""
         return TensorValue(self.space, layout, self.dtype if dtype is None else dtype)
 
+    # A value's argument origin is the final lowering's (its layout's first element), never a chooser's byte offset.
+    binding_origin = None
+
+    def element_size(self):
+        return self.dtype.itemsize
+
+    @property
+    def device(self):
+        import torch
+        return torch.device('mps')
+
+    def slice(self, axis, first, count, step=1):
+        """type: the same space, the layout's slice along `axis`."""
+        return self.view(self.layout.slice(axis, first, count, step))
+
+    def retyped(self, dtype, units):
+        """type: the same elements read at `dtype`, `units` of them an element of this value's dtype (the layout's
+        components), as TensorView.storage_as with components."""
+        return self.view(self.layout.components(units) if units != 1 else self.layout, dtype)
+
     @property
     def shape(self):
         return self.layout.shape
@@ -474,7 +494,9 @@ def binding_layout(layout, declaration):
     return restore(declaration['view']).rebase(restore(declaration['source']), layout)
 
 def descriptor(value):
-    return value if isinstance(value, _stream.TensorLayout) else TensorView.of(value).layout
+    if isinstance(value, (_stream.TensorLayout,)):
+        return value
+    return value.layout if isinstance(value, TensorValue) else TensorView.of(value).layout
 
 
 def relation_layout(relation, shape, extent):
@@ -504,9 +526,11 @@ def byte_operand(value):
     to contain mixed scalar widths. Typed loads apply their width after this
     byte relation; no scalar is rounded or expanded into a different value.
     """
+    import torch
+    if isinstance(value, TensorValue):
+        return value.retyped(torch.uint8, value.element_size())
     value = TensorView.of(value)
     layout = value.layout if value.element_size() == 1 else value.layout.components(value.element_size())
-    import torch
     return TensorView(value.storage_as(torch.uint8), layout, binding_origin=0)
 
 

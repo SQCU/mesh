@@ -138,7 +138,14 @@ def copy_declarations(source, destination, *, algebra=None):
         return []
     if source.shape != destination.shape or source.dtype != destination.dtype:
         raise ValueError('layout materialization preserves the declared values and type')
-    source, destination = TensorView.of(source), TensorView.of(destination)
+    from .operand import TensorValue
+    keep = lambda value: value if isinstance(value, TensorValue) else TensorView.of(value)
+    source, destination = keep(source), keep(destination)
+    def typed(view, dtype, units):
+        """a tile read at the copy's unit type: a value stays a value of its space (design/page-maps-2026-11-02.md)"""
+        if isinstance(view, TensorValue):
+            return view.retyped(dtype, units)
+        return TensorView(view.storage_as(dtype), view.layout.components(units), view.binding_origin)
     configuration = operands()
     limit = max(1, configuration['LAYOUT_COPY_TILE_BYTES'] // source.element_size())
     commands = []
@@ -152,8 +159,7 @@ def copy_declarations(source, destination, *, algebra=None):
         left, right = source, destination
         for axis, (first, count) in enumerate(zip(origin, size)):
             left, right = left.slice(axis, first, count), right.slice(axis, first, count)
-        left = TensorView(left.storage_as(dtype), left.layout.components(units), left.binding_origin)
-        right = TensorView(right.storage_as(dtype), right.layout.components(units), right.binding_origin)
+        left, right = typed(left, dtype, units), typed(right, dtype, units)
         threads = min(configuration['GATHER_THREADS'], _stream.device_facts()[1])
         count = left.numel()
         groups = -(-count // threads)
@@ -198,6 +204,25 @@ def resolve(value, declarations, *, writing=False, device=None):
     capacity = max((item[1] for item in contracts), default=0)
     alignment = math.lcm(*(item[2] for item in contracts))
     origin = storage_origin(declarations)
+    from .operand import TensorValue
+    if isinstance(value, TensorValue):
+        # Changed by the LSTM demonstration session (2026-11-02, design/page-maps-2026-11-02.md): a value's fit is
+        # read in its space, whose element 0 is page aligned, so no base address enters: its first element's byte
+        # position is aligned and its capacity lies in the space. The final lowering turns that position into the
+        # argument's address. What must stay: an unmet requirement placed afresh, with its copy edges.
+        width = value.dtype.itemsize
+        first = value.layout.index(0) if value.layout.count else 0
+        bound = first * width if origin is None else first * width + origin
+        space_bytes = value.space.pages * value.space.page_bytes
+        fits = bound >= 0 and bound % alignment == 0 and bound + capacity <= space_bytes
+        if value.layout == layout and fits and origin is None:
+            return value, []
+        from .placement import allocate_value
+        allocation = layout.shift(-(layout.index(0) if layout.count else 0))
+        extent = (allocation.index(0) * width if allocation.count else 0) + capacity
+        placed = allocate_value(allocation, value.dtype, extent=extent, alignment=alignment,
+                                page_bytes=value.space.page_bytes)
+        return placed, copy_declarations(placed, value) if writing else copy_declarations(value, placed)
     device = value.device.type if device is None else device
     base, available, backing = _stream.page_backing(value)
     at = backing.index(0) if backing.count else backing.offset

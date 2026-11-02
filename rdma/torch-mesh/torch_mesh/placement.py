@@ -14,6 +14,11 @@ def output(shape, dtype, device, out=None):
 
 
 def same_view(a, b):
+    """type: two operands -> whether they name the same elements; values by their space's identity and layout
+    (design/page-maps-2026-11-02.md), views through _stream.same_operand."""
+    if isinstance(a, TensorValue) or isinstance(b, TensorValue):
+        return (isinstance(a, TensorValue) and isinstance(b, TensorValue) and a.space is b.space
+                and a.dtype == b.dtype and a.layout.equivalent(b.layout))
     from . import _stream
     return _stream.same_operand(a, b)
 
@@ -263,8 +268,14 @@ def selected_view(storage, record, *, algebra, layout=None):
     """Compose an explicit typed use with its assigned selected page bytes."""
     binding = record['binding']
     assigned = storage[binding['name']]
-    physical = TensorView.of(assigned['operand'])
     layout = _selected_layout(record, algebra) if layout is None else layout
+    operand = assigned['operand']
+    if isinstance(operand, TensorValue):
+        # design/page-maps-2026-11-02.md: a typed use of a placed value is a view of its space at the use's dtype
+        mapped = rebase_typed(layout, binding['dtype'].itemsize, assigned['source'],
+                              assigned['source_dtype'].itemsize, operand.layout)
+        return operand.view(mapped, binding['dtype'])
+    physical = TensorView.of(operand)
     mapped = rebase_typed(layout, binding['dtype'].itemsize, assigned['source'],
                           assigned['source_dtype'].itemsize, physical.layout)
     return TensorView(physical.storage_as(binding['dtype']), mapped)
