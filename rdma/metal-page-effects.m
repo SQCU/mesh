@@ -825,8 +825,8 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
            8-step LSTM (ncclMeshPageTableCreate + 152 beneath -[MetalPageFields compose], 2026-11-01 19:2x). What must
            stay: the descriptor, its offset 0, the table's base the buffer's. */
         const ncclMeshBuffer whole={(__bridge void *)buffer,0};
-        if(ncclMeshPageTableCreate(&whole,NULL,1,&source->table))PageFailure(@"cannot bind metadata pages");
-        size_t pages=0,width=0;if(ncclMeshPageTableShape(source->table,&pages,&width))PageFailure(@"metadata page shape");
+        if(ncclMeshPageTableCreate(&whole,NULL,1,&source->table))PageFailure([NSString stringWithFormat:@"cannot bind metadata pages: %s",ncclGetLastError(NULL)]);
+        size_t pages=0,width=0;if(ncclMeshPageTableShape(source->table,&pages,&width))PageFailure([NSString stringWithFormat:@"metadata page shape: %s",ncclGetLastError(NULL)]);
         if(alignment&&width!=alignment)PageFailure(@"metadata fields have different local page widths");alignment=width;
         const size_t first=offset/width,count=(offset%width+bytes+width-1)/width;
         selected[i]=(ncclMeshPageSelection){source->table,first,count};
@@ -837,8 +837,8 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
         for(NSUInteger i=0;i<indices.count;i++)words[i]=[fields[[indices[i][0] unsignedIntegerValue]][3] unsignedLongLongValue]+[indices[i][1] unsignedLongLongValue];
     }
     MetalPageComposition *combined=[[[MetalPageComposition alloc] init] autorelease];
-    if(ncclMeshPageTableCompose(selected,fields.count,alignment,NULL,1,&combined->table))PageFailure(@"cannot compose metadata pages");
-    ncclMeshBuffer bound={0};if(ncclMeshPageTableBinding(combined->table,&bound))PageFailure(@"cannot bind composed metadata");
+    if(ncclMeshPageTableCompose(selected,fields.count,alignment,NULL,1,&combined->table))PageFailure([NSString stringWithFormat:@"cannot compose metadata pages: %s",ncclGetLastError(NULL)]);
+    ncclMeshBuffer bound={0};if(ncclMeshPageTableBinding(combined->table,&bound))PageFailure([NSString stringWithFormat:@"cannot bind composed metadata: %s",ncclGetLastError(NULL)]);
     composedOffset=bound.offset;[owners addObject:combined];return (__bridge id<MTLBuffer>)bound.buffer;
 }
 @end
