@@ -11,10 +11,20 @@ isl_map *MeshIndexNormalize(isl_map *relation) {
 }
 
 isl_map *MeshIndexCompose(isl_map *source,isl_map *target) {
-    if(isl_map_is_single_valued(source)==isl_bool_true&&isl_map_is_single_valued(target)==isl_bool_true) {
+    const isl_bool function=isl_map_is_single_valued(target);
+    if(function==isl_bool_true&&isl_map_is_single_valued(source)==isl_bool_true) {
         isl_pw_multi_aff *first=isl_pw_multi_aff_from_map(source),*second=isl_pw_multi_aff_from_map(target);
         return isl_map_from_pw_multi_aff(isl_pw_multi_aff_pullback_pw_multi_aff(second,first));
     }
+    /* A relation through an injective function (an access's bytes through its operand's pages): the preimage of the
+       relation's range by the function's inverse, { x -> p : (x -> inverse(p)) in source }, the same map with no
+       intermediate to eliminate. Changed by the LSTM demonstration session: apply_range left the operand's bytes
+       existential and compute_divs eliminated them, a parametric integer program over the layout's flattened
+       extents: 4.7 s for a 242-unit shard's transposed weight read and over 35 s at 241 units, against 0.6 s and 1.8 s
+       here, the maps equal (scratch isl timing of d-r10's and d-r19's pairs, 2026-11-01). What must stay: the
+       relation composed exactly; a non-injective target still goes through apply_range. */
+    if(function==isl_bool_true&&isl_map_is_injective(target)==isl_bool_true)
+        return MeshIndexNormalize(isl_map_preimage_range_pw_multi_aff(source,isl_pw_multi_aff_from_map(isl_map_reverse(target))));
     return MeshIndexNormalize(isl_map_apply_range(source,target));
 }
 

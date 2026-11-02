@@ -408,7 +408,11 @@ NSData *MetalTensorSpanReaches(id<MTLBuffer> buffer,NSUInteger base,NSData *span
     for(NSUInteger k=0;k<count;k++)out[k]=(struct MetalViewSpan){base+input[k].offset*elementBytes,input[k].count*elementBytes};
     MetalViewUnionSpans(bytes);
     NSMutableData *result=[NSMutableData data];const struct MetalViewSpan *values=bytes.bytes;
-    struct MetalReach reach={buffer,base,0,access|MetalReachBinding,binding};
+    /* a binding reach names its slot; one built with binding -1 (an input's or a transfer payload's, reached by no
+       argument) is a plain reach. Changed by the LSTM demonstration session: every reach was marked a binding, and
+       the recorder refused the 8-step LSTM's transfer-payload reach as slot -1 (and would shift by -1 marking its
+       access), 2026-11-01. What must stay: MetalReachBinding exactly when binding >= 0. */
+    struct MetalReach reach={buffer,base,0,access|(binding>=0?MetalReachBinding:0),binding};
     for(NSUInteger k=0;k<bytes.length/sizeof *values;k++) {
         reach.offset=values[k].offset;reach.length=values[k].length;[result appendBytes:&reach length:sizeof reach];
     }
@@ -444,7 +448,7 @@ NSData *MetalViewMappedReaches(id<MTLBuffer> buffer,NSUInteger offset,const NSUI
                 (NSUInteger)(strides[i]<0?-strides[i]:strides[i]),NULL,0};
         }
     }
-    struct MetalReach reach={buffer,empty?offset:(NSUInteger)base,0,access|MetalReachBinding,binding};
+    struct MetalReach reach={buffer,empty?offset:(NSUInteger)base,0,access|(binding>=0?MetalReachBinding:0),binding};
     if(empty)return [NSData dataWithBytes:&reach length:sizeof reach];
     qsort(axis,rank,sizeof *axis,MetalViewAxisOrder);
     const struct MetalViewSpan first={0,elementBytes};
@@ -1070,7 +1074,11 @@ static void MetalCaptureAppend(MetalCapture *capture,const struct MetalCommandDe
                     [NSException raise:NSInvalidArgumentException format:@"command reach names no matching address operand"];
             } else if(reach.access&MetalReachBinding) {
                 if(reach.binding<0||reach.binding>=MESH_BUFFER_BINDINGS||command.buffers[reach.binding]!=reach.buffer)
-                    [NSException raise:NSInvalidArgumentException format:@"command reach names no matching buffer binding"];
+                    [NSException raise:NSInvalidArgumentException format:@"command reach names no matching buffer binding "
+                        "(reach %zu of %zu: slot %d, its buffer %p of %lu bytes at %lu, the slot's %p of %lu bytes)",k,
+                        description->reachCount,reach.binding,(__bridge void *)reach.buffer,(unsigned long)reach.buffer.length,
+                        (unsigned long)reach.offset,reach.binding>=0&&reach.binding<MESH_BUFFER_BINDINGS?(__bridge void *)command.buffers[reach.binding]:NULL,
+                        reach.binding>=0&&reach.binding<MESH_BUFFER_BINDINGS?(unsigned long)command.buffers[reach.binding].length:0ul];
                 command.extents|=UINT32_C(1)<<reach.binding;
             }
         }

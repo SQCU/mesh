@@ -1839,7 +1839,8 @@ static NSString *TensorStorageDeclaration(MetalTensorLayout *physical,MetalTenso
     return data;
 }
 - (NSData *)reaches:(id<MTLBuffer>)buffer base:(NSUInteger)base elementBytes:(NSUInteger)bytes access:(uint32_t)access binding:(int32_t)binding {
-    if(!_count){struct MetalReach empty={buffer,base+_offset*(NSInteger)bytes,0,access|MetalReachBinding,binding};return [NSData dataWithBytes:&empty length:sizeof empty];}
+    // a binding reach names its slot (metal-recording.m MetalTensorSpanReaches)
+    if(!_count){struct MetalReach empty={buffer,base+_offset*(NSInteger)bytes,0,access|(binding>=0?MetalReachBinding:0),binding};return [NSData dataWithBytes:&empty length:sizeof empty];}
     if(_coordinates)return MetalTensorSpanReaches(buffer,base,TensorExpressionSpans(self,NO),bytes,access,binding);
     NSArray *shape=_indexShape,*strides=_strides;
     NSDictionary *maps=_maps;
