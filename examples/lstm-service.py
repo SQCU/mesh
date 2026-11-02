@@ -119,7 +119,9 @@ def main(config=None):
     inputs, declared = prepare_fragments([(broadcast, X, X)], group)
     program = execution_sequence([inputs, *ordered], O, algebra=algebra)
     def prepare():
-        program.realize()
+        # one realized schedule a run: Executions.run takes the next one (116b67ae ran a second time past the one
+        # realized, and every rank faulted in the second forward)
+        program.realize(config.get('repeats', 1))
         return {'layouts': [choice for function in ordered for choice in function.layout_choices],
                 'choices': [choice for function in ordered for choice in function.choices]}
     bind(configuration, [declared, *groups], prepare)
