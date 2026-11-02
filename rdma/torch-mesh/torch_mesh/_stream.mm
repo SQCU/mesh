@@ -39,6 +39,7 @@
 #include "metal-recording.h"
 #include "metal-page-effects.h"
 #include "mesh-graph.h"
+#include "mesh-page-map.h"
 #include "nccl.h"
 #include "layout.h" /* MESH_PREPARATION_NS: the preparation deadline a kernel compile waits within */
 
@@ -1263,22 +1264,47 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   // elements (its sizes, strides and storage offset, element coordinates of its storage), its lease's page runs
   // (first virtual page, pages, first physical page) and the region's page size. No address crosses here.
   // the region's page size: a chooser's figure for its virtual spaces (design/page-maps-2026-11-02.md)
-  // mesh-graph.h mesh_graph_interval_pack for the run's page assignment (design/page-maps-2026-11-02.md): integers in
-  // and out, `settled(done, next)` a Python predicate (reachability over the solve's edges). Raises where the arena
-  // cannot hold the live set or a pin meets an unsettled item, a compile-time failure.
-  module.def("interval_pack", [](const std::vector<uint64_t> &sizes, const std::vector<uint64_t> &begins,
-                                 const std::vector<uint64_t> &ends, uint64_t capacity, pybind11::function settled) {
-    const size_t n = sizes.size();
-    TORCH_CHECK(begins.size() == n && ends.size() == n, "interval_pack: one size, begin and end an item");
-    std::vector<uint64_t> place(n, 0);
-    struct Context { pybind11::function *settled; } context{&settled};
-    const int status = mesh_graph_interval_pack(n, sizes.data(), begins.data(), ends.data(), nullptr, capacity, place.data(),
-        [](const void *c, size_t done, size_t next) -> int {
-          return pybind11::cast<bool>((*static_cast<const Context *>(c)->settled)(done, next)) ? 1 : 0;
-        }, &context);
-    TORCH_CHECK(!status, "interval_pack: ", status == ENOMEM ? "the arena cannot hold the run's live values" :
-                "a pinned item meets an unsettled one", " (design/page-maps-2026-11-02.md)");
-    return place;
+  // mesh-page-map.h mesh_run_solve, the run's one allocator and scheduler (design/page-maps-2026-11-02.md, "The run's
+  // solve, each choice and its ground"), integers in and out: accesses (begin, end, mode, item, first byte, bytes) in
+  // the declared order, links (from, to), items (pages, pin or RUN_FREE, lives), bins (first, pages) with the arena
+  // last -> dict(edges [(from, to, kind, item, first, bytes)], order, place, arena). Raises with the solve's failure, a
+  // compile-time one.
+  module.attr("RUN_FREE") = pybind11::int_(MESH_RUN_FREE);
+  module.def("run_solve", [](uint64_t page_bytes, uint32_t events,
+                             const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t>> &accesses,
+                             const std::vector<std::pair<uint32_t, uint32_t>> &links,
+                             const std::vector<std::tuple<uint64_t, uint64_t, uint32_t>> &items,
+                             const std::vector<std::pair<uint64_t, uint64_t>> &bins) {
+    std::vector<mesh_graph_access> access;
+    for (const auto &a : accesses)
+      access.push_back({std::get<0>(a), std::get<1>(a), std::get<2>(a), std::get<3>(a), std::get<4>(a), std::get<5>(a)});
+    std::vector<uint32_t> link;
+    for (const auto &l : links) { link.push_back(l.first); link.push_back(l.second); }
+    std::vector<mesh_run_item> item;
+    for (const auto &i : items) item.push_back({std::get<0>(i), std::get<1>(i), std::get<2>(i)});
+    std::vector<mesh_run_bin> bin;
+    for (const auto &b : bins) bin.push_back({b.first, b.second});
+    const mesh_page_space space{page_bytes, 0};
+    mesh_run_plan plan;
+    const int status = mesh_run_solve(&space, events, access.size(), access.data(), links.size(),
+                                      reinterpret_cast<const uint32_t (*)[2]>(link.data()), item.size(), item.data(),
+                                      bin.size(), bin.data(), &plan);
+    TORCH_CHECK(!status, "run_solve: ", status == ENOMEM ? "the run's live set exceeds its bins" :
+                status == EBUSY ? "two pinned items meet while both are live" :
+                "an access outside its item or events, unordered bins, a pin in no bin, or a cycle in the edges",
+                " (design/page-maps-2026-11-02.md)");
+    pybind11::list edges;
+    for (size_t k = 0; k < plan.edges; k++) {
+      const mesh_graph_dependence &d = plan.edge[k];
+      edges.append(pybind11::make_tuple(d.from, d.to, d.kind, d.item, d.first, d.bytes));
+    }
+    pybind11::dict out;
+    out["edges"] = edges;
+    out["order"] = std::vector<uint32_t>(plan.order, plan.order + events);
+    out["place"] = std::vector<uint64_t>(plan.place, plan.place + item.size());
+    out["arena"] = plan.arena;
+    mesh_run_plan_free(&plan);
+    return out;
   });
   module.def("region_page_bytes", []() {
     uint64_t page_bytes = 0;

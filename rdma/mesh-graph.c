@@ -902,51 +902,161 @@ int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t
 }
 
 /* mesh-graph.h */
-struct pack_placed { uint64_t first, size; size_t item; };
-/* items by their first access, then by number (qsort_r's context: the begins) */
-static int pack_by_begin(void *context, const void *left, const void *right) {
-  const uint64_t *begin = context;
+static int access_by_item(void *context, const void *left, const void *right) {
+  const struct mesh_graph_access *a = context;
+  const size_t x = *(const size_t *)left, y = *(const size_t *)right;
+  if (a[x].item != a[y].item) return a[x].item < a[y].item ? -1 : 1;
+  return (x > y) - (x < y);
+}
+static int dependence_order(const void *left, const void *right) {
+  const struct mesh_graph_dependence *a = left, *b = right;
+  if (a->to != b->to) return a->to < b->to ? -1 : 1;
+  if (a->from != b->from) return a->from < b->from ? -1 : 1;
+  if (a->kind != b->kind) return a->kind < b->kind ? -1 : 1;
+  if (a->item != b->item) return a->item < b->item ? -1 : 1;
+  return (a->first > b->first) - (a->first < b->first);
+}
+/* room for `need` byte runs in each of the two run lists the sweep alternates between */
+struct byte_run { uint64_t first, end; };
+static int byte_runs_room(struct byte_run **open, struct byte_run **next, size_t *room, size_t need) {
+  if (need <= *room) return 0;
+  size_t grown = *room ? *room : 8;
+  while (grown < need) grown *= 2;
+  struct byte_run *a = realloc(*open, grown * sizeof *a);
+  if (!a) return ENOMEM;
+  *open = a;
+  struct byte_run *b = realloc(*next, grown * sizeof *b);
+  if (!b) return ENOMEM;
+  *next = b; *room = grown;
+  return 0;
+}
+size_t mesh_graph_dependences(size_t n, const struct mesh_graph_access *access, struct mesh_graph_dependence *out,
+                              size_t capacity) {
+  size_t *by = malloc((n + 1) * sizeof *by), room = 0, count = 0, found_room = 0;
+  struct byte_run *open = NULL, *next = NULL;
+  struct mesh_graph_dependence *found = NULL;
+  int failed = !by;
+  for (size_t k = 0; !failed && k < n; k++) by[k] = k;
+  if (!failed) qsort_r(by, n, sizeof *by, (void *)access, access_by_item);
+  /* each item's accesses in the declared order: for access j, the earlier ones from the latest back, over the bytes
+     of j that no write met since */
+  for (size_t g = 0; !failed && g < n;) {
+    size_t h = g;
+    while (h < n && access[by[h]].item == access[by[g]].item) h++;
+    for (size_t x = g + 1; !failed && x < h; x++) {
+      const struct mesh_graph_access *j = access + by[x];
+      if (!j->bytes || byte_runs_room(&open, &next, &room, 2)) { failed = !!j->bytes; continue; }
+      size_t opens = 1;
+      open[0] = (struct byte_run){j->first, j->first + j->bytes};
+      for (size_t y = x; y-- > g && opens && !failed;) {
+        const struct mesh_graph_access *i = access + by[y];
+        const uint64_t lo = i->first, hi = i->first + i->bytes;
+        const uint32_t kind = i->mode & MESH_GRAPH_WRITE ? (j->mode & MESH_GRAPH_READ ? MESH_GRAPH_RAW : MESH_GRAPH_WAW)
+                              : j->mode & MESH_GRAPH_WRITE ? MESH_GRAPH_WAR : 0;
+        if (byte_runs_room(&open, &next, &room, 2 * opens)) { failed = 1; break; }
+        size_t kept = 0;
+        for (size_t r = 0; r < opens; r++) {
+          const uint64_t a = open[r].first > lo ? open[r].first : lo, b = open[r].end < hi ? open[r].end : hi;
+          if (a >= b) { next[kept++] = open[r]; continue; }
+          if (kind && i->end != j->begin) {
+            if (count == found_room) {
+              const size_t grown = found_room ? 2 * found_room : 64;
+              struct mesh_graph_dependence *more = realloc(found, grown * sizeof *more);
+              if (!more) { failed = 1; break; }
+              found = more; found_room = grown;
+            }
+            found[count++] = (struct mesh_graph_dependence){i->end, j->begin, kind, j->item, a, b - a};
+          }
+          if (i->mode & MESH_GRAPH_WRITE) {
+            if (open[r].first < a) next[kept++] = (struct byte_run){open[r].first, a};
+            if (b < open[r].end) next[kept++] = (struct byte_run){b, open[r].end};
+          } else next[kept++] = open[r];
+        }
+        struct byte_run *swap = open; open = next; next = swap; opens = kept;
+      }
+    }
+    g = h;
+  }
+  size_t joined = 0;
+  if (!failed && count) {
+    qsort(found, count, sizeof *found, dependence_order);
+    for (size_t k = 0; k < count; k++) {
+      struct mesh_graph_dependence *last = joined ? found + joined - 1 : NULL;
+      if (last && last->to == found[k].to && last->from == found[k].from && last->kind == found[k].kind &&
+          last->item == found[k].item && last->first + last->bytes == found[k].first)
+        last->bytes += found[k].bytes;
+      else found[joined++] = found[k];
+    }
+  }
+  for (size_t k = 0; !failed && k < joined && k < capacity; k++) out[k] = found[k];
+  free(by); free(open); free(next); free(found);
+  return failed ? SIZE_MAX : joined;
+}
+
+/* mesh-graph.h */
+struct placed_item { uint64_t first, size; size_t item; };
+struct place_rank { const uint64_t *size, *key; };
+/* the largest first, then by key, then by number (qsort_r's context: sizes and keys) */
+static int place_by_size(void *context, const void *left, const void *right) {
+  const struct place_rank *r = context;
   const size_t a = *(const size_t *)left, b = *(const size_t *)right;
-  if (begin[a] != begin[b]) return begin[a] < begin[b] ? -1 : 1;
+  if (r->size[a] != r->size[b]) return r->size[a] > r->size[b] ? -1 : 1;
+  if (r->key[a] != r->key[b]) return r->key[a] < r->key[b] ? -1 : 1;
   return (a > b) - (a < b);
 }
-int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *begin, const uint64_t *end,
-                             const unsigned char *pinned, uint64_t capacity, uint64_t *place,
-                             int (*settled)(const void *context, size_t done, size_t next), const void *context) {
-  size_t *order = malloc((n + 1) * sizeof *order);
-  struct pack_placed *placed = malloc((n + 1) * sizeof *placed);  /* ascending by first */
-  if (!order || !placed) { free(order); free(placed); return ENOMEM; }
-  size_t count = 0, placed_count = 0;
-  for (size_t k = 0; k < n; k++) if (size[k]) order[count++] = k; else place[k] = 0;
-  qsort_r(order, count, sizeof *order, (void *)begin, pack_by_begin);
+/* the first placed item (ascending by first unit) that would share a unit of [at, at + size) with `item` and is not
+   apart from it, or SIZE_MAX: only the placed items that can reach `at` are visited (`widest`, the largest placed) */
+static size_t place_conflict(const struct placed_item *placed, size_t count, uint64_t widest, uint64_t at, uint64_t size,
+                             size_t item, int (*apart)(const void *context, size_t k, size_t l), const void *context) {
+  size_t lo = 0, hi = count;
+  const uint64_t reach = at > widest ? at - widest : 0;
+  while (lo < hi) { const size_t mid = lo + (hi - lo) / 2; if (placed[mid].first < reach) lo = mid + 1; else hi = mid; }
+  for (size_t y = lo; y < count && placed[y].first < at + size; y++)
+    if (placed[y].first + placed[y].size > at && !apart(context, placed[y].item, item)) return y;
+  return SIZE_MAX;
+}
+static void place_insert(struct placed_item *placed, size_t *count, struct placed_item item) {
+  size_t y = *count;
+  while (y > 0 && placed[y - 1].first > item.first) { placed[y] = placed[y - 1]; y--; }
+  placed[y] = item;
+  (*count)++;
+}
+int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const unsigned char *pinned, size_t bins,
+                     const uint64_t (*bin)[2], uint64_t *place, int (*apart)(const void *context, size_t k, size_t l),
+                     const void *context) {
+  struct placed_item *placed = malloc((n + 1) * sizeof *placed);
+  size_t *order = malloc((n + 1) * sizeof *order), count = 0, free_items = 0;
+  if (!placed || !order) { free(placed); free(order); return ENOMEM; }
+  uint64_t widest = 0;
   int result = 0;
-  for (size_t x = 0; x < count && !result; x++) {
-    const size_t l = order[x];
-    /* the first start at or past `at` whose units every overlapping placed item has settled before l: placed items are
-       visited only where they overlap the candidate */
-    uint64_t at = pinned && pinned[l] ? place[l] : 0;
-    for (int moved = 1; moved;) {
-      moved = 0;
-      if (at + size[l] > capacity) { result = pinned && pinned[l] ? EBUSY : ENOMEM; break; }
-      size_t lo = 0, hi = placed_count;
-      while (lo < hi) { const size_t mid = lo + (hi - lo) / 2; if (placed[mid].first + placed[mid].size <= at) lo = mid + 1; else hi = mid; }
-      for (size_t y = lo; y < placed_count && placed[y].first < at + size[l]; y++) {
-        const size_t k = placed[y].item;
-        const int done = settled ? settled(context, k, l) : end[k] <= begin[l];
-        if (!done) {
-          if (pinned && pinned[l]) { result = EBUSY; break; }
-          at = placed[y].first + placed[y].size; moved = 1; break;
-        }
-      }
-      if (result) break;
-    }
-    if (result) break;
-    place[l] = at;
-    size_t y = placed_count;
-    while (y > 0 && placed[y - 1].first > at) { placed[y] = placed[y - 1]; y--; }
-    placed[y] = (struct pack_placed){at, size[l], l};
-    placed_count++;
+  for (size_t k = 0; !result && k < n; k++) {
+    if (!size[k]) { place[k] = UINT64_MAX; continue; }
+    if (!(pinned && pinned[k])) { order[free_items++] = k; continue; }
+    size_t b = 0;
+    while (b < bins && !(bin[b][0] <= place[k] && place[k] - bin[b][0] <= bin[b][1] && size[k] <= bin[b][1] - (place[k] - bin[b][0]))) b++;
+    if (b == bins) { result = EINVAL; break; }
+    if (place_conflict(placed, count, widest, place[k], size[k], k, apart, context) != SIZE_MAX) { result = EBUSY; break; }
+    place_insert(placed, &count, (struct placed_item){place[k], size[k], k});
+    if (size[k] > widest) widest = size[k];
   }
-  free(order); free(placed);
+  struct place_rank rank = {size, key};
+  if (!result) qsort_r(order, free_items, sizeof *order, &rank, place_by_size);
+  for (size_t x = 0; !result && x < free_items; x++) {
+    const size_t l = order[x];
+    int found = 0;
+    for (size_t b = 0; !found && b < bins; b++) {
+      if (size[l] > bin[b][1]) continue;
+      const uint64_t last = bin[b][0] + (bin[b][1] - size[l]);
+      for (uint64_t at = bin[b][0]; at <= last;) {
+        const size_t y = place_conflict(placed, count, widest, at, size[l], l, apart, context);
+        if (y == SIZE_MAX) { place[l] = at; found = 1; break; }
+        at = placed[y].first + placed[y].size;
+      }
+    }
+    if (!found) { result = ENOMEM; break; }
+    place_insert(placed, &count, (struct placed_item){place[l], size[l], l});
+    if (size[l] > widest) widest = size[l];
+  }
+  free(placed); free(order);
   return result;
 }

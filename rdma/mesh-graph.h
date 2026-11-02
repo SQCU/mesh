@@ -239,19 +239,32 @@ void *mesh_graph_pair_classes(const struct mesh_graph_lattice *removed, int64_t 
    member i % width, a bijection of [0, count); placed[p] the slot position of ordinal p, its tile's rank times width
    plus its place in the tile. -1 where `at` is no such bijection (placed is then unspecified), 0 otherwise. */
 int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t *placed);
-/* type: n x (size, begin, end), pinned, capacity, settled -> place[n] with place[k] + size[k] <= capacity, place[k]
-   unchanged where pinned[k], and for all k != l with nonzero sizes sharing a unit: settled(k, l) or settled(l, k).
-   settled(k, l): item k's last access happens before item l's first in the data-dependency order (design/
-   page-maps-2026-11-02.md: reuse only along causation); NULL reads end[k] <= begin[l] in one total order. begin must
-   be a topological order of the items' first accesses. */
-/* Interval packing: items placed in begin order, each at the first units where every placed item it would share a
-   unit with is settled before it; a pinned item keeps its given place. 0; ENOMEM where no place fits; EBUSY where a
-   pinned item's units hold an unsettled item: a compile-time failure. Each placement visits only the placed items
-   overlapping its candidate units. Consumers: the page allocator (mesh-page-map.h; items a value at an invocation,
-   units physical pages, pinned items the program's leases). */
-int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *begin, const uint64_t *end,
-                             const unsigned char *pinned, uint64_t capacity, uint64_t *place,
-                             int (*settled)(const void *context, size_t done, size_t next), const void *context);
+/* The run's solve's graph algorithms (design/page-maps-2026-11-02.md, "The run's solve, each choice and its ground"),
+   with the solve's records as operands. Events are numbered in the declared order; an item is a value at an
+   invocation, or a state's version. */
+enum { MESH_GRAPH_READ = 1, MESH_GRAPH_WRITE = 2 };
+/* item's bytes [first, first + bytes), read and/or written (mode) over events [begin, end] */
+struct mesh_graph_access { uint32_t begin, end, mode; uint64_t item, first, bytes; };
+enum { MESH_GRAPH_RAW = 1, MESH_GRAPH_WAW = 2, MESH_GRAPH_WAR = 3, MESH_GRAPH_LINK = 4 };
+/* event `from` before event `to`, because of item's bytes [first, first + bytes) (kind RAW, WAW, WAR), or because the
+   transport orders them (LINK: item and bytes 0) */
+struct mesh_graph_dependence { uint32_t from, to, kind; uint64_t item, first, bytes; };
+/* type: [Access] in the declared order -> [Dependence]: for each access j and each byte of it, the edge from the end of
+   the latest earlier access of that byte that writes it (RAW where j reads, WAW where j writes), and where j writes,
+   one from the end of each access that read it since; none from an event to itself. Joined where they differ only in
+   adjacent bytes. Returns the count, written up to `capacity`, or SIZE_MAX where memory ran out. */
+size_t mesh_graph_dependences(size_t n, const struct mesh_graph_access *access, struct mesh_graph_dependence *out,
+                              size_t capacity);
+/* type: n x (size, key), pins, bins [first, first + pages) ascending and disjoint, apart -> place[n]: each item within
+   one bin, a pinned item at its given place, and every two items sharing a unit apart. apart(k, l) is symmetric: one's
+   accesses all happen before the other's. Greedy by size: pins first; then the largest item first, ties by key (a
+   topological order of first accesses), each at the lowest unit of the first bin where every placed item it would
+   share a unit with is apart from it (Pisarchyk and Lee 2020; the exclusion graph of Desnos et al. 2013). Zero-size
+   items are placed nowhere. 0; EINVAL where a pin lies in no bin; EBUSY where two pins meet unapart; ENOMEM where an
+   item fits no bin: compile-time failures. Consumer: the run's solve (mesh-page-map.h). */
+int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const unsigned char *pinned, size_t bins,
+                     const uint64_t (*bin)[2], uint64_t *place, int (*apart)(const void *context, size_t k, size_t l),
+                     const void *context);
 
 #ifdef __cplusplus
 }

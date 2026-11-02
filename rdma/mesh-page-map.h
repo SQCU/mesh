@@ -8,8 +8,9 @@
    - A piece is one affine box of a value's layout: logical coordinates in its box map to virtual elements by integer
      strides and an origin. A layout is a list of pieces with disjoint boxes, every closed form of the layout algebra
      read back this way (mesh-tensor-layout.m, 2026-11-02).
-   - A page map gives each invocation's virtual pages their physical pages, as explicit runs. The allocator writes it
-     from lifetimes; no formula in it is picked by hand. There are no rings, slots or generations.
+   - A page map gives each invocation's virtual pages their physical pages, as explicit runs. The run's solve
+     (mesh_run_solve) writes it from lifetimes; no formula in it is picked by hand. There are no rings, slots or
+     generations.
    - A value is a layout composed with a page map. A tensor, a landing, a SEND source, a progress word and a
      descriptor table are all values.
    - A lifetime is an interval of the function's event order, transport events included.
@@ -20,6 +21,7 @@
 #define MESH_PAGE_MAP_H
 #include <stddef.h>
 #include <stdint.h>
+#include "mesh-graph.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -111,23 +113,39 @@ struct mesh_view {
 size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout *of, struct mesh_piece *out,
                          size_t capacity);
 
-/* The page allocator, a consumer of mesh-graph.h's mesh_graph_interval_pack (rubric C9). Each (value, invocation) is
-   an item: value k's pages[k] virtual pages over lifetimes[k * invocations + i]. Each is placed on physical pages of
-   `space` so that no two live items share one. Value k's map is written to maps[k]: its firsts at
-   firsts[k * (invocations + 1) ..] and its runs at runs[k * invocations ..], one run an invocation. So repeated
-   invocations land wherever pages are free over their lifetimes, never by a picked formula. Pages return through the
-   retire ledger (mesh-lease-retire.h) between functions. 0, ENOMEM where the function's live set exceeds the region (a
-   compile-time failure), or the packing's error */
-/* type: (Space, [VPages_k], [Life_{k,i}], Inv, pins) -> [Map_k] with: for all (k,i) != (l,j) whose lives overlap, their
-   pages are disjoint; every Page < space.pages; and where pinned[k * invocations + i], (k,i)'s pages begin at
-   pinned_first[k * invocations + i], a lease's (the program's state where it touches it). pinned NULL pins none.
-   settled(item, item): one (value, invocation)'s last access happens before another's first in the data-dependency
-   order (items numbered k * invocations + i); NULL reads their lifetimes in one total order. Pages pass between
-   items only where settled holds. ENOMEM iff first-fit finds no place, EBUSY iff a pin meets an unsettled item */
-int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
-                       const struct mesh_lifetime *lifetimes, uint64_t invocations, const unsigned char *pinned,
-                       const uint64_t *pinned_first, int (*settled)(const void *context, size_t done, size_t next),
-                       const void *context, struct mesh_page_map *maps, uint64_t *firsts, struct mesh_map_run *runs);
+/* The run's solve: the library's one allocator and scheduler (design/page-maps-2026-11-02.md, "The run's solve, each
+   choice and its ground"). It takes a run's events (numbered in the declared order: commands, receive posts, SENDs,
+   their completions, landings, the bridge leaving a table), its accesses to items, the transport's own edges and the
+   bins of positions the process owns (one a lease the run touches, the arena last), and decides each item's place and
+   the run's order. It knows no address; the lowering reindexes a place through its bin's lease. */
+enum { MESH_RUN_BEFORE = 1, MESH_RUN_AFTER = 2 }; /* an item live from before the run starts, or past its end */
+#define MESH_RUN_FREE UINT64_MAX
+/* an item: a value at an invocation, a state's version, a collective's own value, or a coexisting buffer (pinned, with
+   `lives`): its pages, and its first position where it is pinned (else MESH_RUN_FREE) */
+struct mesh_run_item { uint64_t pages, pin; uint32_t lives; };
+/* positions [first, first + pages) of one lease; the last bin is the arena, `pages` its most */
+struct mesh_run_bin { uint64_t first, pages; };
+/* the solve's result, owned by the caller after mesh_run_solve until mesh_run_plan_free */
+struct mesh_run_plan {
+  size_t edges;
+  struct mesh_graph_dependence *edge; /* every ordering the effectors realize: the dependences and LINK edges */
+  uint32_t *order;                    /* the events in issue order, each agent's order its subsequence */
+  uint64_t *place;                    /* each item's first position, MESH_RUN_FREE where it holds none */
+  uint64_t arena;                     /* positions of the last bin in use: the arena's pages, held from load */
+};
+/* type: (Space, events, [Access] in the declared order, [(from, to)] links, [Item], [Bin]) -> Plan with:
+   - edges: mesh_graph_dependences over the accesses, each access's begin -> end where they differ, and the links;
+   - order: the least-numbered ready event first (mesh_graph_order), so the declared order where the edges leave it;
+   - place: two items share a position only where every access of one happens before every access of the other over
+     the edges (an item live before the run has nothing before it; one live past it has nothing after); pinned items at
+     their pins; greedy by size (mesh_graph_place).
+   No edge is added for reuse. 0; EINVAL for an access outside its item or its events, unordered bins, a pin in no bin,
+   or a cycle in the edges; EBUSY where two pins meet; ENOMEM where the run's live set exceeds its bins. */
+int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t accesses,
+                   const struct mesh_graph_access *access, size_t links, const uint32_t (*link)[2], size_t items,
+                   const struct mesh_run_item *item, size_t bins, const struct mesh_run_bin *bin,
+                   struct mesh_run_plan *plan);
+void mesh_run_plan_free(struct mesh_run_plan *plan);
 
 #ifdef __cplusplus
 }
