@@ -3433,18 +3433,27 @@ static ncclResult_t route_tree_counts(struct call *c,const struct mesh_program *
     const uint64_t elements=parts[p->parts+k];tree[indices[k]].units=elements?(elements-1)/q+1:0;
     if(__builtin_mul_overflow(elements,(uint64_t)operand.element_bytes,&tree[indices[k]].bytes))good=0;
   }
+  /* each demand's adjustable trees' units and bytes, summed in one pass over the trees. Changed by the LSTM demonstration
+     session: each demand scanned every tree, at every call's steps (calls x demands x trees), and a 64-step LSTM's plan
+     spent its whole minute at that comparison on every rank (collective_steps -> route_tree_counts, 2026-11-01 18:0x).
+     What must stay: one pass over the trees, one over the demands. */
+  const uint32_t count=c->routing->view.demands;
+  uint64_t *sums=good?calloc(2*(size_t)count+1,sizeof *sums):NULL;unsigned char *active=good?calloc((size_t)count+1,1):NULL;
+  if(good&&(!sums||!active)){free(sums);free(active);free(parts);return fail(ncclSystemError,"allocating tree allocation sums");}
+  for(uint32_t t=0;good&&t<c->routing->view.trees;t++)if(tree[t].adjustable&&tree[t].demand<count) {
+    const uint32_t d=tree[t].demand;active[d]=1;
+    if(__builtin_add_overflow(sums[2*(size_t)d],tree[t].units,&sums[2*(size_t)d])||
+       __builtin_add_overflow(sums[2*(size_t)d+1],tree[t].bytes,&sums[2*(size_t)d+1]))good=0;
+  }
   if(good) {
     ncclMeshRouteDemand *demands=(ncclMeshRouteDemand *)c->routing->view.demand;
-    for(uint32_t d=0;d<c->routing->view.demands;d++) {
-      uint64_t units=0,bytes=0;int active=0;
-      for(uint32_t t=0;t<c->routing->view.trees;t++)if(tree[t].demand==d&&tree[t].adjustable) {
-        active=1;
-        if(__builtin_add_overflow(units,tree[t].units,&units)||__builtin_add_overflow(bytes,tree[t].bytes,&bytes)){good=0;break;}
-      }
-      if(active) {demands[d].units=units;if(demands[d].directions&1)demands[d].up=bytes;if(demands[d].directions&2)demands[d].down=bytes;}
+    for(uint32_t d=0;d<count;d++)if(active[d]) {
+      demands[d].units=sums[2*(size_t)d];
+      if(demands[d].directions&1)demands[d].up=sums[2*(size_t)d+1];
+      if(demands[d].directions&2)demands[d].down=sums[2*(size_t)d+1];
     }
   }
-  free(parts);return good?ncclSuccess:fail(ncclInvalidArgument,"tree allocation readback");
+  free(sums);free(active);free(parts);return good?ncclSuccess:fail(ncclInvalidArgument,"tree allocation readback");
 }
 
 static int rank_member(const uint64_t *mask,uint32_t rank);
