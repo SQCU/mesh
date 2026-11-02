@@ -1,0 +1,3 @@
+[
+ {"file":"rdma/mesh-tensor-layout.h","line":2,"lines":"2-3","function":"(file scope)","scope":"chooser","violation":"chooser has access","abstraction":"#import <Metal/Metal.h> and nccl.h (id<MTLBuffer>, ncclMeshBuffer, ncclMeshAccess, ncclMeshPageTable_t)","handles":"lets the layout interface name Metal buffers and the interface's (buffer, offset) types beside its element relations.","group":"operand-identity","replacement":"the layout interface imports only the page-map types (virtual page, physical page index, layout); Metal and pointer-bearing nccl.h types move to the final lowering.","note":"partial; rows to mesh-tensor-layout.m:300 so far"}
+]
