@@ -2233,18 +2233,47 @@ static id TensorRecordValue(id value) {
     if([value isKindOfClass:NSNumber.class]||[value isKindOfClass:NSString.class])return value;
     return value?[value description]:NSNull.null;
 }
-void MetalTensorLayoutRecord(const char *call,uint64_t started,NSDictionary *operands) { @autoreleasepool {
+/* mesh-tensor-layout.h MetalTensorLayoutEnter and MetalTensorLayoutRecord. The operands are serialized once, at entry:
+   written whole to layouts-current-<pid>.json (a temporary file renamed over it, so a rank ended mid-call leaves that
+   call's operands complete), and kept for the line appended at return where the call took over 50 ms. Changed by the
+   layout algebra session: the LSTM's stalled calls never returned within the 8 s quiet bound, so a line written at
+   return left nothing (d-rec1, 2026-11-02). */
+static const char *TensorRecordDirectory(void) {
+    static const char *dir;static int read;
+    if(!read){read=1;dir=getenv("MESH_PREPARE_RECORD");}
+    return dir;
+}
+static _Thread_local NSData *TensorRecordOperands;
+uint64_t MetalTensorLayoutEnter(const char *call,NSDictionary *operands) { @autoreleasepool {
+    const char *dir=TensorRecordDirectory();
+    if(dir) {
+        NSData *data=[NSJSONSerialization dataWithJSONObject:TensorRecordValue(operands) options:0 error:nil];
+        [TensorRecordOperands release];TensorRecordOperands=[data retain];
+        char path[1024],temporary[1040];const int pid=(int)getpid();
+        if(data&&snprintf(path,sizeof path,"%s/layouts-current-%d.json",dir,pid)<(int)sizeof path&&
+           snprintf(temporary,sizeof temporary,"%s.partial",path)<(int)sizeof temporary) {
+            FILE *out=fopen(temporary,"w");
+            if(out) {
+                struct timespec wall;clock_gettime(CLOCK_REALTIME,&wall);
+                fprintf(out,"{\"call\":\"%s\",\"entered\":%.6f,\"operands\":",call,(double)wall.tv_sec+wall.tv_nsec/1e9);
+                fwrite(data.bytes,1,data.length,out);fputs("}\n",out);
+                if(!fclose(out))rename(temporary,path);
+            }
+        }
+    }
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}}
+void MetalTensorLayoutRecord(const char *call,uint64_t started) {
     const double us=(double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-started)/1e3;
-    if(us<=50000)return;
+    NSData *data=TensorRecordOperands;
+    if(us<=50000||!data)return;
     static FILE *out;static int opened;
     if(!opened) {
-        opened=1;const char *dir=getenv("MESH_PREPARE_RECORD");char path[1024];
+        opened=1;const char *dir=TensorRecordDirectory();char path[1024];
         if(dir&&snprintf(path,sizeof path,"%s/layouts-%d.jsonl",dir,(int)getpid())<(int)sizeof path)out=fopen(path,"w");
     }
     if(!out)return;
-    NSData *line=[NSJSONSerialization dataWithJSONObject:@{@"call":@(call),@"us":@(round(us)),
-        @"operands":TensorRecordValue(operands)} options:0 error:nil];
-    if(!line)return;
-    fwrite(line.bytes,1,line.length,out);fputc('\n',out);fflush(out);
-}}
+    fprintf(out,"{\"call\":\"%s\",\"us\":%.0f,\"operands\":",call,us);
+    fwrite(data.bytes,1,data.length,out);fputs("}\n",out);fflush(out);
+}
 

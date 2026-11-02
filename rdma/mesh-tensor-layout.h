@@ -152,10 +152,12 @@ FOUNDATION_EXPORT NSArray<MetalTensorLayout *> * _Nullable MetalTensorPairQuotie
 FOUNDATION_EXPORT NSArray<MetalTensorLayout *> *MetalTensorUnite(MetalTensorLayout *sourceRoot,
     MetalTensorLayout *targetRoot, MetalTensorLayout *source, MetalTensorLayout *target);
 
-// A chooser layout call that took over 50 ms (from `started`, CLOCK_UPTIME_RAW nanoseconds) as one JSON line in
-// MESH_PREPARE_RECORD's directory, layouts-<pid>.jsonl (none where it is unset): its name, microseconds and operands,
-// each layout as its exact state. A log of preparation; nothing reads it back.
-FOUNDATION_EXPORT void MetalTensorLayoutRecord(const char *call, uint64_t started, NSDictionary *operands);
+// A chooser layout call's record in MESH_PREPARE_RECORD's directory (none where it is unset), each layout as its exact
+// state. At entry its name, wall time and operands overwrite layouts-current-<pid>.json, and the entry's
+// CLOCK_UPTIME_RAW nanoseconds are returned; at return, where it took over 50 ms, one line of its name, microseconds and
+// operands is appended to layouts-<pid>.jsonl. A log of preparation; nothing reads it back.
+FOUNDATION_EXPORT uint64_t MetalTensorLayoutEnter(const char *call, NSDictionary *operands);
+FOUNDATION_EXPORT void MetalTensorLayoutRecord(const char *call, uint64_t started);
 
 // The domain maps concatenated storage ordinals to logical positions; selection
 // maps requested ordinals to those positions. Preparation unites physical cuts
