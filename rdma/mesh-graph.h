@@ -264,7 +264,7 @@ size_t mesh_graph_dependences(size_t n, const struct mesh_graph_access *access, 
 int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                           const void *context, size_t sets, const size_t *source_first, const uint32_t *source,
                           const size_t *target_first, const uint32_t *target, unsigned char *precedes);
-/* Greedy by size (mesh-graph-greedy-by-size.c, ported from TensorFlow Lite's GreedyBySizeAssignment, Apache-2.0):
+/* Greedy by size (mesh-graph.c's section ported from TensorFlow Lite's GreedyBySizeAssignment, Apache-2.0):
    `count` items (indices into size and offset) on one line of units from 0, the `placed` pinned items already at their
    offsets. The largest first (ties in the given order), each in the smallest gap left of an item it is not apart from
    that holds it, else after the rightmost such item. type: -> offset[item] for each of `items`, *total the line's

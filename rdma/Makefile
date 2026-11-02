@@ -148,9 +148,9 @@ $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .b
 statistics: .build/libmesh-statistics.dylib
 	cp $< libmesh-statistics.dylib
 .PHONY: statistics
-.build/libmesh.dylib: mesh-graph.c mesh-graph-greedy-by-size.c mesh-graph.h mesh-page-map.c mesh-page-map.h mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c mesh-diagnostics.h mesh.h mesh-plan.h mesh-fabric.h Makefile
+.build/libmesh.dylib: mesh-graph.c mesh-graph.h mesh-page-map.c mesh-page-map.h mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c mesh-diagnostics.h mesh.h mesh-plan.h mesh-fabric.h Makefile
 	mkdir -p .build
-	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-graph.c mesh-graph-greedy-by-size.c mesh-page-map.c mesh-dataflow.c mesh-call.c mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c -framework IOKit -framework CoreFoundation
+	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-graph.c mesh-page-map.c mesh-dataflow.c mesh-call.c mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c -framework IOKit -framework CoreFoundation
 # the built images; never an installed image (the launchd job's binary and the libraries clients map)
 clean:
 	rm -rf $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.metal .build/libnccl-mesh.sha256 \
