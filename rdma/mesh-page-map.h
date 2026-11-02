@@ -118,10 +118,12 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
 /* type: (Space, [VPages_k], [Life_{k,i}], Inv, pins) -> [Map_k] with: for all (k,i) != (l,j) whose lives overlap, their
    pages are disjoint; every Page < space.pages; and where pinned[k * invocations + i], (k,i)'s pages begin at
    pinned_first[k * invocations + i], a lease's (the program's state where it touches it). pinned NULL pins none.
-   ENOMEM iff no such maps exist by first-fit over the event order, EBUSY iff two pins collide */
+   settled(item, item): one (value, invocation)'s last access happens before another's first in the data-dependency
+   order (items numbered k * invocations + i); NULL reads their lifetimes in one total order. Pages pass between
+   items only where settled holds. ENOMEM iff first-fit finds no place, EBUSY iff a pin meets an unsettled item */
 int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
                        const struct mesh_lifetime *lifetimes, uint64_t invocations, const unsigned char *pinned,
-                       const uint64_t *pinned_first, struct mesh_page_map *maps, uint64_t *firsts,
-                       struct mesh_map_run *runs);
+                       const uint64_t *pinned_first, int (*settled)(const void *context, size_t done, size_t next),
+                       const void *context, struct mesh_page_map *maps, uint64_t *firsts, struct mesh_map_run *runs);
 
 #endif

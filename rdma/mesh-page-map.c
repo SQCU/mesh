@@ -222,8 +222,8 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
 /* mesh-page-map.h */
 int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
                        const struct mesh_lifetime *lifetimes, uint64_t invocations, const unsigned char *pinned,
-                       const uint64_t *pinned_first, struct mesh_page_map *maps, uint64_t *firsts,
-                       struct mesh_map_run *runs) {
+                       const uint64_t *pinned_first, int (*settled)(const void *context, size_t done, size_t next),
+                       const void *context, struct mesh_page_map *maps, uint64_t *firsts, struct mesh_map_run *runs) {
   const size_t n = count * (size_t)invocations;
   uint64_t *size = malloc((n + 1) * sizeof *size), *begin = malloc((n + 1) * sizeof *begin),
            *end = malloc((n + 1) * sizeof *end), *place = malloc((n + 1) * sizeof *place);
@@ -234,7 +234,7 @@ int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const 
       size[item] = pages[k]; begin[item] = lifetimes[item].begin; end[item] = lifetimes[item].end;
       place[item] = pinned && pinned[item] ? pinned_first[item] : 0;
     }
-  if (!result) result = mesh_graph_interval_pack(n, size, begin, end, pinned, space->pages, place);
+  if (!result) result = mesh_graph_interval_pack(n, size, begin, end, pinned, space->pages, place, settled, context);
   for (size_t k = 0; !result && k < count; k++) {
     uint64_t *first = firsts + k * (size_t)(invocations + 1);
     struct mesh_map_run *own = runs + k * (size_t)invocations;

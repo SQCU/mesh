@@ -902,87 +902,51 @@ int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t
 }
 
 /* mesh-graph.h */
-struct pack_event { uint64_t at; size_t item; int begins; };
-static int pack_event_order(const void *left, const void *right) {
-  const struct pack_event *a = left, *b = right;
-  if (a->at != b->at) return a->at < b->at ? -1 : 1;
-  if (a->begins != b->begins) return a->begins - b->begins;  /* an end at t frees before a begin at t takes */
-  return (a->item > b->item) - (a->item < b->item);
-}
-/* the first place in free run [first, first + count) for an item of `size` units over [b, e) that meets no pinned item
-   live at any time in [b, e) (the pinned items' units are given, so a later pinned item is respected too); UINT64_MAX
-   where none */
-static uint64_t pack_fit(uint64_t first, uint64_t count, uint64_t size, uint64_t b, uint64_t e, size_t n,
-                         const uint64_t *sizes, const uint64_t *begins, const uint64_t *ends, const unsigned char *pinned,
-                         const uint64_t *place) {
-  uint64_t at = first;
-  for (int moved = 1; moved && at + size <= first + count;) {
-    moved = 0;
-    for (size_t p = 0; pinned && p < n; p++)
-      if (pinned[p] && sizes[p] && begins[p] < e && b < ends[p] && place[p] < at + size && at < place[p] + sizes[p]) {
-        at = place[p] + sizes[p]; moved = 1;
-      }
-  }
-  return at + size <= first + count ? at : UINT64_MAX;
+struct pack_placed { uint64_t first, size; size_t item; };
+/* items by their first access, then by number (qsort_r's context: the begins) */
+static int pack_by_begin(void *context, const void *left, const void *right) {
+  const uint64_t *begin = context;
+  const size_t a = *(const size_t *)left, b = *(const size_t *)right;
+  if (begin[a] != begin[b]) return begin[a] < begin[b] ? -1 : 1;
+  return (a > b) - (a < b);
 }
 int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *begin, const uint64_t *end,
-                             const unsigned char *pinned, uint64_t capacity, uint64_t *place) {
-  struct pack_event *events = malloc((2 * n + 1) * sizeof *events);
-  uint64_t (*free_runs)[2] = malloc((2 * n + 2) * sizeof *free_runs);  /* [first, count), ascending, disjoint, joined */
-  if (!events || !free_runs) { free(events); free(free_runs); return ENOMEM; }
-  size_t e = 0, runs = 1;
-  for (size_t k = 0; k < n; k++) if (size[k]) {
-    events[e++] = (struct pack_event){begin[k], k, 1};
-    events[e++] = (struct pack_event){end[k], k, 0};
-  } else place[k] = 0;
-  qsort(events, e, sizeof *events, pack_event_order);
-  free_runs[0][0] = 0; free_runs[0][1] = capacity;
+                             const unsigned char *pinned, uint64_t capacity, uint64_t *place,
+                             int (*settled)(const void *context, size_t done, size_t next), const void *context) {
+  size_t *order = malloc((n + 1) * sizeof *order);
+  struct pack_placed *placed = malloc((n + 1) * sizeof *placed);  /* ascending by first */
+  if (!order || !placed) { free(order); free(placed); return ENOMEM; }
+  size_t count = 0, placed_count = 0;
+  for (size_t k = 0; k < n; k++) if (size[k]) order[count++] = k; else place[k] = 0;
+  qsort_r(order, count, sizeof *order, (void *)begin, pack_by_begin);
   int result = 0;
-  for (size_t x = 0; x < e && !result; x++) {
-    const size_t k = events[x].item;
-    if (events[x].begins) {
-      size_t r = 0;
-      uint64_t at = UINT64_MAX;
-      if (pinned && pinned[k]) {
-        /* a pinned item's units must be free now: the run holding them whole */
-        while (r < runs && !(free_runs[r][0] <= place[k] && place[k] + size[k] <= free_runs[r][0] + free_runs[r][1])) r++;
-        if (r == runs) { result = EBUSY; break; }
-        at = place[k];
-      } else {
-        for (; r < runs; r++)
-          if ((at = pack_fit(free_runs[r][0], free_runs[r][1], size[k], begin[k], end[k], n, size, begin, end, pinned,
-                             place)) != UINT64_MAX) break;
-        if (r == runs) { result = ENOMEM; break; }
-        place[k] = at;
+  for (size_t x = 0; x < count && !result; x++) {
+    const size_t l = order[x];
+    /* the first start at or past `at` whose units every overlapping placed item has settled before l: placed items are
+       visited only where they overlap the candidate */
+    uint64_t at = pinned && pinned[l] ? place[l] : 0;
+    for (int moved = 1; moved;) {
+      moved = 0;
+      if (at + size[l] > capacity) { result = pinned && pinned[l] ? EBUSY : ENOMEM; break; }
+      size_t lo = 0, hi = placed_count;
+      while (lo < hi) { const size_t mid = lo + (hi - lo) / 2; if (placed[mid].first + placed[mid].size <= at) lo = mid + 1; else hi = mid; }
+      for (size_t y = lo; y < placed_count && placed[y].first < at + size[l]; y++) {
+        const size_t k = placed[y].item;
+        const int done = settled ? settled(context, k, l) : end[k] <= begin[l];
+        if (!done) {
+          if (pinned && pinned[l]) { result = EBUSY; break; }
+          at = placed[y].first + placed[y].size; moved = 1; break;
+        }
       }
-      /* [at, at + size) taken out of run r: what lies before and after it stays free */
-      const uint64_t run_first = free_runs[r][0], run_end = free_runs[r][0] + free_runs[r][1];
-      const int keep_before = at > run_first, keep_after = at + size[k] < run_end;
-      if (keep_before && keep_after) {
-        memmove(free_runs + r + 2, free_runs + r + 1, (runs - r - 1) * sizeof *free_runs); runs++;
-        free_runs[r][1] = at - run_first;
-        free_runs[r + 1][0] = at + size[k]; free_runs[r + 1][1] = run_end - (at + size[k]);
-      } else if (keep_before) free_runs[r][1] = at - run_first;
-      else if (keep_after) { free_runs[r][0] = at + size[k]; free_runs[r][1] = run_end - (at + size[k]); }
-      else { memmove(free_runs + r, free_runs + r + 1, (runs - r - 1) * sizeof *free_runs); runs--; }
-    } else {
-      /* its units back, joined with a neighbour they touch */
-      const uint64_t first = place[k], count = size[k];
-      size_t r = 0;
-      while (r < runs && free_runs[r][0] < first) r++;
-      const int before = r > 0 && free_runs[r - 1][0] + free_runs[r - 1][1] == first;
-      const int after = r < runs && first + count == free_runs[r][0];
-      if (before && after) {
-        free_runs[r - 1][1] += count + free_runs[r][1];
-        memmove(free_runs + r, free_runs + r + 1, (runs - r - 1) * sizeof *free_runs); runs--;
-      } else if (before) free_runs[r - 1][1] += count;
-      else if (after) { free_runs[r][0] = first; free_runs[r][1] += count; }
-      else {
-        memmove(free_runs + r + 1, free_runs + r, (runs - r) * sizeof *free_runs); runs++;
-        free_runs[r][0] = first; free_runs[r][1] = count;
-      }
+      if (result) break;
     }
+    if (result) break;
+    place[l] = at;
+    size_t y = placed_count;
+    while (y > 0 && placed[y - 1].first > at) { placed[y] = placed[y - 1]; y--; }
+    placed[y] = (struct pack_placed){at, size[l], l};
+    placed_count++;
   }
-  free(events); free(free_runs);
+  free(order); free(placed);
   return result;
 }

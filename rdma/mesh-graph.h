@@ -236,16 +236,18 @@ void *mesh_graph_pair_classes(const struct mesh_graph_lattice *removed, int64_t 
    member i % width, a bijection of [0, count); placed[p] the slot position of ordinal p, its tile's rank times width
    plus its place in the tile. -1 where `at` is no such bijection (placed is then unspecified), 0 otherwise. */
 int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t *placed);
-/* type: n x (size, [begin, end)), capacity, pinned -> place[n] with place[k] + size[k] <= capacity, place[k] unchanged
-   where pinned[k] (a lease's pages, given), and for all k != l with overlapping intervals and nonzero sizes,
-   [place[k], place[k] + size[k]) disjoint from [place[l], place[l] + size[l]) */
-/* Interval packing: n items, item k needing size[k] consecutive units over the interval [begin[k], end[k]). Each item
-   is placed at units [place[k], place[k] + size[k]) of [0, capacity), so that no two items whose intervals overlap
-   share a unit. An item with pinned[k] keeps the place it is given (pinned NULL: none is), and every other is placed
-   around it. 0; ENOMEM where the live set at some point exceeds capacity; EBUSY where two pinned items collide: a
-   compile-time failure. Consumers: the page allocator (mesh-page-map.h, items a value at an invocation, units physical
-   pages, pinned items the program's leases; design/page-maps-2026-11-02.md). */
+/* type: n x (size, begin, end), pinned, capacity, settled -> place[n] with place[k] + size[k] <= capacity, place[k]
+   unchanged where pinned[k], and for all k != l with nonzero sizes sharing a unit: settled(k, l) or settled(l, k).
+   settled(k, l): item k's last access happens before item l's first in the data-dependency order (design/
+   page-maps-2026-11-02.md: reuse only along causation); NULL reads end[k] <= begin[l] in one total order. begin must
+   be a topological order of the items' first accesses. */
+/* Interval packing: items placed in begin order, each at the first units where every placed item it would share a
+   unit with is settled before it; a pinned item keeps its given place. 0; ENOMEM where no place fits; EBUSY where a
+   pinned item's units hold an unsettled item: a compile-time failure. Each placement visits only the placed items
+   overlapping its candidate units. Consumers: the page allocator (mesh-page-map.h; items a value at an invocation,
+   units physical pages, pinned items the program's leases). */
 int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *begin, const uint64_t *end,
-                             const unsigned char *pinned, uint64_t capacity, uint64_t *place);
+                             const unsigned char *pinned, uint64_t capacity, uint64_t *place,
+                             int (*settled)(const void *context, size_t done, size_t next), const void *context);
 
 #endif
