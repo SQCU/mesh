@@ -416,12 +416,17 @@ NSArray<NSArray<MetalPageTransfer *> *> *MetalPagePublicationDomains(NSArray<Met
 /* A value arrival constrains reads. Completion of a prior reader constrains
    overwrites of those same pages. Both retain the source version until its
    first numerical write; neither is a command-wide ordering rule. */
+/* Changed by the LSTM demonstration session: the walk went on past the command whose writes cover the transfer's last
+   remaining pages, so every transfer walked every later command of the function, transfers x commands of isl work
+   (MetalPageEffectsSolve under PageObservationGroups, the whole of rank 0's sample in the 64-step plan, 2026-11-01).
+   Once nothing remains no later access meets it and nothing is subtracted, so the walk ends there with the same
+   groups. What must stay: commands visited in order until the transfer's pages are all overwritten. */
 static void PageObservationGroups(NSArray<MetalPageCommand *> *commands,MetalPageTransfer *t,
     void (^each)(NSUInteger,NSUInteger,MetalPageAccess *,isl_set *)) {
     isl_set *remaining=PageRange(t->selection);
-    for(NSUInteger c=0;c<commands.count;c++) {
+    for(NSUInteger c=0;c<commands.count&&!PageEmpty(remaining);c++) {
         MetalPageCommand *command=commands[c];if(command->order<=t->order)continue;
-        for(NSUInteger phase=0;phase<=command->sites.count;phase++) {
+        for(NSUInteger phase=0;phase<=command->sites.count&&!PageEmpty(remaining);phase++) {
             for(MetalPageAccess *access in command->accesses)
                 if(access->phase==phase&&[access->root isEqual:t->root]&&(access->access&t->observeAccess)) {
                     isl_set *groups=PageDomain(access->relation,remaining);
