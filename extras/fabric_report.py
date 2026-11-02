@@ -27,9 +27,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'rdma'))
 import mesh_nodes  # noqa: E402
 
-# Run on each member by its own /usr/bin/python3 (3.9): one JSON object on stdout.
+# Run on each member by its mesh Python (etc/mesh-nodes.json python), mesh_graph from its ~/mesh/rdma: one JSON object
+# on stdout.
 PROBE = r'''
-import json, plistlib, re, socket, subprocess, sys, threading
+import json, os, plistlib, re, socket, subprocess, sys, threading
+sys.path.insert(0, os.path.expanduser('~/mesh/rdma'))
+from mesh_graph import descendants  # the one graph module (design/rubrics.md C9)
 others = json.loads(sys.argv[1])
 def run(*argv, timeout=8):
     try:
@@ -48,7 +51,6 @@ stored = run('/usr/libexec/PlistBuddy', '-c', 'Print :VirtualNetworkInterfaces:B
              '/Library/Preferences/SystemConfiguration/preferences.plist')
 out['bridge0_stored'] = re.findall(r'^\s+(\S+)$', stored, re.M) if 'Array' in stored else []
 ports = {}
-import os
 for line in run(os.path.expanduser('~/mesh/bin/mesh-rdma.sh')).splitlines():
     f = line.split()
     if len(f) < 4:
@@ -57,15 +59,14 @@ for line in run(os.path.expanduser('~/mesh/bin/mesh-rdma.sh')).splitlines():
     status = re.search(r'status: (\w+)', run('ifconfig', f[0]))
     ports[f[0]] = dict(device=fields.get('device'), rid=int(fields.get('rid', -1)), rdma_peer=fields.get('rdma_peer'),
                        link=status.group(1) if status else None)
-# the port's cable: its XDomain link's remote Domain UUID, read from each link's block of ioreg's text (the link's own
-# properties first, then its subtree, where the RDMA peer interface it carries states its RID)
+# the port's cable: its XDomain link's remote Domain UUID, found over the RDMA peer interface the link carries (by RID),
+# a descendant of the link in the IORegistry
+children = lambda entry: entry.get('IORegistryEntryChildren', [])
 cable = {}
-blocks = re.split(r'\n(?=\+-o )', run('ioreg', '-r', '-c', 'IOThunderboltXDomainLink', '-l', '-w0'))
-for block in blocks:
-    uuid = re.search(r'"Domain UUID" = "([0-9A-F-]+)"', block)
-    rid = re.search(r'AppleThunderboltRDMAPeerInterface.*?"RID" = (\d+)', block, re.S)
-    if uuid and rid:
-        cable[int(rid.group(1))] = uuid.group(1)
+for link in plist('ioreg', '-a', '-r', '-c', 'IOThunderboltXDomainLink', '-l'):
+    for entry in descendants(link, children):
+        if entry.get('IOClass') == 'AppleThunderboltRDMAPeerInterface' and 'RID' in entry:
+            cable[int(entry['RID'])] = link.get('Domain UUID')
 for port in ports.values():
     port['cable_uuid'] = cable.get(port['rid'])
 out['ports'] = ports
@@ -105,7 +106,7 @@ def gather(cluster, member, members):
     others = [dict(name=m.name, fabric=m.fabric, tailnet4=m.management) for m in members if m is not member]
     try:
         r = subprocess.run(['ssh', *cluster.ssh, '-o', 'ServerAliveInterval=2', '-o', 'ConnectTimeout=5',
-                            f'{cluster.user}@{member.management}', '/usr/bin/python3 - ' + json.dumps(json.dumps(others))],
+                            f'{cluster.user}@{member.management}', f'{cluster.python} - ' + json.dumps(json.dumps(others))],
                            input=PROBE, capture_output=True, text=True, timeout=30)
         return json.loads(r.stdout.strip().splitlines()[-1])
     except Exception as e:

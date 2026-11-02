@@ -267,3 +267,13 @@ def independent(inputs, users, order, group, value, known):
     users)."""
     return (not any(member in ancestors(inputs, value, known) for member in group)
             and not any(order[u] < order[value] for member in group for u in users(member)))
+
+
+def descendants(root, children):
+    """Every vertex beneath ``root`` in a tree, in preorder: ``children(v)`` gives v's direct children (an IORegistry
+    entry's IORegistryEntryChildren, for one). ``root`` itself is not among them."""
+    stack = list(reversed(children(root)))
+    while stack:
+        v = stack.pop()
+        yield v
+        stack.extend(reversed(children(v)))
