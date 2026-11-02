@@ -95,6 +95,8 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
     NSArray<NSDictionary *> *sites;    /* named source-local cell domains; preparation only */
     NSArray<MetalPageContribution *> *contributions;
     NSArray<MetalPageAnnouncement *> *announcements;
+    ncclMeshBuffer activity;           /* ordinary UInt32 entry predicate, absent for an unconditional source */
+    MetalPageAccess *activityAccess;   /* its retained read in accesses */
 }
 @property(nonatomic) BOOL coherentAccesses;
 @property(nonatomic) uint32_t frame;
@@ -118,11 +120,15 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
     isl_map *selection;                /* zero-based selected byte -> physical byte */
     MetalPageCoverage *coverage;
     NSUInteger coverageCut;
+    uint32_t observeAccess;            /* Read: value arrival; Written: prior reader completion */
 }
 @property(nonatomic, retain) MetalPageCoverage *coverage;
 @property(nonatomic) NSUInteger coverageCut;
 /* owner identifies the declared collective occurrence, not a runtime handle.
-   effect.first is the source/destination logical offset of selection byte 0. */
+   effect.first is the source/destination logical offset of selection byte 0.
+   Observe selects Read accesses initially; prior-reader completion explicitly
+   selects Written accesses. Coverage predicates the observation as well as
+   transfer activity. Its active page is an ordinary prerequisite read. */
 + (instancetype)owner:(id)owner order:(NSUInteger)order effect:(ncclMeshPageEffect)effect
     root:(id)root selection:(isl_map *)selection payload:(id<MTLBuffer>)payload layout:(MetalTensorLayout *)layout;
 @end
@@ -142,6 +148,7 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
     NSArray<MetalPageTransfer *> *results;
 @package
     NSArray *domains, *solved;
+    NSArray *declarationCommands, *declarationTransfers;
 }
 @end
 
@@ -182,6 +189,12 @@ isl_ctx *isl_ctx_alloc(void);
 void isl_ctx_free(isl_ctx *);
 MetalPageEffects *MetalPageEffectsSolve(NSArray<MetalPageCommand *> *commands,
     NSArray<MetalPageTransfer *> *transfers);
+/* Bind a second occurrence of the SAME retained declaration. The caller owns
+   its invariant source/binding-phase authority. Ordinals name those declared
+   commands and transfers; only page operands and absolute counters change.
+   This copies solved incidence, not source ranges or executable snapshots. */
+MetalPageEffects *MetalPageEffectsRebind(MetalPageEffects *declaration,
+    NSArray<MetalPageCommand *> *commands, NSArray<MetalPageTransfer *> *transfers);
 /* The selected-cut domain consumed by contribution index pages. Each array
    has one physical publication word and increasing thresholds. The solver
    consumes these same rows; adapters never infer cut ordinals from addresses. */
@@ -196,8 +209,16 @@ NSArray<NSArray<MetalPageTransfer *> *> *MetalPagePublicationDomains(NSArray<Met
    invocation. GPU subgroups smaller than a SIMD group declare individual lane
    cells with their exact access relations. This is not a possible-address
    union and does not assert coverage for an arbitrary duplicate scatter. */
+/* Entry scope and consumer join scope are independent. Distributed readers
+   enter at each lane's actual selected cells, then join their declared
+   consumer once. An empty/local observation domain emits no join operation. */
 void MetalPageCommandSite(MetalPageCommand *, NSString *name, NSUInteger cells,
-    enum MetalPageSiteScope scope, NSArray<MetalPageAccess *> *accesses);
+    enum MetalPageSiteScope scope, enum MetalPageSiteScope joinScope, NSArray<MetalPageAccess *> *accesses);
+/* The predicate read is part of the same solve. Its producer runs before the
+   predicate, while numerical inputs and contributions are conditional on it.
+   Transfer coverage retains this same source activity; masking does not invent
+   a produced value or an extra runtime scheduling policy. */
+void MetalPageCommandActivity(MetalPageCommand *, id<MTLBuffer> buffer, NSUInteger offset, isl_ctx *context);
 /* Resource analysis and a wholly local site's empty effects use this same
    source ABI. Final specialization replaces these macros with compiled calls. */
 NSString *MetalPageSitesPrelude(void);
@@ -243,7 +264,8 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects, NSUInteger co
     id<MTLDevice> device);
 /* Source-only stage; the fragments already use fixed metadata offsets. */
 NSString *MetalPageEffectsCompose(MetalPageCommand *command, NSString *helpers, NSArray<NSString *> *before,
-    NSArray<NSString *> *after, NSIndexSet *observedSlots, NSIndexSet *publishedSlots);
+    NSArray<NSString *> *after, NSIndexSet *observedSlots, NSIndexSet *publishedSlots,
+    NSString *activityInputs, NSString *activityPredicate);
 #ifdef __cplusplus
 }
 #endif

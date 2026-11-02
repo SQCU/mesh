@@ -2,7 +2,7 @@
    Empty effects are the same recipe for a wholly local provider invocation. */
 #include "mesh-ane-entry.h"
 #ifndef MESH_ANE_ENTER
-#define MESH_ANE_ENTER(arguments)
+#define MESH_ANE_ENTER(arguments) true
 #define MESH_ANE_LEAVE(arguments)
 #endif
 #ifdef __cplusplus
@@ -10,8 +10,8 @@ extern "C" {
 #endif
 void mesh_ane_submit(void *context) {
   MeshANEEntry *entry=(MeshANEEntry *)context;
-  MESH_ANE_ENTER(entry->arguments);
-  MeshANEEvaluateRequest(entry);
+  if(MESH_ANE_ENTER(entry->arguments))MeshANEEvaluateRequest(entry);
+  else entry->complete(entry->completion_context,NULL);
 }
 void mesh_ane_configure(MeshANEEntry *entry) {
   void (^completed)(BOOL,NSError *)=^(BOOL success,NSError *error) {

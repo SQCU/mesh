@@ -975,6 +975,12 @@ typedef struct {
 typedef struct {
   void* commands;
   void* transfers;
+  /* Exact preparation authority for solved relation reuse. definition is
+     assigned by CommPlan, not derived from source text or physical addresses.
+     binding contains every declared payload/coverage occurrence phase. */
+  uint64_t definition;
+  const uint64_t* binding;
+  size_t bindings;
   const ncclMeshTransport* transport;
   size_t transports;
   /* Original command boundaries for each declared call, before coverage

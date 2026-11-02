@@ -778,6 +778,11 @@ struct Occurrence {
     const ncclMeshSources *result=nullptr;
     checked(ncclMeshCommSources(comm,occurrence,context,&result));return result;
   }
+  std::vector<uint64_t> schema(uintptr_t context) const {
+    const auto *source=sources(reinterpret_cast<isl_ctx *>(context));
+    std::vector<uint64_t> result={(uint64_t)(uintptr_t)comm,source->definition,source->bindings};
+    result.insert(result.end(),source->binding,source->binding+source->bindings);return result;
+  }
   void append(MetalSchedule *schedule,const std::vector<size_t> &commands) {
     MetalScheduleCommunicator(schedule,comm);
     const ncclMeshGroup publication{comm,0,1};
@@ -1032,7 +1037,19 @@ static uintptr_t page_group_relation(uintptr_t relation,const std::array<NSUInte
   } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
 }
 
-static pybind11::dict compile_page_effects(uintptr_t context,const pybind11::list &descriptions,const pybind11::list &occurrences) {
+struct PageEffectsPlan {
+  pybind11::object algebra; // destroyed after the retained relation declarations
+  uintptr_t context;
+  pybind11::list descriptions;
+  // The enclosing Plan owns one instance per declared native schema phase,
+  // together with that phase's numerical refinement. Binding retains the
+  // first solved incidence; no source hash or shape guess selects it.
+  std::shared_ptr<MetalPageEffects> declaration;
+  PageEffectsPlan(pybind11::object algebra,pybind11::list descriptions):algebra(std::move(algebra)),
+    context(this->algebra.attr("ctx").cast<uintptr_t>()),descriptions(std::move(descriptions)){}
+  pybind11::dict bind(const pybind11::list &occurrences);
+};
+pybind11::dict PageEffectsPlan::bind(const pybind11::list &occurrences) {
   @try {
     NSMutableArray<MetalPageCommand *> *commands=[NSMutableArray array];
     NSMutableArray<MetalPageTransfer *> *transfers=[NSMutableArray array];
@@ -1079,7 +1096,7 @@ static pybind11::dict compile_page_effects(uintptr_t context,const pybind11::lis
         const auto site=pybind11::reinterpret_borrow<pybind11::dict>(entry);
         const auto name=site["name"].cast<std::string>();
         MetalPageCommandSite(command,@(name.c_str()),site["cells"].cast<NSUInteger>(),
-          site["scope"].cast<MetalPageSiteScope>(),accesses_of(site["accesses"]));
+          site["scope"].cast<MetalPageSiteScope>(),site["join_scope"].cast<MetalPageSiteScope>(),accesses_of(site["accesses"]));
       }
       NSMutableArray *contributions=[NSMutableArray array],*announcements=[NSMutableArray array];
       for(const auto &entry:row["contributions"].cast<pybind11::tuple>()) {
@@ -1124,7 +1141,11 @@ static pybind11::dict compile_page_effects(uintptr_t context,const pybind11::lis
       MetalPageEffectsOrder(entry.second.commands,entry.second.transfers,&next);
       [commands addObjectsFromArray:entry.second.commands];[transfers addObjectsFromArray:entry.second.transfers];
     }
-    MetalPageEffects *effects=MetalPageEffectsSolve(commands,transfers);
+    MetalPageEffects *effects;
+    if(!declaration) {
+      effects=MetalPageEffectsSolve(commands,transfers);
+      declaration=std::shared_ptr<MetalPageEffects>([effects retain],[](MetalPageEffects *value){[value release];});
+    } else effects=MetalPageEffectsRebind(declaration.get(),commands,transfers);
     pybind11::list sources,results;
     std::unordered_map<MetalPageCommand *,MetalPageSource *> emitted;
     auto device=at::mps::MPSDevice::getInstance()->device();
@@ -1528,6 +1549,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   pybind11::class_<Occurrence,std::shared_ptr<Occurrence>>(module,"Occurrence")
     .def(pybind11::init<int64_t,std::vector<at::Tensor>>(),pybind11::arg("comm"),pybind11::arg("operands"),pybind11::call_guard<Drained>())
     .def("lower",&Occurrence::lower,pybind11::arg("invocation")=0,pybind11::call_guard<Drained>())
+    .def("schema",&Occurrence::schema,pybind11::call_guard<Drained>())
     .def("source_views",&occurrence_source_views,pybind11::call_guard<Drained>())
     .def("transports",&occurrence_transports,pybind11::call_guard<Drained>())
     .def("publications",&occurrence_publications,pybind11::call_guard<Drained>())
@@ -1537,7 +1559,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   pybind11::enum_<MetalPageSiteScope>(module,"PageSiteScope")
     .value("Lane",MetalPageSiteLane).value("Threadgroup",MetalPageSiteThreadgroup).value("Simdgroup",MetalPageSiteSimdgroup);
   module.def("page_group_relation",&page_group_relation,pybind11::call_guard<Drained>());
-  module.def("compile_page_effects",&compile_page_effects,pybind11::call_guard<Drained>());
+  pybind11::class_<PageEffectsPlan>(module,"PageEffectsPlan")
+    .def(pybind11::init<pybind11::object,pybind11::list>(),pybind11::call_guard<Drained>())
+    .def("bind",&PageEffectsPlan::bind,pybind11::call_guard<Drained>());
   pybind11::class_<Executions>(module,"Executions")
     .def(pybind11::init<pybind11::object>(), pybind11::call_guard<Drained>())
     .def("add",&Executions::add, pybind11::call_guard<Drained>())

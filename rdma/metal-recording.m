@@ -1250,7 +1250,6 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
 @interface MetalWork : NSObject {
 @public
     NSData *accesses;
-    NSData *activity;
     NSArray *readVersions;
     void (^encode)(struct MetalSchedule *);
     MetalHostOperation operation;
@@ -1278,7 +1277,7 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
 @implementation MetalWork
 - (void)dealloc {
     if(task.release)task.release(task.context);
-    [accesses release];[activity release];[readVersions release];[encode release];[operation release];[dependencies release];[successors release];
+    [accesses release];[readVersions release];[encode release];[operation release];[dependencies release];[successors release];
     [event release];[fence release];[error release];[hostDependencies release];[gpuDependencies release];[super dealloc];
 }
 @end
@@ -1709,23 +1708,9 @@ static void MetalScheduleExpandHost(struct MetalSchedule *root,MetalWork *work,N
         if(failure)[NSException raise:NSInvalidArgumentException format:@"host preparation: %s",failure];
         work->prepared=YES;
     }
-    if(work->task.activity) {
-        NSMutableData *activity=work->activity?[[work->activity mutableCopy] autorelease]:[NSMutableData data];
-        [activity appendBytes:&work->task.activity length:sizeof work->task.activity];
-        [work->activity release];work->activity=[activity copy];
-    }
     if(!work->task.commands) {
         if(!work->task.submit||!work->task.release)
             [NSException raise:NSInvalidArgumentException format:@"host preparation needs submission and lifetime operands"];
-        if(work->activity.length) {
-            NSMutableData *views=[[work->accesses mutableCopy] autorelease];
-            const uint32_t *const *activity=work->activity.bytes;
-            for(NSUInteger i=0;i<work->activity.length/sizeof *activity;i++) {
-                const struct MetalReach reach={nil,(NSUInteger)activity[i],sizeof(uint32_t),MetalReachRead,-1};
-                [views appendBytes:&reach length:sizeof reach];
-            }
-            [work->accesses release];work->accesses=[views copy];
-        }
         [nodes addObject:work];return;
     }
     if(work->task.submit)[NSException raise:NSInvalidArgumentException format:@"compound host declaration cannot supply an executor"];
@@ -1742,7 +1727,6 @@ static void MetalScheduleExpandHost(struct MetalSchedule *root,MetalWork *work,N
             (void)work; // Retain the compound declaration until this prepared leaf is released.
             return command.prepare(command.declaration,complete,context,task);
         });
-        child->activity=[work->activity copy];
         [child->readVersions release];child->readVersions=[work->readVersions copy];
         MetalScheduleExpandHost(root,child,nodes);
     }
@@ -1888,14 +1872,7 @@ static void MetalScheduleBindHost(struct MetalSchedule *root,MetalWork *work,NSA
             block:^(id<MTLSharedEvent> reached,uint64_t value){
                 (void)reached;(void)value;
                 if(atomic_fetch_sub_explicit(&task->remaining,1,memory_order_acq_rel)!=1)return;
-                // A fixed-width mask over declared page operands, evaluated
-                // once at this leaf's data-ready continuation. It never polls
-                // a dependency or chooses a different numerical implementation.
-                const uint32_t *const *activity=task->activity.bytes;
-                uint32_t active=1;
-                for(NSUInteger i=0;i<task->activity.length/sizeof *activity;i++)active&=!!*activity[i];
-                if(active)task->task.submit(task->task.context);
-                else MetalHostFinished(task,NULL);
+                task->task.submit(task->task.context);
             }];
     }
 }

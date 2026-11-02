@@ -944,6 +944,7 @@ class Execution:
         self.steps, self.output, self.pages, self.inputs = tuple(steps), output, tuple(pages), tuple(inputs)
         self.algebra = algebra
         self._initialized = False
+        self.page_plan = None
         self.configuration = None
         self.executions = _stream.Executions(output)
         self.forward = self.executions.run
@@ -952,23 +953,26 @@ class Execution:
     def append(self, schedule):
         # declaration-time state: the first prepared invocation declares the inputs; runtime submits the recorded
         # schedules
-        inputs = list(self.inputs)
-        declarations = []
-        for step in self.steps:
-            if isinstance(step, Function):
-                source = step.execution
-                if source is None:
-                    raise ValueError('declare every function before preparing its sequence')
-                inputs.extend(source.inputs)
-                declarations.extend(dict(value, configuration=source.configuration) for value in source.steps)
-            else:
-                declarations.append(dict(step, configuration=self.configuration))
-        if not self._initialized:
-            schedule.inputs(inputs)
-        from .page_effects import prepare
+        from .page_effects import Plan
         from .compilation import bind
         with bind(self.configuration, algebra=self.algebra):
-            prepare(declarations, schedule, self.output)
+            if self.page_plan is None:
+                inputs = list(self.inputs)
+                declarations = []
+                for step in self.steps:
+                    if isinstance(step, Function):
+                        source = step.execution
+                        if source is None:
+                            raise ValueError('declare every function before preparing its sequence')
+                        inputs.extend(source.inputs)
+                        declarations.extend(dict(value, configuration=source.configuration) for value in source.steps)
+                    else:
+                        declarations.append(dict(step, configuration=self.configuration))
+                self.inputs = tuple(inputs)
+                self.page_plan = Plan(declarations)
+            if not self._initialized:
+                schedule.inputs(self.inputs)
+            self.page_plan.append(schedule)
         self._initialized = True
 
     def realize(self, repetitions=1):

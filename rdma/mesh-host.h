@@ -46,8 +46,6 @@ struct MeshHostTask {
        compound executor and no implicit order between child instructions. */
     const MeshHostCommand *commands;
     size_t command_count;
-    /* Optional one-word page operand. Zero masks this numerical operation;
-       completion still publishes its output dependency. Compound declarations
-       pass their activity relation to each leaf at preparation. */
-    const uint32_t *activity;
+    /* Activity belongs to the numerical source's page operands. Submission
+       always enters that prepared source, including its declared publications. */
 };

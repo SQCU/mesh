@@ -134,6 +134,19 @@ producer relation then selects the reduction identity as the initial accumulator
 The mask does not become an arithmetic weight, and `expected` remains completion
 metadata. Static folds specialize the predicate to true without an activity load.
 
+Incoming availability, output overwrites of outstanding SEND pages, and result
+publication now enter the shared page-effect solve. An arrival constrains reads;
+a prior reader's completion constrains writes. These use the exact same byte
+relations as numerical operands. A masked observation retains its active page
+and cut, including the dependencies needed to read that mask. The compiler puts
+those dependencies before the predicate; it does not join differently masked
+inputs into one unconditional threshold.
+
+The Metal and CPU fold bodies contain the combine equation only. They no longer
+walk ready-word arrays, check overwrite counters, maintain completion state, or
+publish their own prefixes. Their runtime cell tables retain element ranges and
+numerical addresses. The shared emitter supplies the required page effects.
+
 Common numerical cells now end at packet boundaries as well as work-width
 boundaries. Each cell publishes its actual completed contribution prefix; a
 regular multi-page address run no longer joins those arrivals solely because it

@@ -219,12 +219,12 @@ def _site_accesses(command, site, algebra):
                       relation=access['relation'].reshape((site['cells'],)).then(physical[access['slot']])) for access in logical)
 
 
-def transfer_effects(programs, occurrences, schedule):
+def describe(programs):
     """Adapt retained frontend declarations to the common page-effect compiler."""
     from .compilation import relations, bind
     from .native import declared_commands
     algebra = relations()
-    commands, descriptions = [], []
+    descriptions = []
     backends = dict(shader=_stream.PageBackend.Metal, cpu=_stream.PageBackend.CPU, ane=_stream.PageBackend.ANE)
     for program in programs:
         with bind(program['configuration'], algebra=algebra):
@@ -243,6 +243,7 @@ def transfer_effects(programs, occurrences, schedule):
                     metadata_slot=len(command['operands']), argument_names=names,
                     coherent_accesses=command.get('coherent_accesses', False),
                     sites=tuple(dict(name=site['name'], cells=site['cells'], scope=site['scope'],
+                                     join_scope=site.get('join_scope', 0),
                                      accesses=_site_accesses(command, site, algebra))
                                 for site in command.get('sites', ())),
                     contributions=tuple(command.get('contributions', ())),
@@ -250,8 +251,12 @@ def transfer_effects(programs, occurrences, schedule):
                     accesses=tuple(dict(slot=access['slot'],
                         access=1 if access['side'] == 'reads' else 2, relation=access['relation'])
                         for access in accesses)))
-                commands.append(command)
-    solved = _stream.compile_page_effects(algebra.ctx, descriptions,
+    return descriptions
+
+
+def bind_effects(programs, occurrences, schedule, declaration):
+    commands = [command for program in programs for command in program['commands']]
+    solved = declaration.bind(
         [dict(order=order, owner=owner, frame_orders=frames) for order, owner, frames in occurrences])
     for source in solved['sources']:
         command = commands[source['index']]
@@ -278,90 +283,94 @@ def transfer_effects(programs, occurrences, schedule):
     return programs, solved['recordings']
 
 
-def prepare(steps, schedule, output=None):
-    """Lower transfers, solve page effects, then bind/record the whole function.
 
-    CommLower fixes one declaration-owned occurrence. CommEncode later consumes
-    exactly that occurrence. Numerical code remains source throughout the effect
-    solve; no compiled address record is inspected to recover a page relation.
+def source_copy(value):
+    """Copy mutable compiler records, retaining page and source identities."""
+    if type(value) is dict:
+        return {key: source_copy(item) for key, item in value.items()}
+    if type(value) is list:
+        return [source_copy(item) for item in value]
+    if type(value) is tuple:
+        return tuple(source_copy(item) for item in value)
+    if type(value) is set:
+        return set(value)
+    return value
+
+
+class Plan:
+    """One immutable source declaration and its solved occurrence families.
+
+    Numerical source, launch/access relations and page assignments are retained
+    here during preparation. Occurrences bind fresh absolute transport words
+    and private prefix pages; execution still submits only recorded functions.
     """
-    from .native import Program
-    from .compilation import bind, relations
-    algebra = relations()
+    def __init__(self, steps):
+        from .compilation import relations
+        self.algebra = relations()
+        self.declarations, self.positions = [], []
+        for original, step in enumerate(steps):
+            first = len(self.declarations)
+            if 'transfer' in step:
+                if step['before']:
+                    self.declarations.append(dict(commands=step['before'], output=None, pages=(), configuration=step['configuration']))
+                self.declarations.append(step)
+                if step['after']:
+                    self.declarations.append(dict(commands=step['after'], output=None, pages=(), configuration=step['configuration']))
+            else:
+                self.declarations.append(step)
+            self.positions.extend([original] * (len(self.declarations) - first))
+        self.origins = {original: 2 * index for index, original in enumerate(self.positions)}
+        # Each declared binding phase retains both its exact numerical cut
+        # refinement and the dependency solution compiled for those cells.
+        self.variants = {}
 
-    def source_copy(value):
-        # Copy mutable compiler records, retaining their page/source identities.
-        if type(value) is dict:
-            return {key: source_copy(item) for key, item in value.items()}
-        if type(value) is list:
-            return [source_copy(item) for item in value]
-        if type(value) is tuple:
-            return tuple(source_copy(item) for item in value)
-        if type(value) is set:
-            return set(value)
-        return value
-
-    # Frame positions are relative source-declaration indices. Preserve those
-    # coordinates while inserting required layout copies. A frame boundary is
-    # after the named declaration, including its output-layout copies.
-    declarations, positions = [], []
-    for original, step in enumerate(steps):
-        first = len(declarations)
-        if isinstance(step, dict) and 'transfer' in step:
-            if step['before']:
-                declarations.append(dict(commands=step['before'], output=None, pages=(), configuration=step['configuration']))
-            declarations.append(step)
-            if step['after']:
-                declarations.append(dict(commands=step['after'], output=None, pages=(), configuration=step['configuration']))
-        else:
-            declarations.append(step)
-        positions.extend([original] * (len(declarations) - first))
-    programs, prepared, effects = [], [], []
-    origins = {original: 2 * index for index, original in enumerate(positions)}
-    for index, step in enumerate(declarations):
-        order = 2 * index
-        if 'numerical' in step:
-            programs.append(dict(step, order=order))
-        elif 'transfer' not in step:
-            program = source_copy(step)
-            program['order'] = order
-            programs.append(program)
-        else:
+    def append(self, schedule):
+        from .native import Program
+        from .compilation import bind
+        prepared, phase = [], []
+        for index, step in enumerate(self.declarations):
+            if 'transfer' not in step:
+                continue
             bound = (_stream.view_write_operands(step['bindings'], step['group'].handle, 0)
                      if step['transfer'] == 'write' else
                      _stream.Occurrence(step['group'].handle, step['operands']))
             bound.lower(step.get('invocation', 0))
-            frames = tuple(origins[positions[index] + offset] + 1 for offset in step.get('frame_orders', ()))
-            prepared.append((order, bound, frames))
-            effects.extend(TensorView(storage, layout, 0) for storage, layout in bound.source_views(algebra.ctx))
-    # A declaration's numerical program is selected and emitted once in this preparation and each of its occurrences
-    # given its own copy: within one call every occurrence refines its projection against the same effects, so they
-    # select the same domains and emit the same program; transfer_effects below then edits each copy for its own
-    # occurrence. Added by the LSTM demonstration session: one LSTM step's occurrence spent 94 of its 126 ms selecting
-    # and emitting again (m5ult2, 2026-11-01), and the service prepares 4,096. What must stay: a copy for each
-    # occurrence, made before any is edited; the key is the declaration's own objects, alive through this loop.
-    emitted = {}
-    for index, declaration in enumerate(programs):
-        if 'numerical' not in declaration:
-            continue
-        key = tuple(id(declaration[name]) for name in
-                    ('numerical', 'section', 'projection', 'placement', 'operands', 'configuration'))
-        if key not in emitted:
-            with bind(declaration['configuration'], algebra=algebra):
-                retained = declaration['numerical']
-                projection = refine(declaration['section'], declaration['projection'], declaration['placement']['storage'],
-                                    effects, algebra)
-                retained.select_domains(projection['records'])
-                emitted[key] = retained.emit(declaration['operands'], **declaration['placement'])
-        programs[index] = dict(source_copy(emitted[key]), order=declaration['order'],
-                               configuration=declaration['configuration'])
-    if prepared:
-        programs, prepared = transfer_effects(programs, prepared, schedule)
-    for program in programs:
-        with bind(program['configuration'], algebra=algebra):
-            prepared.append((program['order'], Program.prepare(program), None))
-    for _, command, selected in sorted(prepared, key=lambda item: item[0]):
-        if selected is None:
-            command.append(schedule)
-        else:
-            command.append(schedule, selected)
+            frames = tuple(self.origins[self.positions[index] + offset] + 1 for offset in step.get('frame_orders', ()))
+            prepared.append((2 * index, bound, frames))
+            phase.append(tuple(bound.schema(self.algebra.ctx)))
+        phase = tuple(phase)
+        if phase not in self.variants:
+            cuts = [TensorView(storage, layout, 0) for _, bound, _ in prepared
+                    for storage, layout in bound.source_views(self.algebra.ctx)]
+            programs, emitted = [], {}
+            for index, step in enumerate(self.declarations):
+                if 'transfer' in step:
+                    continue
+                if 'numerical' not in step:
+                    programs.append(dict(source_copy(step), order=2 * index))
+                    continue
+                # Repeated uses of this exact retained numerical declaration
+                # share its emission. The enclosing plan owns all these objects.
+                key = tuple(id(step[name]) for name in
+                            ('numerical', 'section', 'projection', 'placement', 'operands', 'configuration'))
+                if key not in emitted:
+                    with bind(step['configuration'], algebra=self.algebra):
+                        retained = step['numerical']
+                        projection = refine(step['section'], step['projection'], step['placement']['storage'], cuts, self.algebra)
+                        retained.select_domains(projection['records'])
+                        emitted[key] = retained.emit(step['operands'], **step['placement'])
+                programs.append(dict(source_copy(emitted[key]), order=2 * index, configuration=step['configuration']))
+            descriptions = describe(programs)
+            effects = _stream.PageEffectsPlan(self.algebra, descriptions)
+            self.variants[phase] = tuple(programs), effects
+        retained, effects = self.variants[phase]
+        programs = source_copy(retained)
+        programs, prepared = bind_effects(programs, prepared, schedule, effects)
+        for program in programs:
+            with bind(program['configuration'], algebra=self.algebra):
+                prepared.append((program['order'], Program.prepare(program), None))
+        for _, command, selected in sorted(prepared, key=lambda item: item[0]):
+            if selected is None:
+                command.append(schedule)
+            else:
+                command.append(schedule, selected)

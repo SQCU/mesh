@@ -180,7 +180,7 @@ struct ncclComm {
   struct channel *channels;
   _Atomic uint64_t *words;
   void *violation;
-  uint64_t groups;
+  uint64_t groups, definitions;
   struct ncclComm *next_live;
   struct plan *plan;
   char *cpu_compiler,*cpu_resources;
@@ -3712,6 +3712,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct metal_program *source;
                size_t *source_link;
                size_t *source_calls;
+               uint64_t *source_bindings;
                ncclMeshTransport *transport;
                struct message **transport_messages;
                struct mesh_landing_run *landings; void *progress;
@@ -3737,7 +3738,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct zplan *zplan; /* its groups' sums as zabbadoo runs them (zabbadoo_plan) */
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds share the declared binding instances and routing basis. */
-struct compiled { struct call *calls; size_t n; uint64_t repeat; struct schedule *plans; double seconds; uint32_t period;
+struct compiled { struct call *calls; size_t n; uint64_t repeat, identity; struct schedule *plans; double seconds; uint32_t period;
                   struct issue **laid; size_t laid_count, laid_room; struct routing *routing; };
 /* a definition dropped: its laid issues freed, their pages back to the region */
 static void calls_free(struct call *list, size_t n);
@@ -4823,6 +4824,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if(u->source){metal_end(u->source);free(u->source);}
   free(u->source_link);
   free(u->source_calls);
+  free(u->source_bindings);
   free(u->transport);free(u->transport_messages);
   schedules_free(comm, u->plans);
   for (size_t i = 0; u->steps && i < u->n; i++) steps_free(u->steps[i]);
@@ -4918,8 +4920,10 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm,struct issue *u) {
       const struct message *x=p->items[k].message;
       const struct channel *ch=comm->channels+p->items[k].channel;
       p->sources[inputs]=x;
-      p->inputs[inputs++]=(struct metal_zelloth_input){x->data.buffer,x->data.offset,ch->buffer,ch->landed,x->summed.buffer,x->summed.offset,
-        x->end,x->pages,x->landings,x->landing_count,0};
+      p->inputs[inputs++]=(struct metal_zelloth_input){.data=x->data.buffer,.data_offset=x->data.offset,
+        .words=ch->buffer,.word=ch->landed,.summed=x->summed.buffer,.summed_offset=x->summed.offset,
+        .target=x->end,.packets=x->pages,.runs=x->landings,.count=x->landing_count,
+        .channel=p->items[k].channel,.entry=x->entry};
     }
     p->items[made++]=(struct zitem){m,item.channel,sums++};a=b;
   }
@@ -5065,7 +5069,7 @@ static ncclResult_t zabbadoo(struct metal_program *program,struct ncclComm *comm
     const struct channel *ch=comm->channels+item->channel;
     struct metal_result emitted;
     if(item->reduction!=SIZE_MAX) {
-      struct metal_zelloth_sum sum=p->sums[item->reduction];sum.identity=reduction_identity(m->c);
+      struct metal_zelloth_sum sum=p->sums[item->reduction];sum.identity=reduction_identity(m->c);sum.call=(size_t)(m->c-u->calls);
       const size_t first=(size_t)(sum.in-p->inputs),width=SIZE[m->c->type]*unit_of(m->c);
       for(size_t j=0;j<sum.inputs;j++)p->inputs[first+j].transport=p->sources[first+j]->transport;
       const struct steps *steps=m->c->bound;
@@ -5082,16 +5086,21 @@ static ncclResult_t zabbadoo(struct metal_program *program,struct ncclComm *comm
           .target=source->end,.packets=source->pages,
           .count=mesh_landing_slice(source->landings,source->landing_count,sum.initial_first/width,m->bytes/width,runs)};
       }
-      emitted=metal_zelloth(program,ktype(m->c),kop(m->c),width,1,&sum,item->channel,m->entry);
+      emitted=metal_zelloth(program,ktype(m->c),kop(m->c),width,1,&sum);
       free(runs);
     } else {
-      const ncclMeshPageEffect arrival={.kind=ncclMeshPageObserve,.operand=ncclMeshPageInternal,
-        .call=(size_t)(m->c-u->calls),.first=m->c->write_binding?effect_first(m,ncclMeshPageDestination):m->offset,.frame=m->frame,
-        .word={ch->buffer,ch->landed},.violation={comm->violation,0},.threshold=pages_to_word(m->end),
-        .channel=item->channel,.entry=m->entry,.polls=u->polls,.bytes=m->bytes,.transport=m->transport};
-      if(m->c->write_binding) {
-        ncclResult_t result=selected_effect(program,m->c,&arrival,0);if(result)return result;
-      } else metal_page_effect(program,&arrival,m->data.buffer,m->data.offset,m->bytes);
+      size_t offset=0;
+      for(size_t packet=0;packet<m->pages.n;packet++) {
+        const size_t bytes=m->spans[packet].bytes;
+        const ncclMeshPageEffect arrival={.kind=ncclMeshPageObserve,.operand=ncclMeshPageInternal,
+          .call=(size_t)(m->c-u->calls),.first=(m->c->write_binding?effect_first(m,ncclMeshPageDestination):m->offset)+offset,.frame=m->frame,
+          .word={ch->buffer,ch->landed},.violation={comm->violation,0},.threshold=pages_to_word(m->end)-m->pages.n+packet+1,
+          .channel=item->channel,.entry=m->entry,.polls=u->polls,.bytes=bytes,.transport=m->transport,.transport_first=offset};
+        if(m->c->write_binding) {
+          ncclResult_t result=selected_effect(program,m->c,&arrival,0);if(result)return result;
+        } else metal_page_effect(program,&arrival,m->data.buffer,m->data.offset+offset,bytes);
+        offset+=bytes;
+      }
       struct source_destination destination={program,m->c};
       ncclResult_t result=destination_effects(u->group,m,item->channel,u->polls,destination_source,&destination);
       if(result)return result;
@@ -5126,14 +5135,18 @@ static ncclResult_t destination_effects(const struct inflight *g,const struct me
     if(spans_add(&later,lo,hi)){free(later.span);return fail(ncclSystemError,"allocating result value domains");}
   }
   const struct channel *channel=g->comm->channels+h;ncclResult_t result=ncclSuccess;
+  size_t packet=0,packet_first=m->offset;
   for(size_t k=0,at=first;!result&&at<end;k++) {
     const size_t until=k<later.count&&later.span[k][0]<end?later.span[k][0]:end;
-    if(until>at) {
+    while(until>at&&!result) {
+      while(packet_first+m->spans[packet].bytes<=at)packet_first+=m->spans[packet++].bytes;
+      const size_t packet_end=packet_first+m->spans[packet].bytes,stop=packet_end<until?packet_end:until;
       const ncclMeshPageEffect landing={.call=(size_t)(c-g->list),.first=effect_first(m,ncclMeshPageDestination)+at-m->offset,
-        .bytes=until-at,.kind=ncclMeshPageObserve,.frame=m->frame,.channel=h,.polls=polls,.operand=ncclMeshPageDestination,
-        .word={channel->buffer,channel->landed},.violation={g->comm->violation,0},.threshold=pages_to_word(m->end),.entry=m->entry,
+        .bytes=stop-at,.kind=ncclMeshPageObserve,.frame=m->frame,.channel=h,.polls=polls,.operand=ncclMeshPageDestination,
+        .word={channel->buffer,channel->landed},.violation={g->comm->violation,0},.threshold=pages_to_word(m->end)-m->pages.n+packet+1,.entry=m->entry,
         .transport=m->transport,.transport_first=at-m->offset};
       result=(ncclResult_t)effect(context,&landing);
+      at=stop;
     }
     if(k>=later.count)break;
     if(later.span[k][1]>at)at=later.span[k][1];
@@ -5609,6 +5622,17 @@ static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
     }
   program->declaration.transport=u->transport;program->declaration.transports=transports;
   program->declaration.call_first=u->source_calls;program->declaration.calls=n;
+  size_t bindings=1;for(size_t i=0;i<n;i++)bindings+=2*list[i].coverage_count;
+  u->source_bindings=malloc(bindings*sizeof *u->source_bindings);
+  if(!u->source_bindings)return fail(ncclSystemError,"retaining declared source binding phase");
+  size_t phase=0;u->source_bindings[phase++]=u->instance;
+  for(size_t i=0;i<n;i++)for(size_t k=0;k<list[i].coverage_count;k++) {
+    const ncclMeshCoverage *coverage=list[i].coverage+k;
+    const ncclMeshBufferSlots slots[]={coverage->active,coverage->expected};
+    for(size_t side=0;side<2;side++)u->source_bindings[phase++]=
+      ncclMeshInvocationIndex(list[i].invocation,slots[side].invocation,slots[side].instances);
+  }
+  program->declaration.binding=u->source_bindings;program->declaration.bindings=bindings;
   program->cpu_compiler=comm->cpu_compiler;program->cpu_resources=comm->cpu_resources;
   for(uint32_t h=0;u->remote&&h<comm->count;h++) {
     metal_resident(program,comm->channels[h].buffer);metal_resident(program,u->plans[h].ready.buffer);
@@ -5692,6 +5716,7 @@ ncclResult_t ncclMeshCommSources(ncclComm_t comm,uint64_t occurrence,struct isl_
   ncclResult_t result=!u||u->recorded||(u->source&&u->source->sources)?fail(ncclInvalidUsage,"declare source before specialization"):ncclSuccess;
   if(!result&&u->source&&u->source->relation_context!=context)result=fail(ncclInvalidUsage,"one source program uses its enclosing relation context");
   if(!result&&!u->source)result=source_group(u,context);
+  if(!result)u->source->declaration.definition=definition_at(comm,occurrence)->identity;
   if(!result)*sources=metal_sources(u->source);
   pthread_mutex_unlock(&group_lock);return result;
 }
@@ -6603,7 +6628,9 @@ static ncclResult_t definition_prepare(struct ncclComm *comm, struct compiled *x
   if(!result)result=coverage_resolve(x);
   int remote = 0;
   for (size_t i = 0; !result && i < x->n; i++) remote |= crosses(x->calls + i);
-  return result ? result : prepared(comm, x, remote);
+  if(!result)result=prepared(comm,x,remote);
+  if(!result)x->identity=++comm->definitions;
+  return result;
 }
 
 /* Compile group definitions, then bind the function's repeated-block order.

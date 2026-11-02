@@ -104,15 +104,15 @@ recorder must consume that result. Source-local sites are part of this handoff,
 but their presence alone does not complete it. Actual provider resource and
 visibility constraints remain explicit compilation operands.
 
-Native reduction source has another precise missing handoff. Its incoming
-scratch arrivals, outgoing-transfer overwrite prerequisites and summed-result
-publications still live in the handwritten CPU/Metal fold body. The reduction
-branch does not supply their transfer effects to the common solver. They are
-not duplicate waits which can simply be deleted. Complete this declaration
-first: observations must select Read or Written accesses as appropriate, retain
-contributor activity, and avoid merging distinct masked prerequisites into an
-unconditional maximum. Then the shared emitter can replace the handwritten
-arrival/overwrite/publication code. The numerical combine equation stays.
+Native reduction source now supplies incoming arrivals, outgoing-transfer
+overwrite prerequisites and result publications to the common solver. Read
+observations constrain numerical inputs; Written observations constrain writes
+which reuse pages with outstanding readers. Distinct masked prerequisites retain
+their own predicates. Their mask-page dependencies precede the predicate reads.
+CPU and Metal fold bodies retain arithmetic and numerical cell operands; their
+separate arrival arrays, overwrite checks and prefix publication code are gone.
+This source change has passed C/Objective-C and generated CPU/Metal compilation;
+it has no new numerical or performance result.
 
 The next source pass has replaced the Python-only effect solver with a binding
 to `metal-page-effects.h`. The common library, CoreML library, CFFI binding and
@@ -251,10 +251,27 @@ placement are chosen. A hardware invocation that is truly indivisible declares
 that granularity as a provider constraint. Complete frontend coverage and live
 provider/page preparation remain unfinished.
 
-Activity also has to cross these interfaces. Skipping a host numerical entry
-must not skip the publications needed to complete a declared transfer domain.
-Index and activity pages therefore belong to the shared numerical and transfer
-declarations. They cannot be separate runtime execution policies.
+Activity now reaches retained source through `MetalPageCommandActivity`.
+Preparation declares its page read in the common solve. Emission puts the
+predicate's own input observations before that predicate and keeps the selected
+numerical inputs, work and contributions inside it. The same composition emits
+CPU, Metal and ANE source. `MeshHostTask.activity` and the recorder's separate
+activity loop are removed; native Swift callers declare the source operand.
+The ANE entry submits its already-bound request only for selected work and
+reports completion for an empty invocation through the existing completion ABI.
+No numerical implementation is selected during submission.
+
+An inactive numerical source contributes no value. A zero-contribution transfer
+cut completes from its declared active/expected metadata producer. Connecting
+every source mask to that coverage remains required; skipping numerical work
+cannot stand in for that declaration. Per-site conditional writers still need
+their actual masks and selected-index provenance in the shared solve. Their
+existing numerical predicates must not acquire a second runtime mask evaluator.
+
+The activity handoff builds the collective/CoreML libraries and the native
+Swift Engine. Masked and unmasked CPU, Metal and ANE emitted source compiles.
+These checks do not establish the complete conditional-writer or local
+cross-backend dependency handoff, and no payload run was launched for them.
 
 Items 4 through 7 remain open. Backend and fold preferences now enter the
 existing assignment vector and observations. The regression fit keeps source
@@ -295,7 +312,23 @@ its region, the stepper's capture alone), 2026-11-01.
   The merged numerical-source change `e8d20c52` now emits a declaration once
   per preparation and copies its emitted source for each occurrence; the reuse
   identity includes all source operands, including configuration. This removes
-  repeated numerical selection/emission, while the page-effect solve still repeats.
-  The remaining work is one page-effect solve per declaration, with each
-  occurrence's absolute words bound as operands before execution. This checkpoint
-  has not established the required 8 s preparation bound for the 4,096-step program.
+  repeated numerical selection/emission. The subsequent integration below also
+  removes repeated page-effect solving. This checkpoint has not established the
+  required preparation bound for the 4,096-step program.
+
+`Execution` now owns its retained numerical declarations and a page-effect plan.
+`CommPlan` supplies each native definition's identity and complete payload and
+coverage binding-phase vector. That declaration authority selects the solved
+relations. `MetalPageEffectsRebind` attaches a later occurrence's words, counters
+and pages to the same command/transfer ordinals. It gives that occurrence fresh
+prefix state; it does not reuse completed counters or an executable snapshot.
+Predicate prerequisites and observation order are solved once too. Source
+binding consumes their retained ordinals without further relation intersections.
+
+Absolute observation thresholds and diagnostic entry values now occupy metadata
+pages, so changing those values does not rewrite the numerical source. Metadata
+field order, aliasing and page-relative offsets belong to the retained binding
+phase. Source bindings do not choose a declaration by a hash or guessed shape.
+The bridge, collective/CoreML libraries, CFFI binding, PyTorch extension and
+generated Metal kernels build with this connection. No preparation speedup or
+whole-function performance result has been measured for it yet.

@@ -87,7 +87,7 @@ void *metal_retain(void *object);
    at the first executed observation; exhausting it ends the program, while a
    revoke or lost link is a value; no kernel halts on the record, every later dispatch running as encoded,
    a later wait on those failure words ending at once, and one under way within 2^10 loads (nccl-mesh-kernels.h
-   mesh_step_failed), so a dispatch's waits spin about one bound in all, however many waves its threadgroups run in.  The failure words: [0] the cause (METAL_BOUND the bound reached,
+   mesh_wait_bounded), so a dispatch's waits spin about one bound in all, however many waves its threadgroups run in.  The failure words: [0] the cause (METAL_BOUND the bound reached,
    METAL_LOST the link's ~0, METAL_REVOKED the bound reached once a revoke set [6]; a landing is none, whatever its
    bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that fails, the one that found 0 recording [0],
    [3], [4] and [2]: nccl-mesh-kernels.h mesh_step_claim), [2] 1 + the entry (stored last by the claimant, by the GPU
@@ -171,17 +171,18 @@ struct metal_wait { void *words, *violation, *data; size_t word, data_offset; me
    later repeat of a fused crossing's `stride` pages past it */
 struct metal_release { void *words; size_t word; mesh_pages value, stride; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
-/* design/zorvek.md zelloth: the sum `out` of `type` and reduction `op` (as metal_land's), each element once, by one
-   writer, from `own` and every input's landed element for it, once all have landed, whatever their order; each input
-   one landing (its landed data, its channel's `landed` word, its target and packets as a metal_wait's, its landing runs,
-   every input's runs over the same elements) and the summed word its forwards name (none: summed NULL), stored past
-   each block in order */
+/* A numerical sum and its preparation relations. Landing maps name each
+   input's page availability; summed names its downstream publication. Shared
+   page lowering consumes both. The numerical body retains only cell ranges,
+   operand addresses, the combine equation and ordinary activity values. */
 struct metal_zelloth_input { void *data; size_t data_offset; void *words; size_t word; void *summed; size_t summed_offset;
                              mesh_pages target, packets; const struct mesh_landing_run *runs; size_t count;
-                             size_t transport; /* retained incoming transport identity, preparation only */ };
+                             size_t transport; /* retained incoming transport identity, preparation only */
+                             uint32_t channel; uint64_t entry; };
 /* Each sum's exact accesses enter the common command graph. */
 struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset;
   uint32_t inputs; const struct metal_zelloth_input *in; uint32_t own_access;
+  size_t call;                         /* retained declared source occurrence */
   /* Exact output ranges which overwrite an outstanding SEND source. These
      observations constrain arithmetic stores, never the scratch DMA landing. */
   size_t waits; const struct metal_wait *wait;
@@ -191,7 +192,7 @@ struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_o
 /* Emit each resolved value version as a command with its exact page accesses.
    The grid assigns one common landing cell to each threadgroup. */
 struct metal_result metal_zelloth(struct metal_program *, int type, int op, size_t element_bytes, uint32_t sums,
-                                  const struct metal_zelloth_sum *sum, uint32_t channel, uint64_t at);
+                                  const struct metal_zelloth_sum *sum);
 /* The next dispatch reads/writes these prepared page
    ranges. Residency and diagnostic atomic words do not imply data ordering. */
 void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);
