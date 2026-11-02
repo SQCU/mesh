@@ -929,11 +929,41 @@ static isl_map *TensorJoinEquations(isl_map *roots,isl_map *fields,NSUInteger co
     }
     isl_map_free(fields);return roots;
 }
+/* Whether a typed value's elements already lie in place: each element's `width` positions consecutive ordinals, its
+   first a multiple of width. Read from the value's strides (MetalTensorFactored): the flat index's axes below `width`
+   dense (each stride its flat weight), every axis above it and the origin multiples of width. */
+static BOOL TensorElementsInPlace(MetalTensorLayout *value,NSInteger width) {
+    MetalTensorLayout *strided=MetalTensorFactored(value);if(!strided)return NO;
+    NSInteger weight=1;
+    for(NSUInteger d=strided.indexShape.count;d-->0;) {
+        const NSInteger extent=[strided.indexShape[d] integerValue],stride=[strided.strides[d] integerValue];
+        if(extent==1)continue;
+        if(weight>=width){if(stride%width)return NO;}
+        else if(weight*extent<=width){if(stride!=weight)return NO;}
+        // an axis across the element boundary: dense below it, and its steps above it are then width apart
+        else if(width%weight||extent%(width/weight)||stride!=weight)return NO;
+        weight*=extent;
+    }
+    return strided.offset%width==0;
+}
 MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
     NSArray<MetalTensorLayout *> *targets,NSArray<NSArray<NSNumber *> *> *footprints,
     NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
     NSCParameterAssert(uses.count==targets.count&&uses.count==footprints.count&&values.count==widths.count);
     if(!count)return [MetalTensorLayout shape:@[@0] strides:@[@1] offset:0 maps:@{} indices:nil];
+    /* No consumer use and every typed value's elements in place (TensorElementsInPlace): the components the field
+       equations join are intervals tiling the ordinals in order, each at an aligned first position, so the packing below
+       places each at its own ordinal, the identity. Added by the layout algebra session: with the LSTM's h stored units
+       first a single typed field's packing went through isl's transitive closure of the cursor recurrence over a periodic
+       root set, 41 s for a [2, 2, 4] half h and past 3 minutes at [2, 8, 1024] (desk replay, 2026-11-02), row-major
+       0.01 s. What must stay: the same placement as the packing. */
+    BOOL inPlace=YES;
+    for(MetalTensorLayout *use in uses)inPlace&=!use.count;
+    for(NSUInteger k=0;inPlace&&k<values.count;k++) {
+        const NSInteger width=widths[k].integerValue;
+        inPlace=width==1||TensorElementsInPlace(values[k],width);
+    }
+    if(inPlace)return [MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:nil];
     isl_ctx *ctx=isl_ctx_alloc();MetalTensorLayout *result=nil;
     isl_map *equations=NULL,*roots=NULL,*extents=NULL,*allowed=NULL,*base=NULL,*walk=NULL,*placed=NULL;
     isl_map *forbidden=isl_map_read_from_str(ctx,
