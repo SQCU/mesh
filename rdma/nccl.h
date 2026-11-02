@@ -409,8 +409,8 @@ typedef struct ncclConfig_v23100 {
  * be larger than requested due to granularity requirement. */
 ncclResult_t  ncclMemAlloc(void** ptr, size_t size);
 ncclResult_t pncclMemAlloc(void** ptr, size_t size);
-/* A lease and its physical page runs at once (design/page-maps-2026-11-02.md): the runs are a chooser's identities,
-   the address the allocator's alone. Declared below with ncclMeshPageBacking. */
+/* A lease's physical page runs, for the allocator's binding at allocation (design/page-maps-2026-11-02.md): the runs
+   are a chooser's identities, the address the allocator's alone. Declared below with ncclMeshPageBacking. */
 
 ncclResult_t  ncclMemFree(void *ptr);
 ncclResult_t pncclMemFree(void *ptr);
@@ -719,7 +719,7 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection* selections, s
    required count; otherwise *count supplies capacity and receives the count.
    `page` is the first page in this process's one registered region mapping. */
 typedef struct { uint64_t first, count, page; } ncclMeshPageBacking;
-ncclResult_t ncclMemAllocPages(void **ptr, size_t size, ncclMeshPageBacking *runs, size_t *count);
+ncclResult_t ncclMeshLeasePages(const void *lease, ncclMeshPageBacking *runs, size_t *count);
 ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table, ncclMeshPageBacking* runs, size_t* count);
 /* Local base of the prepared page view; creates no backend resource. */
 ncclResult_t ncclMeshPageTableAddress(ncclMeshPageTable_t table, const void** address);

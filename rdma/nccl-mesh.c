@@ -1735,18 +1735,20 @@ static ncclResult_t mem_alloc(void **ptr, size_t size, enum mesh_backing backing
 }
 
 ncclResult_t ncclMemAlloc(void **ptr, size_t size) { return mem_alloc(ptr, size, MESH_BACKING_PAGES); }
-/* design/page-maps-2026-11-02.md: a lease and its pages together, so a value's map is handed out with its lease and
-   never recovered later from an address. type: size -> (address, [Backing]) where the Backing runs cover the lease's
-   pages in order: run k's `first` its first page in the lease, `count` pages, `page` the first physical page of the
-   region's page space. Called by the allocator's binding (an effector) once per lease; the runs go to choosers, the
-   address to torch. With runs NULL, *count receives the runs needed */
-ncclResult_t ncclMemAllocPages(void **ptr, size_t size, ncclMeshPageBacking *runs, size_t *count) {
-  if (!ptr || !count) return fail(ncclInvalidArgument, "a lease's pages need somewhere to go");
-  const ncclResult_t made = mem_alloc(ptr, size, MESH_BACKING_PAGES);
-  if (made || !*ptr) return made;
+/* design/page-maps-2026-11-02.md: a lease's physical page runs, read once by the allocator's binding (an effector) at
+   the lease's allocation, so a value's map is handed out with its lease and never recovered from an address by a
+   chooser. type: (a lease's own address, capacity) -> [Backing] covering the lease's pages in order: run k's `first`
+   its first page in the lease, `count` pages, `page` the first physical page of the region's page space. *count in:
+   the capacity; out: the runs the lease has (runs NULL: count only) */
+ncclResult_t ncclMeshLeasePages(const void *lease, ncclMeshPageBacking *runs, size_t *count) {
+  if (!lease || !count) return fail(ncclInvalidArgument, "a lease's pages need a lease and somewhere to go");
   pthread_mutex_lock(&attach_lock);
   struct attach *a = NULL;
-  const struct lease *l = lease_at(*ptr, &a);
+  const struct lease *l = lease_at(lease, &a);
+  if (!l || l->address != lease) {
+    pthread_mutex_unlock(&attach_lock);
+    return fail(ncclInvalidArgument, "%p is no lease's own address", lease);
+  }
   const size_t page = a->context.M->pgsz, pages = l->bytes / page;
   size_t written = 0;
   for (size_t p = 0; p < pages;) {

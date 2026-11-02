@@ -23,7 +23,10 @@
 
 namespace {
 
-struct Lease { void *memory; size_t bytes; id_t id; std::vector<int64_t> shape; std::shared_ptr<at::mps::MPSEvent> event; };
+// pages: the lease's physical page runs (ncclMeshLeasePages), read once here, an effector, and handed to choosers as
+// a value's map (design/page-maps-2026-11-02.md); no chooser recovers them from an address
+struct Lease { void *memory; size_t bytes; id_t id; std::vector<int64_t> shape; std::shared_ptr<at::mps::MPSEvent> event;
+               std::vector<ncclMeshPageBacking> pages; };
 
 std::mutex *lock_ = new std::mutex;
 auto *leases_ = new std::unordered_map<const void *, Lease>;
@@ -82,8 +85,14 @@ c10::DataPtr lease(size_t bytes) {
     TORCH_CHECK_WITH(OutOfMemoryError, false, "MPS backend out of memory: the Metal buffer of a region lease of ", bytes,
                      " bytes (torch_mesh allocator.mm): ", why);
   }
+  std::vector<ncclMeshPageBacking> pages;
+  size_t runs = 0;
+  if (!ncclMeshLeasePages(memory, nullptr, &runs)) {
+    pages.resize(runs);
+    if (ncclMeshLeasePages(memory, pages.data(), &runs)) pages.clear();
+  }
   std::lock_guard<std::mutex> guard(*lock_);
-  leases_->emplace(buffer, Lease{memory, bytes, ++made_, {}, nullptr});
+  leases_->emplace(buffer, Lease{memory, bytes, ++made_, {}, nullptr, std::move(pages)});
   return {buffer, buffer, &release, at::Device(at::DeviceType::MPS, 0)};
 }
 
