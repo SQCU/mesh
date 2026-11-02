@@ -25,12 +25,14 @@ record holds no layout declarations, so every binding compiles as the identity l
 import argparse
 import codecs
 import collections
+import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 from bisect import bisect_right
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -440,47 +442,179 @@ class Source:
         self.path, self.index, self.kind, self.function = path, m.group(1), m.group(2), m.group(3)
         self.text = path.read_text()
         self.bytes = len(self.text.encode())
+        self.declaration = declaration(self.text)
+        self.durations = []
+
+
+def declaration(text):
+    """A source's text but for its waits: the lines that call mesh_step_observe or only close a brace go, metadata offsets
+    unnumbered. One numerical declaration's occurrences (one tick's and the next's) share it."""
+    kept = [line for line in text.splitlines() if 'mesh_step_observe' not in line and line.strip() != '}']
+    return re.sub(r'mesh_effects\s*\+\s*\d+ul', 'mesh_effects', '\n'.join(kept))
+
+
+class Record:
+    """One member's record: its sources in index order and its GPU parts (metal-recording.m
+    MetalScheduleCompletedRecord: schedule, part, dispatches, gpu_start, gpu_end, stamped [name, start us, us])."""
+    def __init__(self, name, directory, parts):
+        self.name, self.directory, self.parts_file = name, directory, parts
+        self.sources = sorted((Source(f) for f in directory.iterdir() if SOURCE.match(f.name)), key=lambda s: s.index)
+        self.parts = [json.loads(line) for line in parts.read_text().splitlines() if line.strip()] if parts else []
+        self.functions = {s.function for s in self.sources}
 
 
 def records(path, member=None):
-    """Each member's record beneath path: (member, its sources in index order, its parts file or None)."""
+    """Each member's record beneath path (a run's directory, a member's, or a sources-<pid>/ itself)."""
     path = Path(path)
     found = []
     for directory in sorted([path] if path.name.startswith('sources-') else path.rglob('sources-*')):
-        if not directory.is_dir():
-            continue
         name = directory.parent.name.removesuffix('-prepare')
-        if member and name != member:
-            continue
-        parts = directory.parent / f"parts-{directory.name.split('-', 1)[1]}.jsonl"
-        sources = sorted((Source(f) for f in directory.iterdir() if SOURCE.match(f.name)), key=lambda s: s.index)
-        found.append((name, directory, sources, parts if parts.exists() else None))
+        if directory.is_dir() and (not member or name == member):
+            parts = directory.parent / f"parts-{directory.name.split('-', 1)[1]}.jsonl"
+            found.append(Record(name, directory, parts if parts.exists() else None))
     return found
 
 
+def examine(compiler, text, function):
+    """A source's counts: its live text's, its raw text's where it has none, and its kernel's AIR's."""
+    live, air, error = compiler.run(text) if compiler else (None, None, 'not compiled')
+    counts, per_word, body = source_counts(live if live is not None else text, function)
+    return live is not None, counts, per_word, body, kernel_counts(air, function) if air else None, error
+
+
 def analyze(found, compiler):
-    """Each source's counts, each distinct text compiled once (in parallel across the machine's cores)."""
-    texts = {s.text for _, _, sources, _ in found for s in sources}
-    done = {}
-    if compiler:
-        with ThreadPoolExecutor(os.cpu_count()) as pool:
-            done = dict(zip(texts, pool.map(compiler.run, texts)))
-    for _, _, sources, _ in found:
-        for s in sources:
-            live, air, s.error = done.get(s.text, (None, None, 'not compiled'))
-            s.live = live is not None
-            s.counts, s.per_word, s.body = source_counts(live if live is not None else s.text, s.function)
-            s.air = kernel_counts(air, s.function) if air else None
+    """Each source's counts, each distinct text examined once, the texts across the machine's cores."""
+    jobs = sorted({(s.text, s.function) for r in found for s in r.sources})
+    with ProcessPoolExecutor(os.cpu_count()) as pool:
+        done = dict(zip(jobs, pool.map(examine, [compiler] * len(jobs), *zip(*jobs), chunksize=1)))
+    for r in found:
+        for s in r.sources:
+            s.live, s.counts, s.per_word, s.body, s.air, s.error = done[s.text, s.function]
+        align(r)
+
+
+# ---- the stamped dispatches and their sources
+
+def stamp_key(name):
+    """A stamp by its place: a kernel's name and index in its replay; the collective's unlabeled pipelines, numbered
+    across the whole schedule, by their label alone."""
+    label = name.rsplit('#', 1)[0]
+    return label if label == 'dispatch' else name
+
+
+def period(keys):
+    """(first, length) of the repetition running from the earliest place to the end of keys (an unrolled step's ticks),
+    the shortest there; (len(keys), 0) where nothing repeats twice."""
+    n = len(keys)
+    for first in range(n):
+        for length in range(1, (n - first) // 2 + 1):
+            if all(keys[i] == keys[i + length] for i in range(first, n - length)):
+                return first, length
+    return n, 0
+
+
+def align(record):
+    """Each stamped dispatch's source. A stamp names its pipeline and its index in its replay, not its source; but the
+    sources were written in command order at their first occurrence and the dispatches encoded in command order
+    (page_effects.py Plan.append). A kernel dispatch with no earlier counterpart (before the repetition, or in its first
+    tick) takes the next unwritten source where its function is that source's; a later one (the same place a tick
+    before, or the same kernel dispatch of an earlier part whose kernel dispatches are these, whatever its collective
+    ones) takes it only where it is the counterpart's declaration, and otherwise runs the counterpart's text again.
+    None: an earlier text the record does not name."""
+    at, assigned, seen, record.shapes = 0, {}, [], []
+    for q, part in enumerate(record.parts):
+        stamps = part.get('stamped') or []
+        keys = [stamp_key(name) for name, _, _ in stamps]
+        first, length = period(keys)
+        kernels = [i for i, (name, _, _) in enumerate(stamps) if name.rsplit('#', 1)[0] in record.functions]
+        signature = [keys[i] for i in kernels]
+        earlier = next((r for r, (k, _, _) in enumerate(seen) if k == keys), None)
+        like = next((r for r, (_, k, _) in enumerate(seen) if k == signature and signature), None)
+        seen.append((keys, signature, kernels))
+        record.shapes.append((q if earlier is None else earlier, first, length))
+        for ordinal, i in enumerate(kernels):
+            name, _, duration = stamps[i]
+            if like is not None:
+                counterpart = (like, seen[like][2][ordinal])
+            else:
+                counterpart = (q, i - length) if length and i >= first + length else None
+            prior = assigned.get(counterpart)
+            label = name.rsplit('#', 1)[0]
+            following = record.sources[at] if at < len(record.sources) and record.sources[at].function == label else None
+            if following is not None and (counterpart is None or (prior is not None and
+                                                                 following.declaration == prior.declaration)):
+                assigned[q, i] = following
+                at += 1
+            else:
+                assigned[q, i] = prior
+            if assigned[q, i] is not None:
+                assigned[q, i].durations.append(duration)
+    record.assigned = assigned
+
+
+def places(record):
+    """{pattern: (its parts, {place: entry})}: the stamped dispatches of each set of parts with the same dispatches, by
+    place: (region, stamp key, its occurrence among the region's), the region 'before' the repetition or a 'tick' of it,
+    so that runs whose steps differ only in collective dispatches still meet. Each entry: its first stamp name, its
+    position (at), durations, sources (None: not named) and the stamps' (part, index)."""
+    found = {}
+    for q, part in enumerate(record.parts):
+        pattern, first, length = record.shapes[q]
+        parts, table = found.setdefault(pattern, ([], {}))
+        parts.append(q)
+        stamps = part.get('stamped') or []
+        keys = [stamp_key(name) for name, _, _ in stamps]
+        for i, (name, _, duration) in enumerate(stamps):
+            tick = bool(length) and i >= first
+            local = (i - first) % length if tick else i
+            region = keys[first:first + length][:local] if tick else keys[:i]
+            place = ('tick' if tick else 'before', keys[i], region.count(keys[i]))
+            entry = table.setdefault(place, dict(name=name, at=(tick, local), durations=[], sources=[], stamps=[]))
+            entry['durations'].append(duration)
+            entry['stamps'].append((q, i))
+            if name.rsplit('#', 1)[0] in record.functions:
+                entry['sources'].append(record.assigned.get((q, i)))
+    return found
+
+
+def span(part):
+    return (part['gpu_end'] - part['gpu_start']) * 1e6
+
+
+def median(values):
+    return statistics.median(values) if values else 0.0
+
+
+def named(sources):
+    """Distinct sources by index, in order, '?' for one the record does not name, long lists elided."""
+    if not sources:
+        return '(collective)'
+    order = list(dict.fromkeys('?' if s is None else s.index for s in sources))
+    return ' '.join(order) if len(order) <= 5 else f"{' '.join(order[:2])} .. {order[-1]} ({len(order)})"
+
+
+def spread(values):
+    values = sorted(set(values))
+    return '-' if not values else f'{values[0]}' if len(values) == 1 else f'{values[0]}-{values[-1]}'
+
+
+def main_pattern(record):
+    """The pattern of parts with the most kernel dispatches (the step), or None."""
+    shapes = places(record)
+    best = max(shapes.items(), key=lambda item: sum(len(e['sources']) for e in item[1][1].values()), default=None)
+    return (best[0], *best[1]) if best and any(e['sources'] for e in best[1][1].values()) else None
 
 
 # ---- the report
 
-def report_sources(name, directory, sources):
-    total = sum(s.bytes for s in sources)
-    print(f'-- {name} ({directory}: {len(sources)} sources, {total} bytes)')
+def report_sources(record):
+    sources, gpu = record.sources, sum(span(p) for p in record.parts)
+    print(f"-- {record.name} ({record.directory}: {len(sources)} sources, {sum(s.bytes for s in sources)} bytes; "
+          f"{len(record.parts)} GPU parts, {gpu / 1e3:.1f} ms)")
     print(f"   {'src':3} {'function':16} {'bytes':>7} {'waits':>5} {'words':>5} {'most':>4} {'extra':>5} {'tbl':>3} "
           f"{'acc':>4} {'div':>4} {'d/acc':>5} {'wrap':>4} {'coh':>4} {'pub':>3} {'pred':>4} | {'insts':>6} {'spin':>4} "
-          f"{'fence':>5} {'bar':>3} {'coh-ld':>9} {'atom':>4} {'idiv':>4} {'i64':>3} {'lp':>3}")
+          f"{'fence':>5} {'bar':>3} {'coh-ld':>9} {'atom':>4} {'idiv':>4} {'i64':>3} {'lp':>3} | {'n':>3} {'med us':>9} "
+          f"{'share':>6}")
     for s in sources:
         c, a = s.counts, s.air
         coherent = f"{c['coherent']}" + (f"/{c['coherent loop']}L" if c['coherent loop'] else '')
@@ -491,18 +625,138 @@ def report_sources(name, directory, sources):
         if a:
             row += (f" {a['instructions']:6} {a['spins']:4} {a['fences']:5} {a['barriers']:3} "
                     f"{a['coherent loads']:5}/{a['loop coherent loads']:<3} {a['atomic loads'] + a['atomic updates']:4} "
-                    f"{a['divisions']:4} {a['64-bit divisions']:3} {a['loop divisions']:3}")
+                    f"{a['divisions']:4} {a['64-bit divisions']:3} {a['loop divisions']:3} |")
         else:
-            row += f" {s.error or 'kernel ' + s.function + ' not in the AIR'}"
+            row += f" {(s.error or 'kernel ' + s.function + ' not in the AIR')[:60]:60} |"
+        row += (f" {len(s.durations):3} {median(s.durations):9.1f} {100 * sum(s.durations) / gpu:5.1f}%" if s.durations
+                else f" {0:3} {'-':>9} {'-':>6}")
         print(row + ('' if s.live else '  (raw text: both #if branches read)'))
-    many = [(s, w, n) for s in sources for w, n in s.per_word.items() if n > 1]
-    if many:
-        print('   words waited on more than once in one prologue (one wait at the greatest threshold covers the rest):')
-        for s in sources:
-            words = [(w, n) for w, n in s.per_word.items() if n > 1]
-            if words:
-                print(f"     {s.index} {s.function}: {s.counts['waits']} waits on {s.counts['words']} words, "
-                      + ', '.join(f'{n} on {w}' for w, n in words))
+    for s in sources:
+        words = [(w, n) for w, n in s.per_word.items() if n > 1]
+        if words:
+            print(f"   {s.index} {s.function}: {s.counts['waits']} waits on {s.counts['words']} words in one prologue, "
+                  + ', '.join(f'{n} on {w}' for w, n in words) + ' (one at its greatest threshold covers each word)')
+    chains = collections.defaultdict(list)
+    for s in sources:
+        chains[s.kind, s.function, s.declaration].append(s)
+    for (kind, function, _), same in chains.items():
+        if len(same) > 1:
+            sizes, waits = [s.bytes for s in same], [s.counts['waits'] for s in same]
+            grows = [name for name, v in (('bytes', sizes), ('waits', waits)) if all(x < y for x, y in zip(v, v[1:]))]
+            print(f"   {function}: one declaration in {len(same)} sources {named(same)}: bytes {sizes[0]} .. {sizes[-1]}, "
+                  f"waits {' '.join(map(str, waits))}" + (f"; {' and '.join(grows)} grow at every occurrence" if grows else ''))
+
+
+def report_dispatches(record):
+    if not record.parts:
+        print('   no parts file beside the sources')
+        return
+    print(f"   stamped dispatches ({record.parts_file.name}):")
+    for pattern, (parts, table) in places(record).items():
+        _, first, length = record.shapes[pattern]
+        spans = [span(record.parts[q]) for q in parts]
+        stamps = len(record.parts[pattern].get('stamped') or [])
+        shape = f'{first} before a repetition of {length}, {(stamps - first) // length} times' if length else 'no repetition'
+        if not any(e['sources'] for e in table.values()):
+            print(f"     {len(parts)} part(s) of {stamps} collective dispatches, median part {median(spans):.1f} us")
+            continue
+        print(f"     {len(parts)} part(s) of {stamps} dispatches ({shape}), median part {median(spans) / 1e3:.2f} ms:")
+        print(f"       {'place':10} {'dispatch':20} {'sources':22} {'waits':>7} {'extra':>7} {'n':>4} {'median us':>10} "
+              f"{'total ms':>9} {'share':>6}")
+        for e in sorted(table.values(), key=lambda e: e['at']):
+            known = [s for s in e['sources'] if s is not None]
+            print(f"       {('tick ' if e['at'][0] else 'before ') + str(e['at'][1]):10} {e['name']:20.20} {named(e['sources']) if e['sources'] else '(collective)':22.22} "
+                  f"{spread(s.counts['waits'] for s in known):>7} {spread(s.counts['extra'] for s in known):>7} "
+                  f"{len(e['durations']):4} {median(e['durations']):10.1f} {sum(e['durations']) / 1e3:9.2f} "
+                  f"{100 * sum(e['durations']) / sum(spans):5.1f}%")
+
+
+def step(record):
+    """Per part of the step (main_pattern): its GPU us, waits and extra waits run, kernel dispatches whose source is not
+    named, and per function its GPU us; with the step's places."""
+    found = main_pattern(record)
+    if not found:
+        return None
+    pattern, parts, table = found
+    each = []
+    for q in parts:
+        row = collections.Counter(span=span(record.parts[q]))
+        for i, (name, _, duration) in enumerate(record.parts[q].get('stamped') or []):
+            label = name.rsplit('#', 1)[0]
+            row['us ' + label] += duration
+            row['n ' + label] += 1
+            if label in record.functions:
+                s = record.assigned.get((q, i))
+                row['unnamed'] += s is None
+                if s is not None:
+                    row['waits'] += s.counts['waits']
+                    row['extra'] += s.counts['extra']
+                    row['waits ' + label] += s.counts['waits']
+                    row['extra ' + label] += s.counts['extra']
+        each.append(row)
+    return collections.Counter({key: median([row[key] for row in each]) for key in set().union(*each)}), table
+
+
+def report_summary(found):
+    print('   summary, a step being one part of the most kernel dispatches (medians over its parts):')
+    print(f"     {'member':12} {'sources':>7} {'bytes':>9} {'waits':>6} {'extra':>6} {'unnamed':>7} {'step ms':>8}  slowest place")
+    for r in found:
+        made = step(r)
+        if not made:
+            print(f"     {r.name:12} {len(r.sources):7} {sum(s.bytes for s in r.sources):9}  (no stamped kernel dispatches)")
+            continue
+        values, table = made
+        e = max(table.values(), key=lambda e: median(e['durations']))
+        known = [s for s in e['sources'] if s is not None]
+        print(f"     {r.name:12} {len(r.sources):7} {sum(s.bytes for s in r.sources):9} {values['waits']:6.0f} "
+              f"{values['extra']:6.0f} {values['unnamed']:7.0f} {values['span'] / 1e3:8.2f}  "
+              f"{('tick ' if e['at'][0] else 'before ') + str(e['at'][1])} {e['name']} "
+              f"{median(e['durations']):.0f} us, sources {named(e['sources']) if e['sources'] else '(collective)'}, "
+              f"waits {spread(s.counts['waits'] for s in known)}")
+
+
+def report_diff(paths, before, after):
+    print(f'== {paths[0]} -> {paths[1]}: per member and function, a step being one part of the most kernel dispatches')
+    print(f"   {'member':12} {'function':18} {'sources':>9} {'bytes':>17} {'waits/step':>11} {'extra/step':>11} "
+          f"{'GPU ms/step':>15} {'median us':>17}")
+    pairs = [(a, b) for a in before for b in after if a.name == b.name]
+    for a, b in pairs:
+        made = step(a), step(b)
+        for function in sorted(a.functions | b.functions) + ['dispatch']:
+            row = []
+            for r, m in zip((a, b), made):
+                values = m[0] if m else collections.Counter()
+                mine = [s for s in r.sources if s.function == function]
+                durations = [d for s in mine for d in s.durations] if function != 'dispatch' else \
+                    [d for part in r.parts for name, _, d in part.get('stamped') or [] if name.startswith('dispatch#')]
+                row.append((len(mine), sum(s.bytes for s in mine), values.get('waits ' + function, 0),
+                            values.get('extra ' + function, 0), values.get('us ' + function, 0) / 1e3, median(durations)))
+            (n0, b0, w0, e0, g0, m0), (n1, b1, w1, e1, g1, m1) = row
+            print(f"   {a.name:12} {function if function != 'dispatch' else '(collective)':18} {n0:4}->{n1:<4} "
+                  f"{b0:8}->{b1:<8} {w0:5.0f}->{w1:<5.0f} {e0:5.0f}->{e1:<5.0f} {g0:7.2f}->{g1:<7.2f} {m0:8.1f}->{m1:<8.1f}")
+        if made[0] and made[1]:
+            print(f"   {'':12} {'step':18} {'':9} {'':17} {made[0][0]['waits']:5.0f}->{made[1][0]['waits']:<5.0f} "
+                  f"{made[0][0]['extra']:5.0f}->{made[1][0]['extra']:<5.0f} "
+                  f"{made[0][0]['span'] / 1e3:7.2f}->{made[1][0]['span'] / 1e3:<7.2f}")
+    print('   by place in the step (the same kernel or collective dispatch, counted in its region, in both runs):')
+    print(f"   {'member':12} {'place':9} {'dispatch':20} {'sources':>24} {'waits':>13} {'median us':>21}")
+    for a, b in pairs:
+        made = step(a), step(b)
+        if not (made[0] and made[1]):
+            continue
+        both = [p for p in made[0][1] if p in made[1][1]]
+        for place in sorted(both, key=lambda p: made[0][1][p]['at']):
+            e0, e1 = made[0][1][place], made[1][1][place]
+            if not (e0['sources'] or e1['sources']) and median(e0['durations']) < 100 and median(e1['durations']) < 100:
+                continue
+            w = [spread(s.counts['waits'] for s in e['sources'] if s is not None) for e in (e0, e1)]
+            src = [named(e['sources']) if e['sources'] else 'coll' for e in (e0, e1)]
+            at = ('tick ' if e0['at'][0] else 'before ') + str(e0['at'][1])
+            print(f"   {a.name:12} {at:9} {e0['name']:20.20} {src[0]:>11.11}->{src[1]:<11.11} "
+                  f"{w[0]:>6}->{w[1]:<6} {median(e0['durations']):9.1f}->{median(e1['durations']):<9.1f}")
+        alone = len(made[0][1]) + len(made[1][1]) - 2 * len(both)
+        if alone:
+            print(f"   {a.name:12} {alone} place(s) in one run's step only")
 
 
 COLUMNS = """   columns: waits = mesh_step_observe calls in the live text; words = distinct words waited on; most = most waits on
@@ -511,7 +765,8 @@ COLUMNS = """   columns: waits = mesh_step_observe calls in the live text; words
    need; d/acc = the most one access needs; wrap = mesh_storage_ calls; coh = coherent accesses (L: in a loop);
    pub = publications; pred = mesh_payload predicates | the kernel's AIR, calls inlined: insts = instructions;
    spin = spin loops; fence; bar = barriers; coh-ld = coherent loads / in loops; atom = atomic loads and updates;
-   idiv = integer divisions, i64 = of them 64-bit, lp = of them in loops"""
+   idiv = integer divisions, i64 = of them 64-bit, lp = of them in loops | its stamped dispatches (align: which
+   dispatch ran which source is inferred from command order): n, median us, share of the member's GPU part time"""
 
 
 def main():
@@ -519,16 +774,24 @@ def main():
     parser.add_argument('paths', nargs='+')
     parser.add_argument('--member')
     parser.add_argument('--no-compile', action='store_true')
+    parser.add_argument('--diff', action='store_true', help='two runs: the per-function change from the first')
     args = parser.parse_args()
+    if args.diff and len(args.paths) != 2:
+        parser.error('--diff takes two runs')
     compiler = None if args.no_compile else Compiler()
     runs = [(path, records(path, args.member)) for path in args.paths]
     analyze([r for _, found in runs for r in found], compiler)
+    if args.diff:
+        report_diff(args.paths, runs[0][1], runs[1][1])
+        return
     for path, found in runs:
         print(f'== {path}: {len(found)} records')
         print(f"   compiled: {compiler.describe if compiler else 'no (--no-compile): raw text'}")
         print(COLUMNS)
-        for name, directory, sources, _ in found:
-            report_sources(name, directory, sources)
+        for record in found:
+            report_sources(record)
+            report_dispatches(record)
+        report_summary(found)
 
 
 if __name__ == '__main__':
