@@ -1037,11 +1037,16 @@ static int bootstrap_listen(const char *host, uint16_t *port) {
   return -1;
 }
 
-/* a bootstrap root's address: a peer is reached on the fabric, never by a name that resolves to Wi-Fi or a LAN:
-   the first address under mesh.h MESH_ULA_PREFIX of an interface other than loopback (bin/mesh-router-init.sh puts one on
-   each fabric port) */
-static ncclResult_t fabric_address(char *address, size_t room) {
-  if (!address || !room) return fail(ncclInvalidArgument, "the fabric address: no room");
+/* a bootstrap root's address: the node's tailnet address, the first address under MESH_TAILNET_PREFIX (the tailnet's own
+   unique-local range) of an interface other than loopback. The bootstrap carries the communicator's configuration only;
+   its transfers are the bridge's. Changed by the LSTM demonstration session from the fabric address (MESH_ULA_PREFIX,
+   bin/mesh-router-init.sh's host routes over each Thunderbolt port): with one of m5ult2's ports stopped, m5ult2 reached
+   only the Mini's fabric address, and every five-rank bootstrap expired awaiting it (2026-11-01 17:1x), while the
+   tailnet reached every member. The operator: "everything should be connected by tailnet". What must stay: the
+   tailnet, not a route that one link carries. */
+#define MESH_TAILNET_PREFIX "fd7a:115c:a1e0:"
+static ncclResult_t tailnet_address(char *address, size_t room) {
+  if (!address || !room) return fail(ncclInvalidArgument, "the tailnet address: no room");
   *address = 0;
   struct ifaddrs *interfaces = NULL;
   if (getifaddrs(&interfaces)) return fail(ncclSystemError, "the node's interfaces (getifaddrs): %s", strerror(errno));
@@ -1050,22 +1055,22 @@ static ncclResult_t fabric_address(char *address, size_t room) {
     char text[INET6_ADDRSTRLEN];
     if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET6 || (i->ifa_flags & IFF_LOOPBACK) ||
         !inet_ntop(AF_INET6, &((struct sockaddr_in6 *)i->ifa_addr)->sin6_addr, text, sizeof text) ||
-        strncmp(text, MESH_ULA_PREFIX, strlen(MESH_ULA_PREFIX)))
+        strncmp(text, MESH_TAILNET_PREFIX, strlen(MESH_TAILNET_PREFIX)))
       continue;
     if (strlen(text) < room) snprintf(address, room, "%s", text);
     else short_room = 1;
   }
   freeifaddrs(interfaces);
-  if (short_room) return fail(ncclInvalidArgument, "the fabric address: %zu bytes hold no address of the fabric's", room);
+  if (short_room) return fail(ncclInvalidArgument, "the tailnet address: %zu bytes hold no tailnet address", room);
   return *address ? ncclSuccess
-                  : fail(ncclSystemError, "this node holds no fabric address (no interface's address under %s: bin/mesh-router-init.sh)", MESH_ULA_PREFIX);
+                  : fail(ncclSystemError, "this node holds no tailnet address (no interface's address under %s)", MESH_TAILNET_PREFIX);
 }
 
 /* A split owns a fresh configuration listener. It neither honors the parent's
    NCCL_COMM_ID nor replaces the unrelated process-global public bootstrap. */
 static int bootstrap_child_id(struct ncclComm *comm, ncclUniqueId *id) {
   char host[256] = {0};
-  if (fabric_address(host, sizeof host)) *host = 0;
+  if (tailnet_address(host, sizeof host)) *host = 0;
   if (!*host && gethostname(host, sizeof host - 1)) return errno;
   uint16_t port = 0;
   const int fd = bootstrap_listen(host, &port);
@@ -1078,15 +1083,15 @@ static int bootstrap_child_id(struct ncclComm *comm, ncclUniqueId *id) {
   return 0;
 }
 
-/* the id: NCCL_COMM_ID where set, else a listener on the node's fabric address (fabric_address) where it holds one, else
-   on its host name */
+/* the id: NCCL_COMM_ID where set, else a listener on the node's tailnet address (tailnet_address) where it holds one,
+   else on its host name */
 ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
   if (!id) return fail(ncclInvalidArgument, "uniqueId is NULL");
   memset(id->internal, 0, sizeof id->internal);
   const char *given = getenv("NCCL_COMM_ID");
   if (given && *given) { snprintf(id->internal, sizeof id->internal, "%s", given); return ncclSuccess; }
   char host[256] = {0};
-  if (fabric_address(host, sizeof host)) *host = 0;
+  if (tailnet_address(host, sizeof host)) *host = 0;
   uint16_t port = 0;
   if (root.fd >= 0) close(root.fd);
   if ((root.fd = *host || !gethostname(host, sizeof host - 1) ? bootstrap_listen(host, &port) : -1) < 0)

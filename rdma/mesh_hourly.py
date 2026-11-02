@@ -19,8 +19,10 @@ cluster = mesh_nodes.load()
 mesh_nodes.wait_paired([mesh_nodes.Node(cluster, '-', 'localhost', local=True)], None, time.time() + 300)
 here = mesh.current()
 nodes = sorted(map(str, here.nodes), key=int)
+# the rendezvous over the tailnet (each member's management address): a fabric address is a host route over one
+# Thunderbolt link, and one stopped port left the other ranks finding rank 0 unreachable (2026-11-01 17:06)
 for ordinal, item in enumerate(json.loads((home / 'metal-microbench/tools/mesh/hourly/workloads.json').read_text())['workloads']):
-    env = {**os.environ, 'RANK': str(nodes.index(str(here.node))), 'WORLD_SIZE': str(len(nodes)), 'MASTER_ADDR': cluster.members[nodes[0]].fabric,
+    env = {**os.environ, 'RANK': str(nodes.index(str(here.node))), 'WORLD_SIZE': str(len(nodes)), 'MASTER_ADDR': cluster.members[nodes[0]].management,
            'MASTER_PORT': str(cluster.rank_port + ordinal), 'PYTHONPATH': f'{home}/mesh/rdma:{home}/mesh/rdma/torch-mesh'}
     print(json.dumps({'hourly': item['tag'], 'nodes': nodes, 'commits': commits, 'unix': time.time()}), flush=True)
     program = subprocess.Popen([sys.executable, home / 'mesh/examples' / f"{item['program']}.py",
