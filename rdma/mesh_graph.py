@@ -277,3 +277,15 @@ def descendants(root, children):
         v = stack.pop()
         yield v
         stack.extend(reversed(children(v)))
+
+
+def preorder_parents(depths):
+    """Each row's parent row in a tree written in preorder with each row's depth (an indented outline, such as a
+    sample(1) call graph): its index, or None for a root."""
+    parents, stack = [], []
+    for i, depth in enumerate(depths):
+        while stack and depths[stack[-1]] >= depth:
+            stack.pop()
+        parents.append(stack[-1] if stack else None)
+        stack.append(i)
+    return parents
