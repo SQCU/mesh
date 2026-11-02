@@ -975,6 +975,21 @@ typedef struct ncclMeshSpace *ncclMeshSpace_t;
 ncclResult_t ncclMeshSpaceCreate(uint64_t serial, uint64_t bytes, ncclMeshSpace_t *out);
 ncclResult_t ncclMeshSpaceBind(ncclMeshSpace_t space, const void *lease, uint64_t first_byte);
 ncclResult_t ncclMeshSpaceDestroy(ncclMeshSpace_t space);
+/* design/page-maps-2026-11-02.md, "The run's solve", integration step 4: a declared group's routed program in value
+   coordinates, read at declaration with no address, for the run's solve.
+   ncclMeshCommTransfers: each of group `group`'s messages, every channel's SENDs then its landings, frame 0 (frame f
+   repeats it at f times the call's frame bytes): its call, channel, the routed step's op (0 SEND, 1 REDUCE, 2 COPY),
+   round and peer, its buffer (0 the operand with the result made in place, b >= 1 the rank's scratch b), and the bytes
+   [offset, offset + bytes) of that buffer it moves. A SEND reads them from its issue to its completion; a COPY writes
+   them from its receive's post until it lands; a REDUCE lands them in pages of its own, then its sum combines them
+   into the buffer. Writes `count` records up to `capacity`.
+   ncclMeshCommBuffers: call `call`'s buffers' bytes (buffer 0 the operand's), `initialized` the number that are the
+   operand's copies made at the call's start (relay buffers follow them), up to `capacity`. */
+typedef struct { uint32_t call, channel, op, round, peer, buffer; uint64_t offset, bytes; } ncclMeshTransferRecord;
+ncclResult_t ncclMeshCommTransfers(ncclComm_t comm, uint32_t group, ncclMeshTransferRecord *records, size_t capacity,
+                                   size_t *count);
+ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, uint32_t capacity,
+                                 uint32_t *count, uint32_t *initialized);
 ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
     int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
     uint64_t* occurrence);

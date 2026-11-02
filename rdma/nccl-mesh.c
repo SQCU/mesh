@@ -5925,6 +5925,47 @@ ncclResult_t ncclMeshCommLower(ncclComm_t comm,uint64_t invocation,uint32_t poll
   return result;
 }
 
+/* nccl.h ncclMeshCommTransfers: compile_group's schedules (x->plans), read as declared */
+ncclResult_t ncclMeshCommTransfers(ncclComm_t comm, uint32_t group, ncclMeshTransferRecord *records, size_t capacity,
+                                   size_t *count) {
+  if (!comm || !count) return fail(ncclInvalidArgument, "read a group's transfers into a count");
+  pthread_mutex_lock(&group_lock);
+  const struct plan *made = comm->plan;
+  ncclResult_t result = made && group < made->view.groups ? ncclSuccess
+                        : fail(ncclInvalidUsage, "a declared group's transfers need its plan (ncclMeshCommPlan)");
+  size_t n = 0;
+  const struct compiled *x = result ? NULL : made->group + group;
+  for (uint32_t h = 0; x && x->plans && h < comm->count; h++)
+    for (int send = 1; send >= 0; send--)
+      for (size_t k = 0; k < (send ? x->plans[h].outs : x->plans[h].ins); k++, n++) {
+        const struct message *m = (send ? x->plans[h].out : x->plans[h].in) + k;
+        const struct mesh_step *step = m->c->bound ? m->c->bound->steps + m->step : NULL;
+        if (n < capacity && step)
+          records[n] = (ncclMeshTransferRecord){(uint32_t)(m->c - x->calls), h, step->op, step->round, step->peer,
+                                                step->buffer, m->offset, m->bytes};
+      }
+  *count = n;
+  pthread_mutex_unlock(&group_lock);
+  return result;
+}
+/* nccl.h ncclMeshCommBuffers: slot_laid's extents, the operand's own first */
+ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, uint32_t capacity,
+                                 uint32_t *count, uint32_t *initialized) {
+  if (!comm || !count || !initialized) return fail(ncclInvalidArgument, "read a call's buffers into a count");
+  pthread_mutex_lock(&group_lock);
+  const struct plan *made = comm->plan;
+  const struct compiled *x = made && group < made->view.groups ? made->group + group : NULL;
+  const struct call *c = x && call < x->n ? x->calls + call : NULL;
+  const struct steps *st = c ? c->bound : NULL;
+  ncclResult_t result = st ? ncclSuccess : fail(ncclInvalidUsage, "a declared call's buffers need its compiled steps");
+  *count = st ? st->buffers : 0;
+  *initialized = st ? st->initialized : 0;
+  for (uint32_t b = 0; st && b < st->buffers && b < capacity; b++)
+    bytes[b] = b < st->initialized ? elements(c) * SIZE[c->type] : st->extent[b];
+  pthread_mutex_unlock(&group_lock);
+  return result;
+}
+
 static struct issue *occurrence_at(ncclComm_t comm,uint64_t occurrence) {
   struct compiled *x=definition_at(comm,occurrence);
   for(size_t k=0;x&&k<x->laid_count;k++)
