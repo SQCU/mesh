@@ -175,4 +175,31 @@ void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *co
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
                                int (*equal)(const void *context, uint32_t k), const void *context);
 void mesh_graph_keyed_add(uint32_t *head, uint32_t *next, uint32_t key, uint32_t k);
+/* exp and log of IEEE-exact operations alone (+, -, x, / correctly rounded; frexp, ldexp, floor exact), so that every
+   node computes the same trees and the same shares from them, whatever its libm */
+double mesh_graph_exp(double x);
+double mesh_graph_log(double x);
+/* A concurrent flow of demands over an undirected graph by multiplicative weights (a planner's routing solve:
+   mesh-plan.h mesh_solve). Edge e joins from[e] and to[e], capacity[e] each way. Demand d's tree is rooted at root[d]
+   and reaches each vertex v for which leaf(context, d, v) holds; up[d] bytes cross it toward the root and down[d] from
+   it. Each of `rounds` rounds routes every demand along its least-length tree, a direction's length
+   exp(eps (load / capacity - most) / width) / capacity weighed by the bytes that cross it, and adds a round's share of
+   those bytes to the loads. Each demand's distinct trees are kept, in the order found: tree k's demand demand[k], its
+   parents parent[k * vertices ..] (the root its own, a vertex off the tree UINT32_MAX), its share share[k] (the
+   rounds that chose it over all rounds). Their count; UINT32_MAX where eps is not positive, a root is no vertex, a leaf
+   has no route, or more than room trees are found. */
+uint32_t mesh_graph_flow(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const double *capacity,
+                         uint32_t count, const uint32_t *root, const double *up, const double *down,
+                         int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
+                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share);
+/* Spanning trees packed by Garg and Koenemann's rounds (a communicator's own forms: mesh-plan.h mesh_trees_pack). Edge e
+   makes vertex to[e] a child of from[e], its route crossing directed hops crossing[through[e]] to
+   crossing[through[e + 1] - 1], hop k of capacity[k]. Every root r for which rooted(context, r) holds is given a demand
+   of one, packed along least-weight arborescences (mesh_graph_arborescence) until the hops' lengths reach one. Each
+   root's `most` heaviest distinct trees are kept, root by root: root[k], parents parent[k * vertices ..] and log
+   weight log_weight[k], the log of its share of its root's kept flow. Their count; 0 where no arborescence spans. */
+uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const uint32_t *through,
+                         const uint32_t *crossing, uint32_t hops, const double *capacity,
+                         int (*rooted)(const void *context, uint32_t r), const void *context, double eps, uint32_t most,
+                         uint32_t *root, uint32_t *parent, double *log_weight);
 #endif

@@ -289,26 +289,6 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
   return error?-error:(int)N;
 }
 
-/* exp and log of IEEE-exact operations alone (+, -, x, / correctly rounded; frexp, ldexp, floor exact), so that every
-   node computes the same trees and the same shares from them, whatever its libm */
-static double mesh_exp(double x){
-  if(x<-745)return 0;
-  if(x>709)return INFINITY;
-  const double ln2_high=0.693147180369123816490,ln2_low=1.90821492927058770002e-10;
-  const double k=floor(x/0.693147180559945309417+0.5),r=(x-k*ln2_high)-k*ln2_low;
-  double term=1,sum=1;
-  for(int i=1;i<=20;i++){term=term*r/i;sum+=term;}
-  return ldexp(sum,(int)k);
-}
-static double mesh_log(double x){
-  if(!(x>0))return -INFINITY;
-  int e;
-  const double m=frexp(x,&e),s=(m-1)/(m+1),s2=s*s;
-  double term=s,sum=0;
-  for(int i=1;i<=61;i+=2){sum+=term/i;term*=s2;}
-  return 2*sum+e*0.693147180559945309417;
-}
-
 /* -- trees --------------------------------------------------------------------------------------------- */
 
 int mesh_trees_check(const struct mesh_link_map *map,const struct mesh_trees *trees){
@@ -578,17 +558,17 @@ int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,con
     const uint64_t base=next,length=mesh_cut_next(segments,elements,sizes,q,g,&next),units=(length+q-1)/q;
     double most=-INFINITY,total=0;
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g && program->log_weight[p]>most)most=program->log_weight[p];
-    for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g)total+=mesh_exp(program->log_weight[p]-most);
+    for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g)total+=mesh_graph_exp(program->log_weight[p]-most);
     /* A skipped global rank is a zero-length segment, never permission to
        silently discard a caller's nonzero count. */
     if(program->segments && length && !(total>0)){return 0;}
     uint64_t floors=0;
     for(uint32_t p=0;p<program->parts;p++)
-      if(program->segment[p]==g)floors+=(uint64_t)floor((double)units*mesh_exp(program->log_weight[p]-most)/total);
+      if(program->segment[p]==g)floors+=(uint64_t)floor((double)units*mesh_graph_exp(program->log_weight[p]-most)/total);
     uint64_t remainder=floors<units?units-floors:0,at=base;
     for(uint32_t p=0;p<program->parts;p++){
       if(program->segment[p]!=g)continue;
-      const double weight=mesh_exp(program->log_weight[p]-most);
+      const double weight=mesh_graph_exp(program->log_weight[p]-most);
       uint64_t share=(uint64_t)floor((double)units*weight/total);
       if(remainder && weight>0 && at+share*q<base+length){share++;remainder--;}
       share*=q;
@@ -729,12 +709,6 @@ int mesh_program_check_members(const struct mesh_program *program,struct mesh_op
 }
 
 /* A packed tree while packing: its root, parents and the flow it carries */
-struct mesh_packed { uint32_t root; double flow; uint32_t *parent; };
-static int mesh_packed_heavier(const void *a,const void *b){
-  const struct mesh_packed *x=a,*y=b;
-  if(x->root!=y->root)return x->root<y->root?-1:1;
-  return x->flow>y->flow?-1:x->flow<y->flow;
-}
 
 /* the map's links among its nodes, a pair's parallel cables one link of their bandwidths summed (mesh-plan.h
    mesh_solve); their count, each link's ends and capacity where `from` is given */
@@ -762,95 +736,34 @@ static uint32_t mesh_solve_links(const struct mesh_link_map *map,uint32_t *from,
 uint32_t mesh_solve_room(const struct mesh_link_map *map,double eps,uint32_t count){
   const uint32_t links=2*mesh_solve_links(map,NULL,NULL,NULL);
   const double e=eps>0?eps:1;
-  const uint64_t rounds=(uint64_t)(mesh_log(links>1?(double)links:2.0)/(e*e))+1,room=rounds*count;
+  const uint64_t rounds=(uint64_t)(mesh_graph_log(links>1?(double)links:2.0)/(e*e))+1,room=rounds*count;
   return room>=UINT32_MAX?UINT32_MAX-1:(uint32_t)room;
 }
 
-/* a solved tree equal to the one just found (mesh_solve), and a packed tree equal to the arborescence just chosen
-   (mesh_trees_pack): the graph module's keyed chains read each demand's, or each root's, trees alone. Changed by the
-   LSTM demonstration session: each scanned every tree found so far, rounds x demands x trees
-   (design/primitive-copies-routing-2026-11-01.md group 18). What must stay: one key's trees compared. */
-struct mesh_same_tree { const uint32_t *parent,*tree; uint32_t n; };
-static int mesh_same_tree(const void *context,uint32_t k){
-  const struct mesh_same_tree *s=context;
-  return !memcmp(s->parent+(size_t)k*s->n,s->tree,s->n*sizeof *s->tree);
+/* the map's links and the demands as mesh-graph.h mesh_graph_flow takes them: the graph module's solve
+   (design/rubrics.md C9). Changed by the LSTM demonstration session: the multiplicative-weights rounds and their
+   least-length trees were written here (design/primitive-copies-routing-2026-11-01.md groups 6, 17 and 18). What must
+   stay: the same trees and shares, from the same rounds. */
+static int mesh_demand_leaf(const void *context,uint32_t d,uint32_t v){
+  return mesh_member(((const struct mesh_demand *)context)[d].leaves,v);
 }
 
 uint32_t mesh_solve(const struct mesh_link_map *map,double eps,const struct mesh_demand *demands,uint32_t count,uint32_t room,
                     uint32_t *demand,uint32_t *parent,double *share){
   const uint32_t n=map->nodes,E=mesh_solve_links(map,NULL,NULL,NULL);
   if(!n || !count)return 0;
-  uint32_t *from=calloc((size_t)E+1,sizeof *from),*to=calloc((size_t)E+1,sizeof *to);
-  double *cap=calloc((size_t)E+1,sizeof *cap),*load=calloc(2*(size_t)E+1,sizeof *load),*add=calloc(2*(size_t)E+1,sizeof *add),
-         *len=calloc(2*(size_t)E+1,sizeof *len),*dist=calloc((size_t)n+1,sizeof *dist);
-  uint32_t *up=calloc((size_t)n+1,sizeof *up),*upl=calloc((size_t)n+1,sizeof *upl),*tree=calloc((size_t)n+1,sizeof *tree),
-           *treel=calloc((size_t)n+1,sizeof *treel),*hits=calloc((size_t)room+1,sizeof *hits),made=0;
-  uint32_t *head=malloc(((size_t)count+1)*sizeof *head),*next=malloc(((size_t)room+1)*sizeof *next);
-  unsigned char *done=calloc((size_t)n+1,1);
-  int failed=!from || !to || !cap || !load || !add || !len || !dist || !up || !upl || !tree || !treel || !hits || !done ||
-             !head || !next || !(eps>0);
-  for(uint32_t d=0;!failed && d<count;d++)head[d]=UINT32_MAX;
-  if(!failed)mesh_solve_links(map,from,to,cap);
-  double least=0,total=0;
-  for(uint32_t e=0;!failed && e<E;e++)if(!least || cap[e]<least)least=cap[e];
-  for(uint32_t d=0;!failed && d<count;d++)total+=(double)demands[d].up+(double)demands[d].down;
-  const uint32_t rounds=failed?0:(uint32_t)(mesh_log(2*E>1?(double)(2*E):2.0)/(eps*eps))+1;
-  const double width=total>0 && least>0?total/rounds/least:1;
-  for(uint32_t r=0;!failed && r<rounds;r++){
-    double most=0;
-    for(size_t e=0;e<2*(size_t)E;e++)if(load[e]/cap[e/2]>most)most=load[e]/cap[e/2];
-    for(size_t e=0;e<2*(size_t)E;e++){len[e]=mesh_exp(eps*(load[e]/cap[e/2]-most)/width)/cap[e/2];add[e]=0;}
-    for(uint32_t d=0;!failed && d<count;d++){
-      const struct mesh_demand *x=demands+d;
-      const double u=(double)x->up,w=(double)x->down;
-      for(uint32_t v=0;v<n;v++){dist[v]=INFINITY;up[v]=UINT32_MAX;upl[v]=UINT32_MAX;done[v]=0;tree[v]=UINT32_MAX;treel[v]=UINT32_MAX;}
-      if(x->root>=n){failed=1;break;}
-      dist[x->root]=0;up[x->root]=x->root;
-      /* the least-length tree toward the root: a direction's length weighed by the bytes that cross it, up toward the
-         root (from the leaf's side) and down from it */
-      for(uint32_t step=0;step<n;step++){
-        uint32_t at=n;
-        for(uint32_t v=0;v<n;v++)if(!done[v] && dist[v]<INFINITY && (at==n || dist[v]<dist[at]))at=v;
-        if(at==n)break;
-        done[at]=1;
-        for(uint32_t e=0;e<E;e++){
-          if(from[e]!=at && to[e]!=at)continue;
-          const uint32_t v=from[e]==at?to[e]:from[e],toward=from[e]==v?0:1;
-          if(done[v])continue;
-          const double through=dist[at]+u*len[2*(size_t)e+toward]+w*len[2*(size_t)e+(toward^1)];
-          if(through<dist[v]){dist[v]=through;up[v]=at;upl[v]=e;}
-        }
-      }
-      tree[x->root]=x->root;
-      for(uint32_t v=0;v<n && !failed;v++){
-        if(v==x->root || !mesh_member(x->leaves,v))continue;
-        if(up[v]==UINT32_MAX){failed=1;break;}
-        for(uint32_t at=v;tree[at]==UINT32_MAX;at=up[at]){tree[at]=up[at];treel[at]=upl[at];}
-      }
-      if(failed)break;
-      const struct mesh_same_tree same={parent,tree,n};
-      uint32_t k=mesh_graph_keyed_find(head,next,d,mesh_same_tree,&same);
-      if(k==UINT32_MAX){
-        if(made>=room){failed=1;break;}
-        demand[made]=d;
-        memcpy(parent+(size_t)made*n,tree,n*sizeof *tree);
-        mesh_graph_keyed_add(head,next,d,made);
-        k=made++;
-      }
-      hits[k]++;
-      for(uint32_t v=0;v<n;v++){
-        if(v==x->root || tree[v]==UINT32_MAX)continue;
-        const uint32_t e=treel[v],toward=from[e]==v?0:1;
-        add[2*(size_t)e+toward]+=u/rounds;
-        add[2*(size_t)e+(toward^1)]+=w/rounds;
-      }
-    }
-    for(size_t e=0;e<2*(size_t)E;e++)load[e]+=add[e];
+  if(!(eps>0))return UINT32_MAX;
+  uint32_t *from=calloc((size_t)E+1,sizeof *from),*to=calloc((size_t)E+1,sizeof *to),*root=calloc((size_t)count+1,sizeof *root);
+  double *cap=calloc((size_t)E+1,sizeof *cap),*up=calloc((size_t)count+1,sizeof *up),*down=calloc((size_t)count+1,sizeof *down);
+  uint32_t made=UINT32_MAX;
+  if(from && to && root && cap && up && down){
+    mesh_solve_links(map,from,to,cap);
+    for(uint32_t d=0;d<count;d++){root[d]=demands[d].root;up[d]=(double)demands[d].up;down[d]=(double)demands[d].down;}
+    const uint32_t rounds=(uint32_t)(mesh_graph_log(2*E>1?(double)(2*E):2.0)/(eps*eps))+1;
+    made=mesh_graph_flow(n,E,from,to,cap,count,root,up,down,mesh_demand_leaf,demands,eps,rounds,room,demand,parent,share);
   }
-  for(uint32_t k=0;!failed && k<made;k++)share[k]=(double)hits[k]/rounds;
-  free(from);free(to);free(cap);free(load);free(add);free(len);free(dist);free(up);free(upl);free(tree);free(treel);free(hits);free(done);
-  free(head);free(next);
-  return failed?UINT32_MAX:made;
+  free(from);free(to);free(root);free(cap);free(up);free(down);
+  return made;
 }
 
 uint32_t mesh_flow_trees(uint32_t nodes,const uint32_t *demand,const struct mesh_demand *demands,const uint32_t *parent,const double *share,
@@ -860,18 +773,16 @@ uint32_t mesh_flow_trees(uint32_t nodes,const uint32_t *demand,const struct mesh
     if(demand[k]<first || demand[k]>=last)continue;
     root[trees]=demands[demand[k]].root;
     memcpy(tree+(size_t)trees*nodes,parent+(size_t)k*nodes,nodes*sizeof *tree);
-    log_weight[trees++]=mesh_log(share[k]);
+    log_weight[trees++]=mesh_graph_log(share[k]);
   }
   return trees;
 }
 
-struct mesh_same_packed { const struct mesh_packed *packed; const uint32_t *from; const int32_t *chosen; uint32_t r,n; };
-static int mesh_same_packed(const void *context,uint32_t t){
-  const struct mesh_same_packed *s=context;
-  uint32_t v=0;
-  while(v<s->n && (v==s->r || s->packed[t].parent[v]==s->from[s->chosen[v]]))v++;
-  return v==s->n;
-}
+/* the map's edges, their routes' directed hops and the hops' capacities as mesh-graph.h mesh_graph_pack takes them:
+   the graph module's packing (design/rubrics.md C9). Changed by the LSTM demonstration session: its Garg and Koenemann
+   rounds were written here (design/primitive-copies-routing-2026-11-01.md groups 6 and 18). What must stay: the same
+   trees and weights. */
+static int mesh_root_member(const void *context,uint32_t r){ return mesh_member(context,r); }
 
 uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
                          double *log_weight){
@@ -887,18 +798,12 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,d
      .. through[e + 1]); directed hop k (one way of a pair, u to x, numbered as first met) its pair's parallel links and
      their least bandwidth */
   uint32_t *from=malloc((m+1)*sizeof *from),*to=malloc((m+1)*sizeof *to),*through=malloc((m+2)*sizeof *through);
-  uint32_t *crossing=malloc(((size_t)m*N+1)*sizeof *crossing),*hop=malloc((size_t)N*N*sizeof *hop),*uses=calloc((size_t)m*N+1,sizeof *uses);
-  double *capacity=malloc(((size_t)m*N+1)*sizeof *capacity),*length=malloc(((size_t)m*N+1)*sizeof *length),*weight=malloc((m+1)*sizeof *weight);
+  uint32_t *crossing=malloc(((size_t)m*N+1)*sizeof *crossing),*hop=malloc((size_t)N*N*sizeof *hop);
+  double *capacity=malloc(((size_t)m*N+1)*sizeof *capacity);
   uint32_t *parallel=malloc(((size_t)m*N+1)*sizeof *parallel);
   uint64_t *aggregate=malloc(((size_t)m*N+1)*sizeof *aggregate);
-  int32_t *chosen=malloc(n*sizeof *chosen);
-  struct mesh_packed *packed=NULL;
-  uint32_t *head=malloc(((size_t)n+1)*sizeof *head),*next=NULL;
-  size_t trees=0,room=0;
   uint32_t written=0,path[N+1];
-  if(!from || !to || !through || !crossing || !hop || !uses || !capacity || !length || !weight || !chosen || !parallel || !aggregate ||
-     !head)goto done;
-  for(uint32_t r=0;r<n;r++)head[r]=UINT32_MAX;
+  if(!from || !to || !through || !crossing || !hop || !capacity || !parallel || !aggregate)goto done;
   for(size_t k=0;k<(size_t)N*N;k++)hop[k]=UINT32_MAX;
   m=0;through[0]=0;
   for(uint32_t v=0;v<n;v++)for(uint32_t w=0;w<n;w++)if(mesh_link_between(map,v,w)){
@@ -922,63 +827,9 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,d
     double inverse=known?8e9/(double)aggregate[k]:1.0/parallel[k];
     capacity[k]=1/inverse;
   }
-  const double delta=mesh_exp(-mesh_log(P/(1-eps))/eps);
-  double D=0;
-  for(uint32_t k=0;k<P;k++){length[k]=delta/capacity[k];D+=length[k]*capacity[k];}
-  while(D<1)for(uint32_t r=0;r<n && D<1;r++)for(double demand=mesh_member(roots,r);demand>0 && D<1;){
-    for(uint32_t e=0;e<m;e++){weight[e]=0;for(uint32_t i=through[e];i<through[e+1];i++)weight[e]+=length[crossing[i]];}
-    if(mesh_graph_arborescence(n,r,m,from,to,weight,chosen))goto done;
-    /* the tree's flow: its demand, at most each directed hop's capacity over the tree's edges crossing it */
-    for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++)uses[crossing[i]]++;
-    double f=demand;
-    for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++)
-      if(capacity[crossing[i]]/uses[crossing[i]]<f)f=capacity[crossing[i]]/uses[crossing[i]];
-    demand-=f;
-    const struct mesh_same_packed same={packed,from,chosen,r,n};
-    const uint32_t found=mesh_graph_keyed_find(head,next,r,mesh_same_packed,&same);
-    size_t t=found==UINT32_MAX?trees:found;
-    if(t==trees){
-      if(trees==room){
-        struct mesh_packed *grown=realloc(packed,(room?2*room:64)*sizeof *grown);
-        if(!grown)goto done;
-        packed=grown;
-        uint32_t *chained=realloc(next,(room?2*room:64)*sizeof *chained);
-        if(!chained)goto done;
-        next=chained;room=room?2*room:64;
-      }
-      if(!(packed[t].parent=malloc(n*sizeof *packed[t].parent)))goto done;
-      packed[t].root=r;packed[t].flow=0;
-      for(uint32_t v=0;v<n;v++)packed[t].parent[v]=v==r?r:from[chosen[v]];
-      mesh_graph_keyed_add(head,next,r,(uint32_t)t);
-      trees++;
-    }
-    packed[t].flow+=f;
-    for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++){
-      const uint32_t k=crossing[i];
-      if(!uses[k])continue;
-      D+=length[k]*eps*f*uses[k];
-      length[k]*=1+eps*f*uses[k]/capacity[k];
-      uses[k]=0;
-    }
-  }
-  qsort(packed,trees,sizeof *packed,mesh_packed_heavier);
-  for(size_t t=0;t<trees;){
-    size_t end=t,keep;
-    double total=0;
-    while(end<trees && packed[end].root==packed[t].root)end++;
-    keep=end-t<most?end-t:most;
-    for(size_t u=t;u<t+keep;u++)total+=packed[u].flow;
-    for(size_t u=t;u<t+keep;u++){
-      root[written]=packed[u].root;
-      memcpy(parent+(size_t)written*n,packed[u].parent,n*sizeof *parent);
-      log_weight[written++]=mesh_log(packed[u].flow/total);
-    }
-    t=end;
-  }
+  written=mesh_graph_pack(n,m,from,to,through,crossing,P,capacity,mesh_root_member,roots,eps,most,root,parent,log_weight);
 done:
-  for(size_t t=0;t<trees;t++)free(packed[t].parent);
-  free(packed);free(from);free(to);free(through);free(crossing);free(hop);free(uses);free(capacity);free(length);free(weight);free(chosen);
-  free(parallel);free(aggregate);free(head);free(next);
+  free(from);free(to);free(through);free(crossing);free(hop);free(capacity);free(parallel);free(aggregate);
   return written;
 }
 
