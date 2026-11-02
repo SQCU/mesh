@@ -22,6 +22,13 @@ isl_pw_aff *MeshIndexFunction(isl_ctx *ctx, MetalTensorLayout *layout);
 isl_map *MeshIndexRelation(isl_ctx *ctx, MetalTensorLayout *layout);
 isl_map *MeshIndexCompose(isl_map *source, isl_map *target); // consumes both
 isl_map *MeshIndexNormalize(isl_map *relation); // consumes the relation
+// A factored strided layout's inverse, storage position to flat logical position, on exactly the layout's image (NULL
+// where the layout has maps or index coordinates, a varying axis has a stride that is not positive, or two axes'
+// positions overlap). Its divisions are by the storage strides alone, never the logical extents.
+isl_map *MeshIndexInverse(isl_ctx *ctx, MetalTensorLayout *layout);
+// source composed with the injective function whose inverse is given: the preimage of source's range by it. Consumes
+// both.
+isl_map *MeshIndexPreimage(isl_map *source, isl_map *inverse);
 // A resolved selection declaration's exact logical position set. JSON is only
 // a preparation-language boundary; no serialized descriptor reaches execution.
 // On a declaration exception, error owns a message freed with mesh_isl_free.

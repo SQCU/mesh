@@ -1326,7 +1326,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     const TensorOperand operand(value);
     MetalTensorLayout *bytes=[operand.layout.value components:operand.storage.element_size()];
     auto *relation=MetalPageRegionSelection(reinterpret_cast<isl_ctx *>(context),operand.pages.buffer,bytes);
-    return std::make_pair(bytes.count,reinterpret_cast<uintptr_t>(relation));
+    // its inverse where the layout has a written one (MetalPageRegionInverse), 0 otherwise: composition through it is
+    // a preimage, no integer program (page_effects._through)
+    auto *inverse=MetalPageRegionInverse(reinterpret_cast<isl_ctx *>(context),operand.pages.buffer,bytes);
+    return std::make_tuple(bytes.count,reinterpret_cast<uintptr_t>(relation),reinterpret_cast<uintptr_t>(inverse));
   },pybind11::call_guard<Drained>());
   module.def("page_storage",&page_storage,pybind11::call_guard<Drained>());
   module.def("page_domain",[](const std::vector<at::Tensor> &owners){

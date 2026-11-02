@@ -26,9 +26,19 @@ class Coverage:
 
 
 def _physical(value, algebra):
+    """A value's bytes as page bytes, and the inverse where its layout has a written one (None otherwise)."""
     from mesh_relation import IndexRelation
-    count, pointer = _stream.page_region(value, algebra.ctx)
-    return IndexRelation(algebra, pointer, (count,))
+    count, pointer, inverse = _stream.page_region(value, algebra.ctx)
+    return IndexRelation(algebra, pointer, (count,)), (IndexRelation(algebra, inverse, (1,)) if inverse else None)
+
+
+def _through(relation, physical):
+    """relation composed with a value's pages: through their written inverse where there is one, a preimage with no
+    intermediate bytes to eliminate. Added by the LSTM demonstration session: then() left the operand's flattened bytes
+    existential and isl eliminated them by a parametric integer program, 4.7 s to over 35 s for one shard's transposed
+    weight read (2026-11-01); through the inverse the same map takes under a millisecond."""
+    function, inverse = physical
+    return relation.through(inverse) if inverse is not None else relation.then(function)
 
 
 def _groups(command):
@@ -77,7 +87,7 @@ def refine(section, projection, storage, cuts, algebra):
         for record in projection['records'] if record.get('finish') is not None})
     placed = {}
     for name, binding in storage.items():
-        physical = _physical(binding['operand'], algebra)
+        physical = _physical(binding['operand'], algebra)[0]
         original = algebra.layout(layout_configuration(binding['source'].components(binding['source_dtype'].itemsize)))
         placed[name] = physical, original
     records = [record for record in projection['records']
@@ -99,7 +109,7 @@ def refine(section, projection, storage, cuts, algebra):
             records.append(dict(record, work=work, finish=finish))
 
     for cut in cuts:
-        relation = _physical(cut, algebra)
+        relation = _physical(cut, algebra)[0]
         positions = relation.image(relation.domain())
         affected = {name: original.image(physical.preimage(positions))
                     for name, (physical, original) in placed.items()}
@@ -192,7 +202,7 @@ def _group_accesses(command, algebra):
     if command['kind'] in ('cpu', 'ane'):
         reached = []
         for slot, mode, value in command['reaches']:
-            relation = _physical(value, algebra)
+            relation = _physical(value, algebra)[0]
             positions = relation.image(relation.domain())
             selected = algebra.map((1,), relation.shape, lambda x, y: []).then(relation)
             for side, flag in (('reads', 1), ('writes', 2)):
@@ -207,7 +217,7 @@ def _group_accesses(command, algebra):
     result = []
     for access in logical:
         started = _compose_record(command, access, physical[access['slot']])
-        relation = access['relation'].then(physical[access['slot']])
+        relation = _through(access['relation'], physical[access['slot']])
         _compose_record(command, access, None, started)
         result.append(dict(access, relation=relation, positions=relation.image(relation.domain())))
     return total, tuple(result)
@@ -244,7 +254,7 @@ def _site_accesses(command, site, algebra):
     logical = logical_dispatch_accesses(dict(command, dispatch=site['dispatch']), algebra)
     physical = {access['slot']: _physical(command['operands'][access['slot']], algebra) for access in logical}
     return tuple(dict(slot=access['slot'], access=1 if access['side'] == 'reads' else 2,
-                      relation=access['relation'].reshape((site['cells'],)).then(physical[access['slot']])) for access in logical)
+                      relation=_through(access['relation'].reshape((site['cells'],)), physical[access['slot']])) for access in logical)
 
 
 def describe(programs):

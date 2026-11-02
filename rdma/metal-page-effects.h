@@ -212,6 +212,9 @@ extern "C" {
 id MetalPageRegionRoot(void);
 isl_map *MetalPageRegionRelation(isl_map *local, id<MTLBuffer> buffer);
 isl_map *MetalPageRegionSelection(isl_ctx *context, id<MTLBuffer> buffer, MetalTensorLayout *bytes);
+// The same selection's inverse, page byte to logical byte, on exactly its pages: the page runs' translations back, then
+// the layout's inverse (MeshIndexInverse). NULL where the layout has no written inverse.
+isl_map *MetalPageRegionInverse(isl_ctx *context, id<MTLBuffer> buffer, MetalTensorLayout *bytes);
 /* Project a retained work-coordinate access onto the target dispatch groups.
    axes has one entry per work dimension: 0,1,2 selects that launch axis and -1
    leaves it inside the group. Reduction dimensions also stay inside a group.

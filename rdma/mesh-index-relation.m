@@ -313,6 +313,56 @@ isl_map *MeshIndexRelation(isl_ctx *ctx,MetalTensorLayout *layout) {
     return isl_map_from_pw_aff(MeshIndexFunction(ctx,layout));
 }
 
+/* mesh-index-relation.h MeshIndexInverse. The layout's position is offset + sum_d x_d stride_d over the mixed-radix
+   digits x of the flat position i = sum_d x_d L_d (L_d the product of the later extents). With the varying axes
+   ascending by stride and each stride at least the one before times its extent, the digits are recovered from the
+   storage position s by its strides alone: x_k = floor(((s - offset) mod stride_{k+1}) / stride_k), the last axis's
+   floor((s - offset) / stride). Added by the LSTM demonstration session: an access composed with its operand's pages
+   had isl invert the flattened forward map by a parametric integer program, 1.8 s to 7 s a composition on the 241- and
+   58-unit shards (2026-11-01); this inverse is written down, its divisions by the storage strides (powers of two for
+   region tensors: a shift and a mask). */
+isl_map *MeshIndexInverse(isl_ctx *ctx,MetalTensorLayout *layout) {
+    if(!layout.factored||layout.maps.count||!layout.count)return NULL;
+    NSArray<NSNumber *> *shape=layout.indexShape,*strides=layout.strides;
+    const NSUInteger rank=shape.count;
+    NSInteger weight[rank>0?rank:1];NSInteger running=1;
+    for(NSUInteger d=rank;d-->0;){weight[d]=running;running*=[shape[d] integerValue];}
+    NSMutableArray<NSNumber *> *axes=[NSMutableArray array];
+    for(NSUInteger d=0;d<rank;d++)if([shape[d] integerValue]>1) {
+        if([strides[d] integerValue]<=0)return NULL;
+        [axes addObject:@(d)];
+    }
+    [axes sortUsingComparator:^NSComparisonResult(NSNumber *a,NSNumber *b){
+        const NSInteger x=[strides[a.unsignedIntegerValue] integerValue],y=[strides[b.unsignedIntegerValue] integerValue];
+        return x<y?NSOrderedAscending:x>y?NSOrderedDescending:NSOrderedSame;
+    }];
+    for(NSUInteger k=0;k+1<axes.count;k++) {
+        const NSUInteger d=axes[k].unsignedIntegerValue,e=axes[k+1].unsignedIntegerValue;
+        if([strides[e] integerValue]<[strides[d] integerValue]*[shape[d] integerValue])return NULL;
+    }
+    const NSInteger offset=layout.offset;NSInteger last=0;
+    NSMutableString *flat=[NSMutableString stringWithString:@"0"],*domain=[NSMutableString string];
+    NSString *relative=[NSString stringWithFormat:@"(s - %ld)",(long)offset];
+    for(NSUInteger k=0;k<axes.count;k++) {
+        const NSUInteger d=axes[k].unsignedIntegerValue;const NSInteger stride=[strides[d] integerValue],extent=[shape[d] integerValue];
+        last+=stride*(extent-1);
+        NSString *digit=k+1<axes.count
+            ?[NSString stringWithFormat:@"floor((%@ mod %ld)/%ld)",relative,(long)[strides[axes[k+1].unsignedIntegerValue] integerValue],(long)stride]
+            :[NSString stringWithFormat:@"floor(%@/%ld)",relative,(long)stride];
+        [flat appendFormat:@" + %ld*%@",(long)weight[d],digit];
+        if(k+1<axes.count)[domain appendFormat:@" and %@ mod %ld < %ld",relative,
+            (long)[strides[axes[k+1].unsignedIntegerValue] integerValue],(long)(stride*extent)];
+    }
+    if(axes.count)[domain appendFormat:@" and %@ mod %ld = 0",relative,(long)[strides[axes[0].unsignedIntegerValue] integerValue]];
+    NSString *text=[NSString stringWithFormat:@"{ [s] -> [i] : %ld <= s <= %ld and i = %@%@ }",(long)offset,(long)(offset+last),flat,domain];
+    return isl_map_read_from_str(ctx,text.UTF8String);
+}
+
+/* mesh-index-relation.h MeshIndexPreimage */
+isl_map *MeshIndexPreimage(isl_map *source,isl_map *inverse) {
+    return MeshIndexNormalize(isl_map_preimage_range_pw_multi_aff(source,isl_pw_multi_aff_from_map(inverse)));
+}
+
 // Number the equivalence classes of a finite ordinal domain. Representative
 // order is the original domain order; every equality participates before a
 // representative is selected, including many-to-one view relations.

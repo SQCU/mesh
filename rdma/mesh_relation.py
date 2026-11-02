@@ -71,6 +71,8 @@ class Algebra:
         self.lib.MeshIndexSetCover.restype = C.POINTER(_Cell)
         self.lib.MeshIndexCompose.argtypes = C.c_void_p, C.c_void_p
         self.lib.MeshIndexCompose.restype = C.c_void_p
+        self.lib.MeshIndexPreimage.argtypes = C.c_void_p, C.c_void_p
+        self.lib.MeshIndexPreimage.restype = C.c_void_p
         self.lib.MeshIndexNormalize.argtypes = C.c_void_p,
         self.lib.MeshIndexNormalize.restype = C.c_void_p
         self.lib.MeshIndexSelectionDomain.argtypes = C.c_void_p, C.c_char_p, C.POINTER(C.c_void_p)
@@ -367,6 +369,11 @@ class IndexRelation(_Object):
     def then(self, other):
         """Compose this relation's target coordinates with the next relation."""
         return IndexRelation(self.algebra, self.algebra.lib.MeshIndexCompose(self.copy(), other.copy()), self.shape)
+
+    def through(self, inverse):
+        """Compose this relation's target with the injective function whose inverse is given: the preimage of this
+        relation's range by it (mesh-index-relation.h MeshIndexPreimage), the same map then(function) gives."""
+        return IndexRelation(self.algebra, self.algebra.lib.MeshIndexPreimage(self.copy(), inverse.copy()), self.shape)
 
     def inverse(self, shape):
         """Reverse the relation with its new domain shape explicitly supplied."""

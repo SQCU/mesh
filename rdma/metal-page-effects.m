@@ -101,6 +101,34 @@ isl_map *MetalPageRegionSelection(isl_ctx *context,id<MTLBuffer> buffer,MetalTen
     isl_map_free(local);return physical;
 }
 
+/* metal-page-effects.h MetalPageRegionInverse: each page run's bytes back to the buffer's, then the layout's inverse;
+   the bounds are the layout's image's, the ones MetalPageRegionRelation queries */
+isl_map *MetalPageRegionInverse(isl_ctx *context,id<MTLBuffer> buffer,MetalTensorLayout *bytes) {
+    isl_map *layout=MeshIndexInverse(context,bytes);
+    if(!layout)return NULL;
+    const struct MeshIndexBounds bounds=MeshIndexImageBounds(isl_map_reverse(isl_map_copy(layout)));
+    const NSUInteger first=(NSUInteger)bounds.low,length=(NSUInteger)(bounds.high-bounds.low)+1;
+    size_t count=0;
+    const void *address=(const char *)buffer.contents+first;
+    if(ncclMeshRegionRuns(address,length,NULL,&count))
+        [NSException raise:NSInvalidArgumentException format:@"page effects: selected bytes have no bridge page mapping"];
+    NSMutableData *storage=[NSMutableData dataWithLength:count*sizeof(ncclMeshRegionRun)];
+    ncclMeshRegionRun *runs=storage.mutableBytes;
+    if(ncclMeshRegionRuns(address,length,runs,&count))
+        [NSException raise:NSInvalidArgumentException format:@"page effects: page mapping changed during preparation"];
+    NSMutableString *text=[NSMutableString stringWithString:@"{ [p] -> [b] : "];
+    NSUInteger at=first;
+    for(size_t k=0;k<count;k++) {
+        [text appendFormat:@"%@( %llu <= p < %llu and b = p - %llu + %lu )",k?@" or ":@"",
+            (unsigned long long)runs[k].offset,(unsigned long long)(runs[k].offset+runs[k].bytes),
+            (unsigned long long)runs[k].offset,(unsigned long)at];
+        at+=runs[k].bytes;
+    }
+    if(!count)[text appendString:@"false"];
+    [text appendString:@" }"];
+    return MeshIndexCompose(isl_map_read_from_str(context,text.UTF8String),layout);
+}
+
 isl_map *MetalPageGroupRelation(isl_map *access,const NSUInteger threads[3],const NSUInteger counts[3],
     const NSInteger *axes,NSUInteger axisCount,const NSUInteger *reductions,NSUInteger reductionCount) {
     NSCParameterAssert((NSUInteger)isl_map_dim(access,isl_dim_in)==axisCount);
