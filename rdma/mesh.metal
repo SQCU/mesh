@@ -60,6 +60,37 @@ __attribute__((always_inline)) static inline T mesh_payload(volatile coherent(sy
     return value;
 }
 
+// The same fixed-width representation handles scalar, vector and record
+// values. Metal's implicit record assignment does not accept coherent device
+// records; these statically sized loads/stores do, without a staging buffer.
+template <typename T>
+__attribute__((always_inline)) static inline void mesh_payload_store(volatile coherent(system) device T *at,T value) {
+    if constexpr (metal::is_scalar<T>::value || metal::is_vector<T>::value) {
+        *at = value;
+    } else if (sizeof(T) % 4 == 0) {
+        thread const uint *from = (thread const uint *)&value;
+        for (uint w = 0u; w < sizeof(T) / 4; w++) ((volatile coherent(system) device uint *)at)[w] = from[w];
+    } else if (sizeof(T) % 2 == 0) {
+        thread const ushort *from = (thread const ushort *)&value;
+        for (uint w = 0u; w < sizeof(T) / 2; w++) ((volatile coherent(system) device ushort *)at)[w] = from[w];
+    } else {
+        thread const uchar *from = (thread const uchar *)&value;
+        for (uint w = 0u; w < sizeof(T); w++) ((volatile coherent(system) device uchar *)at)[w] = from[w];
+    }
+}
+template <typename T>
+__attribute__((always_inline)) static inline T mesh_value_read(volatile coherent(system) device const T *values,ulong index) {
+    return mesh_payload(values+index);
+}
+template <typename T>
+__attribute__((always_inline)) static inline T mesh_value_read(constant T *values,ulong index) {
+    return values[index];
+}
+template <typename T>
+__attribute__((always_inline)) static inline void mesh_value_write(volatile coherent(system) device T *values,ulong index,T value) {
+    mesh_payload_store(values+index,value);
+}
+
 // Counts form a maximum: concurrent publishers cannot move a count backwards.
 // The release fence orders payload stores before the system-visible atomic.
 // The SDK's public atomic overload fixes device coherence and device scope;

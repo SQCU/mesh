@@ -331,7 +331,6 @@ def prepare(steps, schedule, output=None):
                      if step['transfer'] == 'write' else
                      _stream.Occurrence(step['group'].handle, step['operands']))
             bound.lower(step.get('invocation', 0))
-            bound.coverage(algebra.ctx, list(step.get('coverage', ())))
             frames = tuple(origins[positions[index] + offset] + 1 for offset in step.get('frame_orders', ()))
             prepared.append((order, bound, frames))
             effects.extend(TensorView(storage, layout, 0) for storage, layout in bound.source_views(algebra.ctx))

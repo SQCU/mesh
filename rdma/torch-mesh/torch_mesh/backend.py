@@ -30,8 +30,8 @@ WRITE = 8
 # element_shape declares one indivisible numerical element in those scalar units.
 # bindings, where given, are the (send, receive) tensors the call is issued with (nccl.h ncclMeshCall bindings).
 # design/eager-execution.md#what-follows
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready ready_value ready_layout sources route_scope',
-                              defaults=(0, ReduceOp.SUM, None, 0, None, None, None, 0, None, (), None, None, 1, 0, None, 0, None, (), None))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready ready_value ready_layout sources route_scope coverage',
+                              defaults=(0, ReduceOp.SUM, None, 0, None, None, None, 0, None, (), None, None, 1, 0, None, 0, None, (), None, ()))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -67,7 +67,26 @@ def source_work(call, order):
                 declaration['index_shape'], json.dumps(declaration['index_coordinates']))
         selected = order.rebase(_stream.TensorLayout((original.count,), (1,)), original.reshape((original.count,)))
         records.append(dict(record, work=layout_configuration(selected)))
-    return call._replace(sources=tuple(records))
+    coverage = call.coverage
+    if coverage and call.kind == WRITE:
+        # A WRITE's transaction is its one declared byte selection. Restrict
+        # masks through exactly the same order as the payload/source relation;
+        # routing will retain transaction 0 across every physical hop.
+        from .compilation import relations
+        algebra = relations()
+        selected = algebra.layout(layout_configuration(order))
+        projected = []
+        for row in coverage:
+            domain = algebra.set('{ [b] : ' + str(row['first']) + ' <= b < ' +
+                                 str(row['first'] + row['bytes']) + ' }', 1)
+            for first, count, stride, repeat in selected.preimage(domain).spans():
+                if stride == count:
+                    projected.append(dict(row, first=first, bytes=count * repeat))
+                else:
+                    projected.extend(dict(row, first=first + index * stride, bytes=count)
+                                     for index in range(repeat))
+        coverage = tuple(projected)
+    return call._replace(sources=tuple(records), coverage=coverage)
 
 
 def op(reduce_op):
@@ -91,6 +110,13 @@ def _binding(tensor):
     if tensor.is_mps:
         return (ffi.cast('void *', tensor.untyped_storage().data_ptr()), tensor.storage_offset() * tensor.element_size())
     return (ffi.NULL, tensor.data_ptr())
+
+
+def _slots(value):
+    """One ordinary page binding and its explicit occurrence coordinates."""
+    record = value if isinstance(value, dict) else {'tensor': value}
+    return {'buffer': _binding(record.get('tensor')), 'instances': record.get('instances', 1),
+            'stride': record.get('stride', 0), 'invocation': record.get('invocation', 0)}
 
 
 class ProcessGroupMesh(dist.ProcessGroup):
@@ -279,16 +305,17 @@ class ProcessGroupMesh(dist.ProcessGroup):
                     geometries.append(dict(element_bits=bits, rank=len(shape), shape=arrays[0], strides=arrays[1],
                         offset=offset, runs=arrays[2] if mapped else ffi.NULL, nruns=len(runs) // 2,
                         frame_stride=frame[0] if frame else 0))
-            bindings = []
-            for value in local:
-                record = value if isinstance(value, dict) else {'tensor': value}
-                bindings.append({'buffer': _binding(record.get('tensor')), 'instances': record.get('instances', 1),
-                                 'stride': record.get('stride', 0), 'invocation': record.get('invocation', 0)})
+            bindings = [_slots(value) for value in local]
             slots = ffi.new('ncclMeshBufferSlots[2]', bindings) if c.bindings is not None or c.views is not None else ffi.NULL
             views = ffi.new('ncclMeshLayout[2]', geometries) if c.views is not None else ffi.NULL
             kept.extend((slots, views))
             sources, source_held = assignment.source_bindings(c.sources)
             kept.extend(source_held)
+            coverage = [dict({name: row[name] for name in
+                ('transaction', 'frame', 'first', 'bytes', 'cut', 'cuts', 'before')},
+                active=_slots(row['active']), expected=_slots(row['expected'])) for row in c.coverage]
+            held_coverage = ffi.new('ncclMeshCoverage[]', coverage) if coverage else ffi.NULL
+            kept.append(held_coverage)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
                          'group': g, 'destination': c.destination, 'tile_bytes': c.tile_bytes,
                          'production': production, 'bindings': slots, 'views': views, 'frames': c.frames,
@@ -297,6 +324,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
                          'ready_layout': c.ready_layout or {},
                          'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1],
                          'sources': sources, 'source_count': len(c.sources),
+                         'coverage': held_coverage, 'coverage_count': len(coverage),
                          'route_scope': assignment.json_operand(c.route_scope, kept) if c.route_scope is not None else ffi.NULL,
                          'routing': routes if not made else ffi.NULL,
                          'routing_count': len(routing or ()) if not made else 0})

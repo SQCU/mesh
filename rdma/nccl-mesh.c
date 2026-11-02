@@ -2200,6 +2200,8 @@ struct steps {
   uint32_t *order_first;
   struct mesh_transfer *order_transfers;
   struct mesh_packet_view *views;
+  struct mesh_transaction *transaction;
+  uint32_t transactions;
   struct mesh_span_residues *packets;
   uint32_t domains;
   /* the buffers the steps name: 0 the operand, made in place; b >= 1 the rank's scratch b (`buffers` of them) */
@@ -2242,6 +2244,8 @@ struct call {
   uint64_t *contributors, *recipients;
   int declared_bindings;
   ncclMeshBufferSlots bindings[2];
+  ncclMeshCoverage *coverage;
+  size_t coverage_count;
   /* Configuration owns masks. Issued calls retain only their local roles and
      reduction cardinality, so an in-flight call never borrows a plan's masks. */
   uint32_t roles, participants;
@@ -2386,7 +2390,7 @@ static void steps_free(struct steps *s) {
   if (s->source) steps_free(s->source);
   else {
     for (uint32_t k = 0; s->packets && k < s->domains; k++) free(s->packets[k].at);
-    free(s->packets); free(s->views);
+    free(s->packets); free(s->views);free(s->transaction);
     free(s->steps); free(s->cable); free(s->prior_first); free(s->prior);
     free(s->order_first); free(s->order_transfers);
     free(s->extent); free(s->demand); free(s->route_units);
@@ -2404,7 +2408,8 @@ static struct steps *steps_copy(struct steps *from) {
       .initialized = from->initialized, .priors = from->priors, .partial = from->partial, .steps = from->steps, .cable = from->cable,
       .prior_first = from->prior_first, .prior = from->prior, .extent = from->extent,
       .order_first = from->order_first, .order_transfers = from->order_transfers,
-      .views = from->views, .packets = from->packets, .domains = from->domains};
+      .views = from->views, .packets = from->packets, .domains = from->domains,
+      .transaction=from->transaction,.transactions=from->transactions};
     atomic_fetch_add_explicit(&from->references, 1, memory_order_relaxed);
   }
   if (!s || !(s->channel = calloc(most, sizeof *s->channel)) || !(s->entry = calloc(most, sizeof *s->entry)) ||
@@ -2486,8 +2491,11 @@ static ncclResult_t write_steps(struct call *c) {
   }
   for (uint32_t k = 0; k < count; k++) { s->steps[k] = transfers[k].step; s->cable[k] = transfers[k].cable; }
   s->domains=1;s->packets=calloc(1,sizeof *s->packets);s->views=calloc(room,sizeof *s->views);
-  if(!s->packets||!s->views){steps_free(s);if(owned)free(transfers);free(received);return fail(ncclSystemError,"allocating WRITE packet domain");}
-  for(uint32_t k=0;k<count;k++)s->views[k].first=s->steps[k].first*s->steps[k].piece.element_bytes;
+  s->transactions=1;s->transaction=calloc(1,sizeof *s->transaction);
+  if(!s->packets||!s->views||!s->transaction){steps_free(s);if(owned)free(transfers);free(received);return fail(ncclSystemError,"allocating WRITE packet domain");}
+  s->transaction[0]=(struct mesh_transaction){.source=(uint32_t)c->root,.destination=(uint32_t)c->target-1,
+    .piece=write_operand(c)};
+  for(uint32_t k=0;k<count;k++)s->views[k].offset=s->views[k].first=s->steps[k].first*s->steps[k].piece.element_bytes;
   for(size_t i=0;c->write_binding&&i<c->write_binding->occurrences;i++) {
     const struct mesh_span_plan *p=write_packets(c->write_binding,i);
     for(size_t k=0;k<p->count;k++)if(mesh_span_residue_add(s->packets,p->cuts[k])) {
@@ -2567,6 +2575,7 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
       s->consume_order = rank->consume; rank->consume = NULL;
       s->demand = physical.demand; physical.demand = NULL;
       s->route_units = physical.route_units; physical.route_units = NULL;
+      s->transaction=physical.transaction;s->transactions=physical.transactions;physical.transaction=NULL;
       for (uint32_t k = 0; k < s->count; k++) { s->steps[k] = rank->transfer[k].step; s->cable[k] = rank->transfer[k].cable; }
       c->bound = s;
     }
@@ -3688,7 +3697,7 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct where base, area; void *tables;
                /* Prepared region pages and the invocation that owns them. */
                void *zeeb; size_t bytes; uint64_t instance, used, occurrence;
-               uint32_t polls, copies; int remote, recorded, inputs_bound, coverage_bound;
+               uint32_t polls, copies; int remote, recorded, inputs_bound;
                size_t recorded_commands;
                void *input_requirements;
                struct metal_program *source;
@@ -3981,7 +3990,7 @@ static int landing_runs(const struct ncclComm *comm, struct issue *u) {
     }
     for (uint32_t h = 0; h < comm->count; h++) for (size_t k = 0; k < u->plans[h].ins; k++) {
       struct message *m = u->plans[h].in + k;
-      if (m->c->bound->steps[m->step].op != MESH_STEP_REDUCE) continue;
+      if (m->c->write_binding) continue;
       struct mesh_landing_cursor cursor = {0};
       struct mesh_landing_run run;
       const size_t first = count;
@@ -4771,6 +4780,7 @@ static void calls_free(struct call *list, size_t n) {
     call_parts_free(list + i);
     write_binding_drop(list[i].write_binding);
     free(list[i].segments); free(list[i].matrix); free(list[i].contributors); free(list[i].recipients); free(list[i].production);
+    free(list[i].coverage);
   }
   free(list);
 }
@@ -4893,13 +4903,14 @@ static ncclResult_t zabbadoo_plan(struct ncclComm *comm,struct issue *u) {
     while(b<count&&reduction_fold(p->items[b-1].message,p->items[b].message))b++;
     const struct where out=shifted(st->buffer[step->buffer],m->offset);
     const struct where own=st->fresh&&st->fresh[m->step]?shifted(st->read[m->step],m->offset):out;
-    p->sums[sums]=(struct metal_zelloth_sum){out.buffer,out.offset,own.buffer,own.offset,(uint32_t)(b-a),p->inputs+inputs,ncclMeshAccessRead,0,NULL};
+    p->sums[sums]=(struct metal_zelloth_sum){.out=out.buffer,.out_offset=out.offset,.own=own.buffer,.own_offset=own.offset,
+      .inputs=(uint32_t)(b-a),.in=p->inputs+inputs,.own_access=ncclMeshAccessRead};
     for(size_t k=a;k<b;k++) {
       const struct message *x=p->items[k].message;
       const struct channel *ch=comm->channels+p->items[k].channel;
       p->sources[inputs]=x;
       p->inputs[inputs++]=(struct metal_zelloth_input){x->data.buffer,x->data.offset,ch->buffer,ch->landed,x->summed.buffer,x->summed.offset,
-        x->end,x->pages,x->landings,x->landing_count};
+        x->end,x->pages,x->landings,x->landing_count,0};
     }
     p->items[made++]=(struct zitem){m,item.channel,sums++};a=b;
   }
@@ -5034,6 +5045,7 @@ struct source_destination { struct metal_program *program;const struct call *cal
 static int destination_source(void *opaque,const ncclMeshPageEffect *effect) {
   const struct source_destination *at=opaque;return selected_effect(at->program,at->call,effect,0);
 }
+static uint64_t reduction_identity(const struct call *);
 static ncclResult_t zabbadoo(struct metal_program *program,struct ncclComm *comm,struct issue *u,const struct call *call) {
   const struct zplan *p=u->zplan;
   for(size_t k=0;k<p->count;k++) {
@@ -5044,8 +5056,25 @@ static ncclResult_t zabbadoo(struct metal_program *program,struct ncclComm *comm
     const struct channel *ch=comm->channels+item->channel;
     struct metal_result emitted;
     if(item->reduction!=SIZE_MAX) {
-      const struct metal_zelloth_sum *sum=p->sums+item->reduction;
-      emitted=metal_zelloth(program,ktype(m->c),kop(m->c),SIZE[m->c->type]*unit_of(m->c),1,sum,item->channel,m->entry);
+      struct metal_zelloth_sum sum=p->sums[item->reduction];sum.identity=reduction_identity(m->c);
+      const size_t first=(size_t)(sum.in-p->inputs),width=SIZE[m->c->type]*unit_of(m->c);
+      for(size_t j=0;j<sum.inputs;j++)p->inputs[first+j].transport=p->sources[first+j]->transport;
+      const struct steps *steps=m->c->bound;
+      const struct forwarding f={steps,m->step,1};
+      const int64_t predecessor=mesh_graph_forward(steps->prior_first,steps->prior,m->step,0,forwarded,&f);
+      struct mesh_landing_run *runs=NULL;
+      if(predecessor>=0&&steps->steps[predecessor].op==MESH_STEP_COPY) {
+        const struct requiring relation={comm,u->plans,m,NULL};
+        const struct message *source=required_of(&relation,(uint32_t)predecessor);
+        runs=malloc((source->landing_count+1)*sizeof *runs);
+        if(!runs)return fail(ncclSystemError,"restricting the initial fold's declared page relation");
+        sum.initial_first=m->offset-source->offset;
+        sum.initial=(struct metal_zelloth_input){.runs=runs,.transport=source->transport,
+          .target=source->end,.packets=source->pages,
+          .count=mesh_landing_slice(source->landings,source->landing_count,sum.initial_first/width,m->bytes/width,runs)};
+      }
+      emitted=metal_zelloth(program,ktype(m->c),kop(m->c),width,1,&sum,item->channel,m->entry);
+      free(runs);
     } else {
       const ncclMeshPageEffect arrival={.kind=ncclMeshPageObserve,.operand=ncclMeshPageInternal,
         .call=(size_t)(m->c-u->calls),.first=m->c->write_binding?effect_first(m,ncclMeshPageDestination):m->offset,.frame=m->frame,
@@ -5544,6 +5573,7 @@ static ncclResult_t source_publications(struct metal_program *program,const stru
   }
   return ncclSuccess;
 }
+static ncclResult_t source_coverage(struct issue *);
 static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
   struct inflight *g=u->group;struct ncclComm *comm=g->comm;
   struct call *list=g->list;const size_t n=g->n;
@@ -5564,7 +5594,8 @@ static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
       ncclMeshBuffer spans={0};
       if(lease_buffer(m->spans,&spans.buffer,&spans.offset))return fail(ncclSystemError,"binding retained span operands");
       u->transport[ti]=(ncclMeshTransport){.call=(size_t)(m->c-list),.first=view.first,.bytes=m->bytes,
-        .units=m->pages.n,.frame=m->frame,.domain=view.domain,.channel=h,.direction=direction,.entry=m->entry,.spans=spans};
+        .units=m->pages.n,.value_first=view.offset,.frame=m->frame,.domain=view.domain,
+        .transaction=view.transaction,.channel=h,.direction=direction,.entry=m->entry,.spans=spans};
       m->transport=ti+1;u->transport_messages[ti++]=m;
     }
   program->declaration.transport=u->transport;program->declaration.transports=transports;
@@ -5589,6 +5620,7 @@ static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
     if(!result)result=epilogue(program,list+i,1);
   }
   u->source_calls[n]=metal_command_count(program);
+  if(!result)result=source_coverage(u);
   if(!result)metal_sources(program);
   return result;
 }
@@ -5654,58 +5686,87 @@ ncclResult_t ncclMeshCommSources(ncclComm_t comm,uint64_t occurrence,struct isl_
   if(!result)*sources=metal_sources(u->source);
   pthread_mutex_unlock(&group_lock);return result;
 }
-static int coverage_order(const void *a,const void *b) {
-  const ncclMeshCoverageBinding *x=a,*y=b;
-  if(x->transport!=y->transport)return x->transport<y->transport?-1:1;
+/* Semantic declarations are ordered independently of physical routes. */
+static int coverage_declaration_order(const void *a,const void *b) {
+  const ncclMeshCoverage *x=a,*y=b;
+  if(x->transaction!=y->transaction)return x->transaction<y->transaction?-1:1;
+  if(x->frame!=y->frame)return x->frame<y->frame?-1:1;
   return (x->first>y->first)-(x->first<y->first);
 }
-ncclResult_t ncclMeshCommCoverage(ncclComm_t comm,uint64_t occurrence,
-    const ncclMeshCoverageBinding *bindings,size_t count,const ncclMeshSources **sources) {
-  if(!comm||!sources||(count&&!bindings))return fail(ncclInvalidArgument,"coverage requires its retained source operands");
-  pthread_mutex_lock(&group_lock);struct issue *u=occurrence_at(comm,occurrence);
-  ncclResult_t result=!u||!u->source||u->source->sources||u->recorded||u->coverage_bound?
-    fail(ncclInvalidUsage,"bind coverage once before the whole-function source solve"):ncclSuccess;
-  ncclMeshCoverageBinding *selected=NULL;
+static size_t coverage_begin(const struct call *c,uint32_t transaction,uint32_t frame,uint64_t first) {
+  size_t lo=0,hi=c->coverage_count;
+  while(lo<hi) {
+    const size_t mid=lo+(hi-lo)/2;const ncclMeshCoverage *b=c->coverage+mid;
+    const int before=b->transaction<transaction||(b->transaction==transaction&&
+      (b->frame<frame||(b->frame==frame&&b->first+b->bytes<=first)));
+    if(before)lo=mid+1;else hi=mid;
+  }
+  return lo;
+}
+/* Physical span projections exist only inside preparation. Programs declare
+   semantic byte intervals; neither a physical ordinal nor a source-array
+   insertion position crosses the public interface. */
+struct coverage_span {
+  size_t transport,first,units,cut,before;
+  ncclMeshPageCoverage values;
+};
+static ncclMeshBuffer coverage_slot(ncclMeshBufferSlots slots,uint64_t invocation) {
+  ncclMeshBuffer value=slots.buffer;
+  value.offset+=ncclMeshInvocationIndex(invocation,slots.invocation,slots.instances)*slots.stride;
+  return value;
+}
+static ncclResult_t source_coverage(struct issue *u) {
+  struct ncclComm *comm=u->group->comm;
+  ncclResult_t result=ncclSuccess;
+  struct coverage_span *selected=NULL;size_t count=0,room=0;
   const void **mask_effects=NULL;
   size_t *positions=NULL,*relocation=NULL;
   uint64_t **cut_tables=NULL;
   struct metal_coverage_projection *projections=NULL;
-  const size_t previous=!result?metal_command_count(u->source):0;
+  const size_t previous=metal_command_count(u->source);
+  for(size_t t=0;!result&&t<u->source->declaration.transports;t++) {
+    const ncclMeshTransport *transport=u->transport+t;
+    const struct message *m=u->transport_messages[t];const struct call *c=m->c;
+    if(!c->coverage_count)continue;
+    const uint64_t end=transport->value_first+transport->bytes;
+    size_t unit=0;uint64_t at=transport->value_first;
+    for(size_t k=coverage_begin(c,transport->transaction,m->frame,at);k<c->coverage_count;k++) {
+      const ncclMeshCoverage *b=c->coverage+k;
+      if(b->transaction!=transport->transaction||b->frame!=m->frame||b->first>=end)break;
+      const uint64_t first=b->first>transport->value_first?b->first:transport->value_first;
+      const uint64_t last=b->first+b->bytes<end?b->first+b->bytes:end;
+      while(unit<m->pages.n&&at<first)at+=m->spans[unit++].bytes;
+      if(at!=first){result=fail(ncclInternalError,"semantic coverage start is missing from compiled packets");break;}
+      const size_t start=unit;
+      while(unit<m->pages.n&&at<last)at+=m->spans[unit++].bytes;
+      if(at!=last||start==unit||b->before>u->n) {
+        result=fail(ncclInternalError,"declared coverage was not retained by packetization");break;
+      }
+      if(grow(&selected,&room,count,sizeof *selected)){result=fail(ncclSystemError,"allocating coverage projections");break;}
+      if(!named((struct where){b->active.buffer.buffer,b->active.buffer.offset})||
+         !named((struct where){b->expected.buffer.buffer,b->expected.buffer.offset})) {
+        result=fail(ncclInvalidArgument,"logical SEND %u requires its local active/count pages on rank %d",
+          b->transaction,comm->rank);break;
+      }
+      ncclMeshBuffer active=coverage_slot(b->active,c->invocation),expected=coverage_slot(b->expected,c->invocation);
+      struct where a={active.buffer,active.offset},e={expected.buffer,expected.offset};
+      result=as_metal(&a);if(!result)result=as_metal(&e);if(result)break;
+      selected[count++]=(struct coverage_span){t,start,unit-start,b->cut,u->source_calls[b->before],
+        {{a.buffer,a.offset},{e.buffer,e.offset},b->cuts}};
+    }
+  }
+  if(!result&&!count){free(selected);return ncclSuccess;}
   if(!result) {
     relocation=malloc((previous+1)*sizeof *relocation);
-    if(!relocation)result=fail(ncclSystemError,"allocating source placement relation");
-  }
-  if(!result&&count) {
-    selected=malloc(count*sizeof *selected);
-    mask_effects=calloc(count,sizeof *mask_effects);
-    positions=malloc(count*sizeof *positions);
+    mask_effects=calloc(count,sizeof *mask_effects);positions=malloc(count*sizeof *positions);
     cut_tables=calloc(count,sizeof *cut_tables);projections=calloc(count,sizeof *projections);
-    if(!selected||!mask_effects||!positions||!cut_tables||!projections)result=fail(ncclSystemError,"allocating coverage projection operands");
-    else {memcpy(selected,bindings,count*sizeof *selected);qsort(selected,count,sizeof *selected,coverage_order);}
+    if(!relocation||!mask_effects||!positions||!cut_tables||!projections)
+      result=fail(ncclSystemError,"allocating coverage source operands");
   }
-  for(size_t k=0;!result&&k<count;k++) {
-    ncclMeshCoverageBinding *b=selected+k;
-    if(b->transport>=u->source->declaration.transports||!b->units||b->cut>=b->values.cuts||b->before>previous||
-       !named((struct where){b->values.active.buffer,b->values.active.offset})||
-       !named((struct where){b->values.expected.buffer,b->values.expected.offset}))
-      result=fail(ncclInvalidArgument,"coverage names existing spans and explicit active/count page operands");
-    else {
-      const struct message *m=u->transport_messages[b->transport];
-      if(b->first>m->pages.n||b->units>m->pages.n-b->first||
-         (k&&selected[k-1].transport==b->transport&&selected[k-1].first+selected[k-1].units>b->first))
-        result=fail(ncclInvalidArgument,"coverage projections must name disjoint prepared span ranges");
-    }
-    if(!result) {
-      struct where active={b->values.active.buffer,b->values.active.offset},expected={b->values.expected.buffer,b->values.expected.offset};
-      result=as_metal(&active);if(!result)result=as_metal(&expected);
-      b->values.active=(ncclMeshBuffer){active.buffer,active.offset};
-      b->values.expected=(ncclMeshBuffer){expected.buffer,expected.offset};
-      positions[k]=b->before;
-    }
-  }
+  for(size_t k=0;!result&&k<count;k++)positions[k]=selected[k].before;
   const size_t held=!result?u->owned.count:0;
   for(size_t k=0;!result&&k<count;k++) {
-    const ncclMeshCoverageBinding *b=selected+k;
+    const struct coverage_span *b=selected+k;
     struct message *m=u->transport_messages[b->transport];
     const ncclMeshTransport *transport=u->transport+b->transport;
     const int first=!k||selected[k-1].transport!=b->transport;
@@ -5745,15 +5806,16 @@ ncclResult_t ncclMeshCommCoverage(ncclComm_t comm,uint64_t occurrence,
     if(error)result=fail(ncclSystemError,"holding coverage pages: %s",strerror(error));
   }
   if(!result) {
-    metal_coverage(u->source,projections,count);
+    result=gpu(metal_coverage(u->source,projections,count),"binding fold activity operands");
+  }
+  if(!result) {
     metal_place_sources(u->source,previous,positions,mask_effects,count,relocation);
     for(uint32_t h=0;h<comm->count;h++)if(u->plans[h].outs||u->plans[h].ins)
       u->source_link[h]=relocation[u->source_link[h]];
-    u->coverage_bound=1;*sources=metal_sources(u->source);
   }
   for(size_t k=0;cut_tables&&k<count;k++)if(!k||cut_tables[k]!=cut_tables[k-1])free(cut_tables[k]);
   free(projections);free(cut_tables);free(relocation);free(positions);free(mask_effects);free(selected);
-  pthread_mutex_unlock(&group_lock);return result;
+  return result;
 }
 ncclResult_t ncclMeshCommSpecialize(ncclComm_t comm,uint64_t occurrence,void *sources) {
   if(!comm||!sources)return fail(ncclInvalidArgument,"specialization requires its emitted source array");
@@ -6094,6 +6156,26 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
     c->declared_bindings = 1;
   }
   ncclResult_t result = declared_members(c, d);
+  if(!result&&d->coverage_count) {
+    if(!d->coverage||d->coverage_count>SIZE_MAX/sizeof *c->coverage)
+      return fail(ncclInvalidArgument,"declare coverage intervals with their page operands");
+    c->coverage=malloc(d->coverage_count*sizeof *c->coverage);
+    if(!c->coverage)return fail(ncclSystemError,"retaining declared coverage intervals");
+    memcpy(c->coverage,d->coverage,d->coverage_count*sizeof *c->coverage);c->coverage_count=d->coverage_count;
+    for(size_t k=0;k<c->coverage_count;k++) {
+      ncclMeshCoverage *b=c->coverage+k;
+      if(!b->bytes||b->first>SIZE_MAX-b->bytes||b->frame>=c->frames||b->cut>=b->cuts)
+        return fail(ncclInvalidArgument,"coverage requires a finite interval in its active/count page domain");
+      if(!b->active.stride)b->active.instances=1;
+      if(!b->expected.stride)b->expected.instances=1;
+    }
+    qsort(c->coverage,c->coverage_count,sizeof *c->coverage,coverage_declaration_order);
+    for(size_t k=1;k<c->coverage_count;k++) {
+      const ncclMeshCoverage *a=c->coverage+k-1,*b=c->coverage+k;
+      if(a->transaction==b->transaction&&a->frame==b->frame&&a->first+a->bytes>b->first)
+        return fail(ncclInvalidArgument,"each transaction byte has one declared coverage value");
+    }
+  }
   if (!result && counted(c)) result = prepare_counted(c, d->matrix);
   if (!result && reducing(c->what)) result = reduction(c);
   return result;
@@ -6307,6 +6389,27 @@ static ncclResult_t issue_order_like(struct ncclComm *comm,struct issue *u,const
    emitting either end's descriptors. These exchanges belong solely to declaration. */
 static ncclResult_t packets_prepare(struct ncclComm *comm, struct compiled *x) {
   ncclResult_t result = ncclSuccess;
+  /* Coverage belongs to the declared value, not an already numbered span.
+     Project it through each retained logical-SEND view before unioning the
+     peers' physical backing cuts. All frames share that fixed partition. */
+  for(size_t i=0;!result&&i<x->n;i++) {
+    const struct call *c=x->calls+i;const struct steps *st=c->bound;
+    if(!c->coverage_count)continue;
+    for(uint32_t step=0;st&&step<st->count&&!result;step++) {
+      const struct mesh_packet_view view=st->views[step];
+      const uint64_t end=view.offset+mesh_step_bytes(st->steps+step);
+      for(uint32_t frame=0;frame<c->frames&&!result;frame++)
+        for(size_t k=coverage_begin(c,view.transaction,frame,view.offset);k<c->coverage_count;k++) {
+          const ncclMeshCoverage *b=c->coverage+k;
+          if(b->transaction!=view.transaction||b->frame!=frame||b->first>=end)break;
+          const uint64_t first=b->first>view.offset?b->first:view.offset;
+          const uint64_t last=b->first+b->bytes<end?b->first+b->bytes:end;
+          int error=mesh_span_residue_add(st->packets+view.domain,view.first+first-view.offset);
+          if(!error)error=mesh_span_residue_add(st->packets+view.domain,view.first+last-view.offset);
+          if(error){result=fail(ncclSystemError,"declared coverage cuts: %s",strerror(error));break;}
+        }
+    }
+  }
   for (size_t j = 0; !result && j < x->laid_count; j++) {
     const struct issue *u = x->laid[j];
     for (uint32_t h = 0; !result && h < comm->count; h++) for (int send = 1; send >= 0; send--)
@@ -6465,8 +6568,30 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
 }
 
 /* Compile and bind every issue before command recording. */
+/* Resolve declared source references against the complete logical graph once.
+   A rank outside a transaction's route still has this same schema; absence of
+   a local physical message must never turn a bad reference into an unmasked
+   transfer or reject a valid remote value. */
+static ncclResult_t coverage_resolve(const struct compiled *x) {
+  for(size_t i=0;i<x->n;i++) {
+    const struct call *c=x->calls+i;const struct steps *steps=c->bound;
+    for(size_t k=0;k<c->coverage_count;k++) {
+      const ncclMeshCoverage *coverage=c->coverage+k;
+      if(!steps||coverage->transaction>=steps->transactions)
+        return fail(ncclInvalidArgument,"coverage names no logical SEND in declared call %zu",i);
+      const struct mesh_transaction *value=steps->transaction+coverage->transaction;
+      const uint64_t bytes=value->piece.elements*value->piece.element_bytes;
+      if(coverage->first>bytes||coverage->bytes>bytes-coverage->first)
+        return fail(ncclInvalidArgument,"coverage interval exceeds logical SEND %u in declared call %zu",coverage->transaction,i);
+      if(coverage->before>x->n)
+        return fail(ncclInvalidArgument,"coverage source position names no declared call boundary");
+    }
+  }
+  return ncclSuccess;
+}
 static ncclResult_t definition_prepare(struct ncclComm *comm, struct compiled *x) {
   ncclResult_t result = compile_group(comm, x->calls, x->n, &x->plans, &x->seconds);
+  if(!result)result=coverage_resolve(x);
   int remote = 0;
   for (size_t i = 0; !result && i < x->n; i++) remote |= crosses(x->calls + i);
   return result ? result : prepared(comm, x, remote);

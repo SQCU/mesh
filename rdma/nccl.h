@@ -786,6 +786,23 @@ static inline size_t ncclMeshInvocationIndex(uint64_t invocation, int64_t displa
    displacement is independent of buffer.offset. A group is laid and placed for
    every slot as it is declared, and its issue names none. */
 typedef struct { ncclMeshBuffer buffer; size_t stride, instances; int64_t invocation; } ncclMeshBufferSlots;
+/* A semantic interval of one original logical SEND, before physical routing
+   and packetization. Transactions follow source-rank order, then logical SEND
+   order; a WRITE has transaction 0. first/bytes are relative to that SEND.
+   Every routed fragment retains this identity, including relay fragments.
+   active/expected are local page operands with ordinary occurrence slots;
+   cut selects their shared fixed-width domain. before names an original call
+   boundary within this declared group, not a physical command ordinal.
+   Each rank supplies the same mask meaning for matched fragments, using its
+   declared local pages. A rank outside the transaction's physical routes may
+   leave those local pages absent. A consuming rank supplies them in its
+   declaration. Semantic interval ends join physical backing cuts
+   before either endpoint's DMA spans are constructed. */
+typedef struct {
+  uint32_t transaction, frame;
+  size_t first, bytes, cut, cuts, before;
+  ncclMeshBufferSlots active, expected;
+} ncclMeshCoverage;
 /* Exact source declarations and their selected occurrence/work relations.
    Strings are canonical serialized frontend values, not hashes or generated
    physical call names. They are retained only during preparation/reporting. */
@@ -878,6 +895,8 @@ typedef struct {
   const ncclMeshLayout* views;
   uint32_t frames;
   size_t max_packet;
+  const ncclMeshCoverage* coverage;
+  size_t coverage_count;
   /* Explicit external source publication pages. The common source pass consumes
      these as typed observations; destination effects come from transfer lowering. */
   ncclMeshBuffer source_ready;
@@ -948,22 +967,11 @@ struct isl_ctx;
    units is its length. Direction 0 is a SEND, 1 a landing. These records and
    their ordinal identities exist only during preparation. */
 typedef struct {
-  size_t call,first,bytes,units;
-  uint32_t frame,domain,channel,direction;
+  size_t call,first,bytes,units,value_first;
+  uint32_t frame,domain,channel,direction,transaction;
   uint64_t entry;
   ncclMeshBuffer spans;
 } ncclMeshTransport;
-/* An explicit projection from a prepared span range to one semantic coverage
-   cut. first/units select contiguous span ordinals in transport; cut indexes
-   values.active and values.expected, with the same meaning at every endpoint.
-   before is the original Sources command boundary at which the active value
-   is consumed (0 before the first command; command count after the last).
-   The enclosing source graph supplies it; native lowering does not assume
-   coverage was produced outside its occurrence. */
-typedef struct {
-  size_t transport,first,units,cut,before;
-  ncclMeshPageCoverage values;
-} ncclMeshCoverageBinding;
 typedef struct {
   void* commands;
   void* transfers;
@@ -977,12 +985,6 @@ typedef struct {
 } ncclMeshSources;
 ncclResult_t ncclMeshCommSources(ncclComm_t comm,uint64_t occurrence,
     struct isl_ctx* context,const ncclMeshSources** sources);
-/* Attach computed coverage once, before whole-function ordering and solving.
-   This extends the same retained source occurrence with ordinary span-mask
-   declarations. The returned Sources replaces its earlier borrowed arrays;
-   it does not lower the collective a second time. */
-ncclResult_t ncclMeshCommCoverage(ncclComm_t comm,uint64_t occurrence,
-    const ncclMeshCoverageBinding* bindings,size_t count,const ncclMeshSources** sources);
 ncclResult_t ncclMeshCommSpecialize(ncclComm_t comm,uint64_t occurrence,void* sources);
 /* Complete the source dependency solve for a lowered occurrence. Input spans
    use the same logical coordinates as PageEffect. This runs before Encode and

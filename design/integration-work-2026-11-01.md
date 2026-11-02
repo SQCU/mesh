@@ -104,6 +104,16 @@ recorder must consume that result. Source-local sites are part of this handoff,
 but their presence alone does not complete it. Actual provider resource and
 visibility constraints remain explicit compilation operands.
 
+Native reduction source has another precise missing handoff. Its incoming
+scratch arrivals, outgoing-transfer overwrite prerequisites and summed-result
+publications still live in the handwritten CPU/Metal fold body. The reduction
+branch does not supply their transfer effects to the common solver. They are
+not duplicate waits which can simply be deleted. Complete this declaration
+first: observations must select Read or Written accesses as appropriate, retain
+contributor activity, and avoid merging distinct masked prerequisites into an
+unconditional maximum. Then the shared emitter can replace the handwritten
+arrival/overwrite/publication code. The numerical combine equation stays.
+
 The next source pass has replaced the Python-only effect solver with a binding
 to `metal-page-effects.h`. The common library, CoreML library, CFFI binding and
 PyTorch extension build with that connection. This is source/build evidence;
@@ -196,11 +206,28 @@ complete directly on a lane with no request pending. This preserves a prefix
 through completed/masked units without waiting for a later active transfer.
 There is no second completion lookup list, ring, or payload copy. Existing
 holding/table lifetimes retain these descriptors through completion reads.
-Native coverage binding and Python transduction are now written: native source
-keeps original call boundaries and explicit transport identities; coverage
-placements refer to those original boundaries before one shared source solve.
-They do not introduce another execution interface. This does not remove the
-remaining linked occurrence walk or queue-wide host events.
+Coverage now enters `ncclMeshCall` before packetization. Each interval names
+an original logical SEND, a frame and relative bytes, with active/expected page
+slots. The routing compiler retains that transaction and byte offset through
+every fragment and relay. The complete original SEND schema retains its endpoint
+ranks, endpoint step identities, byte origins and extent. Preparation resolves
+coverage references against that schema even on ranks outside the chosen route;
+an unresolved reference cannot silently select unmasked execution. Packet-cut
+domains alone cannot distinguish different partial results which traverse the
+same bytes. Semantic interval ends join the
+shared backing cuts before either endpoint's span list is built. `CommSources`
+then projects those intervals onto the final spans and resolves the occurrence's
+page slots; the public late `CommCoverage` interface and Python occurrence method
+are removed. WRITE and other collectives use the same final packet cursor.
+Python Call declarations and native MeshRank declarations consume this early
+contract. WRITE cuts follow the retained payload selection through fragmentation;
+source call boundaries are mapped to the resulting native declaration boundaries.
+Native general-collective records keep their exact source owner and SEND-local
+coordinates. Shared schemas are independent of local bindings: off-route ranks
+need no mask buffer, while a rank consuming a fragment must supply its pages.
+Automatic generalized-collective transaction synthesis through Python kind/tree
+rewrites remains open. This does not remove the linked occurrence walk or
+queue-wide events.
 
 Automatic coverage generation from indexing/scatter/provider source remains
 open. The shared emitter now accepts the page index a source-local site already
@@ -208,10 +235,15 @@ computes. Its exact retained relation determines contributions under dynamic
 counts too; identity and affine selections emit arithmetic rather than a second
 index lookup. Separate index tensors remain ordinary inputs where the numerical
 source actually produces them. Mixed static/dynamic cuts and different coverage
-arrays may share one publication word. Native fold equations still need the
-declared activity semantics when contributors may be absent. Skipping a transport alone
-does not make an inactive arithmetic input equal to a fold's identity. These
-are required numerical/compiler connections, not reasons for a second executor.
+arrays may share one publication word. Native CPU/Metal fold equations now consume contributor activity, omit the
+inactive payload observation/combine, and use the declared identity for an
+inactive preceding COPY. The higher-order Reduction source accepts an ordinary
+activity operand and selects the identity before its combine graph and AD.
+Transport omission and arithmetic identity are distinct consequences of that
+same input. Automatic source-activity/count generation and projection through
+all frontend rewrites remain open. A native collective's separate partial-result
+generations require their own retained arithmetic provenance; a common packet
+domain or directed cable cannot supply it.
 
 Item 3 has CPU/ANE source assignment and provider connections written. CPU
 products retain partitionable product equations until work domains and
@@ -238,7 +270,9 @@ The combined source checkpoint builds the bridge, collective/CoreML libraries,
 CFFI binding, PyTorch extension and generated Metal kernels. Subsequent source
 checks cover direct relation-driven contributions and source-local aliases.
 Coverage refinement computes packet cuts once per transport and refines the
-retained transfers in one pass over sorted bindings. It no longer rescans all
+retained transfers in one pass over sorted bindings. Source preparation reads
+semantic intervals by transaction/frame and resolves each occurrence's active
+and expected slots; the declaration owns those intervals. It no longer rescans all
 span cuts and rebuilds the transfer array for every mask. These are preparation
 and build results; no numerical payload run or latency/throughput result is
 claimed by this checkpoint.

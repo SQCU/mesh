@@ -17,6 +17,21 @@ struct mesh_landing_run {
    Each input describes the same logical extent, irrespective of wire cuts. */
 struct mesh_landing_map { const struct mesh_landing_run *runs; size_t count; uint64_t base; };
 typedef void (*mesh_landing_emit)(void *context,uint64_t first,uint64_t elements,const uint64_t *through);
+/* Preparation restriction of the same periodic arrival relation to one value
+   interval. No new packet numbering or runtime mapping is introduced. */
+static inline size_t mesh_landing_slice(const struct mesh_landing_run *runs,size_t count,
+    uint64_t first,uint64_t elements,struct mesh_landing_run *out) {
+  size_t made=0;const uint64_t end=first+elements;
+  for(size_t k=0;k<count;k++) {
+    const struct mesh_landing_run r=runs[k];
+    const uint64_t begin=r.first>first?r.first:first,stop=r.first+r.elements<end?r.first+r.elements:end;
+    if(begin>=stop)continue;
+    const uint64_t at=r.phase+(begin-r.first)*r.step;
+    out[made++]=(struct mesh_landing_run){.first=begin-first,.elements=stop-begin,
+      .packet=r.packet+(at>>r.shift),.phase=at&((UINT64_C(1)<<r.shift)-1),.step=r.step,.shift=r.shift};
+  }
+  return made;
+}
 static inline uint64_t mesh_landing_cells(const struct mesh_landing_map *maps,size_t inputs,uint64_t width,
     size_t *cursor,uint64_t *through,mesh_landing_emit emit,void *context) {
   if(!inputs||!maps[0].count)return 0;
@@ -31,6 +46,15 @@ static inline uint64_t mesh_landing_cells(const struct mesh_landing_map *maps,si
       while(first>=r->first+r->elements)r=maps[k].runs+(++cursor[k]);
       const uint64_t boundary=r->first+r->elements;
       if(boundary<stop)stop=boundary;
+      /* A packet is also a possible activity/publication cut. Keep complete
+         values together, but never join values from distinct packets merely
+         because their backing addresses form one regular run. */
+      if(r->step) {
+        const uint64_t at=r->phase+(first-r->first)*r->step;
+        const uint64_t next=(((at>>r->shift)+1)<<r->shift)-r->phase;
+        const uint64_t packet=r->first+(next+r->step-1)/r->step;
+        if(packet>first&&packet<stop)stop=packet;
+      }
     }
     for(size_t k=0;k<inputs;k++) {
       const struct mesh_landing_run *r=maps[k].runs+cursor[k];

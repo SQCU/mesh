@@ -142,7 +142,7 @@ struct metal_coverage_projection {
   const uint64_t *ends;
   ncclMeshPageCoverage values;
 };
-void metal_coverage(struct metal_program *,const struct metal_coverage_projection *,size_t count);
+struct metal_result metal_coverage(struct metal_program *,const struct metal_coverage_projection *,size_t count);
 void metal_coverage_announcement(struct metal_program *,ncclMeshPageCoverage,size_t cut);
 void metal_place_sources(struct metal_program *,size_t previous,const size_t *positions,
                         const void *const *effects,size_t count,size_t *relocation);
@@ -177,13 +177,17 @@ struct metal_result metal_publish(struct metal_program *, const struct metal_rel
    every input's runs over the same elements) and the summed word its forwards name (none: summed NULL), stored past
    each block in order */
 struct metal_zelloth_input { void *data; size_t data_offset; void *words; size_t word; void *summed; size_t summed_offset;
-                             mesh_pages target, packets; const struct mesh_landing_run *runs; size_t count; };
+                             mesh_pages target, packets; const struct mesh_landing_run *runs; size_t count;
+                             size_t transport; /* retained incoming transport identity, preparation only */ };
 /* Each sum's exact accesses enter the common command graph. */
 struct metal_zelloth_sum { void *out; size_t out_offset; void *own; size_t own_offset;
   uint32_t inputs; const struct metal_zelloth_input *in; uint32_t own_access;
   /* Exact output ranges which overwrite an outstanding SEND source. These
      observations constrain arithmetic stores, never the scratch DMA landing. */
-  size_t waits; const struct metal_wait *wait; };
+  size_t waits; const struct metal_wait *wait;
+  /* Initial accumulator's declared COPY producer, when there is one. Its
+     activity replaces an absent accumulator with the declared identity. */
+  struct metal_zelloth_input initial; size_t initial_first; uint64_t identity; };
 /* Emit each resolved value version as a command with its exact page accesses.
    The grid assigns one common landing cell to each threadgroup. */
 struct metal_result metal_zelloth(struct metal_program *, int type, int op, size_t element_bytes, uint32_t sums,

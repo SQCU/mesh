@@ -69,10 +69,13 @@ def selected_calls(record, algebra):
             continue
         order = algebra.selection_relation(dict(shape=[extent], steps=[['select', 0, domain.spans()]]))
         identity = len(contributors) == 1
-        kind = BROADCAST if identity else REDUCE if len(recipients) == 1 else ALLREDUCE
+        kind = WRITE if source.kind == WRITE and identity and len(recipients) == 1 else \
+               BROADCAST if identity else REDUCE if len(recipients) == 1 else ALLREDUCE
         root = contributors[0] if identity else recipients[0]
         call = source._replace(kind=kind, count=order.shape[0], root=root, counts=None, matrix=None,
                                contributors=contributors, recipients=recipients)
+        if kind == WRITE:
+            call = call._replace(destination=recipients[0])
         call = source_work(call, relation_layout(order, order.shape, extent).components(source.dtype.itemsize)
                            .reshape((order.shape[0] * source.dtype.itemsize,)))
         yield dict(call=call, reads={rank: order.then(record['read_relations'][rank]) for rank in contributors},
@@ -206,8 +209,9 @@ def lower(bindings, group):
         cursor += total
         cuts.append(cursor)
     cuts = group.union_cuts(cuts)
-    lowered, declarations = [], []
+    lowered, boundaries = [], []
     for call, origin, total, values in prepared:
+        boundaries.append(len(lowered))
         begin = bisect_right(cuts, origin) - 1
         end = bisect_right(cuts, origin + total)
         edges = [cut - origin for cut in cuts[begin:end]]
@@ -227,5 +231,9 @@ def lower(bindings, group):
                 else:
                     fragment = fragment._replace(counts=counts)
             lowered.append((fragment, *(_alias(*value, first, last) for value in values)))
-            declarations.append(fragment)
+    boundaries.append(len(lowered))
+    lowered = [(call._replace(coverage=tuple(dict(row, before=boundaries[row['before']])
+                                              for row in call.coverage)), source, destination)
+               for call, source, destination in lowered]
+    declarations = [call for call, _, _ in lowered]
     return lowered, declarations, before, after

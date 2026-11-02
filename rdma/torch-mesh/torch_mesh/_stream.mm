@@ -985,22 +985,6 @@ static pybind11::list occurrence_source_views(const Occurrence &prepared,uintptr
   } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
 }
 
-static void occurrence_coverage(Occurrence &prepared,uintptr_t context,const pybind11::list &values) {
-  @try {
-    prepared.sources(reinterpret_cast<isl_ctx *>(context));
-    std::vector<ncclMeshCoverageBinding> bindings;
-    for(const auto &item:values) {
-      auto row=pybind11::reinterpret_borrow<pybind11::dict>(item);
-      PythonPageCoverage *value=page_coverage(row["coverage"]);
-      prepared.operands.insert(prepared.operands.end(),value->tensors.begin(),value->tensors.end());
-      bindings.push_back({row["transport"].cast<size_t>(),row["first"].cast<size_t>(),
-        row["units"].cast<size_t>(),row["cut"].cast<size_t>(),row["before"].cast<size_t>(),value->declaration});
-    }
-    const ncclMeshSources *source=nullptr;
-    checked(ncclMeshCommCoverage(prepared.comm,prepared.occurrence,bindings.data(),bindings.size(),&source));
-  } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
-}
-
 static pybind11::list occurrence_transports(const Occurrence &prepared,uintptr_t context) {
   const ncclMeshSources *source=prepared.sources(reinterpret_cast<isl_ctx *>(context));
   pybind11::list result;
@@ -1008,6 +992,7 @@ static pybind11::list occurrence_transports(const Occurrence &prepared,uintptr_t
     const auto &t=source->transport[i];pybind11::dict row;
     row["transport"]=i;row["call"]=t.call;row["first"]=t.first;row["bytes"]=t.bytes;row["units"]=t.units;
     row["frame"]=t.frame;row["domain"]=t.domain;row["channel"]=t.channel;row["direction"]=t.direction;
+    row["transaction"]=t.transaction;row["value_first"]=t.value_first;
     row["entry"]=t.entry;row["call_begin"]=source->call_first[t.call];row["call_end"]=source->call_first[t.call+1];
     result.append(row);
   }
@@ -1545,7 +1530,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("lower",&Occurrence::lower,pybind11::arg("invocation")=0,pybind11::call_guard<Drained>())
     .def("source_views",&occurrence_source_views,pybind11::call_guard<Drained>())
     .def("transports",&occurrence_transports,pybind11::call_guard<Drained>())
-    .def("coverage",&occurrence_coverage,pybind11::call_guard<Drained>())
     .def("publications",&occurrence_publications,pybind11::call_guard<Drained>())
     .def("append",[](const std::shared_ptr<Occurrence> &c,ScheduleBinding &s,const std::vector<size_t> &commands){s.transfer(c,commands);},pybind11::call_guard<Drained>());
   pybind11::enum_<MetalPageBackend>(module,"PageBackend")

@@ -22,6 +22,14 @@ counts in independent values. With neither, every rank receives the result.
 The example in [examples/function_reduction.py](../examples/function_reduction.py)
 uses the ordinary `Function`, group declaration, and preparation interfaces.
 
+`active` is an optional ordinary page operand with one Boolean or 0/1 value per
+independent contribution. Source lowering selects the local value or the
+declared neutral identity before expanding the chosen fold. Identity evaluation
+uses a typed zero prototype, so it does not read an absent value. Capture and
+autograd see that same selection. A changing mask does not select another
+executor. This source input establishes numerical semantics; automatic projection
+of it into every frontend's transport coverage remains integration work.
+
 ## The chosen fold is a source operand
 
 The default preserves rank order and a left fold. `reassociate=True` permits a
@@ -106,7 +114,7 @@ completion observation. Numerical completion already covers consumed arrival
 words. Neither case adds a numerical wait or publication dispatch.
 
 Only then does `Program.prepare` bind numerical leaves, and
-`ncclMeshCommEncode(comm, occurrence, stream)` record the exact occurrence which
+`ncclMeshCommEncode(comm, occurrence, commands, count, stream)` record the exact occurrence which
 was lowered. The runtime consumes that common recorded graph. It does not recover
 page relationships by decoding backend addresses or repeat the source solve.
 
@@ -115,3 +123,41 @@ are removed. They previously started another numerical compiler during native
 recording. Summary merges now enter through the same `Reduction` source before
 capture and differentiation. Native numerical providers contribute their ordinary
 source declarations and access relations to that same lowering sequence.
+
+## Activity in native fold leaves
+
+Native fold source retains each incoming transport identity and its numerical
+value cells. Coverage binds the actual active page to those cells before the
+shared source solve. The same fold equation skips an inactive input's payload
+observation and combine. A preceding COPY may also be inactive; its declared
+producer relation then selects the reduction identity as the initial accumulator.
+The mask does not become an arithmetic weight, and `expected` remains completion
+metadata. Static folds specialize the predicate to true without an activity load.
+
+Common numerical cells now end at packet boundaries as well as work-width
+boundaries. Each cell publishes its actual completed contribution prefix; a
+regular multi-page address run no longer joins those arrivals solely because it
+is contiguous. Physical fragments of one independent numerical value carry the
+same activity. A byte mask which disagrees within that value does not define a
+numerical contributor.
+
+Native local input activity must be supplied by its numerical source equation;
+masking an arbitrary outgoing transport does not declare that rank absent from
+the fold. Coverage now enters `ncclMeshCall` before packetization, in the byte
+coordinates of an original logical SEND. Its transaction identity survives
+every routed hop and physical refinement. Active/count bindings use the same
+occurrence slots as other page operands. There is no late occurrence-coverage
+API which can silently leave a semantic cut inside an indivisible DMA span.
+
+Python WRITE projection applies the same retained byte-order relation to payload
+and coverage. A one-source/one-recipient WRITE keeps transaction zero; splitting
+calls also transduces their source-call boundaries. A general collective rewrite
+can change its logical SEND graph, contributor stages, and transaction ordinals.
+It still needs a retained original-transaction-to-generated-transaction relation
+before automatic coverage can traverse that rewrite. Reusing an old integer ID
+or choosing a channel cannot supply that relation. Direct final-call declarations
+and projected WRITEs are connected; generalized collective coverage synthesis
+remains unfinished.
+
+Source checks cover static/dynamic Metal fold bodies and generated CPU equations;
+no payload run or performance improvement is claimed.

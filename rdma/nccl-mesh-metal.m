@@ -60,17 +60,32 @@ struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[KIN
 static char argumentPagesKey;
 _Static_assert(sizeof(struct args) <= RECORD, "an argument record");
 
+/* Preparation retains the equation's input identities and fixed value cells.
+   Coverage specializes their page operands; execution never searches transfer
+   intervals or interprets this declaration. */
+@interface MeshFoldActivity : NSObject {
+@public
+  NSData *transports,*origins,*cells;
+  size_t width;
+}
+@end
+@implementation MeshFoldActivity
+- (void)dealloc { [transports release];[origins release];[cells release];[super dealloc]; }
+@end
+
 @interface MeshCollectiveCommand : NSObject {
 @public
   MetalPageCommand *source;
   NSData *bindings,*reaches,*arguments;
   uint32_t kind;
   MTLSize grid,threads;
-  BOOL threadGrid;
+  BOOL threadGrid,sourceSpecialized;
+  MeshFoldActivity *fold;
+  size_t foldCell;
 }
 @end
 @implementation MeshCollectiveCommand
-- (void)dealloc { [source release];[bindings release];[reaches release];[arguments release];[super dealloc]; }
+- (void)dealloc { [source release];[bindings release];[reaches release];[arguments release];[fold release];[super dealloc]; }
 @end
 @interface MeshCollectiveHost : NSObject { @public void *program; }
 @end
@@ -137,9 +152,12 @@ static MetalPageCoverage *coverage_value(struct metal_program *program,ncclMeshP
   return value;
 }
 
+static struct metal_result fold_coverage(struct metal_program *,const struct metal_coverage_projection *,size_t);
+
 /* Coverage refines retained transfer declarations, before their single common
    solve. The span table already supplies the exact packet boundaries. */
-void metal_coverage(struct metal_program *program,const struct metal_coverage_projection *bindings,size_t count) {
+struct metal_result metal_coverage(struct metal_program *program,const struct metal_coverage_projection *bindings,size_t count) {
+  const struct metal_result folded=fold_coverage(program,bindings,count);if(folded.status)return folded;
   NSMutableDictionary *ranges=[NSMutableDictionary dictionary];
   for(size_t first=0;first<count;) {
     size_t end=first+1;while(end<count&&bindings[end].transport==bindings[first].transport)end++;
@@ -176,6 +194,7 @@ void metal_coverage(struct metal_program *program,const struct metal_coverage_pr
     }
   }
   [(id)program->transfers release];program->transfers=made;program->declaration.transfers=made;
+  return METAL_DONE;
 }
 
 void metal_coverage_announcement(struct metal_program *program,ncclMeshPageCoverage values,size_t cut) {
@@ -363,6 +382,97 @@ static int argument_pages(struct metal_program *program,size_t bytes,struct meta
   *made=(struct metal_bytes){pages->page.buffer,pages->page.offset+pages->used,(char *)pages->page.contents+pages->used};
   pages->used+=size;
   return 0;
+}
+
+/* Activity is a normal input page. The prepared index column has one entry
+   per existing (cell, contributor); it contains no transport descriptors and
+   execution does not walk the coverage ranges retained here. Static folds
+   compile the same predicate to true and need no index column. */
+static struct metal_result fold_coverage(struct metal_program *program,
+    const struct metal_coverage_projection *bindings,size_t count) {
+  NSMutableDictionary *ranges=[NSMutableDictionary dictionary],*folds=[NSMutableDictionary dictionary];
+  for(size_t first=0;first<count;) {
+    size_t end=first+1;while(end<count&&bindings[end].transport==bindings[first].transport)end++;
+    ranges[@(bindings[first].transport+1)]=[NSValue valueWithRange:NSMakeRange(first,end-first)];first=end;
+  }
+  for(MeshCollectiveCommand *command in (NSArray *)program->commands)if(command->fold) {
+    NSValue *key=[NSValue valueWithPointer:command->fold];NSMutableArray *commands=folds[key];
+    if(!commands)folds[key]=commands=[NSMutableArray array];[commands addObject:command];
+  }
+  for(NSArray *commands in folds.allValues) {
+    MeshCollectiveCommand *first=commands[0];MeshFoldActivity *fold=first->fold;
+    const size_t *transports=fold->transports.bytes,*origins=fold->origins.bytes,*cells=fold->cells.bytes;
+    const size_t K=fold->transports.length/sizeof *transports,Q=fold->cells.length/(2*sizeof *cells);
+    BOOL dynamic=NO;for(size_t k=0;k<K;k++)dynamic|=ranges[@(transports[k])]!=nil;
+    if(!dynamic)continue;
+    struct metal_bytes indices;
+    if(argument_pages(program,(1+K*Q)*sizeof(uint64_t),&indices))return metal_failed(ENOMEM);
+    *(uint64_t *)indices.contents=1;
+    const BOOL gpu=first->source->backend==MetalPageMetal;
+    const uint64_t initial=gpu?((id<MTLBuffer>)indices.buffer).gpuAddress+indices.offset:(uint64_t)(uintptr_t)indices.contents;
+    uint64_t *selected=(uint64_t *)indices.contents+1;
+    for(size_t i=0;i<K*Q;i++)selected[i]=initial;
+    NSMutableArray *operands=[NSMutableArray arrayWithCapacity:K*Q];
+    for(size_t i=0;i<K*Q;i++)[operands addObject:[NSNull null]];
+    for(size_t k=0;k<K;k++) {
+      NSValue *rangeValue=ranges[@(transports[k])];if(!rangeValue)continue;
+      const NSRange range=rangeValue.rangeValue;size_t b=range.location;
+      for(size_t q=0;q<Q;q++) {
+        /* A numerical value may span physical fragments. Its declared
+           activity is shared by those fragments; its final byte identifies
+           the complete value's incoming cut, just like arrival readiness. */
+        const size_t last=origins[k]+(cells[2*q]+cells[2*q+1])*fold->width-1;
+        while(b<NSMaxRange(range)&&bindings[b].first+bindings[b].bytes<=last)b++;
+        if(b==NSMaxRange(range)||last<bindings[b].first)continue;
+        ncclMeshBuffer active=bindings[b].values.active;active.offset+=bindings[b].cut*sizeof(uint32_t);
+        selected[q*K+k]=gpu?((id<MTLBuffer>)active.buffer).gpuAddress+active.offset:
+          (uint64_t)(uintptr_t)((char *)metal_contents(active.buffer)+active.offset);
+        operands[q*K+k]=[NSValue valueWithBytes:&active objCType:@encode(ncclMeshBuffer)];
+        metal_resident(program,active.buffer);
+      }
+    }
+    indices.offset+=sizeof(uint64_t);indices.contents=(uint64_t *)indices.contents+1;
+    for(MeshCollectiveCommand *command in commands) {
+      const size_t begin=gpu?0:command->foldCell,end=gpu?Q:begin+1;
+      NSMutableArray *accesses=[command->source->accesses mutableCopy];
+      NSMutableData *reaches=[command->reaches mutableCopy];
+      for(size_t q=begin;q<end;q++)for(size_t k=0;k<K;k++) {
+        id operand=operands[q*K+k];if(operand==[NSNull null])continue;
+        ncclMeshBuffer active;[operand getValue:&active size:sizeof active];
+        NSString *relation=[NSString stringWithFormat:@"{ [g] -> [b] : g=%lu and %lu<=b<%lu }",
+          (unsigned long)(gpu?q:0),(unsigned long)active.offset,(unsigned long)(active.offset+sizeof(uint32_t))];
+        [accesses addObject:group_access(program,active.buffer,active.offset,sizeof(uint32_t),-1,MetalReachRead,relation)];
+        const struct MetalReach reach={.buffer=active.buffer,.offset=active.offset,.length=sizeof(uint32_t),.access=MetalReachRead};
+        [reaches appendBytes:&reach length:sizeof reach];
+      }
+      const struct MetalReach indexReach={.buffer=indices.buffer,.offset=indices.offset+begin*K*sizeof(uint64_t),
+        .length=(end-begin)*K*sizeof(uint64_t),.access=MetalReachRead};
+      [reaches appendBytes:&indexReach length:sizeof indexReach];
+      const struct MetalReach constantReach={.buffer=indices.buffer,.offset=indices.offset-sizeof(uint64_t),
+        .length=sizeof(uint32_t),.access=MetalReachRead};
+      [reaches appendBytes:&constantReach length:sizeof constantReach];
+      [command->source->accesses release];command->source->accesses=accesses;
+      [command->reaches release];command->reaches=reaches;
+      NSString *predicate;
+      if(gpu) {
+        NSMutableData *bound=[command->bindings mutableCopy];
+        struct MetalCommandBinding *arguments=bound.mutableBytes;
+        arguments[3].buffer=indices.buffer;arguments[3].offset=indices.offset;
+        [command->bindings release];command->bindings=bound;
+        predicate=[NSString stringWithFormat:@"#define MESH_FOLD_ACTIVE(k,q) (mesh_step_read<uint>((device uchar *)mesh_step_read<ulong>(a,ulong(q)*%luul+(k)),0)!=0)\n#define MESH_FOLD_OWN(q) MESH_FOLD_ACTIVE(%luul,q)\n",(unsigned long)K,(unsigned long)(K-1)];
+      } else {
+        NSMutableData *arguments=[command->arguments mutableCopy];
+        const uint32_t *const *activity=(const uint32_t *const *)indices.contents;
+        memcpy((char *)arguments.mutableBytes+arguments.length-sizeof activity,&activity,sizeof activity);
+        [command->arguments release];command->arguments=arguments;
+        predicate=[NSString stringWithFormat:@"#define MESH_FOLD_ACTIVE(k,q) (__atomic_load_n(a.activity[(unsigned long)(q)*%luul+(k)],__ATOMIC_ACQUIRE)!=0)\n#define MESH_FOLD_OWN(q) MESH_FOLD_ACTIVE(%luul,q)\n",(unsigned long)K,(unsigned long)(K-1)];
+      }
+      NSString *source=[predicate stringByAppendingString:command->source->source];
+      [command->source->source release];command->source->source=[source copy];
+      command->sourceSpecialized=YES;
+    }
+  }
+  return METAL_DONE;
 }
 static struct metal_result record4(struct metal_program *program,id<MTLBuffer> d,id<MTLBuffer> s,id<MTLBuffer> a,id<MTLBuffer> words,
     struct args p,struct MetalCommandBinding *bindings) {
@@ -633,21 +743,38 @@ static void landing_cell(void *context,uint64_t first,uint64_t elements,const ui
     (struct mesh_graph_span){first*out->element_bytes,(first+elements)*out->element_bytes},output_observation_met,&meet);
   out->at+=2+out->inputs+out->observations->count;
 }
+static MeshFoldActivity *fold_activity(const struct metal_zelloth_sum *sum,const uint64_t *cells,
+    size_t count,size_t stride,size_t width) {
+  MeshFoldActivity *fold=[[[MeshFoldActivity alloc] init] autorelease];
+  NSMutableData *transport=[NSMutableData dataWithLength:(sum->inputs+1)*sizeof(size_t)],
+    *origins=[NSMutableData dataWithLength:(sum->inputs+1)*sizeof(size_t)],
+    *ranges=[NSMutableData dataWithLength:2*count*sizeof(size_t)];
+  size_t *input=transport.mutableBytes,*range=ranges.mutableBytes;
+  for(size_t k=0;k<sum->inputs;k++)input[k]=sum->in[k].transport;
+  input[sum->inputs]=sum->initial.transport;
+  ((size_t *)origins.mutableBytes)[sum->inputs]=sum->initial_first;
+  for(size_t q=0;q<count;q++){range[2*q]=cells[q*stride];range[2*q+1]=cells[q*stride+1];}
+  fold->transports=[transport copy];fold->origins=[origins copy];fold->cells=[ranges copy];fold->width=width;return fold;
+}
 static struct metal_result native_zelloth(struct metal_program *program,int op,const struct metal_zelloth_sum *sum,
     uint32_t channel,uint64_t entry) {
   const struct output_observations observations=output_observations(sum);
   const size_t K=sum->inputs,W=observations.count,O=K+W;
-  struct mesh_landing_map maps[K];size_t cursor[K];uint64_t through[K];
+  const size_t map_inputs=K+(sum->initial.count!=0);
+  struct mesh_landing_map maps[K+1];size_t cursor[K+1];uint64_t through[K+1];
   for(size_t k=0;k<K;k++)maps[k]=(struct mesh_landing_map){sum->in[k].runs,sum->in[k].count,
     pages_to_word(pages_sub(sum->in[k].target,sum->in[k].packets))};
-  const uint32_t count=(uint32_t)mesh_landing_cells(maps,K,MESH_TRANSPORT_ELEMENT_THREADS*MESH_TRANSPORT_VALUES_PER_THREAD,cursor,through,NULL,NULL);
+  if(sum->initial.count)maps[K]=(struct mesh_landing_map){sum->initial.runs,sum->initial.count,
+    pages_to_word(pages_sub(sum->initial.target,sum->initial.packets))};
+  const uint32_t count=(uint32_t)mesh_landing_cells(maps,map_inputs,MESH_TRANSPORT_ELEMENT_THREADS*MESH_TRANSPORT_VALUES_PER_THREAD,cursor,through,NULL,NULL);
   if(!count)return METAL_DONE;
   const size_t words=(2+O)*count,states=words+(count+2)/2;
   struct metal_bytes table;
   if(argument_pages(program,states*sizeof(uint64_t),&table))return metal_failed(ENOMEM);
   uint64_t *cells=table.contents;
   struct landing_cells_output output={cells,K,sizeof(double),&observations};
-  mesh_landing_cells(maps,K,MESH_TRANSPORT_ELEMENT_THREADS*MESH_TRANSPORT_VALUES_PER_THREAD,cursor,through,landing_cell,&output);
+  mesh_landing_cells(maps,map_inputs,MESH_TRANSPORT_ELEMENT_THREADS*MESH_TRANSPORT_VALUES_PER_THREAD,cursor,through,landing_cell,&output);
+  MeshFoldActivity *activity=fold_activity(sum,cells,count,2+O,sizeof(double));
   uint32_t *state=(uint32_t *)(cells+words),*prefix=state+count;
   memset(state,0,(count+1)*sizeof *state);
   struct metal_bytes pointers;
@@ -693,23 +820,29 @@ static struct metal_result native_zelloth(struct metal_program *program,int op,c
     metal_accesses(program,&completion,1);
     const struct { double *out;const double *own;const double *const *inputs;uint64_t **ready,**progress;
       const uint64_t *cells;uint32_t *state,*prefix;const struct metal_wait *overwrite;void *violation;
-    } arguments={out,own,inputs,ready,progress,cells,state,prefix,overwrite,violation};
+      const uint32_t *const *activity;
+    } arguments={out,own,inputs,ready,progress,cells,state,prefix,overwrite,violation,NULL};
     static NSString *const expression[]={@"value+next",@"value*next",@"fmax(value,next)",@"fmin(value,next)"};
     NSString *text=[NSString stringWithFormat:
       @"#include <math.h>\n#include \"mesh-publication.h\"\n#include \"nccl-mesh-metal.h\"\n"
-       "struct MeshCpuArguments { double *out; const double *own; const double *const *inputs; uint64_t **ready,**progress; const uint64_t *cells; uint32_t *state,*prefix; const metal_wait *overwrite; void *violation; };\n"
+       "#ifndef MESH_FOLD_ACTIVE\n#define MESH_FOLD_ACTIVE(k,q) true\n#endif\n"
+       "#ifndef MESH_FOLD_OWN\n#define MESH_FOLD_OWN(q) true\n#endif\n"
+       "struct MeshCpuArguments { double *out; const double *own; const double *const *inputs; uint64_t **ready,**progress; const uint64_t *cells; uint32_t *state,*prefix; const struct metal_wait *overwrite; void *violation; const uint32_t *const *activity; };\n"
        "extern \"C\" void mesh_cpu_entry(const void *arguments) { const auto &a=*static_cast<const MeshCpuArguments *>(arguments); "
-       "const uint64_t *cell=a.cells+%luul; "
-       "for(unsigned long k=0;k<%luul;k++)mesh_step_observe(a.ready[k],cell[2+k],a.violation,%uu,%uu,%lluul); "
+       "[[maybe_unused]] const unsigned long q=%uu;const uint64_t *cell=a.cells+%luul; "
+       "for(unsigned long k=0;k<%luul;k++)if(MESH_FOLD_ACTIVE(k,q))mesh_step_observe(a.ready[k],cell[2+k],a.violation,%uu,%uu,%lluul); "
        "for(unsigned long k=0;k<%luul;k++)if(cell[2+%luul+k])mesh_step_observe(a.ready[%luul+k],cell[2+%luul+k],a.violation,%uu,a.overwrite[k].channel,a.overwrite[k].at); "
-       "for(unsigned long j=%luul;j<%luul;j++){double value=a.own[j];for(unsigned long k=0;k<%luul;k++){const double next=a.inputs[k][j];value=(%@);}a.out[j]=value;} "
+       "const uint64_t identity=%lluul;double empty;__builtin_memcpy(&empty,&identity,sizeof empty); "
+       "for(unsigned long j=%luul;j<%luul;j++){double value=MESH_FOLD_OWN(q)?a.own[j]:empty;for(unsigned long k=0;k<%luul;k++)if(MESH_FOLD_ACTIVE(k,q)){const double next=a.inputs[k][j];value=(%@);}a.out[j]=value;} "
        "__atomic_store_n(a.state+%uu,2u,__ATOMIC_RELEASE);const uint32_t at=mesh_graph_prefix(a.state,0,%uu,a.prefix);"
        "if(at){const uint64_t *through=a.cells+%luul*(at-1)+2;for(unsigned long k=0;k<%luul;k++)if(a.progress[k])mesh_publish(a.progress[k],through[k]);} }\n",
-      (unsigned long)((2+O)*q),(unsigned long)K,polls,channel,(unsigned long long)entry,
+      q,(unsigned long)((2+O)*q),(unsigned long)K,polls,channel,(unsigned long long)entry,
       (unsigned long)W,(unsigned long)K,(unsigned long)K,(unsigned long)K,polls,
-      (unsigned long)first,(unsigned long)(first+elements),(unsigned long)K,expression[op],q,count,(unsigned long)(2+O),(unsigned long)K];
+      (unsigned long long)sum->identity,(unsigned long)first,(unsigned long)(first+elements),(unsigned long)K,expression[op],q,count,(unsigned long)(2+O),(unsigned long)K];
     struct metal_result made=native_emit(program,text,&arguments,sizeof arguments);
     if(made.status)return made;
+    MeshCollectiveCommand *command=[(NSArray *)program->commands lastObject];
+    command->fold=[activity retain];command->foldCell=q;
   }
   return METAL_DONE;
 }
@@ -738,7 +871,10 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
     if(!maps||!cursor||!through){free(maps);free(cursor);free(through);return metal_failed(ENOMEM);}
     for(size_t k=0;k<K;k++)maps[k]=(struct mesh_landing_map){sum->in[k].runs,sum->in[k].count,
       pages_to_word(pages_sub(sum->in[k].target,sum->in[k].packets))};
-    const uint64_t blocks=mesh_landing_cells(maps,K,block,cursor,through,NULL,NULL);
+    const size_t map_inputs=K+(sum->initial.count!=0);
+    if(sum->initial.count)maps[K]=(struct mesh_landing_map){sum->initial.runs,sum->initial.count,
+      pages_to_word(pages_sub(sum->initial.target,sum->initial.packets))};
+    const uint64_t blocks=mesh_landing_cells(maps,map_inputs,block,cursor,through,NULL,NULL);
     if(!blocks){free(maps);free(cursor);free(through);continue;}
     const size_t cells=8+3*O,state=cells+(2+O)*blocks,prefix=state+(blocks+1)/2,total=prefix+1;
     struct metal_bytes table;
@@ -748,7 +884,7 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
     z[3]=((id<MTLBuffer>)sum->out).gpuAddress+sum->out_offset;
     z[4]=cells;z[5]=state;z[6]=prefix;z[7]=W;
     struct landing_cells_output output={z+cells,K,element_bytes,&observations};
-    mesh_landing_cells(maps,K,block,cursor,through,landing_cell,&output);
+    mesh_landing_cells(maps,map_inputs,block,cursor,through,landing_cell,&output);
     free(maps);free(cursor);free(through);
     memset(z+state,0,(total-state)*sizeof *z);
     const struct mesh_landing_run *last=sum->in[0].runs+sum->in[0].count-1;
@@ -778,11 +914,13 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
     }
     metal_resident(program,table.buffer);
     struct MetalCommandBinding bindings[6];
-    const struct args args={.src=table.offset,.op=(uint32_t)op,.channel=channel,.at=at,.polls=program->polls};
+    const struct args args={.src=table.offset,.scalar=sum->identity,.op=(uint32_t)op,.channel=channel,.at=at,.polls=program->polls};
     const struct metal_result recorded=record4(program,(id<MTLBuffer>)sum->out,(id<MTLBuffer>)table.buffer,nil,
       program->violation,args,bindings);
     if(recorded.status)return recorded;
     command_emit(program,kind,bindings,MTLSizeMake(blocks,1,1),MTLSizeMake(width,1,1),NO);
+    MeshCollectiveCommand *command=[(NSArray *)program->commands lastObject];
+    command->fold=[fold_activity(sum,z+cells,blocks,2+O,element_bytes) retain];
   }
   return METAL_DONE;
 }
@@ -832,6 +970,7 @@ struct metal_result metal_specialize(struct metal_program *program,void *sources
     [command->source->accesses release];command->source->accesses=nil;
     [command->source->announcements release];command->source->announcements=nil;
     [command->source->contributions release];command->source->contributions=nil;
+    [command->fold release];command->fold=nil;
   }
   [(id)program->declaration.commands release];program->declaration.commands=NULL;
   [(id)program->transfers release];program->transfers=NULL;program->declaration.transfers=NULL;
@@ -885,15 +1024,17 @@ struct metal_result metal_record(struct metal_program *program,const size_t *sel
           });
         continue;
       }
-      if(source->metadata) {
+      if(source->metadata||command->sourceSpecialized) {
         NSError *error=nil;
         id<MTLLibrary> library=[[program->residency.device newLibraryWithSource:source->source
           options:MetalDeviceCompilerOptions(program->residency.device) error:&error] autorelease];
         pipeline=library?[MetalPipelineMake(library,command->source->function,@[],@{},@[],&error) autorelease]:nil;
         if(!pipeline){result=(struct metal_result){EINVAL,say("collective source preparation: %s",error.localizedDescription.UTF8String)};break;}
-        const struct MetalCommandBinding metadata={.buffer=source->metadata,.offset=source->metadataOffset,
-          .length=source->metadata.length-source->metadataOffset,.index=command->source->metadataSlot,.access=MetalReachRead};
-        [bindings appendBytes:&metadata length:sizeof metadata];
+        if(source->metadata) {
+          const struct MetalCommandBinding metadata={.buffer=source->metadata,.offset=source->metadataOffset,
+            .length=source->metadata.length-source->metadataOffset,.index=command->source->metadataSlot,.access=MetalReachRead};
+          [bindings appendBytes:&metadata length:sizeof metadata];
+        }
       }
       if(!pipeline) {
         const char *message=NULL;struct kernels *compiled=program_kernels(program,&message);

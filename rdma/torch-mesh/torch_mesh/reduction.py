@@ -88,8 +88,14 @@ class Reduction:
             if tuple(value.shape) != self.element_shape or value.dtype != dtype:
                 raise ValueError('reduction source must return its declared independent-value schema')
 
-    def __call__(self, value, group, *, root=-1, counts=()):
-        """Declare this reduction in an ordinary Function source graph."""
+    def __call__(self, value, group, *, active=None, root=-1, counts=()):
+        """Declare this reduction in an ordinary Function source graph.
+
+        ``active`` is a page operand with one Boolean/0-or-1 value per
+        independent contribution. An absent contribution supplies the declared
+        neutral identity. Its value does not enter the combine or derivative.
+        The same operand can govern the corresponding declared transfer cuts.
+        """
         if value.dtype != self.dtype or (self.element_shape and tuple(value.shape[-len(self.element_shape):]) != self.element_shape):
             raise ValueError('collective operand does not match the supplied reduction schema')
         if not self.unit:
@@ -105,7 +111,7 @@ class Reduction:
         if occurrence is not None:
             basis = chosen['basis']
             family = dict(kind='fold', source=occurrence, dtype=str(self.dtype), element_shape=self.element_shape,
-                combine=self.combine.code, identity=self.initializer.code, root=root, counts=tuple(counts),
+                combine=self.combine.code, identity=self.initializer.code, active=active is not None, root=root, counts=tuple(counts),
                 basis={name: data for name, data in basis.items() if name != 'share'})
             shares, choices = list(basis['share']), []
             for segment in range(basis['segments']):
@@ -122,9 +128,9 @@ class Reduction:
                 chosen = fold_topology(group, cells, self.dtype.itemsize * self.unit,
                     self.flags, dict(basis, share=shares), counts, root)
             chosen = dict(chosen, choices=choices)
-        return self._source(value, group, chosen, root, tuple(counts))
+        return self._source(value, group, chosen, root, tuple(counts), active)
 
-    def _source(self, value, group, chosen, root, counts):
+    def _source(self, value, group, chosen, root, counts, active):
         """Emit the chosen fold as ordinary source and selected page transfers.
 
         Autograd sees the actual left and right operands of every combine. Its
@@ -135,6 +141,10 @@ class Reduction:
         from torch.fx.experimental.proxy_tensor import get_proxy_mode, get_proxy_slot
         rank, size, cells = group.rank(), group.size(), chosen['cells']
         flat = value.reshape((cells, *self.element_shape))
+        if active is not None:
+            identity = torch.vmap(self.initializer)(torch.zeros_like(flat))
+            present = active.reshape((cells, *(1 for _ in self.element_shape))).to(torch.bool)
+            flat = torch.where(present, flat, identity)
         empty = flat[:0]
 
         def selection(runs):

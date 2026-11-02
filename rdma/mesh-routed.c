@@ -110,6 +110,7 @@ static int refine_pieces(struct routed_piece **storage,size_t *length,uint64_t p
           for(size_t j=0;j<cut->count;j++){
             struct routed_piece p=pieces[k];
             p.offset+=first;p.transfer.step.first+=first;p.view.first+=first*p.transfer.step.piece.element_bytes;
+            p.view.offset+=first*p.transfer.step.piece.element_bytes;
             p.transfer.step.piece.elements=cut->end[j]-first;
             next[written++]=p;first=cut->end[j];
           }
@@ -294,7 +295,7 @@ void mesh_routed_free(struct mesh_routed_program *p){
     free(p->rank[r].transfer);free(p->rank[r].consume);free(p->rank[r].extent);
     free(p->rank[r].views);
   }
-  free(p->rank);free(p->demand);free(p->route_units);*p=(struct mesh_routed_program){0};
+  free(p->rank);free(p->transaction);free(p->demand);free(p->route_units);*p=(struct mesh_routed_program){0};
 }
 
 int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *paths,
@@ -325,7 +326,12 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
       if(s->first>UINT64_MAX-s->piece.elements || s->first+s->piece.elements>UINT64_MAX/s->piece.element_bytes){status=EOVERFLOW;break;}
       const uint64_t extent=(s->first+s->piece.elements)*s->piece.element_bytes;
       if(extent>rank->extent[s->buffer])rank->extent[s->buffer]=extent;
+      made.transactions+=s->op==MESH_STEP_SEND&&s->piece.elements!=0;
     }
+  }
+  if(!status) {
+    made.transaction=calloc((size_t)made.transactions+1,sizeof *made.transaction);
+    if(!made.transaction)status=ENOMEM;
   }
   uint32_t transaction=0;
   for(uint32_t source=0;source<N && !status;source++)for(uint32_t k=first[source];k<first[source+1] && !status;k++){
@@ -342,6 +348,10 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
     matched[receive]=1;
     const struct mesh_step *land=steps+receive;
     const uint64_t bytes=send->piece.elements*send->piece.element_bytes;
+    made.transaction[transaction]=(struct mesh_transaction){.source=source,.destination=destination,
+      .send=k-first[source],.receive=receive-first[destination],
+      .source_first=send->first*send->piece.element_bytes,
+      .destination_first=land->first*land->piece.element_bytes,.piece=send->piece};
     uint64_t *demand=made.demand+(size_t)source*N+destination;
     if(*demand>UINT64_MAX-bytes){status=EOVERFLOW;break;}
     *demand+=bytes;
@@ -382,8 +392,9 @@ int mesh_routed_compile(const struct mesh_fabric *f,const struct mesh_paths *pat
         else if(r==destination){t.step.op=land->op;t.step.buffer=land->buffer;t.step.first+=land->first;local=receive-first[r];}
         else t.step.buffer=relay[r];
         pieces[count++]=(struct routed_piece){t,r,local,transaction,send->round,hop,0,offset,
-          {(offset+(coordinates==MESH_PACKET_OPERAND?send->first:0))*send->piece.element_bytes,
-           coordinates==MESH_PACKET_OPERAND?0:transaction,0}};
+          {.first=(offset+(coordinates==MESH_PACKET_OPERAND?send->first:0))*send->piece.element_bytes,
+           .offset=offset*send->piece.element_bytes,
+           .domain=coordinates==MESH_PACKET_OPERAND?0:transaction,.transaction=transaction}};
         made.rank[r].count++;
       }
       free(physical);

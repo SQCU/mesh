@@ -246,7 +246,18 @@ void mesh_write_routes_free(struct mesh_paths *routes,uint32_t nodes);
    logical operand, or independent transactions with distinct endpoint origins.
    Every physical view uses the same byte-domain representation. */
 enum mesh_packet_coordinates { MESH_PACKET_OPERAND, MESH_PACKET_TRANSACTIONS };
-struct mesh_packet_view { uint64_t first; uint32_t domain, padding; };
+/* first names the shared packet-cut domain; offset names bytes within the
+   original logical SEND. transaction survives every routed hop and refinement.
+   Distinct partial-result generations can share a packet domain. */
+struct mesh_packet_view { uint64_t first, offset; uint32_t domain, transaction; };
+/* One original logical SEND, before physical paths or backing cuts exist.
+   send/receive are the endpoints' local logical step ordinals. Byte origins
+   belong to those logical operands, independently of relay allocations. */
+struct mesh_transaction {
+  uint32_t source,destination,send,receive;
+  uint64_t source_first,destination_first;
+  struct mesh_operand piece;
+};
 struct mesh_routed_rank {
   uint32_t count,buffers,initialized,padding;
   struct mesh_transfer *transfer;
@@ -255,8 +266,9 @@ struct mesh_routed_rank {
   struct mesh_packet_view *views;
 };
 struct mesh_routed_program {
-  uint32_t nodes,domains;
+  uint32_t nodes,domains,transactions;
   struct mesh_routed_rank *rank;
+  struct mesh_transaction *transaction;
   uint64_t *demand;
   uint64_t *route_units; /* largest logical transaction's independently allocatable units, per pair */
 };
