@@ -7479,11 +7479,17 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
       error=EINVAL;which=k;why=!source?"no table":"pages past its table's";break;
     }
     if(!selection.count)continue;
-    struct attach *held=NULL;struct lease *lease=lease_at(address_of(source->base),&held);
-    if(!lease||lease->returned||(attachment&&attachment!=held)||(comm&&comm->attach!=held)||
+    /* a stream page's table (a transport word's, ncclMeshPageTableCreate's second kind): its region found by
+       stream_page, no lease to pin, the region's stream pages living as long as the region. Changed by the LSTM
+       demonstration session: only a lease's table composed, and the LSTM's metadata, whose first field is a word,
+       was refused on ranks 0 and 2 ("its storage is no lease", 2026-11-01). What must stay: a lease's owners pinned. */
+    const void *address=address_of(source->base);
+    struct attach *held=NULL;struct lease *lease=lease_at(address,&held);size_t streamed=0;
+    if(!lease)held=stream_page(address,1,&streamed);
+    if((!lease&&!held)||(lease&&lease->returned)||(attachment&&attachment!=held)||(comm&&comm->attach!=held)||
        (page&&page!=source->page_bytes)||alignment%source->page_bytes){
       error=EINVAL;which=k;
-      why=!lease?"its storage is no lease (a stream page or an unregistered buffer)":lease->returned?"its lease was returned":
+      why=!held?"its storage is neither a lease nor a stream page":lease&&lease->returned?"its lease was returned":
           (attachment&&attachment!=held)||(comm&&comm->attach!=held)?"another region's":"a page width unlike the others'";
       break;
     }
@@ -7496,7 +7502,7 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
       if(!run){error=EINVAL;which=k;why="a page its table has no run for";break;}
       const size_t remaining=run->end-first-at,length=size-at<remaining?size-at:remaining;
       error=mesh_page_run_add(&physical,bytes+at,length,run->offset+first+at-run->first);
-      if(!error&&lease->owners_count)
+      if(!error&&lease&&lease->owners_count)
         error=mesh_page_run_add(&selected,at,length,run->offset+first+at-run->first);
       at+=length;
     }
@@ -7504,7 +7510,7 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection *selections,si
     /* Retain only original owners backing selected pages. An alias of an
        alias has no lifetime chain, and bridge rows remain singly owned. */
     qsort(selected.at,selected.count,sizeof *selected.at,physical_order);
-    const size_t n=lease->owners_count?lease->owners_count:1;
+    const size_t n=!lease?0:lease->owners_count?lease->owners_count:1;
     for(size_t j=0;!error&&j<n;j++) {
       const void *owner=lease->owners_count?lease->owners[j]:lease->address;
       size_t existing=0;while(existing<owner_count&&owners[existing]!=owner)existing++;
