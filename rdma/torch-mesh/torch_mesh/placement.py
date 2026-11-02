@@ -444,6 +444,8 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
             whole = torch.empty((0,), dtype=torch.uint8, device=caller.device).set_(
                 caller.untyped_storage(), 0, (caller.untyped_storage().nbytes(),))
             operand.space.state, operand.space.pins = tag, TensorValue.of_lease(whole).space.lease
+            from .lowering import register_pins
+            register_pins(tag[0], caller)
 
     resolved, owners = {}, list(placements.owners)
     for record, layout in consumers:

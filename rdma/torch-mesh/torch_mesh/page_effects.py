@@ -526,6 +526,11 @@ class Plan:
         invocation_of = lambda order: self.declarations[order // 2].get('run_invocation', 0)
         self.assignments.append(assign_pages(descriptions, invocation_of, spaces))
         programs = source_copy(retained)
+        # the final lowering: every value operand a storage view at its occurrence (lowering.lower_programs)
+        from .lowering import lower_programs
+        page_bytes = next(iter(spaces.values())).page_bytes if spaces else 1
+        programs, arena = lower_programs(programs, self.assignments[-1], invocation_of, page_bytes, 'mps')
+        self.arenas = getattr(self, 'arenas', []) + [arena]
         programs, prepared = bind_effects(programs, prepared, schedule, effects)
         for program in programs:
             with bind(program['configuration'], algebra=self.algebra):

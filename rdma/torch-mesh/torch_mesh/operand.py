@@ -54,6 +54,9 @@ class TensorValue:
         value = _stream.tensor_value(tensor)
         pages = sum(count for _, count, _ in value['runs'])
         space = ValueSpace(pages, value['page_bytes'], state, tuple(tuple(run) for run in value['runs']))
+        # the caller's tensor is the lowering's to hold (lowering.register_lease), not this value's
+        from .lowering import register_lease
+        register_lease(space, tensor)
         return cls(space, _stream.TensorLayout(tuple(value['extent']), tuple(value['stride']), value['origin']), tensor.dtype)
 
     @classmethod
