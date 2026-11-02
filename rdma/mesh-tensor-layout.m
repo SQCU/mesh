@@ -1252,7 +1252,17 @@ static MetalTensorLayout *TensorClosedElements(MetalTensorLayout *layout,NSUInte
     MetalTensorLayout *factors=layout.factored&&[layout.indexShape.lastObject unsignedIntegerValue]==count?[layout reshape:layout.indexShape]:layout;
     const NSUInteger last=factors.shape.count-1;
     MetalTensorLayout *base=[factors element:last at:0];
-    for(NSUInteger k=1;k<count;k++)if(![[factors element:last at:k] isEqual:[base shift:(NSInteger)k]])return nil;
+    // On a factored axis each component is the first's next address exactly when the axis steps by 1 or its map rises
+    // by 1, read from the axis itself. Added by the LSTM demonstration session: the loop built and compared count
+    // layouts a call, 886 of elements:' 991 samples in a four-step LSTM declaration on m5ult2 (2026-11-01).
+    // What must stay: the loop for an axis read through coordinates.
+    if(factors.factored&&[factors.shape isEqual:factors.indexShape]) {
+        NSData *map=factors.maps[@(last)];
+        if(map) {
+            const NSInteger *values=map.bytes;
+            for(NSUInteger k=1;k<count;k++)if(values[k]-values[0]!=(NSInteger)k)return nil;
+        } else if([factors.strides[last] integerValue]!=1)return nil;
+    } else for(NSUInteger k=1;k<count;k++)if(![[factors element:last at:k] isEqual:[base shift:(NSInteger)k]])return nil;
     NSMutableArray *basis=[NSMutableArray array],*steps=[NSMutableArray array],*coordinates=[NSMutableArray array];
     NSMutableDictionary *maps=[NSMutableDictionary dictionary];NSInteger origin=base.offset;
     NSArray *digits=base.coordinates;
