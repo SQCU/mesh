@@ -646,15 +646,24 @@ def report_sources(record):
         if words:
             print(f"   {s.index} {s.function}: {s.counts['waits']} waits on {s.counts['words']} words in one prologue, "
                   + ', '.join(f'{n} on {w}' for w, n in words) + ' (one at its greatest threshold covers each word)')
+    # one declaration's occurrences, apart by the place of the step each first ran at (two places may share one
+    # declaration, such as two products of one shape, and their occurrences interleave in index order)
+    first_place = {}
+    for _, table in places(record).values():
+        for e in sorted(table.values(), key=lambda e: e['at']):
+            for s in e['sources']:
+                if s is not None:
+                    first_place.setdefault(s.index, ('tick ' if e['at'][0] else 'before ') + str(e['at'][1]))
     chains = collections.defaultdict(list)
     for s in sources:
-        chains[s.kind, s.function, s.declaration].append(s)
-    for (kind, function, _), same in chains.items():
+        chains[s.kind, s.function, s.declaration, first_place.get(s.index)].append(s)
+    for (kind, function, _, place), same in chains.items():
         if len(same) > 1:
             sizes, waits = [s.bytes for s in same], [s.counts['waits'] for s in same]
             grows = [name for name, v in (('bytes', sizes), ('waits', waits)) if all(x < y for x, y in zip(v, v[1:]))]
-            print(f"   {function}: one declaration in {len(same)} sources {named(same)}: bytes {sizes[0]} .. {sizes[-1]}, "
-                  f"waits {' '.join(map(str, waits))}" + (f"; {' and '.join(grows)} grow at every occurrence" if grows else ''))
+            print(f"   {function}{' at ' + place if place else ''}: one declaration in {len(same)} sources {named(same)}: "
+                  f"bytes {sizes[0]} .. {sizes[-1]}, waits {' '.join(map(str, waits))}"
+                  + (f"; {' and '.join(grows)} grow at every occurrence" if grows else ''))
 
 
 def report_dispatches(record):
