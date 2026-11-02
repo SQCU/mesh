@@ -123,15 +123,23 @@ def main(config=None):
         return {'layouts': [choice for function in ordered for choice in function.layout_choices],
                 'choices': [choice for function in ordered for choice in function.choices]}
     bind(configuration, [declared, *groups], prepare)
-    started = now()
-    program.forward()
-    completion = program.completion()
     blocks = partition.split(mesh, 'tp', H)
-    summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows,
-                   input_width=KIN, width=H, steps=steps, ticks=ticks, latency_ticks=L)
-    record(configuration, completion, started, steps * rows * H * torch.half.itemsize, summary)
-    while not configuration['observations'].close():
-        time.sleep(0)
+    # the prepared function run `repeats` times, each from the same state (the step counter and every layer's h and c
+    # set again on the device, outside the timed function, once the run before has completed): the first run's rate
+    # includes its first submission, the later ones are the function's own; each is one record
+    for repeat in range(config.get('repeats', 1)):
+        if repeat:
+            t.fill_(L - 1)
+            tick.reset()
+            torch.mps.synchronize()
+        started = now()
+        program.forward()
+        completion = program.completion()
+        summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows, repeat=repeat,
+                       input_width=KIN, width=H, steps=steps, ticks=ticks, latency_ticks=L)
+        record(configuration, completion, started, steps * rows * H * torch.half.itemsize, summary)
+        while not configuration['observations'].close():
+            time.sleep(0)
     if expected is not None:
         # rank 0's outputs, every step's now complete, against the reference: the largest error over every step, row
         # and unit, and over the last step
