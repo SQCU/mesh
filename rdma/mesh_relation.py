@@ -33,7 +33,13 @@ class Algebra:
     """One preparation context; the library location is an explicit build operand."""
     def __init__(self, library=None):
         directory = Path(os.environ.get('MESH_LIBDIR', Path(__file__).parent))
-        self.lib = C.CDLL(str(library or directory / 'libnccl-mesh.dylib'))
+        # PyDLL, not CDLL: a call keeps the GIL. An isl context is one thread's, and ctypes' CDLL released the GIL
+        # for every call, so another Python thread could run meanwhile, its allocations start the cyclic collector,
+        # and a collected relation's __del__ free isl objects of the same context the call was inside. The Mini's
+        # rank faulted that way twice under the profiler's sampling thread, in isl_blk_free beneath
+        # MeshIndexLayoutRelation (2026-11-01, the native backtrace shim's frames). Changed by the LSTM
+        # demonstration session. What must stay: no isl call of this context with the GIL released.
+        self.lib = C.PyDLL(str(library or directory / 'libnccl-mesh.dylib'))
         specs = {
             'ctx_alloc': (C.c_void_p, ()), 'ctx_free': (None, (C.c_void_p,)),
             'ctx_last_error_msg': (C.c_char_p, (C.c_void_p,)),
