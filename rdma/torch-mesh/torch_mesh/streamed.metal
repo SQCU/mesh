@@ -359,10 +359,10 @@ static inline float2 mesh_head_pair(P partials, X plain, S scale, uint n, uint f
 // Norm and paired rotation share one body at every width. Small rows retain
 // their pairs in registers. Wider rows reread their page operands after the
 // norm reduction. Only one scalar per SIMD group needs shared storage.
-template <bool Precise, uint Width, uint Threads, typename P, typename X, typename S, typename G, typename Y>
+template <bool Precise, uint Width, uint Threads, typename P, typename X, typename S, typename G, typename Y, typename L>
 static inline void mesh_head(P partials, X plain, S scale, uint n, uint first,
                              uint rows, uint shares, uint stride, G gamma, uint pairs, uint position, float theta,
-                             Y out, device half *line, threadgroup float *partial, uint t) {
+                             Y out, L line, threadgroup float *partial, uint t) {
     constexpr uint PairCount = (Width + 1) / 2, LanePairs = (PairCount + Threads - 1) / Threads;
     constexpr bool Cached = LanePairs <= MESH_HEAD_REGISTER_PAIRS;
     float2 values[Cached && LanePairs > 0 ? LanePairs : 1];
@@ -373,6 +373,7 @@ static inline void mesh_head(P partials, X plain, S scale, uint n, uint first,
         s += dot(value, value);
     }
     const float rms = streamed_rms(s, Width, 1e-6f, partial, t, Threads);
+    line.begin(t);
     for (uint p = t; p < PairCount; p += Threads) {
         float2 value;
         if constexpr (Cached) value = values[p / Threads];
@@ -382,13 +383,14 @@ static inline void mesh_head(P partials, X plain, S scale, uint n, uint first,
         if (gamma.p) value *= float2(float(gamma[low]), p < Width / 2 ? float(gamma[high]) : 1.0f);
         const half lo = half(p < pairs ? mesh_rope<Precise>(value.x, value.y, true, p, Width, position, theta) : value.x);
         if (out.p) mesh_publish(out, low, lo);
-        if (line) ((volatile coherent(system) device half *)line)[low] = lo;
+        if (line.p) line.write(low, lo);
         if (p < Width / 2) {
             const half hi = half(p < pairs ? mesh_rope<Precise>(value.y, value.x, false, p, Width, position, theta) : value.y);
             if (out.p) mesh_publish(out, high, hi);
-            if (line) ((volatile coherent(system) device half *)line)[high] = hi;
+            if (line.p) line.write(high, hi);
         }
     }
+    line.end(t);
 }
 
 // A lane's k (kb(l) + 8 j) and rows (8 c(l) + q) in every tile.
