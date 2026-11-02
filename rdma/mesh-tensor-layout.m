@@ -946,6 +946,99 @@ static BOOL TensorElementsInPlace(MetalTensorLayout *value,NSInteger width) {
     }
     return strided.offset%width==0;
 }
+static NSInteger TensorValueAt(MetalTensorLayout *layout,NSArray<NSData *> *programs,NSInteger *stack,NSInteger at);
+static MetalTensorLayout *TensorWritten(NSArray *shape,id index,NSInteger low,NSInteger high);
+// A layout's positions at every flat index, integers only (its compiled coordinates and their strides or maps).
+static NSMutableData *TensorPositions(MetalTensorLayout *layout) {
+    NSMutableArray *programs=[NSMutableArray array];NSUInteger longest=1;
+    for(id coordinate in layout.coordinates) {
+        NSMutableData *program=[NSMutableData data];TensorCompile(coordinate,program);[programs addObject:program];
+        longest=MAX(longest,program.length/sizeof(struct TensorProgramStep));
+    }
+    NSInteger stack[longest+1];NSMutableData *values=[NSMutableData dataWithLength:layout.count*sizeof(NSInteger)];
+    NSInteger *out=values.mutableBytes;
+    for(NSUInteger i=0;i<layout.count;i++)out[i]=TensorValueAt(layout,programs,stack,(NSInteger)i);
+    return values;
+}
+/* Positions read back as consecutive mixed-radix strided pieces, each proved over its whole range: from a piece's first
+   position, its innermost axis the positions on one line, each next axis the whole blocks below it repeated at one step.
+   One piece is a factored layout; several, a select over their ranges. */
+static MetalTensorLayout *TensorPiecewise(const NSInteger *values,NSUInteger count) {
+    NSMutableArray *pieces=[NSMutableArray array];
+    for(NSUInteger at=0;at<count;) {
+        NSMutableArray *extents=[NSMutableArray array],*steps=[NSMutableArray array];NSUInteger block=1;
+        while(at+block<count) {
+            const NSInteger step=values[at+block]-values[at];NSUInteger e=1;
+            for(;at+(e+1)*block<=count;e++) {
+                BOOL same=YES;
+                for(NSUInteger j=0;same&&j<block;j++)same=values[at+e*block+j]==values[at+j]+(NSInteger)e*step;
+                if(!same)break;
+            }
+            if(e==1)break;
+            [extents insertObject:@(e) atIndex:0];[steps insertObject:@(step) atIndex:0];block*=e;
+        }
+        [pieces addObject:@[@(at),@(block),extents.count?extents:@[@1],steps.count?steps:@[@0]]];at+=block;
+    }
+    if(pieces.count==1)return [[MetalTensorLayout shape:pieces[0][2] strides:pieces[0][3] offset:values[0] maps:@{} indices:nil]
+        reshape:@[@(count)]];
+    NSInteger low=values[0],high=values[0];for(NSUInteger i=0;i<count;i++){low=MIN(low,values[i]);high=MAX(high,values[i]);}
+    id index=nil;
+    for(NSArray *piece in [pieces reverseObjectEnumerator]) {
+        const NSInteger at=[piece[0] integerValue];NSArray *extents=piece[2],*steps=piece[3];
+        id local=TensorSum(@[@"i",@(-at)]);NSMutableArray *terms=[NSMutableArray arrayWithObject:@(values[at])];NSInteger weight=1;
+        for(NSUInteger k=extents.count;k-->0;) {
+            [terms addObject:TensorScale(TensorQuotient(TensorQuotient(local,weight,NO),[extents[k] integerValue],YES),[steps[k] integerValue])];
+            weight*=[extents[k] integerValue];
+        }
+        id value=TensorSum(terms);
+        index=index?@[@"select",@[@"lt",@"i",@(at+[piece[1] integerValue])],value,index]:value;
+    }
+    return TensorWritten(@[@(count)],index,low,high);
+}
+/* No consumer use, and one typed value whose elements (width W) tile the ordinals (fixed caller pages united into the
+   family: placement.Placements.solve's typed `pages`): the packing joins each element's positions into one component
+   and places the components in order of their least ordinals, each at the next W-aligned position, its positions in
+   element order. Every other typed value's elements must lie inside one tiling element at consecutive element positions
+   aligned to their width (dividing W), so they join nothing more. The placement is read back as strided pieces
+   (TensorPiecewise). nil where any of that does not hold. Added by the layout algebra session: with the caller's pages a
+   permutation of the family's ordinals, the packing's isl walk outlived the 8 s bound on every rank, row-major and
+   units first (d-r4, d-rec3, 2026-11-02). That the caller's pages enter placement as fixed bindings at all is the
+   page-map change's (design/page-maps-2026-11-02.md). */
+static MetalTensorLayout *TensorPlacedOnTiles(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
+    NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
+    for(MetalTensorLayout *use in uses)if(use.count)return nil;
+    NSInteger tile=-1;NSUInteger width=1;
+    for(NSUInteger k=0;k<values.count;k++)if(values[k].count==count&&widths[k].unsignedIntegerValue>width&&
+        count%widths[k].unsignedIntegerValue==0){tile=(NSInteger)k;width=widths[k].unsignedIntegerValue;}
+    if(tile<0)return nil;
+    NSMutableData *tiled=TensorPositions(values[(NSUInteger)tile]);const NSInteger *at=tiled.bytes;
+    NSMutableData *inverse=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *flat=inverse.mutableBytes;
+    for(NSUInteger p=0;p<count;p++)flat[p]=-1;
+    for(NSUInteger i=0;i<count;i++){if(at[i]<0||at[i]>=(NSInteger)count||flat[at[i]]>=0)return nil;flat[at[i]]=(NSInteger)i;}
+    const NSUInteger tiles=count/width;
+    NSMutableData *order=[NSMutableData dataWithLength:tiles*2*sizeof(NSInteger)];NSInteger *least=order.mutableBytes;
+    for(NSUInteger k=0;k<tiles;k++){least[2*k]=(NSInteger)count;least[2*k+1]=(NSInteger)k;}
+    for(NSUInteger i=0;i<count;i++)least[2*(i/width)]=MIN(least[2*(i/width)],at[i]);
+    qsort_b(least,tiles,2*sizeof *least,^int(const void *a,const void *b){
+        const NSInteger x=*(const NSInteger *)a,y=*(const NSInteger *)b;return x<y?-1:x>y;});
+    NSMutableData *rankData=[NSMutableData dataWithLength:tiles*sizeof(NSInteger)];NSInteger *rank=rankData.mutableBytes;
+    for(NSUInteger r=0;r<tiles;r++)rank[least[2*r+1]]=(NSInteger)r;
+    NSMutableData *placedData=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *placed=placedData.mutableBytes;
+    for(NSUInteger p=0;p<count;p++)placed[p]=rank[(NSUInteger)flat[p]/width]*(NSInteger)width+flat[p]%(NSInteger)width;
+    for(NSUInteger k=0;k<values.count;k++) {
+        const NSUInteger w=widths[k].unsignedIntegerValue;
+        if(w==1||(NSInteger)k==tile)continue;
+        if(width%w)return nil;
+        NSMutableData *positions=TensorPositions(values[k]);const NSInteger *v=positions.bytes;
+        for(NSUInteger e=0;e<values[k].count;e+=w) {
+            if(v[e]<0||v[e]>=(NSInteger)count)return nil;
+            const NSInteger first=placed[v[e]];
+            if(first%(NSInteger)w)return nil;
+            for(NSUInteger t=1;t<w;t++)if(v[e+t]<0||v[e+t]>=(NSInteger)count||placed[v[e+t]]!=first+(NSInteger)t)return nil;
+        }
+    }
+    return TensorPiecewise(placed,count);
+}
 MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
     NSArray<MetalTensorLayout *> *targets,NSArray<NSArray<NSNumber *> *> *footprints,
     NSArray<MetalTensorLayout *> *values,NSArray<NSNumber *> *widths) {
@@ -964,6 +1057,8 @@ MetalTensorLayout *MetalTensorPlace(NSUInteger count,NSArray<MetalTensorLayout *
         inPlace=width==1||TensorElementsInPlace(values[k],width);
     }
     if(inPlace)return [MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:nil];
+    MetalTensorLayout *tiled=TensorPlacedOnTiles(count,uses,values,widths);
+    if(tiled)return tiled;
     isl_ctx *ctx=isl_ctx_alloc();MetalTensorLayout *result=nil;
     isl_map *equations=NULL,*roots=NULL,*extents=NULL,*allowed=NULL,*base=NULL,*walk=NULL,*placed=NULL;
     isl_map *forbidden=isl_map_read_from_str(ctx,
