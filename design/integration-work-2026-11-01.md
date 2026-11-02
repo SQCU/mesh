@@ -383,9 +383,14 @@ The written change binds each declared invocation, including indirect-grid
 phase, before one complete graph solve. It preserves MeshRank's existing
 whole-function solve and adds no cache identity or execution wrapper.
 
-Status: written, uncommitted; Engine Swift typecheck passed
-(`/tmp/mesh-native-binding-sourcecheck.log`). Parent still needs the joined
-build/review and commit. Numerical execution has not been run.
+Status at 2026-11-02 03:22 UTC: committed and pushed as microbench `3c09ab3a`.
+Review matched the stated intent. Its `invocations == 0` return is the source's
+empty round sequence (`rounds = max(0, …)` in `lm_engine.swift`), as the old
+empty replay range was. The `-O` Engine module and native `libmetal_native`/
+`libmesh_rank` built against mesh `d51ddcec`, and again in clean worktrees at
+microbench `89f12f47` against mesh `8cccb59d` (Xcode 26.4.1). Rank, goal-a and
+forward_graph sources typecheck against that module. Numerical execution has
+not been run.
 
 ### C3. Retain the provider's original writer-domain program
 
@@ -423,11 +428,18 @@ Scope: microbench native recipes and `streamed_weights.swift`; the shared
 head-sized output run at its existing participant boundary, rather than adding
 an atomic publication for every scalar store.
 
-Status: written, uncommitted; Engine typecheck and retained Metal compilation
-passed. Composed fused-source checking and provenance documentation are in
-progress. Ordinary session construction gives injective active cache targets;
-arbitrary repeated descriptor targets have no declared overwrite policy yet.
-That missing semantic input must remain explicit.
+Status at 2026-11-02 03:22 UTC: committed and pushed as microbench `89f12f47`
+and mesh `8cccb59d`. Composed sources carrying the page sites' bodies and the
+solve's observed/published binding masks compile under Metal 4 (Xcode 26.4.1):
+`cache_select`, `kv_write`, standalone `streamed_heads`, and fused heads, cached,
+with and without stored rows; head widths 7, 65 and 128 also compile.
+microbench `docs/kernels.md` records the provenance of injective active cache
+targets in ordinary session construction. The output run uses the existing
+page-site mechanism: `begin`/`end` bracket each head's D-value run at threadgroup
+scope, so the shared solve's site body runs once per run. No transport decision
+was added. Arbitrary repeated descriptor targets still have no declared
+overwrite policy. That missing semantic input must remain explicit for C1. The
+rank link waits on a LiteRT prepared-library rebuild. No payload run.
 
 ### C5. Declare numerical sources before transport planning
 
