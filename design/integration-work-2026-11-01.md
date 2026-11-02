@@ -242,3 +242,21 @@ retained transfers in one pass over sorted bindings. It no longer rescans all
 span cuts and rebuilds the transfer array for every mask. These are preparation
 and build results; no numerical payload run or latency/throughput result is
 claimed by this checkpoint.
+
+## Item 7: the LSTM's preparation, measured (the LSTM demonstration session)
+
+lstm-service now declares and lowers on every rank (mesh ecc21b26 to b26a5fd9). It does not reach execution,
+because preparation outlasts every bound. These measurements are from one rank on m5ult2 (gloo, CPU tensors in
+its region, the stepper's capture alone), 2026-11-01.
+
+- Declaration is about 3.5 s a step and grows with the steps composed: 12-15 s for four. Most of it is the run
+  search on sets with divisions (MeshIndexSetRuns' subtraction). Placement makes those sets from byte relations
+  built with `floor(x / width)` and `x mod width` (placement.py field_storage's `bytes_` preimage, and selected's
+  `use['positions']`). The positions are typed elements expanded to bytes, so their runs are the elements' runs
+  scaled by the width.
+- Realization is 130-170 ms a step after 2c647fc1 and 29b4c255 (56 s before). It is paid at every occurrence, as
+  replay-templates-2026-10-29.md requires. At 4,096 steps that is about 9 minutes, whatever steps_per_replay is.
+  transfer_effects solves page effects again for every command of each occurrence, but only the effect words
+  differ between occurrences: the accesses, groups, relations and reaches repeat. One solve per declaration,
+  with each occurrence's words as an operand of that solve (absolute, prepared before execution, as 9ba0e43c
+  keeps them), is what lets a 4,096-step program prepare within the operator's 8 s bound.

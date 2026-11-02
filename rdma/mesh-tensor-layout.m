@@ -377,8 +377,25 @@ static struct TensorPiece TensorExpressionPiece(id expression,NSUInteger at,NSUI
     if(TensorConstant(expression))return (struct TensorPiece){[expression integerValue],0,end};
     if([expression isEqual:@"i"])return (struct TensorPiece){(NSInteger)at,1,end};
     if(TensorGeneral(expression)) {
-        struct MeshIndexRun run=MeshIndexRunOf(expression,at,end);
-        return (struct TensorPiece){run.value,run.step,run.end};
+        // The run from `at` read with integers: the compiled expression at each position until it leaves the line its
+        // first two positions fix, MeshIndexRunOf's answer without three isl contexts a run. Changed by the LSTM
+        // demonstration session: a piecewise coordinate's spans called it once a run, and one LSTM step's realization
+        // spent 56 s there on m5ult2 (2026-11-01, all of a 20 s native sample under reaches:).
+        // A layout's spans ask this once a run of the same coordinate (16384 runs of two positions in the LSTM's
+        // realization): the expression is compiled once and kept, with the expression itself held so its address
+        // names no other while it is kept, one a thread.
+        static _Thread_local id held=nil;static _Thread_local NSData *kept=nil;
+        if(held!=expression) {
+            NSMutableData *made=[NSMutableData data];TensorCompile(expression,made);
+            [held release];[kept release];held=[expression retain];kept=[made retain];
+        }
+        const struct TensorProgramStep *program=kept.bytes;const NSUInteger length=kept.length/sizeof *program;
+        NSInteger stack[length+1];
+        const NSInteger value=TensorRun(program,length,(NSInteger)at,stack);
+        const NSInteger step=end>at+1?TensorRun(program,length,(NSInteger)at+1,stack)-value:0;
+        NSUInteger stop=at+1;
+        while(stop<end&&TensorRun(program,length,(NSInteger)stop,stack)==value+step*(NSInteger)(stop-at))stop++;
+        return (struct TensorPiece){value,step,stop};
     }
     NSString *op=expression[0];
     if([op isEqual:@"add"]) {
@@ -1157,9 +1174,30 @@ static NSArray *TensorInverseAxes(MetalTensorLayout *declared,NSInteger *origin)
 // each view address has one preimage. Each composes `placed` by index terms (TensorCompose), keeping its strides and
 // maps, so a mapped placement stays mapped. nil where none applies: the relation composition (rebase) is the general
 // case, whose index functions take the solver once per affine piece wherever they are read (TensorExpressionPiece).
+// Whether every address of an affine view lies in an affine declaration's image where that image is one dense interval
+// (its strides a permutation of the dense steps): 1 or 0 from the two address ranges, -1 where neither is that form.
+// Added by the LSTM demonstration session: the offset-only rebase below proved containment with a relation preimage,
+// 583 of rebase:'s 1032 samples in a four-step LSTM declaration on m5ult2 (2026-11-01).
+static int TensorAffineWithin(MetalTensorLayout *view,MetalTensorLayout *declared) {
+    if(!view.affine||!declared.affine||!view.count||!declared.count)return -1;
+    NSInteger low;NSArray *axes=TensorInverseAxes(declared,&low);NSUInteger width=1;BOOL dense=YES;
+    for(NSNumber *axis in [axes reverseObjectEnumerator]) {
+        NSUInteger d=axis.unsignedIntegerValue;dense&=(NSUInteger)labs([declared.strides[d] integerValue])==width;
+        width*=[declared.shape[d] unsignedIntegerValue];
+    }
+    if(!dense||width!=declared.count)return -1;
+    NSInteger first=view.offset,last=view.offset;
+    for(NSUInteger d=0;d<view.shape.count;d++) {
+        const NSInteger span=([view.shape[d] integerValue]-1)*[view.strides[d] integerValue];
+        first+=MIN(0,span);last+=MAX(0,span);
+    }
+    return first>=low&&last<low+(NSInteger)width;
+}
 static MetalTensorLayout *TensorClosedRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
-    if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]]&&
-       [view preimage:declared].count==view.count)return [view shift:placed.offset-declared.offset];
+    if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]]) {
+        const int within=TensorAffineWithin(view,declared);
+        if(within==1||(within<0&&[view preimage:declared].count==view.count))return [view shift:placed.offset-declared.offset];
+    }
     NSArray *shape=view.shape;
     if(view.count==declared.count&&[[declared reshape:shape] isEqual:view])return [placed reshape:shape];
     if(declared.factored&&view.offset==declared.offset&&[view.indexShape isEqual:declared.indexShape]&&
@@ -1235,7 +1273,17 @@ static MetalTensorLayout *TensorClosedElements(MetalTensorLayout *layout,NSUInte
     MetalTensorLayout *factors=layout.factored&&[layout.indexShape.lastObject unsignedIntegerValue]==count?[layout reshape:layout.indexShape]:layout;
     const NSUInteger last=factors.shape.count-1;
     MetalTensorLayout *base=[factors element:last at:0];
-    for(NSUInteger k=1;k<count;k++)if(![[factors element:last at:k] isEqual:[base shift:(NSInteger)k]])return nil;
+    // On a factored axis each component is the first's next address exactly when the axis steps by 1 or its map rises
+    // by 1, read from the axis itself. Added by the LSTM demonstration session: the loop built and compared count
+    // layouts a call, 886 of elements:' 991 samples in a four-step LSTM declaration on m5ult2 (2026-11-01).
+    // What must stay: the loop for an axis read through coordinates.
+    if(factors.factored&&[factors.shape isEqual:factors.indexShape]) {
+        NSData *map=factors.maps[@(last)];
+        if(map) {
+            const NSInteger *values=map.bytes;
+            for(NSUInteger k=1;k<count;k++)if(values[k]-values[0]!=(NSInteger)k)return nil;
+        } else if([factors.strides[last] integerValue]!=1)return nil;
+    } else for(NSUInteger k=1;k<count;k++)if(![[factors element:last at:k] isEqual:[base shift:(NSInteger)k]])return nil;
     NSMutableArray *basis=[NSMutableArray array],*steps=[NSMutableArray array],*coordinates=[NSMutableArray array];
     NSMutableDictionary *maps=[NSMutableDictionary dictionary];NSInteger origin=base.offset;
     NSArray *digits=base.coordinates;
