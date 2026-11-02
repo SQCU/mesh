@@ -720,6 +720,7 @@ ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection* selections, s
    `page` is the first page in this process's one registered region mapping. */
 typedef struct { uint64_t first, count, page; } ncclMeshPageBacking;
 ncclResult_t ncclMeshLeasePages(const void *lease, ncclMeshPageBacking *runs, size_t *count);
+ncclResult_t ncclMeshRegionPageBytes(uint64_t *bytes);
 ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table, ncclMeshPageBacking* runs, size_t* count);
 /* Local base of the prepared page view; creates no backend resource. */
 ncclResult_t ncclMeshPageTableAddress(ncclMeshPageTable_t table, const void** address);

@@ -1740,6 +1740,16 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) { return mem_alloc(ptr, size,
    chooser. type: (a lease's own address, capacity) -> [Backing] covering the lease's pages in order: run k's `first`
    its first page in the lease, `count` pages, `page` the first physical page of the region's page space. *count in:
    the capacity; out: the runs the lease has (runs NULL: count only) */
+/* the region's page size, in bytes: a chooser's figure for page arithmetic on identities (design/page-maps-2026-11-02.md) */
+ncclResult_t ncclMeshRegionPageBytes(uint64_t *bytes) {
+  if (!bytes) return fail(ncclInvalidArgument, "the page size needs somewhere to go");
+  pthread_mutex_lock(&attach_lock);
+  struct attach *a = NULL;
+  const int status = attach_current(&a);
+  if (!status) *bytes = a->context.M->pgsz;
+  pthread_mutex_unlock(&attach_lock);
+  return status ? fail(ncclSystemError, "no region attached: %s", strerror(status)) : ncclSuccess;
+}
 ncclResult_t ncclMeshLeasePages(const void *lease, ncclMeshPageBacking *runs, size_t *count) {
   if (!lease || !count) return fail(ncclInvalidArgument, "a lease's pages need a lease and somewhere to go");
   pthread_mutex_lock(&attach_lock);

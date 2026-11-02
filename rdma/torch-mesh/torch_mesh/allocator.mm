@@ -233,3 +233,12 @@ std::vector<std::pair<uint64_t, uint64_t>> region_allocations() {
   for (const auto &[memory, bytes] : *hosts_) out.emplace_back((uint64_t)(uintptr_t)memory, bytes);
   return out;
 }
+
+// A region tensor's lease pages (ncclMeshLeasePages, kept at its allocation), found by its MPS buffer. This is the
+// binding's lookup, an effector's, so a chooser receives a value's map as integers (design/page-maps-2026-11-02.md).
+// Empty where `buffer` is no lease of this allocator.
+std::vector<ncclMeshPageBacking> lease_pages(const void *buffer) {
+  std::lock_guard<std::mutex> guard(*lock_);
+  const auto found = leases_->find(buffer);
+  return found == leases_->end() ? std::vector<ncclMeshPageBacking>{} : found->second.pages;
+}

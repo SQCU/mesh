@@ -44,6 +44,7 @@
 // allocator.mm: torch's MPS allocator made the region's, and its leases live now (address, bytes)
 void install_region_allocator();
 std::vector<std::pair<uint64_t, uint64_t>> region_allocations();
+std::vector<ncclMeshPageBacking> lease_pages(const void *buffer);
 
 // Typed immutable scalar evaluation during preparation. Address/support
 // relations are caller operands; all numerical conversions below come from
@@ -1278,6 +1279,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     pybind11::arg("signed")=true,pybind11::arg("scales")=std::nullopt,pybind11::arg("zeros")=std::nullopt,
     pybind11::arg("absent")=0,pybind11::arg("bitcast")=false,pybind11::arg("present")=std::nullopt);
   install_region_allocator();
+  // design/page-maps-2026-11-02.md: an MPS region tensor as a value, integers only: one piece over its storage's
+  // elements (its sizes, strides and storage offset, element coordinates of its storage), its lease's page runs
+  // (first virtual page, pages, first physical page) and the region's page size. No address crosses here.
+  module.def("tensor_value", [](const at::Tensor &tensor) {
+    TORCH_CHECK(tensor.is_mps(), "tensor_value: an MPS region tensor (design/page-maps-2026-11-02.md)");
+    const auto runs = lease_pages(tensor.storage().data_ptr().get());
+    TORCH_CHECK(!runs.empty(), "tensor_value: the tensor is no lease of the region allocator (allocator.mm)");
+    uint64_t page_bytes = 0;
+    TORCH_CHECK(!ncclMeshRegionPageBytes(&page_bytes), "tensor_value: ", ncclGetLastError(nullptr));
+    pybind11::list pages;
+    for (const auto &r : runs) pages.append(pybind11::make_tuple(r.first, r.count, r.page));
+    pybind11::dict value;
+    value["element_bits"] = (int64_t)tensor.element_size() * 8;
+    value["extent"] = tensor.sizes().vec();
+    value["stride"] = tensor.strides().vec();
+    value["origin"] = (int64_t)tensor.storage_offset();
+    value["page_bytes"] = page_bytes;
+    value["runs"] = pages;
+    return value;
+  });
   module.def("place_layout",[](NSUInteger count,const std::vector<TensorLayout> &uses,
       const std::vector<TensorLayout> &targets,const std::vector<std::vector<NSInteger>> &footprints,
       const std::vector<TensorLayout> &values,const std::vector<NSInteger> &widths)->pybind11::object {
