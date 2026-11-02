@@ -46,7 +46,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'rdma'))
-from mesh_graph import ancestors, cyclic, descendants, preorder_parents  # noqa: E402  (the one graph module, design/rubrics.md C9)
+from mesh_graph import ancestors, cyclic, descendants, preorder_parents, recorded_slack  # noqa: E402  (the one graph module, design/rubrics.md C9)
 
 SOURCE = re.compile(r'(\d+)-([^-]+)-(.+)\.metal$')
 MARK = '#pragma mesh_wait_report_source'
@@ -724,11 +724,16 @@ def report_links(record):
                 i = j
                 continue
             landing = words(source(waiting))
+
+            def touches(a, b):
+                # the run at i touches what observes a word of its landing; a kernel not named may touch it
+                other = source(b if a == i else a)
+                return other is None or (other is not False and bool(landing & words(other)))
+
             following = next((k for k in range(j, len(stamps)) if source(k) is False), len(stamps))
-            later = [k for k in range(waiting + 1, following) if source(k) and landing & words(source(k))]
-            toucher = next((k for k in range(i - 1, -1, -1) if source(k) is None or
-                            (source(k) and landing & words(source(k)))), None)
-            between = [k for k in range(0 if toucher is None else toucher + 1, i) if source(k) is not False]
+            toucher, before, reached = recorded_slack(range(len(stamps)), touches, i, following)
+            between = [k for k in before if source(k) is not False]
+            later = [k for k in reached if k > waiting and source(k)]
             entry = runs.setdefault((at(i), at(waiting), None if toucher is None else at(toucher)), dict(
                 names=[stamps[k][0] for k in range(i, j)], waiting=stamps[waiting][0], between=between and [
                     (at(k), stamps[k][0], source(k)) for k in between], toucher=None if toucher is None else

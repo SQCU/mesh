@@ -269,6 +269,16 @@ def cyclic(successors, predecessors, value, forward, backward):
     return ancestors(successors, value, forward) & ancestors(predecessors, value, backward)
 
 
+def recorded_slack(order, touches, k, end=None):
+    """How much earlier item ``order[k]`` of a recorded order could have been recorded, and what follows it:
+    ``touches(a, b)`` whether two items reach the same pages (a dependency, either way). The index of the last earlier
+    item it touches (None where none does), the indices recorded between that one and k (it could precede them), and
+    the later indices before ``end`` (the order's end where None) of the items it touches."""
+    last = next((j for j in range(k - 1, -1, -1) if touches(order[j], order[k])), None)
+    later = [j for j in range(k + 1, len(order) if end is None else end) if touches(order[k], order[j])]
+    return last, list(range(0 if last is None else last + 1, k)), later
+
+
 def independent(inputs, users, order, group, value, known):
     """Whether ``value`` can join ``group`` in one dispatch at ``value``'s place in ``order``: it reads no member's
     result, directly or through others, and no member's result is used before it (``users(v)`` gives v's direct
