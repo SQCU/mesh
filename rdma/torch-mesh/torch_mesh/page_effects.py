@@ -335,16 +335,26 @@ def prepare(steps, schedule, output=None):
             frames = tuple(origins[positions[index] + offset] + 1 for offset in step.get('frame_orders', ()))
             prepared.append((order, bound, frames))
             effects.extend(TensorView(storage, layout, 0) for storage, layout in bound.source_views(algebra.ctx))
+    # A declaration's numerical program is selected and emitted once in this preparation and each of its occurrences
+    # given its own copy: within one call every occurrence refines its projection against the same effects, so they
+    # select the same domains and emit the same program; transfer_effects below then edits each copy for its own
+    # occurrence. Added by the LSTM demonstration session: one LSTM step's occurrence spent 94 of its 126 ms selecting
+    # and emitting again (m5ult2, 2026-11-01), and the service prepares 4,096. What must stay: a copy for each
+    # occurrence, made before any is edited; the key is the declaration's own objects, alive through this loop.
+    emitted = {}
     for index, declaration in enumerate(programs):
         if 'numerical' not in declaration:
             continue
-        with bind(declaration['configuration'], algebra=algebra):
-            retained = declaration['numerical']
-            projection = refine(declaration['section'], declaration['projection'], declaration['placement']['storage'],
-                                effects, algebra)
-            retained.select_domains(projection['records'])
-            program = retained.emit(declaration['operands'], **declaration['placement'])
-            programs[index] = dict(program, order=declaration['order'], configuration=declaration['configuration'])
+        key = tuple(id(declaration[name]) for name in ('numerical', 'section', 'projection', 'placement', 'operands'))
+        if key not in emitted:
+            with bind(declaration['configuration'], algebra=algebra):
+                retained = declaration['numerical']
+                projection = refine(declaration['section'], declaration['projection'], declaration['placement']['storage'],
+                                    effects, algebra)
+                retained.select_domains(projection['records'])
+                emitted[key] = retained.emit(declaration['operands'], **declaration['placement'])
+        programs[index] = dict(source_copy(emitted[key]), order=declaration['order'],
+                               configuration=declaration['configuration'])
     if prepared:
         programs, prepared = transfer_effects(programs, prepared, schedule)
     for program in programs:
