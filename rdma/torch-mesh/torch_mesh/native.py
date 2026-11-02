@@ -653,7 +653,7 @@ def prepare_graph(module, metadata, *, materializations=()):
     from torch._subclasses.fake_tensor import unset_fake_temporarily
     from torch._inductor import config
     from torch._inductor.codegen.common import get_device_op_overrides
-    from torch._inductor.codegen.mps import MetalScheduling, MetalKernel
+    from torch._inductor.codegen.mps import MetalScheduling, MetalKernel, MetalOverrides
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.choices import InductorChoices
     from torch._inductor.graph import GraphLowering
@@ -697,9 +697,22 @@ def prepare_graph(module, metadata, *, materializations=()):
         def reduction_unroll_threshold(self):
             return 0
 
+    class PageOverrides(MetalOverrides):
+        # An indirect index's symbol and extent, kept on the kernel being emitted for its dispatch accesses
+        # (retain_dispatch_access). Changed by the LSTM demonstration session: PageKernel.indirect_indexing kept them,
+        # but inductor's CSEProxy.indirect_indexing (torch 2.14) calls its ops handler, these overrides, never the
+        # kernel, so no symbol was kept and the LSTM stepper's X.index_select(0, t) access failed in
+        # page_effects.logical_dispatch_accesses (KeyError: tmp7, every rank, 2026-11-01). What must stay: each indirect
+        # symbol a variable of the access with its extent.
+        def indirect_indexing(self, var, size, check=True, wrap_neg=True):
+            symbol = super().indirect_indexing(var, size, check, wrap_neg)
+            V.kernel.__dict__.setdefault('dispatch_indirect', {})[symbol] = size
+            return symbol
+
     class PageKernel(MetalKernel):
         # These objects exist during source emission only. The numerical body
         # receives page bindings and the resulting ordinary address expression.
+        overrides = PageOverrides
         max_threadgroup_size = configuration['ROW_THREADS']
         simd_group_size = configuration['SIMD_WIDTH']
 
@@ -717,13 +730,6 @@ def prepare_graph(module, metadata, *, materializations=()):
                 shape=(*[int(root.numel) for root in roots], *[int(extent) for _, extent in indirect]),
                 active=tuple(roots.index(root) for root in self.active_range_trees()),
                 reductions=tuple(index for index, root in enumerate(roots) if root.is_reduction)))
-
-        def indirect_indexing(self, index, size, *args, **kwargs):
-            result = super().indirect_indexing(index, size, *args, **kwargs)
-            known = set(self.range_tree_nodes) | {root.index_sym() for root in self.range_trees}
-            for symbol in result.free_symbols - known:
-                self.__dict__.setdefault('dispatch_indirect', {})[symbol] = size
-            return result
 
         @contextmanager
         def access(self, name):
