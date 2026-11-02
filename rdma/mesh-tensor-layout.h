@@ -212,8 +212,6 @@ FOUNDATION_EXPORT NSDictionary * _Nullable MetalTensorPlacePreferred(NSUInteger 
 + (instancetype)storage:(id<MTLBuffer>)buffer;
 + (instancetype)host:(const void *)address;
 // Describe unique physical pages, or compose a declared order of those pages.
-+ (MetalTensorLayout *)domain:(NSArray<MetalTensorPages *> *)sources;
-+ (instancetype)compose:(NSArray<MetalTensorPages *> *)sources order:(MetalTensorLayout *)order alignment:(NSUInteger)alignment;
 - (MetalTensorLayout *)physical:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes;
 - (MetalTensorLayout *)bind:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes;
 @end

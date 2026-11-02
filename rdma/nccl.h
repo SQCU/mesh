@@ -708,13 +708,9 @@ ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table, size_t* pages, si
    name pages containing indices produced during execution; a fixed binding
    and fixed index-list width do not make those index values constant. */
 ncclResult_t ncclMeshPageTableBinding(ncclMeshPageTable_t table, ncclMeshBuffer* binding);
-/* Preparation-only page composition. The result maps the selected existing
-   pages into one local view and retains their owners; no payload is copied.
-   alignment is an explicit multiple of the source page size. Destroying the
-   result releases the view and its retained owners through ordinary retirement. */
+/* A selection of a table's pages. Page composition into a remapped view (ncclMeshPageTableCompose) is deleted
+   (design/page-maps-2026-11-02.md): a chooser composes page maps (mesh-page-map.h), never views. */
 typedef struct { ncclMeshPageTable_t storage; uint64_t first, count; } ncclMeshPageSelection;
-ncclResult_t ncclMeshPageTableCompose(const ncclMeshPageSelection* selections, size_t count, size_t alignment,
-    ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
 /* Physical page identities, coalesced into runs. With runs NULL, return the
    required count; otherwise *count supplies capacity and receives the count.
    `page` is the first page in this process's one registered region mapping. */

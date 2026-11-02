@@ -2394,36 +2394,6 @@ static MetalTensorLayout *TensorStridedRebase(MetalTensorLayout *view,MetalTenso
     for(size_t i=0;i<count;i++)[parts addObject:@[@(runs[i].page),@(runs[i].count),@0,@1]];
     return [MetalTensorLayout runs:parts];
 }
-+ (MetalTensorLayout *)domain:(NSArray<MetalTensorPages *> *)sources {
-    NSMutableArray *domains=[NSMutableArray array],*parts=[NSMutableArray array];
-    for(MetalTensorPages *source in sources)[domains addObject:[source backing]];
-    for(NSDictionary *cell in MetalTensorCover(domains)) {
-        NSData *physical=[cell[@"domain"] orderedSpans];const struct MetalTensorSpan *pages=physical.bytes;
-        for(NSUInteger k=0;k<physical.length/sizeof *pages;k++)[parts addObject:@[@(pages[k].offset),@(pages[k].count),@0,@1]];
-    }
-    return [MetalTensorLayout runs:parts];
-}
-+ (instancetype)compose:(NSArray<MetalTensorPages *> *)sources order:(MetalTensorLayout *)order alignment:(NSUInteger)alignment {
-    NSMutableArray *parts=[NSMutableArray array],*local=[NSMutableArray array];
-    for(MetalTensorPages *source in sources) {
-        MetalTensorLayout *domain=[source backing];
-        [local addObject:[MetalTensorLayout shape:domain.shape strides:@[@1] offset:0 maps:@{} indices:nil]];
-        NSData *physical=[domain orderedSpans];const struct MetalTensorSpan *pages=physical.bytes;
-        for(NSUInteger k=0;k<physical.length/sizeof *pages;k++)[parts addObject:@[@(pages[k].offset),@(pages[k].count),@0,@1]];
-    }
-    MetalTensorTraversal *traversal=[MetalTensorTraversal layouts:local domain:[MetalTensorLayout runs:parts] selection:order];
-    NSMutableData *selections=[NSMutableData data];NSArray<NSNumber *> *cuts=traversal.cuts;
-    for(NSUInteger k=1;k<cuts.count;k++) {
-        const struct MetalTensorFragment part=[traversal fragment:cuts[k-1].unsignedIntegerValue end:cuts[k].unsignedIntegerValue];
-        if(!part.count)continue;
-        const ncclMeshPageSelection selection={sources[part.part].table,(uint64_t)part.offset,part.count};
-        [selections appendBytes:&selection length:sizeof selection];
-    }
-    ncclMeshPageTable_t table=NULL;
-    if(ncclMeshPageTableCompose(selections.bytes,selections.length/sizeof(ncclMeshPageSelection),alignment,NULL,0,&table))
-        [NSException raise:NSInvalidArgumentException format:@"page composition: %s",ncclGetLastError(NULL)];
-    return [self adopt:table];
-}
 - (MetalTensorLayout *)physical:(MetalTensorLayout *)layout elementBytes:(NSUInteger)bytes {
     MetalTensorLayout *physical=[[[self backing] components:_pageBytes] reshape:@[@(_pageCount*_pageBytes)]];
     MetalTensorLayout *ordinals=[MetalTensorLayout shape:physical.shape strides:@[@1] offset:0 maps:@{} indices:nil];

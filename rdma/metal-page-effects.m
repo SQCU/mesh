@@ -807,13 +807,6 @@ MetalPageEffects *MetalPageEffectsRebind(MetalPageEffects *declaration,
     result->domains=[domains copy];result->solved=[declaration->solved retain];return result;
 }
 
-@interface MetalPageComposition : NSObject {
-@public ncclMeshPageTable_t table;
-}
-@end
-@implementation MetalPageComposition
-- (void)dealloc { if(table)ncclMeshPageTableDestroy(table);[super dealloc]; }
-@end
 
 static id<MTLBuffer> PageData(id<MTLDevice> device,NSData *data) {
     id<MTLBuffer> buffer=[MetalLeaseBuffer(device,data.length) autorelease];

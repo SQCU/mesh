@@ -616,30 +616,6 @@ static void schedule_inputs(MetalSchedule *schedule,const std::vector<pybind11::
 // The canonical bridge backing is already allocated. This preparation handle
 // retains the contributing leases and exposes their one page table to ordinary
 // tensor views; execution receives the same root buffer and compiled indices.
-static NSArray<MetalTensorPages *> *page_sources(const std::vector<at::Tensor> &owners) {
-  NSMutableArray *sources=[NSMutableArray array];
-  for(const auto &owner:owners){MetalTensorPages *pages=tensorPages(owner);[sources addObject:pages];[pages release];}
-  return sources;
-}
-static at::Tensor page_storage(const std::vector<at::Tensor> &owners,
-    const TensorLayout &order,NSUInteger alignment) {
-  TORCH_CHECK(!owners.empty(),"a page backing requires its declared lease operands");
-  struct Storage {
-    MetalTensorPages *pages;
-    ~Storage(){[pages release];}
-  };
-  auto held=std::make_unique<Storage>();held->pages=nil;
-  NSArray<MetalTensorPages *> *sources=page_sources(owners);
-  @try {held->pages=[[MetalTensorPages compose:sources order:order.value alignment:alignment] retain];}
-  @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
-  const bool metal=owners.front().is_mps();
-  const auto device=owners.front().device();
-  const size_t bytes=held->pages.buffer.length;
-  void *pointer=metal?(__bridge void *)held->pages.buffer:held->pages.buffer.contents;
-  c10::DataPtr data(pointer,held.release(),[](void *value){delete static_cast<Storage *>(value);},device);
-  c10::Storage storage(c10::Storage::use_byte_size_t(),bytes,std::move(data),nullptr,false);
-  return at::empty({0},at::TensorOptions().dtype(at::kByte).device(device)).set_(storage,0,{(int64_t)bytes});
-}
 
 // FX's output is the native recorder's input. This constructor only binds
 // storage and constant operands; it neither runs nor records a framework call.
@@ -1380,11 +1356,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     auto *inverse=MetalValueInverse(ctx,bytes.value);
     return std::make_tuple(bytes.value.count,reinterpret_cast<uintptr_t>(relation),reinterpret_cast<uintptr_t>(inverse));
   },pybind11::call_guard<Drained>());
-  module.def("page_storage",&page_storage,pybind11::call_guard<Drained>());
-  module.def("page_domain",[](const std::vector<at::Tensor> &owners){
-    NSArray<MetalTensorPages *> *sources=page_sources(owners);
-    return std::make_pair(TensorLayout([MetalTensorPages domain:sources]),sources[0].pageBytes);
-  },pybind11::call_guard<Drained>());
   module.def("host_page_backing",[](uint64_t address) {
     @try {
       MetalTensorPages *pages=[MetalTensorPages host:(const void *)(uintptr_t)address];
@@ -1519,10 +1490,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("__eq__",[](const TensorLayout &v,const TensorLayout &w){return bool([v.value isEqual:w.value]);}, pybind11::call_guard<Drained>())
     .def("__hash__",[](const TensorLayout &v){return v.value.hash;}, pybind11::call_guard<Drained>());
   module.def("operand_layout",[](const pybind11::object &object){return TensorOperand(object).layout;}, pybind11::call_guard<Drained>());
-  module.def("physical_layout",[](const pybind11::object &object){
-    const TensorOperand operand(object);
-    return TensorLayout([operand.pages physical:operand.layout.value elementBytes:operand.storage.element_size()]);
-  },pybind11::call_guard<Drained>());
   module.def("same_operand",[](const pybind11::object &left,const pybind11::object &right){
     const TensorOperand a(left),b(right);
     return a.storage.scalar_type()==b.storage.scalar_type()&&
