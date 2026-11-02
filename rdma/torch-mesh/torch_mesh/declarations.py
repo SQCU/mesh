@@ -457,9 +457,18 @@ def operation(node):
     return target, args
 
 
+def _storage_order(x):
+    """x's dimensions outermost first, the order its storage runs (by stride, ties in their own order)."""
+    strides = [int(s) for s in x.stride()]
+    return sorted(range(len(strides)), key=lambda d: (-strides[d], d))
+
+
 def _outer(x, dim):
-    """A gather's or a scatter's frames along `dim` (backend.Call outer): the product of x's dimensions before it."""
-    return math.prod(int(s) for s in x.shape[:dim % len(x.shape)])
+    """A gather's or a scatter's frames along `dim` (backend.Call outer): the product of the extents of x's dimensions
+    its storage runs outside `dim` (_storage_order). A row-major [L, rows, H] gathered along H is L x rows frames; the
+    same tensor stored units first is one frame, each rank's block one run (2026-11-01, the LSTM's h)."""
+    order = _storage_order(x)
+    return math.prod(int(x.shape[d]) for d in order[:order.index(dim % len(x.shape))])
 
 
 def _operation(name):
@@ -545,7 +554,7 @@ def _collective_declaration(node):
     def gather(source, result, dim, sizes):
         counts = [int(size) * partition._row(source, dim) for size in sizes]
         call = declare(backend.Call(backend.ALLGATHER, source.numel(), source.dtype, counts=counts,
-                                    outer=_outer(source, dim)), source, result, source_axis=dim, result_axis=dim)
+                                    outer=_outer(result, dim)), source, result, source_axis=dim, result_axis=dim)
         return partition.gathered(source, dim, sizes, group, declaration=call)
 
     if namespace == 'torch_mesh' and name == 'select_exchange':
@@ -677,13 +686,20 @@ def _collective_relations(declaration, mathematical, algebra):
     # block was one run of the call but a gather along h's units (L x rows x H, dim 2) broke its storage at every
     # element, and collective_views.lower cut it into 16384 one-element all-gathers a tick (2026-11-01). What must
     # stay: positions in storage order, the frames' ends the fragments' cuts.
+    # the positions follow the whole operand's storage (the gather's result, the scatter's source: _storage_order),
+    # the order Call.outer's frames are counted in
+    from . import backend
+    whole = mathematical['result'] if call.kind == backend.ALLGATHER else mathematical['source']
+    permutation = _storage_order(whole) if whole is not None and hasattr(whole, 'stride') else None
+
     def order(value, count, axis):
         shape, steps = [count], []
         if axis is not None and count:
             shape = list(map(int, value.shape))
             axis %= len(shape)
             shape[axis] = count // math.prod(shape[:axis] + shape[axis + 1:])
-            steps = [['reshape', [count]]]
+            steps = ([['permute', permutation]] if permutation is not None and permutation != sorted(permutation) else []) + \
+                [['reshape', [count]]]
         return algebra.selection_relation(dict(shape=shape, steps=steps))
 
     for rank in range(group.size()):
