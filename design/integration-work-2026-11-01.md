@@ -375,6 +375,15 @@ and contributor counts, both frontend adapters consume that contract, and the
 old unconditional subtraction/counting behavior has no authority over masked
 writers. Source compilation precedes any payload run.
 
+The in-progress projection resolves surviving and initial generations in the
+original source order, then retains producer identities. Its next consumers are
+ordinary Boolean/count source leaves and the existing source-input dependency
+contract. The latter currently accepts unconditional initial intervals: it must
+consume the computed initial selection when later conditional writes can replace
+those bytes. Passing every possible initial span as an unconditional prerequisite
+would reintroduce false waits. C1 owns that correction; no completed coverage
+claim follows from the declaration checkpoint.
+
 ### C2. Bind every native invocation before solving
 
 Owner: `fallback_inventory`; implementation handed back to the parent.
@@ -433,6 +442,13 @@ allocated during preparation; its inputs use the original argument lowering
 and existing backend binder. This supplies C1's real selection operands without
 adding another evaluator or execution interface. The provider closure note
 records the individual source changes and checks.
+That provider substep is now committed as microbench `fe09f068`: retained
+selection programs use ordinary source commands/bindings and attach their
+original writer-row identities through `MetalPageWriter`. Provider/importer
+source checks and generated Metal compilation passed. The agent's next substep
+is common projection-equation source lowering, coordinated with C1. The
+independent `provider_dispatch` description still supplies unreplaced roles;
+C3 remains open until its complete source relations replace those roles too.
 
 ### C4. Make direct cache writers consume the shared selector
 
@@ -556,6 +572,13 @@ source-boundary mapping review: preserve the original command/mark relationship
 when native leaves are interleaved and source orders are rewritten. Its dated
 substep is in microbench `docs/kernels.md`. C1 still owns the count equations;
 this carrier change does not supply their numerical outputs.
+The finite binding is committed as mesh `cc1e3b56` and microbench `16699c62`.
+The boundary review found no need for another remapping helper: the projection
+consumes the original boundary once and retains producer identities. The early
+MeshRank consumer must give the complete source graph consistent original
+coordinates while retaining local positions for native interleaving. Native
+reduction intermediates still need their actual arithmetic provenance; input
+activity cannot be copied onto each intermediate SEND.
 
 ### Next handoff and validation
 
