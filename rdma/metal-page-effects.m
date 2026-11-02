@@ -860,20 +860,24 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
     NSMutableArray *offsetTables;
     NSMutableData *reaches;
     NSUInteger composedOffset;
+    NSMutableDictionary<NSArray *,NSNumber *> *fieldIndex;
 }
 - (NSUInteger)add:(id<MTLBuffer>)buffer offset:(NSUInteger)offset bytes:(NSUInteger)bytes access:(uint32_t)access;
 - (id<MTLBuffer>)compose;
 @end
 @implementation MetalPageFields
 - (instancetype)init {
-    if((self=[super init])){fields=[NSMutableArray new];owners=[NSMutableArray new];offsetTables=[NSMutableArray new];reaches=[NSMutableData new];}return self;
+    if((self=[super init])){fields=[NSMutableArray new];owners=[NSMutableArray new];offsetTables=[NSMutableArray new];reaches=[NSMutableData new];
+        fieldIndex=[NSMutableDictionary new];}return self;
 }
-- (void)dealloc { [fields release];[owners release];[offsetTables release];[reaches release];[super dealloc]; }
+- (void)dealloc { [fields release];[owners release];[offsetTables release];[reaches release];[fieldIndex release];[super dealloc]; }
 - (NSUInteger)add:(id<MTLBuffer>)buffer offset:(NSUInteger)offset bytes:(NSUInteger)bytes access:(uint32_t)access {
     const struct MetalReach reach={buffer,offset,bytes,access,-1};[reaches appendBytes:&reach length:sizeof reach];
-    for(NSUInteger i=0;i<fields.count;i++) {
-        NSArray *prior=fields[i];if(prior[0]==buffer&&[prior[1] unsignedIntegerValue]==offset&&[prior[2] unsignedIntegerValue]==bytes)return i;
-    }
+    /* a field already added, found by its buffer, offset and bytes (each field was compared with every one before it,
+       fields squared a command) */
+    NSArray *key=@[[NSValue valueWithPointer:(__bridge const void *)buffer],@(offset),@(bytes)];
+    NSNumber *prior=fieldIndex[key];if(prior)return prior.unsignedIntegerValue;
+    fieldIndex[key]=@(fields.count);
     [fields addObject:@[buffer,@(offset),@(bytes)]];[owners addObject:buffer];return fields.count-1;
 }
 - (id<MTLBuffer>)compose {
@@ -914,12 +918,24 @@ static NSString *PageViolationField(MetalPageFields *fields,ncclMeshBuffer word)
     id<MTLBuffer> buffer=(__bridge id<MTLBuffer>)word.buffer;
     return PageField([fields add:buffer offset:word.offset bytes:buffer.length-word.offset access:MetalReachRead|MetalReachWritten|MetalReachAtomic]);
 }
+/* every MESH_EFFECT_FIELD_<n> of the text its field's pointer, in one pass, each token's whole number read. Changed by
+   the LSTM demonstration session: each field rescanned the whole text, fields x text a command, the 64-step LSTM's
+   source generation's whole sample (2026-11-01). What must stay: a token of no field kept as written. */
 static NSString *PageReplaceFields(NSString *text,MetalPageFields *fields,NSString *base) {
-    for(NSUInteger i=fields->fields.count;i-->0;) {
-        NSString *pointer=[NSString stringWithFormat:@"(%@ + %@ul)",base,fields->fields[i][3]];
-        text=[text stringByReplacingOccurrencesOfString:PageField(i) withString:pointer];
+    static NSString *const prefix=@"MESH_EFFECT_FIELD_";
+    const NSUInteger length=text.length,count=fields->fields.count;
+    NSMutableString *out=[NSMutableString stringWithCapacity:length];
+    for(NSUInteger at=0;at<length;) {
+        const NSRange found=[text rangeOfString:prefix options:NSLiteralSearch range:NSMakeRange(at,length-at)];
+        if(found.location==NSNotFound){[out appendString:[text substringFromIndex:at]];break;}
+        [out appendString:[text substringWithRange:NSMakeRange(at,found.location-at)]];
+        NSUInteger end=NSMaxRange(found),value=0;BOOL digits=NO;
+        for(unichar ch;end<length&&(ch=[text characterAtIndex:end])>='0'&&ch<='9';end++){value=value*10+(ch-'0');digits=YES;}
+        if(digits&&value<count)[out appendFormat:@"(%@ + %@ul)",base,fields->fields[value][3]];
+        else [out appendString:[text substringWithRange:NSMakeRange(found.location,end-found.location)]];
+        at=end;
     }
-    return text;
+    return out;
 }
 static NSArray<NSNumber *> *PageIndices(NSIndexSet *set) {
     NSMutableArray *values=[NSMutableArray array];[set enumerateIndexesUsingBlock:^(NSUInteger i,BOOL *stop){(void)stop;[values addObject:@(i)];}];return values;
