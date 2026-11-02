@@ -231,4 +231,9 @@ struct mesh_graph_terms {
 };
 void *mesh_graph_pair_classes(const struct mesh_graph_lattice *removed, int64_t first, int64_t end,
                               const struct mesh_graph_terms *terms, void *consumer);
+/* Tiles placed in order of their least members, each at the next slot of `width` (placement's packing of a field whose
+   elements tile the ordinals, mesh-tensor-layout.m TensorPlacedOnTiles): at[i] the ordinal of tile i / width's
+   member i % width, a bijection of [0, count); placed[p] the slot position of ordinal p, its tile's rank times width
+   plus its place in the tile. -1 where `at` is no such bijection (placed is then unspecified), 0 otherwise. */
+int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t *placed);
 #endif

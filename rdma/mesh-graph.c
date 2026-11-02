@@ -873,3 +873,30 @@ void *mesh_graph_pair_classes(const struct mesh_graph_lattice *removed, int64_t 
   void *other = terms->sum(consumer, terms->position(consumer), terms->scale(consumer, below, -1));
   return terms->select(consumer, conditions == 1 ? inside[0] : terms->all(consumer, inside, conditions), matched, other);
 }
+
+/* mesh-graph.h mesh_graph_tile_slots. Added by the layout algebra session (moved here from TensorPlacedOnTiles by C9). */
+static int tile_least_order(const void *a, const void *b) {
+  const int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+  return x < y ? -1 : x > y;
+}
+int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t *placed) {
+  if (!width || count % width) return -1;
+  const size_t tiles = count / width;
+  int64_t *member = malloc((count ? count : 1) * sizeof *member), *least = malloc((tiles ? tiles : 1) * 2 * sizeof *least),
+          *rank = malloc((tiles ? tiles : 1) * sizeof *rank);
+  int result = member && least && rank ? 0 : -1;
+  for (size_t p = 0; !result && p < count; p++) member[p] = -1;
+  for (size_t i = 0; !result && i < count; i++) {
+    if (at[i] < 0 || (uint64_t)at[i] >= count || member[at[i]] >= 0) result = -1;
+    else member[at[i]] = (int64_t)i;
+  }
+  for (size_t k = 0; !result && k < tiles; k++) { least[2 * k] = (int64_t)count; least[2 * k + 1] = (int64_t)k; }
+  for (size_t i = 0; !result && i < count; i++)
+    if (at[i] < least[2 * (i / width)]) least[2 * (i / width)] = at[i];
+  if (!result) qsort(least, tiles, 2 * sizeof *least, tile_least_order);
+  for (size_t r = 0; !result && r < tiles; r++) rank[least[2 * r + 1]] = (int64_t)r;
+  for (size_t p = 0; !result && p < count; p++)
+    placed[p] = rank[(size_t)member[p] / width] * (int64_t)width + member[p] % (int64_t)width;
+  free(member); free(least); free(rank);
+  return result;
+}

@@ -998,7 +998,7 @@ static MetalTensorLayout *TensorPiecewise(const NSInteger *values,NSUInteger cou
 /* No consumer use, and one typed value whose elements (width W) tile the ordinals (fixed caller pages united into the
    family: placement.Placements.solve's typed `pages`): the packing joins each element's positions into one component
    and places the components in order of their least ordinals, each at the next W-aligned position, its positions in
-   element order. Every other typed value's elements must lie inside one tiling element at consecutive element positions
+   element order (the graph module's mesh_graph_tile_slots). Every other typed value's elements must lie inside one tiling element at consecutive element positions
    aligned to their width (dividing W), so they join nothing more. The placement is read back as strided pieces
    (TensorPiecewise). nil where any of that does not hold. Added by the layout algebra session: with the caller's pages a
    permutation of the family's ordinals, the packing's isl walk outlived the 8 s bound on every rank, row-major and
@@ -1011,20 +1011,10 @@ static MetalTensorLayout *TensorPlacedOnTiles(NSUInteger count,NSArray<MetalTens
     for(NSUInteger k=0;k<values.count;k++)if(values[k].count==count&&widths[k].unsignedIntegerValue>width&&
         count%widths[k].unsignedIntegerValue==0){tile=(NSInteger)k;width=widths[k].unsignedIntegerValue;}
     if(tile<0)return nil;
-    NSMutableData *tiled=TensorPositions(values[(NSUInteger)tile]);const NSInteger *at=tiled.bytes;
-    NSMutableData *inverse=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *flat=inverse.mutableBytes;
-    for(NSUInteger p=0;p<count;p++)flat[p]=-1;
-    for(NSUInteger i=0;i<count;i++){if(at[i]<0||at[i]>=(NSInteger)count||flat[at[i]]>=0)return nil;flat[at[i]]=(NSInteger)i;}
-    const NSUInteger tiles=count/width;
-    NSMutableData *order=[NSMutableData dataWithLength:tiles*2*sizeof(NSInteger)];NSInteger *least=order.mutableBytes;
-    for(NSUInteger k=0;k<tiles;k++){least[2*k]=(NSInteger)count;least[2*k+1]=(NSInteger)k;}
-    for(NSUInteger i=0;i<count;i++)least[2*(i/width)]=MIN(least[2*(i/width)],at[i]);
-    qsort_b(least,tiles,2*sizeof *least,^int(const void *a,const void *b){
-        const NSInteger x=*(const NSInteger *)a,y=*(const NSInteger *)b;return x<y?-1:x>y;});
-    NSMutableData *rankData=[NSMutableData dataWithLength:tiles*sizeof(NSInteger)];NSInteger *rank=rankData.mutableBytes;
-    for(NSUInteger r=0;r<tiles;r++)rank[least[2*r+1]]=(NSInteger)r;
+    // the tiles' order and slots are the graph module's (mesh-graph.h mesh_graph_tile_slots)
+    NSMutableData *tiled=TensorPositions(values[(NSUInteger)tile]);
     NSMutableData *placedData=[NSMutableData dataWithLength:count*sizeof(NSInteger)];NSInteger *placed=placedData.mutableBytes;
-    for(NSUInteger p=0;p<count;p++)placed[p]=rank[(NSUInteger)flat[p]/width]*(NSInteger)width+flat[p]%(NSInteger)width;
+    if(mesh_graph_tile_slots(count,width,(const int64_t *)tiled.bytes,(int64_t *)placed))return nil;
     for(NSUInteger k=0;k<values.count;k++) {
         const NSUInteger w=widths[k].unsignedIntegerValue;
         if(w==1||(NSInteger)k==tile)continue;
