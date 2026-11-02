@@ -1070,7 +1070,11 @@ static void MetalCaptureAppend(MetalCapture *capture,const struct MetalCommandDe
                     [NSException raise:NSInvalidArgumentException format:@"command reach names no matching address operand"];
             } else if(reach.access&MetalReachBinding) {
                 if(reach.binding<0||reach.binding>=MESH_BUFFER_BINDINGS||command.buffers[reach.binding]!=reach.buffer)
-                    [NSException raise:NSInvalidArgumentException format:@"command reach names no matching buffer binding"];
+                    [NSException raise:NSInvalidArgumentException format:@"command reach names no matching buffer binding "
+                        "(reach %zu of %zu: slot %d, its buffer %p of %lu bytes at %lu, the slot's %p of %lu bytes)",k,
+                        description->reachCount,reach.binding,(__bridge void *)reach.buffer,(unsigned long)reach.buffer.length,
+                        (unsigned long)reach.offset,reach.binding>=0&&reach.binding<MESH_BUFFER_BINDINGS?(__bridge void *)command.buffers[reach.binding]:NULL,
+                        reach.binding>=0&&reach.binding<MESH_BUFFER_BINDINGS?(unsigned long)command.buffers[reach.binding].length:0ul];
                 command.extents|=UINT32_C(1)<<reach.binding;
             }
         }
