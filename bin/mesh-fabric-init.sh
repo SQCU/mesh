@@ -17,6 +17,17 @@ for br in $(ifconfig -l | tr ' ' '\n' | grep '^bridge'); do
   for m in $mem; do ifconfig "$br" deletem "$m" >/dev/null 2>&1; done
   ifconfig "$br" destroy >/dev/null 2>&1; drift=1
 done
+# The stored automatic Thunderbolt Bridge (SystemConfiguration VirtualNetworkInterfaces/Bridge/bridge0, __AUTO__
+# thunderbolt-bridge) lists every fabric port, and configd makes bridge0 again from it as ports attach after this has
+# run: on m5ult3 after its 16:35 reboot (2026-11-01) bridge0 bridged en3-en6 again, the bridge's link-local HELLOs
+# crossed it and ports paired with nodes not on their cables (docs facts, metal-microbench). Dissolving the running
+# interface alone (above) was undone; the definition itself is removed, so nothing remains to make it from. Every
+# member held it (en2 en13 en3 en4 en5 en6; the Mini's en2-en4).
+if printf 'get /VirtualNetworkInterfaces/Bridge\nd.show\nquit\n' | scutil --prefs 2>/dev/null | grep -q 'bridge0 :'; then
+  echo "[$(ts)] DRIFT stored bridge0 definition"
+  printf 'get /VirtualNetworkInterfaces/Bridge\nd.remove bridge0\nset /VirtualNetworkInterfaces/Bridge\ncommit\napply\nquit\n' | scutil --prefs >/dev/null 2>&1
+  drift=1
+fi
 now=$(date +%s)
 : > /var/run/mesh-fabric.$$
 for p in $ports; do
