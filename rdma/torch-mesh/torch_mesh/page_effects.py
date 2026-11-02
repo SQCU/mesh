@@ -252,9 +252,19 @@ def describe(programs):
     from .compilation import relations, bind
     from .native import declared_commands
     algebra = relations()
-    descriptions = []
+    descriptions, described = [], {}
     backends = dict(shader=_stream.PageBackend.Metal, cpu=_stream.PageBackend.CPU, ane=_stream.PageBackend.ANE)
     for program in programs:
+        # an occurrence of an emission already described: its commands' accesses are the emission's, composed with
+        # their pages once (Plan.append's `emission`, the declaration's key). Changed by the LSTM demonstration
+        # session: every occurrence composed them again, the same isl composition five times at 4.5 s each in the
+        # 64-step plan (compose record, 2026-11-01). What must stay: an emission's accesses composed once.
+        key = program.pop('emission', None)
+        if key is not None and key in described:
+            program['commands'], made = described[key]
+            descriptions.extend(dict(description, order=program['order']) for description in made)
+            continue
+        made = []
         with bind(program['configuration'], algebra=algebra):
             program['commands'] = tuple(declared_commands(program['commands']))
             for command in program['commands']:
@@ -264,7 +274,7 @@ def describe(programs):
                 if command.get('names'):
                     for argument in command['arguments']:
                         names[argument['slot']] = argument['name']
-                descriptions.append(dict(order=program['order'], groups=groups,
+                made.append(dict(order=program['order'], groups=groups,
                     backend=backends[command['kind']], source=command['source'],
                     function=command['function'] if gpu else '',
                     grid=_groups(command)[1] if gpu else (1, 1, 1),
@@ -279,6 +289,9 @@ def describe(programs):
                     accesses=tuple(dict(slot=access['slot'],
                         access=1 if access['side'] == 'reads' else 2, relation=access['relation'])
                         for access in accesses)))
+        descriptions.extend(made)
+        if key is not None:
+            described[key] = program['commands'], made
     return descriptions
 
 
@@ -387,7 +400,8 @@ class Plan:
                         projection = refine(step['section'], step['projection'], step['placement']['storage'], cuts, self.algebra)
                         retained.select_domains(projection['records'])
                         emitted[key] = retained.emit(step['operands'], **step['placement'])
-                programs.append(dict(source_copy(emitted[key]), order=2 * index, configuration=step['configuration']))
+                programs.append(dict(source_copy(emitted[key]), order=2 * index, configuration=step['configuration'],
+                                     emission=key))
             descriptions = describe(programs)
             effects = _stream.PageEffectsPlan(self.algebra, descriptions)
             self.variants[phase] = tuple(programs), effects
