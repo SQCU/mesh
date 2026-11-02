@@ -1071,7 +1071,10 @@ pybind11::dict PageEffectsPlan::bind(const pybind11::list &occurrences) {
       NSMutableArray<MetalPageAccess *> *accesses=[NSMutableArray array];
       for(const auto &entry:values.cast<pybind11::tuple>()) {
         const auto access=pybind11::reinterpret_borrow<pybind11::dict>(entry);
-        [accesses addObject:[MetalPageAccess root:MetalPageRegionRoot()
+        // a value's space is its own root (design/page-maps-2026-11-02.md: two live spaces never alias); an access
+        // with no space keeps the region's
+        id root=access.contains("root")&&!access["root"].is_none()?(id)@(access["root"].cast<int64_t>()):MetalPageRegionRoot();
+        [accesses addObject:[MetalPageAccess root:root
           slot:access["slot"].cast<NSInteger>() access:access["access"].cast<uint32_t>() relation:relation(access["relation"])]];
       }
       return accesses;
@@ -1367,6 +1370,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     // a preimage, no integer program (page_effects._through)
     auto *inverse=MetalPageRegionInverse(reinterpret_cast<isl_ctx *>(context),operand.pages.buffer,bytes);
     return std::make_tuple(bytes.count,reinterpret_cast<uintptr_t>(relation),reinterpret_cast<uintptr_t>(inverse));
+  },pybind11::call_guard<Drained>());
+  // design/page-maps-2026-11-02.md: a value's bytes in its own space, the layout's relation and its written inverse
+  // (MeshIndexInverse; 0 where it has none). No buffer, no region step: page_region's MetalPageRegionRelation and
+  // ncclMeshRegionRuns are a final lowering's, never a chooser's.
+  module.def("value_region",[](const TensorLayout &bytes,uintptr_t context) {
+    auto *ctx=reinterpret_cast<isl_ctx *>(context);
+    auto *relation=MetalValueRelation(ctx,bytes.value);
+    auto *inverse=MetalValueInverse(ctx,bytes.value);
+    return std::make_tuple(bytes.value.count,reinterpret_cast<uintptr_t>(relation),reinterpret_cast<uintptr_t>(inverse));
   },pybind11::call_guard<Drained>());
   module.def("page_storage",&page_storage,pybind11::call_guard<Drained>());
   module.def("page_domain",[](const std::vector<at::Tensor> &owners){

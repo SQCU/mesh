@@ -95,6 +95,10 @@ isl_map *MetalPageRegionRelation(isl_map *local,id<MTLBuffer> buffer) {
     return MeshIndexCompose(isl_map_copy(local),isl_map_read_from_str(isl_map_get_ctx(local),text.UTF8String));
 }
 
+/* metal-page-effects.h */
+isl_map *MetalValueRelation(isl_ctx *context,MetalTensorLayout *bytes) { return MeshIndexRelation(context,bytes); }
+isl_map *MetalValueInverse(isl_ctx *context,MetalTensorLayout *bytes) { return MeshIndexInverse(context,bytes); }
+
 isl_map *MetalPageRegionSelection(isl_ctx *context,id<MTLBuffer> buffer,MetalTensorLayout *bytes) {
     isl_map *local=MeshIndexRelation(context,bytes);
     isl_map *physical=MetalPageRegionRelation(local,buffer);

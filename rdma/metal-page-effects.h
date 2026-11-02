@@ -212,6 +212,11 @@ extern "C" {
 id MetalPageRegionRoot(void);
 isl_map *MetalPageRegionRelation(isl_map *local, id<MTLBuffer> buffer);
 isl_map *MetalPageRegionSelection(isl_ctx *context, id<MTLBuffer> buffer, MetalTensorLayout *bytes);
+/* design/page-maps-2026-11-02.md: a value's bytes in its own space, the layout's relation and its written inverse
+   (NULL where it has none), with no buffer and no region step: the chooser's counterparts of MetalPageRegionSelection
+   and MetalPageRegionInverse, whose region positions are a final lowering's */
+isl_map *MetalValueRelation(isl_ctx *context, MetalTensorLayout *bytes);
+isl_map *MetalValueInverse(isl_ctx *context, MetalTensorLayout *bytes);
 // The same selection's inverse, page byte to logical byte, on exactly its pages: the page runs' translations back, then
 // the layout's inverse (MeshIndexInverse). NULL where the layout has no written inverse.
 isl_map *MetalPageRegionInverse(isl_ctx *context, id<MTLBuffer> buffer, MetalTensorLayout *bytes);

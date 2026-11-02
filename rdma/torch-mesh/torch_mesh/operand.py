@@ -22,6 +22,15 @@ class ValueSpace:
     page_bytes: int
     state: object = None
     lease: tuple = ()
+    serial: int = 0
+
+    def __post_init__(self):
+        # its identity as an integer for the native solve's roots, never an object address
+        self.serial = next(_SPACES)
+
+
+import itertools
+_SPACES = itertools.count(1)
 
 
 @dataclass(frozen=True, eq=False)

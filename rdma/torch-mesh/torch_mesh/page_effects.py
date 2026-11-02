@@ -26,10 +26,23 @@ class Coverage:
 
 
 def _physical(value, algebra):
-    """A value's bytes as page bytes, and the inverse where its layout has a written one (None otherwise)."""
+    """A value's bytes as page bytes, and the inverse where its layout has a written one (None otherwise). type: a
+    TensorValue -> its bytes in its own space (design/page-maps-2026-11-02.md); a TensorView -> region bytes."""
     from mesh_relation import IndexRelation
-    count, pointer, inverse = _stream.page_region(value, algebra.ctx)
+    from .operand import TensorValue
+    if isinstance(value, TensorValue):
+        width = value.element_size()
+        bytes_ = value.layout if width == 1 else value.layout.components(width)
+        count, pointer, inverse = _stream.value_region(bytes_, algebra.ctx)
+    else:
+        count, pointer, inverse = _stream.page_region(value, algebra.ctx)
     return IndexRelation(algebra, pointer, (count,)), (IndexRelation(algebra, inverse, (1,)) if inverse else None)
+
+
+def _root(operand):
+    """an access's root for the native solve: a value's space serial, None (the region's) for a view"""
+    from .operand import TensorValue
+    return operand.space.serial if isinstance(operand, TensorValue) else None
 
 
 def _through(relation, physical):
@@ -297,7 +310,8 @@ def describe(programs):
                     contributions=tuple(command.get('contributions', ())),
                     announcements=tuple(command.get('announcements', ())),
                     accesses=tuple(dict(slot=access['slot'],
-                        access=1 if access['side'] == 'reads' else 2, relation=access['relation'])
+                        access=1 if access['side'] == 'reads' else 2, relation=access['relation'],
+                        root=_root(command['operands'][access['slot']]))
                         for access in accesses)))
         descriptions.extend(made)
         if key is not None:
