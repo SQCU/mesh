@@ -21,6 +21,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Types, informally (each function below states its own in these terms; the LSTM's dependency chain run end to end on
+   every member is what holds them to account, not a separate test):
+   - Page       a page index in [0, space.pages).
+   - Box(r)     r integer intervals [first, first + extent), extents >= 0.
+   - Piece(r)   Box(r) -> Elem, affine: e(c) = origin + sum stride[d] (c[d] - first[d]).
+   - Layout(r)  pieces of rank r whose boxes are pairwise disjoint; Elem = the virtual elements they reach.
+   - Map        Inv -> (VPage -> Page) as runs, each invocation's runs disjoint in VPage, sorted, and every Page of
+                one invocation's runs distinct.
+   - Value(r)   Layout(r) x Map, every virtual page the layout reaches mapped at every invocation of the map.
+   - View(r,R)  Box(r) -> coordinates of an R-axis value, axis-wise affine (axis[d], step[d]) from base. It has no
+                division: a merged axis is written as mixed-radix axes.
+   - Life       [begin, end) in the function's event order.
+   - Bytes      (Page, first, bytes) with first + bytes <= space.page_bytes: physical bytes as identities. */
+
 /* the region's pages: their size in bytes (16 KiB on these members) and their count */
 struct mesh_page_space { uint64_t page_bytes, pages; };
 
@@ -57,16 +71,22 @@ struct mesh_lifetime { uint64_t begin, end; };
    b is page * page_bytes + byte within the page, an identity pair, never an address. Returns the count written, or
    the count needed where it exceeds `capacity` */
 struct mesh_page_bytes { uint64_t page, first, bytes; };
+/* type: (Space, Value(r), Inv) -> [Bytes] in logical order, joined within a page; SIZE_MAX iff the map leaves a
+   reached virtual page unmapped (then not a Value) */
 size_t mesh_page_image(const struct mesh_page_space *space, const struct mesh_value *v, uint64_t invocation,
                        struct mesh_page_bytes *out, size_t capacity);
 
 /* the logical coordinates of value v that lie in physical byte runs `bytes`, as pieces of v's logical box: the
    preimage a consumer tile's threshold and a DMA unit's coverage are read from. Returns as mesh_page_image */
+/* type: (Space, Value(r), Inv, [Bytes]) -> Layout(r), a sub-layout of the value's: exactly the coordinates whose
+   element bytes lie wholly inside the given Bytes */
 size_t mesh_page_preimage(const struct mesh_page_space *space, const struct mesh_value *v, uint64_t invocation,
                           const struct mesh_page_bytes *bytes, size_t count, struct mesh_piece *out, size_t capacity);
 
 /* whether value a at invocation ia and value b at invocation ib share a physical byte while both lifetimes hold:
    aliasing and hazards. 1, 0, or -1 where a value's map leaves one of its pages unmapped */
+/* type: (Space, Value, Inv, Life, Value, Inv, Life) -> {0, 1, -1}: 1 iff both lives overlap and the two images share
+   a byte; -1 iff an operand is not a Value */
 int mesh_page_meet(const struct mesh_page_space *space, const struct mesh_value *a, uint64_t ia,
                    const struct mesh_lifetime *la, const struct mesh_value *b, uint64_t ib, const struct mesh_lifetime *lb);
 
@@ -83,6 +103,8 @@ struct mesh_view {
 /* the view's layout: `view` read through `of`'s pieces, each of their boxes over `of`'s logical coordinates, cut where
    the view's image crosses a piece's box. Returns the count written, the count needed where it exceeds `capacity`, or
    SIZE_MAX where two view axes walk one axis across a box edge that their mixed radix does not align with */
+/* type: (View(r,R), Layout(R)) -> Layout(r), with e_result(c) = e_of(view(c)) wherever view(c) lies in a box of `of`,
+   and boxes cut exactly at `of`'s box edges; SIZE_MAX where the cut would fall inside one mixed-radix step */
 size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout *of, struct mesh_piece *out,
                          size_t capacity);
 
@@ -93,6 +115,8 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
    invocations land wherever pages are free over their lifetimes, never by a picked formula. Pages return through the
    retire ledger (mesh-lease-retire.h) between functions. 0, ENOMEM where the function's live set exceeds the region (a
    compile-time failure), or the packing's error */
+/* type: (Space, [VPages_k], [Life_{k,i}], Inv) -> [Map_k] with: for all (k,i) != (l,j) whose lives overlap, their
+   pages are disjoint; and every Page < space.pages. ENOMEM iff no such maps exist by first-fit over the event order */
 int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
                        const struct mesh_lifetime *lifetimes, uint64_t invocations, struct mesh_page_map *maps,
                        uint64_t *firsts, struct mesh_page_run *runs);

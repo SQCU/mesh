@@ -240,6 +240,8 @@ int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t
    is placed at units [place[k], place[k] + size[k]) of [0, capacity), so that no two items whose intervals overlap
    share a unit. 0, or ENOMEM where the live set at some point exceeds capacity: a compile-time failure. Consumers:
    the page allocator (mesh-page-map.h, items a value at an invocation, units physical pages; design/page-maps-2026-11-02.md). */
+/* type: n x (size, [begin, end)), capacity -> place[n] with place[k] + size[k] <= capacity and, for all k != l with
+   overlapping intervals and nonzero sizes, [place[k], place[k] + size[k]) disjoint from [place[l], place[l] + size[l]) */
 int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *begin, const uint64_t *end,
                              uint64_t capacity, uint64_t *place);
 
