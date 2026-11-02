@@ -42,9 +42,12 @@ def main(config=None):
         config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
     steps, rows = config['steps'], config['rows']
     inputs, held = None, None
+    expected = None
     if os.environ['RANK'] == '0':
         inputs, values = lstm.inputs(config, steps, rows)
         held = weights(config, values)
+        # the outputs the run must give, from the same inputs and weights on the CPU (lstm.reference)
+        expected = lstm.reference(config, inputs, values, steps)
         del values
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
@@ -129,6 +132,12 @@ def main(config=None):
     record(configuration, completion, started, steps * rows * H * torch.half.itemsize, summary)
     while not configuration['observations'].close():
         time.sleep(0)
+    if expected is not None:
+        # rank 0's outputs, every step's now complete, against the reference: the largest error over every step, row
+        # and unit, and over the last step
+        error = np.abs(O.cpu().float().numpy() - expected)
+        print(json.dumps(dict(phase='checked', max_abs_error=float(error.max()), last_step_max_abs_error=float(error[-1].max()),
+                              output_max_abs=float(np.abs(expected).max()))), flush=True)
     dist.destroy_process_group()
     state = next_configuration(configuration['observations'].declaration,
         [*configuration['group'].configuration_observations, *configuration['observations'].poll()],

@@ -72,6 +72,33 @@ class Tick:
 
 
 # docs/writing-a-service.md#the-lstm
+def reference(config, x, values, steps):
+    """The stepper's outputs computed on the CPU in float32 from the same inputs and weights: the wavefront Tick runs
+    (each tick every started layer's gates from the tick before's h, layer l > 0 reading layer l - 1's previous h; ticks
+    0 to L - 2 start the layers one by one; tick t reads input min(t, steps - 1)), its gates and h rounded to fp16 as
+    the GPU stores them; output step s the top layer's h after tick s + L - 1."""
+    L, H = config['layers'], config['width']
+    rows = x.shape[1]
+    W = [np.concatenate([values[f'w_ih_{l}'], values[f'w_hh_{l}']], 1).astype(np.float32) for l in range(L)]
+    b = [values[f'b_{l}'].astype(np.float32) for l in range(L)]
+    h, c = np.zeros((L, rows, H), np.float32), np.zeros((L, rows, H), np.float32)
+    out = np.zeros((steps, rows, H), np.float32)
+    half = lambda v: v.astype(np.float16).astype(np.float32)
+    sigmoid = lambda v: 1 / (1 + np.exp(-v))
+    for t in range(steps + L - 1):
+        n = min(t + 1, L)
+        step = half(np.asarray(x[min(t, steps - 1)]))
+        z = [half(np.concatenate([step if l == 0 else h[l - 1], h[l]], 1) @ W[l].T + b[l]) for l in range(n)]
+        for l in range(n):
+            i, f, g, o = np.split(z[l], 4, axis=1)
+            c[l] = sigmoid(f) * c[l] + sigmoid(i) * np.tanh(g)
+            h[l] = half(sigmoid(o) * np.tanh(c[l]))
+        if t >= L - 1:
+            out[t - (L - 1)] = h[L - 1]
+    return out
+
+
+# docs/writing-a-service.md#the-lstm
 def inputs(config, steps, rows):
     g, H, KIN = np.random.default_rng(config['seed']), config['width'], config['input_width']
     k, scratch = 1 / np.sqrt(H), chain.region(chain.CHUNK, torch.float64)
