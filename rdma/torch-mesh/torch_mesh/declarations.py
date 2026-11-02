@@ -1069,6 +1069,12 @@ def normalize_edges(module):
     return aliases
 
 
+def _tensor_of(value):
+    """a tensor operand's torch tensor: a TensorView's storage, a tensor itself"""
+    from .operand import TensorView
+    return value.storage if isinstance(value, TensorView) else value
+
+
 def sections(module, cuts, requested_outputs=()):
     """Materialize the common graph partition as FX fragments, retaining metadata."""
     from mesh_graph import partition
@@ -1355,12 +1361,34 @@ class LoweredGraph:
             requested = []
             fixed_uses = []
             empty = algebra.set('{ [i] : false }', 1)
+            # A state, an input whose held pages are also an output's final target, has two versions: what the
+            # section reads and what it writes. Changed by the LSTM demonstration session (2026-11-02, the joint
+            # change of design/page-maps-2026-11-02.md): both were fixed to the caller's pages, one family, so every
+            # tick's landing went into the pages its own products were reading. Now neither is fixed. Each is placed
+            # in a virtual space tagged (state, side), and the run's Plan merges (out, i) with (in, i + 1), pinning
+            # (in, 0) and (out, last) to the caller's lease. What must stay: the caller's tensor holds the state where
+            # the program reads or writes it.
+            held_inputs = {original(key): available[original(key)] for key in inputs
+                           if available.get(original(key)) is not None}
+            states = {}  # an output's original key -> its state's read version, the input's original key
+            for key in outputs:
+                target = final_targets.get(original(key))
+                if target is None:
+                    continue
+                for input_key, held in held_inputs.items():
+                    if torch._C._is_alias_of(_tensor_of(held['operand']), _tensor_of(target[0][1])):
+                        states[original(key)] = input_key
+                        break
+            state_inputs = set(states.values())
             for key, binding in outputs.items():
                 order = selection(key, wanted.get(key, empty))
                 requested.append(dict(binding=binding, selection=order,
-                                      shape=algebra.selection_relation(order).shape))
+                                      shape=algebra.selection_relation(order).shape,
+                                      state=states.get(original(key))))
                 uses = output_bindings[key]
                 key = original(key)
+                if key in states:
+                    continue
                 if key in final_targets:
                     requested_key, destination = final_targets[key][0]
                     owner = ownership['requests'][coordinate][requested_key]
@@ -1376,11 +1404,20 @@ class LoweredGraph:
                     if relocatable:
                         fixed.append(dict(binding=binding, selection=owner['selection'], operand=destination))
                         fixed_uses.extend(dict(binding=value) for value in uses)
+            # binding name -> ((state, side), the caller's tensor it is pinned to where the program touches it)
+            state_bindings = {}
             for key, binding in inputs.items():
                 held = available.get(original(key))
+                if held is not None and original(key) in state_inputs:
+                    state_bindings[binding['name']] = ((original(key), 'in'), held['operand'])
+                    continue
                 if held is not None:
                     fixed.append(dict(binding=binding, **held))
                     fixed_uses.extend(dict(binding=value) for value in input_bindings[key])
+            for key, binding in outputs.items():
+                if original(key) in states:
+                    state_bindings[binding['name']] = ((states[original(key)], 'out'),
+                                                       final_targets[original(key)][0][1])
             for delivery in delivered:
                 key = delivery['source']
                 binding = inputs[key]
@@ -1412,7 +1449,7 @@ class LoweredGraph:
                 inputs=[field_identity(key) for key in input_bindings],
                 outputs=[field_identity(key) for key in output_bindings]))
             plan = selected(projection, algebra=algebra, device=device, results=requested,
-                            fixed=fixed, requirements=requirements,
+                            fixed=fixed, requirements=requirements, states=state_bindings,
                             choice_scope=choice_scope,
                             equalities=(*equalities, *input_relations, *output_relations,
                                         *page_equalities(section, fixed_uses)))

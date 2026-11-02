@@ -319,7 +319,7 @@ def field_storage(bindings, domains, *, algebra):
 
 
 def selected(projection, *, algebra, device, results=(), fixed=(), requirements=(), equalities=(),
-             choice_scope=(), preferences=None):
+             choice_scope=(), preferences=None, states=None):
     """Place one projected numerical span through the ordinary family solver.
 
     Canonical storage demands and returned ``source`` layouts are bytes.
@@ -435,6 +435,15 @@ def selected(projection, *, algebra, device, results=(), fixed=(), requirements=
     placements.solve(choice_scope=choice_scope, preferences=preferences, report=False)
     storage = {name: dict(source=original[name], source_dtype=torch.uint8, operand=placements.get(root))
                for name, root in roots.items()}
+    # a state version's space carries its (state, side) tag and the caller's lease runs it is pinned to where the
+    # program touches it (design/page-maps-2026-11-02.md: the run's Plan merges (out, i) with (in, i + 1))
+    for name, (tag, caller) in (states or {}).items():
+        operand = storage.get(name, {}).get('operand')
+        if isinstance(operand, TensorValue):
+            caller = caller.storage if isinstance(caller, TensorView) else caller
+            whole = torch.empty((0,), dtype=torch.uint8, device=caller.device).set_(
+                caller.untyped_storage(), 0, (caller.untyped_storage().nbytes(),))
+            operand.space.state, operand.space.pins = tag, TensorValue.of_lease(whole).space.lease
 
     resolved, owners = {}, list(placements.owners)
     for record, layout in consumers:

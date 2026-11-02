@@ -23,6 +23,9 @@ class ValueSpace:
     state: object = None
     lease: tuple = ()
     serial: int = 0
+    # a state version's (state, side) tag ('in' or 'out') and the program's lease runs it is pinned to where the
+    # program touches it: (in, invocation 0) and (out, last invocation). Empty for a space with one version.
+    pins: tuple = ()
 
     def __post_init__(self):
         # its identity as an integer for the native solve's roots, never an object address
