@@ -305,6 +305,29 @@ def describe(programs):
     return descriptions
 
 
+_SOURCES = None
+
+
+def _source_record(command):
+    """Each distinct generated kernel source, once, as a file in MESH_PREPARE_RECORD's directory (sources-<pid>/), named
+    by its function: what the page-effects compiler put around each numerical kernel, for people to read. Nothing
+    reads it back."""
+    import os
+    global _SOURCES
+    if _SOURCES is None:
+        directory = os.environ.get('MESH_PREPARE_RECORD')
+        _SOURCES = {'dir': os.path.join(directory, f'sources-{os.getpid()}'), 'seen': set()} if directory else False
+        if _SOURCES:
+            os.makedirs(_SOURCES['dir'], exist_ok=True)
+    text = command.get('source')
+    if not _SOURCES or not isinstance(text, str) or text in _SOURCES['seen']:
+        return
+    _SOURCES['seen'].add(text)
+    name = f"{len(_SOURCES['seen']):03d}-{command.get('kind', 'command')}-{command.get('function') or 'source'}.metal"
+    with open(os.path.join(_SOURCES['dir'], name.replace('/', '_')), 'w') as out:
+        out.write(text)
+
+
 def bind_effects(programs, occurrences, schedule, declaration):
     commands = [command for program in programs for command in program['commands']]
     solved = declaration.bind(
@@ -312,6 +335,7 @@ def bind_effects(programs, occurrences, schedule, declaration):
     for source in solved['sources']:
         command = commands[source['index']]
         command['source'] = source['source']
+        _source_record(command)
         command['observed_slots'] = set(source['observed_slots'])
         command['published_slots'] = set(source['published_slots'])
         metadata = source['metadata']
