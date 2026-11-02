@@ -206,9 +206,37 @@ def _group_accesses(command, algebra):
                 for access in logical}
     result = []
     for access in logical:
+        started = _compose_record(command, access, physical[access['slot']])
         relation = access['relation'].then(physical[access['slot']])
+        _compose_record(command, access, None, started)
         result.append(dict(access, relation=relation, positions=relation.image(relation.domain())))
     return total, tuple(result)
+
+
+_COMPOSE = None
+
+
+def _compose_record(command, access, physical, started=None):
+    """Each access's composition with its pages, one JSON line before (its operands' isl text) and one after (its
+    seconds), in MESH_PREPARE_RECORD's directory: a rank ended while composing names the composition and its operands
+    in its last line. A log of preparation, read by people; nothing reads it back. Added for the LSTM demonstration,
+    whose realization sat in one MeshIndexCompose's isl_map_compute_divs on every rank (2026-11-01)."""
+    import json, os, time
+    global _COMPOSE
+    if _COMPOSE is None:
+        directory = os.environ.get('MESH_PREPARE_RECORD')
+        _COMPOSE = open(os.path.join(directory, f'compose-{os.getpid()}.jsonl'), 'w') if directory else False
+    if not _COMPOSE:
+        return None
+    line = dict(command=command.get('name', command.get('kind')), kind=command['kind'], slot=access['slot'],
+                side=access['side'])
+    if started is None:
+        line.update(logical=str(access['relation']), physical=str(physical))
+    else:
+        line.update(seconds=round(time.monotonic() - started, 6))
+    _COMPOSE.write(json.dumps(line) + '\n')
+    _COMPOSE.flush()
+    return time.monotonic()
 
 
 def _site_accesses(command, site, algebra):
