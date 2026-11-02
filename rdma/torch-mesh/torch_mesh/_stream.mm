@@ -515,7 +515,10 @@ struct TensorLayout {
     if(coordinates) {
       NSData *data=[NSData dataWithBytes:coordinates->data() length:coordinates->size()];
       NSArray *values=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-      return TensorLayout([layout shaped:tensorNumbers(shape) coordinates:values]);
+      const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      TensorLayout made([layout shaped:tensorNumbers(shape) coordinates:values]);
+      MetalTensorLayoutRecord("shaped",started,@{@"layout":layout,@"shape":tensorNumbers(shape),@"coordinates":values});
+      return made;
     }
     return TensorLayout([layout reshape:tensorNumbers(shape)]);
   }
@@ -1283,7 +1286,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     };
     @try {
       NSMutableArray *reserved=[NSMutableArray array];for(const auto &span:footprints)[reserved addObject:tensorNumbers(span)];
+      const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       MetalTensorLayout *placed=MetalTensorPlace(count,layouts(uses),layouts(targets),reserved,layouts(values),tensorNumbers(widths));
+      MetalTensorLayoutRecord("place",started,@{@"count":@(count),@"uses":layouts(uses),@"targets":layouts(targets),
+        @"footprints":reserved,@"values":layouts(values),@"widths":tensorNumbers(widths)});
       return placed?pybind11::cast(TensorLayout(placed)):pybind11::none();
     } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
   }, pybind11::call_guard<Drained>());
@@ -1307,7 +1313,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       for(const auto &group:groups)[choices addObject:demands(group)];
       for(double weight:preferences)[weights addObject:@(weight)];
       for(const auto &value:values)[typed addObject:value.value];
-      NSDictionary *solved=MetalTensorPlacePreferred(count,demands(hard),choices,weights,typed,tensorNumbers(widths));
+      NSArray *held=demands(hard);const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      NSDictionary *solved=MetalTensorPlacePreferred(count,held,choices,weights,typed,tensorNumbers(widths));
+      MetalTensorLayoutRecord("place_preferred",started,@{@"count":@(count),@"hard":held,@"groups":choices,
+        @"preferences":weights,@"values":typed,@"widths":tensorNumbers(widths)});
       if(!solved)return pybind11::none();
       pybind11::dict result;result["layout"]=TensorLayout(solved[@"layout"]);
       result["extent"]=[solved[@"extent"] unsignedIntegerValue];result["alignment"]=[solved[@"alignment"] unsignedIntegerValue];
@@ -1355,14 +1364,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     }, pybind11::call_guard<Drained>());
   pybind11::class_<TensorLayout>(module,"TensorLayout")
     .def_static("identify",[](NSUInteger count,const TensorLayout &source,const TensorLayout &target) {
-      @try {NSArray *result=MetalTensorIdentify(count,source.value,target.value);
+      @try {const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        NSArray *result=MetalTensorIdentify(count,source.value,target.value);
+        MetalTensorLayoutRecord("identify",started,@{@"count":@(count),@"source":source.value,@"target":target.value});
         return std::make_pair(TensorLayout(result[0]),TensorLayout(result[1]));
       } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
     },pybind11::call_guard<Drained>())
     .def_static("assign",[](NSUInteger count,const std::vector<TensorLayout> &uses,const std::vector<TensorLayout> &targets) {
       NSMutableArray *read=[NSMutableArray array],*write=[NSMutableArray array];
       for(const auto &value:uses)[read addObject:value.value];for(const auto &value:targets)[write addObject:value.value];
-      @try { NSArray *assigned=MetalTensorAssignments(count,read,write);
+      @try { const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        NSArray *assigned=MetalTensorAssignments(count,read,write);
+        MetalTensorLayoutRecord("assignments",started,@{@"count":@(count),@"uses":read,@"targets":write});
         return std::make_tuple(TensorLayout(assigned[0]),TensorLayout(assigned[1]),TensorLayout(assigned[2]));
       } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
     }, pybind11::call_guard<Drained>())
@@ -1370,7 +1383,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
         const TensorLayout &source,const TensorLayout &target) {
       @try {
         // the three from one quotient (mesh-tensor-layout.h MetalTensorUnite), where each was its own MeshIndexUnion
+        const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         NSArray *united=MetalTensorUnite(sourceRoot.value,targetRoot.value,source.value,target.value);
+        MetalTensorLayoutRecord("unite",started,@{@"source_root":sourceRoot.value,@"target_root":targetRoot.value,
+          @"source":source.value,@"target":target.value});
         return std::make_tuple(TensorLayout(united[0]),TensorLayout(united[1]),TensorLayout(united[2]));
       } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
     }, pybind11::call_guard<Drained>())
@@ -1411,7 +1427,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("elements",[](const TensorLayout &v,NSUInteger count){return TensorLayout([v.value elements:count]);}, pybind11::call_guard<Drained>())
     .def("gather",[](const TensorLayout &v,const std::vector<NSInteger> &shape,const std::vector<NSInteger> &indices){return TensorLayout([v.value gather:tensorNumbers(shape) indices:tensorWords(indices)]);}, pybind11::call_guard<Drained>())
     .def("rebase",[](const TensorLayout &v,const TensorLayout &declared,const TensorLayout &placed){
-      @try{return TensorLayout([v.value rebase:declared.value onto:placed.value]);}
+      @try{
+        const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        TensorLayout rebased([v.value rebase:declared.value onto:placed.value]);
+        MetalTensorLayoutRecord("rebase",started,@{@"view":v.value,@"declared":declared.value,@"placed":placed.value});
+        return rebased;
+      }
       @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
     }, pybind11::call_guard<Drained>())
     .def("matches",[](const TensorLayout &v,const std::vector<NSInteger> &steps){return bool([v.value matches:tensorNumbers(steps)]);}, pybind11::call_guard<Drained>())

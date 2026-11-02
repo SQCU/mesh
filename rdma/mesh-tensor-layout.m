@@ -2203,3 +2203,48 @@ NSArray<MetalTensorLayout *> *MetalTensorPairQuotient(NSUInteger count,MetalTens
     return [layout shift:_origin/bytes];
 }
 @end
+
+/* mesh-tensor-layout.h MetalTensorLayoutRecord. A layout is its exact state: logical and index shapes, strides, origin,
+   maps, and its coordinates where it is not factored (a factored layout's are its digits). Numbers, strings, arrays and
+   dictionaries are as they are. Added by the layout algebra session: the LSTM's declaration spent 14.5 s on rank 0 in
+   layout calls that a desk replay of hand-built inputs did not reproduce (2026-11-02). A log nothing reads back. */
+static id TensorRecordValue(id value) {
+    if([value isKindOfClass:MetalTensorLayout.class]) {
+        MetalTensorLayout *layout=value;NSMutableDictionary *maps=[NSMutableDictionary dictionary];
+        for(NSNumber *axis in layout.maps) {
+            NSData *data=layout.maps[axis];const NSInteger *words=data.bytes;NSMutableArray *values=[NSMutableArray array];
+            for(NSUInteger k=0;k<data.length/sizeof *words;k++)[values addObject:@(words[k])];
+            maps[axis.stringValue]=values;
+        }
+        NSMutableDictionary *state=[NSMutableDictionary dictionaryWithDictionary:@{@"shape":layout.shape,
+            @"index_shape":layout.indexShape,@"strides":layout.strides,@"offset":@(layout.offset),@"maps":maps,
+            @"factored":@(layout.factored)}];
+        if(!layout.factored)state[@"index_coordinates"]=layout.coordinates;
+        return state;
+    }
+    if([value isKindOfClass:NSArray.class]) {
+        NSMutableArray *items=[NSMutableArray array];for(id item in value)[items addObject:TensorRecordValue(item)];return items;
+    }
+    if([value isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *items=[NSMutableDictionary dictionary];
+        for(id key in value)items[[key description]]=TensorRecordValue(value[key]);
+        return items;
+    }
+    if([value isKindOfClass:NSNumber.class]||[value isKindOfClass:NSString.class])return value;
+    return value?[value description]:NSNull.null;
+}
+void MetalTensorLayoutRecord(const char *call,uint64_t started,NSDictionary *operands) { @autoreleasepool {
+    const double us=(double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-started)/1e3;
+    if(us<=50000)return;
+    static FILE *out;static int opened;
+    if(!opened) {
+        opened=1;const char *dir=getenv("MESH_PREPARE_RECORD");char path[1024];
+        if(dir&&snprintf(path,sizeof path,"%s/layouts-%d.jsonl",dir,(int)getpid())<(int)sizeof path)out=fopen(path,"w");
+    }
+    if(!out)return;
+    NSData *line=[NSJSONSerialization dataWithJSONObject:@{@"call":@(call),@"us":@(round(us)),
+        @"operands":TensorRecordValue(operands)} options:0 error:nil];
+    if(!line)return;
+    fwrite(line.bytes,1,line.length,out);fputc('\n',out);fflush(out);
+}}
+
