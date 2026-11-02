@@ -540,11 +540,25 @@ static isl_map *IndexQuotient(isl_ctx *ctx,NSUInteger count,isl_map *links,NSUIn
     return result;
 }
 
-MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot,MetalTensorLayout *targetRoot,
-    MetalTensorLayout *source,MetalTensorLayout *target,MetalTensorLayout *member,BOOL sourceMember) {
+// A root domain [0, count): factored, no maps, origin 0, its axes the dense row-major steps.
+static BOOL IndexIdentityRoot(MetalTensorLayout *root) {
+    if(!root.factored||root.maps.count||root.offset)return NO;
+    NSInteger step=1;
+    for(NSUInteger d=root.indexShape.count;d-->0;) {
+        const NSInteger n=[root.indexShape[d] integerValue];
+        if(n>1&&[root.strides[d] integerValue]!=step)return NO;
+        step*=n;
+    }
+    return YES;
+}
+/* The union's quotient once, read for each member: nil the joint domain, otherwise the member through its root's
+   inverse and the quotient. Changed by the layout algebra session: MeshIndexUnion built the same quotient once for each
+   of _stream's three results. What must stay: the classes in source-root order, then unmatched target positions. */
+static NSArray<MetalTensorLayout *> *IndexUnite(MetalTensorLayout *sourceRoot,MetalTensorLayout *targetRoot,
+    MetalTensorLayout *source,MetalTensorLayout *target,NSArray *members,NSArray<NSNumber *> *sides) {
     isl_ctx *ctx=isl_ctx_alloc();
     isl_map *sourceInverse=NULL,*targetInverse=NULL,*quotient=NULL,*relation=NULL;
-    MetalTensorLayout *result=nil;
+    NSMutableArray *results=[NSMutableArray array];
     @try {
         isl_map *sourceRelation=MeshIndexRelation(ctx,sourceRoot);
         isl_map *shift=isl_map_from_pw_aff(MeshIndexExpression(ctx,@[@"add",@"i",@(sourceRoot.count)],0,targetRoot.count));
@@ -558,14 +572,17 @@ MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot,MetalTensorLayou
         links=isl_map_union(links,isl_map_apply_range(targetRelation,isl_map_copy(targetInverse)));
         NSUInteger total=0;
         quotient=IndexQuotient(ctx,sourceRoot.count+targetRoot.count,links,&total);
-        if(!member)result=[MetalTensorLayout shape:@[@(total)] strides:@[@1] offset:0 maps:@{} indices:nil];
-        else if(!member.count)result=[MetalTensorLayout shape:member.shape index:@0 parameters:@{}];
-        else {
-            relation=isl_map_apply_range(MeshIndexRelation(ctx,member),isl_map_copy(sourceMember?sourceInverse:targetInverse));
-            relation=isl_map_apply_range(relation,isl_map_copy(quotient));
-            isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(relation);relation=NULL;
-            isl_pw_aff *index=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
-            result=[MetalTensorLayout shape:member.shape index:MeshIndexTerms(index) parameters:@{}];
+        for(NSUInteger k=0;k<members.count;k++) {
+            MetalTensorLayout *member=members[k]==(id)NSNull.null?nil:members[k];
+            if(!member)[results addObject:[MetalTensorLayout shape:@[@(total)] strides:@[@1] offset:0 maps:@{} indices:nil]];
+            else if(!member.count)[results addObject:[MetalTensorLayout shape:member.shape index:@0 parameters:@{}]];
+            else {
+                relation=isl_map_apply_range(MeshIndexRelation(ctx,member),isl_map_copy(sides[k].boolValue?sourceInverse:targetInverse));
+                relation=isl_map_apply_range(relation,isl_map_copy(quotient));
+                isl_pw_multi_aff *function=isl_pw_multi_aff_from_map(relation);relation=NULL;
+                isl_pw_aff *index=isl_pw_multi_aff_get_pw_aff(function,0);isl_pw_multi_aff_free(function);
+                [results addObject:[MetalTensorLayout shape:member.shape index:MeshIndexTerms(index) parameters:@{}]];
+            }
         }
         if(isl_ctx_last_error(ctx)!=isl_error_none)
             [NSException raise:NSInvalidArgumentException format:@"view union: %s",isl_ctx_last_error_msg(ctx)];
@@ -573,7 +590,35 @@ MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot,MetalTensorLayou
         isl_map_free(sourceInverse);isl_map_free(targetInverse);isl_map_free(quotient);isl_map_free(relation);
         isl_ctx_free(ctx);
     }
-    return result;
+    return results;
+}
+/* Two identity roots and a target that is a factored injection: the quotient in closed form (MetalTensorPairQuotient,
+   the target's positions shifted past the source root's), the source root its own map into the joint domain. Added by
+   the layout algebra session: isl's quotient of a units-first h's view and the concatenation piece it equals took past
+   60 s (a [8, 64] piece: >60 s; row-major, 2 ms), the representatives' divisions eliminated even to list them
+   (2026-11-01). */
+static NSArray<MetalTensorLayout *> *IndexUniteClosed(MetalTensorLayout *sourceRoot,MetalTensorLayout *targetRoot,
+    MetalTensorLayout *source,MetalTensorLayout *target) {
+    if(!IndexIdentityRoot(sourceRoot)||!IndexIdentityRoot(targetRoot))return nil;
+    NSArray *quotient=MetalTensorPairQuotient(sourceRoot.count+targetRoot.count,source,target,(NSInteger)sourceRoot.count,
+        sourceRoot.count,targetRoot.count);
+    return quotient?@[quotient[0],sourceRoot,quotient[1]]:nil;
+}
+NSArray<MetalTensorLayout *> *MetalTensorUnite(MetalTensorLayout *sourceRoot,MetalTensorLayout *targetRoot,
+    MetalTensorLayout *source,MetalTensorLayout *target) {
+    return IndexUniteClosed(sourceRoot,targetRoot,source,target)?:
+        IndexUnite(sourceRoot,targetRoot,source,target,@[NSNull.null,sourceRoot,targetRoot],@[@YES,@YES,@NO]);
+}
+MetalTensorLayout *MeshIndexUnion(MetalTensorLayout *sourceRoot,MetalTensorLayout *targetRoot,
+    MetalTensorLayout *source,MetalTensorLayout *target,MetalTensorLayout *member,BOOL sourceMember) {
+    NSArray *closed=IndexUniteClosed(sourceRoot,targetRoot,source,target);
+    if(closed) {
+        // below the source root's count the quotient is the identity
+        if(!member)return closed[0];
+        if(sourceMember)return member;
+        if(IndexIdentityRoot(member)&&member.count==targetRoot.count)return closed[2];
+    }
+    return IndexUnite(sourceRoot,targetRoot,source,target,@[member?:NSNull.null],@[@(sourceMember)])[0];
 }
 
 NSArray<MetalTensorLayout *> *MetalTensorAssignments(NSUInteger count,NSArray<MetalTensorLayout *> *uses,
@@ -674,6 +719,14 @@ finished:
 }
 NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger count,MetalTensorLayout *source,MetalTensorLayout *target) {
     NSCParameterAssert([source.shape isEqual:target.shape]);
+    /* where one view's positions all lie below the other's, the pairing's quotient in closed form, the higher view the
+       removed one (MetalTensorPairQuotient). Added by the layout algebra session, as for MeshIndexUnion. */
+    if(count&&source.count) {
+        const struct MetalTensorSpan a=source.storageSpan,b=target.storageSpan;
+        NSArray *closed=a.offset+(NSInteger)a.count<=b.offset?MetalTensorPairQuotient(count,source,target,0,0,count):
+            b.offset+(NSInteger)b.count<=a.offset?MetalTensorPairQuotient(count,target,source,0,0,count):nil;
+        if(closed)return closed;
+    }
     isl_ctx *ctx=isl_ctx_alloc();isl_map *relation=NULL;NSArray *result=nil;
     @try {
         MetalTensorLayout *domain=[MetalTensorLayout shape:@[@(count)] strides:@[@1] offset:0 maps:@{} indices:nil];

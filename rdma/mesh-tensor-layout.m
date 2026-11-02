@@ -1477,6 +1477,180 @@ static NSString *TensorStorageDeclaration(MetalTensorLayout *physical,MetalTenso
     result->_count=count;result->_coordinates=[@[index] copy];
     return result;
 }
+/* Exact layout algebra in a view's coordinates, for placement's unions and identities (MeshIndexUnion,
+   MetalTensorIdentify). Added by the layout algebra session: a view's flat isl terms carry the divisions that come only
+   from flattening its coordinates into one index (a units-first [2, 8, 1024] half binding's bytes emit as nested selects
+   of i mod 2048), and the quotient of two such views had isl eliminate them by parametric lexmin even to enumerate its
+   representatives, past 60 s on every rank for the LSTM's h stored units first (2026-11-01). Here a view's strides are
+   read back and proved, and the quotient of a pairing is written down, its divisions by the removed view's storage
+   strides alone. What must stay: the same positions and the same class numbering as the isl quotient. */
+
+// The layout's position at one flat index, integers only: its compiled coordinates and their strides or maps.
+static NSInteger TensorValueAt(MetalTensorLayout *layout,NSArray<NSData *> *programs,NSInteger *stack,NSInteger at) {
+    NSInteger value=layout.offset;
+    for(NSUInteger d=0;d<programs.count;d++) {
+        const struct TensorProgramStep *program=programs[d].bytes;
+        const NSInteger c=TensorRun(program,programs[d].length/sizeof *program,at,stack);
+        const NSInteger *map=((NSData *)layout.maps[@(d)]).bytes;
+        value+=map?map[c]:c*[layout.strides[d] integerValue];
+    }
+    return value;
+}
+/* A layout's function as mixed-radix strides, probed from the innermost axis out: an axis' stride is the position one
+   block on, its extent the blocks that stay on that line (a contiguous next axis joins it, which is the same function);
+   the candidate is then compared with the layout at every position, integers only, so a returned layout is the same
+   function exactly. nil where no candidate matches. */
+static MetalTensorLayout *TensorProbed(MetalTensorLayout *layout) {
+    const NSUInteger n=layout.count;if(!n)return nil;
+    NSMutableArray *programs=[NSMutableArray array];NSUInteger longest=1;
+    for(id coordinate in layout.coordinates) {
+        NSMutableData *program=[NSMutableData data];TensorCompile(coordinate,program);[programs addObject:program];
+        longest=MAX(longest,program.length/sizeof(struct TensorProgramStep));
+    }
+    NSInteger stack[longest+1];
+    NSMutableData *levels=[NSMutableData data];
+    const NSInteger origin=TensorValueAt(layout,programs,stack,0);
+    for(NSUInteger block=1;block<n;) {
+        const NSInteger step=TensorValueAt(layout,programs,stack,(NSInteger)block)-origin;NSUInteger e=2;
+        while(e<n/block&&TensorValueAt(layout,programs,stack,(NSInteger)(e*block))==origin+(NSInteger)e*step)e++;
+        if((n/block)%e)return nil;
+        const NSInteger level[3]={(NSInteger)block,(NSInteger)e,step};[levels appendBytes:level length:sizeof level];block*=e;
+    }
+    const NSInteger *axes=levels.bytes;const NSUInteger m=levels.length/(3*sizeof *axes);
+    for(NSUInteger i=0;i<n;i++) {
+        NSInteger value=origin;
+        for(NSUInteger k=0;k<m;k++)value+=(NSInteger)((i/(NSUInteger)axes[3*k])%(NSUInteger)axes[3*k+1])*axes[3*k+2];
+        if(value!=TensorValueAt(layout,programs,stack,(NSInteger)i))return nil;
+    }
+    NSMutableArray *extents=[NSMutableArray array],*strides=[NSMutableArray array];
+    for(NSUInteger k=m;k-->0;){[extents addObject:@(axes[3*k+1])];[strides addObject:@(axes[3*k+2])];}
+    if(!m){[extents addObject:@1];[strides addObject:@1];}
+    return [[MetalTensorLayout shape:extents strides:strides offset:origin maps:@{} indices:nil] reshape:layout.shape];
+}
+// mesh-tensor-layout.h MetalTensorFactored
+MetalTensorLayout *MetalTensorFactored(MetalTensorLayout *layout) {
+    return layout.factored&&!layout.maps.count?layout:TensorProbed(layout);
+}
+// One axis of a pairing's common index refinement: its storage strides in both views, extent and flat weight.
+struct TensorPairAxis { NSInteger removed,kept,extent,weight; };
+static int TensorPairAxisOrder(const void *a,const void *b) {
+    const NSInteger x=((const struct TensorPairAxis *)a)->removed,y=((const struct TensorPairAxis *)b)->removed;
+    return x<y?-1:x>y;
+}
+// The flat-index boundaries of a factored layout's axes (each axis' weight and the weight above it).
+static void TensorBoundaries(MetalTensorLayout *layout,NSMutableSet *bounds) {
+    NSArray *weights=TensorStrides(layout.indexShape);
+    for(NSUInteger d=0;d<weights.count;d++)if([layout.indexShape[d] integerValue]>1) {
+        [bounds addObject:weights[d]];[bounds addObject:@([weights[d] integerValue]*[layout.indexShape[d] integerValue])];
+    }
+}
+// The storage stride of a factored layout along the refined axis of flat weight `weight` (0 where no axis varies there).
+static NSInteger TensorStrideAt(MetalTensorLayout *layout,NSInteger weight) {
+    NSArray *weights=TensorStrides(layout.indexShape);
+    for(NSUInteger d=0;d<weights.count;d++) {
+        const NSInteger w=[weights[d] integerValue],e=[layout.indexShape[d] integerValue];
+        if(e>1&&w<=weight&&weight<w*e)return [layout.strides[d] integerValue]*(weight/w);
+    }
+    return 0;
+}
+// A layout whose index terms are kept as written, positions [low, high]: no isl emission rewrites them.
+static MetalTensorLayout *TensorWritten(NSArray *shape,id index,NSInteger low,NSInteger high) {
+    MetalTensorLayout *result=[[MetalTensorLayout shape:@[@(high-low+1)] strides:@[@1] offset:low maps:@{} indices:nil]
+        withShape:shape offset:low];
+    result->_count=TensorCount(shape);result->_coordinates=[@[TensorSum(@[index,@(-low)])] copy];
+    return result;
+}
+/* mesh-tensor-layout.h MetalTensorPairQuotient. With every kept value below every removed position, each class is one
+   kept value with the removed positions paired to it, its least member that kept value, so the classes in order of their
+   least members are the ordinals that are not removed, in order: p numbers as p - C(p), C(p) the removed positions below
+   p, and removed(x) + shift as kept(x) (below every removed position, so C is 0 there). The removed view is read through
+   its own storage strides: y = p - origin is in its image when y's digit at each stride is within its extent, its flat
+   index is the digits' weighted sum, and C(y) counts axis by axis from the top. */
+NSArray<MetalTensorLayout *> *MetalTensorPairQuotient(NSUInteger count,MetalTensorLayout *kept,MetalTensorLayout *removed,
+    NSInteger shift,NSUInteger first,NSUInteger extent) {
+    MetalTensorLayout *B=MetalTensorFactored(removed);if(!B||!B.count)return nil;
+    MetalTensorLayout *A=MetalTensorFactored(kept);
+    NSMutableSet *bounds=[NSMutableSet setWithObjects:@1,@(B.count),nil];TensorBoundaries(B,bounds);
+    if(A) {
+        NSMutableSet *joint=[[bounds mutableCopy] autorelease];TensorBoundaries(A,joint);
+        NSArray *sorted=[joint.allObjects sortedArrayUsingSelector:@selector(compare:)];BOOL chain=YES;
+        for(NSUInteger k=0;chain&&k+1<sorted.count;k++)chain=[sorted[k+1] integerValue]%[sorted[k] integerValue]==0;
+        if(chain)bounds=joint;else A=nil;
+    }
+    NSArray *weights=[bounds.allObjects sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableData *storage=[NSMutableData data];
+    for(NSUInteger k=0;k+1<weights.count;k++) {
+        const NSInteger w=[weights[k] integerValue];
+        const struct TensorPairAxis axis={TensorStrideAt(B,w),A?TensorStrideAt(A,w):0,[weights[k+1] integerValue]/w,w};
+        if(axis.removed<=0)return nil;
+        [storage appendBytes:&axis length:sizeof axis];
+    }
+    // a single removed position is one axis of extent 1
+    if(!storage.length){const struct TensorPairAxis point={1,0,1,1};[storage appendBytes:&point length:sizeof point];}
+    struct TensorPairAxis *axes=storage.mutableBytes;const NSUInteger m=storage.length/sizeof *axes;
+    qsort(axes,m,sizeof *axes,TensorPairAxisOrder);
+    NSInteger last=0;
+    for(NSUInteger k=0;k<m;k++) {
+        if(k+1<m&&axes[k+1].removed<axes[k].removed*axes[k].extent)return nil;
+        last+=axes[k].removed*(axes[k].extent-1);
+    }
+    const NSInteger origin=B.offset+shift;
+    NSInteger high=0;
+    if(A){high=A.offset;for(NSUInteger k=0;k<m;k++)high+=MAX(0,axes[k].kept*(axes[k].extent-1));}
+    else {
+        if(kept.maps.count)return nil;
+        const struct MetalTensorSpan span=kept.storageSpan;high=span.offset+(NSInteger)span.count-1;
+    }
+    if(high>=origin)return nil;
+    id y=TensorSum(@[@"i",@(-origin)]);NSMutableArray *digits=[NSMutableArray array];
+    for(NSUInteger k=0;k<m;k++)
+        [digits addObject:TensorQuotient(k+1<m?TensorQuotient(y,axes[k+1].removed,YES):y,axes[k].removed,NO)];
+    NSMutableArray *value=[NSMutableArray array];
+    if(A) {
+        [value addObject:@(A.offset)];
+        for(NSUInteger k=0;k<m;k++)[value addObject:TensorScale(digits[k],axes[k].kept)];
+    } else {
+        NSMutableArray *index=[NSMutableArray array],*flat=[NSMutableArray arrayWithObject:@(kept.offset)];
+        for(NSUInteger k=0;k<m;k++)[index addObject:TensorScale(digits[k],axes[k].weight)];
+        NSArray *coordinates=kept.coordinates;
+        for(NSUInteger d=0;d<coordinates.count;d++)[flat addObject:TensorScale(coordinates[d],[kept.strides[d] integerValue])];
+        [value addObject:TensorSubstitute(TensorSum(flat),TensorSum(index))];
+    }
+    id matched=TensorSum(value);
+    const NSInteger begin=(NSInteger)first,end=(NSInteger)(first+extent);
+    NSMutableArray *inside=[NSMutableArray array];
+    if(origin>begin)[inside addObject:@[@"ge",@"i",@(origin)]];
+    if(origin+last<end-1)[inside addObject:@[@"le",@"i",@(origin+last)]];
+    if(axes[0].removed>1)[inside addObject:@[@"eq",TensorQuotient(y,axes[0].removed,YES),@0]];
+    for(NSUInteger k=0;k+1<m;k++)if(axes[k+1].removed>axes[k].removed*axes[k].extent)
+        [inside addObject:@[@"lt",TensorQuotient(y,axes[k+1].removed,YES),@(axes[k].removed*axes[k].extent)]];
+    id classes=matched;
+    if(inside.count) {
+        // C(y) over the removed axes with contiguous neighbours joined, from the top: min(q, e) blocks of the lower axes'
+        // points, and the lower count only while q is within the axis
+        NSMutableData *joined=[NSMutableData data];
+        for(NSUInteger k=0;k<m;k++) {
+            struct TensorPairAxis *top=joined.length?(struct TensorPairAxis *)joined.mutableBytes+joined.length/sizeof *top-1:NULL;
+            if(top&&axes[k].removed==top->removed*top->extent)top->extent*=axes[k].extent;
+            else [joined appendBytes:axes+k length:sizeof *axes];
+        }
+        const struct TensorPairAxis *levels=joined.bytes;const NSUInteger depth=joined.length/sizeof *levels;
+        id below=levels[0].removed>1?@[@"min",TensorQuotient(y,levels[0].removed,YES),@1]:@0;NSInteger points=1;
+        for(NSUInteger k=0;k<depth;k++) {
+            id q=TensorQuotient(k+1<depth?TensorQuotient(y,levels[k+1].removed,YES):y,levels[k].removed,NO);
+            id part=TensorScale(@[@"min",q,@(levels[k].extent)],points);
+            below=[below isEqual:@0]?part:TensorSum(@[part,@[@"select",@[@"lt",q,@(levels[k].extent)],below,@0]]);
+            points*=levels[k].extent;
+        }
+        if(origin>begin)below=@[@"select",@[@"lt",@"i",@(origin)],@0,below];
+        id other=TensorSum(@[@"i",TensorScale(below,-1)]);
+        classes=@[@"select",inside.count==1?inside[0]:[@[@"and"] arrayByAddingObjectsFromArray:inside],matched,other];
+    }
+    const NSInteger total=(NSInteger)count-(NSInteger)B.count;
+    id index=first?TensorSubstitute(classes,TensorSum(@[@"i",@(begin)])):classes;
+    return @[[MetalTensorLayout shape:@[@(total)] strides:@[@1] offset:0 maps:@{} indices:nil],
+        TensorWritten(@[@(extent)],index,0,total-1)];
+}
 - (MetalTensorLayout *)intersection:(MetalTensorLayout *)other {
     isl_ctx *ctx=isl_ctx_alloc();
     isl_set *a=isl_map_range(MeshIndexRelation(ctx,self)),*b=isl_map_range(MeshIndexRelation(ctx,other));
@@ -1571,6 +1745,17 @@ static NSString *TensorStorageDeclaration(MetalTensorLayout *physical,MetalTenso
 - (MetalTensorLayout *)shaped:(NSArray<NSNumber *> *)shape coordinates:(NSArray *)coordinates {
     NSParameterAssert(coordinates.count==_indexShape.count);
     const NSUInteger count=TensorCount(shape);NSMutableArray *values=[NSMutableArray array],*standard=[NSMutableArray array];
+    /* piecewise coordinates (a composition through a written quotient, an isl emission's selects) that are one strided
+       function: its strides read back and proved at every position (TensorProbed), before any normalization. Added by
+       the layout algebra session: a units-first h's views composed with their union's written map spent placement's
+       declaration in normalizing the composite through isl (MeshIndexExpression of nested selects, 2026-11-01), where
+       the composite is the view's own strides in the joint domain. What must stay: the same function. */
+    BOOL piecewise=NO;for(id value in coordinates)piecewise|=TensorHasGeneral(value);
+    if(piecewise&&count>1) {
+        MetalTensorLayout *raw=[self withShape:shape offset:_offset];raw->_count=count;
+        [raw->_coordinates release];raw->_coordinates=[coordinates copy];
+        MetalTensorLayout *strided=TensorProbed(raw);if(strided)return strided;
+    }
     for(id value in coordinates)[values addObject:TensorNormalize(value,count)];
     for(id value in TensorDigits(_indexShape))[standard addObject:TensorNormalize(value,count)];
     if(count==TensorCount(_indexShape)&&[values isEqual:standard]) {

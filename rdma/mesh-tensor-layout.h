@@ -138,6 +138,20 @@ FOUNDATION_EXPORT NSArray<MetalTensorLayout *> *MetalTensorAssignments(NSUIntege
 FOUNDATION_EXPORT NSArray<MetalTensorLayout *> *MetalTensorIdentify(NSUInteger count,
     MetalTensorLayout *source, MetalTensorLayout *target);
 
+// The same function as a factored strided layout (index axes and their strides, no maps), its axes probed with
+// integers and the equality proved by isl; nil where it has none. A factored layout without maps is its own.
+FOUNDATION_EXPORT MetalTensorLayout * _Nullable MetalTensorFactored(MetalTensorLayout *layout);
+// The quotient of ordinals [0, count) identifying each removed(x) + shift with kept(x) (the two views of one value),
+// written in closed form: @[the compact domain, the classes of ordinals [first, first + extent) as a layout of that
+// extent]. nil unless every kept value lies below every removed position and removed is a factored injection with
+// positive strides (kept may repeat). Classes follow their least ordinals, as MeshIndexUnion's and MetalTensorIdentify's.
+FOUNDATION_EXPORT NSArray<MetalTensorLayout *> * _Nullable MetalTensorPairQuotient(NSUInteger count,
+    MetalTensorLayout *kept, MetalTensorLayout *removed, NSInteger shift, NSUInteger first, NSUInteger extent);
+// MeshIndexUnion's three results at once, the joint domain and the source and target roots' maps into it, from one
+// quotient.
+FOUNDATION_EXPORT NSArray<MetalTensorLayout *> *MetalTensorUnite(MetalTensorLayout *sourceRoot,
+    MetalTensorLayout *targetRoot, MetalTensorLayout *source, MetalTensorLayout *target);
+
 // The domain maps concatenated storage ordinals to logical positions; selection
 // maps requested ordinals to those positions. Preparation unites physical cuts
 // from every participant before requesting direct bindings. Execution never

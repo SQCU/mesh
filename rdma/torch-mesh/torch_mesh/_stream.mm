@@ -1369,9 +1369,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def_static("unite",[](const TensorLayout &sourceRoot,const TensorLayout &targetRoot,
         const TensorLayout &source,const TensorLayout &target) {
       @try {
-        return std::make_tuple(TensorLayout(MeshIndexUnion(sourceRoot.value,targetRoot.value,source.value,target.value,nil,YES)),
-          TensorLayout(MeshIndexUnion(sourceRoot.value,targetRoot.value,source.value,target.value,sourceRoot.value,YES)),
-          TensorLayout(MeshIndexUnion(sourceRoot.value,targetRoot.value,source.value,target.value,targetRoot.value,NO)));
+        // the three from one quotient (mesh-tensor-layout.h MetalTensorUnite), where each was its own MeshIndexUnion
+        NSArray *united=MetalTensorUnite(sourceRoot.value,targetRoot.value,source.value,target.value);
+        return std::make_tuple(TensorLayout(united[0]),TensorLayout(united[1]),TensorLayout(united[2]));
       } @catch(NSException *error){throw pybind11::value_error(error.reason.UTF8String);}
     }, pybind11::call_guard<Drained>())
     .def_static("runs",[](const std::vector<std::vector<NSInteger>> &runs){
