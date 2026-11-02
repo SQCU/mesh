@@ -193,5 +193,18 @@
   "group": "progress-words",
   "replacement": "specialization at final lowering: each cell's completion lands at its compiled word position in the composed map and each consumer's threshold is a compiled constant; no run-time prefix choice",
   "note": "emitted by metal-page-effects.m:1070-1071 and nccl-mesh-kernels.h:62; the CPU twin is mesh-publication.h:62 (outside this slice)."
+ },
+ {
+  "file": "rdma/mesh-graph.c",
+  "line": 815,
+  "lines": "815-824; mesh-graph.h:205-208",
+  "function": "mesh_graph_settle",
+  "scope": "chooser",
+  "violation": "chooser has access",
+  "abstraction": "void **items handed to take(consumer, item): in its one caller lease addresses (nccl-mesh.c:1702 leases_reap, a->returning)",
+  "handles": "Gives back every returned lease whose reads are done, again while a return frees another (a composed view unpinning its owners).",
+  "group": "lease-lifetime",
+  "replacement": "lifetime allocation keyed by page identity: items are lease or page-table ordinals (uint32_t), never addresses",
+  "note": "the graph module never dereferences the items; the pointer type is the interface's, which lets the lease ledger key reuse by address."
  }
 ]
