@@ -732,6 +732,9 @@ struct attach {
      leases returned and not yet given back (leases_reap) */
   uint32_t *lease_of;
   size_t returned;
+  /* the returned leases' addresses, so a reap visits those alone (leases_reap) */
+  void **returning;
+  size_t returning_room;
   uint64_t comms;
   /* whether the library made a Metal buffer over the region (a lease's, lease_buffer; a holding's counts', channel_buffer):
      the caller's GPU work, and its residency set, may hold those pages after the buffer is released, so such an attach
@@ -806,7 +809,7 @@ static void attach_settle(void) {
   struct attach *a = attaches;
   if (!a || a->count || a->comms || atomic_load(&a->wrapped) || !attach_expired(a)) return;
   mesh_detach(&a->context);
-  free(a->leases); free(a->lease_of); free(a->composed);
+  free(a->leases); free(a->lease_of); free(a->composed); free(a->returning);
   free(a);
   attaches = NULL;
 }
@@ -1685,13 +1688,20 @@ static int lease_give(struct attach *a, size_t i) {
   if (i < a->count) lease_mark(a, i, (uint32_t)i + 1);
   return 1;
 }
-/* every returned lease whose reads are done given back (a lease returned with reads outstanding waits here) */
+/* every returned lease whose reads are done given back (a lease returned with reads outstanding waits here), the
+   returned ones alone visited (`returning`), again while one is given back (a composed view's return unpins its owners).
+   Changed by the LSTM demonstration session: each reap scanned every lease, and a lease returned with reads outstanding
+   made every allocation scan them all, allocations x leases (mem_alloc's leases_reap, the 64-step LSTM's source
+   generation, 2026-11-01). What must stay: each returned lease given back once its reads are done and none is pinned. */
 static void leases_reap(struct attach *a) {
-  size_t before;
-  do {
-    before=a->count;
-    for (size_t i = 0; a->returned && i < a->count;) i += !lease_give(a, i);
-  } while(a->returned&&a->count!=before);
+  for (int given = 1; given && a->returned;) {
+    given = 0;
+    for (size_t k = 0; k < a->returned;) {
+      struct lease *l = lease_at(a->returning[k], NULL);
+      if (l && lease_give(a, (size_t)(l - a->leases))) { a->returning[k] = a->returning[a->returned]; given = 1; }
+      else k++;
+    }
+  }
 }
 
 /* a lease of the region: its whole pages covering `size` (one page for 0), already registered on every device of the
@@ -1746,10 +1756,12 @@ ncclResult_t ncclMemFree(void *ptr) {
   struct attach *a = NULL;
   struct lease *l = lease_at(ptr, &a);
   const int found = l && l->address == ptr && !l->returned;
-  if (found) { l->returned = 1; a->returned++; leases_reap(a); }
+  const int recorded = found && !grow((void **)&a->returning, &a->returning_room, a->returned, sizeof *a->returning);
+  if (recorded) { l->returned = 1; a->returning[a->returned++] = ptr; leases_reap(a); }
   attach_settle();
   pthread_mutex_unlock(&attach_lock);
-  return found ? ncclSuccess : fail(ncclInvalidArgument, "ncclMemFree of %p: no live lease of this process", ptr);
+  return recorded ? ncclSuccess : found ? fail(ncclSystemError, "ncclMemFree of %p: out of memory recording its return", ptr)
+                 : fail(ncclInvalidArgument, "ncclMemFree of %p: no live lease of this process", ptr);
 }
 
 /* the lease holding ptr and its attach (*held, where held is not NULL), under attach_lock (NULL: none) */

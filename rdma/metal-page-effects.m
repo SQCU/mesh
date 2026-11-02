@@ -860,7 +860,7 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
     NSMutableArray *offsetTables;
     NSMutableData *reaches;
     NSUInteger composedOffset;
-    NSMutableDictionary<NSArray *,NSNumber *> *fieldIndex;
+    NSMutableDictionary<NSString *,NSNumber *> *fieldIndex;
 }
 - (NSUInteger)add:(id<MTLBuffer>)buffer offset:(NSUInteger)offset bytes:(NSUInteger)bytes access:(uint32_t)access;
 - (id<MTLBuffer>)compose;
@@ -874,8 +874,8 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
 - (NSUInteger)add:(id<MTLBuffer>)buffer offset:(NSUInteger)offset bytes:(NSUInteger)bytes access:(uint32_t)access {
     const struct MetalReach reach={buffer,offset,bytes,access,-1};[reaches appendBytes:&reach length:sizeof reach];
     /* a field already added, found by its buffer, offset and bytes (each field was compared with every one before it,
-       fields squared a command) */
-    NSArray *key=@[[NSValue valueWithPointer:(__bridge const void *)buffer],@(offset),@(bytes)];
+       fields squared a command); the key is text, whose hash is its content (an NSArray's is its count) */
+    NSString *key=[NSString stringWithFormat:@"%p %lu %lu",(__bridge const void *)buffer,(unsigned long)offset,(unsigned long)bytes];
     NSNumber *prior=fieldIndex[key];if(prior)return prior.unsignedIntegerValue;
     fieldIndex[key]=@(fields.count);
     [fields addObject:@[buffer,@(offset),@(bytes)]];[owners addObject:buffer];return fields.count-1;
