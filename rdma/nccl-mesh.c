@@ -1797,11 +1797,18 @@ static struct lease *lease_at(const void *ptr, struct attach **held) {
 
 /* Preparation resolves a local view to its bridge page. A descriptor table
    explicitly requests linear backing before adding any table-relative offset. */
+/* Changed by the LSTM demonstration session (2026-11-02): a word of the region's own records lies in no lease, e.g. a
+   channel's `landed`, which landing observations name as {channel->buffer, channel->landed}. Its offset is its place in
+   the region's own mapping. lease_at's NULL was read through, and bandwidth's bind faulted in ncclMeshCommSourceInputs
+   on a SEND whose source landed earlier (metal-microbench output_data/lstm-2026-11-02/d-main3, m5ult2). What must
+   stay: a lease's page offset where the address is in one. The joint change of design/page-maps-2026-11-02.md takes
+   this pointer-to-offset step out of chooser code. */
 static uint64_t lease_offset(const void *ptr) {
   pthread_mutex_lock(&attach_lock);
   struct attach *a = NULL;
   const struct lease *l = lease_at(ptr, &a);
-  const uint64_t offset = lease_page_offset(a,l,(uintptr_t)ptr-(uintptr_t)l->address);
+  const uint64_t offset = l ? lease_page_offset(a,l,(uintptr_t)ptr-(uintptr_t)l->address)
+                            : (uint64_t)((const char *)ptr - (const char *)attaches->context.M);
   pthread_mutex_unlock(&attach_lock);
   return offset;
 }
