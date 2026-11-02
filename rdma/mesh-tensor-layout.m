@@ -381,9 +381,16 @@ static struct TensorPiece TensorExpressionPiece(id expression,NSUInteger at,NSUI
         // first two positions fix, MeshIndexRunOf's answer without three isl contexts a run. Changed by the LSTM
         // demonstration session: a piecewise coordinate's spans called it once a run, and one LSTM step's realization
         // spent 56 s there on m5ult2 (2026-11-01, all of a 20 s native sample under reaches:).
-        NSMutableData *compiled=[NSMutableData data];TensorCompile(expression,compiled);
-        const struct TensorProgramStep *program=compiled.bytes;const NSUInteger length=compiled.length/sizeof *program;
-        NSMutableData *scratch=[NSMutableData dataWithLength:(length+1)*sizeof(NSInteger)];NSInteger *stack=scratch.mutableBytes;
+        // A layout's spans ask this once a run of the same coordinate (16384 runs of two positions in the LSTM's
+        // realization): the expression is compiled once and kept, with the expression itself held so its address
+        // names no other while it is kept, one a thread.
+        static _Thread_local id held=nil;static _Thread_local NSData *kept=nil;
+        if(held!=expression) {
+            NSMutableData *made=[NSMutableData data];TensorCompile(expression,made);
+            [held release];[kept release];held=[expression retain];kept=[made retain];
+        }
+        const struct TensorProgramStep *program=kept.bytes;const NSUInteger length=kept.length/sizeof *program;
+        NSInteger stack[length+1];
         const NSInteger value=TensorRun(program,length,(NSInteger)at,stack);
         const NSInteger step=end>at+1?TensorRun(program,length,(NSInteger)at+1,stack)-value:0;
         NSUInteger stop=at+1;
