@@ -157,17 +157,19 @@ def group_transfers(group, ahead, calls):
     return int(which[0]), records, buffers
 
 
-def _slots(value):
-    """One ordinary page binding and its explicit occurrence coordinates. A value names its space and the byte offset
-    of its first element there (design/page-maps-2026-11-02.md), never a buffer."""
+def _operand(value):
+    """One call operand (nccl.h ncclMeshOperand): a value names its space and the byte offset of its first element there
+    (design/page-maps-2026-11-02.md), a tensor its page binding. Neither names a slot: an occurrence's pages are the
+    run's solve's."""
     from .operand import TensorValue
     if isinstance(value, TensorValue):
         first = value.layout.index(0) * value.dtype.itemsize if value.layout.count else 0
-        return {'buffer': (ffi.NULL, first), 'instances': 1, 'stride': 0, 'invocation': 0,
-                'space': space_handle(value.space)}
+        return {'buffer': (ffi.NULL, first), 'space': space_handle(value.space)}
     record = value if isinstance(value, dict) else {'tensor': value}
-    return {'buffer': _binding(record.get('tensor')), 'instances': record.get('instances', 1),
-            'stride': record.get('stride', 0), 'invocation': record.get('invocation', 0)}
+    if {'instances', 'stride', 'invocation'} & set(record):
+        raise ValueError('a binding slot (instances, stride, invocation) is no operand: each occurrence is a value the '
+                         'run\'s solve places (design/page-maps-2026-11-02.md, integration step 3)')
+    return {'buffer': _binding(record.get('tensor'))}
 
 
 class ProcessGroupMesh(dist.ProcessGroup):
@@ -356,15 +358,15 @@ class ProcessGroupMesh(dist.ProcessGroup):
                     geometries.append(dict(element_bits=bits, rank=len(shape), shape=arrays[0], strides=arrays[1],
                         offset=offset, runs=arrays[2] if mapped else ffi.NULL, nruns=len(runs) // 2,
                         frame_stride=frame[0] if frame else 0))
-            bindings = [_slots(value) for value in local]
-            slots = ffi.new('ncclMeshBufferSlots[2]', bindings) if c.bindings is not None or c.views is not None else ffi.NULL
+            bindings = [_operand(value) for value in local]
+            slots = ffi.new('ncclMeshOperand[2]', bindings) if c.bindings is not None or c.views is not None else ffi.NULL
             views = ffi.new('ncclMeshLayout[2]', geometries) if c.views is not None else ffi.NULL
             kept.extend((slots, views))
             sources, source_held = assignment.source_bindings(c.sources)
             kept.extend(source_held)
             coverage = [dict({name: row[name] for name in
                 ('transaction', 'frame', 'first', 'bytes', 'cut', 'cuts', 'before')},
-                active=_slots(row['active']), expected=_slots(row['expected'])) for row in c.coverage]
+                active=_operand(row['active']), expected=_operand(row['expected'])) for row in c.coverage]
             held_coverage = ffi.new('ncclMeshCoverage[]', coverage) if coverage else ffi.NULL
             kept.append(held_coverage)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,

@@ -2333,7 +2333,7 @@ struct call {
   uint64_t *segments, *matrix;
   uint64_t *contributors, *recipients;
   int declared_bindings;
-  ncclMeshBufferSlots bindings[2];
+  ncclMeshOperand bindings[2];
   ncclMeshCoverage *coverage;
   size_t coverage_count;
   /* Configuration owns masks. Issued calls retain only their local roles and
@@ -5865,9 +5865,9 @@ static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
   size_t phase=0;u->source_bindings[phase++]=u->instance;
   for(size_t i=0;i<n;i++)for(size_t k=0;k<list[i].coverage_count;k++) {
     const ncclMeshCoverage *coverage=list[i].coverage+k;
-    const ncclMeshBufferSlots slots[]={coverage->active,coverage->expected};
-    for(size_t side=0;side<2;side++)u->source_bindings[phase++]=
-      ncclMeshInvocationIndex(list[i].invocation,slots[side].invocation,slots[side].instances);
+    (void)coverage;
+    /* a coverage operand names no slot: its pages are its occurrence's own (ncclMeshOperand) */
+    for(size_t side=0;side<2;side++)u->source_bindings[phase++]=0;
   }
   program->declaration.binding=u->source_bindings;program->declaration.bindings=bindings;
   program->cpu_compiler=comm->cpu_compiler;program->cpu_resources=comm->cpu_resources;
@@ -6039,10 +6039,10 @@ struct coverage_span {
   ncclMeshPageCoverage values;
   void *demand;
 };
-static ncclMeshBuffer coverage_slot(ncclMeshBufferSlots slots,uint64_t invocation) {
-  ncclMeshBuffer value=slots.buffer;
-  value.offset+=ncclMeshInvocationIndex(invocation,slots.invocation,slots.instances)*slots.stride;
-  return value;
+/* a coverage operand's where: its buffer, or its space's bytes, bound to this occurrence's pages by now */
+static struct where coverage_operand(ncclMeshOperand operand) {
+  const struct where w = {operand.buffer.buffer, operand.buffer.offset, operand.space};
+  return w.space ? (struct where){NULL, (size_t)address_of(w), NULL} : w;
 }
 static ncclResult_t source_coverage(struct issue *u) {
   struct ncclComm *comm=u->group->comm;
@@ -6072,13 +6072,11 @@ static ncclResult_t source_coverage(struct issue *u) {
         result=fail(ncclInternalError,"declared coverage was not retained by packetization");break;
       }
       if(grow(&selected,&room,count,sizeof *selected)){result=fail(ncclSystemError,"allocating coverage projections");break;}
-      if(!named((struct where){b->active.buffer.buffer,b->active.buffer.offset, NULL})||
-         !named((struct where){b->expected.buffer.buffer,b->expected.buffer.offset, NULL})) {
+      if(!named(coverage_operand(b->active))||!named(coverage_operand(b->expected))) {
         result=fail(ncclInvalidArgument,"logical SEND %u requires its local active/count pages on rank %d",
           b->transaction,comm->rank);break;
       }
-      ncclMeshBuffer active=coverage_slot(b->active,c->invocation),expected=coverage_slot(b->expected,c->invocation);
-      struct where a={active.buffer,active.offset,NULL},e={expected.buffer,expected.offset,NULL};
+      struct where a=coverage_operand(b->active),e=coverage_operand(b->expected);
       result=as_metal(&a);if(!result)result=as_metal(&e);if(result)break;
       selected[count++]=(struct coverage_span){.transport=t,.first=start,.units=unit-start,.cut=b->cut,
         .before=u->source_calls[b->before],.values={{a.buffer,a.offset},{e.buffer,e.offset},b->cuts},
@@ -6484,12 +6482,6 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
   /* Explicit bindings determine every prepared operand generation. */
   if (d->bindings) {
     memcpy(c->bindings, d->bindings, sizeof c->bindings);
-    for (int j = 0; j < 2; j++) {
-      ncclMeshBufferSlots *b = c->bindings + j;
-      if (!b->stride) b->instances = 1;
-      if (b->instances && b->instances - 1 > (SIZE_MAX - b->buffer.offset) / (b->stride ? b->stride : 1))
-        return fail(ncclInvalidArgument, "collective binding slot extent overflows");
-    }
     c->send_at = (struct where){d->bindings[0].buffer.buffer, d->bindings[0].buffer.offset, d->bindings[0].space};
     c->recv_at = (struct where){d->bindings[1].buffer.buffer, d->bindings[1].buffer.offset, d->bindings[1].space};
     c->declared_bindings = 1;
@@ -6505,8 +6497,6 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
       ncclMeshCoverage *b=c->coverage+k;
       if(!b->bytes||b->first>SIZE_MAX-b->bytes||b->frame>=c->frames||b->cut>=b->cuts)
         return fail(ncclInvalidArgument,"coverage requires a finite interval in its active/count page domain");
-      if(!b->active.stride)b->active.instances=1;
-      if(!b->expected.stride)b->expected.instances=1;
     }
     qsort(c->coverage,c->coverage_count,sizeof *c->coverage,coverage_declaration_order);
     for(size_t k=1;k<c->coverage_count;k++) {
@@ -6848,8 +6838,7 @@ static ncclResult_t zoblimp(struct ncclComm *comm, struct compiled *x, uint64_t 
     if (c->write_binding) {
       c->send_at = c->write_binding->source; c->recv_at = c->write_binding->landing;
     } else {
-      c->send_at = shifted(c->send_at, ncclMeshInvocationIndex(instance, c->bindings[0].invocation, c->bindings[0].instances) * c->bindings[0].stride);
-      c->recv_at = shifted(c->recv_at, ncclMeshInvocationIndex(instance, c->bindings[1].invocation, c->bindings[1].instances) * c->bindings[1].stride);
+      /* its operands as declared: an occurrence's pages are its bound spaces', never a slot of its index */
     }
     result = as_metal(&c->send_at);
     if (!result) result = as_metal(&c->recv_at);
@@ -6883,7 +6872,7 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
     if (c->frames != frames)
       return fail(ncclInvalidArgument, "a group's calls share one frame count");
     for (int b = 0; b < (c->write_binding ? 1 : 2); b++) {
-      const uint64_t slots = c->write_binding ? c->write_binding->occurrences : c->bindings[b].instances;
+      const uint64_t slots = c->write_binding ? c->write_binding->occurrences : 1;
       const uint64_t a = slots ? slots : invocations;
       const uint64_t d = mesh_span_gcd(period, a);
       if (!a) return ncclSuccess;
@@ -7791,15 +7780,15 @@ static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,u
   const int source=c->root,destination=c->target-1,endpoint=c->comm->rank==source?0:1;
   const int relay=c->comm->rank!=source&&c->comm->rank!=destination;
   const struct mesh_paths *paths=call_paths(c,0)+(size_t)source*c->comm->nranks+destination;
-  ncclMeshBufferSlots slots=d->bindings[endpoint];
+  const ncclMeshOperand slots=d->bindings[endpoint];
   struct where binding={slots.buffer.buffer,slots.buffer.offset,slots.space};
   void *lease=NULL;
   const uint64_t bytes=c->count;
   const int64_t dense=1;
   ncclMeshLayout plain={.element_bits=8,.rank=1,.shape=&bytes,.strides=&dense,.frame_stride=(int64_t)bytes};
   const ncclMeshLayout *view=d->views?d->views+endpoint:&plain;
-  struct mesh_write_layout local={.tile_bytes=c->tile_bytes,.instances=slots.instances,
-    .instance_stride=slots.stride,.invocations=invocations,.invocation=slots.invocation};
+  struct mesh_write_layout local={.tile_bytes=c->tile_bytes,.instances=1,.instance_stride=0,.invocations=invocations,
+    .invocation=0};
   ncclResult_t result=ncclSuccess;
   if (relay&&!binding.buffer&&!binding.offset) {
     view=&plain;
@@ -7808,10 +7797,10 @@ static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,u
       size_t frame_bytes=0,last=0,total=0;
       if (__builtin_mul_overflow((size_t)bytes,(size_t)c->frames,&frame_bytes))
         result=fail(ncclInvalidArgument,"relay frame extent");
-      if (!slots.stride) local.instance_stride=frame_bytes;
-      /* An absent slot declaration means distinct storage over the supplied
-         finite invocation domain. Explicit cyclic storage remains explicit. */
-      if (!slots.stride&&!slots.instances&&!slots.invocation) local.instances=0;
+      /* the relay's own storage, distinct for each invocation of the finite domain: the library's renaming in a leaf,
+         until its relay buffers are the run's solve's items (design/page-maps-2026-11-02.md, integration step 4) */
+      local.instance_stride=frame_bytes;
+      local.instances=0;
       if (!result && (write_slot_extent(local,&last) || __builtin_mul_overflow(last,local.instance_stride,&total) ||
           __builtin_add_overflow(total,frame_bytes,&total))) result=fail(ncclInvalidArgument,"relay invocation extent");
       if (!result) result=mem_alloc(&lease,total,MESH_BACKING_PAGES);

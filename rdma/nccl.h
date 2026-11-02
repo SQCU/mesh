@@ -117,7 +117,7 @@
    ended, the residency set that holds argument records ended): no Metal buffer is made at a call.  A group's host
    bookkeeping (its schedules, its steps' state, its record in flight) and its entries' span tables (a lease of them)
    are its definition's too.  A group of collectives' are laid and placed at its declaration for its bindings, one for
-   each generation and each slot of them (ncclMeshBufferSlots), and a group binds only its entries on the channels:
+   each generation of them, and a group binds only its entries on the channels:
    the buffers its calls name are not read.  A prepared WRITE's alone are laid as its plan is prepared, an occurrence
    each; a declared group of WRITEs' at each of its groups, for the plans its calls name (the old tables let go once
    the bridge's reads of them end).  A result is made in recvbuff (a reduce-scatter's own segment too: no compiled piece spans two
@@ -281,7 +281,7 @@ typedef struct {
   void *argumentTable;
   void *residencySet;
   uint32_t polls;
-  /* Each declared binding uses (invocation + displacement) % instances. */
+  /* the realized occurrence this stream records (ncclMeshCommLower's invocation) */
   size_t invocation;
 } ncclMeshStream;
 
@@ -767,9 +767,9 @@ typedef struct { double seconds; uint64_t order; } ncclMeshProduction;
 /* Preparation only. Map an explicit producer traversal onto the fitted duration
    of this group. Predictions order physical descriptors; they add no wait. */
 ncclResult_t ncclMeshProductionTimes(ncclMeshProduction* records, size_t count, double seconds);
-/* Preparation arithmetic shared by numerical and collective bindings. A
-   positive instance count names cyclic storage; zero names linear storage.
-   Displacement belongs to a use of the pages, independently of its byte origin. */
+/* A slot index: (invocation + displacement) mod instances, or linear where instances is 0. No declared operand carries
+   one (design/page-maps-2026-11-02.md, integration step 3): its last readers are the WRITE relay's own per-invocation
+   storage (the solve's to place, step 4) and the Metal recording's operand slots, both to go. */
 static inline size_t ncclMeshInvocationIndex(uint64_t invocation, int64_t displacement, size_t instances) {
   __int128 index = (__int128)invocation + displacement;
   if (instances) {
@@ -778,17 +778,12 @@ static inline size_t ncclMeshInvocationIndex(uint64_t invocation, int64_t displa
   }
   return (size_t)index;
 }
-/* A prepared operand's page-backed local view and its storage slots. Zero
-   stride names one view. instances=0 uses the finite invocation domain; a
-   positive instances count declares cyclic storage. An
-   invocation i (ncclMeshStream invocation) binds the indexed slot * stride
-   bytes past buffer.offset; linear slots use i + invocation directly. The signed
-   displacement is independent of buffer.offset. A group is laid and placed for
-   every slot as it is declared, and its issue names none. */
-/* space: where non-NULL, the operand is that space's bytes from buffer.offset (design/page-maps-2026-11-02.md), and
-   buffer.buffer is unused. The space type is declared with its functions, below */
+/* A call operand (design/page-maps-2026-11-02.md): a page-backed buffer, or, where `space` is non-NULL, that space's
+   bytes from buffer.offset (buffer.buffer unused), bound to each occurrence's pages by the lowering before the
+   occurrence lowers (ncclMeshSpaceBind). It names no stride, instance count or invocation: an occurrence's pages are
+   the run's solve's, never a formula of its index. The space type is declared with its functions, below. */
 struct ncclMeshSpace;
-typedef struct { ncclMeshBuffer buffer; size_t stride, instances; int64_t invocation; struct ncclMeshSpace *space; } ncclMeshBufferSlots;
+typedef struct { ncclMeshBuffer buffer; struct ncclMeshSpace *space; } ncclMeshOperand;
 /* Preparation-only value generations for the explicit invocation interval.
    The frontend retains the values through source preparation. Unlike page
    slots, generation identity never wraps modulo a buffer's instance count. */
@@ -800,7 +795,7 @@ typedef struct {
    and packetization. Transactions follow source-rank order, then logical SEND
    order; a WRITE has transaction 0. first/bytes are relative to that SEND.
    Every routed fragment retains this identity, including relay fragments.
-   active/expected are local page operands with ordinary occurrence slots;
+   active/expected are local page operands;
    cut selects their shared fixed-width domain. before names an original call
    boundary within this declared group, not a physical command ordinal.
    Each rank supplies the same mask meaning for matched fragments, using its
@@ -811,7 +806,7 @@ typedef struct {
 typedef struct {
   uint32_t transaction, frame;
   size_t first, bytes, cut, cuts, before;
-  ncclMeshBufferSlots active, expected;
+  ncclMeshOperand active, expected;
   ncclMeshDemandBindings demands;
 } ncclMeshCoverage;
 /* Exact source declarations and their selected occurrence/work relations.
@@ -893,13 +888,13 @@ typedef struct {
      writes to its root; ReduceScatter owners have nonzero counts. */
   const uint64_t* contributors;
   const uint64_t* recipients;
-  /* Actual source and destination page bindings, including their slot layouts.
+  /* Actual source and destination page bindings.
      Supply on every rank to prepare execution; {NULL,0} is a rank's absent
      operand. A declaration without bindings describes geometry for planning
      queries only. Its transfers cannot be recorded until it is bound.
      Preparation joins endpoint and relay backing cuts in common byte domains,
-     across all declared slots, without splitting numerical rows. */
-  const ncclMeshBufferSlots* bindings;
+     without splitting numerical rows. */
+  const ncclMeshOperand* bindings;
   /* Source and result geometry, in bindings order. NULL means contiguous.
      frames (0 or 1: one) repeats the same logical transfer; each view supplies
      its frame stride. max_packet is the declared physical packet bound. */
@@ -964,7 +959,7 @@ ncclResult_t ncclMeshCommCompiler(ncclComm_t comm,const char* compiler,const cha
    predecessor snapshots. The callback consumes typed source/landing effects;
    no backend encoder, argument table or executable is created here. */
 /* design/page-maps-2026-11-02.md, "The collective lowering in two phases": a value's space as the library sees it.
-   A call operand names a space and a byte offset in it (ncclMeshBufferSlots' space), never a buffer. Before an
+   A call operand names a space and a byte offset in it (ncclMeshOperand's space), never a buffer. Before an
    occurrence is lowered, the run's lowering binds each space it uses to that occurrence's pages: a lease's address
    and the byte offset of the space's first byte in it (the run's arena at the item's place, or a caller's own
    lease). Lowering then resolves the space's bytes as it resolved buffers. Binding is the lowering's call, the one
