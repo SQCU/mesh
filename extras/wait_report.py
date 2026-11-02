@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Waits, and what is shaped like them, in the kernel sources the page-effects compiler wrote around each numerical
 kernel (metal-page-effects.m MetalPageEffectsSource; torch_mesh/page_effects.py _source_record writes each distinct one
-to MESH_PREPARE_RECORD's directory as sources-<pid>/NNN-<kind>-<function>.metal). It prints a description for people
-revising that compiler; it judges, rejects and changes nothing.
+to MESH_PREPARE_RECORD's directory as sources-<pid>/NNN-<kind>-<function>.metal), beside each dispatch's GPU time
+(metal-recording.m MetalScheduleCompletedRecord: parts-<pid>.jsonl). It prints a description for people revising that
+compiler; it judges, rejects and changes nothing.
 
     python3 extras/wait_report.py DIRECTORY... [--member NAME] [--no-compile]
+    python3 extras/wait_report.py --diff BEFORE AFTER [--member NAME]
 
 A DIRECTORY is a run's (each <member>-prepare/ beneath it) or one member's. For each member, each source:
   - its bytes; the mesh_step_observe calls of its live text (the text through the Metal preprocessor, so that only the
@@ -18,14 +20,21 @@ A DIRECTORY is a run's (each <member>-prepare/ beneath it) or one member's. For 
   - its compiled form: the source compiled after the library's prelude (`xcrun metal -S`, AIR as LLVM text), and for
     its kernel, as if every call were inlined: instructions, spin loops (a loop whose exit depends on a coherent or
     atomic load of an address the loop does not change), fences, barriers, coherent and atomic loads, atomic updates and
-    integer divisions, those in loops counted apart.
-The prelude is read from this checkout, as layout.pipeline assembles it (torch_mesh/native.py command_records): the
-record holds no layout declarations, so every binding compiles as the identity layout (LAYOUT below).
+    integer divisions, those in loops counted apart;
+  - its stamped dispatches: how many, their median and their share of the member's GPU part time (which dispatch ran
+    which source is inferred from command order: align);
+then the occurrences of one declaration (its text less its waits) whose bytes or waits grow with their index, the
+step's dispatches by place (before its repetition, each place of a tick) with their sources, waits and times, the
+step's link dispatches (report_links: those recorded later than their earliest order, and the waits on their words),
+and a line a member. --diff: per member and function the change in sources, bytes, waits a step and GPU time, and
+each place's. The prelude is read from this checkout, as layout.pipeline assembles it (torch_mesh/native.py
+command_records): the record holds no layout declarations, so every binding compiles as the identity layout (LAYOUT).
 """
 import argparse
 import codecs
 import collections
 import json
+import math
 import os
 import re
 import statistics
@@ -241,6 +250,7 @@ def source_counts(text, function):
         out['guarded'] += sum('mesh_effect_group' in a[1] for a in waits)
         named = collections.Counter(re.sub(r'\s+', '', re.sub(r'\[[^\[\]]*\]$', '', a[1])) for a in waits)
         tables += sum(1 for n in named.values() if n > 1)
+        out.update({f'table {n}': 1 for n in map(int, re.findall(r'mesh_effects\s*\+\s*(\d+)ul', ' '.join(named)))})
     out['words'], out['tables'], out['prologues'] = len(words), tables, len(prologues)
     out['most'] = max(per_word.values(), default=0)
     entry = re.search(rf'\bkernel\s+void\s+{re.escape(function)}\s*\(', plain)
@@ -671,6 +681,94 @@ def report_dispatches(record):
                   f"{100 * sum(e['durations']) / sum(spans):5.1f}%")
 
 
+def report_links(record):
+    """The step's link dispatches (nccl-mesh.c zinth: per channel with landings, its landing pages declared written,
+    then metal_open_gate's publish, recorded at the collective's own place), each run of them beside the first later
+    kernel that waits. The record holds no page reaches, so a command is taken to touch the landing pages where it
+    observes a word that kernel observes (words named by their place in each command's metadata), and a kernel whose
+    source is not named as one that may. A run recorded after kernels that touch none of them could have been recorded
+    that much earlier: its receive posted before them, not after."""
+    found = main_pattern(record)
+    if not found:
+        return
+    _, parts, _ = found
+    # a word by its offset in its page: a composed field lies at its page's place in the metadata plus its own offset in
+    # that page (metal-page-effects.m MetalPageFields compose), the page width the one that divides every threshold
+    # table's place (each table a whole buffer of its own, so at a page's start)
+    width = math.gcd(*(int(k.split()[1]) for s in record.sources for k in s.counts if k.startswith('table ')))
+
+    def words(s):
+        return {int(n) % width if width else int(n) for w in s.per_word for n in re.findall(r'(\d+)ul', w)}
+
+    runs = {}
+    for q in parts:
+        stamps = record.parts[q].get('stamped') or []
+        _, first, length = record.shapes[q]
+
+        def at(i):
+            return ('tick ' if length and i >= first else 'before ') + str((i - first) % length if length and i >= first else i)
+
+        def source(k):
+            return record.assigned.get((q, k), False)  # False: a collective dispatch, None: a kernel not named
+
+        i = 0
+        while i < len(stamps):
+            if source(i) is not False:
+                i += 1
+                continue
+            j = i
+            while j < len(stamps) and source(j) is False:
+                j += 1
+            waiting = next((k for k in range(j, len(stamps)) if source(k) and source(k).counts['waits']), None)
+            if waiting is None:
+                i = j
+                continue
+            landing = words(source(waiting))
+            following = next((k for k in range(j, len(stamps)) if source(k) is False), len(stamps))
+            later = [k for k in range(waiting + 1, following) if source(k) and landing & words(source(k))]
+            toucher = next((k for k in range(i - 1, -1, -1) if source(k) is None or
+                            (source(k) and landing & words(source(k)))), None)
+            between = [k for k in range(0 if toucher is None else toucher + 1, i) if source(k) is not False]
+            entry = runs.setdefault((at(i), at(waiting), None if toucher is None else at(toucher)), dict(
+                names=[stamps[k][0] for k in range(i, j)], waiting=stamps[waiting][0], between=between and [
+                    (at(k), stamps[k][0], source(k)) for k in between], toucher=None if toucher is None else
+                stamps[toucher][0], gaps=[], spent=[], waited=[], sources=[], touchers=[], n=0, later={}))
+            for k in later:
+                held = entry['later'].setdefault(at(k), [stamps[k][0], [], []])
+                held[1].append(source(k))
+                held[2].append(stamps[k][2])
+            entry['n'] += 1
+            entry['sources'].append(source(waiting))
+            entry['waited'].append(stamps[waiting][2])
+            entry['spent'].append(sum(stamps[k][2] for k in between))
+            if toucher is not None:
+                entry['touchers'].append(source(toucher))
+                entry['gaps'].append(stamps[i][1] - stamps[toucher][1] - stamps[toucher][2])
+            i = j
+    if not runs:
+        return
+    print(f'   link dispatches before a kernel that waits (a command touches the landing pages where it observes a word '
+          f'that kernel observes, a word named by its offset in its {width}-byte page):')
+    for (place, waiting_place, toucher_place), e in runs.items():
+        line = (f"     {place} {' '.join(e['names'])} -> {waiting_place} {e['waiting']} ({named(e['sources'])}, "
+                f"{spread(s.counts['waits'] for s in e['sources'])} waits, median {median(e['waited']):.1f} us), "
+                f"{e['n']} time(s): ")
+        line += ('no earlier kernel of the step touches them' if toucher_place is None else
+                 f"last touched by {toucher_place} {e['toucher']} ({named(e['touchers'])})")
+        if e['between']:
+            line += (f"; recorded {len(e['between'])} kernel dispatch(es) later than its earliest order ("
+                     + ', '.join(f"{p} {n} {named([s])}" for p, n, s in e['between'])
+                     + f": median {median(e['spent']):.1f} us of GPU time)")
+        else:
+            line += '; recorded at its earliest order'
+        if e['gaps']:
+            line += f"; the toucher's end to the link's start: median {median(e['gaps']):.1f} us"
+        if e['later']:
+            line += ('; later waits on its words before the next link: ' + ', '.join(
+                f"{p} {n} ({named(s)}, median {median(d):.1f} us)" for p, (n, s, d) in e['later'].items()))
+        print(line)
+
+
 def step(record):
     """Per part of the step (main_pattern): its GPU us, waits and extra waits run, kernel dispatches whose source is not
     named, and per function its GPU us; with the step's places."""
@@ -791,6 +889,7 @@ def main():
         for record in found:
             report_sources(record)
             report_dispatches(record)
+            report_links(record)
         report_summary(found)
 
 
