@@ -1987,12 +1987,142 @@ NSArray<MetalTensorLayout *> *MetalTensorPairQuotient(NSUInteger count,MetalTens
         [NSException raise:NSInvalidArgumentException format:@"typed element components are not adjacent and aligned in their declared storage"];
     return result;
 }
+/* A rebase through a declaration that is a factored injection, its inverse written down: a view position p is the
+   declaration's at flat index x(p), its digits read at the declaration's own strides (sorted by magnitude, an axis read
+   backward from its last position, as MetalTensorPairQuotient's lattice) and weighted by their flat weights. x is
+   proved at every view position by integers (x in range and the declaration's position at x the view's), then composed
+   into the placement, its strides read back exactly where it has them (TensorProbed). nil where the declaration is not
+   such an injection or a view position is not one of its positions. Added by the layout algebra session: the LSTM's
+   placement rebased each layer's h, at region positions, through the binding's declaration with the layers 1.6M
+   elements apart, and isl's lexmax inverse took 0.7 s a rank (d-rec3) and outlived the 8 s bound (d-r3, 2026-11-02);
+   this is integer arithmetic on strides and offsets, whatever their size. What must stay: the same layout. */
+static MetalTensorLayout *TensorInverseRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
+    if(view.maps.count||placed.maps.count)return nil;
+    declared=MetalTensorFactored(declared);if(!declared)return nil;
+    struct TensorInverseAxis { NSInteger stride,extent,weight; BOOL reversed; };
+    NSArray *weights=TensorStrides(declared.indexShape);NSMutableData *storage=[NSMutableData data];
+    NSInteger origin=declared.offset;
+    for(NSUInteger d=0;d<declared.indexShape.count;d++) {
+        struct TensorInverseAxis axis={[declared.strides[d] integerValue],[declared.indexShape[d] integerValue],
+            [weights[d] integerValue],NO};
+        if(axis.extent==1)continue;
+        if(!axis.stride)return nil;
+        if(axis.stride<0){origin+=axis.stride*(axis.extent-1);axis.stride=-axis.stride;axis.reversed=YES;}
+        [storage appendBytes:&axis length:sizeof axis];
+    }
+    struct TensorInverseAxis *axes=storage.mutableBytes;const NSUInteger m=storage.length/sizeof *axes;
+    for(NSUInteger k=1;k<m;k++)for(NSUInteger j=k;j>0&&axes[j].stride<axes[j-1].stride;j--){
+        const struct TensorInverseAxis t=axes[j];axes[j]=axes[j-1];axes[j-1]=t;
+    }
+    for(NSUInteger k=0;k+1<m;k++)if(axes[k+1].stride<axes[k].stride*axes[k].extent)return nil;
+    NSMutableArray *address=[NSMutableArray arrayWithObject:@(view.offset-origin)];NSArray *coordinates=view.coordinates;
+    for(NSUInteger d=0;d<coordinates.count;d++)[address addObject:TensorScale(coordinates[d],[view.strides[d] integerValue])];
+    id y=TensorSum(address);NSMutableArray *index=[NSMutableArray array];
+    for(NSUInteger k=0;k<m;k++) {
+        id digit=TensorQuotient(k+1<m?TensorQuotient(y,axes[k+1].stride,YES):y,axes[k].stride,NO);
+        if(axes[k].reversed)digit=TensorSum(@[@(axes[k].extent-1),TensorScale(digit,-1)]);
+        [index addObject:TensorScale(digit,axes[k].weight)];
+    }
+    id x=TensorSum(index);
+    NSMutableData *program=[NSMutableData data];TensorCompile(x,program);
+    const struct TensorProgramStep *steps=program.bytes;const NSUInteger length=program.length/sizeof *steps;
+    NSInteger stack[length+1];
+    for(NSUInteger i=0;i<view.count;i++) {
+        const NSInteger at=TensorRun(steps,length,(NSInteger)i,stack);
+        if(at<0||at>=(NSInteger)declared.count||[declared index:(NSUInteger)at]!=[view index:i])return nil;
+    }
+    NSMutableArray *composed=[NSMutableArray array];
+    for(id value in placed.coordinates)[composed addObject:TensorSubstitute(value,x)];
+    MetalTensorLayout *raw=[placed withShape:view.shape offset:placed.offset];raw->_count=view.count;
+    [raw->_coordinates release];raw->_coordinates=[composed copy];
+    return TensorProbed(raw)?:[placed shaped:view.shape coordinates:composed];
+}
+/* The same rebase as integer arithmetic on strides and offsets alone, where the view is factored, the declaration a
+   factored injection and the placement dense (its index axes the row-major steps, any origin). Each view axis moves
+   along one axis of the declaration's lattice (sorted by stride magnitude, reversed axes read forward) by a whole
+   multiple of its stride, a view axis wider than that lattice axis split across contiguous lattice axes it fills from
+   digit 0. With the view's origin's digits as the base, each lattice digit of a view position is its base plus its
+   view axes' steps when their ranges stay within the axis' extent (no carry, so every view position is in the lattice):
+   then the flat index is strided over the view's split axes, each stride the step times the lattice axis' flat weight
+   (negated where it is read backward). nil where any of that does not hold. */
+static MetalTensorLayout *TensorStridedRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
+    if(!view.factored||view.maps.count||!declared.factored||declared.maps.count||!placed.factored||placed.maps.count)return nil;
+    {
+        NSInteger step=1;
+        for(NSUInteger d=placed.indexShape.count;d-->0;) {
+            const NSInteger n=[placed.indexShape[d] integerValue];
+            if(n>1&&[placed.strides[d] integerValue]!=step)return nil;
+            step*=n;
+        }
+    }
+    struct TensorLatticeAxis { NSInteger stride,extent,weight,base,low,high; BOOL reversed; };
+    NSArray *weights=TensorStrides(declared.indexShape);NSMutableData *storage=[NSMutableData data];
+    NSInteger origin=declared.offset;
+    for(NSUInteger d=0;d<declared.indexShape.count;d++) {
+        struct TensorLatticeAxis axis={[declared.strides[d] integerValue],[declared.indexShape[d] integerValue],
+            [weights[d] integerValue],0,0,0,NO};
+        if(axis.extent==1)continue;
+        if(!axis.stride)return nil;
+        if(axis.stride<0){origin+=axis.stride*(axis.extent-1);axis.stride=-axis.stride;axis.reversed=YES;}
+        [storage appendBytes:&axis length:sizeof axis];
+    }
+    struct TensorLatticeAxis *axes=storage.mutableBytes;const NSUInteger m=storage.length/sizeof *axes;
+    for(NSUInteger k=1;k<m;k++)for(NSUInteger j=k;j>0&&axes[j].stride<axes[j-1].stride;j--){
+        const struct TensorLatticeAxis t=axes[j];axes[j]=axes[j-1];axes[j-1]=t;
+    }
+    for(NSUInteger k=0;k+1<m;k++)if(axes[k+1].stride<axes[k].stride*axes[k].extent)return nil;
+    const NSInteger first=view.offset-origin;
+    if(first<0||(m&&first%axes[0].stride))return nil;
+    NSInteger rest=first;
+    for(NSUInteger k=m;k-->0;) {
+        axes[k].base=rest/axes[k].stride;rest-=axes[k].base*axes[k].stride;
+        if(axes[k].base>=axes[k].extent&&k+1<m)return nil;
+        axes[k].low=axes[k].high=axes[k].base;
+    }
+    if(rest||(m&&axes[m-1].base>=axes[m-1].extent)||(!m&&first))return nil;
+    NSMutableArray *shape=[NSMutableArray array],*strides=[NSMutableArray array];
+    for(NSUInteger d=0;d<view.indexShape.count;d++) {
+        NSInteger extent=[view.indexShape[d] integerValue],step=[view.strides[d] integerValue];
+        NSMutableArray *partShape=[NSMutableArray array],*partStrides=[NSMutableArray array];
+        if(extent>1&&!step){[partShape addObject:@(extent)];[partStrides addObject:@0];extent=1;}
+        const NSInteger sign=step<0?-1:1;NSInteger magnitude=labs(step);
+        while(extent>1) {
+            NSInteger k=-1;
+            for(NSUInteger j=0;j<m;j++)if(axes[j].stride<=magnitude)k=(NSInteger)j;
+            if(k<0||magnitude%axes[k].stride)return nil;
+            struct TensorLatticeAxis *axis=axes+k;const NSInteger c=magnitude/axis->stride;
+            const NSInteger along=sign*c*axis->weight*(axis->reversed?-1:1);
+            if(c*(extent-1)<axis->extent) {
+                if(sign>0)axis->high+=c*(extent-1);else axis->low-=c*(extent-1);
+                [partShape insertObject:@(extent) atIndex:0];[partStrides insertObject:@(along) atIndex:0];extent=1;
+            } else {
+                // the inner part fills this lattice axis from digit 0, the rest goes on along the next (contiguous) one
+                if(sign<0||axis->extent%c||axis->base||axis->low||axis->high||(NSUInteger)k+1>=m||
+                   axes[k+1].stride!=axis->stride*axis->extent)return nil;
+                const NSInteger part=axis->extent/c;if(extent%part)return nil;
+                axis->high=c*(part-1);
+                [partShape insertObject:@(part) atIndex:0];[partStrides insertObject:@(along) atIndex:0];
+                extent/=part;magnitude=axes[k+1].stride;
+            }
+        }
+        [shape addObjectsFromArray:partShape];[strides addObjectsFromArray:partStrides];
+    }
+    NSInteger offset=placed.offset;
+    for(NSUInteger k=0;k<m;k++) {
+        if(axes[k].low<0||axes[k].high>=axes[k].extent)return nil;
+        offset+=axes[k].weight*(axes[k].reversed?axes[k].extent-1-axes[k].base:axes[k].base);
+    }
+    if(!shape.count){[shape addObject:@1];[strides addObject:@0];}
+    return [[MetalTensorLayout shape:shape strides:strides offset:offset maps:@{} indices:nil] reshape:view.shape];
+}
 - (MetalTensorLayout *)rebase:(MetalTensorLayout *)declared onto:(MetalTensorLayout *)placed {
     NSParameterAssert([declared.shape isEqual:placed.shape]);
     if([self isEqual:declared])return placed;
     if(!self.count)return [MetalTensorLayout shape:_shape strides:TensorStrides(_shape) offset:0 maps:@{} indices:nil];
     MetalTensorLayout *closed=nil;
     @try{closed=TensorClosedRebase(self,declared,placed);}@catch(NSException *unused){(void)unused;closed=nil;}
+    if(closed)return closed;
+    closed=TensorStridedRebase(self,declared,placed)?:TensorInverseRebase(self,declared,placed);
     if(closed)return closed;
     isl_ctx *ctx=isl_ctx_alloc();
     isl_pw_aff *view=MeshIndexFunction(ctx,self),*target=MeshIndexFunction(ctx,placed);
