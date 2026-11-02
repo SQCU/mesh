@@ -2734,8 +2734,9 @@ static uint32_t demands_of(const struct ncclComm *comm, const struct call *c, st
 
 /* collective c compiled along its own demands' trees, [first, last) of the group's, with their shares (mesh_flow_trees),
    the all-reduce in two phases, its reduce-scatter up every segment's trees and its all-gather down them */
-static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, const struct flow *f, uint32_t first, uint32_t last,
-                                 struct mesh_operand operand, const uint64_t *cut) {
+/* f: the trees of demands first to last alone, the routing's from its tree `base` on (plan_collective) */
+static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, const struct flow *f, uint32_t base, uint32_t first,
+                                 uint32_t last, struct mesh_operand operand, const uint64_t *cut) {
   const uint32_t n = (uint32_t)c->comm->nranks;
   uint32_t *root = calloc((size_t)f->count + 1, sizeof *root), *parent = calloc((size_t)f->count * n + 1, sizeof *parent);
   double *weight = calloc((size_t)f->count + 1, sizeof *weight);
@@ -2750,7 +2751,7 @@ static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, co
   const uint64_t *owners=c->what==MESH_ALLGATHER?c->contributors:c->recipients;
   for(uint32_t root=0;!result&&root<n;root++)if(has_root(c->what)||rank_member(owners,root))
     for(uint32_t k=0;k<f->count;k++)
-      if(f->demand[k]>=first&&f->demand[k]<last&&d[f->demand[k]].root==root)indices[indexed++]=k;
+      if(f->demand[k]>=first&&f->demand[k]<last&&d[f->demand[k]].root==root)indices[indexed++]=base+k;
   if (!result) result = collective_steps(c, &e, operand, cut,indices);
   free(indices);
   program_free(&e.program);
@@ -2838,6 +2839,8 @@ struct routing {
   struct mesh_demand *demands;
   uint32_t *lo,*hi;
   struct flow flow;
+  /* flow's trees are laid demand by demand (routing_prepare): demand d's are [tree_first[d], tree_first[d + 1]) */
+  uint32_t *tree_first;
   struct mesh_paths **paths[2];
   uint32_t **path_first[2];
 };
@@ -2851,7 +2854,7 @@ static void routing_free(struct routing *r) {
   }
   for(uint32_t s=0;s<r->view.scopes;s++)free((void *)r->view.scope[s]);
   free((void *)r->view.source);free((void *)r->view.source_first);free((void *)r->view.scope);free((void *)r->view.call_scope);
-  free(r->demands);free(r->lo);free(r->hi);flow_free(&r->flow);
+  free(r->demands);free(r->lo);free(r->hi);flow_free(&r->flow);free(r->tree_first);
   for(int k=0;k<2;k++) {
     for(uint32_t s=0;s<r->view.scopes;s++) {
       if(r->paths[k])mesh_write_routes_free(r->paths[k][s],r->view.nodes);
@@ -3379,11 +3382,13 @@ static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,con
     r->flow=(struct flow){(uint32_t)columns,calloc(columns+1,sizeof(uint32_t)),calloc(columns*n+1,sizeof(uint32_t)),calloc(columns+1,sizeof(double))};
     trees=calloc(columns+1,sizeof *trees);parents=calloc(columns*n+1,sizeof *parents);
     r->view.tree=trees;r->view.parents=parents;r->view.trees=(uint32_t)columns;
-    if(!r->flow.demand||!r->flow.parent||!r->flow.share||!trees||!parents)result=fail(ncclSystemError,"allocating retained routing columns");
+    r->tree_first=calloc((size_t)made+1,sizeof *r->tree_first);
+    if(!r->flow.demand||!r->flow.parent||!r->flow.share||!trees||!parents||!r->tree_first)
+      result=fail(ncclSystemError,"allocating retained routing columns");
   }
   uint32_t at=0;
   for(uint32_t d=0;d<made&&!result;d++) {
-    const ncclMeshRouting *p=prior[d].route;const uint32_t begin=at;
+    const ncclMeshRouting *p=prior[d].route;const uint32_t begin=r->tree_first[d]=at;
     const struct call *c=calls+demand[d].call;
     const uint32_t adjustable=!c->target&&!counted(c)&&demand[d].form==UINT32_MAX;
     double sum=0;
@@ -3400,6 +3405,7 @@ static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,con
     if(!(sum>0)||!isfinite(sum)){result=fail(ncclInvalidArgument,"each routing demand requires positive finite total share");break;}
     for(uint32_t t=begin;t<at;t++){r->flow.share[t]/=sum;trees[t].share=r->flow.share[t];if(!p)trees[t].initial=trees[t].share;}
   }
+  if(!result)r->tree_first[made]=at;
   if(!result)result=routing_paths(comm,r,paths);
   free(prior);free(paths);free(representative);flow_free(&initial);return result;
 }
@@ -3433,24 +3439,26 @@ static ncclResult_t route_tree_counts(struct call *c,const struct mesh_program *
     const uint64_t elements=parts[p->parts+k];tree[indices[k]].units=elements?(elements-1)/q+1:0;
     if(__builtin_mul_overflow(elements,(uint64_t)operand.element_bytes,&tree[indices[k]].bytes))good=0;
   }
-  /* each demand's adjustable trees' units and bytes, summed in one pass over the trees. Changed by the LSTM demonstration
-     session: each demand scanned every tree, at every call's steps (calls x demands x trees), and a 64-step LSTM's plan
-     spent its whole minute at that comparison on every rank (collective_steps -> route_tree_counts, 2026-11-01 18:0x).
-     What must stay: one pass over the trees, one over the demands. */
-  const uint32_t count=c->routing->view.demands;
-  uint64_t *sums=good?calloc(2*(size_t)count+1,sizeof *sums):NULL;unsigned char *active=good?calloc((size_t)count+1,1):NULL;
+  /* this call's demands' adjustable trees' units and bytes, summed in one pass over their trees, contiguous in the
+     routing's (struct routing tree_first). Changed by the LSTM demonstration session: each demand scanned every tree at
+     every call (calls x demands x trees; ecdb4f2e made it one pass over every tree a call, still calls x trees, 45% of
+     the 64-step plan's samples, 2026-11-01). What must stay: a call reads back its own demands from its own trees. */
+  const struct routing *r=c->routing;
+  const uint32_t call=p->parts?r->view.demand[tree[indices[0]].demand].call:0,lo=p->parts?r->lo[call]:0,hi=p->parts?r->hi[call]:0;
+  const uint32_t mine=hi-lo;
+  uint64_t *sums=good?calloc(2*(size_t)mine+1,sizeof *sums):NULL;unsigned char *active=good?calloc((size_t)mine+1,1):NULL;
   if(good&&(!sums||!active)){free(sums);free(active);free(parts);return fail(ncclSystemError,"allocating tree allocation sums");}
-  for(uint32_t t=0;good&&t<c->routing->view.trees;t++)if(tree[t].adjustable&&tree[t].demand<count) {
-    const uint32_t d=tree[t].demand;active[d]=1;
+  for(uint32_t t=r->tree_first[lo];good&&t<r->tree_first[hi];t++)if(tree[t].adjustable) {
+    const uint32_t d=tree[t].demand-lo;active[d]=1;
     if(__builtin_add_overflow(sums[2*(size_t)d],tree[t].units,&sums[2*(size_t)d])||
        __builtin_add_overflow(sums[2*(size_t)d+1],tree[t].bytes,&sums[2*(size_t)d+1]))good=0;
   }
   if(good) {
     ncclMeshRouteDemand *demands=(ncclMeshRouteDemand *)c->routing->view.demand;
-    for(uint32_t d=0;d<count;d++)if(active[d]) {
-      demands[d].units=sums[2*(size_t)d];
-      if(demands[d].directions&1)demands[d].up=sums[2*(size_t)d+1];
-      if(demands[d].directions&2)demands[d].down=sums[2*(size_t)d+1];
+    for(uint32_t d=0;d<mine;d++)if(active[d]) {
+      demands[lo+d].units=sums[2*(size_t)d];
+      if(demands[lo+d].directions&1)demands[lo+d].up=sums[2*(size_t)d+1];
+      if(demands[lo+d].directions&2)demands[lo+d].down=sums[2*(size_t)d+1];
     }
   }
   free(sums);free(active);free(parts);return good?ncclSuccess:fail(ncclInvalidArgument,"tree allocation readback");
@@ -3522,8 +3530,13 @@ static ncclResult_t plan_collective(ncclComm_t comm, struct routing *r, struct c
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
     uint64_t cut[segmented ? comm->nranks : 1];
     for (int rank = 0; segmented && rank < comm->nranks; rank++) cut[rank] = (c->segments ? c->segments[rank] : c->count) / u;
+    /* the call's own demands' trees, contiguous in the routing's (tree_first). Changed by the LSTM demonstration
+       session: every call scanned and copied over all of its group's trees (mesh_flow_trees, a calloc of every tree's
+       parents), calls x trees on every rank (2026-11-01). What must stay: a call reads its own trees alone. */
+    const uint32_t a = entry ? 0 : r->tree_first[r->lo[i]], b = entry ? 0 : r->tree_first[r->hi[i]];
+    const struct flow mine = {b - a, r->flow.demand + a, r->flow.parent + (size_t)a * comm->nranks, r->flow.share + a};
     result = entry ? collective_steps(c, entry, operand, segmented ? cut : NULL,NULL)
-                        : solved_steps(c, r->demands, &r->flow, r->lo[i], r->hi[i], operand, segmented ? cut : NULL);
+                        : solved_steps(c, r->demands, &mine, a, r->lo[i], r->hi[i], operand, segmented ? cut : NULL);
     if (!result && c->what == MESH_REDUCE_SCATTER) result = partial_split(c);
   }
   return result;
