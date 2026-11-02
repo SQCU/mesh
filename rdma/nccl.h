@@ -960,6 +960,16 @@ ncclResult_t ncclMeshCommCompiler(ncclComm_t comm,const char* compiler,const cha
    CommPlan owns the selected issue, page cuts, word operands and channel
    predecessor snapshots. The callback consumes typed source/landing effects;
    no backend encoder, argument table or executable is created here. */
+/* design/page-maps-2026-11-02.md, "The collective lowering in two phases": an occurrence lowered in value coordinates
+   is bound to its pages here, after the run's page assignment and before its recording.
+   type: (comm, occurrence, per call and side its operand's physical page runs at this occurrence, ncclMeshPageBacking
+   as ncclMeshLeasePages gives them, in the order the occurrence's calls were declared) -> 0, every entry's DMA spans,
+   the bridge tables' descriptors and the landing and SEND spans made from those runs (mesh_page_sges), the one
+   place region offsets are made. `runs[2 * call + side]` holds `counts[2 * call + side]` runs; a side with none is
+   absent. The call's declared views fix each operand's layout within its runs. */
+typedef struct { const ncclMeshPageBacking *runs; size_t count; } ncclMeshOperandPages;
+ncclResult_t ncclMeshCommBindPages(ncclComm_t comm, uint64_t occurrence, const ncclMeshOperandPages *operands,
+                                   size_t count);
 ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
     int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
     uint64_t* occurrence);
