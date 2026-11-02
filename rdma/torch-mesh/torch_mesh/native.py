@@ -1626,14 +1626,13 @@ def prepare_graph(module, metadata, *, materializations=()):
                         break
             if not substituted:
                 return self
-            retained = list(self.operations)
-            for operation in reversed(self.operations):
-                if operation.get_operation_name() not in substituted:
-                    continue
-                live = protected | {dep.name for other in retained if other is not operation
-                                    for dep in nodes[other.get_operation_name()].read_writes.reads}
-                if not any(value.get_name() in live for value in operation.get_outputs()):
-                    retained.remove(operation)
+            # the substituted producers no other kept operation reads, dropped (mesh_graph.retained, the graph module:
+            # design/rubrics.md C9). Changed by the LSTM demonstration session: the sweep was written here, every
+            # removal rebuilding the reads of every kept operation. What must stay: the same operations kept.
+            from mesh_graph import retained as kept
+            retained = kept(self.operations, lambda op: op.get_operation_name() in substituted,
+                            lambda op: [value.get_name() for value in op.get_outputs()],
+                            lambda op: [dep.name for dep in nodes[op.get_operation_name()].read_writes.reads], protected)
             self.operations = retained
             self.declaration_nodes = {op.get_operation_name(): nodes[op.get_operation_name()] for op in retained}
             return self
