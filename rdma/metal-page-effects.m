@@ -256,16 +256,21 @@ static isl_set *PageDomain(isl_map *relation,isl_set *range) {
    MESH_PREPARE_RECORD's directory (none where it is unset): a log of preparation that nothing reads back. Added for the
    LSTM demonstration, whose page-effects solve spent rank 0's whole sample here (2026-11-01). */
 static void PageGroupsRecord(isl_set *groups,size_t count,uint64_t started) {
-    static FILE *out;static int opened;
+    static FILE *out;static int opened;static uint64_t calls;static double total;
     if(!opened){
         opened=1;const char *dir=getenv("MESH_PREPARE_RECORD");char path[1024];
         if(dir&&snprintf(path,sizeof path,"%s/page-groups-%d.jsonl",dir,(int)getpid())<(int)sizeof path)out=fopen(path,"w");
     }
     if(!out)return;
     const double us=(double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-started)/1e3;
-    char *text=us>2000?isl_set_to_str(groups):NULL;
-    fprintf(out,"{\"runs\":%zu,\"us\":%.1f,\"set\":\"%.600s\"}\n",count,us,text?text:"");
-    free(text);fflush(out);
+    calls++;total+=us;
+    /* a slow set alone, with the running count and microseconds of all of them: every set was a line, 468151 of
+       them on rank 0 before its bound (2026-11-01), and the text is isl's, freed by isl's allocator, never free() */
+    if(us<=1000)return;
+    char *text=isl_set_to_str(groups);
+    fprintf(out,"{\"runs\":%zu,\"us\":%.1f,\"calls\":%llu,\"total_us\":%.1f,\"set\":\"%.600s\"}\n",count,us,
+            (unsigned long long)calls,total,text?text:"");
+    mesh_isl_free(text);fflush(out);
 }
 static void PageGroups(isl_set *groups,void (^each)(NSUInteger)) {
     const uint64_t started=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
