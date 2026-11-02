@@ -844,7 +844,7 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
     NSMutableDictionary<NSString *,NSNumber *> *fieldIndex;
 }
 - (NSUInteger)add:(id<MTLBuffer>)buffer offset:(NSUInteger)offset bytes:(NSUInteger)bytes access:(uint32_t)access;
-- (id<MTLBuffer>)compose;
+- (id<MTLBuffer>)composeFor:(BOOL)gpu device:(id<MTLDevice>)device;
 @end
 @implementation MetalPageFields
 - (instancetype)init {
@@ -861,33 +861,27 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
     fieldIndex[key]=@(fields.count);
     [fields addObject:@[buffer,@(offset),@(bytes)]];[owners addObject:buffer];return fields.count-1;
 }
-- (id<MTLBuffer>)compose {
-    NSMutableData *selection=[NSMutableData dataWithLength:fields.count*sizeof(ncclMeshPageSelection)];
-    ncclMeshPageSelection *selected=selection.mutableBytes;size_t cursor=0,alignment=0;
+/* design/page-maps-2026-11-02.md "A kernel's effect fields": one table of addresses, field i's at entry i, in a region
+   lease (MetalLeaseBuffer): a GPU address (gpuAddress plus offset) for a Metal kernel, a host one (contents plus
+   offset) for a CPU or ANE entry. The kernel loads a field's address once and dereferences it. Each offset table's
+   words become the absolute addresses of their fields' entries. This is a lowering step, run once per occurrence after
+   the solve. Changed by the LSTM demonstration session (2026-11-02) from a composition of every field's pages into
+   one remapped view (ncclMeshPageTableCompose, mach_vm_remap), whose offsets were fixed at preparation. What must
+   stay: every field reachable from the one metadata binding, its bytes exactly the field's. */
+- (id<MTLBuffer>)composeFor:(BOOL)gpu device:(id<MTLDevice>)device {
+    id<MTLBuffer> table=[MetalLeaseBuffer(device,(fields.count?fields.count:1)*sizeof(uint64_t)) autorelease];
+    uint64_t *entry=table.contents;
     for(NSUInteger i=0;i<fields.count;i++) {
-        NSArray *field=fields[i];id<MTLBuffer> buffer=field[0];const size_t offset=[field[1] unsignedIntegerValue],bytes=[field[2] unsignedIntegerValue];
-        MetalPageComposition *source=[[[MetalPageComposition alloc] init] autorelease];
-        /* a Metal table is created from the field's {buffer, offset} descriptor (nccl.h ncclMeshPageTableCreate: metal 1
-           reads `local` as an ncclMeshBuffer). Changed by the LSTM demonstration session: 7d3aa6cf passed the buffer's
-           contents, whose first bytes were then read as a buffer and faulted in address_of on ranks 0 and 2 of the
-           8-step LSTM (ncclMeshPageTableCreate + 152 beneath -[MetalPageFields compose], 2026-11-01 19:2x). What must
-           stay: the descriptor, its offset 0, the table's base the buffer's. */
-        const ncclMeshBuffer whole={(__bridge void *)buffer,0};
-        if(ncclMeshPageTableCreate(&whole,NULL,1,&source->table))PageFailure([NSString stringWithFormat:@"cannot bind metadata pages: %s",ncclGetLastError(NULL)]);
-        size_t pages=0,width=0;if(ncclMeshPageTableShape(source->table,&pages,&width))PageFailure([NSString stringWithFormat:@"metadata page shape: %s",ncclGetLastError(NULL)]);
-        if(alignment&&width!=alignment)PageFailure(@"metadata fields have different local page widths");alignment=width;
-        const size_t first=offset/width,count=(offset%width+bytes+width-1)/width;
-        selected[i]=(ncclMeshPageSelection){source->table,first,count};
-        fields[i]=@[buffer,@(offset),@(bytes),@(cursor*width+offset%width)];cursor+=count;[owners addObject:source];
+        NSArray *field=fields[i];id<MTLBuffer> buffer=field[0];const uint64_t offset=[field[1] unsignedLongLongValue];
+        entry[i]=(gpu?buffer.gpuAddress:(uint64_t)(uintptr_t)buffer.contents)+offset;
+        fields[i]=@[buffer,field[1],field[2],@(i)];
     }
-    for(NSArray *table in offsetTables) {
-        id<MTLBuffer> buffer=table[0];NSArray *indices=table[1];uint64_t *words=buffer.contents;
-        for(NSUInteger i=0;i<indices.count;i++)words[i]=[fields[[indices[i][0] unsignedIntegerValue]][3] unsignedLongLongValue]+[indices[i][1] unsignedLongLongValue];
+    for(NSArray *offsets in offsetTables) {
+        id<MTLBuffer> buffer=offsets[0];NSArray *indices=offsets[1];uint64_t *words=buffer.contents;
+        for(NSUInteger i=0;i<indices.count;i++)
+            words[i]=entry[[indices[i][0] unsignedIntegerValue]]+[indices[i][1] unsignedLongLongValue];
     }
-    MetalPageComposition *combined=[[[MetalPageComposition alloc] init] autorelease];
-    if(ncclMeshPageTableCompose(selected,fields.count,alignment,NULL,1,&combined->table))PageFailure([NSString stringWithFormat:@"cannot compose metadata pages: %s",ncclGetLastError(NULL)]);
-    ncclMeshBuffer bound={0};if(ncclMeshPageTableBinding(combined->table,&bound))PageFailure([NSString stringWithFormat:@"cannot bind composed metadata: %s",ncclGetLastError(NULL)]);
-    composedOffset=bound.offset;[owners addObject:combined];return (__bridge id<MTLBuffer>)bound.buffer;
+    composedOffset=0;[owners addObject:table];return table;
 }
 @end
 
@@ -902,7 +896,7 @@ static NSString *PageViolationField(MetalPageFields *fields,ncclMeshBuffer word)
 /* every MESH_EFFECT_FIELD_<n> of the text its field's pointer, in one pass, each token's whole number read. Changed by
    the LSTM demonstration session: each field rescanned the whole text, fields x text a command, the 64-step LSTM's
    source generation's whole sample (2026-11-01). What must stay: a token of no field kept as written. */
-static NSString *PageReplaceFields(NSString *text,MetalPageFields *fields,NSString *base) {
+static NSString *PageReplaceFields(NSString *text,MetalPageFields *fields,NSString *base,BOOL gpu) {
     static NSString *const prefix=@"MESH_EFFECT_FIELD_";
     const NSUInteger length=text.length,count=fields->fields.count;
     NSMutableString *out=[NSMutableString stringWithCapacity:length];
@@ -912,7 +906,9 @@ static NSString *PageReplaceFields(NSString *text,MetalPageFields *fields,NSStri
         [out appendString:[text substringWithRange:NSMakeRange(at,found.location-at)]];
         NSUInteger end=NSMaxRange(found),value=0;BOOL digits=NO;
         for(unichar ch;end<length&&(ch=[text characterAtIndex:end])>='0'&&ch<='9';end++){value=value*10+(ch-'0');digits=YES;}
-        if(digits&&value<count)[out appendFormat:@"(%@ + %@ul)",base,fields->fields[value][3]];
+        /* the field's address, loaded once from the metadata table (composeFor:device:) */
+        if(digits&&value<count)[out appendFormat:gpu?@"(((device uchar * const device *)(%@))[%@ul])":
+                                @"(((uint8_t * const *)(%@))[%@ul])",base,fields->fields[value][3]];
         else [out appendString:[text substringWithRange:NSMakeRange(found.location,end-found.location)]];
         at=end;
     }
@@ -982,8 +978,8 @@ static void PageCoverageSource(MetalPageDomain *domain,MetalPageCommand *command
     [helpers appendFormat:gpu?@"struct %@ { device const ulong *cuts; volatile coherent(system) device ulong *word; void at(uint p) {mesh_publish(word,cuts[p-1]);} };\n":
         @"struct %@ { const uint64_t *cuts; volatile uint64_t *word; void at(uint32_t p) {mesh_publish(word,cuts[p-1]);} };\n",prefix];
     NSString *(^contribute)(NSString *,NSString *,NSUInteger,BOOL,NSString *)=^NSString *(NSString *cut,NSString *flags,NSUInteger delta,BOOL known,NSString *fixedAddress) {
-        NSString *address=fixedAddress?:dynamic?[NSString stringWithFormat:gpu?@"(mesh_effects+((device const ulong *)%@)[%@])":
-            @"(mesh_effects+((const uint64_t *)%@)[%@])",ordinals,cut]:
+        NSString *address=fixedAddress?:dynamic?[NSString stringWithFormat:gpu?@"(((device uchar * const device *)%@)[%@])":
+            @"(((uint8_t * const *)%@)[%@])",ordinals,cut]:
             [NSString stringWithFormat:@"(%@+4ul*%@)",totals,cut];
         if(gpu)return [NSString stringWithFormat:
             @"mesh_graph_coverage((volatile coherent(system) device atomic_uint *)%@+%@,(volatile coherent(system) device atomic_uint *)%@+%@,(volatile coherent(system) device const uint *)%@,%@,%luu,%@);\n",
@@ -1474,14 +1470,14 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
     result->observedSlots=[PageIndices(observed) copy];result->publishedSlots=[PageIndices(published) copy];
     if(!fields->fields.count){result->source=[(command->backend==MetalPageCPU&&command->sites.count?
         [@MESH_PAGE_HOST_SITES_SOURCE stringByAppendingString:command->source]:command->source) copy];result->reaches=[[NSData alloc] init];return result;}
-    result->metadata=[[fields compose] retain];result->metadataOffset=fields->composedOffset;
+    result->metadata=[[fields composeFor:gpu device:device] retain];result->metadataOffset=fields->composedOffset;
     result->owners=[fields->owners copy];result->reaches=[fields->reaches copy];
     NSString *base=@"mesh_effects";
-    NSString *declarations=PageReplaceFields(helpers,fields,base);
+    NSString *declarations=PageReplaceFields(helpers,fields,base,gpu);
     for(NSUInteger phase=0;phase<before.count;phase++) {
-        before[phase]=PageReplaceFields(before[phase],fields,base);after[phase]=PageReplaceFields(after[phase],fields,base);
+        before[phase]=PageReplaceFields(before[phase],fields,base,gpu);after[phase]=PageReplaceFields(after[phase],fields,base,gpu);
     }
     result->source=[MetalPageEffectsCompose(command,declarations,before,after,observed,published,
-        PageReplaceFields(activityInputs,fields,base),PageReplaceFields(activityPredicate,fields,base)) copy];
+        PageReplaceFields(activityInputs,fields,base,gpu),PageReplaceFields(activityPredicate,fields,base,gpu)) copy];
     return result;
 }
