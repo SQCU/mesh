@@ -35,7 +35,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'rdma'))
-from mesh_graph import ancestors, descendants, preorder_parents  # noqa: E402  (the one graph module, design/rubrics.md C9)
+from mesh_graph import ancestors, cyclic, descendants, preorder_parents  # noqa: E402  (the one graph module, design/rubrics.md C9)
 
 SOURCE = re.compile(r'(\d+)-([^-]+)-(.+)\.metal$')
 MARK = '#pragma mesh_wait_report_source'
@@ -356,8 +356,7 @@ def function_counts(blocks, defined):
     forward, backward = {}, {}
 
     def loop_of(b):
-        """The blocks of b's loop: those it reaches that reach it (mesh_graph ancestors each way); empty outside loops."""
-        return ancestors(lambda v: succ.get(v, ()), b, forward) & ancestors(lambda v: pred.get(v, ()), b, backward)
+        return cyclic(lambda v: succ.get(v, ()), lambda v: pred.get(v, ()), b, forward, backward)
 
     looped = {b for b, _ in blocks if b in loop_of(b)}
     defs, place = {}, {}

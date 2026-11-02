@@ -261,6 +261,14 @@ def ancestors(inputs, value, known):
     return known[value]
 
 
+def cyclic(successors, predecessors, value, forward, backward):
+    """The vertices on a cycle through ``value``, itself among them: those it reaches that reach it (its strongly
+    connected component), empty where it lies on none (a basic block outside every loop). ``successors(v)`` and
+    ``predecessors(v)`` give v's direct ones; ``forward`` and ``backward`` keep each direction's answers, as ``known``
+    does for ancestors."""
+    return ancestors(successors, value, forward) & ancestors(predecessors, value, backward)
+
+
 def independent(inputs, users, order, group, value, known):
     """Whether ``value`` can join ``group`` in one dispatch at ``value``'s place in ``order``: it reads no member's
     result, directly or through others, and no member's result is used before it (``users(v)`` gives v's direct
