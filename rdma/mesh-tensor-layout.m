@@ -1340,6 +1340,46 @@ static id TensorSelectionIndex(NSInteger (^extent)(id),NSArray *shape,id express
   return terms;
 }
 
+/* (first, width, step, repeats) runs joined where one continues another: an interval its next one (one interval), single
+   positions at one step (one affine progression), a strided run its next row. Each run is i -> first + step
+   floor(i / width) + i mod width over its positions, so the joined runs are the same function of i. Equal intervals
+   wider than one stay separate pieces: as one strided run their relation's range would carry the floor isl must then
+   eliminate (every page range of a transfer is projected from it), where separate pieces' ranges are intervals.
+   Added by the layout algebra session: a page selection's spans (the pieces of one interval) were parsed into isl,
+   their terms emitted and read back three times, 0.2 ms a single span and 4.5 ms eight (2026-11-01). What must stay:
+   the same positions in the same order. */
+struct TensorRunPart { NSInteger first,width,step,repeats; };
+static NSArray<NSArray<NSNumber *> *> *TensorRunsJoined(NSArray<NSArray<NSNumber *> *> *runs) {
+    NSMutableArray *joined=[NSMutableArray array];struct TensorRunPart last={0,0,0,0};
+    for(NSArray *run in runs) {
+        struct TensorRunPart next={[run[0] integerValue],[run[1] integerValue],[run[2] integerValue],[run[3] integerValue]};
+        if(!next.width||!next.repeats)continue;
+        if(next.repeats==1)next.step=0;
+        else if(next.step==next.width){next.width*=next.repeats;next.repeats=1;next.step=0;}
+        const BOOL alone=last.repeats==1,same=next.width==last.width;
+        if(!last.repeats)last=next;
+        else if(alone&&next.repeats==1&&next.first==last.first+last.width)last.width+=next.width;
+        else if(alone&&same&&next.repeats==1&&next.width==1)last=(struct TensorRunPart){last.first,1,next.first-last.first,2};
+        else if(!alone&&same&&next.first==last.first+last.repeats*last.step&&(next.repeats==1||next.step==last.step))
+            last.repeats+=next.repeats;
+        else if(alone&&same&&next.repeats>1&&next.first==last.first+next.step)
+            last=(struct TensorRunPart){last.first,last.width,next.step,next.repeats+1};
+        else {[joined addObject:@[@(last.first),@(last.width),@(last.step),@(last.repeats)]];last=next;}
+    }
+    if(last.repeats)[joined addObject:@[@(last.first),@(last.width),@(last.step),@(last.repeats)]];
+    return joined;
+}
+// The joined runs' selection terms, in closed form where they are one run, else from isl.
+static id TensorRunsIndex(NSArray<NSArray<NSNumber *> *> *runs) {
+    if(runs.count==1) {
+        const NSInteger first=[runs[0][0] integerValue],width=[runs[0][1] integerValue],step=[runs[0][2] integerValue];
+        if([runs[0][3] integerValue]==1)return TensorSum(@[@(first),@"i"]);
+        return TensorSum(@[@(first),TensorScale(TensorQuotient(@"i",width,NO),step),TensorQuotient(@"i",width,YES)]);
+    }
+    isl_ctx *ctx=isl_ctx_alloc();id index=MeshIndexTerms(MeshIndexRuns(ctx,runs));isl_ctx_free(ctx);
+    return index;
+}
+
 static NSString *TensorStorageDeclaration(MetalTensorLayout *physical,MetalTensorLayout *source,NSString *name) {
     NSCParameterAssert([source.shape isEqual:physical.shape]);
     if(!physical.count)return [NSString stringWithFormat:@"inline long %@(long) { return 0; }\n",name];
@@ -1417,8 +1457,25 @@ static NSString *TensorStorageDeclaration(MetalTensorLayout *physical,MetalTenso
 + (instancetype)runs:(NSArray<NSArray<NSNumber *> *> *)runs {
     NSUInteger count=0;for(NSArray *run in runs)count+=[run[1] unsignedIntegerValue]*[run[3] unsignedIntegerValue];
     if(!count)return [self shape:@[@0] strides:@[@1] offset:0 maps:@{} indices:nil];
-    isl_ctx *ctx=isl_ctx_alloc();id index=MeshIndexTerms(MeshIndexRuns(ctx,runs));isl_ctx_free(ctx);
-    return [self shape:@[@(count)] index:index parameters:@{}];
+    runs=TensorRunsJoined(runs);
+    // one run is the strided layout [repeats, width] at strides [step, 1], read as one axis
+    if(runs.count==1)return [[self shape:@[runs[0][3],runs[0][1]] strides:@[runs[0][2],@1] offset:[runs[0][0] integerValue]
+        maps:@{} indices:nil] reshape:@[@(count)]];
+    /* several runs: one piecewise function, its terms emitted once relative to its lowest position, the storage its
+       closed-form bounds (each run's first and last rows). Joined runs are no affine function (those join to one), so
+       shaped:coordinates:'s affine test and its normalization's second emission are not repeated. */
+    NSInteger low=NSIntegerMax,high=NSIntegerMin;
+    for(NSArray *run in runs) {
+        const NSInteger first=[run[0] integerValue],last=first+[run[2] integerValue]*([run[3] integerValue]-1);
+        low=MIN(low,MIN(first,last));high=MAX(high,MAX(first,last)+[run[1] integerValue]-1);
+    }
+    isl_ctx *ctx=isl_ctx_alloc();
+    id index=MeshIndexTerms(isl_pw_aff_add_constant_val(MeshIndexRuns(ctx,runs),isl_val_int_from_si(ctx,-(long)low)));
+    isl_ctx_free(ctx);
+    MetalTensorLayout *result=[[self shape:@[@(high-low+1)] strides:@[@1] offset:low maps:@{} indices:nil]
+        withShape:@[@(count)] offset:low];
+    result->_count=count;result->_coordinates=[@[index] copy];
+    return result;
 }
 - (MetalTensorLayout *)intersection:(MetalTensorLayout *)other {
     isl_ctx *ctx=isl_ctx_alloc();
@@ -1611,7 +1668,7 @@ static NSString *TensorStorageDeclaration(MetalTensorLayout *physical,MetalTenso
     NSMutableArray *shape=[[_shape mutableCopy] autorelease];shape[axis]=@(count);
     NSUInteger inner=1;for(NSUInteger d=axis+1;d<_shape.count;d++)inner*=[_shape[d] unsignedIntegerValue];
     if(!TensorCount(shape))return [MetalTensorLayout shape:shape strides:TensorStrides(shape) offset:_offset maps:@{} indices:nil];
-    isl_ctx *ctx=isl_ctx_alloc();id selection=MeshIndexTerms(MeshIndexRuns(ctx,runs));isl_ctx_free(ctx);
+    id selection=TensorRunsIndex(TensorRunsJoined(runs));
     id digit=TensorQuotient(TensorQuotient(@"i",inner,NO),count,YES);
     id selected=TensorSubstitute(selection,digit);
     id index=TensorSum(@[TensorScale(TensorQuotient(@"i",count*inner,NO),[_shape[axis] integerValue]*inner),

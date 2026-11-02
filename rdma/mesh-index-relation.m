@@ -5,8 +5,13 @@
 #include <isl/val.h>
 #include <isl/point.h>
 #include <isl/constraint.h>
+#include <isl/local_space.h>
+#include <isl/space.h>
 #include "mesh-isl-memory.h"
 #include <string.h>
+/* isl's disjoint sum (isl_aff_private.h): pieces on domains already disjoint concatenated, where union_add intersects
+   and subtracts every pair of pieces */
+__isl_give isl_pw_aff *isl_pw_aff_add_disjoint(__isl_take isl_pw_aff *pwaff1,__isl_take isl_pw_aff *pwaff2);
 
 isl_map *MeshIndexNormalize(isl_map *relation) {
     return isl_map_coalesce(isl_map_detect_equalities(isl_map_compute_divs(relation)));
@@ -92,23 +97,31 @@ char *MeshIndexRelationTerms(isl_map *relation,char **message) { @autoreleasepoo
     }
 }}
 
-static isl_set *IndexDomain(isl_ctx *ctx, NSUInteger first, NSUInteger end) {
-    return isl_set_read_from_str(ctx, [[NSString stringWithFormat:@"{ [i] : %lu <= i < %lu }",
-        (unsigned long)first, (unsigned long)end] UTF8String]);
+/* The index domain, its leaves and runs built through isl's constructors, not read from text. Changed by the layout
+   algebra session: the chain service's preparation spent its whole sample parsing these, isl_pw_aff_read_from_str
+   for every leaf of every page selection's runs (2026-11-01). What must stay: the same sets and functions, on the
+   one-dimensional space [i]. */
+static isl_val *IndexValue(isl_ctx *ctx,NSInteger value) { return isl_val_int_from_si(ctx,(long)value); }
+static isl_set *IndexInterval(isl_ctx *ctx,NSInteger first,NSInteger end) {
+    isl_set *set=isl_set_universe(isl_space_set_alloc(ctx,0,1));
+    set=isl_set_lower_bound_val(set,isl_dim_set,0,IndexValue(ctx,first));
+    return isl_set_upper_bound_val(set,isl_dim_set,0,IndexValue(ctx,end-1));
 }
-static isl_pw_aff *IndexLeaf(isl_ctx *ctx, id value, NSUInteger first, NSUInteger end) {
-    NSString *text=[NSString stringWithFormat:@"{ [i] -> [(%@)] : %lu <= i < %lu }",
-        value, (unsigned long)first, (unsigned long)end];
-    return isl_pw_aff_read_from_str(ctx,text.UTF8String);
+static isl_set *IndexDomain(isl_ctx *ctx, NSUInteger first, NSUInteger end) {
+    return IndexInterval(ctx,(NSInteger)first,(NSInteger)end);
+}
+static isl_pw_aff *IndexLeaf(isl_ctx *ctx, NSInteger value, NSUInteger first, NSUInteger end) {
+    return isl_pw_aff_val_on_domain(IndexDomain(ctx,first,end),IndexValue(ctx,value));
 }
 // Compile each branch on the positions where its condition holds. Index
 // terms are pure values; constructing an unreachable arm cannot add meaning,
 // and rebuilding every arm over the full domain duplicates relation work.
 static isl_pw_aff *IndexExpression(isl_ctx *ctx,id expression,isl_set *domain) {
-    if([expression isKindOfClass:NSNumber.class]||[expression isEqual:@"i"]) {
-        NSString *text=[NSString stringWithFormat:@"{ [i] -> [(%@)] }",expression];
-        return isl_pw_aff_intersect_domain(isl_pw_aff_read_from_str(ctx,text.UTF8String),isl_set_copy(domain));
-    }
+    if([expression isKindOfClass:NSNumber.class])
+        return isl_pw_aff_val_on_domain(isl_set_copy(domain),IndexValue(ctx,[expression integerValue]));
+    if([expression isEqual:@"i"])
+        return isl_pw_aff_intersect_domain(isl_pw_aff_var_on_domain(
+            isl_local_space_from_space(isl_set_get_space(domain)),isl_dim_set,0),isl_set_copy(domain));
     NSString *op=expression[0];
     isl_pw_aff *a=IndexExpression(ctx,expression[1],domain);
     if([op isEqual:@"mul"]||[op isEqual:@"div"]||[op isEqual:@"mod"]) {
@@ -125,7 +138,7 @@ static isl_pw_aff *IndexExpression(isl_ctx *ctx,id expression,isl_set *domain) {
         isl_pw_aff *right=isl_set_is_empty(no)==isl_bool_true?
             isl_pw_aff_val_on_domain(isl_set_copy(no),isl_val_zero(ctx)):IndexExpression(ctx,expression[3],no);
         isl_set_free(yes);isl_set_free(no);
-        return isl_pw_aff_union_add(left,right);
+        return isl_pw_aff_add_disjoint(left,right);
     }
     for(NSUInteger k=2;k<[expression count];k++) {
         isl_pw_aff *b=IndexExpression(ctx,expression[k],domain);
@@ -156,38 +169,49 @@ isl_pw_aff *MeshIndexExpression(isl_ctx *ctx,id expression,NSUInteger first,NSUI
 // not multiply the table. Composition and inverse use the same relation type.
 static isl_pw_aff *IndexTable(isl_ctx *ctx,NSData *table) {
     const NSInteger *values=table.bytes;NSUInteger count=table.length/sizeof *values;
-    isl_pw_aff *result=IndexLeaf(ctx,@0,0,0);
+    isl_pw_aff *result=IndexLeaf(ctx,0,0,0);
     for(NSUInteger first=0;first<count;) {
         NSUInteger end=first+1;NSInteger step=end<count?values[end]-values[first]:0;
         while(end<count&&values[end]==values[first]+(NSInteger)(end-first)*step)end++;
         isl_pw_aff *run=MeshIndexExpression(ctx,@[@"add",@(values[first]-(NSInteger)first*step),@[@"mul",@"i",@(step)]],first,end);
-        result=isl_pw_aff_union_add(result,run);first=end;
+        result=isl_pw_aff_add_disjoint(result,run);first=end;
     }
     return isl_pw_aff_coalesce(result);
 }
+/* each run (first, width, step, repeats) one piece on its positions [begin, begin + width repeats): first + local +
+   (step - width) floor(local / width), local = i - begin, the floor only where the run repeats at a step other than its
+   width */
 isl_pw_aff *MeshIndexRuns(isl_ctx *ctx,NSArray<NSArray<NSNumber *> *> *runs) {
-    isl_pw_aff *result=IndexLeaf(ctx,@0,0,0);NSUInteger begin=0;
+    isl_pw_aff *result=IndexLeaf(ctx,0,0,0);NSUInteger begin=0;
+    isl_local_space *space=isl_local_space_from_space(isl_space_set_alloc(ctx,0,1));
     for(NSArray *run in runs) {
-        NSUInteger width=[run[1] unsignedIntegerValue],count=width*[run[3] unsignedIntegerValue];
+        const NSInteger first=[run[0] integerValue],width=[run[1] integerValue],step=[run[2] integerValue];
+        const NSUInteger count=(NSUInteger)width*[run[3] unsignedIntegerValue];
         if(!count)continue;
-        id local=@[@"add",@"i",@(-(NSInteger)begin)];
-        id value=@[@"add",run[0],@[@"mul",@[@"div",local,@(width)],run[2]],@[@"mod",local,@(width)]];
-        result=isl_pw_aff_union_add(result,MeshIndexExpression(ctx,value,begin,begin+count));begin+=count;
+        isl_aff *local=isl_aff_add_constant_val(isl_aff_var_on_domain(isl_local_space_copy(space),isl_dim_set,0),
+            IndexValue(ctx,-(NSInteger)begin));
+        isl_aff *value=isl_aff_add_constant_val(isl_aff_copy(local),IndexValue(ctx,first));
+        if(count>(NSUInteger)width&&step!=width)
+            value=isl_aff_add(value,isl_aff_scale_val(isl_aff_floor(isl_aff_scale_down_val(local,IndexValue(ctx,width))),
+                IndexValue(ctx,step-width)));
+        else isl_aff_free(local);
+        result=isl_pw_aff_add_disjoint(result,isl_pw_aff_alloc(IndexDomain(ctx,begin,begin+count),value));begin+=count;
     }
+    isl_local_space_free(space);
     return isl_pw_aff_coalesce(result);
 }
-static isl_set *SetInterval(isl_ctx *ctx,NSInteger first,NSInteger end) {
-    return isl_set_read_from_str(ctx,[[NSString stringWithFormat:@"{ [x] : %ld <= x < %ld }",(long)first,(long)end] UTF8String]);
-}
+static isl_set *SetInterval(isl_ctx *ctx,NSInteger first,NSInteger end) { return IndexInterval(ctx,first,end); }
 static NSInteger SetEdge(isl_set *set,BOOL maximum) {
     isl_val *value=maximum?isl_set_dim_max_val(isl_set_copy(set),0):isl_set_dim_min_val(isl_set_copy(set),0);
     NSInteger result=isl_val_get_num_si(value);isl_val_free(value);return result;
 }
 static isl_set *SetRun(isl_ctx *ctx,NSInteger first,NSInteger width,NSInteger step,NSInteger count) {
-    if(count==1)return SetInterval(ctx,first,first+width);
-    return isl_set_read_from_str(ctx,[[NSString stringWithFormat:
-        @"{ [x] : %ld <= x < %ld and (x - %ld) mod %ld < %ld }",(long)first,(long)(first+step*(count-1)+width),
-        (long)first,(long)step,(long)width] UTF8String]);
+    isl_set *interval=SetInterval(ctx,first,first+step*(count-1)+width);
+    if(count==1)return interval;
+    isl_pw_aff *phase=isl_pw_aff_mod_val(isl_pw_aff_from_aff(isl_aff_add_constant_val(isl_aff_var_on_domain(
+        isl_local_space_from_space(isl_set_get_space(interval)),isl_dim_set,0),IndexValue(ctx,-first))),IndexValue(ctx,step));
+    isl_pw_aff *bound=isl_pw_aff_val_on_domain(isl_set_universe(isl_set_get_space(interval)),IndexValue(ctx,width));
+    return isl_set_intersect(isl_pw_aff_lt_set(phase,bound),interval);
 }
 static isl_set *SetAbsorbIntervals(isl_set *set) {
     // In one dimension a basic set without local divisions is an interval.
@@ -394,7 +418,7 @@ NSArray<NSDictionary *> *MetalTensorCover(NSArray<MetalTensorLayout *> *domains)
     isl_ctx_free(ctx);return result;
 }
 isl_pw_aff *MeshIndexFunction(isl_ctx *ctx,MetalTensorLayout *layout) {
-    isl_pw_aff *value=IndexLeaf(ctx,@(layout.offset),0,layout.count);
+    isl_pw_aff *value=IndexLeaf(ctx,layout.offset,0,layout.count);
     NSArray *coordinates=layout.coordinates;
     for(NSUInteger d=0;d<coordinates.count;d++) {
         isl_pw_aff *part=MeshIndexExpression(ctx,coordinates[d],0,layout.count);
