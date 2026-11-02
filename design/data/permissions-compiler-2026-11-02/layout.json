@@ -9,8 +9,19 @@
   "abstraction": "#import <Metal/Metal.h> and nccl.h (id<MTLBuffer>, ncclMeshBuffer, ncclMeshAccess, ncclMeshPageTable_t)",
   "handles": "lets the layout interface name Metal buffers and the interface's (buffer, offset) types beside its element relations.",
   "group": "operand-identity",
-  "replacement": "the layout interface imports only the page-map types (virtual page, physical page index, layout); Metal and pointer-bearing nccl.h types move to the final lowering.",
-  "note": "partial; rows to mesh-tensor-layout.m:2175 (whole file) so far"
+  "replacement": "the layout interface imports only the page-map types (virtual page, physical page index, layout); Metal and pointer-bearing nccl.h types move to the final lowering."
+ },
+ {
+  "file": "rdma/mesh-tensor-layout.m",
+  "line": 1,
+  "lines": "1",
+  "function": "(file scope)",
+  "scope": "chooser",
+  "violation": "chooser has access",
+  "abstraction": "#import metal-recording.h: Metal.h, nccl.h, struct MetalReach{id<MTLBuffer>, offset, length} and the MetalView* emitters",
+  "handles": "lets the layout implementation build Metal byte reaches and emit index source beside its element algebra.",
+  "group": "operand-identity",
+  "replacement": "the layout implementation imports only the page-map types; reaches and emission move to the final lowering, which takes the specialized page map."
  },
  {
   "file": "rdma/mesh-tensor-layout.m",
@@ -229,5 +240,18 @@
   "handles": "places a layout at the view's offset inside the Metal buffer that binds it.",
   "group": "bind-backend",
   "replacement": "specialization at final lowering: the view's base is the dereferenced first page; the chooser's layout starts at virtual page 0."
+ },
+ {
+  "file": "rdma/mesh-index-relation.h",
+  "line": 2,
+  "lines": "2",
+  "function": "(file scope)",
+  "scope": "chooser",
+  "violation": "chooser has access",
+  "abstraction": "#import mesh-tensor-layout.h, which brings Metal.h and nccl.h (id<MTLBuffer>, ncclMeshBuffer, void *) into the relation algebra",
+  "handles": "reuses the layout type in the isl relation module; the pointer-bearing types come with it.",
+  "group": "operand-identity",
+  "replacement": "the relation module imports the page-map layout type alone; no Metal or pointer-bearing header reaches it.",
+  "note": "the relation algebra itself (compose, inverse, preimage, quotient, closure) is the target model's and has no other violation"
  }
 ]
