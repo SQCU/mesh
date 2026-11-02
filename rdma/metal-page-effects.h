@@ -19,6 +19,8 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
 @interface MetalPageCoverage : NSObject {
 @public
     ncclMeshPageCoverage declaration;
+@package
+    NSArray *identity;
 }
 + (instancetype)declaration:(ncclMeshPageCoverage)declaration;
 @end
@@ -180,10 +182,15 @@ isl_ctx *isl_ctx_alloc(void);
 void isl_ctx_free(isl_ctx *);
 MetalPageEffects *MetalPageEffectsSolve(NSArray<MetalPageCommand *> *commands,
     NSArray<MetalPageTransfer *> *transfers);
+/* The selected-cut domain consumed by contribution index pages. Each array
+   has one physical publication word and increasing thresholds. The solver
+   consumes these same rows; adapters never infer cut ordinals from addresses. */
+NSArray<NSArray<MetalPageTransfer *> *> *MetalPagePublicationDomains(NSArray<MetalPageTransfer *> *transfers);
 /* A source-local continuation uses the same fixed cell domain and exact page
-   relations as an entry dispatch. Each cell is reached once by the source's
-   declared iteration/ownership relation; its execution order may depend on
-   ordinary index pages. The source declares MESH_PAGE_SITE(name) and calls
+   relations as an entry dispatch. Read-only cells may be masked or repeated.
+   Static writer cells are reached once by the declared ownership relation;
+   changing or repeated writes carry explicit coverage/contribution operands.
+   Execution order may depend on ordinary index pages. The source declares MESH_PAGE_SITE(name) and calls
    MESH_PAGE_ENTER/LEAVE(name,metadata,cell,lane). Scope names the participating
    lanes; lane is local to that scope. CPU source cells are owned by one native
    invocation. GPU subgroups smaller than a SIMD group declare individual lane

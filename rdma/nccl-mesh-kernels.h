@@ -16,7 +16,7 @@
 #define XSTR(...) STR(__VA_ARGS__)
 /* a kernel's arguments, one layout for the host (struct args) and the kernels (struct mesh_args): a wait's count at
    aux until scalar, a publication's count at aux stored scalar, each repeat j of a fused crossing's at scalar + j x
-   stride (the packets a repeat adds to the count: nccl.h ncclMeshFused repeats).
+   stride (the packets a repeat adds to the count: ncclMeshCall.frames).
    A landing element j needs scalar + ((phase + j * step) >> mask), compiled
    from its packet lengths before execution (mesh-landing.h). Its input is the
    prepared address of the other numerical operand, also for an in-place merge.
@@ -38,7 +38,6 @@ static NSString *const STEPS =
   @"\nusing namespace metal;\n"
   MESH_PAGE_SITES_SOURCE
   XSTR(ARGS(mesh_args, ulong, uint)) ";\n"
-  "struct mesh_step_binding { device uchar *d; device uchar *s; constant mesh_args *p; device uchar *a; device uchar *v; device ulong *progress; };\n"
   "static inline bool mesh_step_enter(constant mesh_args &p, device uchar *vb, device ulong *progress, bool first) { "
   "(void)p; (void)vb; (void)progress; (void)first; return true; }\n"
   "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, ulong target) { "
@@ -63,30 +62,9 @@ static NSString *const STEPS =
   "static inline void mesh_step_observe(device uchar *word, ulong target, device uchar *vb, uint polls, uint channel, ulong at) { "
   "const ulong status = mesh_wait_bounded((volatile coherent(system) device const ulong *)word, target, polls, "
   "polls ? (device atomic_uint *)(vb + 8) : nullptr); mesh_step_check(polls, channel, at, status, target, vb); }\n"
-  "static inline void mesh_step_counts(constant mesh_args &p, device uchar *words, device uchar *vb, uint j = 0) { "
-  "const ulong target = p.scalar + ulong(j) * p.stride; "
-  "if (p.scalar && !mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, words + p.aux, target, vb), target, vb); }\n"
-  "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *vb, uint i, uint j = 0) { "
-  "if (i == 0) mesh_step_counts(p, words, vb, j); "
-  "threadgroup_barrier(mem_flags::mem_device); "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); return true; }\n"
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i, uint j = 0) { "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux), p.scalar + ulong(j) * p.stride); }\n"
-  "static inline void mesh_source_release(device ulong *words, uint slot, ulong value, uint i) { "
-  "threadgroup_barrier(mem_flags::mem_device); "
-  "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + slot), value); }\n"
-  /* one tile's landing record as the communicator declaration lays it (nccl.h: { uint64_t count; ncclMeshBinding
-     bindings[capacity]; }), at the address the caller's own ncclMeshTileLayout gives that tile: the record's one
-     statement is nccl.h's, so this reads no stride or header of its own */
-  "static inline void mesh_landing_counts(device const ulong *record) { "
-  "device const mesh_step_binding *land = (device const mesh_step_binding *)(record + 1); "
-  "for (uint k = 0; k < record[0]; k++) { auto b = land[k]; "
-  "mesh_step_enter(*b.p, b.v, b.progress, true); mesh_step_counts(*b.p, b.a, b.v); } }\n"
-  "static inline void mesh_landing_await(device const ulong *record, uint i) { "
-  "if (!record) return; if (i == 0) mesh_landing_counts(record); "
-  "threadgroup_barrier(mem_flags::mem_device); "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE)); }\n"
   "template <typename T> static inline void mesh_step_write(device uchar *operand, ulong k, T value) { "
   "((volatile coherent(system) device T *)operand)[k] = value; }\n"
   "template <typename T = half4> static inline T mesh_step_read(device const uchar *landing, ulong k) { "
@@ -116,6 +94,8 @@ static NSString *const KERNELS =
   "#define COPY(Z, W) HEAD(copy_##Z) { copy_body<W>(d,s,p,a,vb,progress,i,g,l,t,tg); }\n"
   "COPY(4, uint)\n"
   "COPY(1, uchar)\n"
+  "HEAD(mask_spans) { const ulong enabled=ulong(mesh_step_read<uint>(a+p.aux,0)); "
+  "LOOP mesh_step_write<ulong>(d+p.dst,p.step*k+p.phase,mesh_step_read<ulong>(s+p.src,k)*enabled); }\n"
   "HEAD(fill_pattern) { volatile coherent(system) device uchar *out=(volatile coherent(system) device uchar *)(d+p.dst); "
   "LOOP { const ulong at=k%p.step; out[k]=at<p.input?uchar(p.scalar>>(8*at)):uchar(0); } }\n"
   "template <typename T> T op_int(T a, T b, uint op) { return op == 0 ? T(ulong(a) + ulong(b)) : op == 1 ? T(ulong(a) * ulong(b)) : (op == 2 ? b > a : b < a) ? b : a; }\n"
@@ -189,7 +169,7 @@ static NSString *const KERNELS =
    them by are deleted with it (design/zorvek.md "The pool's last users") */
 #define REDUCTION_KINDS(X, T) X(zelloth_##T##_sum) X(zelloth_##T##_prod) X(zelloth_##T##_max) X(zelloth_##T##_min)
 #define KINDS_OF(X) \
-  X(fill_pattern) X(copy_4) X(copy_1) \
+  X(fill_pattern) X(copy_4) X(copy_1) X(mask_spans) \
   X(premul_i8) X(truncdiv_i8) X(premul_u8) X(truncdiv_u8) X(premul_i32) X(truncdiv_i32) X(premul_u32) X(truncdiv_u32) \
   X(premul_i64) X(truncdiv_i64) X(premul_u64) X(truncdiv_u64) \
   X(premul_f16) X(premul_f32) X(premul_bf16) X(premul_e4m3) X(premul_e5m2) \

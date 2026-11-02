@@ -281,38 +281,21 @@ See [transport.md](../design/transport.md) for registration and credit units.
   - The calls of one group name one encoder (the group's dispatches are one program) and one communicator; a group
     completes at once. A call that crosses no link makes its result in recvbuff; what a crossing sends from or lands
     in that is not the caller's is the communicator's (nccl.h, Memory).
-  - **Fused WRITE records.** Explicit WRITE calls retain the physical SEND/COPY
-    fragments of their declaration. Parallel cables, multiple fragments per
-    channel, and multihop relay paths remain available. Numerical collectives
-    always emit their actual reductions into the common command graph. A record
-    sink can no longer suppress those numerical operations.
-    On a stream whose `fused` is set, the call writes the argument records and returns `ncclMeshFused` bindings in
-    physical channel order. The caller supplies enough room for the declared physical bindings; rank counts remain
-    separate metadata. The caller's kernels run publication and consumption steps. Zero counts mean no applicable
-    local binding, not permission to change the publication contract.
-    - The producer stores source bytes coherently and its last threadgroup releases every active source publication
-      with `mesh_step_release`. Relay fragments instead become ready from their actual incoming landed prefixes and
-      forward those spans; a source publication cannot announce an unlanded relay range ready.
-    - A consumer observes the final incoming prefixes required by its local uses and reads payload with
-      `mesh_step_read`. It need not wait for later relay-only entries or local SEND completion. Observation can be
-      shared before parallel readers: torch-mesh uses one `gather_ready` dispatch followed by consumers without
-      repeated waits, or inlines observation when the consumer has one threadgroup.
-    - The send and landing buffers are region leases satisfying the compiled exact span layout. Source/relay bytes remain
-      immutable through their declared reads. Fresh disjoint landings are preposted without reciprocal producer
-      gates. The recurrent all-gather has a two-slot lifetime proof when every rank's next publication follows its
-      consumption of the previous pieces. A zero-share rank lacks that natural return edge; torch-mesh then allocates
-      fresh generations and retires them asynchronously. See [whole-function.md](../design/whole-function.md).
-    - `repeats` crossings at once (`ncclMeshFused`'s `repeats` and `stride`: torch-mesh's compiled graphs, one a graph's
-      sums on a group): the group's entries laid that many times, repeat j's buffers j strides on, as that many of the
-      communicator's groups; one record each, its count's stride the DMA units a repeat adds, so the caller's kernels run
-      repeat j by `mesh_step_release` and `mesh_step_await` at j, and the host issues one call for them all.
-    - The caller's Metal 4 kernel binds them through its argument table, and the library adds the buffers the
-      bindings name to the stream's `residencySet` (torch-mesh's `torch_mesh/fused.py` through `_stream.mm`, and
-      metal-microbench's mesh_rank.m).
+  - **Compiled page effects.** WRITE declarations retain selected source and destination pages, frames,
+    and source occurrence identities. The collective compiler supplies retained numerical commands and typed
+    page effects to the enclosing function compiler. The common solve composes observations with the actual
+    input readers and publications with the actual output writers before backend binding.
+    Parallel cables, masked fragments, and multihop relays use that same contract. Relay readiness follows
+    the incoming spans it forwards. Callers do not receive physical channel records or implement a second
+    publication protocol.
+    Framed declarations retain each command's frame. The enclosing compiler places native commands and
+    external numerical commands in their declared order, then records explicit selections of native commands.
+    Descriptor publication remains at occurrence entry, while source-preservation copies retain their frame's
+    data dependencies. The recorder solves these page relationships together; there is no whole-group barrier.
   - A wait polls a holding's count and nothing else: each poll one `volatile coherent(system)` load after a system-scope
     fence (`mesh.metal` `mesh_wait_bounded`; without it a running kernel saw the host's store milliseconds late:
     metal-microbench tools/poll_probe.m, 2026-10-21), and one more fence after the observed count before the landed
-    bytes are read (`mesh_step_await`), each byte loaded coherent (`mesh_payload`). The bridge sets the counts `~0`
+    bytes are read (`mesh_step_observe`), each byte loaded coherently through the shared payload reader. The bridge sets the counts `~0`
     where the link is lost; the stream's `polls` bounds the wait ([Bounded waits](#bounded-waits)). No kernel stops at a
     stop word, and no kernel halts on a failure; a wait ends early only once another wait on the same failure words has
     failed ([Bounded waits](#bounded-waits), [Failures](#failures)).
@@ -644,10 +627,24 @@ MPI collective executor or per-call buffer API.
 
 All compiled frontends declare `ncclMeshCallWrite` through `ncclMeshCommPlan`.
 `bindings` supplies local page-backed buffer slots; optional `views` supplies
-pure typed geometry. Frames, source-ready words and landing records are
+pure typed geometry. Frames, source-ready operands and source identities are
 explicit Call operands. The compiler owns relay storage and physical cuts.
-`ncclMeshCommEncode` records the next declared group into the caller's recorder;
-it takes no independent WRITE plan or replacement buffer bindings.
+`ncclMeshCommLower` resolves one declared occurrence. `ncclMeshCommSources` exposes its retained commands and
+page effects for the whole-function solve; `ncclMeshCommSpecialize` consumes that solve's source results.
+`ncclMeshCommEncode` then records explicitly selected command ordinals from that occurrence into the caller's
+recorder. A whole-occurrence caller supplies every ordinal. No independent WRITE plan, manual publication sink,
+or replacement runtime buffer bindings exist.
+
+Computed transport coverage uses the same source pass. `ncclMeshCommSources` also exposes each transport's
+canonical packet domain and fixed span operand. `ncclMeshCommCoverage` consumes explicit span-range-to-cut
+projections and active/count page operands before ordering and dependency solving. It adds ordinary numerical
+source which multiplies each prepared span length by its active value; offsets and lane-completion positions stay
+fixed. This extends the same declared occurrence, without rerunning routing or introducing another executor.
+
+Both SEND and landing entries consume the resulting span-availability prefix. An inactive span advances logical
+progress without posting payload or filler traffic. Active spans retain their actual payload and overwrite
+dependencies. Mask production consumes only the active operand; contribution-count readiness remains attached
+to its own declared producer or imported-count consumer. No all-counts-ready dependency is added to transport.
 
 ## Not implemented
 

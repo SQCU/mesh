@@ -38,9 +38,10 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   transport (no RDMA WRITE or READ), a SEND and the receive it fills must cover the same number of 4 KiB frames, and a
   SEND is held by the hardware's credit until the peer has a receive posted. The compiled plan makes the SGE lengths
   equal exactly. `ceil(length / 4096)` is the credit charge, not padding read from or written to application memory.
-- **A resolved byte span.** `mesh_dma_span {uint64_t offset, bytes}` is 16 bytes of local immutable metadata; offset
+- **A resolved byte span.** `mesh_dma_span {uint64_t offset, bytes, through}` is 24 bytes of local metadata; offset
   is relative to the region base. It names the actual registered interval, can start inside an allocation page, and
-  never crosses a 1 GiB MR boundary. No copy, header or descriptor travels with the payload. Physical wire framing
+  never crosses a 1 GiB MR boundary. The compiled mask may set bytes to zero. The local completion position
+  `through` includes any following masked units on that lane. No copy, header or descriptor travels with the payload. Physical wire framing
   overhead is separate and is not inferred by treating a credit frame as 4096 transmitted payload bytes.
 - **A readiness word.** A 64-bit contiguous count of compiled span units, with one writer and one or more readers:
   `ready` counts produced units, `sent` completed SEND units, and `landed` completed receive units. Both hardware
@@ -429,48 +430,57 @@ clients copy into the bridge's rings and count positions against them (a lag cre
 the fix of version 125's real defect (clients holding work requests and queue pairs) had moved the data itself into the
 bridge. A client naming its own pages holds no DMA state, and needs no ring.
 
-**The stream (wire 135, layout 154).**
+**The stream (wire 135, layout 162).**
 - Each physical cable carries up to `MESH_LINK_STREAMS` streams, according to its negotiated queue-pair budget.
-  Unit p goes on lane p mod 2 as unit p div 2 there; both ends post equal exact payload lengths in this order.
+  Logical unit p goes on lane p mod `MESH_STREAM_LANES`. Both ends retain that order and the same mask.
 - Each stream has a `wire` identity derived from its pairing. Local holding generations distinguish later users
   of the same pairing and its reset completion words.
-- A holding presents SEND and landing lists of `mesh_entry {spans, units, word, base}`. `spans` is a region offset
-  of an immutable `mesh_dma_span {offset, bytes}` array; `units` is its count. A table can describe contiguous,
-  unaligned or scattered intervals and arbitrarily many affine rows. Descriptor count follows actual packet cuts,
-  not one host call or one list entry per row. List entries are 32 bytes; span records are 16 bytes, all local metadata.
-- The compiled plan gives both endpoints matching units. Each SGE names its exact byte interval with the proper
-  1 GiB registration key; payload does not round to an allocation page or hardware credit frame. Parallel paths
-  and relay buffers use the same descriptor. Storage ownership must hold for every physical reader.
-- A SEND unit k is available when its selected word (0 selects `ready`) reaches `base+k+1`. A receive waits on no
-  word; fresh disjoint destinations need no reciprocal publication. A receive into pages
-  some SEND of the program reads also waits, before its first write, for every SEND before its call on those SENDs'
-  channels to complete (its `after`, mesh.h struct mesh_zwoggle_entry: each named channel's `sent` at the call's base
-  there), so a page is written again only once its last outgoing DMA read ended (pages-and-functions.md, Freeing
-  6-7); the bridge reads its own prefixes, no receipt. `landed` advances
-  only through the completed prefix across both lanes, enabling the actual dependent consumer without a receipt.
-- Queue accounting retains two separate limits: `ceil(actual_length / 4096)` frames per request, and the outstanding
-  request slots in the `MESH_LANE_UNITS` pin ring. Receive completions retire their actual cumulative frame charge.
-  Frame capacity is not permission to send padded application bytes.
-- Before a post, the bridge records its actual physical `{offset, bytes}` pin and slot generation, publishes the
-  posted count, and rechecks the holding. Reclamation intersects that interval with every backing allocation run;
-  logical row IDs or alias tables cannot hide an overlap. The historical stream field `rows` now locates interval
-  pin records, not a single row ID per DMA unit. A racing snapshot conservatively retains storage.
-- `taken` releases a list slot, not the immutable array named by it. Tables remain live through every future use
-  and final SEND/LAND completion. On give, their CPU readers require the bridge's subsequent owner transition to
-  0 or GIVEN-alone before incomplete table uses can detach. Payload request pins do not cover CPU metadata reads.
-- Abrupt client exit uses a separate bridge CPU-read pin. Before dereferencing a table or external dependency word,
-  the progress thread publishes those exact intervals and then rechecks the holding/client with sequentially
-  consistent atomics. Retirement either observes that pin or wins the recheck, preventing the read. A monotonic
-  sequence makes a torn snapshot conservative; clearing the scope or the posting child's exit ends the CPU reads.
-  This retains table/word storage without keeping unrelated allocations and without any remote acknowledgment.
-  The pin occupies unused stream padding; existing field offsets, span descriptors and the 384-byte stream ABI stay
-  unchanged. The sequence does not reset at a new holding or pairing.
+- A holding presents SEND and landing lists of `mesh_entry {spans, units, word, base, step, spans_word, spans_base}`.
+  `spans` names a region array of `mesh_dma_span {offset, bytes, through}`. Entries are 56 bytes; spans are
+  24 bytes. All are local page metadata. The compiler fixes each offset and the equal packet cuts at both ends.
+  Source-local numerical mask work may change each length from its original value to zero.
+- Before reading descriptor k, either endpoint observes `spans_word >= spans_base+k+1`. Static tables bind an
+  explicitly completed word. Computed tables bind their actual producer's prefix. Zero-filled storage does not
+  announce that a mask has been computed. A table dependency does not join all packets of a message.
+- A zero-length unit advances the logical sequence without a SEND, receive, frame credit, payload read, or
+  overwrite dependency. An active SEND additionally requires its payload word (0 selects stream `ready`) to reach
+  `base+k*step+1`. Packet prefixes use step 1; a scalar threshold for a whole tile uses step 0.
+  This represents both dependencies directly, without subtracting a packet count from a scalar value.
+  Active SENDs and landings consume their compiled `after` lists. Fresh disjoint landing pages have
+  no overwrite predecessor. These are local page dependencies; no peer supplies a receipt or permission.
+- Each active SGE names its exact registered interval. It does not round payload to an allocation page or credit
+  frame. Parallel paths and relay buffers use the same representation.
+- Request IDs name their retained span directly. A completion reads its byte count to retire frame credits and
+  its `through` position to advance logical progress. There is no second completion-descriptor search or ring.
+  Preparation initializes `through` to that unit's next lane position. When later masked units are encountered,
+  the bridge extends the latest outstanding span's position; with no request outstanding, those units complete
+  directly. This accounts for changing masks without constructing a new order or delaying a skipped gap behind
+  the next active transfer. The minimum completed position across lanes is the stream's `sent` or `landed` prefix.
+- `ceil(actual_length / MESH_FRAME)` bounds frames; `MESH_LANE_UNITS` independently bounds outstanding requests.
+  Physical posted/completed counts exclude masked units. They remain the counts used to retain outstanding
+  hardware work after a holding ends. Logical progress is not a count of hardware requests.
+- `taken` records occurrence tables the bridge has passed. It does not release their span arrays. Descriptor
+  storage remains live through future posts, completion reads, and the bridge's end of the holding. An unfinished
+  holding retains storage until all physical requests complete or its posting child is reaped, as described in
+  [reclamation-2026-10-30.md](reclamation-2026-10-30.md). No per-entry hazard pointer or interval-pin ring remains.
 
-Diagnostic span-length history has a separate lifetime from the DMA descriptor table. Active trace observers
-retain the lengths needed to reconstruct their windows, even after completed DMA descriptors retire. Without an
-observer, completed history is pruned under the native group lock, retaining cumulative unit/byte baselines and
-the readiness checkpoint. Trace stop joins its observer before releasing history; overlapping traces keep it until
-the last observer ends. This bookkeeping neither retains payload bytes nor sends a receipt.
+The logical-prefix argument is local to each lane. Its `through` is the first
+position on that lane that has not completed. Posting an active unit leaves
+that position unchanged. Skipping a masked unit either advances it directly
+(no active request pending), or extends the last pending request's recorded
+completion position. Only that last request can be extended, so an earlier
+completion cannot jump over a later active request. Queue-pair completions are
+ordered; reading each completed descriptor therefore advances the prefix
+through exactly its active unit and the masked units following it. Taking the
+minimum lane position gives the stream's contiguous prefix, including when
+all units are masked. Mask producers write only descriptor lengths; the
+bridge alone owns these completion positions during execution.
+
+The bridge's link-byte observations sum actual receive completion `byte_len`
+values (`mesh_link_landed`). Logical `sent`/`landed` prefixes are dependency
+positions, not wire-byte measurements; advancing through a masked unit does
+not add bytes to that observation. Whole-function latency and useful work rate
+remain the application measurements.
 
 The bridge's HELLO still requires equal allocation-block sizes because generic collective front ends retain a
 common packet grid. Exact byte DMA itself imposes no such equality. Remove this remaining compatibility check
@@ -551,7 +561,7 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   registered future physical readers before presentation. Its allocation pool separately needs completed GPU uses
   and destination-consumer proofs before overwrite. For a dead payload, giving every relevant holding permits
   outstanding requests to retain it through bridge pins; this is not an application overwrite proof.
-- Immutable descriptor tables have local CPU readers in addition to their SEND/LAND direction obligations.
+- Descriptor tables have local CPU readers in addition to their SEND/LAND direction obligations.
   `client|GIVEN` prevents a future hardware post but does not itself prove the progress thread stopped reading the
   table. Until the bridge transitions that owner to 0 or GIVEN-alone, descriptor storage remains retained. This
   observation is asynchronous local ownership bookkeeping and introduces no remote ACK.

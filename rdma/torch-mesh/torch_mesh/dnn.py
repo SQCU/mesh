@@ -1,146 +1,79 @@
-# design/whole-function.md
+"""The fabric DNN is ordinary captured source over shared page operands."""
 import numpy as np
 import torch
+import torch.distributed._functional_collectives as collectives
+
 import torch_mesh
-from . import _stream, fused
+from mesh_relation import Algebra
 from .engines import host
-from .matrix import product, row_tiles
+from .declarations import Function, execution_sequence
+
 
 class DNN:
     """docs/measurement.md#physical-fabric-dnn"""
 
-    def __init__(self, args, group, fabric, *, source_scope):
-        self.args, self.group = args, group
-        self.source_scope = source_scope
-        self.channels = _stream.channels(group.group_name)
-        B, H, K, L = args.rows, args.width, args.expansion, args.layers
-        self.input = torch_mesh.empty(B, H)
+    def __init__(self, args, group, *, source_scope):
+        self.args, self.group, self.source_scope = args, group, source_scope
+        self.algebra = Algebra()
+        rows, width, expansion = args.rows, args.width, args.expansion
+        self.input = torch_mesh.empty(rows, width)
+        self.output = torch_mesh.empty(rows, width)
         rng = np.random.default_rng(1729)
         rng.standard_normal(out=host(self.input).numpy(), dtype=np.float32)
         self.weights = []
-        for _ in range(L):
-            a, b = torch_mesh.empty(H, K, device='cpu'), torch_mesh.empty(K, H, device='cpu')
+        for _ in range(args.layers):
+            a, b = torch_mesh.empty(width, expansion, device='cpu'), torch_mesh.empty(expansion, width, device='cpu')
             rng.standard_normal(out=a.numpy(), dtype=np.float32)
             rng.standard_normal(out=b.numpy(), dtype=np.float32)
-            a.mul_(H ** -0.5); b.mul_(K ** -0.5)
+            a.mul_(width ** -0.5)
+            b.mul_(expansion ** -0.5)
             self.weights.append((a, b))
-        self.x = torch_mesh.empty(B, H)
-        self.partial = [torch_mesh.empty(B, H) for _ in range(L)]
-        self.pairs = [(a, b) for a in range(group.size()) for b in range(group.size()) if a != b]
-        self.landing = [[torch_mesh.empty(B, H) for _ in self.pairs] for _ in range(L)]
-        peers = group.size() - 1
-        inputs = ''.join(f'volatile coherent(system) device const float *p{k} [[buffer({k + 1})]], ' for k in range(peers))
-        addition = ' + '.join(['own[i]'] + [f'mesh_payload(p{k} + i)' for k in range(peers)])
-        vectors = ' + '.join(['((device const float4 *)own)[i / 4]'] +
-                             [f'mesh_payload((volatile coherent(system) device const float4 *)p{k} + i / 4)' for k in range(peers)])
-        fold_wait = r'''
-    constant mesh_step_binding *land = (constant mesh_step_binding *)(s + 4) + tile * CHANNELS;
-    for (uint k = 0; k < CHANNELS; k++) if (land[k].p) {
-        auto b = land[k];
-        mesh_step_enter(*b.p, b.v, b.progress, tid == 0 && local == 0);
-        if (local == 0) mesh_step_counts(*b.p, b.a, b.v);
-    }
-    threadgroup_barrier(mem_flags::mem_device);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-'''
-        source = fused.steps() + f'#define CHANNELS {self.channels}\n' + f'''
-kernel void fold(device const float *own [[buffer(0)]], {inputs}device float *out [[buffer({peers + 1})]],
-                 constant uint *s [[buffer({peers + 2})]], uint2 pos [[thread_position_in_grid]],
-                 uint local [[thread_index_in_threadgroup]], uint2 grid [[threads_per_grid]],
-                 uint2 group [[threadgroup_position_in_grid]]) {{
-    const uint tid = pos.x, stride = grid.x, tile = group.y;
-    const uint begin = tile * s[1] * s[2], end = min(s[0], begin + s[1] * s[2]);
-    {fold_wait}
-    for (uint i = begin + 4 * tid; i < end; i += 4 * stride) {{
-        if (i % 4 == 0 && i + 3 < end) ((device float4 *)out)[i / 4] = tanh({vectors});
-        else {{
-            const uint stop = min(i + 4, end);
-            for (uint j = i; j < stop; j++) {{ const uint i = j; out[i] = tanh({addition}); }}
-        }}
-    }}
-}}
-'''
-        self.source = source   # Compiled at preparation; numerical execution only submits records.
-        self.parts = None
-        self.tiles = [(first, min(args.tile_rows, B - first)) for first in range(0, B, args.tile_rows)]
 
-    def storage(self, parts):
-        """This rank's shares of the weights and its hidden rows, laid for `parts` (the configuration's)."""
-        rank, B, H = self.group.rank(), self.args.rows, self.args.width
-        share = parts['compute']
-        if share != self.parts:
-            first, width = sum(share[:rank]), share[rank]
-            self.local = []
-            for a, b in self.weights:
-                ag, bg = torch_mesh.empty(H, width), torch_mesh.empty(width, H)
-                ag.copy_(a[:, first:first + width]); bg.copy_(b[first:first + width, :])
-                self.local.append((ag, bg))
-            self.hidden = torch_mesh.empty(B, width)
-            self.parts = list(share)
+    def declare(self, parts, configuration):
+        """Capture each tile shape once, then assign its occurrence's pages."""
+        rank, shares = self.group.rank(), parts['compute']
+        first, width = sum(shares[:rank]), shares[rank]
+        self.local = []
+        for a, b in self.weights:
+            ag, bg = torch_mesh.empty(a.shape[0], width), torch_mesh.empty(width, b.shape[1])
+            ag.copy_(a[:, first:first + width])
+            bg.copy_(b[first:first + width, :])
+            self.local.append((ag, bg))
 
-    def prepared(self, schedule):
-        self.schedule = schedule
-        self.completion = schedule.completion()
-        self.run = schedule.enqueue
+        def forward(value):
+            for a, b in self.local:
+                hidden = torch.tanh(value @ a)
+                partial = hidden @ b
+                value = torch.tanh(collectives.all_reduce(partial, 'sum', self.group))
+            return value
 
-    def prepare(self, parts):
-        rank, B, H = self.group.rank(), self.args.rows, self.args.width
-        self.storage(parts)
-        if not hasattr(self, 'fold'):
-            self.fold = _stream.pipeline(self.source, 'fold')
-        schedule = _stream.Schedule()
-        for tile_index, (first, rows) in enumerate(self.tiles):
-            x = self.input.narrow(0, first, rows)
-            result = self.x.narrow(0, first, rows)
-            hidden = self.hidden.narrow(0, first, rows)
-            for layer, (a, b) in enumerate(self.local):
-                partial = self.partial[layer].narrow(0, first, rows)
-                landings = [t.narrow(0, first, rows) for t in self.landing[layer]]
-                tiles = row_tiles(rows)
-                ready, arrivals, declaration = self.declarations[tile_index][layer]
-                words = [partial.numel(), H, tiles[0][1], 0]
-                if declaration is not None:
-                    crossing = fused.writes(schedule, declaration)
-                    words += [w for binding in crossing.land for w in fused._words(binding)]
-                from .native import Program
-                Program.prepare(dict(commands=[
-                    *product(x, a, hidden, act=True),
-                    *product(hidden, b, partial, ready=ready, arrivals=arrivals)], output=None, pages=())).append(schedule)
-                inputs = [t for (_, destination), t in zip(self.pairs, landings) if destination == rank]
-                output = len(inputs) + 1
-                schedule.compute(self.fold, [partial, *inputs, result],
-                                 words, output + 1, (tiles[0][1] * H + 1023) // 1024, len(tiles), 256,
-                                 ((1 << output) - 1) | (1 << (32 + output)))
-                x = result
-        schedule.finish()
-        self.prepared(schedule)
+        configuration = {key: value for key, value in configuration.items() if key != 'tile_rows'}
+        self.functions, groups, shapes = [], [], {}
+        occurrences = -(-self.args.rows // self.args.tile_rows)
+        for first in range(0, self.args.rows, self.args.tile_rows):
+            rows = min(self.args.tile_rows, self.args.rows - first)
+            occurrence = (first // self.args.tile_rows, occurrences)
+            destination = self.output.narrow(0, first, rows)
+            function = Function(forward, self.input.narrow(0, first, rows), configuration=configuration,
+                algebra=self.algebra, source_scope=dict(scope=self.source_scope, tile_rows=rows))
+            if rows not in shapes:
+                calls = function.declare(self.group, destinations=[destination], occurrence=occurrence)
+                shapes[rows] = function
+            else:
+                source = shapes[rows]
+                function.arguments = (function.arguments[0], *source.source_arguments[1:])
+                function.output_spec, function.result_types = source.output_spec, source.result_types
+                function.choices = source.choices
+                calls = function.declare_graph(source.prepared['expression']['graph'], self.group,
+                    destinations=[destination], prepared=source.prepared, occurrence=occurrence)
+            groups.extend(calls)
+            self.functions.append(function)
+        self.execution = execution_sequence(self.functions, self.output, algebra=self.algebra)
+        return groups
 
-    def declare(self):
-        """Bind producer words and local pages before the communicator plan is compiled."""
-        from .backend import bind_source
-        from ._stream import TensorLayout
-        calls, self.declarations = [], []
-        for first, rows in self.tiles:
-            declared = []
-            tiles = row_tiles(rows)
-            for layer in range(self.args.layers):
-                ready = torch_mesh.empty(len(tiles), dtype=torch.int64) if self.pairs else None
-                arrivals = torch_mesh.empty(len(tiles), dtype=torch.int32) if self.pairs else None
-                declaration = None
-                if ready is not None:
-                    host(ready).zero_(); host(arrivals).zero_()
-                    partial = self.partial[layer].narrow(0, first, rows)
-                    landings = [value.narrow(0, first, rows) for value in self.landing[layer]]
-                    tile_bytes = tiles[0][1] * self.args.width * partial.element_size()
-                    declaration, bound = fused.declare(partial, landings, self.pairs, self.group,
-                        ready=ready, ready_value=tile_bytes, tile_bytes=tile_bytes)
-                    production = [{'seconds': 0, 'order': tile} for tile in range(len(tiles))]
-                    source = {'scope': self.source_scope, 'statement': 'partial output'}
-                    occurrences = TensorLayout((1,), (1,), layer)
-                    work = TensorLayout((partial.numel() * partial.element_size(),), (1,),
-                                        first * self.args.width * partial.element_size())
-                    calls.append([bind_source(call._replace(production=production), source=source,
-                        occurrences=occurrences, work=work, route_scope={'source': source, 'layer': layer}) for call in bound])
-                declared.append((ready, arrivals, declaration))
-            self.declarations.append(declared)
-        return calls
+    def prepare(self):
+        self.execution.realize()
+        self.run = self.execution.forward
+        self.completion = self.execution.completion()
+        return dict(layouts=[choice for function in self.functions for choice in function.layout_choices],
+                    choices=[choice for function in self.functions for choice in function.choices])

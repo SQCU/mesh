@@ -111,21 +111,20 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 An indexed scatter into the blocks of `all_to_all_single` at a program's maximum extents, written in the program's own
 code, is any dispatch by index (an expert dispatch among them); how much of a block a step fills is data in its pages.
 
-### Physical fused writes
+### Numerical work and physical writes
 
 Every communicator retains its physical cables, including parallel cables to the same peer. Explicit WRITE and
-fused collective lowering share the same physical fragment compiler, relay dependencies, and channel bindings.
-`torch_mesh.fused.writes` declares immutable source/destination pairs; `fused.encode` takes a physical `channels`
-extent, independently of rank counts. The removed `fused.exchange` interface is not supported. Unsupported fused
-forms fail rather than executing an ordinary source read before the producer publishes it.
+collective declarations use the same physical fragment compiler, relay dependencies, and channel bindings.
+`Function` captures tensor source; native declarations retain their numerical source and exact group-to-page
+relations. Both enter the same `Execution` preparation pass. It composes source production, transfer landings, and
+consumer accesses before backend binding. The runtime submits that prepared result.
 
-Generic gather and sum declare one page-padded ALLGATHER. A single `gather_ready` dispatch observes their incoming
-prefixes before a parallel consumer; a one-threadgroup consumer inlines that observation. The LSTM example uses
-`torch_mesh::allgatherv_out` to write its persistent hidden-state destination directly, eliminating the additional
-result-to-state copy. Generic gather still uses its common segment layout; not every remaining layout copy has been
-removed. Preparation binds source and result generations and their actual page dependencies.
-See [DESIGN-fused-stream.md](DESIGN-fused-stream.md) for the current API,
-ownership requirements, and dated two-/three-rank validation.
+The chain example retains its tiled numerical body in `chain.metal`, with explicit resource geometry and page
+generations. Its input and recurrent transfers are ordinary selected-page WRITE declarations. The fabric DNN
+uses captured products, tanh, and an all-reduce. Equal-sized DNN tiles reuse retained source sections with new page
+operands and explicit occurrence identities. Neither example has its own executor or publication implementation.
+The obsolete `torch_mesh.fused` helper and native `PreparedChain`/`FusedForm` registries have been removed.
+See [DESIGN-fused-stream.md](DESIGN-fused-stream.md) for the shared preparation contract and validation limits.
 
 ### Partials merge
 

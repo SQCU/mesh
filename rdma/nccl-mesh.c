@@ -130,7 +130,7 @@ struct entry { uint64_t below; struct mesh_program program; struct mesh_trees tr
    offset of `ready`).  Its entries, each list in its own order: `sends` and `lands` laid by the
    groups scheduled, `out` and `in` their pages (the value each count reaches once they are whole).  The host's mirror
    of what the GPU had published and consumed (`published`, `consumed`, `waited`) is deleted with the tracks pool:
-   every group is published and awaited at its own call (zabbadoo, fused_records) */
+   every group is published and awaited at its own call (the shared source-effect solve) */
 struct channel {
   int peer;
   uint32_t node, stream, cable;
@@ -2072,10 +2072,8 @@ struct write_binding {
   uint64_t ready_value;
   uint64_t *ready_offsets;
   size_t ready_tiles;
-  void *land_records;
-  ncclMeshTileLayout ready_layout, land_layout;
+  ncclMeshTileLayout ready_layout;
   struct mesh_write_layout layout;
-  uint32_t land_capacity;
   ncclComm_t comm;
   size_t stride, bytes, row_bytes, rows, pitch;
   ncclMeshSpan *view;
@@ -2263,7 +2261,6 @@ struct call {
 
   struct steps *bound;
   uint32_t polls;
-  ncclMeshFused *fused;
   struct where send_at, recv_at, sum, scalar;
   /* Preparation-owned source generation, only for a real transform or alias. */
   struct where input_from;
@@ -3404,6 +3401,8 @@ struct message { struct call *c; uint32_t step, frame; uint64_t entry; mesh_page
                  const struct mesh_landing_run *landings; size_t landing_count;
                  /* This receive's prepared chunk-progress word, storing its physical/global packet prefix. */
                  struct where summed,copied; uint64_t summed_word;
+                 struct where spans_ready; /* resolved table availability, separate from payload production */
+                 size_t transport; /* 1 + its retained preparation declaration ordinal */
                  uint64_t listed; mesh_pages laid; /* its entry and end in its issue's own lists (issue_lay), schedule_laid's base */
                  /* a SEND's landing it forwards: its channel (UINT32_MAX none) and its base past that channel's landing
                     count before the group (send_dependencies) */
@@ -3590,11 +3589,6 @@ static int write_order(const void *left, const void *right) {
   return a->offset < b->offset ? -1 : a->offset > b->offset;
 }
 
-static int all_writes(const struct call *list, size_t n) {
-  for (size_t i = 0; i < n; i++) if (!list[i].target) return 0;
-  return n != 0;
-}
-
 static ncclResult_t order_transfers(const struct ncclComm *comm,const struct call *list,size_t calls,struct schedule *plans,
                                     const struct mesh_transfer_alias *alias,size_t aliases,unsigned char *separate,double *seconds) {
   const uint32_t nodes=(uint32_t)comm->nranks;
@@ -3694,11 +3688,14 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct where base, area; void *tables;
                /* Prepared region pages and the invocation that owns them. */
                void *zeeb; size_t bytes; uint64_t instance, used, occurrence;
-               uint32_t polls, copies; int remote, recorded, inputs_bound;
+               uint32_t polls, copies; int remote, recorded, inputs_bound, coverage_bound;
+               size_t recorded_commands;
                void *input_requirements;
                struct metal_program *source;
-               ncclMeshFused fused_sources;
                size_t *source_link;
+               size_t *source_calls;
+               ncclMeshTransport *transport;
+               struct message **transport_messages;
                struct mesh_landing_run *landings; void *progress;
                /* design/zorvek.md zinth: on each channel its tables for the bridge (mesh.h struct mesh_zwoggle, its
                   entries after them) in its span tables' lease (`tables`, over Metal buffer `linkable`): their
@@ -3751,7 +3748,7 @@ static struct compiled *group_at(const struct plan *plan, uint64_t holder) {
   return plan->group+run.first+(at-(low?plan->ends[low-1]:0))%run.count;
 }
 
-/* message k of list m (n a repeat) laid repeat after repeat, `stride` bytes a repeat (nccl.h ncclMeshFused repeats) */
+/* message k of list m (n a repeat) laid repeat after repeat, `stride` bytes a repeat (ncclMeshCall.frames) */
 static struct message repeat_of(const struct message *m, size_t n, size_t k, size_t stride, struct call *list, const struct call *calls) {
   struct message x = m[k % n];
   x.c = list + (x.c - calls);
@@ -3763,7 +3760,6 @@ static struct message repeat_of(const struct message *m, size_t n, size_t k, siz
 }
 
 /* a declared call's fused stream's records (declared, plan_calls) */
-static ncclMeshFused fused_declared;
 /* the counts a call of its kind holds a rank each (an all-to-all's to each rank, then from each), where it holds any */
 static size_t call_segments(const struct call *c) { return segments_of(c->what, (size_t)c->comm->nranks); }
 /* whether issued call c is the call declared as d: its kind, type, operator, root, target and counts (a call that
@@ -4005,6 +4001,7 @@ static int landing_runs(const struct ncclComm *comm, struct issue *u) {
 static ncclResult_t landing_progress(const struct ncclComm *comm, struct issue *u) {
   size_t count = 0;
   for(uint32_t h=0;h<comm->count;h++) {
+    count+=u->plans[h].outs+u->plans[h].ins;
     u->plans[h].ready=(struct where){0};u->plans[h].ready_word=0;
     count+=u->plans[h].outs!=0;
     for(size_t k=0;k<u->plans[h].outs;k++) {
@@ -4028,6 +4025,12 @@ static ncclResult_t landing_progress(const struct ncclComm *comm, struct issue *
   struct where base = {0};
   if (lease_buffer(u->progress, &base.buffer, &base.offset)) return fail(ncclSystemError, "binding a group's progress words");
   size_t at = 0;
+  for(uint32_t h=0;h<comm->count;h++)for(int send=1;send>=0;send--)
+    for(size_t k=0;k<(send?u->plans[h].outs:u->plans[h].ins);k++) {
+      struct message *m=(send?u->plans[h].out:u->plans[h].in)+k;
+      m->spans_ready=shifted(base,at*sizeof(uint64_t));
+      ((uint64_t *)u->progress)[at++]=m->pages.n;
+    }
   for(uint32_t h=0;h<comm->count;h++)if(u->plans[h].outs) {
     u->plans[h].ready=shifted(base,at*sizeof(uint64_t));
     u->plans[h].ready_word=lease_offset((uint64_t *)u->progress+at++);
@@ -4116,7 +4119,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
           length += (x->pages.n * sizeof *x->spans + align - 1) / align * align;
           if (!pass) continue;
           for (uint64_t unit = 0, at = 0, bytes; (bytes = mesh_packet_next(cuts, packet, &packets)); unit++, at += bytes) {
-            made[unit] = (struct mesh_dma_span){mesh_page_run_offset(&physical,at), bytes};
+            made[unit] = (struct mesh_dma_span){.offset=mesh_page_run_offset(&physical,at),.bytes=bytes};
             if (!mesh_dma_span_valid(comm->attach->context.M, made[unit])) {
               free(physical.at);return fail(ncclInvalidUsage, "collective binding differs from its prepared page backing"); }
           }
@@ -4158,7 +4161,7 @@ static ncclResult_t place_group(struct ncclComm *comm, struct issue *u) {
     if (result) return result;
   }
   if (!error && u->tables) error = owned_add(&u->owned, u->tables, OWNED_TABLE);
-  if (!error && u->progress) error = owned_add(&u->owned, u->progress, OWNED_TABLE | OWNED_SENDS);
+  if (!error && u->progress) error = owned_add(&u->owned, u->progress, OWNED_TABLE);
   pthread_mutex_lock(&attach_lock);
   if (!error) error = owned_uses(comm, &u->owned);
   if (!error) error = owned_begin(&u->owned, 0);
@@ -4530,7 +4533,11 @@ static ncclResult_t present_group(struct ncclComm *comm, struct issue *owner, st
     /* Each occurrence is scheduled once; readiness words and bases are final. */
     for (size_t k = 0; k < p->outs; k++) {
       const struct message *m = p->out + k;
-      struct mesh_entry entry = {m->table, pages_to_word(m->pages), p->ready_word, pages_to_word(pages_sub(m->laid, m->pages))};
+      for(size_t unit=0;unit<m->pages.n;unit++)
+        m->spans[unit].through=m->end.n-m->pages.n+unit+MESH_STREAM_LANES;
+      struct mesh_entry entry = {.spans=m->table,.units=pages_to_word(m->pages),.word=p->ready_word,
+        .base=pages_to_word(pages_sub(m->laid,m->pages)),.step=1,
+        .spans_word=lease_offset(address_of(m->spans_ready)),.spans_base=0};
       /* the landing it forwards (send_dependencies): that channel's landing count before the group, plus its base */
       if (m->dep_h != UINT32_MAX) {
         /* A combined source names its exact producer word; plain copies use
@@ -4540,20 +4547,23 @@ static ncclResult_t present_group(struct ncclComm *comm, struct issue *owner, st
         entry.base = pages_to_word(pages_add(comm->channels[m->dep_h].in, m->dep_rel));
       } else if (m->c->write_binding && m->c->input_pages) {
         const struct where ready=copied_word(m->c,m->frame,message_tile(m));
-        entry.word=lease_offset(address_of(ready));entry.base=1-m->pages.n;
+        entry.word=lease_offset(address_of(ready));entry.base=0;entry.step=0;
       } else if(named(m->copied)) {
-        entry.word=lease_offset(address_of(m->copied));entry.base=1-m->pages.n;
+        entry.word=lease_offset(address_of(m->copied));entry.base=0;entry.step=0;
       } else if (m->c->write_binding && m->c->write_binding->ready_value) {
         const struct write_binding *plan = m->c->write_binding;
         entry.word = plan->ready_offsets[m->c->invocation % plan->ready_layout.instances * plan->ready_tiles + message_tile(m)];
-        entry.base = plan->ready_value - m->pages.n;
+        entry.base = plan->ready_value-1;entry.step=0;
       }
       records[k] = (struct mesh_zwoggle_entry){entry, m->required ? lease_offset(m->requirement) : 0};
     }
     /* Landings have only their actual overwrite prerequisite lists. */
     for (size_t k = 0; k < p->ins; k++) {
       const struct message *m=p->in+k;
-      records[p->outs+k]=(struct mesh_zwoggle_entry){{m->table,pages_to_word(m->pages),0,0},
+      for(size_t unit=0;unit<m->pages.n;unit++)
+        m->spans[unit].through=m->end.n-m->pages.n+unit+MESH_STREAM_LANES;
+      records[p->outs+k]=(struct mesh_zwoggle_entry){{.spans=m->table,.units=pages_to_word(m->pages),
+          .spans_word=lease_offset(address_of(m->spans_ready)),.spans_base=0},
         m->required?lease_offset(m->requirement):0};
     }
     atomic_store_explicit(&tables->next, 0, memory_order_relaxed);
@@ -4721,7 +4731,6 @@ struct inflight {
   struct schedule *plans;
   uint64_t (*start)[2], (*end)[2];
   uint32_t repeats;
-  int fused;
 };
 
 static ncclResult_t zoblimp(struct ncclComm *comm, struct compiled *x, uint64_t instance, int remote, struct issue **made);
@@ -4744,7 +4753,7 @@ static ncclResult_t zorvek(struct ncclComm *comm, struct compiled *x, int remote
   for (size_t i = 0; i < n; i++) {
     struct call *c = u->calls + i;
     const struct call *from = *calls + i;
-    c->polls = from->polls; c->fused = from->fused; c->invocation = from->invocation;
+    c->polls = from->polls; c->invocation = from->invocation;
     memcpy(c->pre, from->pre, sizeof c->pre);
     if ((c->bound = u->steps[i])) steps_reset(c->bound, 1);
   }
@@ -4793,7 +4802,9 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (!u) return;
   zplan_free(u->zplan);
   if(u->source){metal_end(u->source);free(u->source);}
-  free(u->fused_sources.publish);free(u->fused_sources.land);free(u->source_link);
+  free(u->source_link);
+  free(u->source_calls);
+  free(u->transport);free(u->transport_messages);
   schedules_free(comm, u->plans);
   for (size_t i = 0; u->steps && i < u->n; i++) steps_free(u->steps[i]);
   if (u->group) free(u->group->start);
@@ -4810,40 +4821,10 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (u->zeeb) ncclMemFree(u->zeeb);
   free(u->afters); free(u->steps); free(u->calls); free(u->group); free(u->landings); free(u->linking); free(u->readers); free(u->requirements); free(u);
 }
-static struct message *out_at(struct inflight *g, uint32_t h, uint64_t at) { return g->plans[h].out + (at - g->start[h][0]); }
-static struct message *in_at(struct inflight *g, uint32_t h, uint64_t at) { return consumption_at(g->plans + h, at - g->start[h][1]); }
-
-/* the fused crossing of the group being encoded (nccl.h ncclMeshFused): its records' lists, the room the
-   caller gave each (`room`: publications, landings), and the publications and landings written in place of their
-   dispatches; under group_lock, for one lowered occurrence */
-static struct { ncclMeshFused *out; uint32_t room[2], published, landed; } fusing;
-
-/* Explicit producer words and relay landing words already name readiness.  The last entry of [first, end)
-   on channel h that needs a publication (needs_publication), NULL none */
-static const struct message *channel_publication(struct inflight *g, uint32_t h, uint64_t first, uint64_t end) {
-  const struct message *last = NULL;
-  for (uint64_t at = first; at < end; at++) {
-    const struct message *m = out_at(g, h, at);
-    if (needs_publication(m)) last = m;
-  }
-  return last;
-}
-
-/* Only values addressed to this rank are inputs to its fused consumer. Relay
-   arrivals have their own landed-word dependencies in the transport program;
-   their immutable leases live through the enclosing data function. */
-static uint64_t own_landing(const struct inflight *g, uint32_t h) {
-  const struct schedule *p = g->plans + h;
-  for (size_t k = p->ins / g->repeats; k; k--)
-    if ((!p->in[k - 1].c->target || p->in[k - 1].c->target == g->comm->rank + 1) &&
-        !(p->in[k - 1].c->write_binding && p->in[k - 1].c->write_binding->land_records)) return g->start[h][1] + k;
-  return g->start[h][1];
-}
-
 /* group_lock's arrays, kept from call to call (plan_direct's ranges, complete()'s tracks and tiles): `bytes` of one,
    grown (its new bytes zeroed) where it has fewer, so none is allocated once each has its size; NULL where memory runs
    out */
-enum { KEPT_SPANS, KEPT_TILES, KEPTS };
+enum { KEPT_SPANS, KEPTS };
 static void *kept(int k, size_t bytes) {
   static struct { void *at; size_t room; } room[KEPTS];
   if (bytes > room[k].room) {
@@ -4855,14 +4836,6 @@ static void *kept(int k, size_t bytes) {
   return room[k].at;
 }
 
-/* Configuration-only reduction to the last prefix for each consumer record
-   on a cable. Several contributors can name the same consumer tile. */
-struct tile_landing { uint64_t *record; size_t entry; };
-static int tile_landing_order(const void *left,const void *right) {
-  const struct tile_landing *a=left,*b=right;
-  if(a->record!=b->record)return (uintptr_t)a->record<(uintptr_t)b->record?-1:1;
-  return a->entry>b->entry?-1:a->entry<b->entry;
-}
 /* Every landing is a declared data producer. Its frame and the transfer
    compiler's consumption order identify its value version. COPY and REDUCE
    enter the same command graph; a receive need not share another's packet cuts. */
@@ -5067,6 +5040,7 @@ static ncclResult_t zabbadoo(struct metal_program *program,struct ncclComm *comm
     const struct zitem *item=p->items+k;
     const struct message *m=item->message;
     if(m->c!=call)continue;
+    program->frame=m->frame;
     const struct channel *ch=comm->channels+item->channel;
     struct metal_result emitted;
     if(item->reduction!=SIZE_MAX) {
@@ -5076,7 +5050,7 @@ static ncclResult_t zabbadoo(struct metal_program *program,struct ncclComm *comm
       const ncclMeshPageEffect arrival={.kind=ncclMeshPageObserve,.operand=ncclMeshPageInternal,
         .call=(size_t)(m->c-u->calls),.first=m->c->write_binding?effect_first(m,ncclMeshPageDestination):m->offset,.frame=m->frame,
         .word={ch->buffer,ch->landed},.violation={comm->violation,0},.threshold=pages_to_word(m->end),
-        .channel=item->channel,.entry=m->entry,.polls=u->polls,.bytes=m->bytes};
+        .channel=item->channel,.entry=m->entry,.polls=u->polls,.bytes=m->bytes,.transport=m->transport};
       if(m->c->write_binding) {
         ncclResult_t result=selected_effect(program,m->c,&arrival,0);if(result)return result;
       } else metal_page_effect(program,&arrival,m->data.buffer,m->data.offset,m->bytes);
@@ -5119,7 +5093,8 @@ static ncclResult_t destination_effects(const struct inflight *g,const struct me
     if(until>at) {
       const ncclMeshPageEffect landing={.call=(size_t)(c-g->list),.first=effect_first(m,ncclMeshPageDestination)+at-m->offset,
         .bytes=until-at,.kind=ncclMeshPageObserve,.frame=m->frame,.channel=h,.polls=polls,.operand=ncclMeshPageDestination,
-        .word={channel->buffer,channel->landed},.violation={g->comm->violation,0},.threshold=pages_to_word(m->end),.entry=m->entry};
+        .word={channel->buffer,channel->landed},.violation={g->comm->violation,0},.threshold=pages_to_word(m->end),.entry=m->entry,
+        .transport=m->transport,.transport_first=at-m->offset};
       result=(ncclResult_t)effect(context,&landing);
     }
     if(k>=later.count)break;
@@ -5143,77 +5118,6 @@ static ncclResult_t page_effects(struct inflight *g,uint32_t polls,
     }
     for(size_t k=0;!result&&k<schedule->ins;k++) {
       result=destination_effects(g,schedule->in+k,h,polls,effect,context);
-    }
-  }
-  return result;
-}
-
-/* a fused crossing's records for its caller's kernels (nccl.h ncclMeshFused), its first repeat's alone (a later
-   repeat's are the records' at their own j): on each channel its last publication's (metal_send_deferred: its last
-   threadgroup to write the operand stores `ready`), each WRITE consumer's landing record (metal_land_deferred, the
-   last landing of each consumer tile), and its last landing addressed to this rank (own_landing), recorded for its
-   consumer.  Relay entries already name their incoming landed word, so no publication releases relay bytes early;
-   all leases belong to the enclosing data function, relay-only arrivals among them */
-static ncclResult_t fused_records(struct metal_program *program, struct inflight *g, int *published) {
-  struct ncclComm *comm = g->comm;
-  ncclResult_t result = ncclSuccess;
-  metal_gate(program, comm->violation);
-  for (uint32_t h = 0; h < comm->count && !result; h++) {
-    struct channel *ch = comm->channels + h;
-    const struct schedule *schedule = g->plans + h;
-    const uint64_t first_end = g->start[h][0] + (g->end[h][0] - g->start[h][0]) / g->repeats;
-    const struct message *m = channel_publication(g, h, g->start[h][0], first_end);
-    if (m) {
-      if (fusing.published >= fusing.room[0])
-        return fail(ncclInvalidUsage, "a fused crossing's publications past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[0]);
-      const struct metal_release release = {schedule->ready.buffer, schedule->ready.offset, m->laid, schedule->each[0]};
-      struct where producer=m->data;
-      if(m->c->input_pages&&m->c->write_binding) {
-        const struct write_binding *write=m->c->write_binding;
-        const struct mesh_step *step=m->c->bound->steps+m->step;
-        producer=shifted(m->c->input_from,m->frame*write->stride+
-          write_binding_slot(write,m->c->invocation)*write->layout.instance_stride+
-          write_displacement(write,step->first*step->piece.element_bytes));
-      }
-      result = gpu(metal_send_deferred(program, producer.buffer, producer.offset, &release, fusing.out->publish[fusing.published]),
-                   "a fused publication's record");
-      fusing.published += !result; *published = 1;
-    }
-    struct tile_landing *tiles=kept(KEPT_TILES,(schedule->ins/g->repeats+1)*sizeof *tiles);
-    if(!tiles)return fail(ncclSystemError,"allocating consumer prefix compilation indices");
-    size_t count=0;
-    for (size_t k = schedule->ins / g->repeats; !result && k; k--) {
-      const struct message *x = schedule->in + k - 1;
-      struct write_binding *write = x->c->write_binding;
-      if (!write || !write->land_records || write->to != comm->rank) continue;
-      const size_t tile=write_tile(write,x->offset);
-      uint64_t *record=(uint64_t *)((char *)write->land_records+tile_offset(write->land_layout,tile,x->c->invocation));
-      tiles[count++]=(struct tile_landing){record,k-1};
-    }
-    qsort(tiles,count,sizeof *tiles,tile_landing_order);
-    for(size_t t=0;!result&&t<count;t++) {
-      if(t&&tiles[t].record==tiles[t-1].record)continue;
-      const size_t k=tiles[t].entry;
-      const struct message *x=schedule->in+k;
-      uint64_t *record=tiles[t].record;
-      if (*record == x->c->write_binding->land_capacity) {
-        result=fail(ncclInvalidUsage, "WRITE consumer bindings exceed their prepared physical-channel capacity");break;
-      }
-      const struct metal_wait wait = {ch->buffer, comm->violation, x->data.buffer, ch->landed, x->data.offset,
-        x->end, g->start[h][1] + k, h, schedule->each[1],x->bytes};
-      ncclMeshBinding *bindings=(ncclMeshBinding *)(record+1);
-      result = gpu(metal_land_deferred(program, x->data.buffer, x->data.offset, &wait,
-        bindings[(*record)++]), "a WRITE consumer's landing record");
-    }
-    const uint64_t own = own_landing(g, h);
-    if (!result && own > g->start[h][1]) {
-      if (fusing.landed >= fusing.room[1])
-        return fail(ncclInvalidUsage, "a fused crossing's landings past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[1]);
-      const struct message *x = in_at(g, h, own - 1);
-      const struct metal_wait wait = {ch->buffer, comm->violation, x->data.buffer, ch->landed, x->data.offset, x->end, own - 1, h,
-                                      schedule->each[1], x->bytes};
-      result = gpu(metal_land_deferred(program, x->data.buffer, x->data.offset, &wait, fusing.out->land[fusing.landed]), "a fused landing's record");
-      fusing.landed += !result;
     }
   }
   return result;
@@ -5476,6 +5380,7 @@ static ncclResult_t write_source_copy(struct metal_program *program,const struct
   const size_t instance=write_binding_slot(write,c->invocation)*write->layout.instance_stride;
   ncclResult_t observed=source_generation_effects(program,c,plans,0);if(observed)return observed;
   for(size_t frame=0;frame<c->frames;frame++)for(size_t tile=0;tile<tiles;tile++) {
+    program->frame=(uint32_t)frame;
     const size_t first=tile*stride,length=write->bytes-first<stride?write->bytes-first:stride;
     for(size_t at=first;at<first+length;) {
       const ncclMeshSpan selected=write_selection(write,at,first+length-at);
@@ -5487,7 +5392,7 @@ static ncclResult_t write_source_copy(struct metal_program *program,const struct
       at+=selected.bytes;
     }
     const struct where ready=copied_word(c,frame,tile),payload=shifted(c->send_at,frame*write->bytes+first);
-    const ncclMeshPageEffect effect={.kind=ncclMeshPagePublish,.operand=ncclMeshPageInternal,
+    const ncclMeshPageEffect effect={.kind=ncclMeshPagePublish,.operand=ncclMeshPageInternal,.frame=(uint32_t)frame,
       .word={ready.buffer,ready.offset},.threshold=1,.bytes=length};
     metal_page_effect(program,&effect,payload.buffer,payload.offset,length);
   }
@@ -5598,8 +5503,6 @@ static ncclResult_t lower_group(struct call *list,size_t n,struct issue **made) 
   struct compiled *x=NULL;struct issue *u=NULL;struct schedule *plans=NULL;
   if(!result)result=definition_of(comm,list,n,occurrence,&x);
   if(result)return result;
-  const int fused=list[0].fused&&remote&&all_writes(list,n);
-  for(size_t i=0;i<n;i++)list[i].fused=fused?&fused_declared:NULL;
   struct where area={0};
   result=zorvek(comm,x,remote,&list,n,&plans,&u,&area);
   if(result)return result;
@@ -5607,7 +5510,7 @@ static ncclResult_t lower_group(struct call *list,size_t n,struct issue **made) 
   uint64_t (*const start)[2]=u->group->start;
   struct inflight *g=u->group;
   *g=(struct inflight){.comm=comm,.list=list,.n=n,.plans=plans,.start=start,
-    .end=start+comm->count,.repeats=repeats,.fused=fused};
+    .end=start+comm->count,.repeats=repeats};
   if(remote) {
     for(uint32_t h=0;h<comm->count;h++) {
       g->start[h][0]=comm->channels[h].sends;g->start[h][1]=comm->channels[h].lands;
@@ -5636,7 +5539,7 @@ static ncclResult_t source_publications(struct metal_program *program,const stru
     ncclMeshPageEffect effect={.call=(size_t)(c-g->list),.first=first,.bytes=m->bytes,
       .kind=ncclMeshPagePublish,.operand=ncclMeshPageSource,.frame=m->frame,.channel=h,.polls=program->polls,
       .word={g->plans[h].ready.buffer,g->plans[h].ready.offset},.violation={g->comm->violation,0},
-      .threshold=pages_to_word(m->laid),.entry=m->entry};
+      .threshold=pages_to_word(m->laid),.entry=m->entry,.transport=m->transport};
     ncclResult_t result=selected_effect(program,c,&effect,1);if(result)return result;
   }
   return ncclSuccess;
@@ -5645,8 +5548,27 @@ static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
   struct inflight *g=u->group;struct ncclComm *comm=g->comm;
   struct call *list=g->list;const size_t n=g->n;
   u->source=calloc(1,sizeof *u->source);u->source_link=calloc(comm->count+1,sizeof *u->source_link);
-  if(!u->source||!u->source_link)return fail(ncclSystemError,"allocating collective source declarations");
+  u->source_calls=calloc(n+1,sizeof *u->source_calls);
+  if(!u->source||!u->source_link||!u->source_calls)return fail(ncclSystemError,"allocating collective source declarations");
   struct metal_program *program=metal_prepare(u->source,context,u->remote?comm->violation:NULL,u->polls);
+  size_t transports=0;
+  for(uint32_t h=0;h<comm->count;h++)transports+=u->plans[h].outs+u->plans[h].ins;
+  u->transport=calloc(transports+1,sizeof *u->transport);
+  u->transport_messages=calloc(transports+1,sizeof *u->transport_messages);
+  if(!u->transport||!u->transport_messages)return fail(ncclSystemError,"allocating retained transport declarations");
+  size_t ti=0;
+  for(uint32_t h=0;h<comm->count;h++)for(uint32_t direction=0;direction<2;direction++)
+    for(size_t k=0;k<(direction?u->plans[h].ins:u->plans[h].outs);k++) {
+      struct message *m=(direction?u->plans[h].in:u->plans[h].out)+k;
+      const struct mesh_packet_view view=m->c->bound->views[m->step];
+      ncclMeshBuffer spans={0};
+      if(lease_buffer(m->spans,&spans.buffer,&spans.offset))return fail(ncclSystemError,"binding retained span operands");
+      u->transport[ti]=(ncclMeshTransport){.call=(size_t)(m->c-list),.first=view.first,.bytes=m->bytes,
+        .units=m->pages.n,.frame=m->frame,.domain=view.domain,.channel=h,.direction=direction,.entry=m->entry,.spans=spans};
+      m->transport=ti+1;u->transport_messages[ti++]=m;
+    }
+  program->declaration.transport=u->transport;program->declaration.transports=transports;
+  program->declaration.call_first=u->source_calls;program->declaration.calls=n;
   program->cpu_compiler=comm->cpu_compiler;program->cpu_resources=comm->cpu_resources;
   for(uint32_t h=0;u->remote&&h<comm->count;h++) {
     metal_resident(program,comm->channels[h].buffer);metal_resident(program,u->plans[h].ready.buffer);
@@ -5657,46 +5579,27 @@ static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
   if(u->zeeb)metal_resident(program,u->base.buffer);
   ncclResult_t result=u->remote?gpu(zinth(program,comm,u),"declaring descriptor publication"):ncclSuccess;
   for(size_t i=0;!result&&i<n;i++) {
+    u->source_calls[i]=metal_command_count(program);
+    program->frame=0;
     result=source_publications(program,g,list+i);
     if(!result)result=operand_copies(program,comm,list+i,1,u->plans,NULL);
     if(!result&&u->remote)result=zabbadoo(program,comm,u,list+i);
+    program->frame=0;
     if(!result&&u->remote)result=complement_copy(program,list+i);
     if(!result)result=epilogue(program,list+i,1);
   }
-  if(!result&&g->fused) {
-    ncclMeshFused *fused=&u->fused_sources;
-    for(uint32_t h=0;h<comm->count;h++) {
-      fused->publishes+=channel_publication(g,h,g->start[h][0],g->end[h][0])!=NULL;
-      fused->lands+=own_landing(g,h)>g->start[h][1];
-    }
-    fused->publish=calloc(fused->publishes+1,sizeof *fused->publish);fused->land=calloc(fused->lands+1,sizeof *fused->land);
-    fused->repeats=g->repeats;
-    if(!fused->publish||!fused->land)result=fail(ncclSystemError,"allocating declared source binding records");
-    if(!result) {
-      fusing.out=fused;fusing.room[0]=fused->publishes;fusing.room[1]=fused->lands;
-      fusing.published=fusing.landed=0;int published=0;
-      result=fused_records(program,g,&published);fusing.out=NULL;
-    }
-  }
+  u->source_calls[n]=metal_command_count(program);
   if(!result)metal_sources(program);
   return result;
 }
 /* Recording consumes the exact specialized source program. It neither lowers
    operations nor solves their page relations again. */
-static ncclResult_t record_group(struct issue *u,const ncclMeshStream *on) {
+static ncclResult_t record_group(struct issue *u,const size_t *commands,size_t count,const ncclMeshStream *on) {
   if(!u->source)return fail(ncclInvalidUsage,"declare and specialize native sources before recording");
   if(!on||!on->commandEncoder||!on->argumentTable||!on->residencySet||u->recorded)
     return fail(ncclInvalidUsage,"record one prepared occurrence into its function");
-  if(u->group->fused) {
-    const ncclMeshFused *source=&u->fused_sources;ncclMeshFused *target=on->fused;
-    if(!target||target->publishes<source->publishes||target->lands<source->lands)
-      return fail(ncclInvalidUsage,"bind the declared source and landing records");
-    memcpy(target->publish,source->publish,source->publishes*sizeof *source->publish);
-    memcpy(target->land,source->land,source->lands*sizeof *source->land);
-    target->publishes=source->publishes;target->lands=source->lands;target->repeats=source->repeats;
-  }
-  ncclResult_t result=gpu(metal_record(u->source,on),"recording the specialized collective source");
-  if(!result)u->recorded=1;
+  ncclResult_t result=gpu(metal_record(u->source,commands,count,on),"recording the specialized collective source");
+  if(!result){u->recorded_commands+=count;u->recorded=u->recorded_commands==metal_command_count(u->source);}
   return result;
 }
 
@@ -5749,6 +5652,107 @@ ncclResult_t ncclMeshCommSources(ncclComm_t comm,uint64_t occurrence,struct isl_
   if(!result&&u->source&&u->source->relation_context!=context)result=fail(ncclInvalidUsage,"one source program uses its enclosing relation context");
   if(!result&&!u->source)result=source_group(u,context);
   if(!result)*sources=metal_sources(u->source);
+  pthread_mutex_unlock(&group_lock);return result;
+}
+static int coverage_order(const void *a,const void *b) {
+  const ncclMeshCoverageBinding *x=a,*y=b;
+  if(x->transport!=y->transport)return x->transport<y->transport?-1:1;
+  return (x->first>y->first)-(x->first<y->first);
+}
+ncclResult_t ncclMeshCommCoverage(ncclComm_t comm,uint64_t occurrence,
+    const ncclMeshCoverageBinding *bindings,size_t count,const ncclMeshSources **sources) {
+  if(!comm||!sources||(count&&!bindings))return fail(ncclInvalidArgument,"coverage requires its retained source operands");
+  pthread_mutex_lock(&group_lock);struct issue *u=occurrence_at(comm,occurrence);
+  ncclResult_t result=!u||!u->source||u->source->sources||u->recorded||u->coverage_bound?
+    fail(ncclInvalidUsage,"bind coverage once before the whole-function source solve"):ncclSuccess;
+  ncclMeshCoverageBinding *selected=NULL;
+  const void **mask_effects=NULL;
+  size_t *positions=NULL,*relocation=NULL;
+  uint64_t **cut_tables=NULL;
+  struct metal_coverage_projection *projections=NULL;
+  const size_t previous=!result?metal_command_count(u->source):0;
+  if(!result) {
+    relocation=malloc((previous+1)*sizeof *relocation);
+    if(!relocation)result=fail(ncclSystemError,"allocating source placement relation");
+  }
+  if(!result&&count) {
+    selected=malloc(count*sizeof *selected);
+    mask_effects=calloc(count,sizeof *mask_effects);
+    positions=malloc(count*sizeof *positions);
+    cut_tables=calloc(count,sizeof *cut_tables);projections=calloc(count,sizeof *projections);
+    if(!selected||!mask_effects||!positions||!cut_tables||!projections)result=fail(ncclSystemError,"allocating coverage projection operands");
+    else {memcpy(selected,bindings,count*sizeof *selected);qsort(selected,count,sizeof *selected,coverage_order);}
+  }
+  for(size_t k=0;!result&&k<count;k++) {
+    ncclMeshCoverageBinding *b=selected+k;
+    if(b->transport>=u->source->declaration.transports||!b->units||b->cut>=b->values.cuts||b->before>previous||
+       !named((struct where){b->values.active.buffer,b->values.active.offset})||
+       !named((struct where){b->values.expected.buffer,b->values.expected.offset}))
+      result=fail(ncclInvalidArgument,"coverage names existing spans and explicit active/count page operands");
+    else {
+      const struct message *m=u->transport_messages[b->transport];
+      if(b->first>m->pages.n||b->units>m->pages.n-b->first||
+         (k&&selected[k-1].transport==b->transport&&selected[k-1].first+selected[k-1].units>b->first))
+        result=fail(ncclInvalidArgument,"coverage projections must name disjoint prepared span ranges");
+    }
+    if(!result) {
+      struct where active={b->values.active.buffer,b->values.active.offset},expected={b->values.expected.buffer,b->values.expected.offset};
+      result=as_metal(&active);if(!result)result=as_metal(&expected);
+      b->values.active=(ncclMeshBuffer){active.buffer,active.offset};
+      b->values.expected=(ncclMeshBuffer){expected.buffer,expected.offset};
+      positions[k]=b->before;
+    }
+  }
+  const size_t held=!result?u->owned.count:0;
+  for(size_t k=0;!result&&k<count;k++) {
+    const ncclMeshCoverageBinding *b=selected+k;
+    struct message *m=u->transport_messages[b->transport];
+    const ncclMeshTransport *transport=u->transport+b->transport;
+    const int first=!k||selected[k-1].transport!=b->transport;
+    uint64_t *cuts=cut_tables[k]=first?malloc((m->pages.n+1)*sizeof *cuts):cut_tables[k-1];
+    ncclMeshSpan *written=malloc(b->units*sizeof *written);
+    if(!cuts||!written){free(written);result=fail(ncclSystemError,"allocating exact coverage cuts");break;}
+    if(first) {
+      cuts[0]=0;for(size_t unit=0;unit<m->pages.n;unit++)cuts[unit+1]=cuts[unit]+m->spans[unit].bytes;
+      memcpy((char *)metal_contents(m->spans_ready.buffer)+m->spans_ready.offset,&b->first,sizeof(uint64_t));
+    }
+    ncclMeshBuffer table=transport->spans;table.offset+=b->first*sizeof(struct mesh_dma_span);
+    ncclMeshBuffer active=b->values.active;active.offset+=b->cut*sizeof(uint32_t);
+    u->source->frame=m->frame;
+    result=gpu(metal_mask_spans(u->source,table,m->spans+b->first,b->units,active),"declaring computed transport spans");
+    if(!result) {
+      metal_coverage_announcement(u->source,b->values,b->cut);
+      const uint64_t through=k+1<count&&selected[k+1].transport==b->transport?selected[k+1].first:m->pages.n;
+      for(size_t unit=0;unit<b->units;unit++)written[unit]=(ncclMeshSpan){
+        table.offset+unit*sizeof(struct mesh_dma_span)+offsetof(struct mesh_dma_span,bytes),sizeof(uint64_t)};
+      const ncclMeshPageEffect ready={.call=transport->call,.frame=m->frame,.channel=transport->channel,
+        .kind=ncclMeshPagePublish,.operand=ncclMeshPageInternal,.bytes=b->units*sizeof(uint64_t),
+        .word={m->spans_ready.buffer,m->spans_ready.offset},.threshold=through};
+      mask_effects[k]=metal_page_selection(u->source,&ready,table.buffer,written,b->units);
+      projections[k]=(struct metal_coverage_projection){.transport=b->transport,.first=cuts[b->first],
+        .bytes=cuts[b->first+b->units]-cuts[b->first],.base=transport->direction?m->end.n-m->pages.n:m->laid.n-m->pages.n,
+        .ends=cuts,.units=m->pages.n,.values=b->values,.cut=b->cut};
+      pthread_mutex_lock(&attach_lock);
+      int error=owned_add(&u->owned,address_of((struct where){b->values.active.buffer,b->values.active.offset}),OWNED_TABLE);
+      if(!error)error=owned_add(&u->owned,address_of((struct where){b->values.expected.buffer,b->values.expected.offset}),OWNED_TABLE);
+      pthread_mutex_unlock(&attach_lock);
+      if(error)result=fail(ncclSystemError,"retaining coverage page operands: %s",strerror(error));
+    }
+    free(written);
+  }
+  if(!result) {
+    pthread_mutex_lock(&attach_lock);const int error=owned_begin(&u->owned,held);pthread_mutex_unlock(&attach_lock);
+    if(error)result=fail(ncclSystemError,"holding coverage pages: %s",strerror(error));
+  }
+  if(!result) {
+    metal_coverage(u->source,projections,count);
+    metal_place_sources(u->source,previous,positions,mask_effects,count,relocation);
+    for(uint32_t h=0;h<comm->count;h++)if(u->plans[h].outs||u->plans[h].ins)
+      u->source_link[h]=relocation[u->source_link[h]];
+    u->coverage_bound=1;*sources=metal_sources(u->source);
+  }
+  for(size_t k=0;cut_tables&&k<count;k++)if(!k||cut_tables[k]!=cut_tables[k-1])free(cut_tables[k]);
+  free(projections);free(cut_tables);free(relocation);free(positions);free(mask_effects);free(selected);
   pthread_mutex_unlock(&group_lock);return result;
 }
 ncclResult_t ncclMeshCommSpecialize(ncclComm_t comm,uint64_t occurrence,void *sources) {
@@ -5870,11 +5874,11 @@ ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm,uint64_t occurrence,
   pthread_mutex_unlock(&group_lock);return result;
 }
 
-ncclResult_t ncclMeshCommEncode(ncclComm_t comm,uint64_t occurrence,cudaStream_t stream) {
+ncclResult_t ncclMeshCommEncode(ncclComm_t comm,uint64_t occurrence,const size_t *commands,size_t count,cudaStream_t stream) {
   if(!comm||!stream)return fail(ncclInvalidArgument,"record a lowered group with its prepared stream");
   pthread_mutex_lock(&group_lock);
   struct issue *u=occurrence_at(comm,occurrence);
-  const ncclResult_t result=u?record_group(u,stream):fail(ncclInvalidUsage,"lower the declared occurrence before recording it");
+  const ncclResult_t result=u?record_group(u,commands,count,stream):fail(ncclInvalidUsage,"lower the declared occurrence before recording it");
   pthread_mutex_unlock(&group_lock);
   return result;
 }
@@ -6033,15 +6037,13 @@ static ncclResult_t declared_members(struct call *c, const ncclMeshCall *d) {
   return ncclSuccess;
 }
 
-/* A declared call owns its counts, operand roles and bindings before lowering.
-   Its operator is resolved from source metadata; one declared `fused` names
-   `fused_declared` as its fused stream's records, so the group compiles and is declared as that stream's (no records
-   are written to it: a group's are its issued stream's) */
+/* A declared call owns its counts, page roles and bindings before lowering.
+   Its operator and dependencies enter the common retained source graph. */
 static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call *c) {
   const int n = comm->nranks, me = comm->rank,
             v = d->counts ? (int)segments_of(d->what, (size_t)n) : 0;
   *c = (struct call){.what = d->what, .root = d->peer, .count = d->count, .type = d->type, .op = d->op, .comm = comm,
-                     .fused = d->fused && d->what == ncclMeshCallWrite ? &fused_declared : NULL, .tile_bytes = d->tile_bytes, .frames = d->frames ? d->frames : 1};
+                     .tile_bytes = d->tile_bytes, .frames = d->frames ? d->frames : 1};
   if (d->what == ncclMeshCallWrite && (d->destination < 0 || d->destination >= n))
     return fail(ncclInvalidArgument, "a declared write's destination must belong to the fabric");
   if (d->what == ncclMeshCallWrite) { c->what = MESH_BROADCAST; c->target = d->destination + 1; }
@@ -6425,8 +6427,8 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
   for (size_t i = 0; i < x->n; i++) {
     const struct call *c = x->calls + i;
     if (!c->declared_bindings) return fail(ncclInvalidArgument, "each declared call requires its page bindings before preparation");
-    if (c->frames != frames || !!c->fused != !!x->calls[0].fused)
-      return fail(ncclInvalidArgument, "a group's calls share one frame count and publication record sink");
+    if (c->frames != frames)
+      return fail(ncclInvalidArgument, "a group's calls share one frame count");
     for (int b = 0; b < (c->write_binding ? 1 : 2); b++) {
       const uint64_t slots = c->write_binding ? c->write_binding->occurrences : c->bindings[b].instances;
       const uint64_t a = slots ? slots : invocations;
@@ -6860,7 +6862,7 @@ static ncclResult_t write_prepare_spans(struct write_binding *plan,ncclMeshPageT
         if (next > bytes) next = bytes;
         const uint64_t position=origin+write_binding_slot(plan,instance)*plan->layout.instance_stride+
           repeat*plan->stride+write_displacement(plan,logical+at);
-        struct mesh_dma_span span={mesh_page_run_offset(&table->storage,position),next-at};
+        struct mesh_dma_span span={.offset=mesh_page_run_offset(&table->storage,position),.bytes=next-at};
         if (!mesh_dma_span_valid(m, span)) {
           result = fail(ncclInvalidUsage, "prepared write span crosses a registration extent"); break;
         }
@@ -7395,31 +7397,6 @@ static ncclResult_t write_ready(struct write_binding *plan,ncclMeshBuffer words,
   plan->ready_value=value;plan->ready_layout=layout;return ncclSuccess;
 }
 
-static ncclResult_t write_landings(struct write_binding *plan,ncclMeshBuffer words,uint32_t capacity,ncclMeshTileLayout layout) {
-  if (plan->comm->rank!=plan->to) return ncclSuccess;
-  if (!capacity || plan->repeats!=1) return fail(ncclInvalidArgument,"landing records need declared physical-channel capacity and one frame per record");
-  size_t extent=0,tiles=write_tiles(plan);
-  if (tile_extent(layout,tiles,sizeof(uint64_t)+(size_t)capacity*sizeof(ncclMeshBinding),&extent))
-    return fail(ncclInvalidArgument,"WRITE landing table geometry");
-  struct where binding={words.buffer,words.offset};
-  ncclResult_t result=as_metal(&binding);
-  if (result) return result;
-  void *address=address_of(binding);
-  pthread_mutex_lock(&attach_lock);
-  struct attach *attachment=NULL;struct lease *owner=lease_at(address,&attachment);
-  const size_t offset=owner?(uintptr_t)address-(uintptr_t)owner->address:0;
-  int error=!owner||attachment!=plan->comm->attach||owner->returned||offset>owner->bytes||owner->bytes-offset<extent||
-    (uintptr_t)address%sizeof(uint64_t)?EINVAL:0;
-  const size_t held=plan->owned.count;
-  if (!error) error=owned_add(&plan->owned,address,OWNED_TABLE);
-  if (!error&&plan->owned.count>held) error=owned_begin(&plan->owned,held);
-  pthread_mutex_unlock(&attach_lock);
-  if (error) return fail(ncclInvalidArgument,"landing records are not an aligned live page operand");
-  for (size_t i=0;i<layout.instances;i++) for (size_t t=0;t<tiles;t++)
-    *(uint64_t *)((char *)address+tile_offset(layout,t,i))=0;
-  plan->land_records=address;plan->land_capacity=capacity;plan->land_layout=layout;return ncclSuccess;
-}
-
 static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,uint64_t invocations) {
   if (d->what!=ncclMeshCallWrite) return ncclSuccess;
   if (!d->bindings || !invocations) return fail(ncclInvalidArgument,"WRITE needs declared page bindings and invocation extent");
@@ -7464,7 +7441,6 @@ static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,u
   if (table) ncclMeshPageTableDestroy(table);
   if (!result) { made->relay=lease;lease=NULL; }
   if (!result&&d->ready_value) result=write_ready(made,d->source_ready,d->ready_value,d->ready_layout);
-  if (!result&&d->land_capacity) result=write_landings(made,d->landings,d->land_capacity,d->land_layout);
   if (result) { write_binding_drop(made);if(lease)ncclMemFree(lease);return result; }
   c->write_binding=made;return ncclSuccess;
 }

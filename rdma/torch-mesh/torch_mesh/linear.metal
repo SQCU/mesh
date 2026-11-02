@@ -7,9 +7,8 @@
 // [R, K - K0], rows LD0 and LD1 apart (a cat of the two along K, never made: x0 = x1 and K0 = K where there is one),
 // each segment's span of a simdgroup's K slice its own loop, no branch a load.
 // VW and VX are 4 where w's and x's rows lie on whole 4-element loads, else 1 (four loads of one).  linear_rows stores into y, ACT its activation (0 none, 1
-// tanh); linear_publish (compiled after the library's steps, fused.steps(), and argmax.metal) stores each output into a
-// fused crossing's send segment through the collective's mesh_step_write and publishes it from its last threadgroup
-// (mesh_step_enter, mesh_step_release at its repeat j: partition._fused, which runs the crossing).
+// tanh). The shared source-effect compiler composes publications with these
+// numerical output-page relations before binding the command.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -122,37 +121,3 @@ kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w
     const linear_store<ACT> store{y, bias, d.LDY, d.SDY, d.B};
     linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
 }
-
-#ifdef MESH_METAL
-template <uint CHANNELS>
-struct linear_publish_words { uint R, K, N, B, LDW, K0, LD0, LD1, j; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };
-
-struct linear_step_store {
-    device uchar* send;
-    uint N;
-    void operator()(uint r, uint n, float s) const { mesh_step_write<half>(send, ulong(r) * N + n, half(s)); }
-};
-
-template <uint VW, uint VX, uint COLS, uint NSG, uint U, uint CHANNELS>
-[[max_total_threads_per_threadgroup(NSG * MESH_SIMD_WIDTH)]]
-kernel void linear_publish(device const half* x [[buffer(0)]], device const half* w [[buffer(1)]], device uchar* send [[buffer(2)]],
-                           device atomic_uint* arrivals [[buffer(3)]], device const half* x1 [[buffer(4)]],
-                           constant linear_publish_words<CHANNELS>& p [[buffer(15)]],
-                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                           uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                           uint groups [[threadgroups_per_grid]]) {
-    threadgroup float part[NSG * MESH_LINEAR_ROWS * COLS];
-    threadgroup uint last;
-    for (uint q = 0; q < CHANNELS; q++) if (p.publish[q].p)
-        mesh_step_enter(*p.publish[q].p, p.publish[q].v, p.publish[q].progress, tg == 0 && tid == 0);
-    const linear_dims d = {p.R, p.K, p.N, 0, p.LDW, p.K0, p.LD0, p.LD1, p.N, 1};
-    const linear_step_store store{send, p.N};
-    linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
-    threadgroup_barrier(mem_flags::mem_device);
-    if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
-        for (uint q = 0; q < CHANNELS; q++) if (p.publish[q].p)
-            mesh_step_release(*p.publish[q].p, p.publish[q].a, tid, p.j);
-        mesh_arrival_reset(arrivals, 0, tid);
-    }
-}
-#endif

@@ -19,8 +19,8 @@ using namespace mpp::tensor_ops;
 #endif
 #if !PRODUCT_ROW_KERNEL
 kernel void product(device const INPUT *X [[buffer(0)]], device const WEIGHT *W [[buffer(1)]], device uchar *Y [[buffer(2)]],
-                    device atomic_uint *arrivals [[buffer(3)]], device OUTPUT *bias [[buffer(5)]],
-                    device const INPUT *X1 [[buffer(6)]], device ulong *ready [[buffer(7)]], MESH_MATRIX_PARAMETERS
+                    device OUTPUT *bias [[buffer(5)]],
+                    device const INPUT *X1 [[buffer(6)]], MESH_MATRIX_PARAMETERS
                     uint3 tg [[threadgroup_position_in_grid]], uint3 lane [[thread_position_in_threadgroup]],
                     ushort sg [[simdgroup_index_in_threadgroup]]) {
     const auto readX=MESH_MATRIX_X_READ;const auto readW=MESH_MATRIX_W_READ;
@@ -65,24 +65,12 @@ kernel void product(device const INPUT *X [[buffer(0)]], device const WEIGHT *W 
                                     OUTPUT(ACTIVATE ? tanh(value) : value));
         }
     }
-#if PRODUCED
-    const uint local = lane.x, rowGroups = (M+ROWS*ROW_GROUPS-1)/(ROWS*ROW_GROUPS),
-        columnGroups = (N+COLUMNS*COLUMN_GROUPS-1)/(COLUMNS*COLUMN_GROUPS), slot = tg.z*rowGroups+tg.x;
-    threadgroup uint last[1];
-    if (mesh_last_arrival<true>(arrivals + mesh_index<3>(slot), 0, columnGroups, local, last)) {
-        // The publication value is a marker shared by this family. The final
-        // short tile still transfers only its masked payload bytes.
-        const ulong bytes = ulong(min(uint(ROWS*ROW_GROUPS), uint(M)-tg.x*ROWS*ROW_GROUPS))*N*sizeof(OUTPUT);
-        mesh_source_release(ready + mesh_index<7>(slot), 0, bytes, local);
-        mesh_arrival_reset(arrivals + mesh_index<3>(slot), 0, local);
-    }
-#endif
 }
 
 #else
 kernel void product(device const INPUT* X [[buffer(0)]],device const WEIGHT* W [[buffer(1)]],device uchar* Y [[buffer(2)]],
-    device atomic_uint* arrivals [[buffer(3)]],device const OUTPUT* bias [[buffer(5)]],
-    device const INPUT* X1 [[buffer(6)]],device ulong* ready [[buffer(7)]], MESH_MATRIX_PARAMETERS
+    device const OUTPUT* bias [[buffer(5)]],
+    device const INPUT* X1 [[buffer(6)]], MESH_MATRIX_PARAMETERS
     uint3 tg [[threadgroup_position_in_grid]],uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],uint sg [[simdgroup_index_in_threadgroup]]) {
     const auto readX=MESH_MATRIX_X_READ;const auto readW=MESH_MATRIX_W_READ;const auto readBias=MESH_MATRIX_BIAS_READ;
@@ -100,14 +88,5 @@ kernel void product(device const INPUT* X [[buffer(0)]],device const WEIGHT* W [
     const uint columnGroups=(N+MESH_LINEAR_COLUMNS-1)/MESH_LINEAR_COLUMNS;
     linear_body_read<MESH_LINEAR_COLUMNS,ROW_SPLIT,MESH_LINEAR_LOADS>(x,x1,w,dims,matrix_row_store<2,OUTPUT,decltype(readBias),PRODUCT_ROWS,PRODUCT_COLUMNS,BIAS_ROWS,BIAS?BIAS_COLUMNS:0,ACTIVATE>{Y,readBias,tg.z,ALPHA,BETA},
         part,sg,lane,tg.x*columnGroups+tg.y,tid);
-#if PRODUCED
-    const uint rowGroups=(M+MESH_LINEAR_ROWS-1)/MESH_LINEAR_ROWS,slot=tg.z*rowGroups+tg.x;
-    threadgroup uint last[1];
-    if(mesh_last_arrival<true>(arrivals+mesh_index<3>(slot),0,columnGroups,tid,last)){
-        const ulong bytes=ulong(min(uint(MESH_LINEAR_ROWS),M-tg.x*MESH_LINEAR_ROWS))*N*sizeof(OUTPUT);
-        mesh_source_release(ready+mesh_index<7>(slot),0,bytes,tid);
-        mesh_arrival_reset(arrivals+mesh_index<3>(slot),0,tid);
-    }
-#endif
 }
 #endif

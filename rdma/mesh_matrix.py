@@ -72,8 +72,7 @@ def product_domains(algebra, x, w, out, *, x1=None, bias=None):
                             writes={'out': access(iterations, out, output)}))
 
 
-def product(x, w, out, geometry, capabilities, *, x1=None, bias=None, act=False, alpha=1, beta=1,
-            ready=None, arrivals=None):
+def product(x, w, out, geometry, capabilities, *, x1=None, bias=None, act=False, alpha=1, beta=1):
     """Declare the shared product from ``{shape, type}`` scalar views.
 
     ``type`` is the caller's declared Metal scalar spelling. Shapes are the
@@ -101,12 +100,6 @@ def product(x, w, out, geometry, capabilities, *, x1=None, bias=None, act=False,
                             shape(bias)[-1] not in (1, columns) or
                             (len(shape(bias)) == 2 and shape(bias)[0] not in (1, rows))):
         raise ValueError('matrix bias requires the output dtype and a broadcastable row view')
-    if ready is not None:
-        tiles = len(row_tiles(rows, geometry)) * batches
-        if (ready['type'] != 'long' or prod(shape(ready)) != tiles or arrivals is None or
-                arrivals['type'] != 'int' or prod(shape(arrivals)) != tiles):
-            raise ValueError('tile publication needs one ready word and arrival count per batch row tile')
-
     def step(binding, value, axis):
         return f'mesh_matrix_stride<{binding},{axis % len(shape(value))}>()' if value is not None else 0
 
@@ -120,7 +113,7 @@ def product(x, w, out, geometry, capabilities, *, x1=None, bias=None, act=False,
                        BIAS_ROWS=shape(bias)[0] if bias is not None and len(shape(bias)) == 2 else 1,
                        BIAS_COLUMNS=shape(bias)[-1] if bias is not None else 1,
                        ACTIVATE=int(act), BIAS=int(bias is not None), ALPHA=repr(float(alpha))+'f',
-                       BETA=repr(float(beta))+'f', PRODUCED=int(ready is not None),
+                       BETA=repr(float(beta))+'f',
                        SEGMENTED=int(x1 is not None), PRODUCT_FIRST=first, PRODUCT_ROWS=rows,
                        PRODUCT_COLUMNS=columns, PRODUCT_INNER=inner,
                        A1M=step(6, x1, -2), A1K=step(6, x1, -1), AFFINE_A1=affine(6, x1),
@@ -137,9 +130,8 @@ def product(x, w, out, geometry, capabilities, *, x1=None, bias=None, act=False,
         AB=step(0, x, 0) if len(xs) == 3 else 0,
         BB=step(1, w, 0) if len(ws) == 3 else 0,
         A1B=step(6, x1, 0) if x1 is not None and len(shape(x1)) == 3 else 0)
-    bindings = ('x', 'w', 'out', 'arrivals' if arrivals is not None else None, None,
-                'bias' if bias is not None else None, 'x1' if x1 is not None else None,
-                'ready' if ready is not None else None)
+    bindings = ('x', 'w', 'out', None, None,
+                'bias' if bias is not None else None, 'x1' if x1 is not None else None)
     return dict(definitions=definitions, bindings=bindings, libraries=LIBRARIES, function='product',
                 grid=(-(-rows // row_tile), -(-columns // column_tile), batches), threads=(threads, 1, 1),
                 tile=(row_tile, column_tile), group_order=(1, 2, 0))

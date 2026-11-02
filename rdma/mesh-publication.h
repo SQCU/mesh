@@ -46,7 +46,12 @@ static inline uint32_t mesh_graph_prefix(uint32_t *state,uint32_t head,uint32_t 
    either arrival order closes the cut, including a zero-contribution cut.
    Bit 1 alone denotes complete and is monotone. No thread owns a lock. */
 static inline void mesh_graph_coverage(uint32_t *state,uint32_t *arrivals,const uint32_t *expected,
-                                       uint32_t announce,uint32_t contribution) {
+                                       uint32_t announce,uint32_t contribution,uint32_t known) {
+    if(known) {
+        const uint32_t count=__atomic_fetch_add(arrivals,contribution,__ATOMIC_ACQ_REL)+contribution;
+        if(count==*expected)__atomic_fetch_or(state,2,__ATOMIC_RELEASE);
+        return;
+    }
     if(contribution)__atomic_fetch_add(arrivals,contribution,__ATOMIC_RELAXED);
     uint32_t ready=__atomic_fetch_or(state,announce,__ATOMIC_ACQ_REL)|announce;
     if((ready&5)==5&&__atomic_load_n(arrivals,__ATOMIC_ACQUIRE)==__atomic_load_n(expected,__ATOMIC_ACQUIRE))

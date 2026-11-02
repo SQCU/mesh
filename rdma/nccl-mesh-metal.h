@@ -46,7 +46,7 @@ struct metal_program {
   METAL_HANDLE(id<MTLResidencySet>) residency;
   METAL_HANDLE(id<MTLBuffer>) violation;
   int added;
-  uint32_t polls;
+  uint32_t polls, frame;
   struct kernels *kernels;
   /* Preparation-owned exact accesses for the next typed command. */
   void *accesses;
@@ -54,6 +54,7 @@ struct metal_program {
      their sources before any command is bound to the recorder. */
   void *commands, *transfers, *group_accesses, *loop_accesses, *relation_context;
   void *arguments,*resources,*sources;
+  void *coverage_values; /* interned preparation types; released after source specialization */
   ncclMeshSources declaration;
   int administrative;
   const char *cpu_compiler,*cpu_resources;
@@ -113,14 +114,14 @@ size_t metal_command_count(const struct metal_program *);
 const ncclMeshSources *metal_sources(struct metal_program *);
 void metal_command_accesses(struct metal_program *,size_t command,const ncclMeshAccess *,size_t count);
 struct metal_result metal_specialize(struct metal_program *,void *sources);
-struct metal_result metal_record(struct metal_program *,const ncclMeshStream *);
+struct metal_result metal_record(struct metal_program *,const size_t *,size_t,const ncclMeshStream *);
 /* A buffer of the program's made resident through its residency set. */
 void metal_resident(struct metal_program *, void *buffer);
 /* Local numerical leaves and their selected DMA values enter the same source
    dependency solve as caller numerical leaves. These are preparation operands. */
 void metal_page_effect(struct metal_program *, const ncclMeshPageEffect *,
                        void *payload, size_t offset, size_t bytes);
-void metal_page_selection(struct metal_program *,const ncclMeshPageEffect *,
+void *metal_page_selection(struct metal_program *,const ncclMeshPageEffect *,
                           void *payload,const ncclMeshSpan *,size_t count);
 /* The program's failure words from here on, `violation` (made resident): those of the communicator whose group is
    encoded next, in which every dispatch naming none of its own records a failed wait (nccl-mesh.c complete,
@@ -130,6 +131,21 @@ struct metal_wait;
 /* The source compiler attaches observations and publications to this retained
    numerical copy, before it becomes an execution record. */
 struct metal_result metal_copy(struct metal_program *,void *dst,size_t dst_offset,void *src,size_t src_offset,size_t bytes);
+/* Specialize prepared span lengths from one ordinary coverage scalar. The
+   original extents are copied into preparation-owned argument pages; offsets
+   stay fixed. Exact table writes and active-page reads join the shared solve. */
+struct metal_result metal_mask_spans(struct metal_program *,ncclMeshBuffer table,
+                                    const struct mesh_dma_span *,size_t count,ncclMeshBuffer active);
+struct metal_coverage_projection {
+  size_t transport,first,bytes,units,cut;
+  uint64_t base;
+  const uint64_t *ends;
+  ncclMeshPageCoverage values;
+};
+void metal_coverage(struct metal_program *,const struct metal_coverage_projection *,size_t count);
+void metal_coverage_announcement(struct metal_program *,ncclMeshPageCoverage,size_t cut);
+void metal_place_sources(struct metal_program *,size_t previous,const size_t *positions,
+                        const void *const *effects,size_t count,size_t *relocation);
 /* Repeat a declared byte pattern: the first element's scalar bits, followed by
    zero elements through unit_bytes. The command has only an exact output reach. */
 struct metal_result metal_fill_pattern(struct metal_program *, void *dst, size_t dst_offset,
@@ -149,7 +165,7 @@ struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, 
 /* A wait (design/transport.md section 14): in `words` (the Metal buffer over a holding's counts), the count at `word`
    (its `landed`) until it reaches `target` (0: none), in pages; `data` at `data_offset` the landed bytes a landing combines (the group's
    landing area), `bytes` its exact extent (zero for a counter-only observation); its failure recorded in `violation`'s words at entry `at` of channel `channel`; `stride` the pages
-   each later repeat of a fused crossing's adds to its target (nccl.h ncclMeshFused repeats; 0 none). */
+   each later repeat of a fused crossing's adds to its target (ncclMeshCall.frames; 0 none). */
 struct metal_wait { void *words, *violation, *data; size_t word, data_offset; mesh_pages target; uint64_t at; uint32_t channel; mesh_pages stride; size_t bytes; };
 /* A publication: in `words`, the count at `word` (a holding's `ready`) stored `value` after one system fence, each
    later repeat of a fused crossing's `stride` pages past it */
@@ -180,17 +196,9 @@ void metal_accesses(struct metal_program *, const ncclMeshAccess *, size_t n);
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
 /* the wait alone (a COPY's landing in place), one threadgroup */
 struct mesh_landing_run;
-/* a publication and a landing run by the caller's kernel (nccl.h ncclMeshFused): each one's record written to the function's immutable argument pages as a Metal 4 dispatch's would be, the
-   buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
-   5 progress), nothing dispatched.  The publication: d its operand (at dst), a the
-   holding's counts (mesh_step_release stores `ready`).  The landing: d and s its landing
-   buffer (at dst), a the holding's counts (mesh_step_await), v the communicator's failure words. */
-struct metal_result metal_send_deferred(struct metal_program *, void *operand, size_t offset, const struct metal_release *, uint64_t bound[6]);
-struct metal_result metal_land_deferred(struct metal_program *, void *landing, size_t offset, const struct metal_wait *, uint64_t bound[6]);
 /* metal_contents: a shared buffer's host address (NULL: none, a private buffer's) */
 void *metal_contents(void *buffer);
-/* rdma/mesh.metal as this library was built with it, then the steps' Metal text: the argument record, a deferred step's
-   bindings as one record (mesh_step_binding) and mesh_step_*; what a caller's kernel compiles after */
+/* Shared payload and page-effect primitives from this library's source build. */
 const char *metal_prelude(void);
 /* Release preparation state and commit residency additions. Submission remains
    owned by the enclosing recorded function. */

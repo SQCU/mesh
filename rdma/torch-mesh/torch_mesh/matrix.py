@@ -17,10 +17,10 @@ def row_tiles(rows):
     return mesh_matrix.row_tiles(rows, operands())
 
 
-def arguments(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None):
+def arguments(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1):
     """Bind page operands to the shared metadata-only product declaration."""
     kinds = DTYPE_TO_METAL
-    values = dict(x=x, w=w, out=out, x1=x1, bias=bias, ready=ready, arrivals=arrivals)
+    values = dict(x=x, w=w, out=out, x1=x1, bias=bias)
     declarations = {name: None if value is None else dict(shape=tuple(value.shape), type=kinds[value.dtype])
                     for name, value in values.items()}
     from .command_declarations import configuration
@@ -34,7 +34,7 @@ def declaration(operands, parameters, configuration):
     from .command_declarations import Commands
     kinds = DTYPE_TO_METAL
     commands = Commands(operands, **configuration)
-    roles = ('x', 'w', 'out', 'x1', 'bias', 'ready', 'arrivals')
+    roles = ('x', 'w', 'out', 'x1', 'bias')
     descriptions = {name: dict(shape=value['shape'], type=kinds[value['dtype']])
                     for name, value in operands.items() if name in roles}
     options = {name: parameters[name] for name in ('act', 'alpha', 'beta') if name in parameters}
@@ -50,7 +50,7 @@ def declaration(operands, parameters, configuration):
     readers = parameters.get('readers', {})
     views = [None if role is None or role in readers else commands.view(role) for role in recipe['bindings']]
     access = (3 | (32 if 'bias' in operands else 0) | (64 if 'x1' in operands else 0)
-              | ((140 if 'ready' in operands else 4) << shift))
+              | (4 << shift))
     indices, access_layouts, definitions, sources, declarations = {}, {}, dict(recipe['definitions']), {}, []
     for role, reader in readers.items():
         logical_slot = recipe['bindings'].index(role)
@@ -92,14 +92,14 @@ def declaration(operands, parameters, configuration):
     return commands.declaration()
 
 
-def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, ready=None, arrivals=None, layouts=None):
+def product(x, w, out, *, x1=None, bias=None, act=False, alpha=1, beta=1, layouts=None):
     """Resolve declared layouts and emit the shared product command."""
     layouts = api_layouts('matrix') if layouts is None else layouts
     inputs, before = bindings(dict(x=x, w=w, x1=x1, bias=bias),
         dict(x=layouts['input'], w=layouts['weight'], x1=layouts['input'], bias=layouts['bias']))
     outputs, after = bindings(dict(out=out), dict(out=layouts['output']), writing=True)
     from .command_declarations import descriptions, configuration, bind
-    values = dict(**inputs, out=outputs['out'], ready=ready, arrivals=arrivals)
+    values = dict(**inputs, out=outputs['out'])
     declared = declaration(descriptions(values), dict(act=act, alpha=alpha, beta=beta), configuration())
     return [*before, *bind(declared, values), *after]
 

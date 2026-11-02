@@ -122,10 +122,14 @@ static inline bool mesh_graph_count_exchange(device metal::atomic_uint *value,th
 }
 static inline void mesh_graph_coverage(volatile coherent(system) device metal::atomic_uint *state,
     volatile coherent(system) device metal::atomic_uint *arrivals,volatile coherent(system) device const uint *expected,
-    uint announce,uint contribution) {
-    if(contribution)mesh_count_add(&arrivals->__s,contribution,0);
+    uint announce,uint contribution,bool known) {
     metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,
                              static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
+    const uint count=contribution?mesh_count_add(&arrivals->__s,contribution,0)+contribution:0u;
+    if(known) {
+        if(count==*expected)mesh_count_or(&state->__s,2u,0);
+        return;
+    }
     const uint ready=mesh_count_or(&state->__s,announce,0)|announce;
     metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,
                              static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));

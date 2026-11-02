@@ -546,7 +546,7 @@ def _collective_declaration(node):
     if namespace == 'torch_mesh' and name == 'select_exchange':
         for source, destination, read, write in _exchange_plan(node, args):
             call = declare(backend.Call(backend.WRITE, read.count, x.dtype, root=source,
-                                       destination=destination, fused=True), x, results[0],
+                                       destination=destination), x, results[0],
                            reads={source: read}, writes={destination: write})
             if source != destination:
                 calls.append(call)
@@ -618,14 +618,14 @@ def lower(graph):
         name, n = target._schema.name.split('::', 1)[1], group.size()
         x = args.get('input', args.get('x', args.get('self', args.get('partials', args.get('value')))))
         if calls:
-            fused_calls = all(call.kind == backend.WRITE and call.fused for call in calls)
-            repeats = int(args.get('repeats', 1)) if fused_calls else 1
+            write_calls = all(call.kind == backend.WRITE for call in calls)
+            repeats = int(args.get('repeats', 1)) if write_calls else 1
             if repeats < 1:
                 raise ValueError('compiled collective repeat count must be positive')
             if group_name in trains:
                 train = trains[group_name]
                 if ([call._replace(sources=(), route_scope=None) for call in calls] != train['physical']):
-                    raise ValueError('another collective interrupts a compiled fused repeat train')
+                    raise ValueError('another collective interrupts a compiled repeat train')
                 previous = train['calls']
                 if [call.route_scope for call in calls] == [call.route_scope for call in previous]:
                     previous[:] = [old._replace(sources=(*old.sources, *new.sources))
@@ -647,7 +647,7 @@ def lower(graph):
                 trains[group_name] = dict(physical=[call._replace(sources=(), route_scope=None) for call in calls],
                     calls=calls, count=1, remaining=repeats - 1)
     if trains:
-        raise ValueError('the function graph ends inside a fused repeat train')
+        raise ValueError('the function graph ends inside a repeat train')
     return groups
 
 
@@ -1210,7 +1210,7 @@ def _local_assignment(prepared, arguments):
 
 class LoweredGraph:
     """Lower source work and deliveries to unbound, placed page declarations."""
-    def __init__(self, graph, arguments, group, configuration, destinations=None, *, prepared=None, ownership=None):
+    def __init__(self, graph, arguments, group, configuration, destinations=None, *, prepared=None, ownership=None, occurrence=None):
         if configuration and configuration.get('layout_preferences') and graph.meta.get('mesh_program_scope') is None:
             raise ValueError('layout preferences require a declared source_scope')
         if ownership is None:
@@ -1222,6 +1222,21 @@ class LoweredGraph:
         self.prepared = ownership['prepared']
         self.groups, self.steps = {}, []
         self._lower_sections(ownership, destinations)
+        if occurrence is not None:
+            first, extent = occurrence
+            rewritten = {}
+            def relocate(call):
+                if id(call) not in rewritten:
+                    records = tuple(dict(record, occurrence_extent=extent,
+                        occurrences=dict(record['occurrences'], offset=record['occurrences']['offset'] + first))
+                        for record in call.sources)
+                    rewritten[id(call)] = call._replace(sources=records)
+                return rewritten[id(call)]
+            self.groups = {name: [[relocate(call) for call in calls] for calls in groups]
+                           for name, groups in self.groups.items()}
+            for step in self.steps:
+                if 'transfer' in step:
+                    step['calls'] = tuple(relocate(call) for call in step['calls'])
         self.execution.configuration = dict(self.prepared['configuration'],
             implementations=self.prepared['implementations'],
             implementation_assignment=self.prepared['implementation_assignment'])
@@ -1507,6 +1522,8 @@ class Function:
         self.fold_choices = ()
         self.implementation_regions = ()
         self.choices = ()
+        self.prepared = None
+        self.source_arguments = ()
 
     def capture(self):
         """Capture the source once, before functionalization, partitioning or fusion."""
@@ -1543,19 +1560,25 @@ class Function:
         made.choices = self.choices
         return made
 
-    def declare(self, group, *, destinations=None):
+    def declare(self, group, *, destinations=None, occurrence=None):
         if self.captured_graph is None:
             self.capture()
-        return self.declare_graph(self.captured_graph, group, destinations=destinations)
+        return self.declare_graph(self.captured_graph, group, destinations=destinations, occurrence=occurrence)
 
-    def declare_graph(self, graph, group, *, destinations=None):
-        """Lower an existing typed graph, retaining its source identities."""
+    def declare_graph(self, graph, group, *, destinations=None, prepared=None, occurrence=None):
+        """Place an existing typed graph, retaining its source identities.
+
+        ``prepared`` supplies retained source sections for this configuration;
+        only their new page operands and occurrence are bound. It is produced
+        by a prior declaration, not a saved executable or runtime choice.
+        """
         self.fold_choices = graph.meta.get('mesh_fold_choices', ())
         from torch.distributed.tensor import DTensor
         from torch.utils._pytree import tree_leaves
         from .compilation import lift_state, bind, choice_member
         graph, arguments = lift_state(graph, self.arguments)
         self.source_graph = graph
+        self.source_arguments = tuple(arguments)
         self.result_types = graph.meta.get('mesh_result_types', self.result_types)
         ownership = self.ownership
         if ownership is None:
@@ -1576,14 +1599,18 @@ class Function:
                 self.choices = (*self.choices, *source_choices())
             graph, arguments = assigned['graph'], assigned['arguments']
         with choice_member(None if group is None else group.rank()), bind(self.configuration, algebra=self.algebra):
-            prepared = LoweredGraph(graph, arguments, group, self.configuration, destinations, ownership=assigned)
-            from .compilation import layout_choices, source_choices
+            from .compilation import layout_choices, source_choices, retain_source_choices
+            if prepared is not None:
+                retain_source_choices(prepared['source_choices'])
+            lowered = LoweredGraph(graph, arguments, group, self.configuration, destinations,
+                prepared=prepared, ownership=assigned, occurrence=occurrence)
             self.layout_choices = layout_choices()
-            self.implementation_regions = prepared.prepared['expression']['graph'].meta.get('mesh_implementation_regions', ())
+            self.implementation_regions = lowered.prepared['expression']['graph'].meta.get('mesh_implementation_regions', ())
             from assignment import source_axes
             self.choices = tuple(source_axes((*self.choices, *source_choices(),
                 *(choice for fold in self.fold_choices for choice in fold.get('choices', ())))))
-        self.graph, self.groups, self.execution = graph, prepared.groups, prepared.execution
+        self.graph, self.groups, self.execution = graph, lowered.groups, lowered.execution
+        self.prepared = lowered.prepared
         self.run = self.execution.forward
         self.completion = self.execution.completion
         return self.groups.get(group.group_name, []) if group is not None else []

@@ -78,6 +78,17 @@ inline void mesh_store4(device T *p, ulong i, V value) {
         mesh_page_write<B>(p,i+2,value.z); mesh_page_write<B>(p,i+3,value.w);
     }
 }
+// Pointer fields in prepared helper operands retain the exact visibility of
+// their logical page binding. The selection is a source type, never a branch.
+template<uint B, typename T>
+using mesh_pointer = typename conditional<mesh_observed<B>() || mesh_published<B>(),
+    volatile coherent(system) device T *, device T *>::type;
+template<uint Which, typename A, typename B, typename C>
+inline auto mesh_pointer_select(A a, B b, C c) {
+    if constexpr(Which == 0) return a;
+    else if constexpr(Which == 1) return b;
+    else return c;
+}
 template<uint B, typename P> struct mesh_operand {
     P p; long first;
     decltype(auto) operator[](ulong i) const {
@@ -96,7 +107,7 @@ template<uint B, typename P> inline mesh_operand<B,P> mesh_view(P p, long first=
 template<uint B> inline long mesh_position(ulong i);
 template<uint B> constexpr ulong mesh_position_span();
 template<uint B> constexpr ulong mesh_position_count();
-template<uint B, typename T> inline void mesh_publish(mesh_operand<B, device T *> out, ulong i, T value) {
+template<uint B, typename T, typename V> inline void mesh_publish(mesh_operand<B, device T *> out, ulong i, V value) {
     ((volatile coherent(system) device T *)out.p)[mesh_index<B>(out.first + long(i))] = value;
 }
 

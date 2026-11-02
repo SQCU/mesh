@@ -80,19 +80,27 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==MESH_SIZEOF_MESH_PAGE_ENTRY && _Alignof(struct mesh_page_entry)==MESH_ALIGNOF_MESH_PAGE_ENTRY &&
   offsetof(struct mesh_page_entry,address)==MESH_OFFSET_MESH_PAGE_ENTRY_ADDRESS,"mesh_page_entry");
-/* Wire 135 / layout 154: an immutable table of resolved byte extents. Offsets
-   are relative to the region base; each span is one exact SEND/receive payload.
-   A span never crosses a registration extent. Full-page data uses this same
-   representation. The compiler jointly partitions both endpoints into equal
-   payload lengths in equal unit order; the bridge never pads or copies data. */
-struct mesh_dma_span { uint64_t offset,bytes; };
-struct mesh_entry { uint64_t spans,units,word,base; };
+/* Layout 162: resolved page payloads, in the jointly compiled unit order.
+   offset is relative to the region base and never crosses a registration
+   extent. A numerical mask producer may set bytes to zero; both endpoints
+   consume the same mask before using that unit. No filler DMA is posted.
+   through starts at the next position on this unit's lane. The bridge extends
+   it across subsequent masked units while this request is outstanding. A
+   completion names this descriptor directly; no completion lookup list is
+   built. Full pages and masked pages use this same representation. */
+struct mesh_dma_span { uint64_t offset,bytes,through; };
+struct mesh_entry { uint64_t spans,units,word,base,step,spans_word,spans_base; };
 _Static_assert(sizeof(struct mesh_dma_span)==MESH_SIZEOF_MESH_DMA_SPAN,"mesh_dma_span ABI");
 _Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI");
-/* A SEND's unit i is available at word >= base+i+1 (word 0: stream ready).
-   A receive's word and base are 0: it waits on nothing but its `after`. The
-   immutable span table and its backing allocations outlive every future unit
-   and every posted DMA. `taken` does not release this table. */
+/* Descriptor i is available at spans_word >= spans_base+i+1 in both
+   directions. Static descriptors name an explicitly completed word; computed
+   lengths name their producer's prefix. An active SEND additionally requires
+   word > base+i*step (word 0: stream ready). Packet prefixes use step 1;
+   one scalar producer for the whole selection uses step 0. A receive's
+   word/base/step are unused.
+   Masked units touch no payload and need neither payload nor overwrite
+   prerequisites. Descriptor storage outlives every posted DMA and completion
+   read. `taken` does not release this table. */
 /* A prepared occurrence's tables on one stream: SEND and landing entries
    (`entries`, region offsets; `count` of each list), and `next`, the region
    offset of the next occurrence's tables. Preparation writes every entry's
@@ -135,11 +143,10 @@ static inline struct mesh_pages mesh_pages_load(const _Atomic uint64_t *word){ r
 static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){ atomic_store_explicit(word,p.n,memory_order_release); }
 /* a holding's `sent` and `landed` once its link is lost */
 #define MESH_PAGES_LOST ((struct mesh_pages){UINT64_MAX})
-/* Each posted unit retains its actual arena interval, independent of aliases
-   or allocation-row boundaries. A stable sequence identifies its ring slot;
-   a reader racing reuse conservatively retains the allocation. */
+/* Actual requests posted/completed on each lane. A holding which ends with
+   outstanding requests retains its storage until these counts meet or its
+   posting child has exited. Masked logical units do not enter these counts. */
 struct mesh_posts { _Alignas(MESH_RECORD_ALIGNMENT) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
-_Static_assert(!(MESH_LANE_UNITS&(MESH_LANE_UNITS-1)),"a ring a power of two");
 static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span b){
   return a.bytes && b.bytes && (a.offset<=b.offset?b.offset-a.offset<a.bytes:a.offset-b.offset<b.bytes);
 }
@@ -150,14 +157,13 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
    holding at once (nothing more of it posted), makes the holding's words new (every count 0) and stores 0 where nothing
    of it is outstanding (design/transport.md section 14, "A holding's end").  `posts`,
    the bridge's: each of the stream's two lanes' units over its pairing, each way, posted and completed, counted from 0
-   as the port's child makes the link's queue pairs, and `rows` (a region offset, historical field name) their rings of physical byte intervals, and `child` and `child_start`, the pid and start (mesh-dataflow.h mesh_started) of the port's child that
+   as the port's child makes the link's queue pairs, and `child` and `child_start`, the pid and start (mesh-dataflow.h mesh_started) of the port's child that
    posts them, written as it opens the stream: a unit's buffer is the hardware's until it completes or the queue pair
    holding it is gone with that process (verbs), so the units outstanding count only while it lives
-   (mesh-dataflow.c mesh_pinned).  Nothing is posted on a stream but its holders' declared byte spans, and a holding ends with nothing of it
+   (mesh-dataflow.c mesh_holding_retained). Nothing is posted on a stream but its holders' declared byte spans, and a holding ends with nothing of it
    outstanding or the stream never live again in the pairing, so on a live stream both ends'
-   counts are equal whenever no holder holds it.  No communicator reads them; a client reads every stream's, and their
-   rows and child, as it returns a lease (mesh-dataflow.c mesh_lease_return, mesh_pinned: a row a unit outstanding
-   names stays held).
+   physical counts match whenever no holder holds it. Reclamation reads the
+   unfinished holding's counts and child (mesh-dataflow.c mesh_holding_retained).
    A holding that ended with units
    outstanding leaves its owner word MESH_STREAM_GIVEN alone (naming no client, so none takes it) and the stream not
    live for the rest of its pairing.  The holder links its calls' tables (struct mesh_zwoggle, `zwoggle`), and the

@@ -30,8 +30,8 @@ WRITE = 8
 # element_shape declares one indivisible numerical element in those scalar units.
 # bindings, where given, are the (send, receive) tensors the call is issued with (nccl.h ncclMeshCall bindings).
 # design/eager-execution.md#what-follows
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready landings ready_value ready_layout land_layout land_capacity sources route_scope',
-                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, None, 0, None, (), None, None, 1, 0, None, None, 0, None, None, 0, (), None))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready ready_value ready_layout sources route_scope',
+                              defaults=(0, ReduceOp.SUM, None, 0, None, None, None, 0, None, (), None, None, 1, 0, None, 0, None, (), None))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -184,12 +184,12 @@ class ProcessGroupMesh(dist.ProcessGroup):
         check(LIB.ncclCommRevoke(self.comm, 0))
 
     def shutdown(self):
-        """torch's end of this group (destroy_process_group): the fused crossings' forms on its communicator released,
-        their leases back to the region once the stream has passed them (_stream.mm fused_release).
-        Observe ready reports once. Applications finish pending observations before shutdown."""
+        """Observe ready reports once; prepared Functions own their page lifetimes.
+
+        Applications finish pending observations before group shutdown.
+        """
         for observations in self.observations:
             observations.close()
-        _stream.fused_release(self.handle)
         super().shutdown()
 
     def size(self):
@@ -290,11 +290,11 @@ class ProcessGroupMesh(dist.ProcessGroup):
             sources, source_held = assignment.source_bindings(c.sources)
             kept.extend(source_held)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'type': nccl, 'op': code,
-                         'group': g, 'destination': c.destination, 'fused': int(c.fused), 'tile_bytes': c.tile_bytes,
+                         'group': g, 'destination': c.destination, 'tile_bytes': c.tile_bytes,
                          'production': production, 'bindings': slots, 'views': views, 'frames': c.frames,
                          'max_packet': c.max_packet, 'source_ready': _binding(c.source_ready),
-                         'landings': _binding(c.landings), 'ready_value': c.ready_value,
-                         'ready_layout': c.ready_layout or {}, 'land_layout': c.land_layout or {}, 'land_capacity': c.land_capacity,
+                         'ready_value': c.ready_value,
+                         'ready_layout': c.ready_layout or {},
                          'counts': counts, 'matrix': matrix, 'contributors': masks[0], 'recipients': masks[1],
                          'sources': sources, 'source_count': len(c.sources),
                          'route_scope': assignment.json_operand(c.route_scope, kept) if c.route_scope is not None else ffi.NULL,
@@ -345,20 +345,25 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return {(a, b): int(values[a * n + b]) for a in range(n) for b in range(n)
                 if a != b and values[a * n + b]}
 
-    def prepare_writes(self, deliveries, *, declarations=None):
-        """Bind local source/result geometry into ordinary communicator Calls."""
+    def prepare_writes(self, deliveries, *, declarations=None, frame_strides=None):
+        """Bind local page geometry and explicit frame strides into ordinary Calls.
+
+        Frame strides are in the selected tensor's scalar units. The Call's
+        frame count and binding-instance operands determine their finite use.
+        """
         from .operand import TensorView
         bindings, calls, views = [], [], []
-        for value, source, destination in deliveries:
+        strides = [0] * len(deliveries) if frame_strides is None else frame_strides
+        for (value, source, destination), frame_stride in zip(deliveries, strides, strict=True):
             view = TensorView.of(value)
             views.append((view, view))
             geometry = view.write_layout()
             bindings.append((*geometry, int(source), int(destination)))
-            sides = tuple(geometry if self.rank() == rank else None for rank in (source, destination))
+            sides = tuple((*geometry, frame_stride) if self.rank() == rank else None for rank in (source, destination))
             calls.append(Call(WRITE, view.numel() * view.element_size(), torch.uint8,
-                              root=source, destination=destination, views=sides, fused=True))
+                              root=source, destination=destination, views=sides))
         if declarations is not None:
-            calls = [declared._replace(views=physical.views, fused=True)
+            calls = [declared._replace(views=physical.views)
                      for declared, physical in zip(declarations, calls, strict=True)]
         return dict(transfer='write', bindings=tuple(bindings), views=tuple(views), calls=tuple(calls), group=self,
                     before=(), after=()), calls

@@ -215,7 +215,8 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
 // at their places in o's gathered input (O[n columns + inverse[c]] = scale[inverse[c]] value) where `columns` is nonzero,
 // else in place. Row offsets retain their full address width. Only the logical
 // tail's active elements read destination indices and scales.
-__attribute__((always_inline)) static inline void mesh_gathered_places(ulong out, device const int *inverse, device const float *scale, uint columns,
+template<typename I, typename S>
+__attribute__((always_inline)) static inline void mesh_gathered_places(ulong out, I inverse, S scale, uint columns,
                                                                       thread ulong4 &dst, thread float4 &cs, uint stride, uint count = 4) {
     dst = ulong4(out) + ulong4(0, 1, 2, 3);
     cs = float4(1.0f);
@@ -229,25 +230,26 @@ __attribute__((always_inline)) static inline void mesh_gathered_places(ulong out
     }
 }
 
-__attribute__((always_inline)) static inline void mesh_gathered_store(device half *O, ulong4 dst, float4 scale, uint columns, float4 value,
+template<typename O>
+__attribute__((always_inline)) static inline void mesh_gathered_store(O output, ulong4 dst, float4 scale, uint columns, float4 value,
                                                                     uint count = 4, bool aligned = true) {
-    if (columns == 0 && count == 4 && aligned) { *(device half4 *)(O + dst.x) = half4(value); return; }
-    for (uint i = 0; i < count; ++i) O[dst[i]] = half(scale[i] * value[i]);
+    if (columns == 0 && count == 4 && aligned) { streamed_store_four(output, dst.x, half4(value)); return; }
+    for (uint i = 0; i < count; ++i) output[dst[i]] = half(scale[i] * value[i]);
 }
 
 // A prepared channel tile of one row: d is its absolute float4 index, Threads
 // its physical launch width. The host covers ceil(D / 4) slices with bounded
 // launches. Every lane participates in the weight shuffles; inactive tail lanes
 // read and write no channels. The same row helper serves local and peer parts.
-template <uint D, uint Threads, typename P>
-__attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i, uint J, uint d, uint lane, device half *O, device const int *inverse,
-                                                                device const float *scale, uint columns, uint stride) {
+template <uint D, uint Threads, typename P, typename O, typename I, typename S>
+__attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i, uint J, uint d, uint lane, O output, I inverse,
+                                                                S scale, uint columns, uint stride) {
     const uint count = 4 * d < D ? min(4u, D - 4 * d) : 0;
     ulong4 dst;
     float4 cs;
     mesh_gathered_places(ulong(i) * D + 4 * d, inverse, scale, columns, dst, cs, stride, count);
     mesh_merge<(D + 3) / 4, 1, 0, Threads>(parts, J, d, 0u, lane, nullptr, [&](float, float total, float4 sum) {
-        mesh_gathered_store(O, dst, cs, columns, mesh_merged(total, sum), count, D % 4 == 0);
+        mesh_gathered_store(output, dst, cs, columns, mesh_merged(total, sum), count, D % 4 == 0);
     });
 }
 
@@ -393,6 +395,7 @@ inline uint mesh_matrix_lane(uint lane) {
 }
 
 template<uint D> struct mesh_attention_access {
+    using query_type = device const half *;
     __attribute__((always_inline)) half4 query(device const half *q, ulong at) const { return ((device const half4 *)q)[at]; }
     __attribute__((always_inline)) half query_element(device const half *q, ulong at) const { return q[at]; }
     __attribute__((always_inline)) void load(thread simdgroup_half8x8 &out, device const half *p, uint, uint row, uint column,
@@ -416,7 +419,7 @@ struct mesh_tile {
                       8 * query_pitch * sizeof(half) + (12 * columns + 64) * sizeof(float) + simdgroups * sizeof(ulong) + sizeof(uint) <= MESH_DEVICE_THREADGROUP_BYTES,
                   query_words = cache_query ? 4 * query_pitch : 0, region = query_words + 12 * columns };
     KV kv;
-    device const half *Q;
+    typename Access::query_type Q;
     F mp;
     F lp;
     F4 op;

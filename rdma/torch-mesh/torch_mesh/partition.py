@@ -26,7 +26,6 @@ import json
 import math
 import resource
 import weakref
-from pathlib import Path
 from allocate import partition_bounds
 
 import torch
@@ -45,7 +44,6 @@ from torch.distributed.tensor.placement_types import _StridedShard
 from torch.utils import _pytree as pytree
 
 aten = torch.ops.aten
-_LINEAR_SOURCE = Path(__file__).with_name('linear.metal').read_text()
 
 
 class _Operand:
@@ -108,149 +106,7 @@ def _(x, out, dim, sizes, group_name, repeats=1):
 
 
 # The generic gather and sum are data functions over the compiler's physical
-# A reduction's rank-local partials, fused producer publication and numerical
-# fold. Gathers use the common indexed WRITE planner and final tensor views.
-_GATHER_SOURCE = r"""
-template <uint N, uint CHANNELS>
-struct gather_words { uint count, pre, post, rank, j; uint sizes[N], starts[N]; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };
 
-template <uint AXES, uint CHANNELS>
-struct partial_publish_words {
-    uint count, j, shape[AXES], strides[AXES];
-    mesh_step_binding land[CHANNELS], publish[CHANNELS];
-};
-
-template <uint AXES, uint UNITS, uint COPY_BYTES, uint CHANNELS, bool CONTIGUOUS, uint THREADS>
-[[max_total_threads_per_threadgroup(THREADS)]]
-kernel void partial_publish(device const metal::conditional_t<COPY_BYTES == 1, uchar, ushort>* x [[buffer(0)]], device uchar* send [[buffer(1)]],
-                           device atomic_uint* arrivals [[buffer(2)]], constant partial_publish_words<AXES, CHANNELS>& w [[buffer(15)]],
-                           uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]],
-                           uint groups [[threadgroups_per_grid]]) {
-    using T = metal::conditional_t<COPY_BYTES == 1, uchar, ushort>;
-    threadgroup uint last;
-    for (uint q = 0; q < CHANNELS; q++) if (w.publish[q].p)
-        mesh_step_enter(*w.publish[q].p, w.publish[q].v, w.publish[q].progress, g == 0 && tid == 0);
-    for (uint k = g * THREADS + tid; k < w.count; k += groups * THREADS) {
-        ulong at = k;
-        if (!CONTIGUOUS) {
-            uint element = k / UNITS;
-            at = k % UNITS;
-            for (uint axis = AXES; axis-- > 0;) {
-                at += ulong(element % w.shape[axis]) * w.strides[axis] * UNITS;
-                element /= w.shape[axis];
-            }
-        }
-        mesh_step_write<T>(send, k, x[at]);
-    }
-    threadgroup_barrier(mem_flags::mem_device);
-    if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
-        for (uint q = 0; q < CHANNELS; q++) if (w.publish[q].p)
-            mesh_step_release(*w.publish[q].p, w.publish[q].a, tid, w.j);
-        mesh_arrival_reset(arrivals, 0, tid);
-    }
-}
-
-// Exactly one threadgroup observes the compiled physical landing prefixes.
-// The serial encoder orders the parallel consumers after this dispatch; they
-// use system-coherent payload loads, without repeating these waits or fences.
-template <uint N, uint CHANNELS>
-inline void gather_observe(constant gather_words<N, CHANNELS>& w, uint tid) {
-    if (tid == 0)
-        for (uint q = 0; q < CHANNELS; q++) if (w.land[q].p) {
-            mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, true);
-            mesh_step_counts(*w.land[q].p, w.land[q].a, w.land[q].v, w.j);
-        }
-    threadgroup_barrier(mem_flags::mem_device);
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-}
-
-template <uint N, uint CHANNELS, uint THREADS>
-[[max_total_threads_per_threadgroup(THREADS)]]
-kernel void gather_ready(constant gather_words<N, CHANNELS>& w [[buffer(15)]],
-                         uint tid [[thread_index_in_threadgroup]]) {
-    gather_observe(w, tid);
-}
-
-template <uint BYTES, uint N, uint CHANNELS, bool WAIT, uint THREADS>
-[[max_total_threads_per_threadgroup(THREADS)]]
-kernel void sum_land(device const uchar* lease [[buffer(0)]], device metal::conditional_t<BYTES == 2, half, float>* out [[buffer(1)]],
-                     constant gather_words<N, CHANNELS>& w [[buffer(15)]], uint tid [[thread_index_in_threadgroup]],
-                     uint g [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]]) {
-    using T = metal::conditional_t<BYTES == 2, half, float>;
-    if (WAIT) gather_observe(w, tid);
-    for (uint k = g * THREADS + tid; k < w.count * 2 / BYTES; k += groups * THREADS) {
-        float sum = 0.0f;
-        for (uint r = 0; r < N; r++)
-            sum += float(r == w.rank ? ((device const T*)lease)[w.starts[r] + k] : mesh_step_read<T>(lease, w.starts[r] + k));
-        out[k] = T(sum);
-    }
-}
-"""
-from . import _stream
-_GATHER_KERNELS, _GATHER_THREADS = {}, _stream.compilation['GATHER_THREADS']
-
-
-def _gather_kernel(kernel, *arguments):
-    """A gather/fold kernel at `arguments` (ranks and physical channels, sum's element bytes first), compiled
-    once after the library's steps (fused.steps)."""
-    from . import _stream, fused
-    from .argmax import SOURCE
-    from .streamed import instance
-    name, line = instance(kernel, *arguments, _GATHER_THREADS)
-    if name not in _GATHER_KERNELS:
-        _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + _GATHER_SOURCE + '\n' + line + '\n', name)
-    return _GATHER_KERNELS[name]
-
-
-def _linear_kernel(*arguments):
-    """linear.metal's linear_publish at `arguments`, compiled once after the library's steps (fused.steps) and
-    argmax.metal's arrival count."""
-    from . import _stream, fused
-    from .argmax import SOURCE
-    from .streamed import instance
-    name, line = instance('linear_publish', *arguments)
-    if name not in _GATHER_KERNELS:
-        _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + _LINEAR_SOURCE + '\n' + line + '\n', name)
-    return _GATHER_KERNELS[name]
-
-
-def _fused_form(x, dim, sizes, group_name, channels):
-    """A chain crossing's prepared physical declarations: the communicator;
-    this rank and its peers; the partial publication's kernel and grid; the reduction's (sum_land, and
-    this rank's segment's start and each rank's sizes in its words); every rank's exact segment start and count
-    and the output's shape; the publication's arrival count; the separate landing-prefix
-    observer and physical channel extent."""
-    from . import _stream
-    group = dist.distributed_c10d._resolve_process_group(group_name)
-    n, rank = len(sizes), group.rank()
-    operand = tuple(x.shape)
-    dim %= len(operand)
-    copy_bytes = 1 if x.element_size() == 1 else 2
-    row, half = math.prod(operand[:dim] + operand[dim + 1:]), x.element_size() // copy_bytes
-    counts = [s * row for s in sizes]
-    starts = list(itertools.accumulate(counts, initial=0))
-    words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank, 0] + list(sizes) +
-             starts[:-1])
-    shape = operand
-    from .streamed import node
-    geometry = _stream.compilation
-    capacity = node()[1] * geometry['GATHER_GROUPS_PER_CORE']
-    grain = _GATHER_THREADS * geometry['GATHER_ELEMENTS_PER_THREAD']
-    spread = lambda count: max(1, min(capacity, -(-count // grain)))
-    groups = spread(math.prod(shape) * half)
-    inline_wait = groups == 1
-    land = _gather_kernel('sum_land', x.element_size(), n, channels, inline_wait)
-    publish_words = [math.prod(operand) * half, 0, *x.shape, *x.stride()]
-    publish = (_gather_kernel('partial_publish', x.ndim, half, copy_bytes, channels, x.is_contiguous()), publish_words, 1,
-               spread(words[0]), _GATHER_THREADS)
-    return (group.handle, _stream.polls, n, rank, *publish, land, words, 4, groups, _GATHER_THREADS,
-            starts, counts, list(shape), torch.zeros(1, dtype=torch.int32, device='mps'),
-            -1 if inline_wait else _gather_kernel('gather_ready', n, channels), channels)
-
-
-from . import _stream as _native  # noqa: E402
-
-_native.fused_maker(_fused_form)
 
 
 @torch.library.custom_op('torch_mesh::reduce_scatterv', mutates_args=())
@@ -635,14 +491,14 @@ def calls(tensor):
             for i, p in enumerate(tensor.placements) if isinstance(p, RaggedShard) and mesh.size(i) > 1]
 
 
-def plan(mesh, name, groups, *, production_seconds=None, routing=None):
+def plan(mesh, name, groups, *, order=None, production_seconds=None, routing=None):
     """The program's collectives on mesh dimension `name`'s group declared once, in their order (torch_mesh.plan):
     `groups` from the ops' own (calls, gathered, scattered), as a step issues them, or a function of no arguments
     giving them from the parts attached now, called when preparation supplies new parts. A list declares
     invariant counts; use a callable for every declaration whose counts depend on the current partition."""
     from . import plan as declare
     return declare(mesh.get_group(name), groups() if callable(groups) else groups,
-                   production_seconds=production_seconds, routing=routing)
+                   order=order, production_seconds=production_seconds, routing=routing)
 
 
 def split(mesh, name, N):

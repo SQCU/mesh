@@ -86,7 +86,7 @@ def placement(mesh, name, workload, seed=None, *, parameters, observations, prop
             'implementation': revision(Path(assignment.__file__).resolve().parents[1]), 'sequence': 0}
 
 
-def bind(configuration, groups, prepare):
+def bind(configuration, groups, prepare, *, order=None):
     """Bind one proposal and retain its executed operands for the next call.
 
     ``prepare`` returns layout and source choices from the Function declarations
@@ -99,7 +99,7 @@ def bind(configuration, groups, prepare):
     routing.forms(group.comm, c['forms'])   # before the declaration compiles its groups along them
     graph = c['graphs'].get(name)
     routed = assignment.route_operands(c['assignment']['parts'], name, graph) if graph is not None else None
-    partition.plan(mesh, name, groups, production_seconds=production_seconds, routing=routed)
+    partition.plan(mesh, name, groups, order=order, production_seconds=production_seconds, routing=routed)
     emit({'phase': 'declared', 'unix': time.time()})   # the function traced and compiled (partition.plan's groups)
     graph = {**assignment.graph(group.comm, group._plan), 'production_seconds': list(production_seconds), 'forms': c['forms']}
     emit({'phase': 'installed', 'unix': time.time()})

@@ -58,7 +58,8 @@ class Commands:
 
     def shader(self, source, function, operands, *, grid, threadgroup, access,
                constants=None, definitions=None, indices=None, instance='', thread_grid=False,
-               threadgroup_policy=None, limits=None, access_layouts=None, dispatch=None, coherent_accesses=False):
+               threadgroup_policy=None, limits=None, access_layouts=None, dispatch=None, coherent_accesses=False,
+               sites=(), contributions=(), announcements=()):
         from mesh_relation import Algebra
         from .operand import layout_configuration
         algebra = self.algebra
@@ -102,7 +103,8 @@ class Commands:
             index_layouts={} if indices is None else indices,
             binding_origins=tuple(origins), constants=constants, access=access, accesses=tuple(accesses),
             grid=tuple(grid), threadgroup=None if threadgroup is None else tuple(threadgroup),
-            threadgroup_policy=threadgroup_policy, limits=limits, thread_grid=thread_grid, dispatch=dispatch))
+            threadgroup_policy=threadgroup_policy, limits=limits, thread_grid=thread_grid, dispatch=dispatch,
+            sites=tuple(sites), contributions=tuple(contributions), announcements=tuple(announcements)))
 
     def declaration(self):
         return dict(commands=tuple(self.commands), bindings=dict(self.bindings))

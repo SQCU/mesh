@@ -5,11 +5,24 @@ group-indexed threshold/contribution pages and its ordinary payload pages.
 It neither searches page ranges nor constructs dependency edges at execution.
 """
 import math
+from dataclasses import dataclass
 
 import torch
 
 from . import _stream
 from .operand import TensorView, byte_operand, index_relation, layout_configuration
+
+
+@dataclass(frozen=True)
+class Coverage:
+    """Declared UInt32 active/count page operands, shared with transport.
+
+    The fixed cut domain is explicit. Values are produced by the ordinary
+    index/count graph; this object neither evaluates nor caches their contents.
+    """
+    active: object
+    expected: object
+    cuts: int
 
 
 def _physical(value, algebra):
@@ -198,6 +211,14 @@ def _group_accesses(command, algebra):
     return total, tuple(result)
 
 
+def _site_accesses(command, site, algebra):
+    """Place a source-local cell's declared accesses on the same page roots."""
+    logical = logical_dispatch_accesses(dict(command, dispatch=site['dispatch']), algebra)
+    physical = {access['slot']: _physical(command['operands'][access['slot']], algebra) for access in logical}
+    return tuple(dict(slot=access['slot'], access=1 if access['side'] == 'reads' else 2,
+                      relation=access['relation'].reshape((site['cells'],)).then(physical[access['slot']])) for access in logical)
+
+
 def transfer_effects(programs, occurrences, schedule):
     """Adapt retained frontend declarations to the common page-effect compiler."""
     from .compilation import relations, bind
@@ -221,12 +242,17 @@ def transfer_effects(programs, occurrences, schedule):
                     grid=_groups(command)[1] if gpu else (1, 1, 1),
                     metadata_slot=len(command['operands']), argument_names=names,
                     coherent_accesses=command.get('coherent_accesses', False),
+                    sites=tuple(dict(name=site['name'], cells=site['cells'], scope=site['scope'],
+                                     accesses=_site_accesses(command, site, algebra))
+                                for site in command.get('sites', ())),
+                    contributions=tuple(command.get('contributions', ())),
+                    announcements=tuple(command.get('announcements', ())),
                     accesses=tuple(dict(slot=access['slot'],
                         access=1 if access['side'] == 'reads' else 2, relation=access['relation'])
                         for access in accesses)))
                 commands.append(command)
     solved = _stream.compile_page_effects(algebra.ctx, descriptions,
-        [dict(order=order, owner=owner) for order, owner in occurrences])
+        [dict(order=order, owner=owner, frame_orders=frames) for order, owner, frames in occurrences])
     for source in solved['sources']:
         command = commands[source['index']]
         command['source'] = source['source']
@@ -249,7 +275,7 @@ def transfer_effects(programs, occurrences, schedule):
         command['reaches'] = (*command['reaches'],
             *((slot, access, byte_operand(value)) for slot, access, value in source['reaches']))
     schedule.results(solved['results'])
-    return programs
+    return programs, solved['recordings']
 
 
 def prepare(steps, schedule, output=None):
@@ -275,8 +301,12 @@ def prepare(steps, schedule, output=None):
             return set(value)
         return value
 
-    declarations = []
-    for step in steps:
+    # Frame positions are relative source-declaration indices. Preserve those
+    # coordinates while inserting required layout copies. A frame boundary is
+    # after the named declaration, including its output-layout copies.
+    declarations, positions = [], []
+    for original, step in enumerate(steps):
+        first = len(declarations)
         if isinstance(step, dict) and 'transfer' in step:
             if step['before']:
                 declarations.append(dict(commands=step['before'], output=None, pages=(), configuration=step['configuration']))
@@ -285,9 +315,11 @@ def prepare(steps, schedule, output=None):
                 declarations.append(dict(commands=step['after'], output=None, pages=(), configuration=step['configuration']))
         else:
             declarations.append(step)
+        positions.extend([original] * (len(declarations) - first))
     programs, prepared, effects = [], [], []
+    origins = {original: 2 * index for index, original in enumerate(positions)}
     for index, step in enumerate(declarations):
-        order = index
+        order = 2 * index
         if 'numerical' in step:
             programs.append(dict(step, order=order))
         elif 'transfer' not in step:
@@ -298,8 +330,10 @@ def prepare(steps, schedule, output=None):
             bound = (_stream.view_write_operands(step['bindings'], step['group'].handle, 0)
                      if step['transfer'] == 'write' else
                      _stream.Occurrence(step['group'].handle, step['operands']))
-            bound.lower()
-            prepared.append((order, bound))
+            bound.lower(step.get('invocation', 0))
+            bound.coverage(algebra.ctx, list(step.get('coverage', ())))
+            frames = tuple(origins[positions[index] + offset] + 1 for offset in step.get('frame_orders', ()))
+            prepared.append((order, bound, frames))
             effects.extend(TensorView(storage, layout, 0) for storage, layout in bound.source_views(algebra.ctx))
     for index, declaration in enumerate(programs):
         if 'numerical' not in declaration:
@@ -312,9 +346,12 @@ def prepare(steps, schedule, output=None):
             program = retained.emit(declaration['operands'], **declaration['placement'])
             programs[index] = dict(program, order=declaration['order'], configuration=declaration['configuration'])
     if prepared:
-        programs = transfer_effects(programs, prepared, schedule)
+        programs, prepared = transfer_effects(programs, prepared, schedule)
     for program in programs:
         with bind(program['configuration'], algebra=algebra):
-            prepared.append((program['order'], Program.prepare(program)))
-    for _, command in sorted(prepared, key=lambda item: item[0]):
-        command.append(schedule)
+            prepared.append((program['order'], Program.prepare(program), None))
+    for _, command, selected in sorted(prepared, key=lambda item: item[0]):
+        if selected is None:
+            command.append(schedule)
+        else:
+            command.append(schedule, selected)

@@ -118,21 +118,15 @@ encoding no longer runs a separate collective effect solve. The direct eager
 collective/group entry points and the standalone Python collective executor
 have been deleted.
 
-The older `chain.py`/`PreparedChain` and `dnn.py`/`fused.writes` frontends still
-record their own bound numerical sequences. They must move their retained
-numerical bodies and transfer declarations into the common preparation before
-their old registries and publication protocols are removed. They are not
-complete consumers of `CommSources`/`CommSpecialize`; the new contract has no
-compatibility execution substitute for them.
-
-Their replacements are being connected to grouped frame declarations. The
-source and transfer records retain explicit frame identity and logical order.
-Recording must preserve that order too: appending all native preservation
-copies at an occurrence's entry can put a later frame's read before its writer.
-Repeated frames may use the same physical pages, so a generic next-writer flag
-cannot identify the right generation. Interleave the retained native leaves
-with the declared numerical leaves before recorder dependency construction.
-This is unfinished; deleting the old fused-record sink alone does not close it.
+The Chain/DNN frontend migration is written and built. The old `PreparedChain`,
+`FusedForm`, fused registry and native fused-record sink are removed. Chain keeps
+its numerical body while declaring grouped frames and their actual physical
+page generations. DNN reuses retained numerical declarations by tile shape.
+The common source adapter interleaves native and frontend leaves by explicit
+frame order before recorder dependencies are built. `CommEncode` consumes an
+explicit selection of prepared command ordinals; it has no separate whole-list
+execution substitute. These changes join this source checkpoint. Integrated numerical/performance
+evidence remains required.
 
 Swift's enclosing preparation now gathers native and frontend declarations,
 solves them together, then binds commands. Its recipes and the LiteRT provider
@@ -171,13 +165,53 @@ The bridge, collective/CoreML libraries, CFFI binding, PyTorch extension and
 generated Metal kernels build with these shared changes. Native recipe and
 provider consumers remain in progress; this build did not execute payloads.
 
-Dynamic index and activity values still need complete coverage.
-Its fixed group-to-byte relations cannot by themselves describe a group whose
-selected pages depend on another function's index-page outputs. Reads, writes,
-transfer prerequisites and contribution coverage must retain those same index
-values and masks. A union of all possible pages would impose false dependencies
-and count producers which never write a selected page. This connection belongs
-in the shared contract, not in attention, sparse-product or serving executors.
+Dynamic index and activity coverage now has shared source machinery, committed
+as `7c4ed19c`. `ncclMeshPageCoverage` contains ordinary active/expected UInt32
+page operands and their fixed domain. Each transfer retains its explicit
+coverage-cut projection; selected contribution rows are ordinary index pages.
+The common source solve attaches count/mask announcements to their actual
+writers or to an explicitly declared imported-value continuation. The count
+and contribution order may vary; zero-contribution cuts still complete from
+their metadata producer. Exact index/count input reads enter the same dependency
+solve. Source compilation established this implementation's syntax, not complete
+frontend or transport integration.
+
+Native transport and Python/Swift/provider bindings are being connected to
+that contract. The native routed compiler already retains matching packet
+domains and positions for source, relay and destination messages. Coverage must
+project from those identities before the common source solve; it must not
+reconstruct them from kernel names or source/destination offsets after binding.
+A union of all possible pages would impose false dependencies and count writers
+which never contribute. It is not a substitute for these ordinary index inputs.
+
+The bridge side now builds with shared-region layout 162. Each entry supplies a
+descriptor-production prefix independent of payload readiness. Payload readiness
+retains its affine unit stride: a packet prefix uses stride 1; a scalar tile
+publication uses stride 0. This removes the old `1 - packet_count` underflow
+which made early packets of a multi-packet copied tile wait forever. A masked unit
+advances logical progress without a SEND or receive. Actual DMA counters and
+frame charges exclude those units. Completions name their retained span directly;
+masked gaps extend the preceding pending completion's logical coverage, or
+complete directly on a lane with no request pending. This preserves a prefix
+through completed/masked units without waiting for a later active transfer.
+There is no second completion lookup list, ring, or payload copy. Existing
+holding/table lifetimes retain these descriptors through completion reads.
+Native coverage binding and Python transduction are now written: native source
+keeps original call boundaries and explicit transport identities; coverage
+placements refer to those original boundaries before one shared source solve.
+They do not introduce another execution interface. This does not remove the
+remaining linked occurrence walk or queue-wide host events.
+
+Automatic coverage generation from indexing/scatter/provider source remains
+open. The shared emitter now accepts the page index a source-local site already
+computes. Its exact retained relation determines contributions under dynamic
+counts too; identity and affine selections emit arithmetic rather than a second
+index lookup. Separate index tensors remain ordinary inputs where the numerical
+source actually produces them. Mixed static/dynamic cuts and different coverage
+arrays may share one publication word. Native fold equations still need the
+declared activity semantics when contributors may be absent. Skipping a transport alone
+does not make an inactive arithmetic input equal to a fold's identity. These
+are required numerical/compiler connections, not reasons for a second executor.
 
 Item 3 has CPU/ANE source assignment and provider connections written. CPU
 products retain partitionable product equations until work domains and
@@ -199,3 +233,12 @@ contraction batching and finish fusion, complete LiteRT request graphs, and
 ordinary committed application evidence remain required. The immediate
 priority is completing the shared indexed-page/source/dependency/binding
 contract in items 1 through 3.
+
+The combined source checkpoint builds the bridge, collective/CoreML libraries,
+CFFI binding, PyTorch extension and generated Metal kernels. Subsequent source
+checks cover direct relation-driven contributions and source-local aliases.
+Coverage refinement computes packet cuts once per transport and refines the
+retained transfers in one pass over sorted bindings. It no longer rescans all
+span cuts and rebuilds the transfer array for every mask. These are preparation
+and build results; no numerical payload run or latency/throughput result is
+claimed by this checkpoint.

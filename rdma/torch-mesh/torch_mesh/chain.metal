@@ -84,75 +84,43 @@ struct Summand {
     }
 };
 
-// Processing stages above are restored from 1c0afa53^ (the coherent n-rank
-// form of the original chain kernel). Physical bindings below use the current
-// prepared write interface; rank count and cable count are separate operands.
-template <uint CHANNELS>
-struct chain_words {
-    uint first, pad0, rows, ks0, ks1, last, width, actual_rows, previous_j, j, input_j, pad;
-    mesh_step_binding land[CHANNELS], publish[CHANNELS], input[CHANNELS];
-};
+// The historical numerical stages are retained. Transfers and publications
+// are composed from these commands' page relations by the common compiler.
+struct chain_words { uint ks0, ks1, width, actual_rows; };
 
-template <uint CHANNELS>
-struct input_words { uint j, pad; mesh_step_binding channels[CHANNELS]; };
-
-template <uint CHANNELS>
-kernel void chain_publish_input(constant input_words<CHANNELS>& words [[buffer(15)]], uint tid [[thread_index_in_threadgroup]]) {
-    for (uint q = 0; q < CHANNELS; q++) if (words.channels[q].p) {
-        const auto p = words.channels[q];
-        mesh_step_enter(*p.p, p.v, p.progress, tid == 0);
-        mesh_step_release(*p.p, p.a, tid, words.j);
-    }
-}
-
-template <uint TILE, uint K, uint S, uint R, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS, uint CHANNELS, uint PHASE>
+template <uint TILE, uint K, uint S, uint R, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint RANKS,
+          uint PHASE, bool FIRST, bool LAST>
 [[max_total_threads_per_threadgroup(THREADS)]]
-kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
-                       coherent(device) device half* out [[buffer(3)]], coherent(device) device half* X [[buffer(4)]],
-                       coherent(device) device half* Y [[buffer(5)]], device half* P [[buffer(6)]],
-                       device atomic_uint* arrivals [[buffer(7)]],
-                       device const uchar* previous [[buffer(8)]], constant chain_words<CHANNELS>& words [[buffer(15)]],
+kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]],
+                       device const half* E [[buffer(2)]], device half* out [[buffer(3)]],
+                       device half* X [[buffer(4)]], device half* Y [[buffer(5)]], device half* P [[buffer(6)]],
+                       device const half* previous [[buffer(7)]], constant chain_words& words [[buffer(8)]],
                        uint tid [[thread_index_in_threadgroup]], uint sgid [[simdgroup_index_in_threadgroup]],
                        uint lane [[thread_index_in_simdgroup]], uint w [[threadgroup_position_in_grid]]) {
     static_assert(TILE == 8, "simdgroup matrices are 8 x 8");
     static_assert(THREADS % SIMD == 0 && RG % RB == 0, "whole simdgroups; whole batches of row groups");
     constexpr uint SG = THREADS / SIMD;
     threadgroup float red[SG * RB * 64];
-    threadgroup uint last;
     constexpr uint groups = R / (TILE * RG);
-    const uint ks0 = words.ks0, ks1 = words.ks1;
     const uint2 xs = share<K / TILE * groups, G>(w), ys = share<S / TILE * groups, G>(w);
     const uint2 elements = share<R * K, G>(w);
-    // Each phase uses the existing numerical body. Dispatch dependencies are
-    // compiled from X/Y accesses; no group waits for another to be scheduled.
     if constexpr (PHASE == 0) {
-        if (!words.last && tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.input[q].p) {
-            constant mesh_step_binding& input = words.input[q];
-            mesh_step_enter(*input.p, input.v, input.progress, w == 0);
-            mesh_step_counts(*input.p, input.a, input.v, words.input_j);
-        }
-        if (!words.first) {
-            if (tid == 0) for (uint q = 0; q < CHANNELS; q++) if (words.land[q].p) {
-                constant mesh_step_binding& l = words.land[q];
-                mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
-                mesh_step_counts(*l.p, l.a, l.v, words.previous_j);
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_device);
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
         for (uint q = tid; q < elements.y; q += THREADS) {
             const uint i = elements.x + q;
             const uint row = i / K, column = i % K;
             const bool present = row < words.actual_rows && column < words.width;
             const uint logical = row * words.width + column;
             float z = 0.0f;
-            if (!words.first) {
+            if constexpr (!FIRST) if (present) {
                 float sum = 0.0f;
-                for (uint rank = 0; rank < RANKS; rank++) sum += float(mesh_step_read<half>(previous, ulong(rank) * R * K + i));
+                for (uint rank = 0; rank < RANKS; rank++)
+                    sum += float(mesh_step_read<half>((device const uchar*)previous, ulong(rank) * R * K + i));
                 z = tanh(float(half(sum)));
-                if (present) out[logical] = half(z);
+                mesh_step_write<half>((device uchar*)out, logical, half(z));
             }
-            if (!words.last) X[i] = half((present ? float(mesh_step_read<half>((device const uchar*)E, logical)) : 0.0f) + z);
+            if constexpr (!LAST)
+                mesh_step_write<half>((device uchar*)X, i,
+                    half((present ? float(mesh_step_read<half>((device const uchar*)E, logical)) : 0.0f) + z));
         }
         return;
     }
@@ -160,18 +128,12 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     if constexpr (PHASE == 1) {
         Activated activated{Y, 0, S, at};
         const Rows xs_rows{X, K, at};
-        stage<RG, RB, K, SG>(xs_rows, At, ys, groups, ks0, sgid, red, activated);
+        stage<RG, RB, K, SG>(xs_rows, At, ys, groups, words.ks0, sgid, red, activated);
         return;
     }
-    Summand summand{P, 0, K, at};
-    const Rows ys_rows{Y, S, at};
-    stage<RG, RB, S, SG>(ys_rows, Bt, xs, groups, ks1, sgid, red, summand);
-    for (uint q = 0; q < CHANNELS; q++) if (words.publish[q].p)
-        mesh_step_enter(*words.publish[q].p, words.publish[q].v, words.publish[q].progress, w == 0 && tid == 0);
-    threadgroup_barrier(mem_flags::mem_device);
-    if (mesh_last_arrival<true>(arrivals, 0, G, tid, &last)) {
-        for (uint q = 0; q < CHANNELS; q++) if (words.publish[q].p)
-            mesh_step_release(*words.publish[q].p, words.publish[q].a, tid, words.j);
-        mesh_arrival_reset(arrivals, 0, tid);
+    if constexpr (PHASE == 2) {
+        Summand summand{P, 0, K, at};
+        const Rows ys_rows{Y, S, at};
+        stage<RG, RB, S, SG>(ys_rows, Bt, xs, groups, words.ks1, sgid, red, summand);
     }
 }

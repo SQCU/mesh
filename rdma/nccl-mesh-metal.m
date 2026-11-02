@@ -114,18 +114,117 @@ static void cell_access(struct metal_program *program,void *buffer,size_t offset
   [relation appendString:@" }"];
   [(NSMutableArray *)program->group_accesses addObject:group_access(program,(id<MTLBuffer>)buffer,offset,bytes,slot,access,relation)];
 }
-void metal_page_selection(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,const ncclMeshSpan *spans,size_t count) {
-  if(!count)return;
+void *metal_page_selection(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,const ncclMeshSpan *spans,size_t count) {
+  if(!count)return NULL;
   NSMutableArray *runs=[NSMutableArray array];
   for(size_t k=0;k<count;k++)[runs addObject:@[@(spans[k].offset),@(spans[k].bytes),@0,@1]];
   MetalTensorLayout *layout=[MetalTensorLayout runs:runs];
   isl_map *selection=MetalPageRegionSelection(program->relation_context,(id<MTLBuffer>)payload,layout);
   MetalPageTransfer *transfer=[MetalPageTransfer owner:[NSValue valueWithPointer:program] order:[(NSArray *)program->commands count]+(effect->kind==ncclMeshPagePublish)
     effect:*effect root:MetalPageRegionRoot() selection:selection payload:(id<MTLBuffer>)payload layout:layout];
-  [(NSMutableArray *)program->transfers addObject:transfer];isl_map_free(selection);
+  [(NSMutableArray *)program->transfers addObject:transfer];isl_map_free(selection);return transfer;
 }
 void metal_page_effect(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,size_t offset,size_t bytes) {
   if(bytes){const ncclMeshSpan span={offset,bytes};metal_page_selection(program,effect,payload,&span,1);}
+}
+
+static MetalPageCoverage *coverage_value(struct metal_program *program,ncclMeshPageCoverage values) {
+  NSMutableDictionary *declarations=program->coverage_values;
+  NSArray *key=@[[NSValue valueWithPointer:values.active.buffer],@(values.active.offset),
+    [NSValue valueWithPointer:values.expected.buffer],@(values.expected.offset),@(values.cuts)];
+  MetalPageCoverage *value=declarations[key];
+  if(!value)declarations[key]=value=[MetalPageCoverage declaration:values];
+  return value;
+}
+
+/* Coverage refines retained transfer declarations, before their single common
+   solve. The span table already supplies the exact packet boundaries. */
+void metal_coverage(struct metal_program *program,const struct metal_coverage_projection *bindings,size_t count) {
+  NSMutableDictionary *ranges=[NSMutableDictionary dictionary];
+  for(size_t first=0;first<count;) {
+    size_t end=first+1;while(end<count&&bindings[end].transport==bindings[first].transport)end++;
+    ranges[@(bindings[first].transport+1)]=[NSValue valueWithRange:NSMakeRange(first,end-first)];first=end;
+  }
+  NSMutableArray *made=[NSMutableArray new];
+  for(MetalPageTransfer *prior in (NSArray *)program->transfers) {
+    NSValue *selected=ranges[@(prior->effect.transport)];
+    if(!selected){[made addObject:prior];continue;}
+    const NSRange range=selected.rangeValue;
+    const size_t begin=prior->effect.transport_first,end=begin+prior->effect.bytes;
+    size_t low=range.location,high=NSMaxRange(range);
+    while(low<high){const size_t mid=low+(high-low)/2;
+      if(bindings[mid].first+bindings[mid].bytes<=begin)low=mid+1;else high=mid;}
+    if(low==NSMaxRange(range)||bindings[low].first>=end){[made addObject:prior];continue;}
+    const struct metal_coverage_projection *domain=bindings+range.location;
+    for(size_t at=begin,k=low;at<end;) {
+      const int covered=k<NSMaxRange(range)&&bindings[k].first<=at;
+      const size_t until=MIN(end,k==NSMaxRange(range)?end:covered?bindings[k].first+bindings[k].bytes:bindings[k].first);
+      ncclMeshPageEffect effect=prior->effect;
+      effect.first+=at-begin;effect.bytes=until-at;effect.transport_first=at;
+      size_t before=0,after=domain->units;
+      while(before<after){const size_t mid=before+(after-before)/2;
+        if(domain->ends[mid]<until)before=mid+1;else after=mid;}
+      effect.threshold=domain->base+before;
+      MetalTensorLayout *layout=[prior->layout slice:0 first:(NSInteger)(at-begin) count:until-at step:1];
+      isl_map *selection=MetalPageRegionSelection(program->relation_context,prior->payload,layout);
+      MetalPageTransfer *next=[MetalPageTransfer owner:prior->owner order:prior->order effect:effect
+        root:prior->root selection:selection payload:prior->payload layout:layout];
+      next.coverage=covered?coverage_value(program,bindings[k].values):prior->coverage;
+      next->coverageCut=covered?bindings[k].cut:prior->coverageCut;
+      [made addObject:next];isl_map_free(selection);at=until;
+      if(covered)k++;
+    }
+  }
+  [(id)program->transfers release];program->transfers=made;program->declaration.transfers=made;
+}
+
+void metal_coverage_announcement(struct metal_program *program,ncclMeshPageCoverage values,size_t cut) {
+  MeshCollectiveCommand *command=[(NSArray *)program->commands lastObject];
+  MetalPageCoverage *coverage=coverage_value(program,values);
+  NSString *text=[NSString stringWithFormat:@"{ [g] -> [c] : 0 <= g < %lu and c = %lu }",
+    (unsigned long)command->source->groups,(unsigned long)cut];
+  isl_map *relation=isl_map_read_from_str(program->relation_context,text.UTF8String);
+  MetalPageAnnouncement *announcement=[MetalPageAnnouncement coverage:coverage phase:0 flags:4 relation:relation];
+  [command->source->announcements release];command->source->announcements=[@[announcement] copy];
+  isl_map_free(relation);
+}
+
+void metal_place_sources(struct metal_program *program,size_t previous,const size_t *positions,
+    const void *const *effects,size_t count,size_t *relocation) {
+  NSMutableArray *commands=program->commands;
+  if(count) {
+    NSMutableArray *made=[NSMutableArray arrayWithCapacity:commands.count];
+    NSMutableDictionary *effectOrder=[NSMutableDictionary dictionaryWithCapacity:count];
+    NSMutableDictionary *atBoundary=[NSMutableDictionary dictionary];
+    for(size_t k=0;k<count;k++) {
+      NSNumber *at=@(positions[k]);NSMutableArray *items=atBoundary[at];
+      if(!items)atBoundary[at]=items=[NSMutableArray array];
+      [items addObject:@(k)];
+    }
+    for(size_t boundary=0;boundary<=previous;boundary++) {
+      for(NSNumber *item in atBoundary[@(boundary)]) {
+        const NSUInteger k=item.unsignedIntegerValue;
+        MeshCollectiveCommand *command=commands[previous+k];
+        [made addObject:command];command->source->order=made.count;
+        effectOrder[[NSValue valueWithPointer:effects[k]]]=@(made.count+1);
+      }
+      if(boundary<previous) {
+        relocation[boundary]=made.count;
+        MeshCollectiveCommand *command=commands[boundary];
+        [made addObject:command];command->source->order=made.count;
+      }
+    }
+    for(MetalPageTransfer *transfer in (NSArray *)program->transfers) {
+      NSNumber *placed=effectOrder[[NSValue valueWithPointer:transfer]];
+      if(placed)transfer->order=placed.unsignedIntegerValue;
+      else if(transfer->order)transfer->order=transfer->order<=previous?
+        relocation[transfer->order-1]+1:made.count+1;
+    }
+    [commands setArray:made];
+  } else {
+    for(size_t i=0;i<previous;i++)relocation[i]=i;
+  }
+  [(id)program->declaration.commands release];program->declaration.commands=NULL;
 }
 
 static id<MTLDevice> device_;
@@ -221,6 +320,7 @@ void *metal_retain(void *object) { return [(id)object retain]; }
 struct metal_program *metal_prepare(struct metal_program *program,struct isl_ctx *context,void *violation,uint32_t polls) {
   *program=(struct metal_program){0};program->violation=[(id<MTLBuffer>)violation retain];program->polls=polls;
   program->accesses=[NSMutableData new];program->commands=[NSMutableArray new];program->transfers=[NSMutableArray new];
+  program->coverage_values=[NSMutableDictionary new];
   program->group_accesses=[NSMutableArray new];program->loop_accesses=[NSMutableArray new];program->resources=[NSMutableSet new];
   program->relation_context=context;metal_resident(program,violation);return program;
 }
@@ -265,20 +365,17 @@ static int argument_pages(struct metal_program *program,size_t bytes,struct meta
   return 0;
 }
 static struct metal_result record4(struct metal_program *program,id<MTLBuffer> d,id<MTLBuffer> s,id<MTLBuffer> a,id<MTLBuffer> words,
-    struct args p,uint64_t bound[6],struct MetalCommandBinding *bindings) {
+    struct args p,struct MetalCommandBinding *bindings) {
   struct metal_bytes record;
   const int failed=argument_pages(program,sizeof p,&record);
   if(failed)return metal_failed(failed);
   id<MTLBuffer> v = words ? words : program->violation ? program->violation : d;
   p.polls = v != d ? program->polls : 0;
   p.sequence=0;
-  const uint64_t argument=((id<MTLBuffer>)record.buffer).gpuAddress+record.offset;
   memcpy(record.contents,&p,sizeof p);
   const id<MTLBuffer> used[4] = {d, s ? s : d, a ? a : d, v};
   for (int k = 0; k < 4; k++) metal_resident(program, used[k]);
-  const uint64_t made[6] = {d.gpuAddress,(s?s:d).gpuAddress,argument,(a?a:d).gpuAddress,v.gpuAddress,argument};
-  memcpy(bound, made, sizeof made);
-  if(bindings) {
+  {
     const id<MTLBuffer> buffers[6]={d,s?s:d,(id<MTLBuffer>)record.buffer,a?a:d,v,(id<MTLBuffer>)record.buffer};
     for(uint32_t k=0;k<6;k++)bindings[k]=(struct MetalCommandBinding){.buffer=buffers[k],
       .offset=(k==2||k==5)?record.offset:0,.length=k==2?sizeof p:0,
@@ -317,6 +414,7 @@ static void command_emit(struct metal_program *program,uint32_t kind,
   command->source=[[MetalPageCommand order:[(NSArray *)program->commands count]+1 groups:groups backend:MetalPageMetal
     source:source function:@"mesh_prepared_leaf" grid:MTLSizeMake(groups,1,1) metadataSlot:6 accesses:relations] retain];
   command->source->coherentAccesses=YES;
+  command->source->frame=program->administrative?UINT32_MAX:program->frame;
   command->bindings=[[NSData alloc] initWithBytes:bindings length:6*sizeof *bindings];
   command->reaches=[accesses copy];command->kind=kind;
   command->grid=grid;command->threads=threads;command->threadGrid=threadGrid;
@@ -327,8 +425,8 @@ static void command_emit(struct metal_program *program,uint32_t kind,
 
 static struct metal_result dispatch4(struct metal_program *program,uint32_t kind,id<MTLBuffer> d,id<MTLBuffer> s,
     id<MTLBuffer> a,id<MTLBuffer> words,struct args p,uint64_t units,int group) {
-  uint64_t bound[6];struct MetalCommandBinding bindings[6];
-  const struct metal_result recorded=record4(program,d,s,a,words,p,bound,bindings);
+  struct MetalCommandBinding bindings[6];
+  const struct metal_result recorded=record4(program,d,s,a,words,p,bindings);
   if(recorded.status)return recorded;
   const NSUInteger most=group?MESH_TRANSPORT_GROUP_THREADS:MESH_TRANSPORT_ELEMENT_THREADS;
   const NSUInteger width=most;
@@ -363,6 +461,41 @@ struct metal_result metal_copy(struct metal_program *program,void *dst,size_t ds
   return dispatch(program,COPY[!words],dst,src,NULL,NULL,(struct args){.dst=dst_offset,.src=src_offset,.n=words?bytes/4:bytes},words?bytes/4:bytes,0);
 }
 
+struct metal_result metal_mask_spans(struct metal_program *program,ncclMeshBuffer table,
+    const struct mesh_dma_span *spans,size_t count,ncclMeshBuffer active) {
+  if(!count)return METAL_DONE;
+  struct metal_bytes lengths;
+  const int failed=argument_pages(program,count*sizeof(uint64_t),&lengths);
+  if(failed)return metal_failed(failed);
+  for(size_t k=0;k<count;k++)((uint64_t *)lengths.contents)[k]=spans[k].bytes;
+  const ncclMeshAccess inputs[]={{{lengths.buffer,lengths.offset},count*sizeof(uint64_t),ncclMeshAccessRead},
+    {active,sizeof(uint32_t),ncclMeshAccessRead}};
+  metal_accesses(program,inputs,2);
+  for(size_t k=0;k<count;k++) {
+    const ncclMeshAccess output={{table.buffer,table.offset+k*sizeof(struct mesh_dma_span)+offsetof(struct mesh_dma_span,bytes)},
+      sizeof(uint64_t),ncclMeshAccessWritten};
+    metal_accesses(program,&output,1);
+  }
+  const NSUInteger grid=MIN(count,MESH_TRANSPORT_GRID_THREADS),threads=MESH_TRANSPORT_ELEMENT_THREADS;
+  loop_access(program,lengths.buffer,lengths.offset,count,sizeof(uint64_t),1,MetalReachRead);
+  NSString *writes=[NSString stringWithFormat:
+    @"{ [g] -> [b] : exists k : 0 <= k < %lu and %lu + %lu*k <= b < %lu + %lu*k and g = floor((k mod %lu)/%lu) }",
+    (unsigned long)count,(unsigned long)(table.offset+offsetof(struct mesh_dma_span,bytes)),
+    (unsigned long)sizeof(struct mesh_dma_span),
+    (unsigned long)(table.offset+offsetof(struct mesh_dma_span,bytes)+sizeof(uint64_t)),
+    (unsigned long)sizeof(struct mesh_dma_span),
+    (unsigned long)grid,(unsigned long)threads];
+  [(NSMutableArray *)program->group_accesses addObject:group_access(program,(id<MTLBuffer>)table.buffer,
+    table.offset,count*sizeof(struct mesh_dma_span),0,MetalReachWritten,writes)];
+  NSString *reads=[NSString stringWithFormat:@"{ [g] -> [b] : 0 <= g < %lu and %lu <= b < %lu }",
+    (unsigned long)((grid+threads-1)/threads),(unsigned long)active.offset,(unsigned long)(active.offset+sizeof(uint32_t))];
+  [(NSMutableArray *)program->group_accesses addObject:group_access(program,(id<MTLBuffer>)active.buffer,
+    active.offset,sizeof(uint32_t),3,MetalReachRead,reads)];
+  return dispatch(program,KIND_mask_spans,table.buffer,lengths.buffer,active.buffer,NULL,
+    (struct args){.dst=table.offset,.src=lengths.offset,.n=count,.aux=active.offset,
+      .step=sizeof(struct mesh_dma_span)/sizeof(uint64_t),.phase=offsetof(struct mesh_dma_span,bytes)/sizeof(uint64_t)},count,0);
+}
+
 struct metal_result metal_fill_pattern(struct metal_program *program,void *dst,size_t dst_offset,
     size_t bytes,uint64_t scalar,size_t element_bytes,size_t unit_bytes) {
   const ncclMeshAccess output={{dst,dst_offset},bytes,ncclMeshAccessWritten};
@@ -388,6 +521,7 @@ static struct metal_result native_emit(struct metal_program *program,NSString *t
   MeshCollectiveCommand *command=[[[MeshCollectiveCommand alloc] init] autorelease];
   command->source=[[MetalPageCommand order:[(NSArray *)program->commands count]+1 groups:1 backend:MetalPageCPU
     source:text function:@"mesh_cpu_entry" grid:MTLSizeMake(1,1,1) metadataSlot:0 accesses:relations] retain];
+  command->source->frame=program->frame;
   command->reaches=[reaches copy];command->arguments=[[NSData alloc] initWithBytes:arguments length:bytes];
   [(NSMutableArray *)program->commands addObject:command];[(NSMutableData *)program->accesses setLength:0];
   return METAL_DONE;
@@ -431,12 +565,6 @@ struct metal_result metal_truncdiv(struct metal_program *program, int type, void
 /* a wait's arguments (nccl-mesh-metal.h struct metal_wait): `landed` at aux until scalar,
    the landed bytes at src, dst the destination's offset, its entry and channel for its failure's record.  Its page
    counts become the record's words here and in release_args alone */
-static struct args wait_args(const struct metal_wait *w, size_t dst_offset, size_t n, int op) {
-  return (struct args){.dst = dst_offset, .src = w->data_offset, .n = n, .scalar = pages_to_word(w->target), .aux = w->word, .op = (uint32_t)op,
-                       .at = w->at, .channel = w->channel, .stride = (uint32_t)pages_to_word(w->stride)};
-}
-
-/* a publication's arguments (struct metal_release): its count at aux stored scalar; dst the operand's offset (a deferred one's) */
 static struct args release_args(const struct metal_release *r, size_t dst_offset) {
   return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word, .stride = (uint32_t)pages_to_word(r->stride)};
 }
@@ -649,10 +777,10 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
       metal_accesses(program,&use,1);
     }
     metal_resident(program,table.buffer);
-    uint64_t bound[6];struct MetalCommandBinding bindings[6];
+    struct MetalCommandBinding bindings[6];
     const struct args args={.src=table.offset,.op=(uint32_t)op,.channel=channel,.at=at,.polls=program->polls};
     const struct metal_result recorded=record4(program,(id<MTLBuffer>)sum->out,(id<MTLBuffer>)table.buffer,nil,
-      program->violation,args,bound,bindings);
+      program->violation,args,bindings);
     if(recorded.status)return recorded;
     command_emit(program,kind,bindings,MTLSizeMake(blocks,1,1),MTLSizeMake(width,1,1),NO);
   }
@@ -663,17 +791,6 @@ struct metal_result metal_open_gate(struct metal_program *program, void *words, 
   const ncclMeshAccess use={{words,word},sizeof(uint64_t),ncclMeshAccessWritten|ncclMeshAccessAtomic};metal_accesses(program,&use,1);
   return dispatch(program, KIND_publish, words, NULL, NULL, NULL, (struct args){.scalar = value, .aux = word}, 1, 1);
 }
-
-/* Deferred steps retain their compiled records through the function's residency set. */
-struct metal_result metal_send_deferred(struct metal_program *program, void *operand, size_t offset, const struct metal_release *r, uint64_t bound[6]) {
-  return record4(program, (id<MTLBuffer>)operand, nil, (id<MTLBuffer>)r->words, nil, release_args(r, offset), bound, NULL);
-}
-
-struct metal_result metal_land_deferred(struct metal_program *program, void *landing, size_t offset, const struct metal_wait *w, uint64_t bound[6]) {
-  return record4(program, (id<MTLBuffer>)landing, (id<MTLBuffer>)landing, (id<MTLBuffer>)w->words, (id<MTLBuffer>)w->violation,
-                 wait_args(w, offset, 0, 0), bound, NULL);
-}
-
 
 void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }
 
@@ -713,12 +830,15 @@ struct metal_result metal_specialize(struct metal_program *program,void *sources
      completed source and its page operands, never the enclosing ISL context. */
   for(MeshCollectiveCommand *command in (NSArray *)program->commands) {
     [command->source->accesses release];command->source->accesses=nil;
+    [command->source->announcements release];command->source->announcements=nil;
+    [command->source->contributions release];command->source->contributions=nil;
   }
   [(id)program->declaration.commands release];program->declaration.commands=NULL;
   [(id)program->transfers release];program->transfers=NULL;program->declaration.transfers=NULL;
+  [(id)program->coverage_values release];program->coverage_values=NULL;
   return METAL_DONE;
 }
-struct metal_result metal_record(struct metal_program *program,const ncclMeshStream *on) {
+struct metal_result metal_record(struct metal_program *program,const size_t *selected,size_t count,const ncclMeshStream *on) {
   if(!program->sources)return (struct metal_result){EINVAL,"complete the whole-function source solve before recording"};
   program->encoder=(id<MTL4ComputeCommandEncoder>)on->commandEncoder;
   program->table=(id<MTL4ArgumentTable>)on->argumentTable;
@@ -729,7 +849,8 @@ struct metal_result metal_record(struct metal_program *program,const ncclMeshStr
   struct metal_result result=METAL_DONE;
   @try {
     NSArray<MeshCollectiveCommand *> *commands=program->commands;
-    for(NSUInteger i=0;i<commands.count&&!result.status;i++) {
+    for(NSUInteger at=0;at<count&&!result.status;at++) {
+      const NSUInteger i=selected[at];
       MeshCollectiveCommand *command=commands[i];
       MetalPageSource *source=((NSArray *)program->sources)[i];
       [argument_owner(program)->sources addObject:source];
@@ -794,5 +915,6 @@ void metal_end(struct metal_program *program) {
   [(id)program->accesses release];[(id)program->commands release];[(id)program->transfers release];
   [(id)program->group_accesses release];[(id)program->loop_accesses release];
   [(id)program->arguments release];[(id)program->resources release];[(id)program->sources release];
+  [(id)program->coverage_values release];
   [(id)program->declaration.commands release];[program->violation release];
 }

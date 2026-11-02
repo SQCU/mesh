@@ -25,11 +25,11 @@ def main(config=None):
         family=getattr(args, 'family', {'function': 'fabric-dnn', **workload}))
     args.tile_rows = configuration['assignment']['operands']['tile_rows']
     group = mesh.get_group('ffn')
-    dnn = DNN(args, group, group.fabric, source_scope={'program': 'fabric-dnn'})
+    dnn = DNN(args, group, source_scope={'program': 'fabric-dnn'})
     def prepare():
-        dnn.prepare({'compute': partition.split(mesh, 'ffn', args.expansion)})
-        return {'layouts': [], 'choices': []}
-    bind(configuration, dnn.declare(), prepare)
+        return dnn.prepare()
+    bind(configuration, lambda: dnn.declare({'compute': partition.split(mesh, 'ffn', args.expansion)},
+                                          configuration['assignment']['operands']), prepare)
     started = now()
     dnn.run()
     record(configuration, dnn.completion, started, args.rows * args.width * 4,

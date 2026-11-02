@@ -11,7 +11,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
 from torch_mesh import chain as sequence
 from torch_mesh.configuration import placement, bind, record
-from torch_mesh import _stream, compute
+from torch_mesh import compute
 from mesh_statistics import now, next_configuration
 
 import chain
@@ -69,18 +69,17 @@ def main(config=None):
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
     group = mesh.get_group('tp')
-    groups, operands = sequence.operands(a, b, E, O, group, k, chosen['resident_tiles'], chosen['input_frames'], capabilities,
+    groups, order, program = sequence.operands(a, b, E, O, group, k, chosen['resident_tiles'], chosen['input_frames'], capabilities,
                                          source_scope={'program': 'chain_sequence'})
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
     def prepare():
-        sequence.prepare(operands)
-        return {'layouts': [], 'choices': []}
-    bind(configuration, groups, prepare)
-    completion = _stream.chain_completion(operands[0])
+        return sequence.prepare(program)
+    bind(configuration, groups, prepare, order=order)
     started = now()
-    _stream.chain_run(operands[0])
+    program.forward()
+    completion = program.completion()
     summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
                    steps_per_replay=k)
     record(configuration, completion, started, O.numel() * O.element_size(), summary)

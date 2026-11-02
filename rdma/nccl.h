@@ -248,26 +248,6 @@ typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
    Both are uint32 values. Their producers/arrivals are declared dependencies,
    so zero-initialized storage never stands in for a completed masked cut. */
 typedef struct { ncclMeshBuffer active, expected; size_t cuts; } ncclMeshPageCoverage;
-/* Fused publication and landing bindings, in physical channel order. Each
-   record contains six GPU addresses: d, s, argument record, a, v, progress
-   (ncclMeshMetalPrelude's mesh_step_binding). The caller supplies room using
-   its compiled group's counts; the result gives actual active-channel counts.
-   Parallel channels remain separate and may contain multiple physical fragments.
-   Zero counts mean no corresponding local publication/consumption, not permission
-   to silently execute an unfused source read before its producer.
-
-   Producers release all ordinary source publications. Relay fragments are
-   supplied by their incoming landed prefixes. Consumers await the final own
-   landing on each relevant channel, excluding any relay-only trailing entries.
-   Source and relay bytes remain immutable through all declared reads; receiving
-   ranges have a first-write ownership proof and no reciprocal producer gate.
-
-   repeats (0 as 1) declares consecutive executions of the same compiled form.
-   stride is their local byte storage displacement. Only the first frame's
-   binding records are returned; their prefix increments describe subsequent
-   frames, and kernels use mesh_step_release/mesh_step_await with that frame's
-   index. A zero stride does not establish permission to overwrite live pages. */
-typedef uint64_t ncclMeshBinding[6];
 /* Typed preparation output, before backend argument records contain addresses.
    operand names the declaration's source or destination binding. first/bytes
    are frame-local logical bytes in that binding: a gathered source and a
@@ -281,6 +261,9 @@ typedef struct {
   uint32_t kind,frame,channel,polls,operand;
   ncclMeshBuffer word,violation;
   uint64_t threshold,entry;
+  /* 1 + the retained native transport ordinal, or 0 for a purely local
+     effect. transport_first is the selected byte's offset in that transport. */
+  size_t transport,transport_first;
 } ncclMeshPageEffect;
 enum { ncclMeshPagePublish=1, ncclMeshPageObserve=2 };
 enum { ncclMeshPageSource=0, ncclMeshPageDestination=1, ncclMeshPageInternal=2 };
@@ -294,16 +277,10 @@ typedef struct {
   size_t count;
 } ncclMeshSourceInput;
 typedef struct {
-  ncclMeshBinding *publish, *land;
-  uint32_t publishes, lands, repeats;
-  size_t stride;
-} ncclMeshFused;
-typedef struct {
   void *commandEncoder;
   void *argumentTable;
   void *residencySet;
   uint32_t polls;
-  ncclMeshFused *fused;
   /* Each declared binding uses (invocation + displacement) % instances. */
   size_t invocation;
 } ncclMeshStream;
@@ -773,9 +750,9 @@ typedef struct { uint32_t element_bits, rank; const uint64_t* shape; const int64
    recvcount, an all-gather's sendcount), `counts` (NULL: none; read for these alone) uneven segments (all-gather
    and reduce-scatter: a rank's count each; all-to-all: sendcounts then recvcounts), `type` (a WRITE's
    `count` of it is the WRITE's bytes, all a WRITE moves: its values' type is its producer's and consumer's), `op` (a
-   reduction's), and `group`: consecutive declarations of one number form one prepared group. ncclMeshPlanRun supplies their invocation order. `fused` (not 0) gives explicit WRITE calls a producer/consumer record sink
-   (ncclMeshStream fused). Numerical collectives always enter the common command
-   graph. All calls in a WRITE group share its sink and frame count. It uses the same physical striping and routed-write
+   reduction's), and `group`: consecutive declarations of one number form one prepared group.
+   ncclMeshPlanRun supplies their invocation order. Numerical collectives and
+   WRITE calls enter the common source graph. Calls in one group share a frame count. It uses the same physical striping and routed-write
    representation as other calls; fusion changes publication/consumption encoding, not available cables. */
 enum { ncclMeshCallAllReduce = 0, ncclMeshCallBroadcast = 1, ncclMeshCallReduce = 2, ncclMeshCallReduceScatter = 3,
        ncclMeshCallAllGather = 4, ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
@@ -878,7 +855,6 @@ typedef struct {
   ncclRedOp_t op;
   int group;
   int destination;
-  int fused;
   size_t tile_bytes; /* WRITE publication geometry, 0: whole operand */
   const ncclMeshProduction* production;
   /* Optional complete source-major count matrix for AlltoAllV. Otherwise
@@ -902,14 +878,11 @@ typedef struct {
   const ncclMeshLayout* views;
   uint32_t frames;
   size_t max_packet;
-  /* Source publication words and destination landing records are page operands
-     of this declaration. Relays consume their incoming publication prefixes.
-     Landing records hold {count, bindings[land_capacity]}; preparation fills
-     each tile's incoming prefixes across all contributing physical cables. */
-  ncclMeshBuffer source_ready, landings;
+  /* Explicit external source publication pages. The common source pass consumes
+     these as typed observations; destination effects come from transfer lowering. */
+  ncclMeshBuffer source_ready;
   uint64_t ready_value;
-  ncclMeshTileLayout ready_layout, land_layout;
-  uint32_t land_capacity;
+  ncclMeshTileLayout ready_layout;
   /* A physical call can cover multiple original equations/occurrences. An
      explicit equal route_scope permits their routing choices to be shared,
      independently of physical group boundaries. NULL declares a fresh local
@@ -926,7 +899,7 @@ typedef struct {
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
    (`issues`, the sum of each block's count times repeat), the number of the communicator's group the order starts at (`first`: its groups
    numbered from 1 in issue order, the first after the call), and of declared group g this rank's entries on its send
-   lists and on its landing lists (entries[g][0] and [1]: a fused crossing's publications and landings, ncclMeshFused);
+   lists and on its landing lists (entries[g][0] and [1]: the physical send and landing counts);
    and of declared group g its compiled finish (seconds[g]: from its first unit to its schedule's last unit's end, every
    page moved as soon as it is ready at its cables' rates and nothing else waited for, mesh-graph.h mesh_graph_schedule),
    and of declared call k (ncclMeshCommPlan's calls[k]) its complete source-major count matrix, nranks x nranks
@@ -969,19 +942,59 @@ struct isl_ctx;
    order. The enclosing compiler places that order in its whole function,
    solves all page effects together, and returns one MetalPageSource per
    command in this array. The occurrence owns these objects until plan release. */
-typedef struct { void* commands; void* transfers; } ncclMeshSources;
+/* A transport declaration retains the packet domain produced by the common
+   routing compiler. first/bytes name that domain, independently of local
+   source/result offsets. spans is the fixed-width resolved span operand;
+   units is its length. Direction 0 is a SEND, 1 a landing. These records and
+   their ordinal identities exist only during preparation. */
+typedef struct {
+  size_t call,first,bytes,units;
+  uint32_t frame,domain,channel,direction;
+  uint64_t entry;
+  ncclMeshBuffer spans;
+} ncclMeshTransport;
+/* An explicit projection from a prepared span range to one semantic coverage
+   cut. first/units select contiguous span ordinals in transport; cut indexes
+   values.active and values.expected, with the same meaning at every endpoint.
+   before is the original Sources command boundary at which the active value
+   is consumed (0 before the first command; command count after the last).
+   The enclosing source graph supplies it; native lowering does not assume
+   coverage was produced outside its occurrence. */
+typedef struct {
+  size_t transport,first,units,cut,before;
+  ncclMeshPageCoverage values;
+} ncclMeshCoverageBinding;
+typedef struct {
+  void* commands;
+  void* transfers;
+  const ncclMeshTransport* transport;
+  size_t transports;
+  /* Original command boundaries for each declared call, before coverage
+     insertion. The enclosing compiler maps retained source identities here;
+     descriptor-publication commands precede call_first[0]. */
+  const size_t* call_first;
+  size_t calls;
+} ncclMeshSources;
 ncclResult_t ncclMeshCommSources(ncclComm_t comm,uint64_t occurrence,
     struct isl_ctx* context,const ncclMeshSources** sources);
+/* Attach computed coverage once, before whole-function ordering and solving.
+   This extends the same retained source occurrence with ordinary span-mask
+   declarations. The returned Sources replaces its earlier borrowed arrays;
+   it does not lower the collective a second time. */
+ncclResult_t ncclMeshCommCoverage(ncclComm_t comm,uint64_t occurrence,
+    const ncclMeshCoverageBinding* bindings,size_t count,const ncclMeshSources** sources);
 ncclResult_t ncclMeshCommSpecialize(ncclComm_t comm,uint64_t occurrence,void* sources);
 /* Complete the source dependency solve for a lowered occurrence. Input spans
    use the same logical coordinates as PageEffect. This runs before Encode and
    extends the occurrence's immutable descriptor prerequisites. */
 ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm, uint64_t occurrence,
     const ncclMeshSourceInput* inputs, size_t count);
-/* Bind and record exactly that lowered occurrence. All placement, readiness
-   and channel order decisions already belong to its declaration-owned issue.
-   A missing occurrence is a preparation error, never an implicit lowering. */
-ncclResult_t ncclMeshCommEncode(ncclComm_t comm, uint64_t occurrence, cudaStream_t stream);
+/* Bind the explicitly selected retained command ordinals into the enclosing
+   recorder. The compiler interleaves these leaves with external numerical
+   source before dependency compilation. Whole occurrences supply every ordinal;
+   there is no implicit whole-occurrence or alternate execution mode. */
+ncclResult_t ncclMeshCommEncode(ncclComm_t comm, uint64_t occurrence,
+    const size_t* commands, size_t count, cudaStream_t stream);
 /* Compiler-derived useful directed bytes for one entire declared function.
    demand has nranks*nranks entries (source-major); group repeats are included.
    Relay amplification is excluded. Query after configuration, before execution;
@@ -992,49 +1005,10 @@ ncclResult_t ncclMeshCommPlanDemands(ncclComm_t comm, uint64_t* demand, size_t e
    increase this number. A weight change smaller than 1/units may compile to the
    identical schedule; this is probe resolution, never a minimum path share. */
 ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t entries);
-/* Fused WRITE records use the same physical fragment compiler and channel bindings
-   as ordinary compiled writes. A peer may have any number of parallel channels,
-   and a logical transfer may contain multiple fragments and relay hops. There is
-   no peer-sized restriction and no silent fallback that reads an operand before
-   the caller's publishing kernel has produced it. Numerical reductions emit
-   their commands into the common graph; this WRITE record interface does not
-   replace or suppress them.
-
-   The caller supplies room for the declared physical publication and landing
-   bindings (ncclMeshFused). The producer writes source pages with the required
-   coherence and releases each active channel's cumulative publication. Relay
-   entries instead depend on their actual incoming landed prefix and forward from
-   those same pages. A source publication never declares an unlanded relay ready.
-   The consumer observes only the final incoming prefixes needed by its local
-   data uses. It need not await later relay-only entries or local SEND completion.
-   Consolidate repeated observation/fence work where the execution graph permits;
-   observing availability is not a separate network message.
-
-   Receives have AOT addresses and orders. Fresh disjoint landing ranges can be
-   preposted immediately, independent of this node's outgoing publication. A
-   reused range's landing is posted once the SEND that last read it completed
-   (the bridge's `sent`, the landing's `after`). Immutable source leases survive
-   until their final local DMA reads end, with asynchronous bridge-owned
-   retirement; destination consumers have separate lifetimes. No receive gate,
-   per-tensor receipt all-gather or remote ACK is added.
-
-   Fused kernels are ordered by the caller's serial compute stream. An encoding
-   group publishes binding records, not the source values themselves. Repeated
-   groups return the first frame's physical records and their per-repeat prefix
-   increments; stride addresses distinct page-aligned storage for later repeats.
-   These contracts describe expressibility and ownership, not a proof of optimal
-   routing, collective decomposition or attained bandwidth. */
-/* rdma/mesh.metal's text as this library was built with it, then the Metal text of the steps the library's kernels and
-   a fused crossing's kernels run: the whole of what a caller's kernel is compiled after, from the library the process
-   loaded, so it never reads a file that may be another build's (a checkout's mesh.metal newer or older than the
-   installed library), and needs no path to one.  The steps' text is the argument record (struct mesh_args), a fused
-   step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's order) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
-   mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_write, mesh_step_release and mesh_step_read (any element type: a landed
-   element, loaded system-coherent from the caller's own landing buffer), on a holding's counts (`ready` to store,
-   `landed` to await); the library's own, so the caller compiles them with its kernels and keeps no copy.
-   Every thread of the threadgroup calls mesh_step_await and mesh_step_release (each holds a barrier);
-   mesh_step_enter's and mesh_step_await's results are true (no kernel halts on a failure: rdma/NCCL.md "Bounded
-   waits"), kept so that a kernel testing them compiles as it is. */
+/* The shared Metal payload and page-effect primitives as built into the loaded
+   library. Frontends retain their numerical source and exact page relations;
+   the common source pass supplies observations and publications before binding.
+   No caller receives a second executable protocol or physical binding records. */
 const char* ncclMeshMetalPrelude(void);
 /* The Metal buffer (an id<MTLBuffer>) over the whole lease (ncclMemAlloc) holding `ptr`, any byte of it, and ptr's offset
    in it: the library's, made at the lease's first such call and released during deferred lease retirement after
