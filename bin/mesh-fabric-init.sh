@@ -23,9 +23,10 @@ done
 # crossed it and ports paired with nodes not on their cables (docs facts, metal-microbench). Dissolving the running
 # interface alone (above) was undone; the definition itself is removed, so nothing remains to make it from. Every
 # member held it (en2 en13 en3 en4 en5 en6; the Mini's en2-en4).
-if printf 'get /VirtualNetworkInterfaces/Bridge\nd.show\nquit\n' | scutil --prefs 2>/dev/null | grep -q 'bridge0 :'; then
+# (scutil keeps it as its own path: a get of /VirtualNetworkInterfaces/Bridge shows none of the paths beneath it)
+if printf 'get /VirtualNetworkInterfaces/Bridge/bridge0\nd.show\nquit\n' | scutil --prefs 2>/dev/null | grep -q 'Interfaces'; then
   echo "[$(ts)] DRIFT stored bridge0 definition"
-  printf 'get /VirtualNetworkInterfaces/Bridge\nd.remove bridge0\nset /VirtualNetworkInterfaces/Bridge\ncommit\napply\nquit\n' | scutil --prefs >/dev/null 2>&1
+  printf 'remove /VirtualNetworkInterfaces/Bridge/bridge0\ncommit\napply\nquit\n' | scutil --prefs >/dev/null 2>&1
   drift=1
 fi
 now=$(date +%s)
