@@ -536,6 +536,27 @@ distinct value generation. C1 and C5 must carry the declaration's occurrence
 binding into the common solve; physical buffer aliases cannot supply it.
 This is preparation data only, with no additional runtime generation token.
 
+Occurrence-binding substep, started 2026-11-02 03:34:31 UTC; owner: parent.
+Replace the single demand pointer in `ncclMeshCoverage` with an explicit finite
+invocation-to-demand binding (`values`, `first`, `count`). The frontend retains
+that table; native source preparation selects the exact entry using the declared
+invocation. This removes the incorrect inheritance of generation identity from
+cyclic buffer slots. Scope: the shared coverage declaration and `source_coverage`,
+plus `MeshRankCoverage` ownership and its Swift constructor. Keep the existing
+per-occurrence `MetalPageWriteDemand` and physical transfer identity; the table
+does not survive source preparation. Generated count installation and final
+source-boundary transduction remain separate required consumers.
+
+Status at 2026-11-02 03:37:32 UTC: the finite binding and native ownership are
+written. Shared collective/CoreML libraries, CFFI and PyTorch extension, native
+libraries and Engine build (`/tmp/mesh-demand-invocations-20261102.log`,
+`/tmp/mesh-demand-modules-20261102.log`, `/tmp/micro-demand-invocations-20261102.log`).
+No runtime generation lookup was added. `schedule_equivalence` now owns the
+source-boundary mapping review: preserve the original command/mark relationship
+when native leaves are interleaved and source orders are rewritten. Its dated
+substep is in microbench `docs/kernels.md`. C1 still owns the count equations;
+this carrier change does not supply their numerical outputs.
+
 ### Next handoff and validation
 
 Keep C1 and C5 coordinated at the early coverage boundary. C3 and C4 supply

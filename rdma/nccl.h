@@ -786,6 +786,13 @@ static inline size_t ncclMeshInvocationIndex(uint64_t invocation, int64_t displa
    displacement is independent of buffer.offset. A group is laid and placed for
    every slot as it is declared, and its issue names none. */
 typedef struct { ncclMeshBuffer buffer; size_t stride, instances; int64_t invocation; } ncclMeshBufferSlots;
+/* Preparation-only value generations for the explicit invocation interval.
+   The frontend retains the values through source preparation. Unlike page
+   slots, generation identity never wraps modulo a buffer's instance count. */
+typedef struct {
+  const void* const* values;
+  size_t first, count;
+} ncclMeshDemandBindings;
 /* A semantic interval of one original logical SEND, before physical routing
    and packetization. Transactions follow source-rank order, then logical SEND
    order; a WRITE has transaction 0. first/bytes are relative to that SEND.
@@ -802,9 +809,7 @@ typedef struct {
   uint32_t transaction, frame;
   size_t first, bytes, cut, cuts, before;
   ncclMeshBufferSlots active, expected;
-  /* Preparation-only source value-generation identity, retained by its
-     frontend declaration. It never enters a bridge descriptor or runtime. */
-  void* demand;
+  ncclMeshDemandBindings demands;
 } ncclMeshCoverage;
 /* Exact source declarations and their selected occurrence/work relations.
    Strings are canonical serialized frontend values, not hashes or generated

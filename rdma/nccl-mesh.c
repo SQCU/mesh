@@ -5927,7 +5927,8 @@ static ncclResult_t source_coverage(struct issue *u) {
       struct where a={active.buffer,active.offset},e={expected.buffer,expected.offset};
       result=as_metal(&a);if(!result)result=as_metal(&e);if(result)break;
       selected[count++]=(struct coverage_span){.transport=t,.first=start,.units=unit-start,.cut=b->cut,
-        .before=u->source_calls[b->before],.values={{a.buffer,a.offset},{e.buffer,e.offset},b->cuts},.demand=b->demand};
+        .before=u->source_calls[b->before],.values={{a.buffer,a.offset},{e.buffer,e.offset},b->cuts},
+        .demand=b->demands.count?(void *)b->demands.values[c->invocation-b->demands.first]:NULL};
     }
   }
   if(!result&&!count){free(selected);return ncclSuccess;}
