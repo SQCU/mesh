@@ -377,8 +377,18 @@ static struct TensorPiece TensorExpressionPiece(id expression,NSUInteger at,NSUI
     if(TensorConstant(expression))return (struct TensorPiece){[expression integerValue],0,end};
     if([expression isEqual:@"i"])return (struct TensorPiece){(NSInteger)at,1,end};
     if(TensorGeneral(expression)) {
-        struct MeshIndexRun run=MeshIndexRunOf(expression,at,end);
-        return (struct TensorPiece){run.value,run.step,run.end};
+        // The run from `at` read with integers: the compiled expression at each position until it leaves the line its
+        // first two positions fix, MeshIndexRunOf's answer without three isl contexts a run. Changed by the LSTM
+        // demonstration session: a piecewise coordinate's spans called it once a run, and one LSTM step's realization
+        // spent 56 s there on m5ult2 (2026-11-01, all of a 20 s native sample under reaches:).
+        NSMutableData *compiled=[NSMutableData data];TensorCompile(expression,compiled);
+        const struct TensorProgramStep *program=compiled.bytes;const NSUInteger length=compiled.length/sizeof *program;
+        NSMutableData *scratch=[NSMutableData dataWithLength:(length+1)*sizeof(NSInteger)];NSInteger *stack=scratch.mutableBytes;
+        const NSInteger value=TensorRun(program,length,(NSInteger)at,stack);
+        const NSInteger step=end>at+1?TensorRun(program,length,(NSInteger)at+1,stack)-value:0;
+        NSUInteger stop=at+1;
+        while(stop<end&&TensorRun(program,length,(NSInteger)stop,stack)==value+step*(NSInteger)(stop-at))stop++;
+        return (struct TensorPiece){value,step,stop};
     }
     NSString *op=expression[0];
     if([op isEqual:@"add"]) {
