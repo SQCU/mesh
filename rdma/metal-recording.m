@@ -1296,7 +1296,11 @@ struct MetalSchedule {
     id<MTL4ArgumentTable> table;
     id<MTLResidencySet> residency;
     MTL4CommitOptions *options;
-    NSMutableSet *owners;
+    // What the schedule keeps alive until it ends, held by identity. Changed by the LSTM demonstration session: an
+    // NSMutableSet compares by content, and a replay's owner is its capture's own set of buffers and pipelines, so
+    // a second occurrence of one function (an equal set) was never retained; its Commands were freed and the flush
+    // read through its owner (MetalScheduleExpand, m5ult2, 2026-11-01). What must stay: identity, strong.
+    NSHashTable *owners;
     NSMutableSet *replayResidency;
     NSMutableOrderedSet *communicators;
     NSMutableIndexSet *hostDependencies, *partDependencies;
@@ -1384,7 +1388,7 @@ static struct MetalSchedule *MetalScheduleCreatePart(id<MTL4CommandQueue> queue,
     atomic_init(&s->pending,1);s->root=s;
     atomic_init(&s->status,0);
     s->device=[device retain];s->form=form;s->queue=[queue retain];
-    s->owners=[NSMutableSet new];
+    s->owners=[[NSHashTable alloc] initWithOptions:NSPointerFunctionsStrongMemory|NSPointerFunctionsObjectPointerPersonality capacity:0];
     s->work=[NSMutableArray new];s->hosts=[NSMutableArray new];s->waits=[NSMutableData new];
     s->hostDependencies=[NSMutableIndexSet new];s->partDependencies=[NSMutableIndexSet new];
     s->history=[NSMutableArray new];s->frontierRead=[NSMutableDictionary new];s->frontierWritten=[NSMutableDictionary new];
@@ -1569,8 +1573,12 @@ static void MetalScheduleRangeNow(struct MetalSchedule *root,struct MetalReplay 
     [s->owners addObject:replay->owner];
     if(!s->replayResidency)s->replayResidency=[NSMutableSet new];
     if(![s->replayResidency containsObject:replay->residency]) {
+        // Each replay's allocations join the part's one residency set, which the part commits and its command buffer
+        // uses once (MetalScheduleFinishPart). Changed by the LSTM demonstration session: a command buffer took each
+        // replay's own set, and a 16-step LSTM function's replays passed Metal's limit of sets a command buffer may
+        // use (IOGPUMetalCommandBufferStorageAddResidencySets asserted, m5ult2, 2026-11-01).
         [s->replayResidency addObject:replay->residency];
-        [s->command useResidencySet:replay->residency];
+        for(id<MTLAllocation> allocation in replay->residency.allAllocations)[s->residency addAllocation:allocation];
     }
     id<MTL4ComputeCommandEncoder> encoder=s->encoder;
     for(NSUInteger c=t*n+from;c<t*n+to;c++) @autoreleasepool {
