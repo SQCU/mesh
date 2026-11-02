@@ -26,12 +26,13 @@ class Tick:
         self.W, self.b = [held(w) for w in weights], [held(b) for b in biases]
         self.group, self.sizes = mesh.get_group('tp').group_name, partition.split(mesh, 'tp', H)
         self.c = torch_mesh.empty(self.L, rows, HR, dtype=torch.float32)
-        # every layer's h stored units first, so a rank's units of every layer and row are one run and the gather
-        # along the units one collective of each rank's run (declarations._outer: one frame), where row-major storage
-        # made it L x rows one-row gathers a tick, each its own messages. Placement's layout union of these views
-        # stalled in isl's divisions twice (59bd0249, 08be882d, 2026-11-01) until the unions and identities were kept
-        # in the views' coordinates (212f8e8e, 62df13f9, 2026-11-02).
-        self.h = torch_mesh.empty(H, self.L, rows, dtype=torch.half).permute(1, 2, 0)
+        # row-major. Stored units first (H, L, rows permuted), the gather is one collective a tick
+        # (declarations._outer: one frame). The layout unions that stalled it are kept in coordinates since 212f8e8e
+        # and 62df13f9, but every rank then stalled in placement itself: MetalTensorPlace -> TensorFunctionLayout ->
+        # -[MetalTensorLayout shaped:coordinates:] -> TensorBound -> MeshIndexExpression, IndexExpression recursing
+        # about 30 levels through isl conditions (metal-microbench output_data/lstm-2026-11-02/d-u2, every sample,
+        # 2026-11-02). Units first returns once that passes on the whole collective, not on a desk check.
+        self.h = torch_mesh.empty(self.L, rows, H, dtype=torch.half)
         first = sum(self.sizes[:mesh.get_group('tp').rank()])
         self.mine = self.h.narrow(2, first, HR)
         self.reset()
