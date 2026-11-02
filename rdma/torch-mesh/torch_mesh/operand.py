@@ -11,6 +11,40 @@ from . import _stream
 
 
 @dataclass(frozen=True, eq=False)
+class TensorValue:
+    """design/page-maps-2026-11-02.md: a value, a chooser's only operand.
+
+    type: layout: logical index -> element of the value's own virtual space (a _stream.TensorLayout of element
+    offsets from 0); dtype: its element type, whose width enters only at the final lowering; pages: the virtual pages
+    its elements reach at `page_bytes`; state: the identity a state's versions share (None for a value with one
+    version); lease: the program's page runs ((first virtual page, pages, first physical page), ...) where a caller's
+    tensor backs it, a constant map; () where the run's Plan allocates its map per occurrence.
+    It holds no storage, no address and no byte offset: the final lowering alone specializes it into addresses."""
+    layout: _stream.TensorLayout
+    dtype: object
+    pages: int
+    page_bytes: int
+    state: object = None
+    lease: tuple = ()
+
+    @classmethod
+    def of_lease(cls, tensor, *, state=None):
+        """type: a caller's MPS region tensor -> its value: one piece over its storage's elements, its lease's runs.
+        The runs come from the allocator's binding (_stream.tensor_value), never from the tensor's address."""
+        value = _stream.tensor_value(tensor)
+        layout = _stream.TensorLayout(tuple(value['extent']), tuple(value['stride']), value['origin'])
+        pages = sum(count for _, count, _ in value['runs'])
+        return cls(layout, tensor.dtype, pages, value['page_bytes'], state, tuple(tuple(run) for run in value['runs']))
+
+    @property
+    def shape(self):
+        return self.layout.shape
+
+    def numel(self):
+        return self.layout.count
+
+
+@dataclass(frozen=True, eq=False)
 class TensorView:
     storage: object
     layout: _stream.TensorLayout
