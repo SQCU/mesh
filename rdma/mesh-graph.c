@@ -1024,14 +1024,6 @@ int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*hea
 /* mesh-graph.h */
 struct placed_item { uint64_t first, size; size_t item; };
 struct place_rank { const uint64_t *size, *key; };
-/* the largest first, then by key, then by number (qsort_r's context: sizes and keys) */
-static int place_by_size(void *context, const void *left, const void *right) {
-  const struct place_rank *r = context;
-  const size_t a = *(const size_t *)left, b = *(const size_t *)right;
-  if (r->size[a] != r->size[b]) return r->size[a] > r->size[b] ? -1 : 1;
-  if (r->key[a] != r->key[b]) return r->key[a] < r->key[b] ? -1 : 1;
-  return (a > b) - (a < b);
-}
 /* by key, then by number */
 static int place_by_key(void *context, const void *left, const void *right) {
   const struct place_rank *r = context;
@@ -1109,24 +1101,26 @@ int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const 
   }
   struct place_rank rank = {size, key};
   if (!result) {
-    qsort_r(order, whole, sizeof *order, &rank, place_by_size);
+    qsort_r(order, whole, sizeof *order, &rank, place_by_key);
     qsort_r(order + whole, paged, sizeof *order, &rank, place_by_key);
   }
-  /* contiguous items: one range in the first bin where every run it meets is apart from it */
-  for (size_t x = 0; !result && x < whole; x++) {
-    const size_t l = order[x];
-    int found = 0;
-    for (size_t b = 0; !found && b < bins; b++) {
-      if (size[l] > bin[b][1]) continue;
-      const uint64_t last = bin[b][0] + (bin[b][1] - size[l]);
-      for (uint64_t at = bin[b][0]; at <= last;) {
-        const size_t y = place_conflict(p.placed, p.count, p.widest, at, size[l], l, apart, context);
-        if (y == SIZE_MAX) { found = 1; result = place_take(&p, l, at, size[l]); break; }
-        at = p.placed[y].first + p.placed[y].size;
-      }
+  /* contiguous items: greedy by size on the arena's line (mesh_graph_greedy_by_size, ties by key), with the pins that
+     lie in the arena already on it */
+  if (!result && whole) {
+    const uint64_t base = bin[bins - 1][0];
+    size_t *here = malloc((n + 1) * sizeof *here), pins_here = 0;
+    uint64_t *line = malloc((n + 1) * sizeof *line), extent = 0;
+    if (!here || !line) result = ENOMEM;
+    for (size_t k = 0; !result && k < n; k++)
+      if (size[k] && pin[k] != UINT64_MAX && pin[k] >= base) { here[pins_here++] = k; line[k] = pin[k] - base; }
+    if (!result)
+      result = mesh_graph_greedy_by_size(whole, order, pins_here, here, size, apart, context, bin[bins - 1][1], line,
+                                         &extent);
+    for (size_t x = 0; !result && x < whole; x++) {
+      result = place_take(&p, order[x], base + line[order[x]], size[order[x]]);
+      if (!result) result = place_insert(&p, p.taken + p.takes - 1);
     }
-    if (!result && !found) result = ENOMEM;
-    if (!result) result = place_insert(&p, p.taken + p.takes - 1);
+    free(here); free(line);
   }
   /* every other item: the lowest free positions, page by page, joined into runs within a bin */
   for (size_t x = whole; !result && x < whole + paged; x++) {

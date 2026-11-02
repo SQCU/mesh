@@ -264,16 +264,25 @@ size_t mesh_graph_dependences(size_t n, const struct mesh_graph_access *access, 
 int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                           const void *context, size_t sets, const size_t *source_first, const uint32_t *source,
                           const size_t *target_first, const uint32_t *target, unsigned char *precedes);
+/* Greedy by size (mesh-graph-greedy-by-size.c, ported from TensorFlow Lite's GreedyBySizeAssignment, Apache-2.0):
+   `count` items (indices into size and offset) on one line of units from 0, the `placed` pinned items already at their
+   offsets. The largest first (ties in the given order), each in the smallest gap left of an item it is not apart from
+   that holds it, else after the rightmost such item. type: -> offset[item] for each of `items`, *total the line's
+   extent; 0, ENOMEM where *total passes capacity. */
+int mesh_graph_greedy_by_size(size_t count, const size_t *items, size_t placed, const size_t *pinned,
+                              const uint64_t *size, int (*apart)(const void *context, size_t k, size_t l),
+                              const void *context, uint64_t capacity, uint64_t *offset, uint64_t *total);
 /* type: n x (size, key, contiguous, pin), bins [first, first + pages) ascending and disjoint, apart -> each item's runs
    (first position, pages), item k's at runs[run_first[k] .. run_first[k + 1]) ascending, *runs the callee's (free it):
    - a pinned item (pin[k] != UINT64_MAX) is one run at its pin, inside one bin;
-   - a contiguous item (a contiguous_input or contiguous_output function reads or writes it) is one run in one bin;
+   - a contiguous item (a contiguous_input or contiguous_output function reads or writes it) is one run in the last
+     bin, the arena, placed by mesh_graph_greedy_by_size with the pins in the arena already on its line;
    - every other item takes any free positions, one page at a time, in any bins: no function addresses it but
      through its pages;
    and no two items not apart share a position. apart(k, l) is symmetric: one's accesses all happen before the
-   other's. Pins first; then contiguous items greedy by size (the largest first, ties by key: Pisarchyk and Lee 2020),
-   each at the lowest free range of the first bin it fits; then the others in key order (a topological order of first
-   accesses), page by page from the lowest free position. Page by page leaves no external fragmentation, so the
+   other's. Pins first; then the contiguous items, greedy by size in the arena (Pisarchyk and Lee 2020, TensorFlow
+   Lite's code; ties by key); then the others in key order (a topological order of first accesses), page by page from
+   the lowest free position of any bin. Page by page leaves no external fragmentation, so the
    hardness of dynamic storage allocation touches the contiguous items alone. The exclusion relation is Desnos et
    al.'s (2013). Zero-size items get no run. 0; EINVAL where a pin lies in no bin; EBUSY where two pins meet unapart;
    ENOMEM where the bins cannot hold an item: compile-time failures. Consumer: the run's solve (mesh-page-map.h). */
