@@ -28,10 +28,13 @@ WRITE = 8
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
 # all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
 # element_shape declares one indivisible numerical element in those scalar units.
+# outer, for an all-gather or a reduce-scatter along a later axis, its frames: the product of the dimensions before the
+# axis. Its positions are its operand's own order, frame by frame, each rank's block in every frame
+# (collective_views._pieces); counts are each rank's in all of them.
 # bindings, where given, are the (send, receive) tensors the call is issued with (nccl.h ncclMeshCall bindings).
 # design/eager-execution.md#what-follows
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready ready_value ready_layout sources route_scope coverage',
-                              defaults=(0, ReduceOp.SUM, None, 0, None, None, None, 0, None, (), None, None, 1, 0, None, 0, None, (), None, ()))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination contributors matrix recipients tile_bytes production element_shape bindings views frames max_packet source_ready ready_value ready_layout sources route_scope coverage outer',
+                              defaults=(0, ReduceOp.SUM, None, 0, None, None, None, 0, None, (), None, None, 1, 0, None, 0, None, (), None, (), 1))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,

@@ -83,6 +83,16 @@ def selected_calls(record, algebra):
                    identity=identity)
 
 
+def _pieces(call):
+    """A gather's or a scatter's positions, each rank's: its block of counts in every frame (backend.Call outer), in
+    its operand's own order, frame by frame; and the call's whole extent."""
+    edges = list(accumulate([0, *call.counts]))
+    outer = call.outer
+    frame = edges[-1] // outer
+    return [[(o * frame + edges[q] // outer, o * frame + edges[q + 1] // outer) for o in range(outer)]
+            for q in range(len(call.counts))], edges[-1]
+
+
 def _domains(call, rank, size):
     from .backend import REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, WRITE
     if call.kind == ALLTOALL:
@@ -91,9 +101,9 @@ def _domains(call, rank, size):
         receives = [(edges[q * size + rank], edges[q * size + rank + 1]) for q in range(size)]
         total = edges[-1]
     elif call.kind in (ALLGATHER, REDUCE_SCATTER):
-        edges = list(accumulate([0, *call.counts]))
-        own, whole = [(edges[rank], edges[rank + 1])], [(0, edges[-1])]
-        total, sends, receives = (edges[-1], own, whole) if call.kind == ALLGATHER else (edges[-1], whole, own)
+        pieces, total = _pieces(call)
+        own, whole = pieces[rank], [(0, total)]
+        sends, receives = (own, whole) if call.kind == ALLGATHER else (whole, own)
     else:
         total, whole = call.count, [(0, call.count)]
         sends = whole if call.kind not in (BROADCAST, WRITE) or rank == call.root else []
@@ -205,6 +215,10 @@ def lower(bindings, group):
             # root's pieces interleave on every cable instead of one root's call after another's
             cuts.extend(cursor + end for end in traversal.cuts if any(start < end < stop for start, stop in domain))
             values.append((spans, traversal))
+        # a gather's or a scatter's frames (backend.Call outer): each frame's ends are cuts, so every fragment is one
+        # collective of the ranks' blocks in order, bound in place
+        if call.kind in (ALLGATHER, REDUCE_SCATTER) and call.outer > 1:
+            cuts.extend(cursor + o * (total // call.outer) for o in range(1, call.outer))
         prepared.append((call, cursor, total, values))
         cursor += total
         cuts.append(cursor)
@@ -218,12 +232,18 @@ def lower(bindings, group):
         intervals = zip(edges, edges[1:]) if total else [(0, 0)]
         counts = call.matrix if call.kind == ALLTOALL else call.counts
         bounds = list(accumulate([0, *counts])) if counts is not None else []
+        pieces = _pieces(call)[0] if call.kind in (ALLGATHER, REDUCE_SCATTER) else None
         for first, last in intervals:
             fragment = source_work(call, _stream.TensorLayout(((last - first) * call.dtype.itemsize,),
                                                               (1,), first * call.dtype.itemsize))
-            fragment = fragment._replace(count=last - first)
+            fragment = fragment._replace(count=last - first, outer=1)
             if call.kind in (ALLGATHER, REDUCE_SCATTER, ALLTOALL):
-                counts = [max(0, min(last, end) - max(first, start)) for start, end in zip(bounds, bounds[1:])]
+                if pieces is None:
+                    counts = [max(0, min(last, end) - max(first, start)) for start, end in zip(bounds, bounds[1:])]
+                else:
+                    # the fragment lies in one frame (its ends are cuts): each rank's block of that frame
+                    frame = first // (total // call.outer) if total else 0
+                    counts = [max(0, min(last, piece[frame][1]) - max(first, piece[frame][0])) for piece in pieces]
                 if call.kind == ALLTOALL:
                     own = counts[rank * size:(rank + 1) * size]
                     fragment = fragment._replace(count=sum(own), matrix=counts,
