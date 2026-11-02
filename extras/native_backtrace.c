@@ -27,8 +27,13 @@ static void dump(int sig) {
     raise(sig);
 }
 
+// One line when it is loaded, so a record shows the shim was in place: until 2026-11-01 it was named through
+// /usr/bin/nohup, a protected binary that drops every DYLD_ variable, and no rank had loaded it.
 __attribute__((constructor)) static void install(void) {
     signal(SIGABRT, dump);
     signal(SIGSEGV, dump);
     signal(SIGBUS, dump);
+    char line[96];
+    const int length = snprintf(line, sizeof line, "NATIVE-BACKTRACE installed pid %d\n", (int)getpid());
+    write(2, line, (size_t)length);
 }
