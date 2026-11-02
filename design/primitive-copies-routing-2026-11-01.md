@@ -77,6 +77,18 @@ rank 0's preparation record (nccl-mesh.c prepare_record, read with extras/prepar
 | d-r10 | 2430d610 | realization, silent at 45 s | 144 page compositions, 40 s; one shader read's pair composed 5 times, 4.5 s each |
 | d-r11 | 28971add | page-effects solve, silent at 45 s | 47 compositions, 13.4 s; then MetalPageEffectsSolve, under PageObservationGroups |
 | d-r12 | d51ddcec | page-effects solve, silent at 45 s | the observation walk ended early, no change: the cost is PageGroups' MeshIndexSetRuns |
+| d-r23 | 7f7cef0b | completed, all five ranks, 8 steps | page compositions 0.03 s a rank in all; 121 ms a step; preparation 3.4 s |
+| d-r30 | 5695af53 | completed, 8 steps × 5 runs | 78–109 ms a warm step |
+| d-r31 | 5695af53 | completed, 8 steps, checked | largest error 6.1e-5 against the CPU wavefront reference |
+| d-r25, d-r26 | 40309819, 96737e42 | 64 steps, silent at 60 s | the page solve's dense domain × command × group tables (PageSlots) and their release |
+
+What is left, in order:
+1. GPU timestamps per dispatch in the recorder, to say which dispatch or which peer holds each 40–100 ms exchange.
+2. One strided collective a tick in place of 16 one-row fragments (`Call.outer` taken by the native all-gather), and
+   routes over more of rank 0's six links.
+3. Preparation solved for one replay and bound for every occurrence, not over the unrolled program; that also removes
+   the dense domain × command tables, which grow as the square of the steps.
+4. The chain service and the trainable load-balancing LSTM on main.
 
 ## The addressing artifact in page relations
 
