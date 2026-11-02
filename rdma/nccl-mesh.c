@@ -2950,6 +2950,44 @@ static int route_demand_equal(const ncclMeshRouting *a,uint32_t x,const ncclMesh
     !memcmp(a->contributors+(size_t)left->call*words,b->contributors+(size_t)right->call*words,words*sizeof(uint64_t))&&
     !memcmp(a->recipients+(size_t)left->call*words,b->recipients+(size_t)right->call*words,words*sizeof(uint64_t));
 }
+/* route_demand_equal's fields as a total order: equal demands are adjacent in it, so a plan finds every demand equal to
+   one by a sort and a binary search instead of comparing every pair. Two demands with no scope order as equal here but
+   are never equal (route_scope_equal), so a run is confirmed with route_demand_equal. Ties keep the demands' indices in
+   order. Added by the LSTM demonstration session: the pairwise searches (the representative of each demand in a plan,
+   and each demand against every earlier routing's) held the Mini for a minute in a 64-step LSTM's plan while the other
+   ranks waited in its configuration exchange (sample of 2026-11-01 17:53). */
+static int route_demand_order(const ncclMeshRouting *a,uint32_t x,const ncclMeshRouting *b,uint32_t y) {
+  const ncclMeshRouteDemand *left=a->demand+x,*right=b->demand+y;
+  const char *sa=a->scope[a->call_scope[left->call]],*sb=b->scope[b->call_scope[right->call]];
+  if(!sa||!sb){if(sa!=sb)return sa?1:-1;}
+  else{const int c=strcmp(sa,sb);if(c)return c;}
+  const size_t words=((size_t)a->nodes+63)/64;
+  int c=memcmp((const char *)left+offsetof(ncclMeshRouteDemand,what),(const char *)right+offsetof(ncclMeshRouteDemand,what),
+               offsetof(ncclMeshRouteDemand,form)-offsetof(ncclMeshRouteDemand,what));
+  if(!c)c=memcmp(a->leaves+(size_t)x*words,b->leaves+(size_t)y*words,words*sizeof(uint64_t));
+  if(!c)c=memcmp(a->contributors+(size_t)left->call*words,b->contributors+(size_t)right->call*words,words*sizeof(uint64_t));
+  if(!c)c=memcmp(a->recipients+(size_t)left->call*words,b->recipients+(size_t)right->call*words,words*sizeof(uint64_t));
+  return c;
+}
+static int route_demand_sorting(void *routing,const void *left,const void *right) {
+  const uint32_t x=*(const uint32_t *)left,y=*(const uint32_t *)right;
+  const int c=route_demand_order(routing,x,routing,y);
+  return c?c:(x>y)-(x<y);
+}
+/* r's first `count` demands' indices in route_demand_order */
+static uint32_t *route_demands_sorted(const ncclMeshRouting *r,uint32_t count) {
+  uint32_t *sorted=calloc((size_t)count+1,sizeof *sorted);
+  if(!sorted)return NULL;
+  for(uint32_t d=0;d<count;d++)sorted[d]=d;
+  qsort_r(sorted,count,sizeof *sorted,(void *)r,route_demand_sorting);
+  return sorted;
+}
+/* the first position of `sorted` (b's demands in route_demand_order) not before a's demand x */
+static uint32_t route_demand_first(const ncclMeshRouting *b,const uint32_t *sorted,uint32_t count,const ncclMeshRouting *a,uint32_t x) {
+  uint32_t lo=0,hi=count;
+  while(lo<hi){const uint32_t mid=lo+(hi-lo)/2;if(route_demand_order(b,sorted[mid],a,x)<0)lo=mid+1;else hi=mid;}
+  return lo;
+}
 static int route_tree_basis_equal(struct route_prior a,struct route_prior b) {
   const ncclMeshRouting *x=a.route,*y=b.route;uint32_t i=0,j=0;
   if(x->demand[a.index].form!=y->demand[b.index].form)return 0;
@@ -2981,7 +3019,13 @@ static ncclResult_t routing_prior(struct routing *r,const struct route_catalog *
     const ncclMeshRouting *prior=catalog->at[bank]+g;
     ncclResult_t error=routing_catalog_check(prior);if(error)return error;
     if(!route_topology_equal(&r->view,prior))continue;
-    for(uint32_t d=0;d<r->view.demands;d++)for(uint32_t p=0;p<prior->demands;p++)if(route_demand_equal(&r->view,d,prior,p)) {
+    uint32_t *sorted=route_demands_sorted(prior,prior->demands);
+    if(!sorted)return fail(ncclSystemError,"allocating a routing's demand order");
+    for(uint32_t d=0;d<r->view.demands;d++)
+    for(uint32_t at=route_demand_first(prior,sorted,prior->demands,&r->view,d);
+        at<prior->demands&&!route_demand_order(prior,sorted[at],&r->view,d);at++) {
+      const uint32_t p=sorted[at];
+      if(!route_demand_equal(&r->view,d,prior,p))continue;
       int supplied=0;for(uint32_t old=0;bank&&old<catalog->count[0];old++)supplied|=demands[d].route==catalog->at[0]+old;
       if(supplied)continue;
       /* this plan's earlier groups (bank 1): the first that solved an equal demand is the plan's choice for it; a later
@@ -2993,9 +3037,10 @@ static ncclResult_t routing_prior(struct routing *r,const struct route_catalog *
          service unable to plan at all (e3305b96) */
       if(bank&&demands[d].route)continue;
       const struct route_prior found={prior,p};
-      if(demands[d].route&&!route_tree_basis_equal(demands[d],found))return fail(ncclInvalidArgument,"one routing scope supplies conflicting tree choices");
+      if(demands[d].route&&!route_tree_basis_equal(demands[d],found)){free(sorted);return fail(ncclInvalidArgument,"one routing scope supplies conflicting tree choices");}
       demands[d]=found;
     }
+    free(sorted);
     for(uint32_t s=0;s<r->view.scopes;s++)for(uint32_t p=0;p<prior->scopes;p++)if(route_scope_equal(r->view.scope[s],prior->scope[p])) {
       int supplied=0;for(uint32_t old=0;bank&&old<catalog->count[0];old++)supplied|=paths[s].route==catalog->at[0]+old;
       if(supplied)continue;
@@ -3276,9 +3321,18 @@ static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,con
   if(!prior||!paths||!representative)result=fail(ncclSystemError,"allocating scoped routing correspondence");
   if(!result)result=routing_prior(r,catalog,prior,paths);
   int fresh=0;
+  /* each demand's representative, the first demand equal to it: runs of the demands in route_demand_order */
+  uint32_t *sorted=result?NULL:route_demands_sorted(&r->view,made);
+  if(!result&&!sorted)result=fail(ncclSystemError,"allocating the plan's demand order");
+  for(uint32_t at=0;!result&&at<made;) {
+    uint32_t end=at+1;
+    while(end<made&&!route_demand_order(&r->view,sorted[at],&r->view,sorted[end]))end++;
+    for(uint32_t k=at;k<end;k++)
+      representative[sorted[k]]=route_demand_equal(&r->view,sorted[k],&r->view,sorted[at])?sorted[at]:sorted[k];
+    at=end;
+  }
+  free(sorted);
   for(uint32_t d=0;d<made&&!result;d++) {
-    representative[d]=d;
-    for(uint32_t p=0;p<d;p++)if(route_demand_equal(&r->view,d,&r->view,p)){representative[d]=representative[p];break;}
     if(!prior[d].route&&!prior[representative[d]].route)fresh=1;
     if(!prior[d].route)prior[d]=prior[representative[d]];
     if(prior[d].route) {
