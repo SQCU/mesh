@@ -819,7 +819,13 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
     for(NSUInteger i=0;i<fields.count;i++) {
         NSArray *field=fields[i];id<MTLBuffer> buffer=field[0];const size_t offset=[field[1] unsignedIntegerValue],bytes=[field[2] unsignedIntegerValue];
         MetalPageComposition *source=[[[MetalPageComposition alloc] init] autorelease];
-        if(ncclMeshPageTableCreate(buffer.contents,NULL,1,&source->table))PageFailure(@"cannot bind metadata pages");
+        /* a Metal table is created from the field's {buffer, offset} descriptor (nccl.h ncclMeshPageTableCreate: metal 1
+           reads `local` as an ncclMeshBuffer). Changed by the LSTM demonstration session: 7d3aa6cf passed the buffer's
+           contents, whose first bytes were then read as a buffer and faulted in address_of on ranks 0 and 2 of the
+           8-step LSTM (ncclMeshPageTableCreate + 152 beneath -[MetalPageFields compose], 2026-11-01 19:2x). What must
+           stay: the descriptor, its offset 0, the table's base the buffer's. */
+        const ncclMeshBuffer whole={(__bridge void *)buffer,0};
+        if(ncclMeshPageTableCreate(&whole,NULL,1,&source->table))PageFailure(@"cannot bind metadata pages");
         size_t pages=0,width=0;if(ncclMeshPageTableShape(source->table,&pages,&width))PageFailure(@"metadata page shape");
         if(alignment&&width!=alignment)PageFailure(@"metadata fields have different local page widths");alignment=width;
         const size_t first=offset/width,count=(offset%width+bytes+width-1)/width;
