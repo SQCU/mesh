@@ -6089,10 +6089,19 @@ ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm,uint64_t occurrence,
     pthread_mutex_lock(&attach_lock);
     const size_t held=u->owned.count;
     int error=owned_add(&u->owned,u->input_requirements,OWNED_TABLE|OWNED_SENDS);
+    /* Changed by the LSTM demonstration session (2026-11-02): a word in a channel's buffer (its `sent` or `landed`, which
+       landing observations name) is the communicator's own record and lives as long as it does, so the issue holds no
+       lease for it. owned_begin found no lease for it and the bind failed "holding source dependency pages: Invalid
+       argument" (metal-microbench output_data/lstm-2026-11-02/d-bw1, bandwidth). What must stay: every other observed
+       word's lease held through execution. */
     for(uint32_t h=0;!error&&h<comm->count;h++)for(size_t k=0;!error&&k<u->plans[h].outs;k++) {
       const struct message *m=u->plans[h].out+k;
-      for(size_t j=0;!error&&j<m->source_observation_count;j++)
-        error=owned_add(&u->owned,address_of((struct where){m->source_observations[j].words,m->source_observations[j].word}),OWNED_TABLE|OWNED_SENDS);
+      for(size_t j=0;!error&&j<m->source_observation_count;j++) {
+        uint32_t q=0;
+        while(q<comm->count&&comm->channels[q].buffer!=m->source_observations[j].words)q++;
+        if(q==comm->count)
+          error=owned_add(&u->owned,address_of((struct where){m->source_observations[j].words,m->source_observations[j].word}),OWNED_TABLE|OWNED_SENDS);
+      }
     }
     if(!error)error=owned_begin(&u->owned,held);
     pthread_mutex_unlock(&attach_lock);
