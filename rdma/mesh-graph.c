@@ -810,3 +810,15 @@ done:
   free(packed);free(uses);free(length);free(weight);free(chosen);free(head);free(next);
   return written;
 }
+
+/* mesh-graph.h mesh_graph_settle */
+size_t mesh_graph_settle(void **items, size_t count, int (*take)(void *consumer, void *item), void *consumer) {
+  for (int taken = 1; taken && count;) {
+    taken = 0;
+    for (size_t k = 0; k < count;) {
+      if (take(consumer, items[k])) { items[k] = items[--count]; taken = 1; }
+      else k++;
+    }
+  }
+  return count;
+}

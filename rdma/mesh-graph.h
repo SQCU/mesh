@@ -202,4 +202,8 @@ uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from
                          const uint32_t *crossing, uint32_t hops, const double *capacity,
                          int (*rooted)(const void *context, uint32_t r), const void *context, double eps, uint32_t most,
                          uint32_t *root, uint32_t *parent, double *log_weight);
+/* The items left once every one take(consumer, item) accepts is taken, the passes repeating while one is taken (taking
+   one can free another: a composed page view's return unpins its owner leases, nccl-mesh.c leases_reap); a taken item
+   leaves the array by swap-removal. The count left. */
+size_t mesh_graph_settle(void **items, size_t count, int (*take)(void *consumer, void *item), void *consumer);
 #endif

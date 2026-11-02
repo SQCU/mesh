@@ -1681,7 +1681,6 @@ static int lease_give(struct attach *a, size_t i) {
   free(l->owners);free(l->backing.at);
   mesh_lease_retire_destroy(&l->reads);
   lease_mark(a, i, 0);
-  a->returned--;
   if (l->owners_count) a->composed_total--;
   a->composed_stale = 1;
   *l = a->leases[--a->count];
@@ -1689,19 +1688,18 @@ static int lease_give(struct attach *a, size_t i) {
   return 1;
 }
 /* every returned lease whose reads are done given back (a lease returned with reads outstanding waits here), the
-   returned ones alone visited (`returning`), again while one is given back (a composed view's return unpins its owners).
+   returned ones alone visited (`returning`), again while one is given back (a composed view's return unpins its owners:
+   the graph module's mesh_graph_settle, design/rubrics.md C9).
    Changed by the LSTM demonstration session: each reap scanned every lease, and a lease returned with reads outstanding
    made every allocation scan them all, allocations x leases (mem_alloc's leases_reap, the 64-step LSTM's source
    generation, 2026-11-01). What must stay: each returned lease given back once its reads are done and none is pinned. */
+static int lease_take(void *consumer, void *address) {
+  struct attach *a = consumer;
+  struct lease *l = lease_at(address, NULL);
+  return l && lease_give(a, (size_t)(l - a->leases));
+}
 static void leases_reap(struct attach *a) {
-  for (int given = 1; given && a->returned;) {
-    given = 0;
-    for (size_t k = 0; k < a->returned;) {
-      struct lease *l = lease_at(a->returning[k], NULL);
-      if (l && lease_give(a, (size_t)(l - a->leases))) { a->returning[k] = a->returning[a->returned]; given = 1; }
-      else k++;
-    }
-  }
+  a->returned = mesh_graph_settle(a->returning, a->returned, lease_take, a);
 }
 
 /* a lease of the region: its whole pages covering `size` (one page for 0), already registered on every device of the
