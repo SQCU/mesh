@@ -1,0 +1,87 @@
+[
+ {
+  "file": "rdma/mesh-plan.h",
+  "line": 5,
+  "lines": "5,389",
+  "function": "header include of etc/bridge/layout.h",
+  "scope": "chooser",
+  "violation": "chooser has access",
+  "abstraction": "etc/bridge/layout.h: bridge ABI byte facts (MESH_OFFSET_MESH_PAGE_ENTRY_ADDRESS, MESH_OFFSET_MESH_STREAM_READY, MESH_SIZEOF_MESH_DMA_SPAN, MESH_SIZEOF_MESH_BUFFER) in every planner consumer",
+  "handles": "Sizing struct mesh_node_health's model field with MESH_MODEL_BYTES at line 389.",
+  "group": "new:header-scope",
+  "replacement": "split the header: the planner's header names pages, nodes and steps only; the bridge's byte-offset ABI stays in the effector's headers",
+  "note": "new group: a chooser header or file reaches pointer or byte-offset declarations for an unrelated constant; the one answer is header scope, not a page-map operation."
+ },
+ {
+  "file": "rdma/mesh-plan.h",
+  "line": 166,
+  "lines": "166-167,171",
+  "function": "struct mesh_step (buffer 0)",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "buffer 0 = the operand, the result made in place",
+  "handles": "Lets a step read and land in the caller's operand without a copy between the send operand and the result.",
+  "group": "in-place",
+  "replacement": "lifetime allocation: the result's virtual pages share the operand's physical pages only where the solved lifetimes allow it; a step names a logical operand position and the page map, never buffer 0"
+ },
+ {
+  "file": "rdma/mesh-plan.h",
+  "line": 166,
+  "lines": "166-167,171,287-288,290-291",
+  "function": "struct mesh_step / struct mesh_move / struct mesh_program (buffer b >= 1, scratch)",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "numbered scratch buffer b >= 1, a copy of the operand made at the call's start; mesh_program.scratch the most scratch buffers a rank uses",
+  "handles": "Gives partial sums and forwarded pieces storage apart from the operand.",
+  "group": "scratch-placement",
+  "replacement": "lifetime allocation of the program's intermediate values onto physical pages; the program names values and their lifetimes, not numbered buffers"
+ },
+ {
+  "file": "rdma/mesh-plan.h",
+  "line": 202,
+  "lines": "202-210",
+  "function": "struct mesh_transfer_alias / mesh_transfer_order (preserve, separate)",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "a keep-alias or separate-source-generation flag per placed-page overwrite (preserve, separate[k])",
+  "handles": "Breaks a cycle where an overwrite of placed pages must wait on a read of the same pages.",
+  "group": "war-reuse",
+  "replacement": "lifetime allocation over the composed invocation map: a read and an overwrite of one physical page are an interference edge, answered by assigning another physical page, not by a separate-generation flag"
+ },
+ {
+  "file": "rdma/mesh-plan.h",
+  "line": 231,
+  "lines": "231-237,261-267",
+  "function": "mesh_routed_compile / struct mesh_routed_rank (buffers, initialized, extent)",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "relay fragments in separate, compact, uninitialized leases as numbered buffers past initialized[r], each with a byte extent; offsets and buffer numbers differ at the two endpoints",
+  "handles": "Gives a relay rank storage for fragments it forwards, apart from its logical buffers.",
+  "group": "scratch-placement",
+  "replacement": "lifetime allocation of relay fragments' virtual pages; the extent is the image size of the solved map"
+ },
+ {
+  "file": "rdma/mesh-plan.h",
+  "line": 318,
+  "lines": "318-323",
+  "function": "mesh_compile (MESH_ALLREDUCE whole 1)",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "distinct scratch per forwarded partial; a separate immutable source binding for the original contribution",
+  "handles": "Keeps a contribution readable by its SEND while the result over the same operand can change.",
+  "group": "war-reuse",
+  "replacement": "lifetime allocation: the contribution and the result are two values; they share physical pages only where their lifetimes do not overlap"
+ },
+ {
+  "file": "rdma/mesh-plan.h",
+  "line": 376,
+  "lines": "376-380",
+  "function": "mesh_counted_steps",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "buffer 0 at q's segment for each SEND, buffer 1 at q's segment for each COPY",
+  "handles": "Tells an all-to-all's send operand from its receive operand by fixed buffer numbers.",
+  "group": "operand-identity",
+  "replacement": "a step names the declared operand (source or destination) whose page map composed with its layout gives segment q's virtual pages"
+ }
+]
