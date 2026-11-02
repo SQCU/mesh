@@ -163,4 +163,16 @@ int mesh_graph_join(uint32_t parts, const size_t *base, const uint32_t *const *f
 int mesh_graph_classes(uint32_t vertices, const size_t *first, const uint32_t *head, const uint32_t *class_of,
                        uint32_t classes, const struct mesh_graph_span *span, const uint32_t *part, uint32_t *place,
                        size_t **in_first, uint32_t **in_from);
+/* Records grouped by a key into compressed rows (a routing's trees by their demand, its paths by their scope): record
+   k's key is key(context, k) < keys; key v's records are order[first[v]] to order[first[v + 1] - 1], in record order.
+   first holds keys + 1 entries and order items: one count, one sum and one scatter. */
+void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *context, size_t k), const void *context,
+                     size_t *first, size_t *order);
+/* Items chained by a key, latest first, as a solver finds them (its distinct trees of one demand or of one root):
+   head[key] that key's latest item (UINT32_MAX: none) and next[k] the one before item k. mesh_graph_keyed_find gives
+   the key's item for which equal(context, k) holds, or UINT32_MAX, and reads that key's items alone;
+   mesh_graph_keyed_add chains item k to its key. */
+uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
+                               int (*equal)(const void *context, uint32_t k), const void *context);
+void mesh_graph_keyed_add(uint32_t *head, uint32_t *next, uint32_t key, uint32_t k);
 #endif
