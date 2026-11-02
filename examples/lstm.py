@@ -32,7 +32,7 @@ class Tick:
         # -[MetalTensorLayout shaped:coordinates:] -> TensorBound -> MeshIndexExpression, IndexExpression recursing
         # about 30 levels through isl conditions (metal-microbench output_data/lstm-2026-11-02/d-u2, every sample,
         # 2026-11-02). Units first returns once that passes on the whole collective, not on a desk check.
-        self.h = torch_mesh.empty(self.L, rows, H, dtype=torch.half)
+        self.h = torch_mesh.empty(H, self.L, rows, dtype=torch.half).permute(1, 2, 0)
         first = sum(self.sizes[:mesh.get_group('tp').rank()])
         self.mine = self.h.narrow(2, first, HR)
         self.reset()
