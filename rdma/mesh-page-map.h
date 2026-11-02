@@ -20,6 +20,9 @@
 #define MESH_PAGE_MAP_H
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Types, informally (each function below states its own in these terms; the LSTM's dependency chain run end to end on
    every member is what holds them to account, not a separate test):
@@ -126,4 +129,7 @@ int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const 
                        const uint64_t *pinned_first, int (*settled)(const void *context, size_t done, size_t next),
                        const void *context, struct mesh_page_map *maps, uint64_t *firsts, struct mesh_map_run *runs);
 
+#ifdef __cplusplus
+}
+#endif
 #endif

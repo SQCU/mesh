@@ -5,6 +5,9 @@
 #define MESH_GRAPH_H
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* A path's share of a tree's flow: the path from `from` of `hops` hops, hop k leading from `at` to
    `step(context, k, at)` and carrying `split(context, k, at)` of what reaches it, followed up the tree (parent[v]: v's
@@ -250,4 +253,7 @@ int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *beg
                              const unsigned char *pinned, uint64_t capacity, uint64_t *place,
                              int (*settled)(const void *context, size_t done, size_t next), const void *context);
 
+#ifdef __cplusplus
+}
+#endif
 #endif

@@ -38,6 +38,7 @@
 #undef MESH_SCALAR_PREPARATION
 #include "metal-recording.h"
 #include "metal-page-effects.h"
+#include "mesh-graph.h"
 #include "nccl.h"
 #include "layout.h" /* MESH_PREPARATION_NS: the preparation deadline a kernel compile waits within */
 
@@ -1262,6 +1263,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   // elements (its sizes, strides and storage offset, element coordinates of its storage), its lease's page runs
   // (first virtual page, pages, first physical page) and the region's page size. No address crosses here.
   // the region's page size: a chooser's figure for its virtual spaces (design/page-maps-2026-11-02.md)
+  // mesh-graph.h mesh_graph_interval_pack for the run's page assignment (design/page-maps-2026-11-02.md): integers in
+  // and out, `settled(done, next)` a Python predicate (reachability over the solve's edges). Raises where the arena
+  // cannot hold the live set or a pin meets an unsettled item, a compile-time failure.
+  module.def("interval_pack", [](const std::vector<uint64_t> &sizes, const std::vector<uint64_t> &begins,
+                                 const std::vector<uint64_t> &ends, uint64_t capacity, pybind11::function settled) {
+    const size_t n = sizes.size();
+    TORCH_CHECK(begins.size() == n && ends.size() == n, "interval_pack: one size, begin and end an item");
+    std::vector<uint64_t> place(n, 0);
+    struct Context { pybind11::function *settled; } context{&settled};
+    const int status = mesh_graph_interval_pack(n, sizes.data(), begins.data(), ends.data(), nullptr, capacity, place.data(),
+        [](const void *c, size_t done, size_t next) -> int {
+          return pybind11::cast<bool>((*static_cast<const Context *>(c)->settled)(done, next)) ? 1 : 0;
+        }, &context);
+    TORCH_CHECK(!status, "interval_pack: ", status == ENOMEM ? "the arena cannot hold the run's live values" :
+                "a pinned item meets an unsettled one", " (design/page-maps-2026-11-02.md)");
+    return place;
+  });
   module.def("region_page_bytes", []() {
     uint64_t page_bytes = 0;
     TORCH_CHECK(!ncclMeshRegionPageBytes(&page_bytes), "region_page_bytes: ", ncclGetLastError(nullptr));
