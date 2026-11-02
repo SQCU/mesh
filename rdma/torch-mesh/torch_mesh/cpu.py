@@ -88,7 +88,11 @@ _SCALAR_ABI = dict(bool=ctypes.c_bool, int8_t=ctypes.c_int8, uint8_t=ctypes.c_ui
 
 
 def argument_record(command, pointer_values):
-    """Bind the native entry's fixed argument ABI during preparation."""
+    """Bind the fixed argument ABI and retain its pointer-field relocations.
+
+    Both local binding and exported source use this layout. Relocations name
+    an argument slot and its declared byte offset, not a captured address.
+    """
     fields, values = [], {}
     if 'engine_command' in command:
         from .engines import CpuCommand
@@ -105,7 +109,10 @@ def argument_record(command, pointer_values):
             fields.append((name, kind))
             values[name] = command['constants'][slot]
     record = type('CpuArguments', (ctypes.Structure,), {'_fields_': fields})
-    return bytes(record(**values))
+    places = tuple(dict(offset=getattr(record, f'a{spec["slot"]}').offset,
+                        slot=spec['slot'], byte_offset=spec.get('byte_offset', 0))
+                   for spec in command['argument_specs'] if spec['kind'] == 'pointer')
+    return bytes(record(**values)), places
 
 
 def prepare(command):
@@ -114,7 +121,7 @@ def prepare(command):
     from . import _stream
     bindings = {slot: _stream.page_backing(operand)
                 for slot, operand in enumerate(command['operands']) if operand is not None}
-    arguments = argument_record(command,
+    arguments, _ = argument_record(command,
         {slot: binding[0] for slot, binding in bindings.items()})
     source = PREAMBLE + index_source(command['arguments'], bindings) + command['source']
     reads, writes = [], []

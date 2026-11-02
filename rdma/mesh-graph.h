@@ -127,9 +127,9 @@ int mesh_graph_cells_through(const uint64_t *a_first, const uint64_t *a_length, 
    it neither chooses work nor reconstructs dependencies. */
 #define MESH_GRAPH_PREFIX_METAL \
   "static inline uint mesh_graph_prefix(device atomic_uint *state, uint head, uint n, device atomic_uint *at) { " \
-  "uint p = atomic_load_explicit(at, memory_order_relaxed); " \
-  "while (p < n && atomic_load_explicit(state + head + p, memory_order_relaxed) == 2u) " \
-  "if (atomic_compare_exchange_weak_explicit(at, &p, p + 1u, memory_order_relaxed, memory_order_relaxed)) p++; " \
+  "uint p = mesh_graph_count_load(at); " \
+  "while (p < n && (mesh_graph_count_load(state + head + p) & 2u)) " \
+  "if (mesh_graph_count_exchange(at, &p, p + 1u)) p++; " \
   "return p; }\n" \
   "template <typename Publish> static inline void mesh_graph_settle(device atomic_uint *state, uint head, uint n, " \
   "device atomic_uint *at, thread Publish &publish) { " \

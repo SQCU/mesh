@@ -33,12 +33,24 @@ static inline void mesh_step_observe(volatile uint64_t *word,uint64_t target,voi
 
 static inline uint32_t mesh_graph_prefix(uint32_t *state,uint32_t head,uint32_t count,uint32_t *prefix) {
     uint32_t at=__atomic_load_n(prefix,__ATOMIC_ACQUIRE);
-    while(at<count && __atomic_load_n(state+head+at,__ATOMIC_ACQUIRE)==2) {
+    while(at<count && (__atomic_load_n(state+head+at,__ATOMIC_ACQUIRE)&2)) {
         uint32_t expected=at;
         if(__atomic_compare_exchange_n(prefix,&expected,at+1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))at++;
         else at=expected;
     }
     return at;
+}
+
+/* Counts (bit 0) and activity (bit 2) are independent produced values. The
+   ready-word RMW orders announcements against completed contributions, so
+   either arrival order closes the cut, including a zero-contribution cut.
+   Bit 1 alone denotes complete and is monotone. No thread owns a lock. */
+static inline void mesh_graph_coverage(uint32_t *state,uint32_t *arrivals,const uint32_t *expected,
+                                       uint32_t announce,uint32_t contribution) {
+    if(contribution)__atomic_fetch_add(arrivals,contribution,__ATOMIC_RELAXED);
+    uint32_t ready=__atomic_fetch_or(state,announce,__ATOMIC_ACQ_REL)|announce;
+    if((ready&5)==5&&__atomic_load_n(arrivals,__ATOMIC_ACQUIRE)==__atomic_load_n(expected,__ATOMIC_ACQUIRE))
+        __atomic_fetch_or(state,2,__ATOMIC_RELEASE);
 }
 #ifdef __cplusplus
 /* Publish is a compiled functor. No callback lookup occurs in the numerical loop. */

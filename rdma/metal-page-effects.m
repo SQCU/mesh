@@ -7,6 +7,37 @@
 
 id MetalPageRegionRoot(void) { return @"mesh-region"; }
 
+static ncclMeshBuffer PageBuffer(ncclMeshBuffer value) {
+    if(!value.buffer&&ncclMeshMemBuffer((void *)value.offset,&value.buffer,&value.offset))
+        [NSException raise:NSInvalidArgumentException format:@"page effects: operand has no region page binding"];
+    return value;
+}
+
+@implementation MetalPageCoverage
++ (instancetype)declaration:(ncclMeshPageCoverage)value {
+    MetalPageCoverage *v=[[[self alloc] init] autorelease];
+    v->declaration=value;v->declaration.active=PageBuffer(value.active);v->declaration.expected=PageBuffer(value.expected);
+    [(__bridge id)v->declaration.active.buffer retain];[(__bridge id)v->declaration.expected.buffer retain];return v;
+}
+- (void)dealloc { [(__bridge id)declaration.active.buffer release];[(__bridge id)declaration.expected.buffer release];[super dealloc]; }
+@end
+@implementation MetalPageContribution
++ (instancetype)coverage:(MetalPageCoverage *)c word:(ncclMeshBuffer)ready phase:(NSUInteger)p cells:(NSUInteger)n
+    width:(NSUInteger)w indices:(ncclMeshBuffer)i {
+    MetalPageContribution *v=[[[self alloc] init] autorelease];v->coverage=[c retain];v->phase=p;
+    v->cells=n;v->width=w;v->word=PageBuffer(ready);v->indices=PageBuffer(i);
+    [(__bridge id)v->word.buffer retain];[(__bridge id)v->indices.buffer retain];return v;
+}
+- (void)dealloc { [coverage release];[(__bridge id)word.buffer release];[(__bridge id)indices.buffer release];[super dealloc]; }
+@end
+@implementation MetalPageAnnouncement
++ (instancetype)coverage:(MetalPageCoverage *)c phase:(NSUInteger)p flags:(uint32_t)f relation:(isl_map *)r {
+    MetalPageAnnouncement *v=[[[self alloc] init] autorelease];v->coverage=[c retain];v->phase=p;v->flags=f;
+    v->relation=isl_map_copy(r);return v;
+}
+- (void)dealloc { [coverage release];isl_map_free(relation);[super dealloc]; }
+@end
+
 isl_map *MetalPageRegionRelation(isl_map *local,id<MTLBuffer> buffer) {
     if(isl_map_is_empty(local)==isl_bool_true)return isl_map_copy(local);
     const struct MeshIndexBounds bounds=MeshIndexImageBounds(isl_map_copy(local));
@@ -114,7 +145,7 @@ MetalPageAccess *MetalPageImportAccess(isl_ctx *context,NSDictionary *declaratio
     MetalPageCommand *v=[[[self alloc] init] autorelease];v->order=o;v->groups=g;v->backend=b;
     v->source=[s copy];v->function=[f copy];v->grid=d;v->metadataSlot=slot;v->accesses=[a copy];return v;
 }
-- (void)dealloc { [source release];[function release];[accesses release];[argumentNames release];[sites release];[super dealloc]; }
+- (void)dealloc { [source release];[function release];[accesses release];[argumentNames release];[sites release];[contributions release];[announcements release];[super dealloc]; }
 @end
 void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger cells,enum MetalPageSiteScope scope,
     NSArray<MetalPageAccess *> *accesses) {
@@ -135,6 +166,7 @@ void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger ce
     [command->sites release];command->sites=[sites copy];command->groups+=cells;
 }
 @implementation MetalPageTransfer
+@synthesize coverage,coverageCut;
 + (instancetype)owner:(id)o order:(NSUInteger)n effect:(ncclMeshPageEffect)e root:(id)r selection:(isl_map *)s
     payload:(id<MTLBuffer>)p layout:(MetalTensorLayout *)l {
     if(!e.word.buffer&&ncclMeshMemBuffer((void *)e.word.offset,&e.word.buffer,&e.word.offset))
@@ -145,7 +177,7 @@ void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger ce
     [(__bridge id)e.word.buffer retain];[(__bridge id)e.violation.buffer retain];
     v->root=[r retain];v->selection=isl_map_copy(s);v->payload=[p retain];v->layout=[l retain];return v;
 }
-- (void)dealloc { [owner release];[root release];[payload release];[layout release];
+- (void)dealloc { [owner release];[root release];[payload release];[layout release];[coverage release];
     [(__bridge id)effect.word.buffer release];[(__bridge id)effect.violation.buffer release];isl_map_free(selection);[super dealloc]; }
 @end
 @implementation MetalPageInitial
@@ -162,6 +194,9 @@ void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger ce
 @interface MetalPageDomain : NSObject {
 @public NSArray<MetalPageTransfer *> *rows;
     BOOL publication;
+    MetalPageCoverage *coverage;
+    NSMutableArray<NSMutableArray<NSMutableIndexSet *> *> *announcements;
+    NSMutableArray<NSMutableArray<NSMutableIndexSet *> *> *activity;
     NSMutableArray<NSMutableArray<NSMutableIndexSet *> *> *contributions;
     NSMutableArray<NSMutableData *> *thresholds;
     NSMutableArray<NSMutableIndexSet *> *observedSlots,*publishedSlots;
@@ -172,6 +207,7 @@ void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger ce
 @end
 @implementation MetalPageDomain
 - (void)dealloc { [rows release];[contributions release];[thresholds release];[observedSlots release];[publishedSlots release];
+    [coverage release];[announcements release];[activity release];
     [expected release];[completed release];[initial release];[pages release];[super dealloc]; }
 @end
 
@@ -210,6 +246,107 @@ static NSMutableArray *PageSlots(NSUInteger count) {
     for(NSUInteger i=0;i<count;i++)[values addObject:[NSMutableIndexSet indexSet]];return values;
 }
 
+/* Map each coverage value to the exact byte word which defines it. The
+   domain is a cut ordinal, not a possible numerical destination address. */
+static isl_map *PageCoverageWords(isl_ctx *context,ncclMeshBuffer word,NSUInteger count) {
+    NSString *text=[NSString stringWithFormat:@"{ [c] -> [b] : 0<=c<%lu and %llu+4*c<=b<%llu+4*c+4 }",
+        (unsigned long)count,(unsigned long long)word.offset,(unsigned long long)word.offset];
+    isl_map *local=isl_map_read_from_str(context,text.UTF8String);
+    isl_map *physical=MetalPageRegionRelation(local,(__bridge id<MTLBuffer>)word.buffer);
+    isl_map_free(local);return physical;
+}
+
+static void PageCoverageAccesses(MetalPageCommand *command,isl_ctx *context) {
+    if(!command->contributions.count&&!command->announcements.count)return;
+    NSMutableArray *accesses=[command->accesses mutableCopy];
+    void (^append)(isl_map *,NSUInteger)=^(isl_map *relation,NSUInteger phase) {
+        MetalPageAccess *access=[MetalPageAccess root:MetalPageRegionRoot() slot:-1 access:MetalReachRead relation:relation];
+        access->phase=phase;[accesses addObject:access];isl_map_free(relation);
+    };
+    for(MetalPageContribution *part in command->contributions) {
+        NSUInteger first=part->phase?[command->sites[part->phase-1][@"first"] unsignedIntegerValue]:0;
+        NSString *text=[NSString stringWithFormat:@"{ [g] -> [b] : %lu<=g<%lu and %llu+%lu*(g-%lu)<=b<%llu+%lu*(g-%lu+1) }",
+            (unsigned long)first,(unsigned long)(first+part->cells),(unsigned long long)part->indices.offset,
+            (unsigned long)(part->width*sizeof(int64_t)),(unsigned long)first,(unsigned long long)part->indices.offset,
+            (unsigned long)(part->width*sizeof(int64_t)),(unsigned long)first];
+        isl_map *local=isl_map_read_from_str(context,text.UTF8String);
+        append(MetalPageRegionRelation(local,(__bridge id<MTLBuffer>)part->indices.buffer),part->phase);isl_map_free(local);
+    }
+    for(MetalPageAnnouncement *part in command->announcements) {
+        NSUInteger first=part->phase?[command->sites[part->phase-1][@"first"] unsignedIntegerValue]:0;
+        NSString *text=[NSString stringWithFormat:@"{ [g] -> [c] : c=g-%lu }",(unsigned long)first];
+        isl_map *group=MeshIndexCompose(isl_map_read_from_str(context,text.UTF8String),isl_map_copy(part->relation));
+        if(part->flags&1)append(MeshIndexCompose(isl_map_copy(group),PageCoverageWords(context,part->coverage->declaration.expected,part->coverage->declaration.cuts)),part->phase);
+        if(part->flags&4)append(MeshIndexCompose(isl_map_copy(group),PageCoverageWords(context,part->coverage->declaration.active,part->coverage->declaration.cuts)),part->phase);
+        isl_map_free(group);
+    }
+    [command->accesses release];command->accesses=accesses;
+}
+
+static void PageCoverageAnnouncements(NSArray<MetalPageCommand *> *commands,MetalPageDomain *domain) {
+    domain->announcements=[[NSMutableArray alloc] initWithCapacity:commands.count];
+    domain->activity=[[NSMutableArray alloc] initWithCapacity:commands.count];
+    for(MetalPageCommand *command in commands) {
+        [domain->announcements addObject:PageSlots(command->groups)];
+        [domain->activity addObject:PageSlots(command->groups)];
+    }
+    for(NSUInteger kind=0;kind<2;kind++) {
+        ncclMeshBuffer word=kind?domain->coverage->declaration.active:domain->coverage->declaration.expected;
+        isl_ctx *context=isl_map_get_ctx(domain->rows[0]->selection);
+        isl_map *words=PageCoverageWords(context,word,domain->coverage->declaration.cuts);
+        isl_set *selected=isl_set_empty(isl_space_domain(isl_map_get_space(words)));
+        for(MetalPageTransfer *row in domain->rows) {
+            isl_set *cell=isl_set_universe(isl_set_get_space(selected));
+            cell=isl_set_fix_val(cell,isl_dim_set,0,isl_val_int_from_ui(context,row->coverageCut));
+            selected=isl_set_union(selected,cell);
+        }
+        words=isl_map_intersect_domain(words,selected);
+        isl_set *remaining=PageRange(words);
+        NSMutableArray *target=kind?domain->activity:domain->announcements;
+        for(NSUInteger c=commands.count;c-->0;) {
+            MetalPageCommand *command=commands[c];if(command->order>=domain->rows[0]->order)continue;
+            for(NSUInteger phase=command->sites.count+1;phase-->0;) {
+                for(MetalPageAccess *access in command->accesses) {
+                    if(access->phase!=phase||![access->root isEqual:MetalPageRegionRoot()]||!(access->access&MetalReachWritten))continue;
+                    isl_map *writes=isl_map_intersect_range(isl_map_copy(access->relation),isl_set_copy(remaining));
+                    isl_map *cuts=MeshIndexCompose(writes,isl_map_reverse(isl_map_copy(words)));
+                    isl_set *groups=isl_map_domain(isl_map_copy(cuts));
+                    if(!PageEmpty(groups)&&access->slot>=0)[domain->publishedSlots[c] addIndex:(NSUInteger)access->slot];
+                    PageGroups(groups,^(NSUInteger group) {
+                        isl_map *selected=isl_map_fix_val(isl_map_copy(cuts),isl_dim_in,0,isl_val_int_from_ui(context,group));
+                        isl_set *range=isl_map_range(selected);
+                        PageGroups(range,^(NSUInteger cut){
+                            for(NSUInteger row=0;row<domain->rows.count;row++)
+                                if(domain->rows[row]->coverageCut==cut)[target[c][group] addIndex:row];
+                        });isl_set_free(range);
+                    });
+                    isl_set_free(groups);isl_map_free(cuts);
+                }
+                for(MetalPageAccess *access in command->accesses)
+                    if(access->phase==phase&&[access->root isEqual:MetalPageRegionRoot()]&&(access->access&MetalReachWritten))
+                        remaining=isl_set_subtract(remaining,PageRange(access->relation));
+            }
+            for(MetalPageAnnouncement *announcement in command->announcements) {
+                if(announcement->coverage!=domain->coverage||!(announcement->flags&(kind?4u:1u)))continue;
+                NSUInteger first=announcement->phase?[command->sites[announcement->phase-1][@"first"] unsignedIntegerValue]:0;
+                isl_set *groups=isl_map_domain(isl_map_copy(announcement->relation));
+                PageGroups(groups,^(NSUInteger group) {
+                    isl_map *selected=isl_map_fix_val(isl_map_copy(announcement->relation),isl_dim_in,0,isl_val_int_from_ui(context,group));
+                    isl_set *range=isl_map_range(selected);
+                    PageGroups(range,^(NSUInteger cut) {
+                        for(NSUInteger row=0;row<domain->rows.count;row++)
+                            if(domain->rows[row]->coverageCut==cut)[target[c][first+group] addIndex:row];
+                    });isl_set_free(range);
+                });isl_set_free(groups);
+                isl_map *reached=MeshIndexCompose(isl_map_copy(announcement->relation),isl_map_copy(words));
+                remaining=isl_set_subtract(remaining,PageRange(reached));isl_map_free(reached);
+            }
+        }
+        if(!PageEmpty(remaining))PageFailure(@"coverage values need their declared producer or imported-value continuation");
+        isl_set_free(remaining);isl_map_free(words);
+    }
+}
+
 void MetalPageEffectsOrder(NSArray<MetalPageCommand *> *commands,NSArray<MetalPageTransfer *> *transfers,NSUInteger *next) {
     NSMutableSet *values=[NSMutableSet set];
     for(MetalPageCommand *c in commands)[values addObject:@(c->order)];
@@ -227,6 +364,10 @@ MetalPageEffects *MetalPageEffectsSolve(NSArray<MetalPageCommand *> *given,NSArr
         return a->order<b->order?NSOrderedAscending:a->order>b->order?NSOrderedDescending:NSOrderedSame;
     }) retain];
     NSArray *commands=result->commands;
+    if(transfers.count) {
+        isl_ctx *context=isl_map_get_ctx(((MetalPageTransfer *)transfers[0])->selection);
+        for(MetalPageCommand *command in commands)PageCoverageAccesses(command,context);
+    }
     NSMutableDictionary *publishers=[NSMutableDictionary dictionary],*observers=[NSMutableDictionary dictionary];
     NSMutableArray *arrivals=[NSMutableArray array];
     for(MetalPageTransfer *t in transfers) {
@@ -246,11 +387,27 @@ MetalPageEffects *MetalPageEffectsSolve(NSArray<MetalPageCommand *> *given,NSArr
         domain->rows=[PageSorted(publishers[word],^NSComparisonResult(MetalPageTransfer *a,MetalPageTransfer *b){
             return a->effect.threshold<b->effect.threshold?NSOrderedAscending:a->effect.threshold>b->effect.threshold?NSOrderedDescending:NSOrderedSame;
         }) retain];
+        domain->coverage=[domain->rows[0]->coverage retain];
+        for(MetalPageTransfer *row in domain->rows)
+            if(row->coverage!=domain->coverage)PageFailure(@"one publication domain must retain one coverage operand");
         domain->expected=[[NSMutableData alloc] initWithLength:domain->rows.count*sizeof(uint32_t)];
         domain->completed=[[NSMutableData alloc] initWithLength:(domain->rows.count+1)*sizeof(uint32_t)];
         domain->contributions=[[NSMutableArray alloc] initWithCapacity:commands.count];
         domain->publishedSlots=[PageSlots(commands.count) retain];
         for(MetalPageCommand *command in commands)[domain->contributions addObject:PageSlots(command->groups)];
+        if(domain->coverage) {
+            PageCoverageAnnouncements(commands,domain);
+            for(NSUInteger c=0;c<commands.count;c++) {
+                MetalPageCommand *command=commands[c];
+                for(MetalPageContribution *part in command->contributions) {
+                    if(part->coverage!=domain->coverage||![PageWord(part->word) isEqual:word])continue;
+                    for(MetalPageAccess *access in command->accesses)
+                        if(access->phase==part->phase&&(access->access&MetalReachWritten)&&access->slot>=0)
+                            [domain->publishedSlots[c] addIndex:(NSUInteger)access->slot];
+                }
+            }
+            [domains addObject:domain];continue;
+        }
         NSMutableArray *inputs=[NSMutableArray array];
         for(NSUInteger cut=0;cut<domain->rows.count;cut++) {
             MetalPageTransfer *t=domain->rows[cut];isl_set *all=PageRange(t->selection),*remaining=isl_set_copy(all);
@@ -352,7 +509,8 @@ static NSArray *PageDomainPages(MetalPageDomain *domain,id<MTLDevice> device) {
             for(NSUInteger i=0;i<domain->rows.count;i++)((uint64_t *)thresholds.mutableBytes)[i]=domain->rows[i]->effect.threshold;
             NSData *arrivals=[NSMutableData dataWithLength:domain->rows.count*sizeof(uint32_t)];
             domain->pages=[@[PageData(device,thresholds),PageData(device,domain->completed),
-                PageData(device,domain->expected),PageData(device,arrivals)] retain];
+                domain->coverage?(__bridge id<MTLBuffer>)domain->coverage->declaration.expected.buffer:PageData(device,domain->expected),
+                PageData(device,arrivals)] retain];
         }
         return domain->pages;
     }
@@ -419,6 +577,95 @@ static NSString *PageReplaceFields(NSString *text,MetalPageFields *fields,NSStri
 static NSArray<NSNumber *> *PageIndices(NSIndexSet *set) {
     NSMutableArray *values=[NSMutableArray array];[set enumerateIndexesUsingBlock:^(NSUInteger i,BOOL *stop){(void)stop;[values addObject:@(i)];}];return values;
 }
+
+static void PageCoverageSource(MetalPageDomain *domain,MetalPageCommand *command,NSUInteger index,
+    id<MTLDevice> device,MetalPageFields *fields,NSMutableString *helpers,NSMutableArray *after,NSUInteger *ordinal) {
+    NSMutableArray<MetalPageContribution *> *contributions=[NSMutableArray array];
+    NSNumber *wordIdentity=PageWord(domain->rows[0]->effect.word);
+    for(MetalPageContribution *part in command->contributions)
+        if(part->coverage==domain->coverage&&[PageWord(part->word) isEqual:wordIdentity])[contributions addObject:part];
+    NSMutableArray<NSMutableDictionary *> *announcements=[NSMutableArray array];NSUInteger announcementWidth=0;
+    for(NSUInteger group=0;group<command->groups;group++) {
+        NSMutableDictionary *cuts=[NSMutableDictionary dictionary];
+        for(NSNumber *cut in PageIndices(domain->announcements[index][group]))cuts[cut]=@1;
+        for(NSNumber *cut in PageIndices(domain->activity[index][group]))cuts[cut]=@([cuts[cut] unsignedIntValue]|4u);
+        [announcements addObject:cuts];announcementWidth=MAX(announcementWidth,cuts.count);
+    }
+    if(!contributions.count&&!announcementWidth)return;
+    [fields->owners addObject:domain->coverage];
+    BOOL gpu=command->backend==MetalPageMetal;NSUInteger count=domain->rows.count;
+    NSArray *pages=PageDomainPages(domain,device);
+    NSString *thresholds=PageField([fields add:pages[0] offset:0 bytes:count*sizeof(uint64_t) access:MetalReachRead]);
+    NSString *state=PageField([fields add:pages[1] offset:0 bytes:(count+1)*sizeof(uint32_t)
+        access:MetalReachRead|MetalReachWritten|MetalReachAtomic]);
+    NSString *arrivals=PageField([fields add:pages[3] offset:0 bytes:count*sizeof(uint32_t)
+        access:MetalReachRead|MetalReachWritten|MetalReachAtomic]);
+    ncclMeshBuffer expected=domain->coverage->declaration.expected;
+    NSString *totals=PageField([fields add:(__bridge id<MTLBuffer>)expected.buffer offset:expected.offset
+        bytes:domain->coverage->declaration.cuts*sizeof(uint32_t) access:MetalReachRead|MetalReachObserve]);
+    NSMutableData *projection=[NSMutableData dataWithLength:count*sizeof(uint64_t)];
+    for(NSUInteger cut=0;cut<count;cut++)((uint64_t *)projection.mutableBytes)[cut]=domain->rows[cut]->coverageCut;
+    id<MTLBuffer> projected=PageData(device,projection);
+    NSString *ordinals=PageField([fields add:projected offset:0 bytes:projection.length access:MetalReachRead]);
+    NSString *word=PageWordField(fields,domain->rows[0]->effect.word,MetalReachWritten|MetalReachAtomic);
+    NSString *prefix=[NSString stringWithFormat:@"MeshPageCoveragePrefix%lu",(unsigned long)(*ordinal)++];
+    [helpers appendFormat:gpu?@"struct %@ { device const ulong *cuts; volatile coherent(system) device ulong *word; void at(uint p) {mesh_publish(word,cuts[p-1]);} };\n":
+        @"struct %@ { const uint64_t *cuts; volatile uint64_t *word; void at(uint32_t p) {mesh_publish(word,cuts[p-1]);} };\n",prefix];
+    NSString *(^contribute)(NSString *,NSString *,NSUInteger)=^NSString *(NSString *cut,NSString *flags,NSUInteger delta) {
+        if(gpu)return [NSString stringWithFormat:
+            @"mesh_graph_coverage((volatile coherent(system) device atomic_uint *)%@+%@,(volatile coherent(system) device atomic_uint *)%@+%@,(volatile coherent(system) device const uint *)%@+((device const ulong *)%@)[%@],%@,%luu);\n",
+            state,cut,arrivals,cut,totals,ordinals,cut,flags,(unsigned long)delta];
+        return [NSString stringWithFormat:
+            @"mesh_graph_coverage((uint32_t *)%@+%@,(uint32_t *)%@+%@,(const uint32_t *)%@+((const uint64_t *)%@)[%@],%@,%luu);\n",
+            state,cut,arrivals,cut,totals,ordinals,cut,flags,(unsigned long)delta];
+    };
+    NSMutableIndexSet *phases=[NSMutableIndexSet indexSet];
+    for(MetalPageContribution *part in contributions) {
+        NSUInteger first=part->phase?[command->sites[part->phase-1][@"first"] unsignedIntegerValue]:0;
+        NSUInteger cells=part->phase?[command->sites[part->phase-1][@"count"] unsignedIntegerValue]:
+            command->sites.count?[command->sites[0][@"first"] unsignedIntegerValue]:command->groups;
+        if(cells!=part->cells)PageFailure(@"contribution rows must retain the source phase's declared cell domain");
+        NSString *indices=PageField([fields add:(__bridge id<MTLBuffer>)part->indices.buffer offset:part->indices.offset
+            bytes:part->cells*part->width*sizeof(int64_t) access:MetalReachRead]);
+        for(NSUInteger column=0;column<part->width;column++) {
+            [after[part->phase] appendFormat:gpu?@"{ const long cut=((device const long *)%@)[(mesh_effect_group-%luul)*%luul+%luul]; if(cut>=0) {\n":
+                @"{ const int64_t cut=((const int64_t *)%@)[(mesh_effect_group-%luul)*%luul+%luul]; if(cut>=0) {\n",
+                indices,(unsigned long)first,(unsigned long)part->width,(unsigned long)column];
+            [after[part->phase] appendString:contribute(@"cut",@"0u",1)];[after[part->phase] appendString:@"} }\n"];
+        }
+        [phases addIndex:part->phase];
+    }
+    if(announcementWidth) {
+        NSMutableData *table=[NSMutableData dataWithLength:command->groups*announcementWidth*2*sizeof(int64_t)];
+        memset(table.mutableBytes,0xff,table.length);
+        for(NSUInteger group=0;group<command->groups;group++) {
+            NSUInteger column=0;
+            for(NSNumber *cut in [announcements[group].allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+                int64_t *row=(int64_t *)table.mutableBytes+(group*announcementWidth+column++)*2;
+                row[0]=cut.longLongValue;row[1]=[announcements[group][cut] longLongValue];
+            }
+        }
+        id<MTLBuffer> buffer=PageData(device,table);
+        NSString *indices=PageField([fields add:buffer offset:0 bytes:table.length access:MetalReachRead]);
+        for(NSUInteger phase=0;phase<after.count;phase++) {
+            NSUInteger first=phase?[command->sites[phase-1][@"first"] unsignedIntegerValue]:0;
+            NSUInteger end=phase?first+[command->sites[phase-1][@"count"] unsignedIntegerValue]:
+                command->sites.count?[command->sites[0][@"first"] unsignedIntegerValue]:command->groups;
+            BOOL needed=NO;for(NSUInteger g=first;g<end;g++)needed|=announcements[g].count!=0;if(!needed)continue;
+            for(NSUInteger column=0;column<announcementWidth;column++) {
+                [after[phase] appendFormat:gpu?@"{ device const long *entry=(device const long *)%@+(mesh_effect_group*%luul+%luul)*2ul; const long cut=entry[0]; if(cut>=0) {\n":
+                    @"{ const int64_t *entry=(const int64_t *)%@+(mesh_effect_group*%luul+%luul)*2ul; const int64_t cut=entry[0]; if(cut>=0) {\n",
+                    indices,(unsigned long)announcementWidth,(unsigned long)column];
+                [after[phase] appendString:contribute(@"cut",@"(unsigned int)entry[1]",0)];[after[phase] appendString:@"} }\n"];
+            }
+            [phases addIndex:phase];
+        }
+    }
+    for(NSNumber *phase in PageIndices(phases))[after[phase.unsignedIntegerValue] appendFormat:gpu?
+        @"{ %@ prefix={(device const ulong *)%@,(volatile coherent(system) device ulong *)%@};mesh_graph_settle((device atomic_uint *)%@,0,%luu,(device atomic_uint *)%@+%luu,prefix); }\n":
+        @"{ %@ prefix={(const uint64_t *)%@,(volatile uint64_t *)%@};mesh_graph_settle((uint32_t *)%@,0,%luu,(uint32_t *)%@+%luu,prefix); }\n",
+        prefix,thresholds,word,state,(unsigned long)count,state,(unsigned long)count];
+}
 static NSRegularExpression *PageRegex(NSString *pattern) { return [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:NULL]; }
 static NSString *PageSub(NSString *source,NSString *pattern,NSString *replacement) {
     return [PageRegex(pattern) stringByReplacingMatchesInString:source options:0 range:NSMakeRange(0,source.length) withTemplate:replacement];
@@ -456,16 +703,34 @@ static NSString *PageNumericalScope(NSString *body) {
     for(NSTextCheckingResult *match in outer.reverseObjectEnumerator)[inside deleteCharactersInRange:match.range];
     return [NSString stringWithFormat:@"%@\n[&]() {%@}();\n",declarations,inside];
 }
-static NSString *PageMetalSource(MetalPageCommand *command,NSString *helpers,NSString *before,NSString *after,
-    NSIndexSet *observed,NSIndexSet *published) {
-    NSString *source=command->source,*name=command->function;
+static NSArray<NSTextCheckingResult *> *PageMetalEntries(NSString *source,NSString *name) {
     NSString *escaped=[NSRegularExpression escapedPatternForString:name];
     NSTextCheckingResult *instance=[PageRegex([NSString stringWithFormat:@"host_name\\(\"%@\"\\).*?decltype\\((\\w+)\\s*<",escaped])
         firstMatchInString:source options:0 range:NSMakeRange(0,source.length)];
     if(instance)name=[source substringWithRange:[instance rangeAtIndex:1]];
-    NSArray *entries=[PageRegex([NSString stringWithFormat:@"kernel\\s+void\\s+%@\\s*\\(",[NSRegularExpression escapedPatternForString:name]])
+    return [PageRegex([NSString stringWithFormat:@"kernel\\s+void\\s+%@\\s*\\(",[NSRegularExpression escapedPatternForString:name]])
         matchesInString:source options:0 range:NSMakeRange(0,source.length)];
+}
+NSUInteger MetalPageMetadataSlot(NSString *source,NSString *function,NSIndexSet *generatedBindings,NSUInteger capacity) {
+    NSMutableIndexSet *occupied=[[generatedBindings mutableCopy] autorelease];
+    NSArray *entries=PageMetalEntries(source,function);
     if(!entries.count)PageFailure(@"numerical declaration has no retained source entry");
+    for(NSTextCheckingResult *entry in entries) {
+        NSUInteger opening=NSMaxRange(entry.range)-1,end=PageClose(source,opening,'(',')');
+        NSRange parameters=NSMakeRange(opening+1,end-opening-1);
+        for(NSTextCheckingResult *binding in [PageRegex(@"\\[\\[\\s*buffer\\s*\\(\\s*([0-9]+)\\s*\\)\\s*\\]\\]")
+            matchesInString:source options:0 range:parameters])
+            [occupied addIndex:[[source substringWithRange:[binding rangeAtIndex:1]] integerValue]];
+    }
+    for(NSUInteger slot=0;slot<capacity;slot++)if(![occupied containsIndex:slot])return slot;
+    return NSNotFound;
+}
+static NSString *PageMetalSource(MetalPageCommand *command,NSString *helpers,NSString *before,NSString *after,
+    NSIndexSet *observed,NSIndexSet *published) {
+    NSString *source=command->source;
+    NSArray *entries=PageMetalEntries(source,command->function);
+    if(!entries.count)PageFailure(@"numerical declaration has no retained source entry");
+    if(command->metadataSlot==NSNotFound)PageFailure(@"page metadata needs a free declared buffer binding");
     NSMutableIndexSet *coherent=[[observed mutableCopy] autorelease];[coherent addIndexes:published];
     for(NSTextCheckingResult *entry in entries.reverseObjectEnumerator) {
         const NSUInteger opening=NSMaxRange(entry.range)-1,end=PageClose(source,opening,'(',')');
@@ -613,6 +878,10 @@ MetalPageSource *MetalPageEffectsSource(MetalPageEffects *effects,NSUInteger ind
                 if(uses)[before[phase] appendString:fragment];
             }
             continue;
+        }
+        if(domain->coverage) {
+            [published addIndexes:domain->publishedSlots[index]];
+            PageCoverageSource(domain,command,index,device,fields,helpers,after,&ordinal);continue;
         }
         NSArray<NSIndexSet *> *cuts=domain->contributions[index];NSUInteger width=0;
         for(NSIndexSet *value in cuts)width=MAX(width,value.count);if(!width)continue;

@@ -86,6 +86,52 @@ __attribute__((always_inline)) static inline void mesh_publish(volatile coherent
     mesh_atomic_max(&word->__s, value, 0);
 }
 
+// The count and its activity mask can be produced independently of the
+// numerical contributors. One system-scope RMW orders their announcements;
+// it does not order unrelated cuts or hold a lock across numerical work.
+#define MESH_COUNT_RMW(name, primitive) \
+template<class A> __attribute__((always_inline)) static inline auto name(A word,uint value,int) \
+ -> decltype(primitive(word,value,0,0,__METAL_MEMORY_FLAGS_NONE__)) { \
+ return primitive(word,value,int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE,__METAL_MEMORY_FLAGS_NONE__); } \
+template<class A> __attribute__((always_inline)) static inline uint name(A word,uint value,long) { \
+ return primitive(word,value,int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE); }
+MESH_COUNT_RMW(mesh_count_add,__metal_atomic_fetch_add_explicit)
+MESH_COUNT_RMW(mesh_count_or,__metal_atomic_fetch_or_explicit)
+#undef MESH_COUNT_RMW
+template<class A> static inline auto mesh_count_load(A word,int)
+ -> decltype(__metal_atomic_load_explicit(word,0,0,__METAL_MEMORY_FLAGS_NONE__)) {
+    return __metal_atomic_load_explicit(word,int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE,__METAL_MEMORY_FLAGS_NONE__);
+}
+template<class A> static inline uint mesh_count_load(A word,long) {
+    return __metal_atomic_load_explicit(word,int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE);
+}
+template<class A> static inline auto mesh_count_exchange(A word,thread uint *expected,uint value,int)
+ -> decltype(__metal_atomic_compare_exchange_weak_explicit(word,expected,value,0,0,0,__METAL_MEMORY_FLAGS_NONE__)) {
+    return __metal_atomic_compare_exchange_weak_explicit(word,expected,value,int(metal::memory_order_relaxed),
+        int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE,__METAL_MEMORY_FLAGS_NONE__);
+}
+template<class A> static inline bool mesh_count_exchange(A word,thread uint *expected,uint value,long) {
+    return __metal_atomic_compare_exchange_weak_explicit(word,expected,value,int(metal::memory_order_relaxed),
+        int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE);
+}
+static inline uint mesh_graph_count_load(device metal::atomic_uint *value) {
+    return mesh_count_load(&((volatile coherent(system) device metal::atomic_uint *)value)->__s,0);
+}
+static inline bool mesh_graph_count_exchange(device metal::atomic_uint *value,thread uint *expected,uint desired) {
+    return mesh_count_exchange(&((volatile coherent(system) device metal::atomic_uint *)value)->__s,expected,desired,0);
+}
+static inline void mesh_graph_coverage(volatile coherent(system) device metal::atomic_uint *state,
+    volatile coherent(system) device metal::atomic_uint *arrivals,volatile coherent(system) device const uint *expected,
+    uint announce,uint contribution) {
+    if(contribution)mesh_count_add(&arrivals->__s,contribution,0);
+    metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,
+                             static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
+    const uint ready=mesh_count_or(&state->__s,announce,0)|announce;
+    metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,
+                             static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
+    if((ready&5u)==5u&&mesh_count_or(&arrivals->__s,0u,0)==*expected)mesh_count_or(&state->__s,2u,0);
+}
+
 // FP8 E4M3 (fn: no infinity, S.1111.111 NaN) and, with e5, E5M2 (IEEE-like) [OCP 8-bit floating point, 2023]: a byte's
 // value, and a float rounded to nearest even, saturating E4M3 to NaN and E5M2 to infinity past their largest; the host's
 // codec is nccl-mesh.c's f8_to and f8_from, line for line.

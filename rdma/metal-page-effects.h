@@ -10,6 +10,49 @@ typedef struct isl_ctx isl_ctx;
 enum MetalPageBackend { MetalPageMetal, MetalPageCPU, MetalPageANE };
 enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPageSiteSimdgroup };
 
+/* The index producer declares the actual contribution domain as ordinary
+   pages. active and expected have one UInt32 per semantic transfer cut. Each
+   physical transfer retains its coverageCut projection. A masked cut has
+   active=expected=0. Counts are
+   values, never the size of a possible-address union. The same active operand
+   is consumed by the matched source/landing transport declaration. */
+@interface MetalPageCoverage : NSObject {
+@public
+    ncclMeshPageCoverage declaration;
+}
++ (instancetype)declaration:(ncclMeshPageCoverage)declaration;
+@end
+
+/* An existing source continuation may establish imported coverage operands.
+   Its ordinary typed reads carry their availability relation. relation maps
+   phase-local cells to coverage ordinals; flags are 1 for expected and 4 for
+   active. Numerical writers of these pages need no such annotation: Solve
+   already finds their defining accesses. */
+@interface MetalPageAnnouncement : NSObject {
+@public
+    MetalPageCoverage *coverage;
+    NSUInteger phase;
+    uint32_t flags;
+    isl_map *relation;
+}
++ (instancetype)coverage:(MetalPageCoverage *)coverage phase:(NSUInteger)phase
+    flags:(uint32_t)flags relation:(isl_map *)relation;
+@end
+
+/* One fixed-width row per source cell. Each Int64 is an actual selected cut;
+   -1 is an inactive slot. Repeated cut indices are separate contributions.
+   The numerical source consumes these same index pages. Their contents may
+   change; their shape and page binding are preparation operands. */
+@interface MetalPageContribution : NSObject {
+@public
+    MetalPageCoverage *coverage;
+    ncclMeshBuffer word, indices;      /* publication domain and selected local row ordinals */
+    NSUInteger phase, cells, width;
+}
++ (instancetype)coverage:(MetalPageCoverage *)coverage word:(ncclMeshBuffer)word phase:(NSUInteger)phase
+    cells:(NSUInteger)cells width:(NSUInteger)width indices:(ncclMeshBuffer)indices;
+@end
+
 @interface MetalPageAccess : NSObject {
 @public
     id root;
@@ -48,6 +91,8 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
     MTLSize grid;
     NSArray<MetalPageAccess *> *accesses;
     NSArray<NSDictionary *> *sites;    /* named source-local cell domains; preparation only */
+    NSArray<MetalPageContribution *> *contributions;
+    NSArray<MetalPageAnnouncement *> *announcements;
 }
 @property(nonatomic) BOOL coherentAccesses;
 @property(nonatomic) uint32_t frame;
@@ -69,7 +114,11 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
     id<MTLBuffer> payload;
     MetalTensorLayout *layout;          /* same selected bytes in payload-local offsets */
     isl_map *selection;                /* zero-based selected byte -> physical byte */
+    MetalPageCoverage *coverage;
+    NSUInteger coverageCut;
 }
+@property(nonatomic, retain) MetalPageCoverage *coverage;
+@property(nonatomic) NSUInteger coverageCut;
 /* owner identifies the declared collective occurrence, not a runtime handle.
    effect.first is the source/destination logical offset of selection byte 0. */
 + (instancetype)owner:(id)owner order:(NSUInteger)order effect:(ncclMeshPageEffect)effect
@@ -145,6 +194,11 @@ void MetalPageCommandSite(MetalPageCommand *, NSString *name, NSUInteger cells,
 /* Resource analysis and a wholly local site's empty effects use this same
    source ABI. Final specialization replaces these macros with compiled calls. */
 NSString *MetalPageSitesPrelude(void);
+/* Choose from the target entry's declared bindings, not reflection liveness.
+   generatedBindings retains slots introduced by explicit parameter recipes.
+   Capacity is the backend manifest operand. The caller retains this placement
+   through source emission and binding; NSNotFound means all slots are occupied. */
+NSUInteger MetalPageMetadataSlot(NSString *source, NSString *function, NSIndexSet *generatedBindings, NSUInteger capacity);
 // Place one retained source block into the complete function's order. Equal
 // local positions stay equal; no command or relation is reconstructed.
 void MetalPageEffectsOrder(NSArray<MetalPageCommand *> *commands,

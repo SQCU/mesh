@@ -243,6 +243,11 @@ struct mesh_trees;
 /* Recording context: an ncclMeshStream supplied by the common function recorder. */
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
+/* Coverage is ordinary page data over the declared cut domain. active[k] is
+   the payload mask; expected[k] is the number of numerical contributions.
+   Both are uint32 values. Their producers/arrivals are declared dependencies,
+   so zero-initialized storage never stands in for a completed masked cut. */
+typedef struct { ncclMeshBuffer active, expected; size_t cuts; } ncclMeshPageCoverage;
 /* Fused publication and landing bindings, in physical channel order. Each
    record contains six GPU addresses: d, s, argument record, a, v, progress
    (ncclMeshMetalPrelude's mesh_step_binding). The caller supplies room using

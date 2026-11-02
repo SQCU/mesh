@@ -137,7 +137,7 @@ def prepare(command):
     from .cpu import argument_record
     from .engines import coreml_graph
     definition = command['provider']
-    arguments = argument_record(command, {
+    arguments, _ = argument_record(command, {
         slot: _stream.page_backing(value)[0] for slot, value in enumerate(command['operands'])})
     return coreml_graph(definition['compiled'], command['source_views'], command['target_views'],
         configuration=definition['configuration'], contract=definition['contract'],
