@@ -45,6 +45,68 @@ def _root(operand):
     return operand.space.serial if isinstance(operand, TensorValue) else None
 
 
+def _spans(operand, access):
+    """a value access's exact byte runs in its space ((lo, hi), ...); () for a view's, which the region root keeps"""
+    from .operand import TensorValue
+    positions = access.get('positions')
+    return tuple(positions.spans()) if isinstance(operand, TensorValue) and positions is not None else ()
+
+
+def assign_pages(descriptions, invocation_of, spaces):
+    """The run's page assignment (design/page-maps-2026-11-02.md, "The run's page assignment, in order").
+
+    type: (descriptions, each command's accesses with their space root and byte runs, in their run order;
+    invocation_of(order) -> the command's run invocation; spaces, serial -> ValueSpace) -> dict(edges, arena, places,
+    pinned, items): the solve's ordered edges between commands (mesh_graph.frontier_edges), the arena's page count,
+    each arena item's first arena page, each pinned item's lease runs, and each (space serial, invocation)'s item key.
+    An item is a (space, invocation), or for a state one version: (out, i) and (in, i + 1) are one item. A state's
+    first and last versions are pinned to the caller's lease; every other item is packed in the arena, a page passing
+    from k to l only where k's last command is an ancestor of l's first over the edges (settled), never by run order.
+    A lease-backed space is its own constant map and makes no item."""
+    from mesh_graph import frontier_edges, ancestors
+    order = sorted(range(len(descriptions)), key=lambda i: (descriptions[i]['order'], i))
+    position = {command: at for at, command in enumerate(order)}
+    edges = frontier_edges([(c, a['root'], a['spans'], a['access']) for c in order
+                            for a in descriptions[c]['accesses'] if a.get('root') is not None and a.get('spans')])
+    inputs = {}
+    for earlier, later in edges:
+        inputs.setdefault(later, []).append(earlier)
+    known = {}
+    items, keys, versions = {}, {}, {}
+    for c in order:
+        invocation = invocation_of(descriptions[c]['order'])
+        for access in descriptions[c]['accesses']:
+            root = access.get('root')
+            if root is None or spaces[root].lease:
+                continue
+            space = spaces[root]
+            if space.state is not None:
+                state, side = space.state
+                key = ('state', state, invocation if side == 'in' else invocation + 1)
+                versions.setdefault(state, set()).add(key[2])
+            else:
+                key = ('space', root, invocation)
+            keys[root, invocation] = key
+            item = items.setdefault(key, dict(pages=space.pages, first=c, last=c, pins=space.pins))
+            item['last'], item['pages'] = c, max(item['pages'], space.pages)
+    pinned = {}
+    for state, seen in versions.items():
+        for version in (min(seen), max(seen)):
+            key = ('state', state, version)
+            if items[key]['pins']:
+                pinned[key] = items[key]['pins']
+    packed = [key for key in items if key not in pinned]
+    sizes = [items[key]['pages'] for key in packed]
+    begins = [position[items[key]['first']] for key in packed]
+    ends = [position[items[key]['last']] + 1 for key in packed]
+    def settled(done, next_):
+        last, first = items[packed[done]]['last'], items[packed[next_]]['first']
+        return last in ancestors(lambda v: inputs.get(v, ()), first, known)
+    places = _stream.interval_pack(sizes, begins, ends, max(1, sum(sizes)), settled) if packed else []
+    arena = max((place + size for place, size in zip(places, sizes)), default=0)
+    return dict(edges=edges, arena=arena, places=dict(zip(packed, places)), pinned=pinned, items=keys)
+
+
 def _through(relation, physical):
     """relation composed with a value's pages: through their written inverse where there is one, a preimage with no
     intermediate bytes to eliminate. Added by the LSTM demonstration session: then() left the operand's flattened bytes
@@ -311,7 +373,8 @@ def describe(programs):
                     announcements=tuple(command.get('announcements', ())),
                     accesses=tuple(dict(slot=access['slot'],
                         access=1 if access['side'] == 'reads' else 2, relation=access['relation'],
-                        root=_root(command['operands'][access['slot']]))
+                        root=_root(command['operands'][access['slot']]),
+                        spans=_spans(command['operands'][access['slot']], access))
                         for access in accesses)))
         descriptions.extend(made)
         if key is not None:
@@ -412,6 +475,8 @@ class Plan:
         # Each declared binding phase retains both its exact numerical cut
         # refinement and the dependency solution compiled for those cells.
         self.variants = {}
+        # each run's page assignment, in its append order (assign_pages), for the lowering
+        self.assignments = []
 
     def append(self, schedule):
         from .native import Program
@@ -452,8 +517,14 @@ class Plan:
                                      emission=key))
             descriptions = describe(programs)
             effects = _stream.PageEffectsPlan(self.algebra, descriptions)
-            self.variants[phase] = tuple(programs), effects
-        retained, effects = self.variants[phase]
+            self.variants[phase] = tuple(programs), effects, descriptions
+        retained, effects, descriptions = self.variants[phase]
+        # the run's page assignment (assign_pages): each (space, invocation)'s arena place or pin, kept for the lowering
+        from .operand import TensorValue
+        spaces = {operand.space.serial: operand.space for program in retained for command in program['commands']
+                  for operand in command.get('operands', ()) if isinstance(operand, TensorValue)}
+        invocation_of = lambda order: self.declarations[order // 2].get('run_invocation', 0)
+        self.assignments.append(assign_pages(descriptions, invocation_of, spaces))
         programs = source_copy(retained)
         programs, prepared = bind_effects(programs, prepared, schedule, effects)
         for program in programs:
