@@ -206,4 +206,29 @@ uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from
    one can free another: a composed page view's return unpins its owner leases, nccl-mesh.c leases_reap); a taken item
    leaves the array by swap-removal. The count left. */
 size_t mesh_graph_settle(void **items, size_t count, int (*take)(void *consumer, void *item), void *consumer);
+/* The classes of ordinals under a pairing (placement's view equalities, mesh-tensor-layout.m MetalTensorPairQuotient):
+   each position of a removed lattice joined with the kept position of the same flat index, every kept value below every
+   removed position. The classes in order of their least members number an ordinal p as p - C(p), C(p) the lattice's
+   positions below p, and a removed position as its kept partner. The lattice is origin + sum_k digit_k stride[k], digit_k
+   in [0, extent[k]), axes ascending by stride, each stride at least the span of the axes below (stride[k + 1] >=
+   stride[k] extent[k]). Written as integer terms over the ordinal p in [first, end) through the consumer's constructors
+   (`kept` the kept side's position at the digits of a removed one), so the only divisions are by the lattice's strides:
+   p is in the lattice where each digit of y = p - origin at its stride is within its extent, and C(y) counts axis by
+   axis from the top, min(q, extent) blocks of the axes below and those axes' count only while q is within its axis. */
+enum mesh_graph_relation { MESH_GRAPH_BELOW, MESH_GRAPH_AT_MOST, MESH_GRAPH_AT_LEAST, MESH_GRAPH_EQUAL };
+struct mesh_graph_lattice { int64_t origin; size_t axes; const int64_t *stride, *extent; };
+struct mesh_graph_terms {
+  void *(*constant)(void *consumer, int64_t value);
+  void *(*position)(void *consumer);
+  void *(*sum)(void *consumer, void *a, void *b);
+  void *(*scale)(void *consumer, void *a, int64_t factor);
+  void *(*quotient)(void *consumer, void *a, int64_t divisor, int remainder); /* floor(a / divisor), or a mod divisor */
+  void *(*minimum)(void *consumer, void *a, int64_t bound);
+  void *(*compare)(void *consumer, void *a, enum mesh_graph_relation relation, int64_t bound);
+  void *(*all)(void *consumer, void *const *conditions, size_t count);
+  void *(*select)(void *consumer, void *condition, void *yes, void *no);
+  void *(*kept)(void *consumer, void *const *digits, size_t axes);
+};
+void *mesh_graph_pair_classes(const struct mesh_graph_lattice *removed, int64_t first, int64_t end,
+                              const struct mesh_graph_terms *terms, void *consumer);
 #endif

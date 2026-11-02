@@ -822,3 +822,54 @@ size_t mesh_graph_settle(void **items, size_t count, int (*take)(void *consumer,
   }
   return count;
 }
+
+/* mesh-graph.h mesh_graph_pair_classes. Added by the layout algebra session (moved here from MetalTensorPairQuotient by
+   C9). */
+void *mesh_graph_pair_classes(const struct mesh_graph_lattice *removed, int64_t first, int64_t end,
+                              const struct mesh_graph_terms *terms, void *consumer) {
+  const size_t m = removed->axes;
+  const int64_t *stride = removed->stride, *extent = removed->extent, origin = removed->origin;
+  int64_t last = 0;
+  for (size_t k = 0; k < m; k++) last += stride[k] * (extent[k] - 1);
+  void *p = terms->position(consumer), *y = terms->sum(consumer, p, terms->constant(consumer, -origin));
+  void *digits[m ? m : 1], *inside[m + 3];
+  size_t conditions = 0;
+  for (size_t k = 0; k < m; k++)
+    digits[k] = terms->quotient(consumer, k + 1 < m ? terms->quotient(consumer, y, stride[k + 1], 1) : y, stride[k], 0);
+  void *matched = terms->kept(consumer, digits, m);
+  if (origin > first) inside[conditions++] = terms->compare(consumer, terms->position(consumer), MESH_GRAPH_AT_LEAST, origin);
+  if (origin + last < end - 1)
+    inside[conditions++] = terms->compare(consumer, terms->position(consumer), MESH_GRAPH_AT_MOST, origin + last);
+  if (stride[0] > 1)
+    inside[conditions++] = terms->compare(consumer, terms->quotient(consumer, y, stride[0], 1), MESH_GRAPH_EQUAL, 0);
+  for (size_t k = 0; k + 1 < m; k++)
+    if (stride[k + 1] > stride[k] * extent[k])
+      inside[conditions++] = terms->compare(consumer, terms->quotient(consumer, y, stride[k + 1], 1), MESH_GRAPH_BELOW,
+                                            stride[k] * extent[k]);
+  if (!conditions) return matched;
+  /* C(y) over the axes with contiguous neighbours joined */
+  int64_t level_stride[m], level_extent[m];
+  size_t depth = 0;
+  for (size_t k = 0; k < m; k++) {
+    if (depth && stride[k] == level_stride[depth - 1] * level_extent[depth - 1]) level_extent[depth - 1] *= extent[k];
+    else { level_stride[depth] = stride[k]; level_extent[depth++] = extent[k]; }
+  }
+  int zero = level_stride[0] <= 1;
+  void *below = zero ? terms->constant(consumer, 0)
+                     : terms->minimum(consumer, terms->quotient(consumer, y, level_stride[0], 1), 1);
+  int64_t points = 1;
+  for (size_t k = 0; k < depth; k++) {
+    void *q = terms->quotient(consumer, k + 1 < depth ? terms->quotient(consumer, y, level_stride[k + 1], 1) : y,
+                              level_stride[k], 0);
+    void *part = terms->scale(consumer, terms->minimum(consumer, q, level_extent[k]), points);
+    below = zero ? part : terms->sum(consumer, part, terms->select(consumer,
+        terms->compare(consumer, q, MESH_GRAPH_BELOW, level_extent[k]), below, terms->constant(consumer, 0)));
+    zero = 0;
+    points *= level_extent[k];
+  }
+  if (origin > first)
+    below = terms->select(consumer, terms->compare(consumer, terms->position(consumer), MESH_GRAPH_BELOW, origin),
+                          terms->constant(consumer, 0), below);
+  void *other = terms->sum(consumer, terms->position(consumer), terms->scale(consumer, below, -1));
+  return terms->select(consumer, conditions == 1 ? inside[0] : terms->all(consumer, inside, conditions), matched, other);
+}

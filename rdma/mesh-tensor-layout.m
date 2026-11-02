@@ -1,5 +1,6 @@
 #import "metal-recording.h"
 #import "mesh-index-relation.h"
+#include "mesh-graph.h"
 #include <isl/ilp.h>
 #include <isl/val.h>
 
@@ -1560,6 +1561,40 @@ static MetalTensorLayout *TensorWritten(NSArray *shape,id index,NSInteger low,NS
     result->_count=TensorCount(shape);result->_coordinates=[@[TensorSum(@[index,@(-low)])] copy];
     return result;
 }
+// mesh_graph_pair_classes' term constructors: the index terms of this file (TensorSum, TensorScale, TensorQuotient).
+struct TensorPairTerms { MetalTensorLayout *factored,*kept; const struct TensorPairAxis *axes; };
+static void *TensorPairConstant(void *c,int64_t v){(void)c;return @(v);}
+static void *TensorPairPosition(void *c){(void)c;return @"i";}
+static void *TensorPairSum(void *c,void *a,void *b){(void)c;return TensorSum(@[(id)a,(id)b]);}
+static void *TensorPairScale(void *c,void *a,int64_t f){(void)c;return TensorScale((id)a,(NSInteger)f);}
+static void *TensorPairQuotient(void *c,void *a,int64_t d,int r){(void)c;return TensorQuotient((id)a,(NSInteger)d,r!=0);}
+static void *TensorPairMinimum(void *c,void *a,int64_t b){(void)c;return @[@"min",(id)a,@(b)];}
+static void *TensorPairCompare(void *c,void *a,enum mesh_graph_relation relation,int64_t b) {
+    (void)c;NSString *op=relation==MESH_GRAPH_BELOW?@"lt":relation==MESH_GRAPH_AT_MOST?@"le":relation==MESH_GRAPH_AT_LEAST?@"ge":@"eq";
+    return @[op,(id)a,@(b)];
+}
+static void *TensorPairAll(void *c,void *const *conditions,size_t count) {
+    (void)c;NSMutableArray *all=[NSMutableArray arrayWithObject:@"and"];
+    for(size_t k=0;k<count;k++)[all addObject:(id)conditions[k]];
+    return all;
+}
+static void *TensorPairSelect(void *c,void *condition,void *yes,void *no){(void)c;return @[@"select",(id)condition,(id)yes,(id)no];}
+static void *TensorPairKept(void *c,void *const *digits,size_t m) {
+    const struct TensorPairTerms *pair=c;NSMutableArray *value=[NSMutableArray array];
+    if(pair->factored) {
+        [value addObject:@(pair->factored.offset)];
+        for(size_t k=0;k<m;k++)[value addObject:TensorScale((id)digits[k],pair->axes[k].kept)];
+    } else {
+        NSMutableArray *index=[NSMutableArray array],*flat=[NSMutableArray arrayWithObject:@(pair->kept.offset)];
+        for(size_t k=0;k<m;k++)[index addObject:TensorScale((id)digits[k],pair->axes[k].weight)];
+        NSArray *coordinates=pair->kept.coordinates;
+        for(NSUInteger d=0;d<coordinates.count;d++)[flat addObject:TensorScale(coordinates[d],[pair->kept.strides[d] integerValue])];
+        [value addObject:TensorSubstitute(TensorSum(flat),TensorSum(index))];
+    }
+    return TensorSum(value);
+}
+static const struct mesh_graph_terms TensorPairTermConstructors={TensorPairConstant,TensorPairPosition,TensorPairSum,
+    TensorPairScale,TensorPairQuotient,TensorPairMinimum,TensorPairCompare,TensorPairAll,TensorPairSelect,TensorPairKept};
 /* mesh-tensor-layout.h MetalTensorPairQuotient. With every kept value below every removed position, each class is one
    kept value with the removed positions paired to it, its least member that kept value, so the classes in order of their
    least members are the ordinals that are not removed, in order: p numbers as p - C(p), C(p) the removed positions below
@@ -1589,11 +1624,8 @@ NSArray<MetalTensorLayout *> *MetalTensorPairQuotient(NSUInteger count,MetalTens
     if(!storage.length){const struct TensorPairAxis point={1,0,1,1};[storage appendBytes:&point length:sizeof point];}
     struct TensorPairAxis *axes=storage.mutableBytes;const NSUInteger m=storage.length/sizeof *axes;
     qsort(axes,m,sizeof *axes,TensorPairAxisOrder);
-    NSInteger last=0;
-    for(NSUInteger k=0;k<m;k++) {
-        if(k+1<m&&axes[k+1].removed<axes[k].removed*axes[k].extent)return nil;
-        last+=axes[k].removed*(axes[k].extent-1);
-    }
+    // a lattice: each axis' stride at least the span of those below
+    for(NSUInteger k=0;k+1<m;k++)if(axes[k+1].removed<axes[k].removed*axes[k].extent)return nil;
     const NSInteger origin=B.offset+shift;
     NSInteger high=0;
     if(A){high=A.offset;for(NSUInteger k=0;k<m;k++)high+=MAX(0,axes[k].kept*(axes[k].extent-1));}
@@ -1602,52 +1634,16 @@ NSArray<MetalTensorLayout *> *MetalTensorPairQuotient(NSUInteger count,MetalTens
         const struct MetalTensorSpan span=kept.storageSpan;high=span.offset+(NSInteger)span.count-1;
     }
     if(high>=origin)return nil;
-    id y=TensorSum(@[@"i",@(-origin)]);NSMutableArray *digits=[NSMutableArray array];
-    for(NSUInteger k=0;k<m;k++)
-        [digits addObject:TensorQuotient(k+1<m?TensorQuotient(y,axes[k+1].removed,YES):y,axes[k].removed,NO)];
-    NSMutableArray *value=[NSMutableArray array];
-    if(A) {
-        [value addObject:@(A.offset)];
-        for(NSUInteger k=0;k<m;k++)[value addObject:TensorScale(digits[k],axes[k].kept)];
-    } else {
-        NSMutableArray *index=[NSMutableArray array],*flat=[NSMutableArray arrayWithObject:@(kept.offset)];
-        for(NSUInteger k=0;k<m;k++)[index addObject:TensorScale(digits[k],axes[k].weight)];
-        NSArray *coordinates=kept.coordinates;
-        for(NSUInteger d=0;d<coordinates.count;d++)[flat addObject:TensorScale(coordinates[d],[kept.strides[d] integerValue])];
-        [value addObject:TensorSubstitute(TensorSum(flat),TensorSum(index))];
-    }
-    id matched=TensorSum(value);
-    const NSInteger begin=(NSInteger)first,end=(NSInteger)(first+extent);
-    NSMutableArray *inside=[NSMutableArray array];
-    if(origin>begin)[inside addObject:@[@"ge",@"i",@(origin)]];
-    if(origin+last<end-1)[inside addObject:@[@"le",@"i",@(origin+last)]];
-    if(axes[0].removed>1)[inside addObject:@[@"eq",TensorQuotient(y,axes[0].removed,YES),@0]];
-    for(NSUInteger k=0;k+1<m;k++)if(axes[k+1].removed>axes[k].removed*axes[k].extent)
-        [inside addObject:@[@"lt",TensorQuotient(y,axes[k+1].removed,YES),@(axes[k].removed*axes[k].extent)]];
-    id classes=matched;
-    if(inside.count) {
-        // C(y) over the removed axes with contiguous neighbours joined, from the top: min(q, e) blocks of the lower axes'
-        // points, and the lower count only while q is within the axis
-        NSMutableData *joined=[NSMutableData data];
-        for(NSUInteger k=0;k<m;k++) {
-            struct TensorPairAxis *top=joined.length?(struct TensorPairAxis *)joined.mutableBytes+joined.length/sizeof *top-1:NULL;
-            if(top&&axes[k].removed==top->removed*top->extent)top->extent*=axes[k].extent;
-            else [joined appendBytes:axes+k length:sizeof *axes];
-        }
-        const struct TensorPairAxis *levels=joined.bytes;const NSUInteger depth=joined.length/sizeof *levels;
-        id below=levels[0].removed>1?@[@"min",TensorQuotient(y,levels[0].removed,YES),@1]:@0;NSInteger points=1;
-        for(NSUInteger k=0;k<depth;k++) {
-            id q=TensorQuotient(k+1<depth?TensorQuotient(y,levels[k+1].removed,YES):y,levels[k].removed,NO);
-            id part=TensorScale(@[@"min",q,@(levels[k].extent)],points);
-            below=[below isEqual:@0]?part:TensorSum(@[part,@[@"select",@[@"lt",q,@(levels[k].extent)],below,@0]]);
-            points*=levels[k].extent;
-        }
-        if(origin>begin)below=@[@"select",@[@"lt",@"i",@(origin)],@0,below];
-        id other=TensorSum(@[@"i",TensorScale(below,-1)]);
-        classes=@[@"select",inside.count==1?inside[0]:[@[@"and"] arrayByAddingObjectsFromArray:inside],matched,other];
-    }
+    /* the class rule and the lattice's count are the graph module's (mesh-graph.h mesh_graph_pair_classes); the terms
+       are built here, the kept side's position at a removed position's digits by the kept view's strides along the
+       common axes, or its own terms at their flat index */
+    NSMutableData *strides=[NSMutableData dataWithLength:m*sizeof(int64_t)],*extents=[NSMutableData dataWithLength:m*sizeof(int64_t)];
+    for(NSUInteger k=0;k<m;k++){((int64_t *)strides.mutableBytes)[k]=axes[k].removed;((int64_t *)extents.mutableBytes)[k]=axes[k].extent;}
+    const struct mesh_graph_lattice lattice={origin,m,strides.bytes,extents.bytes};
+    struct TensorPairTerms pair={A,kept,axes};
+    id classes=(id)mesh_graph_pair_classes(&lattice,(int64_t)first,(int64_t)(first+extent),&TensorPairTermConstructors,&pair);
     const NSInteger total=(NSInteger)count-(NSInteger)B.count;
-    id index=first?TensorSubstitute(classes,TensorSum(@[@"i",@(begin)])):classes;
+    id index=first?TensorSubstitute(classes,TensorSum(@[@"i",@((NSInteger)first)])):classes;
     return @[[MetalTensorLayout shape:@[@(total)] strides:@[@1] offset:0 maps:@{} indices:nil],
         TensorWritten(@[@(extent)],index,0,total-1)];
 }
