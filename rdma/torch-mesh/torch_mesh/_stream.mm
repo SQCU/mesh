@@ -1282,6 +1282,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   // design/page-maps-2026-11-02.md: an MPS region tensor as a value, integers only: one piece over its storage's
   // elements (its sizes, strides and storage offset, element coordinates of its storage), its lease's page runs
   // (first virtual page, pages, first physical page) and the region's page size. No address crosses here.
+  // the region's page size: a chooser's figure for its virtual spaces (design/page-maps-2026-11-02.md)
+  module.def("region_page_bytes", []() {
+    uint64_t page_bytes = 0;
+    TORCH_CHECK(!ncclMeshRegionPageBytes(&page_bytes), "region_page_bytes: ", ncclGetLastError(nullptr));
+    return page_bytes;
+  });
   module.def("tensor_value", [](const at::Tensor &tensor) {
     TORCH_CHECK(tensor.is_mps(), "tensor_value: an MPS region tensor (design/page-maps-2026-11-02.md)");
     const auto runs = lease_pages(tensor.storage().data_ptr().get());

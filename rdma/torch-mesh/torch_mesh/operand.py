@@ -10,31 +10,51 @@ from dataclasses import dataclass, replace
 from . import _stream
 
 
-@dataclass(frozen=True, eq=False)
-class TensorValue:
-    """design/page-maps-2026-11-02.md: a value, a chooser's only operand.
+@dataclass(eq=False)
+class ValueSpace:
+    """design/page-maps-2026-11-02.md: one family's virtual pages, shared by every value placed in it.
 
-    type: layout: logical index -> element of the value's own virtual space (a _stream.TensorLayout of element
-    offsets from 0); dtype: its element type, whose width enters only at the final lowering; pages: the virtual pages
-    its elements reach at `page_bytes`; state: the identity a state's versions share (None for a value with one
-    version); lease: the program's page runs ((first virtual page, pages, first physical page), ...) where a caller's
-    tensor backs it, a constant map; () where the run's Plan allocates its map per occurrence.
-    It holds no storage, no address and no byte offset: the final lowering alone specializes it into addresses."""
-    layout: _stream.TensorLayout
-    dtype: object
+    type: pages, the virtual pages it holds at page_bytes; state, the identity a state's versions share (None for a
+    space with one version); lease, the program's page runs ((first virtual page, pages, first physical page), ...)
+    where a caller's tensor is the space, a constant map; () where the run's Plan allocates its map per occurrence
+    (mesh_page_allocate). Identity is the object's: two values of one space are views of one storage."""
     pages: int
     page_bytes: int
     state: object = None
     lease: tuple = ()
 
+
+@dataclass(frozen=True, eq=False)
+class TensorValue:
+    """design/page-maps-2026-11-02.md: a value, a chooser's only operand.
+
+    type: space, its ValueSpace; layout, logical index -> element offset in the space at `dtype`'s width (a
+    _stream.TensorLayout); dtype, whose width enters only at the final lowering. It holds no storage, no address
+    and no byte offset: the final lowering alone specializes it into addresses."""
+    space: ValueSpace
+    layout: _stream.TensorLayout
+    dtype: object
+
     @classmethod
     def of_lease(cls, tensor, *, state=None):
-        """type: a caller's MPS region tensor -> its value: one piece over its storage's elements, its lease's runs.
-        The runs come from the allocator's binding (_stream.tensor_value), never from the tensor's address."""
+        """type: a caller's MPS region tensor -> its value over its storage's space, the lease's runs read through the
+        allocator's binding (_stream.tensor_value), never from the tensor's address."""
         value = _stream.tensor_value(tensor)
-        layout = _stream.TensorLayout(tuple(value['extent']), tuple(value['stride']), value['origin'])
         pages = sum(count for _, count, _ in value['runs'])
-        return cls(layout, tensor.dtype, pages, value['page_bytes'], state, tuple(tuple(run) for run in value['runs']))
+        space = ValueSpace(pages, value['page_bytes'], state, tuple(tuple(run) for run in value['runs']))
+        return cls(space, _stream.TensorLayout(tuple(value['extent']), tuple(value['stride']), value['origin']), tensor.dtype)
+
+    @classmethod
+    def virtual(cls, extent, page_bytes, *, state=None):
+        """type: a family's byte extent -> a uint8 value over a new space of ceil(extent / page_bytes) virtual pages,
+        its map the run's Plan's to assign per occurrence."""
+        import torch
+        pages = -(-int(extent) // int(page_bytes))
+        return cls(ValueSpace(pages, int(page_bytes), state), _stream.TensorLayout((int(extent),), (1,)), torch.uint8)
+
+    def view(self, layout, dtype=None):
+        """type: a layout over the same space -> a value of it (same identity of pages)."""
+        return TensorValue(self.space, layout, self.dtype if dtype is None else dtype)
 
     @property
     def shape(self):

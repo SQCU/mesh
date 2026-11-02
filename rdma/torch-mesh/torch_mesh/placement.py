@@ -1,6 +1,6 @@
 """Preparation-only tensor placement relations, shared by graph binding/lowering."""
 import torch
-from .operand import TensorView, descriptor, rebase_typed
+from .operand import TensorValue, TensorView, descriptor, rebase_typed
 
 
 def output(shape, dtype, device, out=None):
@@ -25,9 +25,29 @@ def relation(described, placed, view):
 
 
 def alias(described, placed, view):
+    """type: (a declared tensor, its placed value, a view of it) -> the view's value over the same space, its layout
+    at the view's dtype (design/page-maps-2026-11-02.md)."""
+    if isinstance(placed, TensorValue):
+        return placed.view(relation(described, placed.layout, view), view.dtype)
     placed = TensorView.of(placed)
     layout = relation(described, placed.layout, view)
     return TensorView(placed.storage_as(view.dtype), layout)
+
+
+def allocate_value(layout, dtype, *, extent=0, alignment=1, page_bytes):
+    """type: a family's chosen layout, its byte extent and alignment -> a value over a new virtual space. Element 0 of
+    a space is page aligned, so any alignment dividing page_bytes holds with no padding; a larger one is the
+    allocator's, not a chooser's address arithmetic (design/page-maps-2026-11-02.md). Replaces layout.allocate's lease
+    and its base-address padding for function-internal families."""
+    import math
+    width = dtype.itemsize
+    if page_bytes % math.lcm(alignment, width):
+        raise ValueError(f'an alignment of {alignment} bytes past the page size {page_bytes} is the page '
+                         'allocator\'s to meet (design/page-maps-2026-11-02.md)')
+    first, length = layout.storage_span()
+    origin = -min(0, first)
+    count = -(-max((first + length + origin) * width, extent) // width)
+    return TensorValue.virtual(count * width, page_bytes).view(layout.shift(origin), dtype)
 
 
 class Placements:
@@ -124,7 +144,7 @@ class Placements:
         """Solve the retained logical families, then bind their actual pages."""
         import math
         from . import _stream
-        from .layout import allocate, prefer_layout
+        from .layout import prefer_layout
         from .operand import layout_configuration, required_layout
         from .compilation import layout_preferences, layout_choice
         if described is not None:
@@ -182,21 +202,30 @@ class Placements:
                     if report:
                         layout_choice(record)
                 return solved['layout'], solved['extent'], solved['alignment']
+            page_bytes = _stream.region_page_bytes()
             if not fixed:
                 mapping, extent, alignment = choose(domain.count, demands, typed)
-                placed = allocate(mapping, torch.uint8, members[0]['logical'].device.type, extent=extent, alignment=alignment)
-                self.owners.append(placed.storage)
+                placed = allocate_value(mapping, torch.uint8, extent=extent, alignment=alignment, page_bytes=page_bytes)
+                self.owners.append(placed.space)
             else:
-                actuals = [TensorView.of(actual) for _, _, actual in fixed]
-                owners = [value.storage for value in actuals]
-                physical_pages, page = _stream.page_domain(owners)
-                fixed_bytes = physical_pages.components(page).reshape((physical_pages.count * page,))
-                fixed_domain = _stream.TensorLayout(tuple(fixed_bytes.shape), (1,))
+                # Changed by the LSTM demonstration session (2026-11-02, the joint change of
+                # design/page-maps-2026-11-02.md): a family touching a caller's tensor is placed in that caller
+                # storage's own byte coordinates, its space the caller's value (TensorValue.of_lease). The region byte
+                # positions of _stream.page_domain and physical_layout, and the remapped storage of page_storage, are
+                # gone: they made every version of a state alias the caller's pages, and they were the large constants
+                # of the declaration's layout algebra (d-r3). What must stay: a family's values at the caller's own
+                # positions where it fixes them.
+                storages = {}
+                for _, _, actual in fixed:
+                    storages.setdefault(actual.storage.untyped_storage()._cdata, actual)
+                if len(storages) != 1:
+                    raise ValueError('one family touches several caller storages; each needs its own family '
+                                     '(design/page-maps-2026-11-02.md)')
+                caller = next(iter(storages.values()))
                 def assignments():
                     return _stream.TensorLayout.assign(domain.count,
-                        [use(logical, view) for logical, view, _ in fixed],
-                        [_stream.physical_layout(actual) for actual in actuals])
-                covered, physical, _ = assignments()
+                        [use(logical, view) for logical, view, _ in fixed], [actual.layout for _, _, actual in fixed])
+                covered, physical, missing = assignments()
                 unique = physical.intersection(physical)
                 representatives = physical.rebase(unique, unique.rebase(physical, covered))
                 if not representatives.equivalent(covered):
@@ -205,37 +234,18 @@ class Placements:
                     for member in members:
                         member['mapping'] = member['mapping'].rebase(domain, mapping)
                     domain = family['domain'] = changed
-                    covered, physical, _ = assignments()
-                    typed = [(view.rebase(family_domain, mapping), width) for view, width in typed]
-                    demands = [(view.rebase(family_domain, mapping), width, kind, target, capacity, aligned)
-                               for view, width, kind, target, capacity, aligned in demands]
-                # Include complete caller pages as ordinary typed fields. The
-                # unknown bytes remain reserved; no new value can overwrite them.
-                joint, original, pages = _stream.TensorLayout.unite(domain, fixed_domain,
-                    covered, physical.rebase(fixed_bytes, fixed_domain))
-                typed = [(view.rebase(domain, original), width) for view, width in typed]
-                typed.append((pages, page))
-                demanded = [(view.rebase(domain, original), width, kind, target, capacity, aligned)
-                            for view, width, kind, target, capacity, aligned in demands]
-                mapping, extent, alignment = choose(joint.count, demanded, typed)
-                alignment = math.lcm(alignment, page)
-                placed_pages = pages.rebase(joint, mapping).reshape((physical_pages.count, page)).elements(page)
-                first, length = mapping.storage_span()
-                count = -(-max(first + length, extent) // page)
-                known, locations, missing = _stream.TensorLayout.assign(count, [placed_pages], [physical_pages])
+                    covered, physical, missing = assignments()
                 if missing.count:
-                    from . import empty
-                    extra = empty((missing.count * page,), dtype=torch.uint8, device=actuals[0].device.type)
-                    owners.append(extra)
-                    extra_pages = _stream.physical_layout(extra).reshape((missing.count, page)).elements(page)
-                    known, locations, missing = _stream.TensorLayout.assign(count, [known, missing], [locations, extra_pages])
-                order = _stream.TensorLayout((count,), (1,)).rebase(known, locations)
-                storage = _stream.page_storage(owners, order, alignment)
-                placed = TensorView(storage, original.rebase(joint, mapping))
-                self.owners.append(storage)
+                    raise ValueError('a family reaches past its caller storage; its other values need a space of '
+                                     'their own (design/page-maps-2026-11-02.md)')
+                whole = torch.empty((0,), dtype=torch.uint8, device=caller.storage.device).set_(
+                    caller.storage.untyped_storage(), 0, (caller.storage.untyped_storage().nbytes(),))
+                space = TensorValue.of_lease(whole)
+                placed = space.view(_stream.TensorLayout((domain.count,), (1,)).rebase(covered, physical))
+                self.owners.append(placed.space)
             for member in members:
                 mapping = member['mapping'].rebase(domain, placed.layout)
-                self.bindings.append((member['logical'], TensorView(placed.storage, mapping)))
+                self.bindings.append((member['logical'], placed.view(mapping)))
 
 
 def _selected_layout(record, algebra):
