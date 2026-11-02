@@ -46,24 +46,48 @@ def lower_value(value, invocation, assignment, arena):
     TensorView passes unchanged."""
     if not isinstance(value, TensorValue):
         return value
+    storage, first = _storage_at(value, invocation, assignment, arena)
+    return _view(storage, value, first)
+
+
+def _storage_at(value, invocation, assignment, arena):
+    """type: a TensorValue at an invocation -> (the storage tensor its space lies in from byte 0, the byte of that storage
+    where the space's byte 0 sits): the arena or a state's whole lease at its run's place, a lease space's own storage
+    at 0 (design/page-maps-2026-11-02.md: the lowering reindexes a place through its bin)."""
     space = value.space
     if space.lease:
-        return _view(_LEASES[space.serial].view(torch.uint8).reshape(-1), value, 0)
+        return _whole(_LEASES[space.serial]), 0
     key = assignment['items'].get((space.serial, invocation))
     if key is None:
         raise ValueError('a value with no page assignment at its invocation (design/page-maps-2026-11-02.md)')
     runs = assignment['places'][key]
     if len(runs) != 1:
-        # a TensorView is one storage and an affine layout: the contiguous operand type. A value on several runs is
-        # reached through its page table, the paged operand type of design/page-maps-2026-11-02.md, "Kernel addressing
-        # from a value's pieces"; no command here takes it yet
         raise ValueError('a paged value reached a contiguous operand (design/page-maps-2026-11-02.md)')
     place, _ = runs[0]
     for first, pages, owner in assignment['bins']:
         if first <= place < first + pages:
             storage = arena if owner == 'arena' else _whole(_PINS[owner[1]])
-            return _view(storage, value, (place - first) * space.page_bytes)
+            return storage, (place - first) * space.page_bytes
     raise ValueError('a value placed in no bin (design/page-maps-2026-11-02.md)')
+
+
+def bind_spaces(values, invocation, assignment, arena):
+    """type: an occurrence's operand values (TensorValues among them), its run invocation, the run's page assignment and
+    arena -> the storage tensors they lie in, which the occurrence holds. Each value's space is bound to its
+    occurrence's bytes (nccl.h ncclMeshSpaceBind: a lease's address, the byte of its space's first) before the
+    occurrence lowers: the one place a lease address passes to the library (design/page-maps-2026-11-02.md, "The
+    collective lowering in two phases")."""
+    from . import _stream
+    from .backend import ffi, LIB, check, space_handle
+    held = []
+    for value in values:
+        if not isinstance(value, TensorValue):
+            continue
+        storage, first = _storage_at(value, invocation, assignment, arena)
+        address, _, _ = _stream.page_backing(storage)
+        check(LIB.ncclMeshSpaceBind(space_handle(value.space), ffi.cast('void *', address), first))
+        held.append(storage)
+    return held
 
 
 def lower_programs(programs, assignment, invocation_of, page_bytes, device):

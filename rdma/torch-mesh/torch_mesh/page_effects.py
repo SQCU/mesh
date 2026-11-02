@@ -110,6 +110,27 @@ def _transfer_accesses(t, transfer, post_key):
     return accesses, links
 
 
+def _declared_cuts(transfers):
+    """The collective's declared cuts as value layouts (design/page-maps-2026-11-02.md, "Cuts before any lowering"): each
+    landing's bytes in its destination value, a flat view of the value's space, read from the declaration without
+    lowering. A cut off its element width is a declaration defect, raised."""
+    cuts, seen = [], set()
+    for transfer in transfers:
+        for r in transfer['records']:
+            if r['op'] == _SEND or r['buffer'] != 0 or not r['bytes']:
+                continue
+            destination = transfer['views'][r['call']][1]
+            placed = _value_bytes(destination, r['offset'] - transfer['buffers'][r['call']]['result_origin'], r['bytes'])
+            if placed is None or placed in seen:
+                continue
+            seen.add(placed)
+            width = destination.dtype.itemsize
+            if placed[1] % width or placed[2] % width:
+                raise ValueError('a landing cut off its element width (design/page-maps-2026-11-02.md)')
+            cuts.append(destination.flat(placed[1] // width, placed[2] // width))
+    return cuts
+
+
 def assign_pages(descriptions, invocation_of, spaces, transfers=()):
     """The run's page assignment by the run's solve (mesh-page-map.h mesh_run_solve; design/page-maps-2026-11-02.md,
     "The run's solve, each choice and its ground").
@@ -568,7 +589,7 @@ class Plan:
     def append(self, schedule):
         from .native import Program
         from .compilation import bind
-        prepared, phase = [], []
+        prepared = []
         # each collective occurrence's transfers, read from its declaration before any occurrence lowers (the C
         # cursor counts every lowering of a communicator, a WRITE's too): the run's solve's transport accesses
         from .backend import group_transfers
@@ -584,20 +605,11 @@ class Plan:
             _, records, buffers = group_transfers(step['group'], behind, len(step['calls']))
             transfers.append(dict(order=2 * index, invocation=step.get('run_invocation', 0), records=records,
                                   buffers=buffers, views=step['views']))
-        for index, step in enumerate(self.declarations):
-            if 'transfer' not in step:
-                continue
-            bound = (_stream.view_write_operands(step['bindings'], step['group'].handle, 0)
-                     if step['transfer'] == 'write' else
-                     _stream.Occurrence(step['group'].handle, step['operands']))
-            bound.lower(step.get('invocation', 0))
-            frames = tuple(self.origins[self.positions[index] + offset] + 1 for offset in step.get('frame_orders', ()))
-            prepared.append((2 * index, bound, frames))
-            phase.append(tuple(bound.schema(self.algebra.ctx)))
-        phase = tuple(phase)
+        # values carry no binding phase, so the plan has one variant, and its cuts are the collective's declared ones,
+        # read without lowering (design/page-maps-2026-11-02.md, integration steps 1 and 2)
+        phase = ()
         if phase not in self.variants:
-            cuts = [TensorView(storage, layout, 0) for _, bound, _ in prepared
-                    for storage, layout in bound.source_views(self.algebra.ctx)]
+            cuts = _declared_cuts(transfers)
             programs, emitted = [], {}
             for index, step in enumerate(self.declarations):
                 if 'transfer' in step:
@@ -636,6 +648,22 @@ class Plan:
         page_bytes = next(iter(spaces.values())).page_bytes if spaces else 1
         programs, arena = lower_programs(programs, self.assignments[-1], invocation_of, page_bytes, 'mps')
         self.arenas = getattr(self, 'arenas', []) + [arena]
+        # each occurrence's spaces bound to its runs, then the occurrence lowered, in declaration order: the C
+        # cursor's (lowering.bind_spaces; design/page-maps-2026-11-02.md, "The collective lowering in two phases")
+        from .lowering import bind_spaces
+        for index, step in enumerate(self.declarations):
+            if 'transfer' not in step:
+                continue
+            if step['transfer'] == 'write':
+                bound = _stream.view_write_operands(step['bindings'], step['group'].handle, 0)
+            else:
+                values = [value for pair in step['views'] for value in pair if value is not None]
+                held = bind_spaces(values, step.get('run_invocation', 0), self.assignments[-1], arena)
+                operands = [operand for operand in step['operands'] if not isinstance(operand, TensorValue)] + held
+                bound = _stream.Occurrence(step['group'].handle, operands)
+            bound.lower(step.get('invocation', 0))
+            frames = tuple(self.origins[self.positions[index] + offset] + 1 for offset in step.get('frame_orders', ()))
+            prepared.append((2 * index, bound, frames))
         programs, prepared = bind_effects(programs, prepared, schedule, effects)
         for program in programs:
             with bind(program['configuration'], algebra=self.algebra):
