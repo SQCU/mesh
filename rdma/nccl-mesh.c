@@ -3296,7 +3296,23 @@ static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,con
   }
   // One ordinary initial solve generates only previously undeclared domains.
   // Retained columns remain authoritative even when other domains are new.
-  if(!result&&fresh)result=flow_solve(comm,r->demands,made,&initial);
+  /* Equal demands (route_demand_equal) are one commodity: solved once with their bytes summed, the same concurrent flow
+     (identical commodities share one path distribution), its trees read through representative[d] below. Changed by
+     the LSTM demonstration session: every occurrence of a repeated function's calls was its own commodity, and the
+     solve (about ln(links)/eps^2 rounds over every commodity) held a 64-step LSTM's plan past 60 s on every rank
+     (ncclMeshCommPlan in flow_solve, m5ult4, 2026-11-01). What must stay: one commodity a distinct demand. */
+  if(!result&&fresh) {
+    struct mesh_demand *merged=calloc((size_t)made+1,sizeof *merged);
+    uint32_t *index=calloc((size_t)made+1,sizeof *index),*original=calloc((size_t)made+1,sizeof *original),distinct=0;
+    if(!merged||!index||!original)result=fail(ncclSystemError,"allocating distinct routing demands");
+    for(uint32_t d=0;d<made&&!result;d++) {
+      if(representative[d]==d){index[d]=distinct;original[distinct]=d;merged[distinct++]=r->demands[d];}
+      else{struct mesh_demand *one=merged+index[representative[d]];one->up+=r->demands[d].up;one->down+=r->demands[d].down;}
+    }
+    if(!result)result=flow_solve(comm,merged,distinct,&initial);
+    for(uint32_t t=0;!result&&t<initial.count;t++)initial.demand[t]=original[initial.demand[t]];
+    free(merged);free(index);free(original);
+  }
   size_t columns=0;
   for(uint32_t d=0;d<made&&!result;d++) {
     const ncclMeshRouting *p=prior[d].route;
