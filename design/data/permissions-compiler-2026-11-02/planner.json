@@ -83,5 +83,102 @@
   "handles": "Tells an all-to-all's send operand from its receive operand by fixed buffer numbers.",
   "group": "operand-identity",
   "replacement": "a step names the declared operand (source or destination) whose page map composed with its layout gives segment q's virtual pages"
+ },
+ {
+  "file": "rdma/mesh-collective.c",
+  "line": 1,
+  "lines": "1",
+  "function": "file include of mesh-call.h",
+  "scope": "chooser",
+  "violation": "chooser has access",
+  "abstraction": "mesh-call.h and mesh-dataflow.h: struct mesh_ctx {struct hdr *M; void *view}, mesh_section_address returning void *, mesh_stream_view's _Atomic uint64_t * words",
+  "handles": "Nothing this file uses: the solver calls none of the declarations mesh-call.h or mesh-dataflow.h bring in.",
+  "group": "new:header-scope",
+  "replacement": "include mesh-plan.h and mesh-graph.h alone; region mapping and stream words stay in the effector's files",
+  "note": "same group as mesh-plan.h:5: header scope gives the solver a pointer-yielding API it never needs."
+ },
+ {
+  "file": "rdma/mesh-collective.c",
+  "line": 405,
+  "lines": "386,405-429,437",
+  "function": "mesh_compile_sets (MESH_ALLREDUCE whole 1)",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "buffer[u*n+v] = next++ from 2: a numbered scratch buffer per recipient whose heaviest tree has u inner; program scratch = the most a rank uses",
+  "handles": "Gives each forwarded partial of a single-phase all-reduce storage apart from the operand and from other recipients' partials.",
+  "group": "scratch-placement",
+  "replacement": "lifetime allocation of each partial value onto physical pages; the program names the partial (tree, recipient), not a buffer number"
+ },
+ {
+  "file": "rdma/mesh-collective.c",
+  "line": 406,
+  "lines": "406-410,423-427",
+  "function": "mesh_compile_sets (MESH_ALLREDUCE whole 1)",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "buffer[u*n+u] = 1, a separate immutable source generation, unless the operand is sent to one node only and u receives no result (then buffer 0)",
+  "handles": "Keeps a rank's original contribution readable by its SENDs while buffer 0 already receives the reduced result.",
+  "group": "war-reuse",
+  "replacement": "lifetime allocation: the contribution and the result are two values whose lifetimes overlap, so they get different physical pages; no fixed generation number"
+ },
+ {
+  "file": "rdma/mesh-collective.c",
+  "line": 437,
+  "lines": "437,470,473",
+  "function": "mesh_compile_sets",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "receiver buffer 0 where w is the recipient (437); out = in = 0 for every move of the tree forms (470, 473): the operand made in place",
+  "handles": "Lands each reduction and broadcast piece in the caller's operand so the result needs no copy.",
+  "group": "in-place",
+  "replacement": "lifetime allocation: the result's virtual pages map onto the operand's physical pages where the solved lifetimes allow; moves name values, not buffer 0"
+ },
+ {
+  "file": "rdma/mesh-collective.c",
+  "line": 476,
+  "lines": "476-485",
+  "function": "mesh_compile_sets (coalescing)",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "messages joined where last->out == m->out and last->in == m->in (hand-numbered buffers) and parts adjoin",
+  "handles": "Joins adjoining parts sent between the same two nodes in one round into one message.",
+  "group": "operand-identity",
+  "replacement": "image: coalesce where the two parts' page images adjoin under the composed map, at both ends"
+ },
+ {
+  "file": "rdma/mesh-collective.c",
+  "line": 690,
+  "lines": "654,684,690",
+  "function": "mesh_program_check_members",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "definite initialization kept per numbered buffer b < scratch + 1; every buffer, scratch included, defined with the operand's range at the start",
+  "handles": "Checks a program reads only defined values, taking every scratch buffer as a copy of the operand made at the call's start.",
+  "group": "scratch-placement",
+  "replacement": "preimage: a read is defined where its virtual pages lie in the image of earlier writes under the composed map; no scratch is an operand copy"
+ },
+ {
+  "file": "rdma/mesh-collective.c",
+  "line": 701,
+  "lines": "701-703",
+  "function": "mesh_program_check_members",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "the required result checked in defined[0], buffer 0, the operand made in place",
+  "handles": "Checks a required result is left defined, assuming it lies in buffer 0.",
+  "group": "in-place",
+  "replacement": "preimage: the result is defined where the destination's virtual pages lie in the image of the program's writes"
+ },
+ {
+  "file": "rdma/mesh-collective.c",
+  "line": 863,
+  "lines": "861-864",
+  "function": "mesh_counted_steps",
+  "scope": "chooser",
+  "violation": "chooser picks a map by hand",
+  "abstraction": "step buffer = q >= nodes: 0 for each SEND, 1 for each COPY",
+  "handles": "Tells an all-to-all's send operand from its receive operand by fixed buffer numbers.",
+  "group": "operand-identity",
+  "replacement": "a step names the declared source or destination operand, whose page map composed with its layout gives segment q's virtual pages"
  }
 ]
