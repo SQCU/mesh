@@ -5883,6 +5883,7 @@ static size_t coverage_begin(const struct call *c,uint32_t transaction,uint32_t 
 struct coverage_span {
   size_t transport,first,units,cut,before;
   ncclMeshPageCoverage values;
+  void *demand;
 };
 static ncclMeshBuffer coverage_slot(ncclMeshBufferSlots slots,uint64_t invocation) {
   ncclMeshBuffer value=slots.buffer;
@@ -5925,8 +5926,8 @@ static ncclResult_t source_coverage(struct issue *u) {
       ncclMeshBuffer active=coverage_slot(b->active,c->invocation),expected=coverage_slot(b->expected,c->invocation);
       struct where a={active.buffer,active.offset},e={expected.buffer,expected.offset};
       result=as_metal(&a);if(!result)result=as_metal(&e);if(result)break;
-      selected[count++]=(struct coverage_span){t,start,unit-start,b->cut,u->source_calls[b->before],
-        {{a.buffer,a.offset},{e.buffer,e.offset},b->cuts}};
+      selected[count++]=(struct coverage_span){.transport=t,.first=start,.units=unit-start,.cut=b->cut,
+        .before=u->source_calls[b->before],.values={{a.buffer,a.offset},{e.buffer,e.offset},b->cuts},.demand=b->demand};
     }
   }
   if(!result&&!count){free(selected);return ncclSuccess;}
@@ -5966,7 +5967,7 @@ static ncclResult_t source_coverage(struct issue *u) {
       mask_effects[k]=metal_page_selection(u->source,&ready,table.buffer,written,b->units);
       projections[k]=(struct metal_coverage_projection){.transport=b->transport,.first=cuts[b->first],
         .bytes=cuts[b->first+b->units]-cuts[b->first],.base=transport->direction?m->end.n-m->pages.n:m->laid.n-m->pages.n,
-        .ends=cuts,.units=m->pages.n,.values=b->values,.cut=b->cut};
+        .ends=cuts,.units=m->pages.n,.values=b->values,.cut=b->cut,.demand=b->demand};
       pthread_mutex_lock(&attach_lock);
       int error=owned_add(&u->owned,address_of((struct where){b->values.active.buffer,b->values.active.offset}),OWNED_TABLE);
       if(!error)error=owned_add(&u->owned,address_of((struct where){b->values.expected.buffer,b->values.expected.offset}),OWNED_TABLE);

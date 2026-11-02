@@ -141,6 +141,7 @@ struct metal_coverage_projection {
   uint64_t base;
   const uint64_t *ends;
   ncclMeshPageCoverage values;
+  void *demand;
 };
 struct metal_result metal_coverage(struct metal_program *,const struct metal_coverage_projection *,size_t count);
 void metal_coverage_announcement(struct metal_program *,ncclMeshPageCoverage,size_t cut);

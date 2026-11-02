@@ -25,6 +25,21 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
 + (instancetype)declaration:(ncclMeshPageCoverage)declaration;
 @end
 
+/* One semantic publication demand before routing or packetization. Identity
+   belongs to this source value generation, independently of mask/count page
+   aliases. selection maps ordered demand bytes to canonical region bytes;
+   before is its source boundary. Projection binds coverage/cut before CommPlan.
+   Physical children retain this same object until source specialization. */
+@interface MetalPageWriteDemand : NSObject {
+@public
+    NSUInteger before, cut;
+    isl_map *selection;
+    MetalPageCoverage *coverage;
+}
++ (instancetype)before:(NSUInteger)before selection:(isl_map *)selection;
+- (void)bind:(MetalPageCoverage *)coverage cut:(NSUInteger)cut;
+@end
+
 /* An existing source continuation may establish imported coverage operands.
    Its ordinary typed reads carry their availability relation. relation maps
    phase-local cells to coverage ordinals; flags are 1 for expected and 4 for
@@ -82,6 +97,32 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
 - (MetalPageAccess *)resolve:(isl_ctx *)context displacement:(NSInteger)displacement;
 @end
 
+@class MetalPageCommand;
+/* These are the original store semantics, not a backend scheduling choice.
+   Ordered assignments retain their source sequence; disjoint rows never
+   invent one. Reduction rows retain their original shared output generation. */
+enum MetalPageWriteOwnership { MetalPageWriteDisjoint, MetalPageWriteOrdered, MetalPageWriteReduction };
+
+/* A retained selector source emits one Int64 per potential numerical writer.
+   -1 explicitly means inactive; other values are destination storage-cell
+   ordinals. `groups` maps those rows to the numerical phase's source cells.
+   Source projections run through the ordinary parameter/binding lowerer.
+   No selector function or writer descriptor survives into execution. */
+@interface MetalPageWriter : NSObject {
+@public
+    MetalPageCommand *producer, *command;
+    NSUInteger phase, cells, cellBytes;
+    ncclMeshBuffer selected, destination;
+    MetalTensorLayout *groups, *sequence;
+    enum MetalPageWriteOwnership ownership;
+}
++ (instancetype)producer:(MetalPageCommand *)producer command:(MetalPageCommand *)command
+    phase:(NSUInteger)phase cells:(NSUInteger)cells selected:(ncclMeshBuffer)selected
+    destination:(ncclMeshBuffer)destination cellBytes:(NSUInteger)cellBytes
+    groups:(MetalTensorLayout *)groups ownership:(enum MetalPageWriteOwnership)ownership
+    sequence:(MetalTensorLayout *)sequence;
+@end
+
 @interface MetalPageCommand : NSObject {
 @public
     NSUInteger order, groups, metadataSlot;
@@ -95,6 +136,7 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
     NSArray<NSDictionary *> *sites;    /* named source-local cell domains; preparation only */
     NSArray<MetalPageContribution *> *contributions;
     NSArray<MetalPageAnnouncement *> *announcements;
+    NSArray<MetalPageWriter *> *writers;
     ncclMeshBuffer activity;           /* ordinary UInt32 entry predicate, absent for an unconditional source */
     MetalPageAccess *activityAccess;   /* its retained read in accesses */
 }
@@ -119,10 +161,12 @@ enum MetalPageSiteScope { MetalPageSiteLane, MetalPageSiteThreadgroup, MetalPage
     MetalTensorLayout *layout;          /* same selected bytes in payload-local offsets */
     isl_map *selection;                /* zero-based selected byte -> physical byte */
     MetalPageCoverage *coverage;
+    MetalPageWriteDemand *demand;      /* original publication value generation */
     NSUInteger coverageCut;
     uint32_t observeAccess;            /* Read: value arrival; Written: prior reader completion */
 }
 @property(nonatomic, retain) MetalPageCoverage *coverage;
+@property(nonatomic, retain) MetalPageWriteDemand *demand;
 @property(nonatomic) NSUInteger coverageCut;
 /* owner identifies the declared collective occurrence, not a runtime handle.
    effect.first is the source/destination logical offset of selection byte 0.
@@ -214,6 +258,12 @@ NSArray<NSArray<MetalPageTransfer *> *> *MetalPagePublicationDomains(NSArray<Met
    consumer once. An empty/local observation domain emits no join operation. */
 void MetalPageCommandSite(MetalPageCommand *, NSString *name, NSUInteger cells,
     enum MetalPageSiteScope scope, enum MetalPageSiteScope joinScope, NSArray<MetalPageAccess *> *accesses);
+/* The original source branch already consumes this cell-to-UInt32 relation.
+   Retain it as conditional access typing; this setter emits no second runtime
+   predicate. phase names an already declared source site (starting at 1);
+   the entry uses MetalPageCommandActivity. */
+void MetalPageCommandSiteActivity(MetalPageCommand *, NSUInteger phase, MetalPageAccessLayout *activity,
+    isl_ctx *context);
 /* The predicate read is part of the same solve. Its producer runs before the
    predicate, while numerical inputs and contributions are conditional on it.
    Transfer coverage retains this same source activity; masking does not invent

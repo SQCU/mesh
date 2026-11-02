@@ -189,6 +189,7 @@ struct metal_result metal_coverage(struct metal_program *program,const struct me
         root:prior->root selection:selection payload:prior->payload layout:layout];
       next->observeAccess=prior->observeAccess;
       next.coverage=covered?coverage_value(program,bindings[k].values):prior->coverage;
+      next.demand=covered?(MetalPageWriteDemand *)bindings[k].demand:prior->demand;
       next->coverageCut=covered?bindings[k].cut:prior->coverageCut;
       [made addObject:next];isl_map_free(selection);at=until;
       if(covered)k++;

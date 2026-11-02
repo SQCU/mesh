@@ -802,6 +802,9 @@ typedef struct {
   uint32_t transaction, frame;
   size_t first, bytes, cut, cuts, before;
   ncclMeshBufferSlots active, expected;
+  /* Preparation-only source value-generation identity, retained by its
+     frontend declaration. It never enters a bridge descriptor or runtime. */
+  void* demand;
 } ncclMeshCoverage;
 /* Exact source declarations and their selected occurrence/work relations.
    Strings are canonical serialized frontend values, not hashes or generated

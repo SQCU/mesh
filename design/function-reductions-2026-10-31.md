@@ -174,3 +174,43 @@ remains unfinished.
 
 Source checks cover static/dynamic Metal fold bodies and generated CPU equations;
 no payload run or performance improvement is claimed.
+
+## Conditional writer integration, 2026-11-01
+
+C1 starts by retaining a write's original source cells, selected byte relation,
+activity operand, and value generation. A later conditional assignment does not
+remove the earlier writer from that relation. For overlapping assignments, the
+surviving contribution is the earlier selection with every later active overlap
+removed. Readers earlier in the source graph retain their earlier generation.
+Parallel disjoint writes and supplied reductions keep their declared semantics;
+source order does not invent a total order among parallel stores.
+
+C1's shared lowering must consume that relation in both directions: selecting
+which generation supplies a read, and selecting which completed source cells
+supply a transport cut. Compact masks stay compact when many heads or columns
+share one selector. Counts name actual surviving source cells, not storage
+capacity or the union of possible addresses. The selector/count outputs enter
+the transport declaration before packetization.
+
+The next C1 step lowers the selection/count equation into an existing retained
+source continuation. It must not add a second predicate around numerical work
+which already consumes the selector. When selection is already a producer input,
+the compiler emits the selected contribution directly. Otherwise completion and
+selection arrive independently at ordinary prepared state pages. The second
+arrival contributes once if that generation was selected. This prevents an
+earlier numerical writer from waiting for a later selector merely to finish its
+arithmetic. Unconditional writes need neither that state nor those atomics.
+
+Completion requires the shared solver, source emitter, and early transport
+callers to consume the same declarations. Retaining a field without those
+consumers is not completion. No numerical run is authorized by this source work.
+
+C1 also needs the ordinary source declaration to retain bindings for generated
+selector/count leaves before the joint solve. Their inputs are the original
+selector's page operands; their outputs are selected-cell and coverage pages.
+They use the existing Metal command bindings or host argument recipe and join
+the original graph before backend binding. A count-specific executor, an opaque
+prepared callback, or a second binder would move this compiler work to the wrong
+phase. The provider's retained projection already supplies its original parameter
+recipe and final storage-cell selector, so no shader text needs to be decoded to
+recover those operands.

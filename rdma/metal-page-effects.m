@@ -42,6 +42,13 @@ static NSData *PageOperandIdentity(ncclMeshBuffer value,NSUInteger bytes) {
 - (NSUInteger)hash { return identity.hash; }
 - (void)dealloc { [(__bridge id)declaration.active.buffer release];[(__bridge id)declaration.expected.buffer release];[identity release];[super dealloc]; }
 @end
+@implementation MetalPageWriteDemand
++ (instancetype)before:(NSUInteger)b selection:(isl_map *)s {
+    MetalPageWriteDemand *v=[[[self alloc] init] autorelease];v->before=b;v->selection=isl_map_copy(s);return v;
+}
+- (void)bind:(MetalPageCoverage *)c cut:(NSUInteger)k { [coverage release];coverage=[c retain];cut=k; }
+- (void)dealloc { isl_map_free(selection);[coverage release];[super dealloc]; }
+@end
 @implementation MetalPageContribution
 + (instancetype)coverage:(MetalPageCoverage *)c word:(ncclMeshBuffer)ready phase:(NSUInteger)p cells:(NSUInteger)n
     width:(NSUInteger)w indices:(ncclMeshBuffer)i {
@@ -159,6 +166,21 @@ MetalPageAccess *MetalPageImportAccess(isl_ctx *context,NSDictionary *declaratio
 }
 - (void)dealloc { [buffer release];[groups release];[bytes release];[super dealloc]; }
 @end
+@implementation MetalPageWriter
++ (instancetype)producer:(MetalPageCommand *)p command:(MetalPageCommand *)c
+    phase:(NSUInteger)f cells:(NSUInteger)n selected:(ncclMeshBuffer)s destination:(ncclMeshBuffer)d
+    cellBytes:(NSUInteger)b groups:(MetalTensorLayout *)g ownership:(enum MetalPageWriteOwnership)o
+    sequence:(MetalTensorLayout *)q {
+    MetalPageWriter *v=[[[self alloc] init] autorelease];
+    /* Commands own their attached writer declarations. The enclosing source
+       array owns both endpoint commands, so these links are non-owning. */
+    v->producer=p;v->command=c;v->phase=f;v->cells=n;v->selected=PageBuffer(s);v->destination=PageBuffer(d);
+    [(__bridge id)v->selected.buffer retain];[(__bridge id)v->destination.buffer retain];
+    v->cellBytes=b;v->groups=[g retain];v->ownership=o;v->sequence=[q retain];return v;
+}
+- (void)dealloc { [(__bridge id)selected.buffer release];[(__bridge id)destination.buffer release];
+    [groups release];[sequence release];[super dealloc]; }
+@end
 @implementation MetalPageCommand
 @synthesize coherentAccesses, argumentNames, frame;
 + (instancetype)order:(NSUInteger)o groups:(NSUInteger)g backend:(enum MetalPageBackend)b source:(NSString *)s
@@ -166,7 +188,7 @@ MetalPageAccess *MetalPageImportAccess(isl_ctx *context,NSDictionary *declaratio
     MetalPageCommand *v=[[[self alloc] init] autorelease];v->order=o;v->groups=g;v->backend=b;
     v->source=[s copy];v->function=[f copy];v->grid=d;v->metadataSlot=slot;v->accesses=[a copy];return v;
 }
-- (void)dealloc { [(__bridge id)activity.buffer release];[source release];[function release];[accesses release];[argumentNames release];[sites release];[contributions release];[announcements release];[super dealloc]; }
+- (void)dealloc { [(__bridge id)activity.buffer release];[source release];[function release];[accesses release];[argumentNames release];[sites release];[contributions release];[announcements release];[writers release];[super dealloc]; }
 @end
 void MetalPageCommandActivity(MetalPageCommand *command,id<MTLBuffer> buffer,NSUInteger offset,isl_ctx *context) {
     [(__bridge id)command->activity.buffer release];command->activity=(ncclMeshBuffer){[buffer retain],offset};
@@ -197,8 +219,21 @@ void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger ce
         @"count":@(cells),@"scope":@(scope),@"join_scope":@(joinScope)}];
     [command->sites release];command->sites=[sites copy];command->groups+=cells;
 }
+void MetalPageCommandSiteActivity(MetalPageCommand *command,NSUInteger phase,MetalPageAccessLayout *activity,
+    isl_ctx *context) {
+    NSMutableArray *sites=[command->sites mutableCopy];
+    NSMutableDictionary *site=[sites[phase-1] mutableCopy];site[@"activity"]=activity;
+    sites[phase-1]=site;[site release];[command->sites release];command->sites=sites;
+    MetalPageAccess *local=[activity resolve:context displacement:0];
+    const NSUInteger first=[site[@"first"] unsignedIntegerValue];
+    NSString *shift=[NSString stringWithFormat:@"{ [g] -> [c] : c=g-%lu }",(unsigned long)first];
+    isl_map *relation=MeshIndexCompose(isl_map_read_from_str(context,shift.UTF8String),isl_map_copy(local->relation));
+    MetalPageAccess *read=[MetalPageAccess root:local->root slot:local->slot access:MetalReachRead relation:relation];
+    read->phase=phase;isl_map_free(relation);
+    NSArray *all=[command->accesses arrayByAddingObject:read];[command->accesses release];command->accesses=[all copy];
+}
 @implementation MetalPageTransfer
-@synthesize coverage,coverageCut;
+@synthesize coverage,demand,coverageCut;
 + (instancetype)owner:(id)o order:(NSUInteger)n effect:(ncclMeshPageEffect)e root:(id)r selection:(isl_map *)s
     payload:(id<MTLBuffer>)p layout:(MetalTensorLayout *)l {
     if(!e.word.buffer&&ncclMeshMemBuffer((void *)e.word.offset,&e.word.buffer,&e.word.offset))
@@ -209,7 +244,7 @@ void MetalPageCommandSite(MetalPageCommand *command,NSString *name,NSUInteger ce
     [(__bridge id)e.word.buffer retain];[(__bridge id)e.violation.buffer retain];
     v->root=[r retain];v->selection=isl_map_copy(s);v->payload=[p retain];v->layout=[l retain];return v;
 }
-- (void)dealloc { [owner release];[root release];[payload release];[layout release];[coverage release];
+- (void)dealloc { [owner release];[root release];[payload release];[layout release];[coverage release];[demand release];
     [(__bridge id)effect.word.buffer release];[(__bridge id)effect.violation.buffer release];isl_map_free(selection);[super dealloc]; }
 @end
 @implementation MetalPageInitial
@@ -275,7 +310,7 @@ static NSNumber *PageWord(ncclMeshBuffer word) {
 }
 static NSArray *PageSorted(NSArray *values,NSComparator compare) { return [values sortedArrayWithOptions:NSSortStable usingComparator:compare]; }
 static NSArray *PageSemanticCut(MetalPageTransfer *t) {
-    return @[t->owner,t->root,@(t->effect.call),@(t->effect.frame),@(t->effect.operand),t->coverage,@(t->coverageCut)];
+    return @[t->owner,t->root,@(t->effect.call),@(t->effect.frame),@(t->effect.operand),t->demand?:NSNull.null,t->coverage,@(t->coverageCut)];
 }
 static NSMutableArray *PageSlots(NSUInteger count) {
     NSMutableArray *values=[NSMutableArray arrayWithCapacity:count];
