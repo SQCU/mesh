@@ -361,7 +361,15 @@ outputs must be ordinary source equations, with their actual producer boundary
 available to transport declaration before packetization. An earlier writer must
 not wait for a later-produced mask merely to decide whether it contributes.
 
-Status: contract/design work; no shared-source changes in this pass yet.
+Status at 2026-11-02 03:31:05 UTC: the shared declaration checkpoint is committed
+as mesh `e5cc70e3`, not yet the complete count lowering. `MetalPageWriteDemand` retains semantic
+selection and generation identity before routing. The early coverage record
+and refined source effects carry that identity without a runtime token.
+`MetalPageCommandSiteActivity` now receives the native site's original mask
+relation; `MeshRankCoverage` retains the demand through fragmentation.
+Selection/count source binding and the conditional-generation solver remain in
+progress. The next substep retains each generated leaf's ordinary page binding
+recipe before the joint solve, so the existing backend binder can consume it.
 Completion evidence: source masks and generations affect solved dependencies
 and contributor counts, both frontend adapters consume that contract, and the
 old unconditional subtraction/counting behavior has no authority over masked
@@ -383,9 +391,11 @@ The written change binds each declared invocation, including indirect-grid
 phase, before one complete graph solve. It preserves MeshRank's existing
 whole-function solve and adds no cache identity or execution wrapper.
 
-Status: written, uncommitted; Engine Swift typecheck passed
-(`/tmp/mesh-native-binding-sourcecheck.log`). Parent still needs the joined
-build/review and commit. Numerical execution has not been run.
+Status: committed as microbench `3c09ab3a`; Engine Swift typecheck passed
+(`/tmp/mesh-native-binding-sourcecheck.log`). Native libraries and the Engine
+build also completed. Numerical execution has not been run. C2 is closed at the
+source/binding boundary; future mutable local progress still needs its own
+declared occurrence pages when that local-effect work is implemented.
 
 ### C3. Retain the provider's original writer-domain program
 
@@ -403,11 +413,22 @@ that same source program. C1 consumes the resulting relations; C5 makes them
 available before transport planning. Do not create a separate provider-only
 expression evaluator or numerical-source parser.
 
-Status: source seams identified; the next writer-domain implementation has not
-been written. The earlier clipped MPP read-site work is committed as microbench
-`69a469b5`. Complete this step when exact writer domains replace the independent
-`provider_dispatch` description for their consumers; do not claim all provider
-recipes are covered merely because one recipe exports the new contract.
+Status: retained writer projections are committed as microbench `33f6daa5`;
+`3c56f3c7` carries their argument types through the same provider lowering.
+MPP, shared FC/FC-OI output generation and common elementwise recipes now retain
+the original writer program. Source checks passed. The importer holds these
+declarations; it does not yet bind the common selection/count producer.
+The earlier clipped MPP read-site work is committed as `69a469b5`. Complete C3
+when those exact domains replace the independent `provider_dispatch`
+description for their consumers; do not claim all recipes are covered merely
+because one recipe exports the new contract.
+
+Next substep, started 2026-11-02 03:27:30 UTC: bind the retained provider
+selection program as an ordinary source command. Its selected-row pages are
+allocated during preparation; its inputs use the original argument lowering
+and existing backend binder. This supplies C1's real selection operands without
+adding another evaluator or execution interface. The provider closure note
+records the individual source changes and checks.
 
 ### C4. Make direct cache writers consume the shared selector
 
@@ -423,11 +444,15 @@ Scope: microbench native recipes and `streamed_weights.swift`; the shared
 head-sized output run at its existing participant boundary, rather than adding
 an atomic publication for every scalar store.
 
-Status: written, uncommitted; Engine typecheck and retained Metal compilation
-passed. Composed fused-source checking and provenance documentation are in
-progress. Ordinary session construction gives injective active cache targets;
-arbitrary repeated descriptor targets have no declared overwrite policy yet.
-That missing semantic input must remain explicit.
+Status: microbench changes are committed as `89f12f47`; the matching shared
+`streamed.metal` helper is committed as mesh `f9c2df4f`. Engine compilation and
+retained/composed Metal source checks passed. One temporary-module rank check
+failed at duplicate bridging headers; a later session's normal Engine build
+and rank/goal-a/forward-graph typecheck logs supersede that failed setup. No
+linked rank application or payload result is claimed here. Ordinary session construction
+gives injective active cache targets; arbitrary repeated descriptor targets have
+no declared overwrite policy yet. The common conditional/count handoff remains
+open and that missing semantic input stays explicit.
 
 ### C5. Declare numerical sources before transport planning
 
@@ -444,17 +469,46 @@ than calling the source producer again. Preserve the complete function order,
 including its declared epilogue, and release preparation relations after the
 joined solve/binding.
 
-Status: inspected, not yet written. Completion evidence: source/selector facts
-exist before packetization; their original declaration identities reach the
-joined solve; no second declaration traversal reconstructs them. This ordering
-change is necessary for C1/C3 coverage consumption, but does not itself generate
-that coverage.
+Status at 2026-11-02 03:31:05 UTC: the ordering substep is committed as
+microbench `42564104`. `MeshRankPlan`
+retains `sourceRuns` and each invocation's `sourceCommands` in one
+`sourceContext`, before the declaration exchange and `CommPlan`.
+`MeshRankPrepare` consumes those arrays; its second source callback is gone.
+The context and source relations are released after binding, or on teardown if
+preparation did not reach that stage. The interface documents that the complete
+run and epilogue are declared before Plan. Native libraries build with this
+change (`/tmp/mesh-early-native-declaration-20261101.log`).
+
+Source inspection establishes the new ordering and retained declaration
+identity. This completes the ordering substep, not C1/C3 coverage generation:
+the projection consumer still has to install the original source's active/count
+operands into the early transfer declarations.
+
+The adapter substep, committed as microbench `a4c47793`, preserves the C1 demand object in
+`MeshRankCoverage` and passes native `DispatchSite.activity` through the common
+`MetalPageAccessLayout` representation. It adds no numerical predicate and does
+not generate counts on its own. Existing explicitly supplied coverage does not
+yet have a generated demand. The joined collective/CoreML, native library and
+Engine builds passed against mesh `e5cc70e3` (`/tmp/mesh-conditional-abi-20261102.log`
+and `/tmp/micro-conditional-adapters-20261102.log`). This validates the ABI
+connection, not the unfinished count equations or their early coverage use.
+
+Next substep, started 2026-11-02 03:27:30 UTC: build the shared ABI, then build
+the native libraries and Engine against it. Review and commit the source-order
+and adapter changes together with their recorded dependency on the shared ABI.
+This establishes a resumable source checkpoint, not completion of generated
+coverage. In parallel, `schedule_equivalence` is tracing the retained source
+boundary, invocation, SEND ordinal, byte selection and generation in MeshRank.
+That map must identify the existing join which installs C1's outputs before
+`mark_records`; it must not invent generation identity from buffer addresses.
+The source/build checkpoint above completes the build part of this substep;
+the mapping and generated coverage consumer remain in progress.
 
 ### Next handoff and validation
 
 Keep C1 and C5 coordinated at the early coverage boundary. C3 and C4 supply
-original source facts to that same boundary. C2 can be built and committed
-independently once reviewed. The broader host-event/visibility replacement,
+original source facts to that same boundary. C2's source checkpoint is committed.
+The broader host-event/visibility replacement,
 flat bridge posting, complete serving graphs and whole-function performance
 evidence remain open under the original seven items.
 
