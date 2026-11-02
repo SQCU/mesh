@@ -129,18 +129,26 @@ static void cell_access(struct metal_program *program,void *buffer,size_t offset
   [relation appendString:@" }"];
   [(NSMutableArray *)program->group_accesses addObject:group_access(program,(id<MTLBuffer>)buffer,offset,bytes,slot,access,relation)];
 }
-void *metal_page_selection(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,const ncclMeshSpan *spans,size_t count) {
+/* A transfer over its payload's bytes: rooted at the payload's space where it names one (space, its serial: the
+   selection the spans' own relation within the space, MetalValueRelation, no region step; design/page-maps-2026-11-02.md,
+   "Page effects onto values"), else at the region over the payload buffer's bytes. A space transfer holds no payload
+   buffer: an initial input's reach is the occurrence's bound space's, made at the lowering */
+void *metal_page_selection(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,uint64_t space,
+    const ncclMeshSpan *spans,size_t count) {
   if(!count)return NULL;
   NSMutableArray *runs=[NSMutableArray array];
   for(size_t k=0;k<count;k++)[runs addObject:@[@(spans[k].offset),@(spans[k].bytes),@0,@1]];
   MetalTensorLayout *layout=[MetalTensorLayout runs:runs];
-  isl_map *selection=MetalPageRegionSelection(program->relation_context,(id<MTLBuffer>)payload,layout);
+  isl_map *selection=space?MetalValueRelation(program->relation_context,layout)
+                          :MetalPageRegionSelection(program->relation_context,(id<MTLBuffer>)payload,layout);
+  id root=space?(id)@((long long)space):MetalPageRegionRoot();
   MetalPageTransfer *transfer=[MetalPageTransfer owner:[NSValue valueWithPointer:program] order:[(NSArray *)program->commands count]+(effect->kind==ncclMeshPagePublish)
-    effect:*effect root:MetalPageRegionRoot() selection:selection payload:(id<MTLBuffer>)payload layout:layout];
+    effect:*effect root:root selection:selection payload:space?nil:(id<MTLBuffer>)payload layout:layout];
   [(NSMutableArray *)program->transfers addObject:transfer];isl_map_free(selection);return transfer;
 }
-void metal_page_effect(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,size_t offset,size_t bytes) {
-  if(bytes){const ncclMeshSpan span={offset,bytes};metal_page_selection(program,effect,payload,&span,1);}
+void metal_page_effect(struct metal_program *program,const ncclMeshPageEffect *effect,void *payload,uint64_t space,
+    size_t offset,size_t bytes) {
+  if(bytes){const ncclMeshSpan span={offset,bytes};metal_page_selection(program,effect,payload,space,&span,1);}
 }
 
 static MetalPageCoverage *coverage_value(struct metal_program *program,ncclMeshPageCoverage values) {
@@ -721,7 +729,7 @@ static void fold_relations(struct metal_program *program,const struct metal_zell
         .word={publish?input->summed:input->words,publish?input->summed_offset:input->word},
         .violation={program->violation,0},.threshold=threshold,.channel=input->channel,.entry=input->entry,.polls=program->polls,
         .transport=publish?0:input->transport,.transport_first=first};
-      metal_page_effect(program,&effect,publish?sum->out:input->data,
+      metal_page_effect(program,&effect,publish?sum->out:input->data,0,
         (publish?sum->out_offset:input->data_offset)+first,bytes);
       q=end;
     }
@@ -733,7 +741,7 @@ static void fold_relations(struct metal_program *program,const struct metal_zell
       .violation={wait->violation,0},.threshold=pages_to_word(wait->target),
       .channel=wait->channel,.entry=wait->at,.polls=program->polls};
     const ncclMeshSpan span={wait->data_offset,wait->bytes};
-    MetalPageTransfer *observation=metal_page_selection(program,&effect,sum->out,&span,1);
+    MetalPageTransfer *observation=metal_page_selection(program,&effect,sum->out,0,&span,1);
     observation->observeAccess=MetalReachWritten;
   }
 }

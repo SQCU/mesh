@@ -2117,6 +2117,8 @@ static struct where shifted(struct where w, size_t by) { w.offset += by; return 
 /* design/page-maps-2026-11-02.md: a value's space, bound per occurrence by the run's lowering to a lease's bytes from
    first_byte (ncclMeshSpaceBind); `lease` NULL while unbound */
 struct ncclMeshSpace { uint64_t serial, bytes; const unsigned char *lease; uint64_t first_byte; };
+/* a where's space serial, 0 where it names a buffer (metal_page_selection's root) */
+static uint64_t where_space(struct where w);
 static unsigned char *address_of(struct where w) {
   if (w.space) return w.space->lease ? (unsigned char *)w.space->lease + w.space->first_byte + w.offset : NULL;
   if (!w.buffer) return (unsigned char *)w.offset;
@@ -2124,6 +2126,7 @@ static unsigned char *address_of(struct where w) {
   return base ? base + w.offset : NULL;
 }
 
+static uint64_t where_space(struct where w) { return w.space ? w.space->serial : 0; }
 /* nccl.h ncclMeshSpaceCreate */
 ncclResult_t ncclMeshSpaceCreate(uint64_t serial, uint64_t bytes, ncclMeshSpace_t *out) {
   if (!out) return fail(ncclInvalidArgument, "a space needs somewhere to go");
@@ -5259,7 +5262,7 @@ static ncclResult_t selected_effect(struct metal_program *program,const struct c
   const struct write_binding *write=c->write_binding;
   const struct where binding=source?(c->input_pages?c->input_from:c->send_at):c->recv_at;
   if(!write) {
-    metal_page_effect(program,effect,binding.buffer,binding.offset+effect->first,effect->bytes);return ncclSuccess;
+    metal_page_effect(program,effect,binding.buffer,where_space(binding),binding.offset+effect->first,effect->bytes);return ncclSuccess;
   }
   const size_t base=binding.offset+write_binding_slot(write,c->invocation)*write->layout.instance_stride+effect->frame*write->stride;
   size_t count=0;
@@ -5268,7 +5271,7 @@ static ncclResult_t selected_effect(struct metal_program *program,const struct c
   for(size_t k=0,at=effect->first;k<count;k++) {
     spans[k]=write_selection(write,at,effect->first+effect->bytes-at);at+=spans[k].bytes;spans[k].offset+=base;
   }
-  metal_page_selection(program,effect,binding.buffer,spans,count);free(spans);return ncclSuccess;
+  metal_page_selection(program,effect,binding.buffer,where_space(binding),spans,count);free(spans);return ncclSuccess;
 }
 static ncclResult_t destination_effects(const struct inflight *,const struct message *,uint32_t,uint32_t,
     int (*)(void *,const ncclMeshPageEffect *),void *);
@@ -5316,7 +5319,7 @@ static ncclResult_t zabbadoo(struct metal_program *program,struct ncclComm *comm
           .channel=item->channel,.entry=m->entry,.polls=u->polls,.bytes=bytes,.transport=m->transport,.transport_first=offset};
         if(m->c->write_binding) {
           ncclResult_t result=selected_effect(program,m->c,&arrival,0);if(result)return result;
-        } else metal_page_effect(program,&arrival,m->data.buffer,m->data.offset+offset,bytes);
+        } else metal_page_effect(program,&arrival,m->data.buffer,where_space(m->data),m->data.offset+offset,bytes);
         offset+=bytes;
       }
       struct source_destination destination={program,m->c};
@@ -5630,7 +5633,7 @@ static ncclResult_t source_generation_effects(struct metal_program *program,cons
       if(write)continue;
       const ncclMeshPageEffect effect={.kind=ncclMeshPagePublish,.operand=ncclMeshPageInternal,
         .word={m->copied.buffer,m->copied.offset},.threshold=1,.bytes=m->bytes};
-      metal_page_effect(program,&effect,m->data.buffer,m->data.offset,m->bytes);
+      metal_page_effect(program,&effect,m->data.buffer,where_space(m->data),m->data.offset,m->bytes);
       continue;
     }
     if(!(write&&write->ready_value))continue;
@@ -5663,7 +5666,7 @@ static ncclResult_t write_source_copy(struct metal_program *program,const struct
     const struct where ready=copied_word(c,frame,tile),payload=shifted(c->send_at,frame*write->bytes+first);
     const ncclMeshPageEffect effect={.kind=ncclMeshPagePublish,.operand=ncclMeshPageInternal,.frame=(uint32_t)frame,
       .word={ready.buffer,ready.offset},.threshold=1,.bytes=length};
-    metal_page_effect(program,&effect,payload.buffer,payload.offset,length);
+    metal_page_effect(program,&effect,payload.buffer,where_space(payload),payload.offset,length);
   }
   return ncclSuccess;
 }
@@ -6043,7 +6046,7 @@ static ncclResult_t source_coverage(struct issue *u) {
       const ncclMeshPageEffect ready={.call=transport->call,.frame=m->frame,.channel=transport->channel,
         .kind=ncclMeshPagePublish,.operand=ncclMeshPageInternal,.bytes=b->units*sizeof(uint64_t),
         .word={m->spans_ready.buffer,m->spans_ready.offset},.threshold=through};
-      mask_effects[k]=metal_page_selection(u->source,&ready,table.buffer,written,b->units);
+      mask_effects[k]=metal_page_selection(u->source,&ready,table.buffer,0,written,b->units);
       projections[k]=(struct metal_coverage_projection){.transport=b->transport,.first=cuts[b->first],
         .bytes=cuts[b->first+b->units]-cuts[b->first],.base=transport->direction?m->end.n-m->pages.n:m->laid.n-m->pages.n,
         .ends=cuts,.units=m->pages.n,.values=b->values,.cut=b->cut,.demand=b->demand};

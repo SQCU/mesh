@@ -119,10 +119,8 @@ struct metal_result metal_record(struct metal_program *,const size_t *,size_t,co
 void metal_resident(struct metal_program *, void *buffer);
 /* Local numerical leaves and their selected DMA values enter the same source
    dependency solve as caller numerical leaves. These are preparation operands. */
-void metal_page_effect(struct metal_program *, const ncclMeshPageEffect *,
-                       void *payload, size_t offset, size_t bytes);
-void *metal_page_selection(struct metal_program *,const ncclMeshPageEffect *,
-                          void *payload,const ncclMeshSpan *,size_t count);
+void metal_page_effect(struct metal_program *, const ncclMeshPageEffect *, void *payload, uint64_t space, size_t offset, size_t bytes);
+void *metal_page_selection(struct metal_program *,const ncclMeshPageEffect *,void *payload,uint64_t space,const ncclMeshSpan *spans,size_t count);
 /* The program's failure words from here on, `violation` (made resident): those of the communicator whose group is
    encoded next, in which every dispatch naming none of its own records a failed wait (nccl-mesh.c complete,
    issue_group, retire), so one communicator's failure is recorded as its own and no other's. */
