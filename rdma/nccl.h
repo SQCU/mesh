@@ -785,7 +785,10 @@ static inline size_t ncclMeshInvocationIndex(uint64_t invocation, int64_t displa
    bytes past buffer.offset; linear slots use i + invocation directly. The signed
    displacement is independent of buffer.offset. A group is laid and placed for
    every slot as it is declared, and its issue names none. */
-typedef struct { ncclMeshBuffer buffer; size_t stride, instances; int64_t invocation; } ncclMeshBufferSlots;
+/* space: where non-NULL, the operand is that space's bytes from buffer.offset (design/page-maps-2026-11-02.md), and
+   buffer.buffer is unused. The space type is declared with its functions, below */
+struct ncclMeshSpace;
+typedef struct { ncclMeshBuffer buffer; size_t stride, instances; int64_t invocation; struct ncclMeshSpace *space; } ncclMeshBufferSlots;
 /* Preparation-only value generations for the explicit invocation interval.
    The frontend retains the values through source preparation. Unlike page
    slots, generation identity never wraps modulo a buffer's instance count. */
@@ -960,16 +963,18 @@ ncclResult_t ncclMeshCommCompiler(ncclComm_t comm,const char* compiler,const cha
    CommPlan owns the selected issue, page cuts, word operands and channel
    predecessor snapshots. The callback consumes typed source/landing effects;
    no backend encoder, argument table or executable is created here. */
-/* design/page-maps-2026-11-02.md, "The collective lowering in two phases": an occurrence lowered in value coordinates
-   is bound to its pages here, after the run's page assignment and before its recording.
-   type: (comm, occurrence, per call and side its operand's physical page runs at this occurrence, ncclMeshPageBacking
-   as ncclMeshLeasePages gives them, in the order the occurrence's calls were declared) -> 0, every entry's DMA spans,
-   the bridge tables' descriptors and the landing and SEND spans made from those runs (mesh_page_sges), the one
-   place region offsets are made. `runs[2 * call + side]` holds `counts[2 * call + side]` runs; a side with none is
-   absent. The call's declared views fix each operand's layout within its runs. */
-typedef struct { const ncclMeshPageBacking *runs; size_t count; } ncclMeshOperandPages;
-ncclResult_t ncclMeshCommBindPages(ncclComm_t comm, uint64_t occurrence, const ncclMeshOperandPages *operands,
-                                   size_t count);
+/* design/page-maps-2026-11-02.md, "The collective lowering in two phases": a value's space as the library sees it.
+   A call operand names a space and a byte offset in it (ncclMeshBufferSlots' space), never a buffer. Before an
+   occurrence is lowered, the run's lowering binds each space it uses to that occurrence's pages: a lease's address
+   and the byte offset of the space's first byte in it (the run's arena at the item's place, or a caller's own
+   lease). Lowering then resolves the space's bytes as it resolved buffers. Binding is the lowering's call, the one
+   place a lease address passes; a chooser creates spaces and never binds one.
+   type: Create (serial, bytes) -> a space with no pages; Bind (space, lease address, byte offset) -> its pages until
+   the next Bind; an address read from an unbound space is a defect, raised. */
+typedef struct ncclMeshSpace *ncclMeshSpace_t;
+ncclResult_t ncclMeshSpaceCreate(uint64_t serial, uint64_t bytes, ncclMeshSpace_t *out);
+ncclResult_t ncclMeshSpaceBind(ncclMeshSpace_t space, const void *lease, uint64_t first_byte);
+ncclResult_t ncclMeshSpaceDestroy(ncclMeshSpace_t space);
 ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
     int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
     uint64_t* occurrence);

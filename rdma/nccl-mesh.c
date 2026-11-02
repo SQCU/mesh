@@ -2107,16 +2107,40 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
 
 /* where a step's bytes are: on the Metal path a buffer and a byte offset into it; on the host path an address (buffer
    NULL, offset the address); {NULL, 0} none */
-struct where { void *buffer; size_t offset; };
-static int same(struct where a, struct where b) { return a.buffer == b.buffer && a.offset == b.offset; }
-static int named(struct where w) { return w.buffer || w.offset; }
+/* space: a value's space (design/page-maps-2026-11-02.md), its bytes from `offset`; buffer unused where it is set */
+struct ncclMeshSpace;
+struct where { void *buffer; size_t offset; const struct ncclMeshSpace *space; };
+static int same(struct where a, struct where b) { return a.buffer == b.buffer && a.offset == b.offset && a.space == b.space; }
+static int named(struct where w) { return w.buffer || w.offset || w.space; }
 static struct where shifted(struct where w, size_t by) { w.offset += by; return w; }
 /* a where's host address: NULL where it names none, or a buffer the host cannot read (a private one, never a lease's) */
+/* design/page-maps-2026-11-02.md: a value's space, bound per occurrence by the run's lowering to a lease's bytes from
+   first_byte (ncclMeshSpaceBind); `lease` NULL while unbound */
+struct ncclMeshSpace { uint64_t serial, bytes; const unsigned char *lease; uint64_t first_byte; };
 static unsigned char *address_of(struct where w) {
+  if (w.space) return w.space->lease ? (unsigned char *)w.space->lease + w.space->first_byte + w.offset : NULL;
   if (!w.buffer) return (unsigned char *)w.offset;
   unsigned char *base = metal_contents(w.buffer);
   return base ? base + w.offset : NULL;
 }
+
+/* nccl.h ncclMeshSpaceCreate */
+ncclResult_t ncclMeshSpaceCreate(uint64_t serial, uint64_t bytes, ncclMeshSpace_t *out) {
+  if (!out) return fail(ncclInvalidArgument, "a space needs somewhere to go");
+  struct ncclMeshSpace *space = calloc(1, sizeof *space);
+  if (!space) return fail(ncclSystemError, "allocating a space");
+  *space = (struct ncclMeshSpace){serial, bytes, NULL, 0};
+  *out = space;
+  return ncclSuccess;
+}
+/* nccl.h ncclMeshSpaceBind: the lowering's call, at an occurrence, before the occurrence is lowered */
+ncclResult_t ncclMeshSpaceBind(ncclMeshSpace_t space, const void *lease, uint64_t first_byte) {
+  if (!space || !lease) return fail(ncclInvalidArgument, "bind a space to a lease's bytes");
+  space->lease = lease; space->first_byte = first_byte;
+  return ncclSuccess;
+}
+/* nccl.h ncclMeshSpaceDestroy */
+ncclResult_t ncclMeshSpaceDestroy(ncclMeshSpace_t space) { free(space); return ncclSuccess; }
 
 /* Immutable WRITE operands owned by their ordinary compiled call. Geometry,
    packet cuts and page descriptors are prepared before the group is realized.
@@ -4152,7 +4176,7 @@ static ncclResult_t zappo(struct ncclComm *comm, struct compiled *x, struct issu
   if (!zirn) { u->base = (struct where){0}; u->bytes = 0; *area = u->base; return ncclSuccess; }
   ncclResult_t result = mem_alloc(&u->zeeb, zirn, MESH_BACKING_LINEAR);
   if (result) return fail(ncclSystemError, "a group's own pages: %s", last.text);
-  u->base = (struct where){NULL, (size_t)u->zeeb};
+  u->base = (struct where){NULL, (size_t)u->zeeb, NULL};
   if (lease_buffer(u->zeeb, &u->base.buffer, &u->base.offset)) return fail(ncclSystemError, "no Metal buffer over a group's own pages");
   u->bytes=zirn;
   slot_laid(comm, x, list, n, u->plans, &u->base, area);
@@ -4782,7 +4806,7 @@ static ncclResult_t present_group(struct ncclComm *comm, struct issue *owner, st
     atomic_store_explicit(&tables->next, 0, memory_order_relaxed);
     tables->entries[0] = laid->region + sizeof *tables; tables->entries[1] = tables->entries[0] + p->outs * sizeof *records;
     tables->count[0] = p->outs; tables->count[1] = p->ins;
-    laid->predecessor=(struct where){ch->link,ch->link_at};
+    laid->predecessor=(struct where){ch->link,ch->link_at, NULL};
     ch->link=owner->linkable;ch->link_at=laid->offset+offsetof(struct mesh_zwoggle,next);
     laid->left=++ch->linked;
     for(unsigned d=0;owner->owned.uses&&d<2;d++)owner->owned.uses[2*comm->count+2*h+d].end=ch->linked;
@@ -5147,7 +5171,7 @@ static ncclResult_t arithmetic_readers(struct ncclComm *comm,const struct plan *
     struct metal_zelloth_sum *sum=p->sums+item.reduction;sum->waits=0;
     const struct message *m=item.message;
     struct mesh_page_runs destination={0};
-    result=binding_backing(comm,(struct where){sum->out,sum->out_offset},m->bytes,&destination);
+    result=binding_backing(comm,(struct where){sum->out,sum->out_offset, NULL},m->bytes,&destination);
     for(uint32_t g=0;!result&&g<plan->view.groups;g++) {
       const struct compiled *x=plan->group+g;
       for(size_t j=0;!result&&j<x->laid_count;j++) {
@@ -5370,7 +5394,7 @@ static ncclResult_t page_effects(struct inflight *g,uint32_t polls,
 
 static struct where where_of(const void *argument) {
   const ncclMeshBuffer *b = argument;
-  return b ? (struct where){b->buffer, b->offset} : (struct where){NULL, 0};
+  return b ? (struct where){b->buffer, b->offset, NULL} : (struct where){NULL, 0, NULL};
 }
 
 /* one buffer's written ranges, in elements, disjoint and in order */
@@ -5512,7 +5536,7 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
     if(step->op!=MESH_STEP_COPY&&!meet){
       if(from<lo||to>hi)return fail(ncclInternalError,"declared operation reads an undefined source value");
       const struct where source=view_at(c,1,(size_t)(from-lo)*z);
-      st->read[k]=(struct where){source.buffer,source.offset-(size_t)from*z};
+      st->read[k]=(struct where){source.buffer,source.offset-(size_t)from*z, NULL};
       st->fresh[k]=step->op==MESH_STEP_REDUCE;
     }
     if(step->op!=MESH_STEP_SEND&&spans_add(w+step->buffer,from,to))
@@ -5872,7 +5896,7 @@ static ncclResult_t as_metal(struct where *w) {
   if (lease_buffer((const void *)w->offset, &buffer, &offset))
     return fail(ncclInvalidUsage, "a host buffer at %p is in no lease of this process (nccl.h, Memory)",
                 (void *)w->offset);
-  *w = (struct where){buffer, offset};
+  *w = (struct where){buffer, offset, NULL};
   return ncclSuccess;
 }
 /* Declaration lowering is the only phase that advances issue order. */
@@ -5972,13 +5996,13 @@ static ncclResult_t source_coverage(struct issue *u) {
         result=fail(ncclInternalError,"declared coverage was not retained by packetization");break;
       }
       if(grow(&selected,&room,count,sizeof *selected)){result=fail(ncclSystemError,"allocating coverage projections");break;}
-      if(!named((struct where){b->active.buffer.buffer,b->active.buffer.offset})||
-         !named((struct where){b->expected.buffer.buffer,b->expected.buffer.offset})) {
+      if(!named((struct where){b->active.buffer.buffer,b->active.buffer.offset, NULL})||
+         !named((struct where){b->expected.buffer.buffer,b->expected.buffer.offset, NULL})) {
         result=fail(ncclInvalidArgument,"logical SEND %u requires its local active/count pages on rank %d",
           b->transaction,comm->rank);break;
       }
       ncclMeshBuffer active=coverage_slot(b->active,c->invocation),expected=coverage_slot(b->expected,c->invocation);
-      struct where a={active.buffer,active.offset},e={expected.buffer,expected.offset};
+      struct where a={active.buffer,active.offset,NULL},e={expected.buffer,expected.offset,NULL};
       result=as_metal(&a);if(!result)result=as_metal(&e);if(result)break;
       selected[count++]=(struct coverage_span){.transport=t,.first=start,.units=unit-start,.cut=b->cut,
         .before=u->source_calls[b->before],.values={{a.buffer,a.offset},{e.buffer,e.offset},b->cuts},
@@ -6024,8 +6048,8 @@ static ncclResult_t source_coverage(struct issue *u) {
         .bytes=cuts[b->first+b->units]-cuts[b->first],.base=transport->direction?m->end.n-m->pages.n:m->laid.n-m->pages.n,
         .ends=cuts,.units=m->pages.n,.values=b->values,.cut=b->cut,.demand=b->demand};
       pthread_mutex_lock(&attach_lock);
-      int error=owned_add(&u->owned,address_of((struct where){b->values.active.buffer,b->values.active.offset}),OWNED_TABLE);
-      if(!error)error=owned_add(&u->owned,address_of((struct where){b->values.expected.buffer,b->values.expected.offset}),OWNED_TABLE);
+      int error=owned_add(&u->owned,address_of((struct where){b->values.active.buffer,b->values.active.offset, NULL}),OWNED_TABLE);
+      if(!error)error=owned_add(&u->owned,address_of((struct where){b->values.expected.buffer,b->values.expected.offset, NULL}),OWNED_TABLE);
       pthread_mutex_unlock(&attach_lock);
       if(error)result=fail(ncclSystemError,"retaining coverage page operands: %s",strerror(error));
     }
@@ -6089,11 +6113,11 @@ ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm,uint64_t occurrence,
     if(!m->source_observations){result=fail(ncclSystemError,"allocating source dependency operands");break;}
     for(size_t i=0;i<count;i++)if(input_intersects(inputs+i,m,u))for(size_t j=0;j<inputs[i].count;j++) {
       const ncclMeshPageEffect *effect=inputs[i].observations+j;
-      const struct where location={effect->word.buffer,effect->word.offset};
+      const struct where location={effect->word.buffer,effect->word.offset,NULL};
       const uint64_t word=lease_offset(address_of(location));size_t found=0;
       for(;found<m->source_observation_count;found++) {
         const struct metal_wait *prior=m->source_observations+found;
-        if(lease_offset(address_of((struct where){prior->words,prior->word}))==word)break;
+        if(lease_offset(address_of((struct where){prior->words,prior->word, NULL}))==word)break;
       }
       struct metal_wait *to=m->source_observations+found;
       if(found==m->source_observation_count||effect->threshold>to->target.n)
@@ -6115,7 +6139,7 @@ ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm,uint64_t occurrence,
     struct mesh_zwoggle_after *need=(struct mesh_zwoggle_after *)(list+1);
     for(size_t j=0;j<m->source_observation_count;j++) {
       const struct metal_wait *observed=m->source_observations+j;
-      need[prior+j]=(struct mesh_zwoggle_after){lease_offset(address_of((struct where){observed->words,observed->word})),observed->target.n};
+      need[prior+j]=(struct mesh_zwoggle_after){lease_offset(address_of((struct where){observed->words,observed->word, NULL})),observed->target.n};
     }
     m->requirement=list;m->required=1;
     struct mesh_zwoggle_entry *entries=(struct mesh_zwoggle_entry *)(u->linking[h].tables+1);
@@ -6137,7 +6161,7 @@ ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm,uint64_t occurrence,
         uint32_t q=0;
         while(q<comm->count&&comm->channels[q].buffer!=m->source_observations[j].words)q++;
         if(q==comm->count)
-          error=owned_add(&u->owned,address_of((struct where){m->source_observations[j].words,m->source_observations[j].word}),OWNED_TABLE|OWNED_SENDS);
+          error=owned_add(&u->owned,address_of((struct where){m->source_observations[j].words,m->source_observations[j].word, NULL}),OWNED_TABLE|OWNED_SENDS);
       }
     }
     if(!error)error=owned_begin(&u->owned,held);
@@ -6390,8 +6414,8 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
       if (b->instances && b->instances - 1 > (SIZE_MAX - b->buffer.offset) / (b->stride ? b->stride : 1))
         return fail(ncclInvalidArgument, "collective binding slot extent overflows");
     }
-    c->send_at = (struct where){d->bindings[0].buffer.buffer, d->bindings[0].buffer.offset};
-    c->recv_at = (struct where){d->bindings[1].buffer.buffer, d->bindings[1].buffer.offset};
+    c->send_at = (struct where){d->bindings[0].buffer.buffer, d->bindings[0].buffer.offset, d->bindings[0].space};
+    c->recv_at = (struct where){d->bindings[1].buffer.buffer, d->bindings[1].buffer.offset, d->bindings[1].space};
     c->declared_bindings = 1;
   }
   ncclResult_t result = declared_members(c, d);
@@ -7462,7 +7486,7 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
     table->comm = comm; table->metal = metal; table->page_bytes = comm->page;
     *out = table; return ncclSuccess;
   }
-  const struct where binding=metal ? where_of(local) : (struct where){NULL,(size_t)local};
+  const struct where binding=metal ? where_of(local) : (struct where){NULL,(size_t)local, NULL};
   const void *address=address_of(binding);
   pthread_mutex_lock(&attach_lock);
   struct attach *owner=NULL;
@@ -7474,7 +7498,7 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
     if(!table)error=ENOMEM;
     if(table) {
       const size_t offset=(uintptr_t)address-(uintptr_t)lease->address;
-      table->base=metal ? (struct where){binding.buffer,binding.offset-offset} : (struct where){NULL,(size_t)lease->address};
+      table->base=metal ? (struct where){binding.buffer,binding.offset-offset, NULL} : (struct where){NULL,(size_t)lease->address, NULL};
       table->comm=comm;table->metal=metal;
       table->page_bytes=owner->context.M->pgsz;
       table->pages=lease->bytes/table->page_bytes;
@@ -7491,7 +7515,7 @@ ncclResult_t ncclMeshPageTableCreate(const void *local, ncclComm_t comm, int met
       table=calloc(1,sizeof *table);
       if(!table)error=ENOMEM;
       if(table) {
-        table->base=metal ? (struct where){binding.buffer,binding.offset-offset} : (struct where){NULL,(size_t)((char *)m+m->stream_off)};
+        table->base=metal ? (struct where){binding.buffer,binding.offset-offset, NULL} : (struct where){NULL,(size_t)((char *)m+m->stream_off), NULL};
         table->comm=comm;table->metal=metal;
         table->page_bytes=m->pgsz;table->pages=bytes/m->pgsz;
         error=mesh_page_run_add(&table->storage,0,bytes,m->stream_off);
@@ -7650,7 +7674,7 @@ static ncclResult_t write_ready(struct write_binding *plan,ncclMeshBuffer words,
     size_t extent=0,tiles=write_tiles(plan);
     if (tile_extent(layout,tiles,sizeof(uint64_t),&extent) || tiles>SIZE_MAX/sizeof(uint64_t)/layout.instances)
       return fail(ncclInvalidArgument,"source readiness table geometry");
-    struct where ready={words.buffer,words.offset};
+    struct where ready={words.buffer,words.offset,NULL};
     ncclResult_t result=as_metal(&ready);
     if (result) return result;
     uint64_t *offsets=malloc(tiles*layout.instances*sizeof *offsets);
@@ -7681,7 +7705,7 @@ static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,u
   const int relay=c->comm->rank!=source&&c->comm->rank!=destination;
   const struct mesh_paths *paths=call_paths(c,0)+(size_t)source*c->comm->nranks+destination;
   ncclMeshBufferSlots slots=d->bindings[endpoint];
-  struct where binding={slots.buffer.buffer,slots.buffer.offset};
+  struct where binding={slots.buffer.buffer,slots.buffer.offset,slots.space};
   void *lease=NULL;
   const uint64_t bytes=c->count;
   const int64_t dense=1;
@@ -7704,7 +7728,7 @@ static ncclResult_t write_binding_prepare(struct call *c,const ncclMeshCall *d,u
       if (!result && (write_slot_extent(local,&last) || __builtin_mul_overflow(last,local.instance_stride,&total) ||
           __builtin_add_overflow(total,frame_bytes,&total))) result=fail(ncclInvalidArgument,"relay invocation extent");
       if (!result) result=mem_alloc(&lease,total,MESH_BACKING_PAGES);
-      if (!result) { binding=(struct where){NULL,(size_t)lease};view=&plain; }
+      if (!result) { binding=(struct where){NULL,(size_t)lease, NULL};view=&plain; }
     }
   }
   if (!result) result=as_metal(&binding);
