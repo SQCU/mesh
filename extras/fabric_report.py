@@ -57,28 +57,21 @@ for line in run(os.path.expanduser('~/mesh/bin/mesh-rdma.sh')).splitlines():
     status = re.search(r'status: (\w+)', run('ifconfig', f[0]))
     ports[f[0]] = dict(device=fields.get('device'), rid=int(fields.get('rid', -1)), rdma_peer=fields.get('rdma_peer'),
                        link=status.group(1) if status else None)
-# the port's cable: its XDomain link's remote Domain UUID, found over the RDMA peer interface the link carries (by RID)
-def descendants(entry):
-    for child in entry.get('IORegistryEntryChildren', []):
-        yield child
-        yield from descendants(child)
+# the port's cable: its XDomain link's remote Domain UUID, read from each link's block of ioreg's text (the link's own
+# properties first, then its subtree, where the RDMA peer interface it carries states its RID)
 cable = {}
-for link in plist('ioreg', '-a', '-r', '-c', 'IOThunderboltXDomainLink', '-l'):
-    for child in descendants(link):
-        if child.get('IOClass') == 'AppleThunderboltRDMAPeerInterface' and 'RID' in child:
-            cable[int(child['RID'])] = link.get('Domain UUID')
+blocks = re.split(r'\n(?=\+-o )', run('ioreg', '-r', '-c', 'IOThunderboltXDomainLink', '-l', '-w0'))
+for block in blocks:
+    uuid = re.search(r'"Domain UUID" = "([0-9A-F-]+)"', block)
+    rid = re.search(r'AppleThunderboltRDMAPeerInterface.*?"RID" = (\d+)', block, re.S)
+    if uuid and rid:
+        cable[int(rid.group(1))] = uuid.group(1)
 for port in ports.values():
     port['cable_uuid'] = cable.get(port['rid'])
 out['ports'] = ports
-# this node's own Domain UUIDs (its controllers' local nodes), the ones its neighbours' XDomain links name
-own = set()
-for cls in ('IOThunderboltController', 'IOThunderboltLocalNode'):
-    for entry in plist('ioreg', '-a', '-r', '-c', cls, '-l'):
-        for e in (entry, *descendants(entry)):
-            if e.get('IOClass') in ('IOThunderboltLocalNode',) or e is entry:
-                if e.get('Domain UUID'):
-                    own.add(e['Domain UUID'])
-out['own_uuids'] = sorted(own - set(cable.values()))
+# this node's own Domain UUIDs, its Thunderbolt local nodes' (the ones its neighbours' XDomain links name)
+out['own_uuids'] = sorted({e['Domain UUID'] for e in plist('ioreg', '-a', '-r', '-c', 'IOThunderboltLocalNode', '-d', '1', '-l')
+                           if e.get('Domain UUID')})
 # the bridge's pairings, and each link index's last interface name in its log
 stat = run(os.path.expanduser('~/mesh/rdma/mesh-stat')).splitlines()
 try:
