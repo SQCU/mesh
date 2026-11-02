@@ -1650,25 +1650,9 @@ static MetalTensorLayout *TensorProbed(MetalTensorLayout *layout) {
     if(!m){[extents addObject:@1];[strides addObject:@1];}
     return [[MetalTensorLayout shape:extents strides:strides offset:origin maps:@{} indices:nil] reshape:layout.shape];
 }
-/* mesh-tensor-layout.h MetalTensorFactored. Coordinates affine over the whole range (one TensorExpressionPiece run, read
-   from the terms' structure) are a single stride without visiting a position. Changed by the layout algebra session:
-   a 3.9 MB weight family's flat `i` fields were probed and proved at every position, about 0.5 s a placement (d-r5,
-   2026-11-02). */
+// mesh-tensor-layout.h MetalTensorFactored
 MetalTensorLayout *MetalTensorFactored(MetalTensorLayout *layout) {
-    if(layout.factored&&!layout.maps.count)return layout;
-    if(!layout.maps.count&&layout.count) {
-        NSInteger origin=layout.offset,step=0;BOOL affine=YES;NSArray *coordinates=layout.coordinates;
-        for(NSUInteger d=0;affine&&d<coordinates.count;d++) {
-            id term=coordinates[d];
-            if(TensorGeneral(term)||TensorHasGeneral(term)){affine=NO;break;}
-            const struct TensorPiece piece=TensorExpressionPiece(term,0,layout.count);
-            affine=piece.end==layout.count;
-            origin+=piece.value*[layout.strides[d] integerValue];step+=piece.step*[layout.strides[d] integerValue];
-        }
-        if(affine)return [[MetalTensorLayout shape:@[@(layout.count)] strides:@[@(step)] offset:origin maps:@{} indices:nil]
-            reshape:layout.shape];
-    }
-    return TensorProbed(layout);
+    return layout.factored&&!layout.maps.count?layout:TensorProbed(layout);
 }
 // One axis of a pairing's common index refinement: its storage strides in both views, extent and flat weight, and
 // whether the removed view reads it backward (its stride negative, here the stride's magnitude).
@@ -1745,19 +1729,7 @@ static const struct mesh_graph_terms TensorPairTermConstructors={TensorPairConst
    index is the digits' weighted sum, and C(y) counts axis by axis from the top. */
 NSArray<MetalTensorLayout *> *MetalTensorPairQuotient(NSUInteger count,MetalTensorLayout *kept,MetalTensorLayout *removed,
     NSInteger shift,NSUInteger first,NSUInteger extent) {
-    MetalTensorLayout *B=MetalTensorFactored(removed);
-    /* a removed side that is no single stride pattern (a written piecewise map): both sides' positions read with
-       integers, the classes numbered by the graph module's numeric form, read back as strided pieces. Added by the
-       layout algebra session: such unions went to the isl quotient, about 60 ms each (d-r5, 2026-11-02). */
-    if(!B&&removed.count&&!removed.maps.count&&!kept.maps.count) {
-        NSMutableData *a=TensorPositions(kept),*b=TensorPositions(removed);
-        int64_t *shifted=b.mutableBytes;for(NSUInteger x=0;x<removed.count;x++)shifted[x]+=shift;
-        NSMutableData *classes=[NSMutableData dataWithLength:MAX(extent,(NSUInteger)1)*sizeof(int64_t)];
-        if(mesh_graph_pair_classes_at(count,a.bytes,b.bytes,removed.count,first,extent,classes.mutableBytes))return nil;
-        return @[[MetalTensorLayout shape:@[@(count-removed.count)] strides:@[@1] offset:0 maps:@{} indices:nil],
-            TensorPiecewise(classes.bytes,extent)];
-    }
-    if(!B||!B.count)return nil;
+    MetalTensorLayout *B=MetalTensorFactored(removed);if(!B||!B.count)return nil;
     MetalTensorLayout *A=MetalTensorFactored(kept);
     NSMutableSet *bounds=[NSMutableSet setWithObjects:@1,@(B.count),nil];TensorBoundaries(B,bounds);
     if(A) {
@@ -2228,45 +2200,14 @@ static MetalTensorLayout *TensorStridedRebase(MetalTensorLayout *view,MetalTenso
     if(!shape.count){[shape addObject:@1];[strides addObject:@0];}
     return [[MetalTensorLayout shape:shape strides:strides offset:offset maps:@{} indices:nil] reshape:view.shape];
 }
-/* The rebase read at every position with integers: the declaration's positions sorted with their indices (the last
-   index where a position repeats, as isl's lexmax inverse picks), each view position found by search and taken to the
-   placement at that index, the composite written back as strided pieces (TensorPiecewise). nil where a view position
-   is no declaration position (isl's path then refuses it). Added by the layout algebra session: composing written
-   piecewise maps by substitution and normalizing the composite through isl took 77-246 ms a rebase, a declaration of a
-   fixed caller's region positions through a written map among them (d-r5, 2026-11-02). */
-static MetalTensorLayout *TensorEvaluatedRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
-    const NSUInteger n=declared.count;
-    NSMutableData *at=TensorPositions(view),*target=TensorPositions(placed),*source=TensorPositions(declared);
-    NSMutableData *pairs=[NSMutableData dataWithLength:n*2*sizeof(NSInteger)];NSInteger *sorted=pairs.mutableBytes;
-    const NSInteger *positions=source.bytes,*placing=target.bytes;NSInteger *values=at.mutableBytes;
-    for(NSUInteger x=0;x<n;x++){sorted[2*x]=positions[x];sorted[2*x+1]=(NSInteger)x;}
-    qsort_b(sorted,n,2*sizeof *sorted,^int(const void *a,const void *b){
-        const NSInteger *x=a,*y=b;return x[0]<y[0]?-1:x[0]>y[0]?1:x[1]<y[1]?-1:x[1]>y[1];});
-    for(NSUInteger i=0;i<view.count;i++) {
-        NSUInteger low=0,high=n;
-        while(low<high){const NSUInteger middle=(low+high)/2;if(sorted[2*middle]<=values[i])low=middle+1;else high=middle;}
-        if(!low||sorted[2*(low-1)]!=values[i])return nil;
-        values[i]=placing[sorted[2*(low-1)+1]];
-    }
-    return [TensorPiecewise(values,view.count) reshape:view.shape];
-}
 - (MetalTensorLayout *)rebase:(MetalTensorLayout *)declared onto:(MetalTensorLayout *)placed {
     NSParameterAssert([declared.shape isEqual:placed.shape]);
     if([self isEqual:declared])return placed;
     if(!self.count)return [MetalTensorLayout shape:_shape strides:TensorStrides(_shape) offset:0 maps:@{} indices:nil];
-    BOOL piecewise=NO;
-    for(id term in self.coordinates)piecewise|=TensorHasGeneral(term);
-    for(id term in declared.coordinates)piecewise|=TensorHasGeneral(term);
-    for(id term in placed.coordinates)piecewise|=TensorHasGeneral(term);
-    if(piecewise) {
-        MetalTensorLayout *evaluated=TensorEvaluatedRebase(self,declared,placed);
-        if(evaluated)return evaluated;
-    }
     MetalTensorLayout *closed=nil;
     @try{closed=TensorClosedRebase(self,declared,placed);}@catch(NSException *unused){(void)unused;closed=nil;}
     if(closed)return closed;
-    closed=TensorStridedRebase(self,declared,placed)?:TensorInverseRebase(self,declared,placed)?:
-        TensorEvaluatedRebase(self,declared,placed);
+    closed=TensorStridedRebase(self,declared,placed)?:TensorInverseRebase(self,declared,placed);
     if(closed)return closed;
     isl_ctx *ctx=isl_ctx_alloc();
     isl_pw_aff *view=MeshIndexFunction(ctx,self),*target=MeshIndexFunction(ctx,placed);

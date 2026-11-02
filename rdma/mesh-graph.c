@@ -900,26 +900,3 @@ int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t
   free(member); free(least); free(rank);
   return result;
 }
-
-/* mesh-graph.h mesh_graph_pair_classes_at. Added by the layout algebra session. */
-int mesh_graph_pair_classes_at(size_t count, const int64_t *kept, const int64_t *removed, size_t n, size_t first,
-                               size_t extent, int64_t *classes) {
-  int64_t *partner = malloc((count ? count : 1) * sizeof *partner), least = (int64_t)count, most = -1;
-  if (!partner || first + extent > count) { free(partner); return -1; }
-  for (size_t p = 0; p < count; p++) partner[p] = -1;
-  for (size_t x = 0; x < n; x++) {
-    if (removed[x] < 0 || (uint64_t)removed[x] >= count || partner[removed[x]] >= 0) { free(partner); return -1; }
-    partner[removed[x]] = (int64_t)x;
-    if (removed[x] < least) least = removed[x];
-    if (kept[x] > most) most = kept[x];
-  }
-  if (n && most >= least) { free(partner); return -1; }
-  int64_t below = 0;
-  for (size_t p = 0; p < first + extent; p++) {
-    const int64_t x = partner[p];
-    if (p >= first) classes[p - first] = x >= 0 ? kept[x] : (int64_t)p - below;
-    if (x >= 0) below++;
-  }
-  free(partner);
-  return 0;
-}

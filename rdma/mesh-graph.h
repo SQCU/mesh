@@ -236,11 +236,4 @@ void *mesh_graph_pair_classes(const struct mesh_graph_lattice *removed, int64_t 
    member i % width, a bijection of [0, count); placed[p] the slot position of ordinal p, its tile's rank times width
    plus its place in the tile. -1 where `at` is no such bijection (placed is then unspecified), 0 otherwise. */
 int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t *placed);
-/* mesh_graph_pair_classes over positions given as numbers rather than a lattice (a removed side that is no single stride
-   pattern): kept[x] and removed[x] for x in [0, n), every kept value below every removed position, removed injective
-   in [0, count); classes[q] for ordinals q in [first, first + extent) as mesh_graph_pair_classes numbers them: a
-   removed position its kept partner, any other p as p minus the removed positions below it. -1 where removed is not
-   injective in [0, count) or a kept value is not below every removed position, 0 otherwise. */
-int mesh_graph_pair_classes_at(size_t count, const int64_t *kept, const int64_t *removed, size_t n, size_t first,
-                               size_t extent, int64_t *classes);
 #endif
