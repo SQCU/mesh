@@ -121,23 +121,33 @@ constexpr uint mesh_attention_groups(uint slices, uint threads, uint positions) 
 // sum through `red` ((G - 1) DS float4s); group 0 calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a
 // threadgroup a row: mesh_merge_row and the hosts' kernels) or LastArrival (the last of a row's parts to arrive:
 // argmax.metal's mesh_last_arrival, the merge, then mesh_arrival_reset).
-template <typename F, typename F4, uint D>
-struct mesh_split_parts {
-    F ms;
-    F ls;
-    F4 os;
-    ulong base;
-    __attribute__((always_inline)) float m(uint j) { return ms[base + j]; }
-    __attribute__((always_inline)) float l(uint j) { return ls[base + j]; }
-    __attribute__((always_inline)) float4 o(uint j, uint d) {
-        if constexpr (D % 4 == 0) return 4 * d < D ? os[(base + j) * (D / 4) + d] : float4(0);
+template<uint D> struct mesh_partial_access {
+    template<uint Slot, typename P>
+    __attribute__((always_inline)) float scalar(P p, ulong at) const { return p[at]; }
+    template<typename F, typename F4>
+    __attribute__((always_inline)) float4 vector(F4 p, ulong at, uint d) const {
+        if constexpr (D % 4 == 0) return 4 * d < D ? p[at * (D / 4) + d] : float4(0);
         else {
-            F values = (F)os;
+            const F values = (F)p;
             float4 value = 0;
             for (uint e = 0; e < 4; ++e)
-                if (4 * d + e < D) value[e] = values[(base + j) * D + 4 * d + e];
+                if (4 * d + e < D) value[e] = values[at * D + 4 * d + e];
             return value;
         }
+    }
+};
+
+template <typename F, typename F4, uint D, typename Access = mesh_partial_access<D>, typename L = F>
+struct mesh_split_parts {
+    F ms;
+    L ls;
+    F4 os;
+    ulong base;
+    Access access;
+    __attribute__((always_inline)) float m(uint j) { return access.template scalar<4>(ms, base + j); }
+    __attribute__((always_inline)) float l(uint j) { return access.template scalar<5>(ls, base + j); }
+    __attribute__((always_inline)) float4 o(uint j, uint d) {
+        return access.template vector<F>(os, base + j, d);
     }
 };
 
@@ -355,7 +365,7 @@ __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &
                     for (uint b = 0; b < active; b++) simdgroup_multiply_accumulate(o[b], p, vm[b], o[b]);
                 }
             }
-            if constexpr (CB < OB) for (uint b = 0; b < active; b++) a.store_output(o[b], first + b);
+            if constexpr (CB < OB) for (uint b = 0; b < active; b++) a.store_output(o[b], first + b, i == 0, !a.chunk(i + 1));
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -396,6 +406,8 @@ template<uint D> struct mesh_attention_access {
     using query_type = device const half *;
     __attribute__((always_inline)) half4 query(device const half *q, ulong at) const { return ((device const half4 *)q)[at]; }
     __attribute__((always_inline)) half query_element(device const half *q, ulong at) const { return q[at]; }
+    template<uint Slot, typename P>
+    __attribute__((always_inline)) void partial(P values, ulong at, float value, bool, bool) const { values[at] = value; }
     template<bool Key, typename Page>
     __attribute__((always_inline)) void load(thread simdgroup_half8x8 &out, Page page, uint, uint row, uint column,
                                             uint stride, uint lane, bool) const {
@@ -409,7 +421,7 @@ template<uint D> struct mesh_attention_access {
 };
 
 template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *, typename M = mesh_unmasked,
-          typename Access = mesh_attention_access<D>>
+          typename Access = mesh_attention_access<D>, typename L = F, typename V = F>
 struct mesh_tile {
     using Page = typename KV::Page;
     enum : uint { dims = D, page_extent = KV::page_extent, simdgroups = 4,
@@ -422,7 +434,7 @@ struct mesh_tile {
     KV kv;
     typename Access::query_type Q;
     F mp;
-    F lp;
+    L lp;
     F4 op;
     threadgroup half *qs;
     threadgroup float *ss;
@@ -431,6 +443,7 @@ struct mesh_tile {
     threadgroup Page *places;
     float scale;
     uint stride, s, lane, t, J, j, base, pages, parts;
+    uint partFirst = 0;
     uint rows[8], lo[8], hi[8];
     M mod;
     uint2 query[8];
@@ -504,32 +517,32 @@ struct mesh_tile {
 
     __attribute__((always_inline)) void load_output(thread simdgroup_float8x8 &out, uint block) {
         const uint e = mesh_matrix_lane(lane), i = rows[e / 8], c = 8 * (block * simdgroups + s) + e % 8;
-        const F values = (F)op;
+        const V values = (V)op;
         for (uint k = 0; k < 2; k++) out.thread_elements()[k] = i != 0xFFFFFFFFu && (D % (8 * simdgroups) == 0 || c + k < D)
-            ? values[(ulong(i) * parts + j) * D + c + k] : 0.0f;
+            ? values[(ulong(i) * parts + partFirst + j) * D + c + k] : 0.0f;
     }
 
-    __attribute__((always_inline)) void store_output(thread const simdgroup_float8x8 &out, uint block) {
+    __attribute__((always_inline)) void store_output(thread const simdgroup_float8x8 &out, uint block, bool first, bool last) {
         const uint e = mesh_matrix_lane(lane), i = rows[e / 8], c = 8 * (block * simdgroups + s) + e % 8;
-        const F values = (F)op;
+        const V values = (V)op;
         for (uint k = 0; k < 2; k++) if (i != 0xFFFFFFFFu && (D % (8 * simdgroups) == 0 || c + k < D))
-            values[(ulong(i) * parts + j) * D + c + k] = out.thread_elements()[k];
+            access.template partial<6>(values, (ulong(i) * parts + partFirst + j) * D + c + k, out.thread_elements()[k], first, last);
     }
 
     __attribute__((always_inline)) void finish(thread simdgroup_float8x8 *o, thread const float *m, thread const float *l) {
         constexpr uint NSG = simdgroups, RS = 8 / NSG;
         if constexpr (accumulator_blocks == output_blocks) {
-            for (uint b = 0; b < output_blocks; b++) store_output(o[b], b);
+            for (uint b = 0; b < output_blocks; b++) store_output(o[b], b, true, true);
         } else if (!chunk(0)) {
             const auto zero = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
-            for (uint b = 0; b < output_blocks; b++) store_output(zero, b);
+            for (uint b = 0; b < output_blocks; b++) store_output(zero, b, true, true);
         }
         if (lane == 0)
             for (uint k = 0; k < RS; k++) {
                 const uint i = rows[s * RS + k];
                 if (i == 0xFFFFFFFFu) continue;
-                mp[ulong(i) * parts + j] = l[k] > 0.0f ? m[k] : -INFINITY;
-                lp[ulong(i) * parts + j] = l[k];
+                access.template partial<4>(mp, ulong(i) * parts + partFirst + j, l[k] > 0.0f ? m[k] : -INFINITY, true, true);
+                access.template partial<5>(lp, ulong(i) * parts + partFirst + j, l[k], true, true);
             }
     }
 };
@@ -567,8 +580,8 @@ struct mesh_shared {
 // in query, each cut to the range; the pages of
 // their union, every one of the range's `splits` parts. The task's other members are the caller's
 // (layout, scale, stride, s, lane, t, j, parts), its KV type mapping the range's pages.
-template <uint D, typename KV, typename F, typename F4, typename M, typename Access, typename Row>
-__attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_tile<D, KV, F, F4, M, Access> &task, mesh_shared range, uint item, uint count,
+template <uint D, typename KV, typename F, typename F4, typename M, typename Access, typename L, typename V, typename Row>
+__attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_tile<D, KV, F, F4, M, Access, L, V> &task, mesh_shared range, uint item, uint count,
                                                                    Row row) {
     for (uint r = 0; r < 8; ++r) {
         const uint e = 8 * item + r;
@@ -584,18 +597,16 @@ __attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_t
 }
 
 // A sharing stream's tail on its task (rows and keys as the per-row path fills them): each row's keys cut to past the
-// range, its parts at slots [range.splits, range.splits + J) (the partial pointers offset), J = `splits`; the row's part
+// range, its parts at slots [range.splits, range.splits + J), J = `splits`; the row's part
 // count range.splits + J, the merge's.
-template <uint D, typename KV, typename F, typename F4, typename M, typename Access>
-__attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_tile<D, KV, F, F4, M, Access> &task, mesh_shared range, uint splits) {
+template <uint D, typename KV, typename F, typename F4, typename M, typename Access, typename L, typename V>
+__attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_tile<D, KV, F, F4, M, Access, L, V> &task, mesh_shared range, uint splits) {
     for (uint r = 0; r < 8; ++r) {
         const uint2 keys = range.tail(uint2(task.lo[r], task.hi[r]));
         task.lo[r] = keys.x;
         task.hi[r] = keys.y;
     }
-    task.mp += range.splits;
-    task.lp += range.splits;
-    task.op = (F4)((F)task.op + ulong(range.splits) * D);
+    task.partFirst = range.splits;
     task.span(splits);
     return range.splits + splits;
 }
