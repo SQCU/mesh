@@ -9,7 +9,7 @@ import torch.distributed as dist
 import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
-from torch_mesh import chain as sequence
+from torch_mesh.declarations import Function, execution_sequence
 from torch_mesh.configuration import placement, bind, record
 from torch_mesh import compute
 from mesh_statistics import now, next_configuration
@@ -50,11 +50,11 @@ def main(config=None):
         config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
     capabilities = compute.metal(config['capabilities'])
     steps, rows = config['steps'], config['rows']
-    inputs, folds = None, None
-    if os.environ['RANK'] == '0':
-        inputs, full = chain.inputs(config, steps, rows)
-        folds = folded(config, full)
-        del full
+    # every rank draws the same inputs from the configuration's seed: no broadcast of E into E (design/page-maps-
+    # 2026-11-02.md, Construction 7); rank 0's folds are the ones distributed
+    inputs, full = chain.inputs(config, steps, rows)
+    folds = folded(config, full)
+    del full
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size, width = dist.get_rank(), dist.get_world_size(), config['width']
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
@@ -68,15 +68,41 @@ def main(config=None):
     a, b = chain.weights(mesh, folds, width)
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
+    E.copy_(torch.from_numpy(inputs[:]))
+    del inputs
     group = mesh.get_group('tp')
-    groups, order, program = sequence.operands(a, b, E, O, group, k, chosen['resident_tiles'], chosen['input_frames'], capabilities,
-                                         source_scope={'program': 'chain_sequence'})
-    if rank == 0:
-        E.copy_(torch.from_numpy(inputs[:]))
+    # the chain's step through the frontend the LSTM uses: one declaration for each distinct chunk length, replayed for
+    # every chunk of that length, the step counter t on the GPU selecting its steps (examples/lstm-service.py)
+    tick = chain.Tick(mesh, a, b, rows, width)
+    t = torch.zeros(1, dtype=torch.int64, device='mps')
+    full, rest = divmod(steps, k)
+    chunks = [k] * full + [rest] * bool(rest)
+    from mesh_relation import Algebra
+    algebra = Algebra()
+    unit = Function(tick.stepper(E, O, 1), t, algebra=algebra,
+                    source_scope={'program': 'chain_sequence', 'phase': 'step'}).capture()
+    functions = {}
+    for count in dict.fromkeys(chunks):
+        function = unit.repeated(count)
+        function.declare(group)
+        functions[count] = function
+    ordered = [functions[count] for count in chunks]
+    groups = []
+    for function in ordered:
+        own = function.groups.get(group.group_name, [])
+        if len(own) == 1 and groups and isinstance(groups[-1], tuple) and groups[-1][0] is own[0]:
+            groups[-1] = (own[0], groups[-1][1] + 1)
+        elif len(own) == 1:
+            groups.append((own[0], 1))
+        else:
+            groups.extend(own)
     torch_mesh.check_memory()
+    program = execution_sequence(ordered, O, algebra=algebra)
     def prepare():
-        return sequence.prepare(program)
-    bind(configuration, groups, prepare, order=order)
+        program.realize(1)
+        return {'layouts': [choice for function in ordered for choice in function.layout_choices],
+                'choices': [choice for function in ordered for choice in function.choices]}
+    bind(configuration, groups, prepare)
     started = now()
     program.forward()
     completion = program.completion()
