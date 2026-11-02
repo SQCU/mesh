@@ -1024,9 +1024,11 @@ static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
 static int bootstrap_listen(const char *host, uint16_t *port) {
   struct sockaddr_in6 at = {.sin6_len = sizeof at, .sin6_family = AF_INET6, .sin6_port = htons(*port)};
   socklen_t length = sizeof at;
-  int on = 1, fd = socket(AF_INET6, SOCK_STREAM, 0);
+  int on = 1, off = 0, fd = socket(AF_INET6, SOCK_STREAM, 0);
   if (inet_pton(AF_INET6, host, &at.sin6_addr) != 1) at.sin6_addr = in6addr_any;
-  if (fd >= 0 && !setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) && !bind(fd, (struct sockaddr *)&at, sizeof at) &&
+  /* an IPv4-mapped host (the tailnet's IPv4, tailnet_address) is bound on a dual-stack socket */
+  if (fd >= 0 && !setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) &&
+      !setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off) && !bind(fd, (struct sockaddr *)&at, sizeof at) &&
       !listen(fd, 64) && !getsockname(fd, (struct sockaddr *)&at, &length) && !fcntl(fd, F_SETFL, O_NONBLOCK)) {
     *port = ntohs(at.sin6_port);
     return fd;
@@ -1037,14 +1039,15 @@ static int bootstrap_listen(const char *host, uint16_t *port) {
   return -1;
 }
 
-/* a bootstrap root's address: the node's tailnet address, the first address under MESH_TAILNET_PREFIX (the tailnet's own
-   unique-local range) of an interface other than loopback. The bootstrap carries the communicator's configuration only;
-   its transfers are the bridge's. Changed by the LSTM demonstration session from the fabric address (MESH_ULA_PREFIX,
-   bin/mesh-router-init.sh's host routes over each Thunderbolt port): with one of m5ult2's ports stopped, m5ult2 reached
-   only the Mini's fabric address, and every five-rank bootstrap expired awaiting it (2026-11-01 17:1x), while the
-   tailnet reached every member. The operator: "everything should be connected by tailnet". What must stay: the
-   tailnet, not a route that one link carries. */
-#define MESH_TAILNET_PREFIX "fd7a:115c:a1e0:"
+/* a bootstrap root's address: the node's tailnet IPv4 address (in the tailnet's 100.64.0.0/10, on its utun interface),
+   written IPv4-mapped (::ffff:a.b.c.d) for the bootstrap's IPv6 sockets. The bootstrap carries the communicator's
+   configuration only; its transfers are the bridge's. Changed by the LSTM demonstration session from the fabric address
+   (MESH_ULA_PREFIX, bin/mesh-router-init.sh's host routes over each Thunderbolt port): with one of m5ult2's ports
+   stopped, m5ult2 reached only the Mini's fabric address and every five-rank bootstrap expired awaiting it (2026-11-01
+   17:1x). The tailnet's IPv6 range is no way around it: babel holds a /128 host route for each member's tailnet IPv6
+   address over a Thunderbolt port, more specific than the tailnet's own /48 on utun0, so it too reached nothing. Its
+   IPv4 range has no babel route: m5ult2 reached m5ult4 at ::ffff:100.107.135.46 in 0.12 s. The operator: "everything
+   should be connected by tailnet". What must stay: a route the Thunderbolt fabric does not carry. */
 static ncclResult_t tailnet_address(char *address, size_t room) {
   if (!address || !room) return fail(ncclInvalidArgument, "the tailnet address: no room");
   *address = 0;
@@ -1052,18 +1055,19 @@ static ncclResult_t tailnet_address(char *address, size_t room) {
   if (getifaddrs(&interfaces)) return fail(ncclSystemError, "the node's interfaces (getifaddrs): %s", strerror(errno));
   int short_room = 0;
   for (struct ifaddrs *i = interfaces; i && !*address && !short_room; i = i->ifa_next) {
-    char text[INET6_ADDRSTRLEN];
-    if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET6 || (i->ifa_flags & IFF_LOOPBACK) ||
-        !inet_ntop(AF_INET6, &((struct sockaddr_in6 *)i->ifa_addr)->sin6_addr, text, sizeof text) ||
-        strncmp(text, MESH_TAILNET_PREFIX, strlen(MESH_TAILNET_PREFIX)))
+    char text[INET_ADDRSTRLEN];
+    if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || (i->ifa_flags & IFF_LOOPBACK)) continue;
+    const uint32_t v4 = ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr);
+    if ((v4 & 0xffc00000u) != 0x64400000u ||
+        !inet_ntop(AF_INET, &((struct sockaddr_in *)i->ifa_addr)->sin_addr, text, sizeof text))
       continue;
-    if (strlen(text) < room) snprintf(address, room, "%s", text);
+    if (strlen("::ffff:") + strlen(text) < room) snprintf(address, room, "::ffff:%s", text);
     else short_room = 1;
   }
   freeifaddrs(interfaces);
   if (short_room) return fail(ncclInvalidArgument, "the tailnet address: %zu bytes hold no tailnet address", room);
   return *address ? ncclSuccess
-                  : fail(ncclSystemError, "this node holds no tailnet address (no interface's address under %s)", MESH_TAILNET_PREFIX);
+                  : fail(ncclSystemError, "this node holds no tailnet address (no interface's address in 100.64.0.0/10)");
 }
 
 /* A split owns a fresh configuration listener. It neither honors the parent's
