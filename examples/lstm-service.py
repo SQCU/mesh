@@ -10,10 +10,8 @@ import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard
 from torch_mesh import partition
-from torch_mesh.backend import BROADCAST, Call, bind_source
 from torch_mesh.declarations import Function, execution_sequence
 from torch_mesh.configuration import placement, bind, record
-from torch_mesh import _stream
 from torch_mesh.compilation import parameters
 from mesh_statistics import now, next_configuration
 
@@ -41,14 +39,15 @@ def main(config=None):
     if config is None:
         config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
     steps, rows = config['steps'], config['rows']
-    inputs, held = None, None
-    expected = None
+    held, expected = None, None
+    # every rank draws the same inputs from the configuration's seed: no broadcast of X into X (design/page-maps-
+    # 2026-11-02.md, Construction 7); rank 0's weights are the ones distributed
+    inputs, values = lstm.inputs(config, steps, rows)
     if os.environ['RANK'] == '0':
-        inputs, values = lstm.inputs(config, steps, rows)
         held = weights(config, values)
         # the outputs the run must give, from the same inputs and weights on the CPU (lstm.reference)
         expected = lstm.reference(config, inputs, values, steps)
-        del values
+    del values
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
     L, KIN, H = config['layers'], config['input_width'], config['width']
@@ -106,25 +105,18 @@ def main(config=None):
             groups.append((own[0], 1))
         else:
             groups.extend(own)
-    if rank == 0:
-        X.copy_(torch.from_numpy(inputs[:]))
+    X.copy_(torch.from_numpy(inputs[:]))
+    del inputs
     torch_mesh.check_memory()
     ticks = steps + L - 1
-    from torch_mesh.backend import prepare_fragments
-    source = {'program': 'lstm_sequence', 'statement': 'inputs'}
-    broadcast = bind_source(Call(BROADCAST, X.numel(), X.dtype, root=0), source=source,
-        occurrences=_stream.TensorLayout((1,), (1,)),
-        work=_stream.TensorLayout((X.numel() * X.element_size(),), (1,)), route_scope=source)
-    # the broadcast's lowered fragments, each with the tensors it is issued with (design/eager-execution.md#what-follows)
-    inputs, declared = prepare_fragments([(broadcast, X, X)], group)
-    program = execution_sequence([inputs, *ordered], O, algebra=algebra)
+    program = execution_sequence(ordered, O, algebra=algebra)
     def prepare():
         # one realized schedule a run: Executions.run takes the next one (116b67ae ran a second time past the one
         # realized, and every rank faulted in the second forward)
         program.realize(config.get('repeats', 1))
         return {'layouts': [choice for function in ordered for choice in function.layout_choices],
                 'choices': [choice for function in ordered for choice in function.choices]}
-    bind(configuration, [declared, *groups], prepare)
+    bind(configuration, groups, prepare)
     blocks = partition.split(mesh, 'tp', H)
     # the prepared function run `repeats` times, each from the same state (the step counter and every layer's h and c
     # set again on the device, outside the timed function, once the run before has completed): the first run's rate
