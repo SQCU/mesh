@@ -26,11 +26,12 @@ class Tick:
         self.W, self.b = [held(w) for w in weights], [held(b) for b in biases]
         self.group, self.sizes = mesh.get_group('tp').group_name, partition.split(mesh, 'tp', H)
         self.c = torch_mesh.empty(self.L, rows, HR, dtype=torch.float32)
-        # row-major. Stored units first, the gather is one collective a tick (declarations._outer: one frame), but
-        # placement's layout union of h's views (TensorLayout.unite -> MeshIndexUnion -> IndexQuotient) builds
-        # representatives whose divisions isl must eliminate even to enumerate them, past 60 s (59bd0249, 08be882d,
-        # 2026-11-01). It waits on layout unions computed in coordinates.
-        self.h = torch_mesh.empty(self.L, rows, H, dtype=torch.half)
+        # every layer's h stored units first, so a rank's units of every layer and row are one run and the gather
+        # along the units one collective of each rank's run (declarations._outer: one frame), where row-major storage
+        # made it L x rows one-row gathers a tick, each its own messages. Placement's layout union of these views
+        # stalled in isl's divisions twice (59bd0249, 08be882d, 2026-11-01) until the unions and identities were kept
+        # in the views' coordinates (212f8e8e, 62df13f9, 2026-11-02).
+        self.h = torch_mesh.empty(H, self.L, rows, dtype=torch.half).permute(1, 2, 0)
         first = sum(self.sizes[:mesh.get_group('tp').rank()])
         self.mine = self.h.narrow(2, first, HR)
         self.reset()
