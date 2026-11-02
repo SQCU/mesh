@@ -51,13 +51,13 @@ struct mesh_piece {
 struct mesh_layout { uint32_t element_bits; size_t count; const struct mesh_piece *pieces; };
 
 /* `count` virtual pages from `first_virtual` on physical pages from `first_physical`, at one invocation */
-struct mesh_page_run { uint64_t first_virtual, first_physical, count; };
+struct mesh_map_run { uint64_t first_virtual, first_physical, count; };
 /* a page map: invocation i's runs are runs[first[i] .. first[i+1]), sorted by first_virtual, disjoint; invocations
    [0, invocations) */
 struct mesh_page_map {
   uint64_t invocations;
   const uint64_t *first;
-  const struct mesh_page_run *runs;
+  const struct mesh_map_run *runs;
 };
 
 /* a value: its layout's virtual elements on its map's pages */
@@ -122,6 +122,6 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
 int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
                        const struct mesh_lifetime *lifetimes, uint64_t invocations, const unsigned char *pinned,
                        const uint64_t *pinned_first, struct mesh_page_map *maps, uint64_t *firsts,
-                       struct mesh_page_run *runs);
+                       struct mesh_map_run *runs);
 
 #endif

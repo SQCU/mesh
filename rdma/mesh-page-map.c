@@ -10,7 +10,7 @@ static size_t page_run(const struct mesh_page_map *map, uint64_t i, uint64_t vp)
   size_t lo = (size_t)map->first[i], hi = (size_t)map->first[i + 1];
   while (lo < hi) {
     const size_t mid = lo + (hi - lo) / 2;
-    const struct mesh_page_run *r = map->runs + mid;
+    const struct mesh_map_run *r = map->runs + mid;
     if (vp < r->first_virtual) hi = mid;
     else if (vp >= r->first_virtual + r->count) lo = mid + 1;
     else return mid;
@@ -223,7 +223,7 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
 int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
                        const struct mesh_lifetime *lifetimes, uint64_t invocations, const unsigned char *pinned,
                        const uint64_t *pinned_first, struct mesh_page_map *maps, uint64_t *firsts,
-                       struct mesh_page_run *runs) {
+                       struct mesh_map_run *runs) {
   const size_t n = count * (size_t)invocations;
   uint64_t *size = malloc((n + 1) * sizeof *size), *begin = malloc((n + 1) * sizeof *begin),
            *end = malloc((n + 1) * sizeof *end), *place = malloc((n + 1) * sizeof *place);
@@ -237,10 +237,10 @@ int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const 
   if (!result) result = mesh_graph_interval_pack(n, size, begin, end, pinned, space->pages, place);
   for (size_t k = 0; !result && k < count; k++) {
     uint64_t *first = firsts + k * (size_t)(invocations + 1);
-    struct mesh_page_run *own = runs + k * (size_t)invocations;
+    struct mesh_map_run *own = runs + k * (size_t)invocations;
     for (uint64_t i = 0; i < invocations; i++) {
       first[i] = (uint64_t)(own - runs) + i;
-      own[i] = (struct mesh_page_run){0, place[k * (size_t)invocations + i], pages[k]};
+      own[i] = (struct mesh_map_run){0, place[k * (size_t)invocations + i], pages[k]};
     }
     first[invocations] = (uint64_t)(own - runs) + invocations;
     maps[k] = (struct mesh_page_map){invocations, first, runs};
