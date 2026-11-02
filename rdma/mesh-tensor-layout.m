@@ -1174,9 +1174,30 @@ static NSArray *TensorInverseAxes(MetalTensorLayout *declared,NSInteger *origin)
 // each view address has one preimage. Each composes `placed` by index terms (TensorCompose), keeping its strides and
 // maps, so a mapped placement stays mapped. nil where none applies: the relation composition (rebase) is the general
 // case, whose index functions take the solver once per affine piece wherever they are read (TensorExpressionPiece).
+// Whether every address of an affine view lies in an affine declaration's image where that image is one dense interval
+// (its strides a permutation of the dense steps): 1 or 0 from the two address ranges, -1 where neither is that form.
+// Added by the LSTM demonstration session: the offset-only rebase below proved containment with a relation preimage,
+// 583 of rebase:'s 1032 samples in a four-step LSTM declaration on m5ult2 (2026-11-01).
+static int TensorAffineWithin(MetalTensorLayout *view,MetalTensorLayout *declared) {
+    if(!view.affine||!declared.affine||!view.count||!declared.count)return -1;
+    NSInteger low;NSArray *axes=TensorInverseAxes(declared,&low);NSUInteger width=1;BOOL dense=YES;
+    for(NSNumber *axis in [axes reverseObjectEnumerator]) {
+        NSUInteger d=axis.unsignedIntegerValue;dense&=(NSUInteger)labs([declared.strides[d] integerValue])==width;
+        width*=[declared.shape[d] unsignedIntegerValue];
+    }
+    if(!dense||width!=declared.count)return -1;
+    NSInteger first=view.offset,last=view.offset;
+    for(NSUInteger d=0;d<view.shape.count;d++) {
+        const NSInteger span=([view.shape[d] integerValue]-1)*[view.strides[d] integerValue];
+        first+=MIN(0,span);last+=MAX(0,span);
+    }
+    return first>=low&&last<low+(NSInteger)width;
+}
 static MetalTensorLayout *TensorClosedRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
-    if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]]&&
-       [view preimage:declared].count==view.count)return [view shift:placed.offset-declared.offset];
+    if([[declared shift:-declared.offset] isEqual:[placed shift:-placed.offset]]) {
+        const int within=TensorAffineWithin(view,declared);
+        if(within==1||(within<0&&[view preimage:declared].count==view.count))return [view shift:placed.offset-declared.offset];
+    }
     NSArray *shape=view.shape;
     if(view.count==declared.count&&[[declared reshape:shape] isEqual:view])return [placed reshape:shape];
     if(declared.factored&&view.offset==declared.offset&&[view.indexShape isEqual:declared.indexShape]&&
