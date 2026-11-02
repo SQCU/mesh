@@ -86,9 +86,15 @@ struct mesh_view {
 size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout *of, struct mesh_piece *out,
                          size_t capacity);
 
-/* Allocation is not declared here: it is mesh-graph.h's mesh_graph_interval_pack over (value, invocation) items, each
-   needing its virtual pages over its lifetime, with this header's types as the consumer's operands (rubric C9). Its
-   placements become each value's page map, and pages return through the retire ledger (mesh-lease-retire.h) at their
-   lifetime's end. */
+/* The page allocator, a consumer of mesh-graph.h's mesh_graph_interval_pack (rubric C9). Each (value, invocation) is
+   an item: value k's pages[k] virtual pages over lifetimes[k * invocations + i]. Each is placed on physical pages of
+   `space` so that no two live items share one. Value k's map is written to maps[k]: its firsts at
+   firsts[k * (invocations + 1) ..] and its runs at runs[k * invocations ..], one run an invocation. So repeated
+   invocations land wherever pages are free over their lifetimes, never by a picked formula. Pages return through the
+   retire ledger (mesh-lease-retire.h) between functions. 0, ENOMEM where the function's live set exceeds the region (a
+   compile-time failure), or the packing's error */
+int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
+                       const struct mesh_lifetime *lifetimes, uint64_t invocations, struct mesh_page_map *maps,
+                       uint64_t *firsts, struct mesh_page_run *runs);
 
 #endif

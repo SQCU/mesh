@@ -1,5 +1,6 @@
 /* design/page-maps-2026-11-02.md: mesh-page-map.h's operations, integer arithmetic on pieces and page runs only. */
 #include "mesh-page-map.h"
+#include "mesh-graph.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -216,4 +217,32 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
     written++;
   }
   return written;
+}
+
+/* mesh-page-map.h */
+int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
+                       const struct mesh_lifetime *lifetimes, uint64_t invocations, struct mesh_page_map *maps,
+                       uint64_t *firsts, struct mesh_page_run *runs) {
+  const size_t n = count * (size_t)invocations;
+  uint64_t *size = malloc((n + 1) * sizeof *size), *begin = malloc((n + 1) * sizeof *begin),
+           *end = malloc((n + 1) * sizeof *end), *place = malloc((n + 1) * sizeof *place);
+  int result = size && begin && end && place ? 0 : ENOMEM;
+  for (size_t k = 0; !result && k < count; k++)
+    for (uint64_t i = 0; i < invocations; i++) {
+      const size_t item = k * (size_t)invocations + i;
+      size[item] = pages[k]; begin[item] = lifetimes[item].begin; end[item] = lifetimes[item].end;
+    }
+  if (!result) result = mesh_graph_interval_pack(n, size, begin, end, space->pages, place);
+  for (size_t k = 0; !result && k < count; k++) {
+    uint64_t *first = firsts + k * (size_t)(invocations + 1);
+    struct mesh_page_run *own = runs + k * (size_t)invocations;
+    for (uint64_t i = 0; i < invocations; i++) {
+      first[i] = (uint64_t)(own - runs) + i;
+      own[i] = (struct mesh_page_run){0, place[k * (size_t)invocations + i], pages[k]};
+    }
+    first[invocations] = (uint64_t)(own - runs) + invocations;
+    maps[k] = (struct mesh_page_map){invocations, first, runs};
+  }
+  free(size); free(begin); free(end); free(place);
+  return result;
 }
