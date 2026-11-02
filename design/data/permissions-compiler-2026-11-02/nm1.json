@@ -964,5 +964,30 @@
   "handles": "Handing the compiler the resolved span operand of a transport.",
   "group": "dma-spans",
   "replacement": "spans are specialized at the final lowering from the transport's page image"
+ },
+ {
+  "file": "rdma/nccl.h",
+  "line": 1040,
+  "lines": "410,413,695,701,708,722,1040",
+  "function": "(file scope) ncclMemAlloc, ncclMeshRegionRuns, ncclMeshPageTableCreate/Binding/Address, ncclMeshMemBuffer",
+  "scope": "chooser",
+  "violation": "chooser has access",
+  "abstraction": "pointer-yielding calls declared in the header every compiler file includes",
+  "handles": "Offering data programs the NCCL memory API and the lease's Metal buffer.",
+  "group": "header-scope",
+  "replacement": "split the header: data programs keep NCCL's pointer API; the compiler's header declares page-map types only",
+  "note": "metal-page-effects, mesh-tensor-layout and mesh-index-relation reach these through nccl.h."
+ },
+ {
+  "file": "rdma/nccl-mesh.c",
+  "line": 2071,
+  "lines": "1779,1800,1882,1890,2071",
+  "function": "(file scope) lease_at, lease_offset, stream_page, lease_buffer, address_of",
+  "scope": "chooser",
+  "violation": "chooser has access",
+  "abstraction": "static pointer-yielding helpers in the same translation unit as the schedule compiler, placement and page effects",
+  "handles": "Letting any compile step turn a where or a pointer into an address, a region offset or a Metal buffer.",
+  "group": "header-scope",
+  "replacement": "move the helpers into the final lowering translation unit with page indices as their only input; no chooser can call them"
  }
 ]
