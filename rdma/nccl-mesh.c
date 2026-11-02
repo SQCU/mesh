@@ -3457,6 +3457,36 @@ static ncclResult_t route_tree_counts(struct call *c,const struct mesh_program *
 }
 
 static int rank_member(const uint64_t *mask,uint32_t rank);
+
+/* A preparation's stages as one JSON line each in MESH_PREPARE_RECORD's directory, a file a process (none where it is
+   unset): the stage, its group, its call where it is one call's, the call's kind and sizes, the steps it made, the
+   group's solved trees, routing demands and catalog trees, and its microseconds. A log of preparation, read by people
+   and by extras/prepare_report.py, never by the plan or the transport. Added for the LSTM demonstration, whose 64-step
+   plan sampled at 40% in write_steps and 45% in collective_steps with no sizes to say why (2026-11-01). */
+static _Thread_local uint32_t prepare_group;
+static uint64_t prepare_clock(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static void prepare_record(const struct ncclComm *comm, const char *stage, uint64_t started, size_t call, int what,
+                           int target, size_t count, size_t tile_bytes, uint64_t steps, uint64_t trees, uint64_t demands,
+                           uint64_t catalog) {
+  static FILE *out;
+  static int opened;
+  if (!opened) {
+    opened = 1;
+    const char *dir = getenv("MESH_PREPARE_RECORD");
+    char path[1024];
+    if (dir && snprintf(path, sizeof path, "%s/prepare-%d-%d.jsonl", dir, comm->rank, (int)getpid()) < (int)sizeof path)
+      out = fopen(path, "w");
+  }
+  if (!out) return;
+  fprintf(out, "{\"rank\":%d,\"stage\":\"%s\",\"group\":%u,\"call\":%zu,\"what\":%d,\"target\":%d,\"count\":%zu,"
+          "\"tile_bytes\":%zu,\"steps\":%llu,\"trees\":%llu,\"demands\":%llu,\"catalog\":%llu,\"us\":%.1f}\n",
+          comm->rank, stage, prepare_group, call, what, target, count, tile_bytes, (unsigned long long)steps,
+          (unsigned long long)trees, (unsigned long long)demands, (unsigned long long)catalog,
+          (double)(prepare_clock() - started) / 1e3);
+  fflush(out);
+}
+
+static ncclResult_t plan_collective(ncclComm_t comm, struct routing *r, struct call *c, size_t i);
 /* every call that crosses a link planned, its group's traffic routed at once (above): a WRITE's steps over its pair's
    paths (write_steps), an all-to-all's over the group's weighed table (counted_steps), a collective along a configured form or the caller's
    programs where one fits it (comm_compile, program_of), else along its solved trees (solved_steps); its steps cut on
@@ -3469,12 +3499,22 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   for (size_t i = 0; !result && i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
+    const uint64_t started = prepare_clock();
     if (c->target) {
       result=route_path_counts(c,0,(uint32_t)c->root,(uint32_t)c->target-1,write_operand(c));
       if(!result)result=write_steps(c);
-      continue;
-    }
-    if (counted(c)) { result = counted_steps(c, call_paths(c,0)); continue; }
+    } else if (counted(c)) result = counted_steps(c, call_paths(c,0));
+    else result = plan_collective(comm, r, c, i);
+    prepare_record(comm, "call", started, i, c->what, c->target, c->count, c->tile_bytes,
+                   c->bound ? c->bound->count : 0, r->flow.count, r->view.demands, r->view.trees);
+  }
+  return result;
+}
+
+/* plan_calls' collective: along a configured form where its demand names one, else along its solved trees */
+static ncclResult_t plan_collective(ncclComm_t comm, struct routing *r, struct call *c, size_t i) {
+  ncclResult_t result;
+  {
     const uint32_t form=r->view.demand[r->lo[i]].form;
     const struct entry *entry=form==UINT32_MAX?NULL:comm->entries+form;
     const int segmented = partitioned(c->what);
@@ -3765,11 +3805,19 @@ done:
 /* a group's calls compiled: each crossing call's steps (plan_calls) and the group's entries on each channel, each list
    from its 0 (schedule_group), *seconds its schedule's finish (mesh_transfer_order); *plans NULL where it failed */
 static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule **plans, double *seconds) {
+  uint64_t started = prepare_clock();
   ncclResult_t result = plan_calls(comm, list, n);
+  prepare_record(comm, "plan_calls", started, n, 0, 0, 0, 0, 0, 0, 0, 0);
   if (!result && !(*plans = calloc(comm->count + 1, sizeof **plans))) result = fail(ncclSystemError, "out of memory");
+  started = prepare_clock();
   if (!result) result = schedule_group(comm, list, n, *plans);
+  prepare_record(comm, "schedule_group", started, n, 0, 0, 0, 0, 0, 0, 0, 0);
+  started = prepare_clock();
   if (!result) result = order_transfers(comm, list, n, *plans, NULL, 0, NULL, seconds);
+  prepare_record(comm, "order_transfers", started, n, 0, 0, 0, 0, 0, 0, 0, 0);
+  started = prepare_clock();
   for (uint32_t h = 0; h < comm->count && !result; h++) result = schedule_consumption(*plans + h, 1);
+  prepare_record(comm, "schedule_consumption", started, n, 0, 0, 0, 0, 0, 0, 0, 0);
   if (result) { schedules_free(comm, *plans); *plans = NULL; }
   return result;
 }
@@ -6745,21 +6793,31 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   for (size_t i = 0, g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
     const struct route_catalog catalog={{calls[0].routing,made->routing},{calls[0].routing_count,(uint32_t)g}};
+    prepare_group = (uint32_t)g;
+    uint64_t started = prepare_clock();
     pthread_mutex_lock(&group_lock);
     if(!result)result=routing_prepare(comm,x->calls,calls+i,x->n,&catalog,&x->routing);
     pthread_mutex_unlock(&group_lock);
     if(!result)made->routing[g]=x->routing->view;
+    prepare_record(comm, "routing", started, x->n, 0, 0, x->repeat, 0, 0, x->routing ? x->routing->flow.count : 0,
+                   x->routing ? x->routing->view.demands : 0, x->routing ? x->routing->view.trees : 0);
     for (size_t j = 0; j < x->n && !result; j++, i++)
       if (x->calls[j].target && x->calls[j].declared_bindings) {
         const uint32_t frames = x->calls[j].frames;
+        started = prepare_clock();
         if (x->repeat % frames) result = fail(ncclInvalidArgument, "declared frame count must divide its invocation order");
         else result = write_binding_prepare(x->calls + j, calls + i, x->repeat / frames);
+        prepare_record(comm, "write_binding", started, j, x->calls[j].what, x->calls[j].target, x->calls[j].count,
+                       x->calls[j].tile_bytes, x->repeat / frames, frames, 0, 0);
       }
   }
   pthread_mutex_lock(&group_lock);
   for (uint32_t g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
+    prepare_group = g;
+    const uint64_t started = prepare_clock();
     result = definition_prepare(comm, x);
+    prepare_record(comm, "definition", started, x->n, 0, 0, x->repeat, 0, 0, 0, 0, 0);
     if (!result) made->seconds[g] = x->seconds;
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
   }
