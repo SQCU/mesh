@@ -456,11 +456,25 @@ than calling the source producer again. Preserve the complete function order,
 including its declared epilogue, and release preparation relations after the
 joined solve/binding.
 
-Status: inspected, not yet written. Completion evidence: source/selector facts
-exist before packetization; their original declaration identities reach the
-joined solve; no second declaration traversal reconstructs them. This ordering
-change is necessary for C1/C3 coverage consumption, but does not itself generate
-that coverage.
+Status at 2026-11-02 03:29 UTC: the ordering substep is committed and pushed as
+microbench `42564104`. `MeshRankPlan` retains `sourceRuns` and each
+invocation's `sourceCommands` in one `sourceContext`, once, before it waits on
+its communicator and before the declaration exchange and `CommPlan`.
+`MeshRankPrepare` consumes those arrays; its second source callback is gone.
+The context and source relations are released after binding, or at detach if
+preparation did not reach that stage. The interface documents that the complete
+run and epilogue are declared before Plan. The native rank library and `-O`
+Engine module build against mesh `862ece24`; rank, goal-a and forward_graph
+sources typecheck. No payload run.
+
+Completion evidence met: source/selector facts exist before packetization;
+their original declaration identities reach the joined solve; no second
+declaration traversal reconstructs them. This completes the ordering substep,
+not C1/C3 coverage generation: the projection consumer still has to install the
+original source's active/count operands into the early transfer declarations.
+The C1 adapter hunks (`MeshRankCoverage` retaining the demand, native
+`DispatchSite.activity` through `MetalPageAccessLayout`) depend on C1's shared
+ABI and are not in this commit.
 
 ### Next handoff and validation
 
