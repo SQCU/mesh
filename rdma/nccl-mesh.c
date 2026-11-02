@@ -3960,7 +3960,10 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct owned owned; /* the leases its entries read, held from its placement to the next or its end */ };
 /* All operation kinds share the declared binding instances and routing basis. */
 struct compiled { struct call *calls; size_t n; uint64_t repeat, identity; struct schedule *plans; double seconds; uint32_t period;
-                  struct issue **laid; size_t laid_count, laid_room; struct routing *routing; };
+                  struct issue **laid; size_t laid_count, laid_room; struct routing *routing;
+                  /* design/page-maps-2026-11-02.md, integration step 1: a call names a space, so nothing is laid at
+                     declaration; each occurrence lays its own issue once its spaces are bound (zorvek) */
+                  int deferred; };
 /* a definition dropped: its laid issues freed, their pages back to the region */
 static void calls_free(struct call *list, size_t n);
 static void issue_free(struct ncclComm *comm, struct issue *u);
@@ -4977,13 +4980,26 @@ static ncclResult_t zoblimp(struct ncclComm *comm, struct compiled *x, uint64_t 
 static ncclResult_t issue_order_like(struct ncclComm *,struct issue *,const struct issue *);
 /* Each recorded invocation has its declared pages. Preparation never polls
    execution progress to select a binding or rewrite a still-live program. */
+static ncclResult_t issue_order(struct ncclComm *comm,struct issue *u,double *seconds);
+static ncclResult_t packets_prepare(struct ncclComm *comm, struct compiled *x, const struct issue *only);
 static ncclResult_t zorvek(struct ncclComm *comm, struct compiled *x, int remote, struct call **calls, size_t n,
                            struct schedule **plans, struct issue **issued, struct where *area) {
   const uint64_t instance = (*calls)[0].invocation % x->period;
   struct issue *u = NULL;
-  for (size_t k = 0; !u && k < x->laid_count; k++)
+  for (size_t k = 0; !x->deferred && !u && k < x->laid_count; k++)
     if (x->laid[k]->instance == instance && !x->laid[k]->used) u = x->laid[k];
-  if (!u) {
+  if (!u && x->deferred) {
+    /* its spaces are bound to this occurrence's runs (ncclMeshSpaceBind), so the issue is laid on them now. Its
+       landings' readers are not searched (landing_readers): the run's solve gave its landings pages no unsettled
+       access holds, and orders the rest by its edges (design/page-maps-2026-11-02.md, integration steps 4 and 5) */
+    double seconds = 0;
+    ncclResult_t result = zoblimp(comm, x, instance, remote, &u);
+    if (!result && remote) result = issue_order(comm, u, &seconds);
+    if (!result && remote) result = packets_prepare(comm, x, u);
+    if (!result && remote) result = issue_place(comm, u);
+    if (result) return result;
+    if (seconds > x->seconds) x->seconds = seconds;
+  } else if (!u) {
     ncclResult_t result = zoblimp(comm, x, instance, remote, &u);
     if (!result && remote) result = issue_order_like(comm,u,x->laid[instance]);
     if (!result && remote) result = issue_place(comm, u);
@@ -5893,7 +5909,7 @@ const char *ncclMeshMetalPrelude(void) { return metal_prelude(); }
 
 /* a host binding as its lease's Metal buffer: 0, ncclInvalidUsage where it lies in no lease */
 static ncclResult_t as_metal(struct where *w) {
-  if (w->buffer || !w->offset) return ncclSuccess;
+  if (w->space || w->buffer || !w->offset) return ncclSuccess;
   void *buffer = NULL;
   size_t offset = 0;
   if (lease_buffer((const void *)w->offset, &buffer, &offset))
@@ -6710,7 +6726,7 @@ static ncclResult_t issue_order_like(struct ncclComm *comm,struct issue *u,const
 /* Every endpoint and relay contributes physical backing cuts in the declared
    operand or transaction coordinates. Union every laid issue's placement (each binding instance) before
    emitting either end's descriptors. These exchanges belong solely to declaration. */
-static ncclResult_t packets_prepare(struct ncclComm *comm, struct compiled *x) {
+static ncclResult_t packets_prepare(struct ncclComm *comm, struct compiled *x, const struct issue *only) {
   ncclResult_t result = ncclSuccess;
   /* Coverage belongs to the declared value, not an already numbered span.
      Project it through each retained logical-SEND view before unioning the
@@ -6735,6 +6751,8 @@ static ncclResult_t packets_prepare(struct ncclComm *comm, struct compiled *x) {
   }
   for (size_t j = 0; !result && j < x->laid_count; j++) {
     const struct issue *u = x->laid[j];
+    /* a deferred definition's earlier occurrences were cut when they were laid; their spaces are bound elsewhere now */
+    if (only && u != only) continue;
     for (uint32_t h = 0; !result && h < comm->count; h++) for (int send = 1; send >= 0; send--)
       for (size_t k = 0; !result && k < (send ? u->plans[h].outs : u->plans[h].ins); k++) {
         const struct message *m = (send ? u->plans[h].out : u->plans[h].in) + k;
@@ -6847,6 +6865,15 @@ static ncclResult_t zoblimp(struct ncclComm *comm, struct compiled *x, uint64_t 
    (packets_prepare), then placed. WRITE and collective calls share the same issue storage and packet preparation. */
 static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remote) {
   uint64_t period = 1;
+  for (size_t i = 0; i < x->n; i++)
+    if (x->calls[i].send_at.space || x->calls[i].recv_at.space) x->deferred = 1;
+  if (x->deferred) {
+    for (size_t i = 0; i < x->n; i++)
+      if (!x->calls[i].declared_bindings)
+        return fail(ncclInvalidArgument, "each declared call requires its page bindings before preparation");
+    x->period = 1;
+    return ncclSuccess;
+  }
   const uint32_t frames = x->calls[0].frames;
   if (x->repeat % frames) return fail(ncclInvalidArgument, "declared frame count must divide its invocation order");
   const uint64_t invocations = x->repeat / frames;
@@ -6885,7 +6912,7 @@ static ncclResult_t prepared(struct ncclComm *comm, struct compiled *x, int remo
     double seconds=0;result=issue_order(comm,x->laid[j],&seconds);
     if(seconds>x->seconds)x->seconds=seconds;
   }
-  if (!result && remote) result = packets_prepare(comm, x);
+  if (!result && remote) result = packets_prepare(comm, x, NULL);
   for (size_t j = 0; !result && remote && j < x->laid_count; j++) result = issue_place(comm, x->laid[j]);
   return result;
 }
