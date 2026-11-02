@@ -183,24 +183,24 @@ class Scopes:
             depths.append(len(held))
             held.append(end)
         self.spans, self.opens = found, [s[0] for s in found]
-        self.parents = preorder_parents(depths)
-        self.looped = []
-        for k, (_, _, keyword) in enumerate(found):
-            parent = self.parents[k]
-            self.looped.append(keyword in LOOPS or (parent is not None and self.looped[parent]))
+        parents = preorder_parents(depths)
+        self.enclosing, self.known = (lambda k: () if parents[k] is None else (parents[k],)), {}
+        self.looped = [any(found[j][2] in LOOPS for j in self.chain(k)) for k in range(len(found))]
+
+    def chain(self, k):
+        """Scope k and every scope that holds it (mesh_graph ancestors over the parent relation)."""
+        return {k} | ancestors(self.enclosing, k, self.known)
 
     def at(self, position):
-        """The innermost scope holding position, or None."""
+        """The innermost scope holding position, or None: the latest-opened of the scopes holding the last one opened
+        before it."""
         k = bisect_right(self.opens, position) - 1
-        while k is not None and k >= 0 and not (self.spans[k][0] < position < self.spans[k][1]):
-            k = self.parents[k]
-        return None if k is None or k < 0 else k
+        held = [j for j in (self.chain(k) if k >= 0 else ()) if self.spans[j][0] < position < self.spans[j][1]]
+        return max(held, default=None)
 
     def outermost(self, position):
         k = self.at(position)
-        while k is not None and self.parents[k] is not None:
-            k = self.parents[k]
-        return k
+        return None if k is None else min(self.chain(k))
 
     def in_loop(self, position):
         k = self.at(position)
@@ -349,8 +349,17 @@ def function_counts(blocks, defined):
     """One function's own counts (each also as 'loop <name>' where a loop holds it), its spin loops, and its calls:
     [(callee, whether a loop holds the call)]. A block lies in a loop where it reaches itself (mesh_graph ancestors)."""
     succ = {b: sorted({t for line in lines for t in TARGET.findall(line)}) for b, lines in blocks}
-    reach = {}
-    looped = {b for b, _ in blocks if b in ancestors(lambda v: succ.get(v, ()), b, reach)}
+    pred = collections.defaultdict(list)
+    for b, targets in succ.items():
+        for t in targets:
+            pred[t].append(b)
+    forward, backward = {}, {}
+
+    def loop_of(b):
+        """The blocks of b's loop: those it reaches that reach it (mesh_graph ancestors each way); empty outside loops."""
+        return ancestors(lambda v: succ.get(v, ()), b, forward) & ancestors(lambda v: pred.get(v, ()), b, backward)
+
+    looped = {b for b, _ in blocks if b in loop_of(b)}
     defs, place = {}, {}
     for b, lines in blocks:
         for line in lines:
@@ -391,7 +400,7 @@ def function_counts(blocks, defined):
 
     spins = set()
     for value, address, b in loads:
-        loop = {v for v in reach[b] if b in reach.get(v, ())} if b in looped else set()
+        loop = loop_of(b)
         if not loop or place.get(address) in loop:
             continue
         for x, lines in blocks:
