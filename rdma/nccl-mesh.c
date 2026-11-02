@@ -2734,8 +2734,9 @@ static uint32_t demands_of(const struct ncclComm *comm, const struct call *c, st
 
 /* collective c compiled along its own demands' trees, [first, last) of the group's, with their shares (mesh_flow_trees),
    the all-reduce in two phases, its reduce-scatter up every segment's trees and its all-gather down them */
-static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, const struct flow *f, uint32_t first, uint32_t last,
-                                 struct mesh_operand operand, const uint64_t *cut) {
+/* f: the trees of demands first to last alone, the routing's from its tree `base` on (plan_collective) */
+static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, const struct flow *f, uint32_t base, uint32_t first,
+                                 uint32_t last, struct mesh_operand operand, const uint64_t *cut) {
   const uint32_t n = (uint32_t)c->comm->nranks;
   uint32_t *root = calloc((size_t)f->count + 1, sizeof *root), *parent = calloc((size_t)f->count * n + 1, sizeof *parent);
   double *weight = calloc((size_t)f->count + 1, sizeof *weight);
@@ -2750,7 +2751,7 @@ static ncclResult_t solved_steps(struct call *c, const struct mesh_demand *d, co
   const uint64_t *owners=c->what==MESH_ALLGATHER?c->contributors:c->recipients;
   for(uint32_t root=0;!result&&root<n;root++)if(has_root(c->what)||rank_member(owners,root))
     for(uint32_t k=0;k<f->count;k++)
-      if(f->demand[k]>=first&&f->demand[k]<last&&d[f->demand[k]].root==root)indices[indexed++]=k;
+      if(f->demand[k]>=first&&f->demand[k]<last&&d[f->demand[k]].root==root)indices[indexed++]=base+k;
   if (!result) result = collective_steps(c, &e, operand, cut,indices);
   free(indices);
   program_free(&e.program);
@@ -2838,6 +2839,8 @@ struct routing {
   struct mesh_demand *demands;
   uint32_t *lo,*hi;
   struct flow flow;
+  /* flow's trees are laid demand by demand (routing_prepare): demand d's are [tree_first[d], tree_first[d + 1]) */
+  uint32_t *tree_first;
   struct mesh_paths **paths[2];
   uint32_t **path_first[2];
 };
@@ -2851,7 +2854,7 @@ static void routing_free(struct routing *r) {
   }
   for(uint32_t s=0;s<r->view.scopes;s++)free((void *)r->view.scope[s]);
   free((void *)r->view.source);free((void *)r->view.source_first);free((void *)r->view.scope);free((void *)r->view.call_scope);
-  free(r->demands);free(r->lo);free(r->hi);flow_free(&r->flow);
+  free(r->demands);free(r->lo);free(r->hi);flow_free(&r->flow);free(r->tree_first);
   for(int k=0;k<2;k++) {
     for(uint32_t s=0;s<r->view.scopes;s++) {
       if(r->paths[k])mesh_write_routes_free(r->paths[k][s],r->view.nodes);
@@ -2950,6 +2953,44 @@ static int route_demand_equal(const ncclMeshRouting *a,uint32_t x,const ncclMesh
     !memcmp(a->contributors+(size_t)left->call*words,b->contributors+(size_t)right->call*words,words*sizeof(uint64_t))&&
     !memcmp(a->recipients+(size_t)left->call*words,b->recipients+(size_t)right->call*words,words*sizeof(uint64_t));
 }
+/* route_demand_equal's fields as a total order: equal demands are adjacent in it, so a plan finds every demand equal to
+   one by a sort and a binary search instead of comparing every pair. Two demands with no scope order as equal here but
+   are never equal (route_scope_equal), so a run is confirmed with route_demand_equal. Ties keep the demands' indices in
+   order. Added by the LSTM demonstration session: the pairwise searches (the representative of each demand in a plan,
+   and each demand against every earlier routing's) held the Mini for a minute in a 64-step LSTM's plan while the other
+   ranks waited in its configuration exchange (sample of 2026-11-01 17:53). */
+static int route_demand_order(const ncclMeshRouting *a,uint32_t x,const ncclMeshRouting *b,uint32_t y) {
+  const ncclMeshRouteDemand *left=a->demand+x,*right=b->demand+y;
+  const char *sa=a->scope[a->call_scope[left->call]],*sb=b->scope[b->call_scope[right->call]];
+  if(!sa||!sb){if(sa!=sb)return sa?1:-1;}
+  else{const int c=strcmp(sa,sb);if(c)return c;}
+  const size_t words=((size_t)a->nodes+63)/64;
+  int c=memcmp((const char *)left+offsetof(ncclMeshRouteDemand,what),(const char *)right+offsetof(ncclMeshRouteDemand,what),
+               offsetof(ncclMeshRouteDemand,form)-offsetof(ncclMeshRouteDemand,what));
+  if(!c)c=memcmp(a->leaves+(size_t)x*words,b->leaves+(size_t)y*words,words*sizeof(uint64_t));
+  if(!c)c=memcmp(a->contributors+(size_t)left->call*words,b->contributors+(size_t)right->call*words,words*sizeof(uint64_t));
+  if(!c)c=memcmp(a->recipients+(size_t)left->call*words,b->recipients+(size_t)right->call*words,words*sizeof(uint64_t));
+  return c;
+}
+static int route_demand_sorting(void *routing,const void *left,const void *right) {
+  const uint32_t x=*(const uint32_t *)left,y=*(const uint32_t *)right;
+  const int c=route_demand_order(routing,x,routing,y);
+  return c?c:(x>y)-(x<y);
+}
+/* r's first `count` demands' indices in route_demand_order */
+static uint32_t *route_demands_sorted(const ncclMeshRouting *r,uint32_t count) {
+  uint32_t *sorted=calloc((size_t)count+1,sizeof *sorted);
+  if(!sorted)return NULL;
+  for(uint32_t d=0;d<count;d++)sorted[d]=d;
+  qsort_r(sorted,count,sizeof *sorted,(void *)r,route_demand_sorting);
+  return sorted;
+}
+/* the first position of `sorted` (b's demands in route_demand_order) not before a's demand x */
+static uint32_t route_demand_first(const ncclMeshRouting *b,const uint32_t *sorted,uint32_t count,const ncclMeshRouting *a,uint32_t x) {
+  uint32_t lo=0,hi=count;
+  while(lo<hi){const uint32_t mid=lo+(hi-lo)/2;if(route_demand_order(b,sorted[mid],a,x)<0)lo=mid+1;else hi=mid;}
+  return lo;
+}
 static int route_tree_basis_equal(struct route_prior a,struct route_prior b) {
   const ncclMeshRouting *x=a.route,*y=b.route;uint32_t i=0,j=0;
   if(x->demand[a.index].form!=y->demand[b.index].form)return 0;
@@ -2981,7 +3022,13 @@ static ncclResult_t routing_prior(struct routing *r,const struct route_catalog *
     const ncclMeshRouting *prior=catalog->at[bank]+g;
     ncclResult_t error=routing_catalog_check(prior);if(error)return error;
     if(!route_topology_equal(&r->view,prior))continue;
-    for(uint32_t d=0;d<r->view.demands;d++)for(uint32_t p=0;p<prior->demands;p++)if(route_demand_equal(&r->view,d,prior,p)) {
+    uint32_t *sorted=route_demands_sorted(prior,prior->demands);
+    if(!sorted)return fail(ncclSystemError,"allocating a routing's demand order");
+    for(uint32_t d=0;d<r->view.demands;d++)
+    for(uint32_t at=route_demand_first(prior,sorted,prior->demands,&r->view,d);
+        at<prior->demands&&!route_demand_order(prior,sorted[at],&r->view,d);at++) {
+      const uint32_t p=sorted[at];
+      if(!route_demand_equal(&r->view,d,prior,p))continue;
       int supplied=0;for(uint32_t old=0;bank&&old<catalog->count[0];old++)supplied|=demands[d].route==catalog->at[0]+old;
       if(supplied)continue;
       /* this plan's earlier groups (bank 1): the first that solved an equal demand is the plan's choice for it; a later
@@ -2993,9 +3040,10 @@ static ncclResult_t routing_prior(struct routing *r,const struct route_catalog *
          service unable to plan at all (e3305b96) */
       if(bank&&demands[d].route)continue;
       const struct route_prior found={prior,p};
-      if(demands[d].route&&!route_tree_basis_equal(demands[d],found))return fail(ncclInvalidArgument,"one routing scope supplies conflicting tree choices");
+      if(demands[d].route&&!route_tree_basis_equal(demands[d],found)){free(sorted);return fail(ncclInvalidArgument,"one routing scope supplies conflicting tree choices");}
       demands[d]=found;
     }
+    free(sorted);
     for(uint32_t s=0;s<r->view.scopes;s++)for(uint32_t p=0;p<prior->scopes;p++)if(route_scope_equal(r->view.scope[s],prior->scope[p])) {
       int supplied=0;for(uint32_t old=0;bank&&old<catalog->count[0];old++)supplied|=paths[s].route==catalog->at[0]+old;
       if(supplied)continue;
@@ -3276,9 +3324,18 @@ static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,con
   if(!prior||!paths||!representative)result=fail(ncclSystemError,"allocating scoped routing correspondence");
   if(!result)result=routing_prior(r,catalog,prior,paths);
   int fresh=0;
+  /* each demand's representative, the first demand equal to it: runs of the demands in route_demand_order */
+  uint32_t *sorted=result?NULL:route_demands_sorted(&r->view,made);
+  if(!result&&!sorted)result=fail(ncclSystemError,"allocating the plan's demand order");
+  for(uint32_t at=0;!result&&at<made;) {
+    uint32_t end=at+1;
+    while(end<made&&!route_demand_order(&r->view,sorted[at],&r->view,sorted[end]))end++;
+    for(uint32_t k=at;k<end;k++)
+      representative[sorted[k]]=route_demand_equal(&r->view,sorted[k],&r->view,sorted[at])?sorted[at]:sorted[k];
+    at=end;
+  }
+  free(sorted);
   for(uint32_t d=0;d<made&&!result;d++) {
-    representative[d]=d;
-    for(uint32_t p=0;p<d;p++)if(route_demand_equal(&r->view,d,&r->view,p)){representative[d]=representative[p];break;}
     if(!prior[d].route&&!prior[representative[d]].route)fresh=1;
     if(!prior[d].route)prior[d]=prior[representative[d]];
     if(prior[d].route) {
@@ -3296,7 +3353,23 @@ static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,con
   }
   // One ordinary initial solve generates only previously undeclared domains.
   // Retained columns remain authoritative even when other domains are new.
-  if(!result&&fresh)result=flow_solve(comm,r->demands,made,&initial);
+  /* Equal demands (route_demand_equal) are one commodity: solved once with their bytes summed, the same concurrent flow
+     (identical commodities share one path distribution), its trees read through representative[d] below. Changed by
+     the LSTM demonstration session: every occurrence of a repeated function's calls was its own commodity, and the
+     solve (about ln(links)/eps^2 rounds over every commodity) held a 64-step LSTM's plan past 60 s on every rank
+     (ncclMeshCommPlan in flow_solve, m5ult4, 2026-11-01). What must stay: one commodity a distinct demand. */
+  if(!result&&fresh) {
+    struct mesh_demand *merged=calloc((size_t)made+1,sizeof *merged);
+    uint32_t *index=calloc((size_t)made+1,sizeof *index),*original=calloc((size_t)made+1,sizeof *original),distinct=0;
+    if(!merged||!index||!original)result=fail(ncclSystemError,"allocating distinct routing demands");
+    for(uint32_t d=0;d<made&&!result;d++) {
+      if(representative[d]==d){index[d]=distinct;original[distinct]=d;merged[distinct++]=r->demands[d];}
+      else{struct mesh_demand *one=merged+index[representative[d]];one->up+=r->demands[d].up;one->down+=r->demands[d].down;}
+    }
+    if(!result)result=flow_solve(comm,merged,distinct,&initial);
+    for(uint32_t t=0;!result&&t<initial.count;t++)initial.demand[t]=original[initial.demand[t]];
+    free(merged);free(index);free(original);
+  }
   size_t columns=0;
   for(uint32_t d=0;d<made&&!result;d++) {
     const ncclMeshRouting *p=prior[d].route;
@@ -3309,11 +3382,13 @@ static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,con
     r->flow=(struct flow){(uint32_t)columns,calloc(columns+1,sizeof(uint32_t)),calloc(columns*n+1,sizeof(uint32_t)),calloc(columns+1,sizeof(double))};
     trees=calloc(columns+1,sizeof *trees);parents=calloc(columns*n+1,sizeof *parents);
     r->view.tree=trees;r->view.parents=parents;r->view.trees=(uint32_t)columns;
-    if(!r->flow.demand||!r->flow.parent||!r->flow.share||!trees||!parents)result=fail(ncclSystemError,"allocating retained routing columns");
+    r->tree_first=calloc((size_t)made+1,sizeof *r->tree_first);
+    if(!r->flow.demand||!r->flow.parent||!r->flow.share||!trees||!parents||!r->tree_first)
+      result=fail(ncclSystemError,"allocating retained routing columns");
   }
   uint32_t at=0;
   for(uint32_t d=0;d<made&&!result;d++) {
-    const ncclMeshRouting *p=prior[d].route;const uint32_t begin=at;
+    const ncclMeshRouting *p=prior[d].route;const uint32_t begin=r->tree_first[d]=at;
     const struct call *c=calls+demand[d].call;
     const uint32_t adjustable=!c->target&&!counted(c)&&demand[d].form==UINT32_MAX;
     double sum=0;
@@ -3330,6 +3405,7 @@ static ncclResult_t routing_prepare(struct ncclComm *comm,struct call *calls,con
     if(!(sum>0)||!isfinite(sum)){result=fail(ncclInvalidArgument,"each routing demand requires positive finite total share");break;}
     for(uint32_t t=begin;t<at;t++){r->flow.share[t]/=sum;trees[t].share=r->flow.share[t];if(!p)trees[t].initial=trees[t].share;}
   }
+  if(!result)r->tree_first[made]=at;
   if(!result)result=routing_paths(comm,r,paths);
   free(prior);free(paths);free(representative);flow_free(&initial);return result;
 }
@@ -3363,21 +3439,62 @@ static ncclResult_t route_tree_counts(struct call *c,const struct mesh_program *
     const uint64_t elements=parts[p->parts+k];tree[indices[k]].units=elements?(elements-1)/q+1:0;
     if(__builtin_mul_overflow(elements,(uint64_t)operand.element_bytes,&tree[indices[k]].bytes))good=0;
   }
+  /* this call's demands' adjustable trees' units and bytes, summed in one pass over their trees, contiguous in the
+     routing's (struct routing tree_first). Changed by the LSTM demonstration session: each demand scanned every tree at
+     every call (calls x demands x trees; ecdb4f2e made it one pass over every tree a call, still calls x trees, 45% of
+     the 64-step plan's samples, 2026-11-01). What must stay: a call reads back its own demands from its own trees. */
+  const struct routing *r=c->routing;
+  const uint32_t call=p->parts?r->view.demand[tree[indices[0]].demand].call:0,lo=p->parts?r->lo[call]:0,hi=p->parts?r->hi[call]:0;
+  const uint32_t mine=hi-lo;
+  uint64_t *sums=good?calloc(2*(size_t)mine+1,sizeof *sums):NULL;unsigned char *active=good?calloc((size_t)mine+1,1):NULL;
+  if(good&&(!sums||!active)){free(sums);free(active);free(parts);return fail(ncclSystemError,"allocating tree allocation sums");}
+  for(uint32_t t=r->tree_first[lo];good&&t<r->tree_first[hi];t++)if(tree[t].adjustable) {
+    const uint32_t d=tree[t].demand-lo;active[d]=1;
+    if(__builtin_add_overflow(sums[2*(size_t)d],tree[t].units,&sums[2*(size_t)d])||
+       __builtin_add_overflow(sums[2*(size_t)d+1],tree[t].bytes,&sums[2*(size_t)d+1]))good=0;
+  }
   if(good) {
     ncclMeshRouteDemand *demands=(ncclMeshRouteDemand *)c->routing->view.demand;
-    for(uint32_t d=0;d<c->routing->view.demands;d++) {
-      uint64_t units=0,bytes=0;int active=0;
-      for(uint32_t t=0;t<c->routing->view.trees;t++)if(tree[t].demand==d&&tree[t].adjustable) {
-        active=1;
-        if(__builtin_add_overflow(units,tree[t].units,&units)||__builtin_add_overflow(bytes,tree[t].bytes,&bytes)){good=0;break;}
-      }
-      if(active) {demands[d].units=units;if(demands[d].directions&1)demands[d].up=bytes;if(demands[d].directions&2)demands[d].down=bytes;}
+    for(uint32_t d=0;d<mine;d++)if(active[d]) {
+      demands[lo+d].units=sums[2*(size_t)d];
+      if(demands[lo+d].directions&1)demands[lo+d].up=sums[2*(size_t)d+1];
+      if(demands[lo+d].directions&2)demands[lo+d].down=sums[2*(size_t)d+1];
     }
   }
-  free(parts);return good?ncclSuccess:fail(ncclInvalidArgument,"tree allocation readback");
+  free(sums);free(active);free(parts);return good?ncclSuccess:fail(ncclInvalidArgument,"tree allocation readback");
 }
 
 static int rank_member(const uint64_t *mask,uint32_t rank);
+
+/* A preparation's stages as one JSON line each in MESH_PREPARE_RECORD's directory, a file a process (none where it is
+   unset): the stage, its group, its call where it is one call's, the call's kind and sizes, the steps it made, the
+   group's solved trees, routing demands and catalog trees, and its microseconds. A log of preparation, read by people
+   and by extras/prepare_report.py, never by the plan or the transport. Added for the LSTM demonstration, whose 64-step
+   plan sampled at 40% in write_steps and 45% in collective_steps with no sizes to say why (2026-11-01). */
+static _Thread_local uint32_t prepare_group;
+static uint64_t prepare_clock(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static void prepare_record(const struct ncclComm *comm, const char *stage, uint64_t started, size_t call, int what,
+                           int target, size_t count, size_t tile_bytes, uint64_t steps, uint64_t trees, uint64_t demands,
+                           uint64_t catalog) {
+  static FILE *out;
+  static int opened;
+  if (!opened) {
+    opened = 1;
+    const char *dir = getenv("MESH_PREPARE_RECORD");
+    char path[1024];
+    if (dir && snprintf(path, sizeof path, "%s/prepare-%d-%d.jsonl", dir, comm->rank, (int)getpid()) < (int)sizeof path)
+      out = fopen(path, "w");
+  }
+  if (!out) return;
+  fprintf(out, "{\"rank\":%d,\"stage\":\"%s\",\"group\":%u,\"call\":%zu,\"what\":%d,\"target\":%d,\"count\":%zu,"
+          "\"tile_bytes\":%zu,\"steps\":%llu,\"trees\":%llu,\"demands\":%llu,\"catalog\":%llu,\"us\":%.1f}\n",
+          comm->rank, stage, prepare_group, call, what, target, count, tile_bytes, (unsigned long long)steps,
+          (unsigned long long)trees, (unsigned long long)demands, (unsigned long long)catalog,
+          (double)(prepare_clock() - started) / 1e3);
+  fflush(out);
+}
+
+static ncclResult_t plan_collective(ncclComm_t comm, struct routing *r, struct call *c, size_t i);
 /* every call that crosses a link planned, its group's traffic routed at once (above): a WRITE's steps over its pair's
    paths (write_steps), an all-to-all's over the group's weighed table (counted_steps), a collective along a configured form or the caller's
    programs where one fits it (comm_compile, program_of), else along its solved trees (solved_steps); its steps cut on
@@ -3390,12 +3507,22 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   for (size_t i = 0; !result && i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
+    const uint64_t started = prepare_clock();
     if (c->target) {
       result=route_path_counts(c,0,(uint32_t)c->root,(uint32_t)c->target-1,write_operand(c));
       if(!result)result=write_steps(c);
-      continue;
-    }
-    if (counted(c)) { result = counted_steps(c, call_paths(c,0)); continue; }
+    } else if (counted(c)) result = counted_steps(c, call_paths(c,0));
+    else result = plan_collective(comm, r, c, i);
+    prepare_record(comm, "call", started, i, c->what, c->target, c->count, c->tile_bytes,
+                   c->bound ? c->bound->count : 0, r->flow.count, r->view.demands, r->view.trees);
+  }
+  return result;
+}
+
+/* plan_calls' collective: along a configured form where its demand names one, else along its solved trees */
+static ncclResult_t plan_collective(ncclComm_t comm, struct routing *r, struct call *c, size_t i) {
+  ncclResult_t result;
+  {
     const uint32_t form=r->view.demand[r->lo[i]].form;
     const struct entry *entry=form==UINT32_MAX?NULL:comm->entries+form;
     const int segmented = partitioned(c->what);
@@ -3403,8 +3530,13 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
     uint64_t cut[segmented ? comm->nranks : 1];
     for (int rank = 0; segmented && rank < comm->nranks; rank++) cut[rank] = (c->segments ? c->segments[rank] : c->count) / u;
+    /* the call's own demands' trees, contiguous in the routing's (tree_first). Changed by the LSTM demonstration
+       session: every call scanned and copied over all of its group's trees (mesh_flow_trees, a calloc of every tree's
+       parents), calls x trees on every rank (2026-11-01). What must stay: a call reads its own trees alone. */
+    const uint32_t a = entry ? 0 : r->tree_first[r->lo[i]], b = entry ? 0 : r->tree_first[r->hi[i]];
+    const struct flow mine = {b - a, r->flow.demand + a, r->flow.parent + (size_t)a * comm->nranks, r->flow.share + a};
     result = entry ? collective_steps(c, entry, operand, segmented ? cut : NULL,NULL)
-                        : solved_steps(c, r->demands, &r->flow, r->lo[i], r->hi[i], operand, segmented ? cut : NULL);
+                        : solved_steps(c, r->demands, &mine, a, r->lo[i], r->hi[i], operand, segmented ? cut : NULL);
     if (!result && c->what == MESH_REDUCE_SCATTER) result = partial_split(c);
   }
   return result;
@@ -3686,11 +3818,19 @@ done:
 /* a group's calls compiled: each crossing call's steps (plan_calls) and the group's entries on each channel, each list
    from its 0 (schedule_group), *seconds its schedule's finish (mesh_transfer_order); *plans NULL where it failed */
 static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule **plans, double *seconds) {
+  uint64_t started = prepare_clock();
   ncclResult_t result = plan_calls(comm, list, n);
+  prepare_record(comm, "plan_calls", started, n, 0, 0, 0, 0, 0, 0, 0, 0);
   if (!result && !(*plans = calloc(comm->count + 1, sizeof **plans))) result = fail(ncclSystemError, "out of memory");
+  started = prepare_clock();
   if (!result) result = schedule_group(comm, list, n, *plans);
+  prepare_record(comm, "schedule_group", started, n, 0, 0, 0, 0, 0, 0, 0, 0);
+  started = prepare_clock();
   if (!result) result = order_transfers(comm, list, n, *plans, NULL, 0, NULL, seconds);
+  prepare_record(comm, "order_transfers", started, n, 0, 0, 0, 0, 0, 0, 0, 0);
+  started = prepare_clock();
   for (uint32_t h = 0; h < comm->count && !result; h++) result = schedule_consumption(*plans + h, 1);
+  prepare_record(comm, "schedule_consumption", started, n, 0, 0, 0, 0, 0, 0, 0, 0);
   if (result) { schedules_free(comm, *plans); *plans = NULL; }
   return result;
 }
@@ -6693,21 +6833,31 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   for (size_t i = 0, g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
     const struct route_catalog catalog={{calls[0].routing,made->routing},{calls[0].routing_count,(uint32_t)g}};
+    prepare_group = (uint32_t)g;
+    uint64_t started = prepare_clock();
     pthread_mutex_lock(&group_lock);
     if(!result)result=routing_prepare(comm,x->calls,calls+i,x->n,&catalog,&x->routing);
     pthread_mutex_unlock(&group_lock);
     if(!result)made->routing[g]=x->routing->view;
+    prepare_record(comm, "routing", started, x->n, 0, 0, x->repeat, 0, 0, x->routing ? x->routing->flow.count : 0,
+                   x->routing ? x->routing->view.demands : 0, x->routing ? x->routing->view.trees : 0);
     for (size_t j = 0; j < x->n && !result; j++, i++)
       if (x->calls[j].target && x->calls[j].declared_bindings) {
         const uint32_t frames = x->calls[j].frames;
+        started = prepare_clock();
         if (x->repeat % frames) result = fail(ncclInvalidArgument, "declared frame count must divide its invocation order");
         else result = write_binding_prepare(x->calls + j, calls + i, x->repeat / frames);
+        prepare_record(comm, "write_binding", started, j, x->calls[j].what, x->calls[j].target, x->calls[j].count,
+                       x->calls[j].tile_bytes, x->repeat / frames, frames, 0, 0);
       }
   }
   pthread_mutex_lock(&group_lock);
   for (uint32_t g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
+    prepare_group = g;
+    const uint64_t started = prepare_clock();
     result = definition_prepare(comm, x);
+    prepare_record(comm, "definition", started, x->n, 0, 0, x->repeat, 0, 0, 0, 0, 0);
     if (!result) made->seconds[g] = x->seconds;
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
   }

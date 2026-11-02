@@ -457,6 +457,11 @@ def operation(node):
     return target, args
 
 
+def _outer(x, dim):
+    """A gather's or a scatter's frames along `dim` (backend.Call outer): the product of x's dimensions before it."""
+    return math.prod(int(s) for s in x.shape[:dim % len(x.shape)])
+
+
 def _operation(name):
     names = {'sum': 'SUM', 'product': 'PRODUCT', 'max': 'MAX', 'min': 'MIN', 'avg': 'AVG'}
     if name not in names:
@@ -539,8 +544,8 @@ def _collective_declaration(node):
 
     def gather(source, result, dim, sizes):
         counts = [int(size) * partition._row(source, dim) for size in sizes]
-        call = declare(backend.Call(backend.ALLGATHER, source.numel(), source.dtype, counts=counts), source, result,
-                       source_axis=dim, result_axis=dim)
+        call = declare(backend.Call(backend.ALLGATHER, source.numel(), source.dtype, counts=counts,
+                                    outer=_outer(source, dim)), source, result, source_axis=dim, result_axis=dim)
         return partition.gathered(source, dim, sizes, group, declaration=call)
 
     if namespace == 'torch_mesh' and name == 'select_exchange':
@@ -568,8 +573,9 @@ def _collective_declaration(node):
         calls = [declare(backend.Call(backend.ALLREDUCE, x.numel(), x.dtype, op=_operation(reduction)), x, results[0])]
     elif namespace == 'torch_mesh' and name == 'reduce_scatterv':
         counts = [int(size) * partition._row(x, args['dim']) for size in args['sizes']]
-        calls = [declare(backend.Call(backend.REDUCE_SCATTER, x.numel(), x.dtype, counts=counts, op=_operation(reduction)),
-                         x, results[0], source_axis=args['dim'], result_axis=args['dim'])]
+        calls = [declare(backend.Call(backend.REDUCE_SCATTER, x.numel(), x.dtype, counts=counts, op=_operation(reduction),
+                                      outer=_outer(x, args['dim'])), x, results[0], source_axis=args['dim'],
+                         result_axis=args['dim'])]
     elif name in ('all_reduce', 'all_reduce_'):
         calls = [declare(backend.Call(backend.ALLREDUCE, x.numel(), x.dtype, op=_operation(reduction)), x, results[0])]
     elif name in ('broadcast', 'broadcast_'):
@@ -666,13 +672,18 @@ def _collective_relations(declaration, mathematical, algebra):
         return ({rank: algebra.layout(layout_configuration(layout)) for rank, layout in mathematical['reads'].items()},
                 {rank: algebra.layout(layout_configuration(layout)) for rank, layout in mathematical['writes'].items()})
 
+    # a gather's or a scatter's positions are its operand's own order, frame by frame (Call.outer,
+    # collective_views._pieces). Changed by the LSTM demonstration session: the axis was moved first, so each rank's
+    # block was one run of the call but a gather along h's units (L x rows x H, dim 2) broke its storage at every
+    # element, and collective_views.lower cut it into 16384 one-element all-gathers a tick (2026-11-01). What must
+    # stay: positions in storage order, the frames' ends the fragments' cuts.
     def order(value, count, axis):
         shape, steps = [count], []
         if axis is not None and count:
             shape = list(map(int, value.shape))
             axis %= len(shape)
             shape[axis] = count // math.prod(shape[:axis] + shape[axis + 1:])
-            steps = [['permute', [axis, *(i for i in range(len(shape)) if i != axis)]], ['reshape', [count]]]
+            steps = [['reshape', [count]]]
         return algebra.selection_relation(dict(shape=shape, steps=steps))
 
     for rank in range(group.size()):

@@ -267,3 +267,48 @@ def independent(inputs, users, order, group, value, known):
     users)."""
     return (not any(member in ancestors(inputs, value, known) for member in group)
             and not any(order[u] < order[value] for member in group for u in users(member)))
+
+
+def descendants(root, children):
+    """Every vertex beneath ``root`` in a tree, in preorder: ``children(v)`` gives v's direct children (an IORegistry
+    entry's IORegistryEntryChildren, for one). ``root`` itself is not among them."""
+    stack = list(reversed(children(root)))
+    while stack:
+        v = stack.pop()
+        yield v
+        stack.extend(reversed(children(v)))
+
+
+def preorder_parents(depths):
+    """Each row's parent row in a tree written in preorder with each row's depth (an indented outline, such as a
+    sample(1) call graph): its index, or None for a root."""
+    parents, stack = [], []
+    for i, depth in enumerate(depths):
+        while stack and depths[stack[-1]] >= depth:
+            stack.pop()
+        parents.append(stack[-1] if stack else None)
+        stack.append(i)
+    return parents
+
+
+def retained(items, removable, writes, reads, protected=()):
+    """``items`` in order, less every removable one whose values no other kept item reads and none of which is
+    protected, the later ones considered first (a dead-code sweep): ``removable(item)`` says whether it may go,
+    ``writes(item)`` and ``reads(item)`` name the values it writes and reads. Each value's readers are counted once and
+    an item's removal takes its reads off them, so the sweep is one pass over the items' reads."""
+    items, protected = list(items), set(protected)
+    own = [set(reads(item)) for item in items]
+    readers = {}
+    for values in own:
+        for value in values:
+            readers[value] = readers.get(value, 0) + 1
+    kept = [True] * len(items)
+    for k in reversed(range(len(items))):
+        if not removable(items[k]):
+            continue
+        if any(value in protected or readers.get(value, 0) - (value in own[k]) > 0 for value in writes(items[k])):
+            continue
+        kept[k] = False
+        for value in own[k]:
+            readers[value] -= 1
+    return [item for item, keep in zip(items, kept) if keep]
