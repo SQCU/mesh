@@ -16,8 +16,8 @@ class ValueSpace:
 
     type: pages, the virtual pages it holds at page_bytes; state, the identity a state's versions share (None for a
     space with one version); lease, the program's page runs ((first virtual page, pages, first physical page), ...)
-    where a caller's tensor is the space, a constant map; () where the run's Plan allocates its map per occurrence
-    (mesh_page_allocate). Identity is the object's: two values of one space are views of one storage."""
+    where a caller's tensor is the space, a constant map; () where the run's solve places it per occurrence
+    (mesh_run_solve). Identity is the object's: two values of one space are views of one storage."""
     pages: int
     page_bytes: int
     state: object = None
@@ -85,6 +85,14 @@ class TensorValue:
     def slice(self, axis, first, count, step=1):
         """type: the same space, the layout's slice along `axis`."""
         return self.view(self.layout.slice(axis, first, count, step))
+
+    def reshape(self, shape):
+        """type: the same space, the layout reshaped (TensorLayout.reshape)."""
+        return self.view(self.layout.reshape(tuple(shape)))
+
+    def flat(self, offset, count):
+        """type: the same space, `count` consecutive elements from element `offset` (a fragment's view)."""
+        return self.view(_stream.TensorLayout((int(count),), (1,), int(offset)))
 
     def retyped(self, dtype, units):
         """type: the same elements read at `dtype`, `units` of them an element of this value's dtype (the layout's

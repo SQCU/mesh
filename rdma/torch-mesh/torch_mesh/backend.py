@@ -115,8 +115,29 @@ def _binding(tensor):
     return (ffi.NULL, tensor.data_ptr())
 
 
+# each value space's handle in the library (nccl.h ncclMeshSpaceCreate), by its serial: created once, bound per
+# occurrence by the lowering (lowering.bind_spaces), never by a chooser
+_SPACES = {}
+
+
+def space_handle(space):
+    """type: a ValueSpace -> its ncclMeshSpace_t, created on first use under the same serial (design/page-maps-2026-11-02.md)."""
+    handle = _SPACES.get(space.serial)
+    if handle is None:
+        made = ffi.new('ncclMeshSpace_t *')
+        check(LIB.ncclMeshSpaceCreate(space.serial, space.pages * space.page_bytes, made))
+        handle = _SPACES[space.serial] = made[0]
+    return handle
+
+
 def _slots(value):
-    """One ordinary page binding and its explicit occurrence coordinates."""
+    """One ordinary page binding and its explicit occurrence coordinates. A value names its space and the byte offset
+    of its first element there (design/page-maps-2026-11-02.md), never a buffer."""
+    from .operand import TensorValue
+    if isinstance(value, TensorValue):
+        first = value.layout.index(0) * value.dtype.itemsize if value.layout.count else 0
+        return {'buffer': (ffi.NULL, first), 'instances': 1, 'stride': 0, 'invocation': 0,
+                'space': space_handle(value.space)}
     record = value if isinstance(value, dict) else {'tensor': value}
     return {'buffer': _binding(record.get('tensor')), 'instances': record.get('instances', 1),
             'stride': record.get('stride', 0), 'invocation': record.get('invocation', 0)}
@@ -430,10 +451,11 @@ def prepare_fragments(bindings, group):
     # each declaration names the tensors its issue passes, so CommPlan lays and places it for them.
     # design/eager-execution.md#what-follows
     declarations = [d._replace(bindings=(source, destination)) for d, source, destination in bindings]
-    from .operand import TensorView
+    from .operand import TensorValue, TensorView
     views, operands = [], []
     for declaration, source, destination in bindings:
-        views.append(tuple(None if value is None else TensorView.of(value) for value in (source, destination)))
+        views.append(tuple(None if value is None else value if isinstance(value, TensorValue) else TensorView.of(value)
+                           for value in (source, destination)))
         operands.extend(t for t in (source, destination) if t is not None)
     return dict(transfer='collective', views=tuple(views), calls=tuple(declarations),
                 operands=tuple(operands), group=group, before=tuple(before), after=tuple(after)), declarations

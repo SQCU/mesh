@@ -7,7 +7,17 @@ from bisect import bisect_right
 from itertools import accumulate
 import math
 
-from .operand import TensorView, ordered_runs
+from .operand import TensorValue, TensorView, ordered_runs
+
+
+def _of(value):
+    """an operand as itself where it is a value (design/page-maps-2026-11-02.md), else as a view"""
+    return value if isinstance(value, TensorValue) else TensorView.of(value)
+
+
+def _identity(value):
+    """the identity a span's runs share: a value's space, a view's storage"""
+    return value.space if isinstance(value, TensorValue) else value.storage
 from . import _stream
 
 
@@ -148,11 +158,11 @@ def complete_calls(calls, group):
 def _binding(value, domain, unit, writing, layouts):
     """Resolve the numerical consumer's field constraint before cutting rows."""
     from .layout import resolve
-    value = TensorView.of(value)
-    runs, count = ordered_runs([(value.storage, value)])
+    value = _of(value)
+    runs, count = ordered_runs([(_identity(value), value)])
     if count != sum(end - start for start, end in domain):
         raise ValueError('collective page selection must cover its declared local domain')
-    commands, spans = [], [(value.storage, value)]
+    commands, spans = [], [(_identity(value), value)]
     # A scalar is one field. A record is indivisible numerical work, even when
     # its rows are gathered or separated by gaps in the original allocation.
     split = sorted({end // unit for _, end, _, _ in runs if end % unit})
@@ -166,15 +176,15 @@ def _binding(value, domain, unit, writing, layouts):
                 end += 1
                 at += 1
             if first < start:
-                spans.append((value.storage, rows.slice(0, first, start - first)))
+                spans.append((_identity(value), rows.slice(0, first, start - first)))
             placed, copies = resolve(rows.slice(0, start, end - start),
                                      (layouts['output' if writing else 'input'],), writing=writing)
-            placed = TensorView.of(placed)
-            spans.append((placed.storage, placed))
+            placed = _of(placed)
+            spans.append((_identity(placed), placed))
             commands.extend(copies)
             first = end
         if first < count // unit:
-            spans.append((value.storage, rows.slice(0, first, count // unit - first)))
+            spans.append((_identity(value), rows.slice(0, first, count // unit - first)))
     selection = _stream.TensorLayout.runs([[first, end - first, 0, 1] for first, end in domain])
     requested = _stream.TensorLayout.runs([[0, max((end for _, end in domain), default=0), 0, 1]])
     traversal = _stream.TensorTraversal([view.layout for _, view in spans], selection, requested)
@@ -183,7 +193,10 @@ def _binding(value, domain, unit, writing, layouts):
 
 def _alias(spans, traversal, first, last):
     part, offset, count = traversal.fragment(first, last)
-    return spans[part][0].as_strided((count,), (1,), offset)
+    identity, view = spans[part]
+    if isinstance(view, TensorValue):
+        return view.flat(offset, count)
+    return identity.as_strided((count,), (1,), offset)
 
 
 def lower(bindings, group):
@@ -204,10 +217,10 @@ def lower(bindings, group):
         if total % unit or any(count % unit for count in call.counts or ()):
             raise ValueError('collective counts must contain complete declared operator elements')
         values = []
-        exemplar = TensorView.of(source if source is not None else destination)
+        exemplar = _of(source if source is not None else destination)
         for value, domain, writing in ((source, sends, False), (destination, receives, True)):
             if not domain or not any(end > start for start, end in domain):
-                value = exemplar.storage.as_strided((0,), (1,), 0)
+                value = exemplar.flat(0, 0) if isinstance(exemplar, TensorValue) else exemplar.storage.as_strided((0,), (1,), 0)
             spans, traversal, commands = _binding(value, domain, unit, writing, layouts)
             (after if writing else before).extend(commands)
             # a cut where this rank's storage breaks inside its domain, never at the domain's own ends: a
