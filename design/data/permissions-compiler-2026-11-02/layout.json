@@ -1,3 +1,52 @@
 [
- {"file":"rdma/mesh-tensor-layout.h","line":2,"lines":"2-3","function":"(file scope)","scope":"chooser","violation":"chooser has access","abstraction":"#import <Metal/Metal.h> and nccl.h (id<MTLBuffer>, ncclMeshBuffer, ncclMeshAccess, ncclMeshPageTable_t)","handles":"lets the layout interface name Metal buffers and the interface's (buffer, offset) types beside its element relations.","group":"operand-identity","replacement":"the layout interface imports only the page-map types (virtual page, physical page index, layout); Metal and pointer-bearing nccl.h types move to the final lowering.","note":"partial; rows to mesh-tensor-layout.m:300 so far"}
+ {
+  "file": "rdma/mesh-tensor-layout.h",
+  "line": 2,
+  "lines": "2-3",
+  "function": "(file scope)",
+  "scope": "chooser",
+  "violation": "chooser has access",
+  "abstraction": "#import <Metal/Metal.h> and nccl.h (id<MTLBuffer>, ncclMeshBuffer, ncclMeshAccess, ncclMeshPageTable_t)",
+  "handles": "lets the layout interface name Metal buffers and the interface's (buffer, offset) types beside its element relations.",
+  "group": "operand-identity",
+  "replacement": "the layout interface imports only the page-map types (virtual page, physical page index, layout); Metal and pointer-bearing nccl.h types move to the final lowering.",
+  "note": "partial; rows to mesh-tensor-layout.m:1820 so far"
+ },
+ {
+  "file": "rdma/mesh-tensor-layout.m",
+  "line": 321,
+  "lines": "321-351",
+  "function": "TensorExpressionSource",
+  "scope": "effector",
+  "violation": "effector computes a map",
+  "abstraction": "emitted Metal source with div and mod by layout extents, select and min/max over long(i)",
+  "handles": "turns a layout's index terms into kernel text so the kernel finds each element's storage position.",
+  "group": "runtime-map",
+  "replacement": "specialize at final lowering: pointer literal or base + affine offset from the page table; only an affine piece, its base dereferenced from the page table, reaches kernel text.",
+  "note": "every declaration emitter below reaches kernel text through this function"
+ },
+ {
+  "file": "rdma/mesh-tensor-layout.m",
+  "line": 388,
+  "lines": "388-392",
+  "function": "TensorExpressionPiece",
+  "scope": "chooser",
+  "violation": "chooser holds pointer",
+  "abstraction": "thread-local cache keyed by the expression object's address (held != expression)",
+  "handles": "keeps one compiled index program per expression so a layout's runs do not recompile it.",
+  "group": "identity-by-address",
+  "replacement": "key the compiled program by the layout's own identity (its value or an ordinal), never by an object's host address."
+ },
+ {
+  "file": "rdma/mesh-tensor-layout.m",
+  "line": 1384,
+  "lines": "1384-1397",
+  "function": "TensorStorageDeclaration",
+  "scope": "effector",
+  "violation": "effector computes a map",
+  "abstraction": "emitted 'inline long name(long storage) { long i = storage - low; return ...; }': the inverse of the source layout composed with the physical layout, evaluated per access",
+  "handles": "maps a frontend's declared storage index to the placed page position inside the kernel.",
+  "group": "runtime-map",
+  "replacement": "specialize at final lowering: compose the inverse with the page map at preparation and emit the result as pointer literals or base + affine offset from the page table."
+ }
 ]
