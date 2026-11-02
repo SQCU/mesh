@@ -115,10 +115,13 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
    invocations land wherever pages are free over their lifetimes, never by a picked formula. Pages return through the
    retire ledger (mesh-lease-retire.h) between functions. 0, ENOMEM where the function's live set exceeds the region (a
    compile-time failure), or the packing's error */
-/* type: (Space, [VPages_k], [Life_{k,i}], Inv) -> [Map_k] with: for all (k,i) != (l,j) whose lives overlap, their
-   pages are disjoint; and every Page < space.pages. ENOMEM iff no such maps exist by first-fit over the event order */
+/* type: (Space, [VPages_k], [Life_{k,i}], Inv, pins) -> [Map_k] with: for all (k,i) != (l,j) whose lives overlap, their
+   pages are disjoint; every Page < space.pages; and where pinned[k * invocations + i], (k,i)'s pages begin at
+   pinned_first[k * invocations + i], a lease's (the program's state where it touches it). pinned NULL pins none.
+   ENOMEM iff no such maps exist by first-fit over the event order, EBUSY iff two pins collide */
 int mesh_page_allocate(const struct mesh_page_space *space, size_t count, const uint64_t *pages,
-                       const struct mesh_lifetime *lifetimes, uint64_t invocations, struct mesh_page_map *maps,
-                       uint64_t *firsts, struct mesh_page_run *runs);
+                       const struct mesh_lifetime *lifetimes, uint64_t invocations, const unsigned char *pinned,
+                       const uint64_t *pinned_first, struct mesh_page_map *maps, uint64_t *firsts,
+                       struct mesh_page_run *runs);
 
 #endif

@@ -236,13 +236,16 @@ void *mesh_graph_pair_classes(const struct mesh_graph_lattice *removed, int64_t 
    member i % width, a bijection of [0, count); placed[p] the slot position of ordinal p, its tile's rank times width
    plus its place in the tile. -1 where `at` is no such bijection (placed is then unspecified), 0 otherwise. */
 int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t *placed);
+/* type: n x (size, [begin, end)), capacity, pinned -> place[n] with place[k] + size[k] <= capacity, place[k] unchanged
+   where pinned[k] (a lease's pages, given), and for all k != l with overlapping intervals and nonzero sizes,
+   [place[k], place[k] + size[k]) disjoint from [place[l], place[l] + size[l]) */
 /* Interval packing: n items, item k needing size[k] consecutive units over the interval [begin[k], end[k]). Each item
    is placed at units [place[k], place[k] + size[k]) of [0, capacity), so that no two items whose intervals overlap
-   share a unit. 0, or ENOMEM where the live set at some point exceeds capacity: a compile-time failure. Consumers:
-   the page allocator (mesh-page-map.h, items a value at an invocation, units physical pages; design/page-maps-2026-11-02.md). */
-/* type: n x (size, [begin, end)), capacity -> place[n] with place[k] + size[k] <= capacity and, for all k != l with
-   overlapping intervals and nonzero sizes, [place[k], place[k] + size[k]) disjoint from [place[l], place[l] + size[l]) */
+   share a unit. An item with pinned[k] keeps the place it is given (pinned NULL: none is), and every other is placed
+   around it. 0; ENOMEM where the live set at some point exceeds capacity; EBUSY where two pinned items collide: a
+   compile-time failure. Consumers: the page allocator (mesh-page-map.h, items a value at an invocation, units physical
+   pages, pinned items the program's leases; design/page-maps-2026-11-02.md). */
 int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *begin, const uint64_t *end,
-                             uint64_t capacity, uint64_t *place);
+                             const unsigned char *pinned, uint64_t capacity, uint64_t *place);
 
 #endif

@@ -909,10 +909,26 @@ static int pack_event_order(const void *left, const void *right) {
   if (a->begins != b->begins) return a->begins - b->begins;  /* an end at t frees before a begin at t takes */
   return (a->item > b->item) - (a->item < b->item);
 }
+/* the first place in free run [first, first + count) for an item of `size` units over [b, e) that meets no pinned item
+   live at any time in [b, e) (the pinned items' units are given, so a later pinned item is respected too); UINT64_MAX
+   where none */
+static uint64_t pack_fit(uint64_t first, uint64_t count, uint64_t size, uint64_t b, uint64_t e, size_t n,
+                         const uint64_t *sizes, const uint64_t *begins, const uint64_t *ends, const unsigned char *pinned,
+                         const uint64_t *place) {
+  uint64_t at = first;
+  for (int moved = 1; moved && at + size <= first + count;) {
+    moved = 0;
+    for (size_t p = 0; pinned && p < n; p++)
+      if (pinned[p] && sizes[p] && begins[p] < e && b < ends[p] && place[p] < at + size && at < place[p] + sizes[p]) {
+        at = place[p] + sizes[p]; moved = 1;
+      }
+  }
+  return at + size <= first + count ? at : UINT64_MAX;
+}
 int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *begin, const uint64_t *end,
-                             uint64_t capacity, uint64_t *place) {
+                             const unsigned char *pinned, uint64_t capacity, uint64_t *place) {
   struct pack_event *events = malloc((2 * n + 1) * sizeof *events);
-  uint64_t (*free_runs)[2] = malloc((n + 2) * sizeof *free_runs);  /* [first, count), ascending, disjoint, joined */
+  uint64_t (*free_runs)[2] = malloc((2 * n + 2) * sizeof *free_runs);  /* [first, count), ascending, disjoint, joined */
   if (!events || !free_runs) { free(events); free(free_runs); return ENOMEM; }
   size_t e = 0, runs = 1;
   for (size_t k = 0; k < n; k++) if (size[k]) {
@@ -926,10 +942,29 @@ int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *beg
     const size_t k = events[x].item;
     if (events[x].begins) {
       size_t r = 0;
-      while (r < runs && free_runs[r][1] < size[k]) r++;
-      if (r == runs) { result = ENOMEM; break; }
-      place[k] = free_runs[r][0]; free_runs[r][0] += size[k]; free_runs[r][1] -= size[k];
-      if (!free_runs[r][1]) { memmove(free_runs + r, free_runs + r + 1, (runs - r - 1) * sizeof *free_runs); runs--; }
+      uint64_t at = UINT64_MAX;
+      if (pinned && pinned[k]) {
+        /* a pinned item's units must be free now: the run holding them whole */
+        while (r < runs && !(free_runs[r][0] <= place[k] && place[k] + size[k] <= free_runs[r][0] + free_runs[r][1])) r++;
+        if (r == runs) { result = EBUSY; break; }
+        at = place[k];
+      } else {
+        for (; r < runs; r++)
+          if ((at = pack_fit(free_runs[r][0], free_runs[r][1], size[k], begin[k], end[k], n, size, begin, end, pinned,
+                             place)) != UINT64_MAX) break;
+        if (r == runs) { result = ENOMEM; break; }
+        place[k] = at;
+      }
+      /* [at, at + size) taken out of run r: what lies before and after it stays free */
+      const uint64_t run_first = free_runs[r][0], run_end = free_runs[r][0] + free_runs[r][1];
+      const int keep_before = at > run_first, keep_after = at + size[k] < run_end;
+      if (keep_before && keep_after) {
+        memmove(free_runs + r + 2, free_runs + r + 1, (runs - r - 1) * sizeof *free_runs); runs++;
+        free_runs[r][1] = at - run_first;
+        free_runs[r + 1][0] = at + size[k]; free_runs[r + 1][1] = run_end - (at + size[k]);
+      } else if (keep_before) free_runs[r][1] = at - run_first;
+      else if (keep_after) { free_runs[r][0] = at + size[k]; free_runs[r][1] = run_end - (at + size[k]); }
+      else { memmove(free_runs + r, free_runs + r + 1, (runs - r - 1) * sizeof *free_runs); runs--; }
     } else {
       /* its units back, joined with a neighbour they touch */
       const uint64_t first = place[k], count = size[k];
