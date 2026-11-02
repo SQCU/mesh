@@ -130,6 +130,33 @@ def space_handle(space):
     return handle
 
 
+def group_transfers(group, ahead, calls):
+    """design/page-maps-2026-11-02.md, integration step 4: the declared group that the occurrence `ahead` lowerings past
+    the next one lowers (nccl.h ncclMeshCommDefinitionAhead), read at declaration with no address.
+
+    type: (a ProcessGroupMesh, ahead, its group's call count) -> (definition, records, buffers): records, nccl.h
+    ncclMeshTransferRecord's fields as dicts (op 0 SEND, 1 REDUCE, 2 COPY; buffer 0 the operand with the result made
+    in place); buffers, each call's dict(bytes, initialized, send_origin, result_origin) (ncclMeshCommBuffers)."""
+    which = ffi.new('uint32_t *')
+    check(LIB.ncclMeshCommDefinitionAhead(group.comm, ahead, which))
+    count = ffi.new('size_t *')
+    check(LIB.ncclMeshCommTransfers(group.comm, which[0], ffi.NULL, 0, count))
+    made = ffi.new('ncclMeshTransferRecord[]', max(1, count[0]))
+    check(LIB.ncclMeshCommTransfers(group.comm, which[0], made, count[0], count))
+    names = ('call', 'channel', 'op', 'round', 'peer', 'buffer', 'offset', 'bytes')
+    records = [{name: int(getattr(record, name)) for name in names} for record in made[0:count[0]]]
+    buffers = []
+    for call in range(calls):
+        n, initialized = ffi.new('uint32_t *'), ffi.new('uint32_t *')
+        send, result = ffi.new('uint64_t *'), ffi.new('uint64_t *')
+        check(LIB.ncclMeshCommBuffers(group.comm, which[0], call, ffi.NULL, 0, n, initialized, send, result))
+        sizes = ffi.new('uint64_t[]', max(1, n[0]))
+        check(LIB.ncclMeshCommBuffers(group.comm, which[0], call, sizes, n[0], n, initialized, send, result))
+        buffers.append(dict(bytes=tuple(int(b) for b in sizes[0:n[0]]), initialized=int(initialized[0]),
+                            send_origin=int(send[0]), result_origin=int(result[0])))
+    return int(which[0]), records, buffers
+
+
 def _slots(value):
     """One ordinary page binding and its explicit occurrence coordinates. A value names its space and the byte offset
     of its first element there (design/page-maps-2026-11-02.md), never a buffer."""

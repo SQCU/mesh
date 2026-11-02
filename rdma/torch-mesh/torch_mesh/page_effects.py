@@ -52,49 +52,127 @@ def _spans(operand, access):
     return tuple(positions.spans()) if isinstance(operand, TensorValue) and positions is not None else ()
 
 
-def assign_pages(descriptions, invocation_of, spaces):
+# the routed program's step ops (mesh-plan.h): SEND publishes a piece of a buffer, REDUCE and COPY receive one
+_SEND, _REDUCE, _COPY = 0, 1, 2
+
+
+def _value_bytes(value, first, count):
+    """a TensorValue's space root and the bytes [first, first + count) of the value, as bytes of its space: a collective
+    operand is contiguous-typed (design/page-maps-2026-11-02.md, "The run's solve", 15). None where the value is not a
+    placed one (a view of storage, or a lease's constant map, which the solve does not place)."""
+    from .operand import TensorValue
+    if not isinstance(value, TensorValue) or value.space.lease or count <= 0 or first < 0:
+        return None
+    origin = value.layout.index(0) * value.dtype.itemsize if value.layout.count else 0
+    return value.space.serial, origin + first, count
+
+
+def _transfer_accesses(t, transfer, post_key):
+    """type: a transfer occurrence (order, invocation, records, buffers, views) -> its accesses (semantic key, begin key,
+    end key, mode, root, invocation, first byte, bytes) and links (from key, to key) on its operands' values, with the
+    routed buffer 0 read as versions (design/page-maps-2026-11-02.md, step 4): a SEND of buffer-0 bytes no earlier
+    step of the call wrote reads the send operand, else the result; a COPY writes the result over [post, landed]; a
+    REDUCE combines into the result once landed. The collective's own buffers are its own until it declares them."""
+    P, invocation = transfer['order'], transfer['invocation']
+    accesses, links = [], []
+    written = {}
+    for r in transfer['records']:
+        if r['buffer'] == 0 and r['op'] != _SEND:
+            written.setdefault(r['call'], []).append((r['round'], r['offset'], r['offset'] + r['bytes']))
+    for k, r in enumerate(transfer['records']):
+        if r['buffer'] != 0 or not r['bytes']:
+            continue
+        source, destination = transfer['views'][r['call']]
+        origins = transfer['buffers'][r['call']]
+        lo, hi = r['offset'], r['offset'] + r['bytes']
+        if r['op'] == _SEND:
+            begin, end = (P, 1, t, k), (P, 3, t, k)
+            links.append((begin, end))
+            # the parts of [lo, hi) an earlier round of this call wrote are the result's; the rest the send operand's
+            cuts = sorted({lo, hi} | {x for round_, a, b in written.get(r['call'], ()) if round_ < r['round']
+                                      for x in (a, b) if lo < x < hi})
+            for a, b in zip(cuts, cuts[1:]):
+                done = any(round_ < r['round'] and w0 <= a and b <= w1 for round_, w0, w1 in written.get(r['call'], ()))
+                value, origin = ((destination, origins['result_origin']) if done or source is None
+                                 else (source, origins['send_origin']))
+                placed = _value_bytes(value, a - origin, b - a)
+                if placed is not None:
+                    accesses.append(((P, 1, t, k), begin, end, 1, placed[0], invocation, placed[1], placed[2]))
+        else:
+            post, landed = post_key(invocation, t, k), (P, 2, t, k)
+            links.append((post, landed))
+            placed = _value_bytes(destination, lo - origins['result_origin'], hi - lo)
+            if placed is not None:
+                if r['op'] == _COPY:
+                    accesses.append(((P, 2, t, k), post, landed, 2, placed[0], invocation, placed[1], placed[2]))
+                else:
+                    accesses.append(((P, 2, t, k), landed, landed, 3, placed[0], invocation, placed[1], placed[2]))
+    return accesses, links
+
+
+def assign_pages(descriptions, invocation_of, spaces, transfers=()):
     """The run's page assignment by the run's solve (mesh-page-map.h mesh_run_solve; design/page-maps-2026-11-02.md,
     "The run's solve, each choice and its ground").
 
     type: (descriptions, each command's accesses with their space root and byte runs; invocation_of(order) -> the
-    command's run invocation; spaces, serial -> ValueSpace) -> dict(edges, bins, places, items, arena):
-    - an event is a command, in the run's order (description order, then index); an item is a (space, invocation),
-      or for a state one version, (out, i) and (in, i + 1) being one item;
+    command's run invocation; spaces, serial -> ValueSpace; transfers, each collective occurrence's dict(order,
+    invocation, records, buffers, views) from backend.group_transfers) -> dict(edges, bins, places, items, arena):
+    - an event is a command, or a transfer's SEND, completion, post or landing; events take the run's order, a
+      landing's post first in its invocation; an item is a (space, invocation), or for a state one version, (out, i)
+      and (in, i + 1) being one item;
+    - accesses are taken in their semantic order (a transfer's at its step), each over [begin, end];
     - a state's first version is pinned at the start of its lease's bin, live from before the run, and its last
       version likewise, live past it; each such lease is one bin, and the arena is the last;
     - an item is contiguous where a command reaches it through a contiguous operand type: a TensorView, one storage and
-      an affine layout, is contiguous_input and contiguous_output; an access marked `paged` reaches its pages through
-      the value's page table (design/page-maps-2026-11-02.md, "The run's solve", 15);
-    - edges are the solve's (earlier command, later command, kind); places, each item key's runs (first position,
+      an affine layout, is contiguous_input and contiguous_output, as is every transfer's operand; an access marked
+      `paged` reaches its pages through the value's page table (design/page-maps-2026-11-02.md, "The run's solve", 15);
+    - edges are the solve's (earlier event key, later event key, kind); places, each item key's runs (first position,
       pages); bins, each (first, pages, owner), owner ('state', state) or 'arena'; items, each (space serial,
       invocation)'s key; arena, the arena's pages in use.
     A lease-backed space is its caller's own storage at every invocation and makes no item."""
     order = sorted(range(len(descriptions)), key=lambda i: (descriptions[i]['order'], i))
-    keys, index, pages, contiguous, accesses, versions, leases = {}, {}, [], [], [], {}, {}
-    for event, c in enumerate(order):
-        invocation = invocation_of(descriptions[c]['order'])
-        for access in descriptions[c]['accesses']:
+    raw, links, starts = [], [], {}
+    for c in order:
+        description = descriptions[c]
+        invocation = invocation_of(description['order'])
+        starts[invocation] = min(starts.get(invocation, description['order']), description['order'])
+        key = (description['order'], 0, c)
+        for access in description['accesses']:
             root = access.get('root')
             if root is None or not access.get('spans') or spaces[root].lease:
                 continue
-            space = spaces[root]
-            if space.state is not None:
-                state, side = space.state
-                key = ('state', state, invocation if side == 'in' else invocation + 1)
-                versions.setdefault(state, set()).add(key[2])
-                if space.pins:
-                    leases[state] = space.pins
-            else:
-                key = ('space', root, invocation)
-            keys[root, invocation] = key
-            if key not in index:
-                index[key] = len(pages)
-                pages.append(space.pages)
-                contiguous.append(0)
-            item = index[key]
-            pages[item] = max(pages[item], space.pages)
-            contiguous[item] |= 0 if access.get('paged') else 1
-            accesses.extend((event, event, access['access'], item, lo, hi - lo) for lo, hi in access['spans'] if hi > lo)
+            for lo, hi in access['spans']:
+                if hi > lo:
+                    raw.append((key, key, key, access['access'], root, invocation, lo, hi - lo, access.get('paged')))
+    for transfer in transfers:
+        starts[transfer['invocation']] = min(starts.get(transfer['invocation'], transfer['order']), transfer['order'])
+    for t, transfer in enumerate(transfers):
+        made, joined = _transfer_accesses(t, transfer, lambda invocation, t, k: (starts[invocation], -1, t, k))
+        raw.extend(access + (False,) for access in made)
+        links.extend(joined)
+    raw.sort(key=lambda access: access[0])
+    keys = sorted({k for access in raw for k in access[1:3]} | {k for link in links for k in link})
+    event = {key: at for at, key in enumerate(keys)}
+    items, index, pages, contiguous, accesses, versions, leases = {}, {}, [], [], [], {}, {}
+    for _, begin, end, mode, root, invocation, lo, count, paged in raw:
+        space = spaces[root]
+        if space.state is not None:
+            state, side = space.state
+            key = ('state', state, invocation if side == 'in' else invocation + 1)
+            versions.setdefault(state, set()).add(key[2])
+            if space.pins:
+                leases[state] = space.pins
+        else:
+            key = ('space', root, invocation)
+        items[root, invocation] = key
+        if key not in index:
+            index[key] = len(pages)
+            pages.append(space.pages)
+            contiguous.append(0)
+        item = index[key]
+        pages[item] = max(pages[item], space.pages)
+        contiguous[item] |= 0 if paged else 1
+        accesses.append((event[begin], event[end], mode, item, lo, count))
     page_bytes = next(iter(spaces.values())).page_bytes if spaces else 1
     bins, first = [], 0
     pin, lives = [_stream.RUN_FREE] * len(pages), [0] * len(pages)
@@ -109,10 +187,10 @@ def assign_pages(descriptions, invocation_of, spaces):
         first += held
     # the arena's bound is every item's pages, so the bound itself never refuses; the region refuses at its lease
     bins.append((first, max(1, sum(pages)), 'arena'))
-    solved = _stream.run_solve(page_bytes, len(order), accesses, [], list(zip(pages, pin, lives, contiguous)),
-                               [(at, held) for at, held, _ in bins])
-    return dict(edges=[(order[f], order[t], kind) for f, t, kind, *_ in solved['edges']], bins=bins,
-                places={key: tuple(solved['runs'][item]) for key, item in index.items()}, items=keys,
+    solved = _stream.run_solve(page_bytes, len(keys), accesses, [(event[a], event[b]) for a, b in links],
+                               list(zip(pages, pin, lives, contiguous)), [(at, held) for at, held, _ in bins])
+    return dict(edges=[(keys[f], keys[t], kind) for f, t, kind, *_ in solved['edges']], bins=bins,
+                places={key: tuple(solved['runs'][item]) for key, item in index.items()}, items=items,
                 arena=solved['arena'])
 
 
@@ -491,6 +569,21 @@ class Plan:
         from .native import Program
         from .compilation import bind
         prepared, phase = [], []
+        # each collective occurrence's transfers, read from its declaration before any occurrence lowers (the C
+        # cursor counts every lowering of a communicator, a WRITE's too): the run's solve's transport accesses
+        from .backend import group_transfers
+        transfers, ahead = [], {}
+        for index, step in enumerate(self.declarations):
+            if 'transfer' not in step:
+                continue
+            handle = step['group'].handle
+            behind = ahead.get(handle, 0)
+            ahead[handle] = behind + 1
+            if step['transfer'] != 'collective':
+                continue
+            _, records, buffers = group_transfers(step['group'], behind, len(step['calls']))
+            transfers.append(dict(order=2 * index, invocation=step.get('run_invocation', 0), records=records,
+                                  buffers=buffers, views=step['views']))
         for index, step in enumerate(self.declarations):
             if 'transfer' not in step:
                 continue
@@ -533,7 +626,10 @@ class Plan:
         spaces = {operand.space.serial: operand.space for program in retained for command in program['commands']
                   for operand in command.get('operands', ()) if isinstance(operand, TensorValue)}
         invocation_of = lambda order: self.declarations[order // 2].get('run_invocation', 0)
-        self.assignments.append(assign_pages(descriptions, invocation_of, spaces))
+        for transfer in transfers:
+            for pair in transfer['views']:
+                spaces.update((value.space.serial, value.space) for value in pair if isinstance(value, TensorValue))
+        self.assignments.append(assign_pages(descriptions, invocation_of, spaces, transfers))
         programs = source_copy(retained)
         # the final lowering: every value operand a storage view at its occurrence (lowering.lower_programs)
         from .lowering import lower_programs

@@ -5925,6 +5925,16 @@ ncclResult_t ncclMeshCommLower(ncclComm_t comm,uint64_t invocation,uint32_t poll
   return result;
 }
 
+/* nccl.h ncclMeshCommDefinitionAhead */
+ncclResult_t ncclMeshCommDefinitionAhead(ncclComm_t comm, uint64_t ahead, uint32_t *group) {
+  if (!comm || !group) return fail(ncclInvalidArgument, "read an occurrence's definition into a group");
+  pthread_mutex_lock(&group_lock);
+  const struct compiled *x = comm->plan ? definition_at(comm, comm->groups + 1 + ahead) : NULL;
+  ncclResult_t result = x ? ncclSuccess : fail(ncclInvalidUsage, "an occurrence's definition needs the plan's order");
+  if (x) *group = (uint32_t)(x - comm->plan->group);
+  pthread_mutex_unlock(&group_lock);
+  return result;
+}
 /* nccl.h ncclMeshCommTransfers: compile_group's schedules (x->plans), read as declared */
 ncclResult_t ncclMeshCommTransfers(ncclComm_t comm, uint32_t group, ncclMeshTransferRecord *records, size_t capacity,
                                    size_t *count) {
@@ -5950,8 +5960,9 @@ ncclResult_t ncclMeshCommTransfers(ncclComm_t comm, uint32_t group, ncclMeshTran
 }
 /* nccl.h ncclMeshCommBuffers: slot_laid's extents, the operand's own first */
 ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, uint32_t capacity,
-                                 uint32_t *count, uint32_t *initialized) {
-  if (!comm || !count || !initialized) return fail(ncclInvalidArgument, "read a call's buffers into a count");
+                                 uint32_t *count, uint32_t *initialized, uint64_t *send_origin, uint64_t *result_origin) {
+  if (!comm || !count || !initialized || !send_origin || !result_origin)
+    return fail(ncclInvalidArgument, "read a call's buffers into a count and origins");
   pthread_mutex_lock(&group_lock);
   const struct plan *made = comm->plan;
   const struct compiled *x = made && group < made->view.groups ? made->group + group : NULL;
@@ -5962,6 +5973,11 @@ ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call,
   *initialized = st ? st->initialized : 0;
   for (uint32_t b = 0; st && b < st->buffers && b < capacity; b++)
     bytes[b] = b < st->initialized ? elements(c) * SIZE[c->type] : st->extent[b];
+  /* plan_direct's: an all-gather's send operand is its own segment of the result; a reduce-scatter's result is its
+     segment of the whole (result_of) */
+  size_t length = 0;
+  *send_origin = st && c->what == MESH_ALLGATHER ? segment_at(c, c->comm->rank, &length) * SIZE[c->type] : 0;
+  *result_origin = st && st->partial ? segment_at(c, c->comm->rank, &length) * SIZE[c->type] : 0;
   pthread_mutex_unlock(&group_lock);
   return result;
 }

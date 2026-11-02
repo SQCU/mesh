@@ -984,12 +984,18 @@ ncclResult_t ncclMeshSpaceDestroy(ncclMeshSpace_t space);
    them from its receive's post until it lands; a REDUCE lands them in pages of its own, then its sum combines them
    into the buffer. Writes `count` records up to `capacity`.
    ncclMeshCommBuffers: call `call`'s buffers' bytes (buffer 0 the operand's), `initialized` the number that are the
-   operand's copies made at the call's start (relay buffers follow them), up to `capacity`. */
+   operand's copies made at the call's start (relay buffers follow them), up to `capacity`; and where in buffer 0 the
+   send operand's first byte sits (an all-gather's own segment) and the receive operand's (a reduce-scatter's), so a
+   record's buffer-0 bytes name the operands' own. */
 typedef struct { uint32_t call, channel, op, round, peer, buffer; uint64_t offset, bytes; } ncclMeshTransferRecord;
+/* ncclMeshCommDefinitionAhead: the declared group (an index of the plan's groups) that the occurrence `ahead` lowerings
+   past the next one will lower, by the plan's own order (definition_at), so the run's solve reads each occurrence's
+   transfers before any is lowered. */
+ncclResult_t ncclMeshCommDefinitionAhead(ncclComm_t comm, uint64_t ahead, uint32_t *group);
 ncclResult_t ncclMeshCommTransfers(ncclComm_t comm, uint32_t group, ncclMeshTransferRecord *records, size_t capacity,
                                    size_t *count);
 ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, uint32_t capacity,
-                                 uint32_t *count, uint32_t *initialized);
+                                 uint32_t *count, uint32_t *initialized, uint64_t *send_origin, uint64_t *result_origin);
 ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
     int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
     uint64_t* occurrence);
