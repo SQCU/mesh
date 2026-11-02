@@ -396,6 +396,10 @@ Status: committed as microbench `3c09ab3a`; Engine Swift typecheck passed
 build also completed. Numerical execution has not been run. C2 is closed at the
 source/binding boundary; future mutable local progress still needs its own
 declared occurrence pages when that local-effect work is implemented.
+The concurrent demonstration session also built the native libraries and `-O`
+Engine in clean worktrees at microbench `89f12f47` and mesh `8cccb59d`, then
+typechecked rank, goal-a and forward_graph sources. Its review confirmed that
+the empty invocation sequence remains the source's explicit zero-round case.
 
 ### C3. Retain the provider's original writer-domain program
 
@@ -445,7 +449,8 @@ head-sized output run at its existing participant boundary, rather than adding
 an atomic publication for every scalar store.
 
 Status: microbench changes are committed as `89f12f47`; the matching shared
-`streamed.metal` helper is committed as mesh `f9c2df4f`. Engine compilation and
+`streamed.metal` helper is committed as mesh `f9c2df4f` (also `8cccb59d` on the
+concurrent session's merged history). Engine compilation and
 retained/composed Metal source checks passed. One temporary-module rank check
 failed at duplicate bridging headers; a later session's normal Engine build
 and rank/goal-a/forward-graph typecheck logs supersede that failed setup. No
@@ -453,6 +458,10 @@ linked rank application or payload result is claimed here. Ordinary session cons
 gives injective active cache targets; arbitrary repeated descriptor targets have
 no declared overwrite policy yet. The common conditional/count handoff remains
 open and that missing semantic input stays explicit.
+The source checks cover `cache_select`, `kv_write`, standalone and fused heads,
+with and without stored rows, at head widths 7, 65 and 128 under Metal 4/Xcode
+26.4.1. `begin`/`end` uses the existing threadgroup site once per head-sized run.
+The rank link still needs the updated LiteRT prepared library.
 
 ### C5. Declare numerical sources before transport planning
 
@@ -478,6 +487,8 @@ The context and source relations are released after binding, or on teardown if
 preparation did not reach that stage. The interface documents that the complete
 run and epilogue are declared before Plan. Native libraries build with this
 change (`/tmp/mesh-early-native-declaration-20261101.log`).
+The concurrent session also built the native rank library and `-O` Engine
+against mesh `862ece24` and typechecked rank, goal-a and forward_graph sources.
 
 Source inspection establishes the new ordering and retained declaration
 identity. This completes the ordering substep, not C1/C3 coverage generation:

@@ -74,6 +74,37 @@ rank 0's preparation record (nccl-mesh.c prepare_record, read with extras/prepar
 | d-r5 | a88732ac | definition, silent at 60 s | plan_calls 0.09 s a group; definition 19 s a group over 16384 calls (order_transfers 8 s) |
 | d-r6 | 2a13732c | page_effects, KeyError tmp7 | native preparation 2.4 s whole; 16 calls a gather group |
 | d-r7 | e16e5f1e | realization, silent at 60 s | native preparation under 1 s; 97% of samples in MeshIndexCompose |
+| d-r10 | 2430d610 | realization, silent at 45 s | 144 page compositions, 40 s; one shader read's pair composed 5 times, 4.5 s each |
+| d-r11 | 28971add | page-effects solve, silent at 45 s | 47 compositions, 13.4 s; then MetalPageEffectsSolve, under PageObservationGroups |
+| d-r12 | d51ddcec | page-effects solve, silent at 45 s | the observation walk ended early, no change: the cost is PageGroups' MeshIndexSetRuns |
+
+## The addressing artifact in page relations
+
+The slow composition's physical relation (d-r10, rank 0, a shader's read of its weights) maps a logical byte i to a
+page byte p by
+
+    p = 465960960 + i + 4094 floor(i / 2) - 3964926 floor(i / 1936).
+
+Write i = 1936 r + 2 c + b, the row, the column and the byte of a 2048 x 968 half view. Then p = 465960960 + 4096 c +
+2 r + b: a transposed view, affine in its coordinates, with no division at all. The floors come only from flattening
+the view's coordinates to one byte number and recovering them again. isl then has to eliminate those divisions
+exactly (isl_map_compute_divs, a parametric integer program with multi-precision gcds) each time two such relations
+compose.
+
+Floor division is not the algebra this needs. Strided views are integer-linear maps on mixed-radix coordinates (a
+shape and a stride per mode, as in CuTe's layout algebra). Composing two of them is integer linear algebra on stride
+tuples, with modes split where one shape does not divide the other. It is exact and has no divisions. The image of
+such a map over a box is a union of arithmetic progressions, which is the four-field run (first, width, step, repeats)
+the page compiler already uses, in closed form. Pages are power-of-two multiples, so the page of a byte is a shift and
+its offset a mask.
+
+At run time the same holds. Each SIMT lane has its coordinates from its thread and threadgroup position and forms an
+address by multiply-adds with the strides. A division by a constant that cannot be avoided is a multiply-high and a
+shift (Granlund and Montgomery), and a power of two is a shift and a mask.
+
+The repair is to keep page relations in coordinates through composition, and to flatten only where runs are read
+out. That changes _stream.page_region and the access relations' byte components (operand.py,
+page_effects.logical_dispatch_accesses), and it is the next item for realization.
 
 ## The groups
 
