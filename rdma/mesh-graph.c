@@ -900,3 +900,54 @@ int mesh_graph_tile_slots(size_t count, size_t width, const int64_t *at, int64_t
   free(member); free(least); free(rank);
   return result;
 }
+
+/* mesh-graph.h */
+struct pack_event { uint64_t at; size_t item; int begins; };
+static int pack_event_order(const void *left, const void *right) {
+  const struct pack_event *a = left, *b = right;
+  if (a->at != b->at) return a->at < b->at ? -1 : 1;
+  if (a->begins != b->begins) return a->begins - b->begins;  /* an end at t frees before a begin at t takes */
+  return (a->item > b->item) - (a->item < b->item);
+}
+int mesh_graph_interval_pack(size_t n, const uint64_t *size, const uint64_t *begin, const uint64_t *end,
+                             uint64_t capacity, uint64_t *place) {
+  struct pack_event *events = malloc((2 * n + 1) * sizeof *events);
+  uint64_t (*free_runs)[2] = malloc((n + 2) * sizeof *free_runs);  /* [first, count), ascending, disjoint, joined */
+  if (!events || !free_runs) { free(events); free(free_runs); return ENOMEM; }
+  size_t e = 0, runs = 1;
+  for (size_t k = 0; k < n; k++) if (size[k]) {
+    events[e++] = (struct pack_event){begin[k], k, 1};
+    events[e++] = (struct pack_event){end[k], k, 0};
+  } else place[k] = 0;
+  qsort(events, e, sizeof *events, pack_event_order);
+  free_runs[0][0] = 0; free_runs[0][1] = capacity;
+  int result = 0;
+  for (size_t x = 0; x < e && !result; x++) {
+    const size_t k = events[x].item;
+    if (events[x].begins) {
+      size_t r = 0;
+      while (r < runs && free_runs[r][1] < size[k]) r++;
+      if (r == runs) { result = ENOMEM; break; }
+      place[k] = free_runs[r][0]; free_runs[r][0] += size[k]; free_runs[r][1] -= size[k];
+      if (!free_runs[r][1]) { memmove(free_runs + r, free_runs + r + 1, (runs - r - 1) * sizeof *free_runs); runs--; }
+    } else {
+      /* its units back, joined with a neighbour they touch */
+      const uint64_t first = place[k], count = size[k];
+      size_t r = 0;
+      while (r < runs && free_runs[r][0] < first) r++;
+      const int before = r > 0 && free_runs[r - 1][0] + free_runs[r - 1][1] == first;
+      const int after = r < runs && first + count == free_runs[r][0];
+      if (before && after) {
+        free_runs[r - 1][1] += count + free_runs[r][1];
+        memmove(free_runs + r, free_runs + r + 1, (runs - r - 1) * sizeof *free_runs); runs--;
+      } else if (before) free_runs[r - 1][1] += count;
+      else if (after) { free_runs[r][0] = first; free_runs[r][1] += count; }
+      else {
+        memmove(free_runs + r + 1, free_runs + r, (runs - r) * sizeof *free_runs); runs++;
+        free_runs[r][0] = first; free_runs[r][1] = count;
+      }
+    }
+  }
+  free(events); free(free_runs);
+  return result;
+}

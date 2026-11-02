@@ -65,13 +65,25 @@ size_t mesh_page_image(const struct mesh_page_space *space, const struct mesh_va
 size_t mesh_page_preimage(const struct mesh_page_space *space, const struct mesh_value *v, uint64_t invocation,
                           const struct mesh_page_bytes *bytes, size_t count, struct mesh_piece *out, size_t capacity);
 
-/* whether values a and b share a physical byte at some invocation where both lifetimes hold: aliasing and hazards */
-int mesh_page_meet(const struct mesh_page_space *space, const struct mesh_value *a, const struct mesh_lifetime *la,
-                   const struct mesh_value *b, const struct mesh_lifetime *lb);
+/* whether value a at invocation ia and value b at invocation ib share a physical byte while both lifetimes hold:
+   aliasing and hazards. 1, 0, or -1 where a value's map leaves one of its pages unmapped */
+int mesh_page_meet(const struct mesh_page_space *space, const struct mesh_value *a, uint64_t ia,
+                   const struct mesh_lifetime *la, const struct mesh_value *b, uint64_t ib, const struct mesh_lifetime *lb);
 
-/* a view of v: layout `view` read through v's layout (logical coordinates of the view to v's logical coordinates),
-   the result's pieces written to `out`. Returns as mesh_page_image */
-size_t mesh_page_compose(const struct mesh_layout *view, const struct mesh_layout *of, struct mesh_piece *out,
+/* a view: its coordinates c, in the box first/extent of rank `rank`, walk the coordinates of the value it views. View
+   axis d moves that value's axis axis[d] by step[d] a unit, from base[]. Several view axes may walk one axis (a
+   split), a step may be 0 (a broadcast) or negative (a reversal). A reshape that merges axes is written as more view
+   axes, in mixed radix, so composition needs no division. */
+struct mesh_view {
+  uint32_t rank, of_rank;
+  int64_t first[MESH_PIECE_RANK], extent[MESH_PIECE_RANK], step[MESH_PIECE_RANK];
+  uint32_t axis[MESH_PIECE_RANK];
+  int64_t base[MESH_PIECE_RANK];
+};
+/* the view's layout: `view` read through `of`'s pieces, each of their boxes over `of`'s logical coordinates, cut where
+   the view's image crosses a piece's box. Returns the count written, the count needed where it exceeds `capacity`, or
+   SIZE_MAX where two view axes walk one axis across a box edge that their mixed radix does not align with */
+size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout *of, struct mesh_piece *out,
                          size_t capacity);
 
 /* Allocation is not declared here: it is mesh-graph.h's mesh_graph_interval_pack over (value, invocation) items, each
