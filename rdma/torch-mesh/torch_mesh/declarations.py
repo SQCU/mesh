@@ -986,15 +986,20 @@ class Execution:
             if self.page_plan is None:
                 inputs = list(self.inputs)
                 declarations = []
-                for step in self.steps:
+                # each entry of the sequence is one invocation, a function or a plain step, and every step it
+                # flattens carries that invocation's number as `run_invocation`: the run's page assignment makes its
+                # items per (space, invocation) (design/page-maps-2026-11-02.md, "The run's page assignment, in
+                # order"). It is not a step's `invocation`, a call's binding-slot index for ncclMeshCommLower.
+                for invocation, step in enumerate(self.steps):
                     if isinstance(step, Function):
                         source = step.execution
                         if source is None:
                             raise ValueError('declare every function before preparing its sequence')
                         inputs.extend(source.inputs)
-                        declarations.extend(dict(value, configuration=source.configuration) for value in source.steps)
+                        declarations.extend(dict(value, configuration=source.configuration, run_invocation=invocation)
+                                            for value in source.steps)
                     else:
-                        declarations.append(dict(step, configuration=self.configuration))
+                        declarations.append(dict(step, configuration=self.configuration, run_invocation=invocation))
                 self.inputs = tuple(inputs)
                 self.page_plan = Plan(declarations)
             if not self._initialized:
