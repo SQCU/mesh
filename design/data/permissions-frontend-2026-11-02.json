@@ -1,6 +1,6 @@
 {
  "commit": "212f8e8e",
- "status": "rows complete for the slice; summary in design/permissions-frontend-2026-11-02.md",
+ "status": "complete for the slice",
  "method": "design/permissions-frontend-2026-11-02.md#method",
  "rule": "choosers know pages, never pointers; effectors know pointers and pages and decide nothing; pointer literals enter only at the final lowering, as page-table dereferences (operator, 2026-11-02)",
  "violations": {
@@ -13,63 +13,78 @@
  "groups": {
   "P1": {
    "problem": "hand an operand to the native compiler or recorder",
-   "replacement": "pass the operand's page map (its lease's virtual pages to physical page indices) and its layout in elements; the final lowering dereferences page-table indices into pointer literals"
+   "replacement": "pass the operand's page map (its lease's virtual pages to physical page indices) and its layout in elements; the final lowering dereferences page-table indices into pointer literals",
+   "rows": 10
   },
   "P2": {
    "problem": "start a kernel, host or provider argument at a byte other than its layout's first element",
-   "replacement": "the argument's origin is a coordinate of its layout over the page map; the final lowering emits page_table[page] + affine offset as the literal"
+   "replacement": "the argument's origin is a coordinate of its layout over the page map; the final lowering emits page_table[page] + affine offset as the literal",
+   "rows": 15
   },
   "P3": {
    "problem": "meet an API's alignment and capacity, and decide between direct use and a copy",
-   "replacement": "alignment and capacity are constraints of the page-map solve, in pages and in-page elements; no base address is read"
+   "replacement": "alignment and capacity are constraints of the page-map solve, in pages and in-page elements; no base address is read",
+   "rows": 4
   },
   "P4": {
    "problem": "relate producer and consumer selections of different scalar types",
-   "replacement": "typed layouts composed onto one page map, the dtype carried by the layout; the scalar width multiplies only in the final lowering"
+   "replacement": "typed layouts composed onto one page map, the dtype carried by the layout; the scalar width multiplies only in the final lowering",
+   "rows": 26
   },
   "P5": {
    "problem": "decide which values share an allocation and how large it is",
-   "replacement": "two values alias where their page-map images intersect; an allocation's extent is its page map's domain"
+   "replacement": "two values alias where their page-map images intersect; an allocation's extent is its page map's domain",
+   "rows": 8
   },
   "P6": {
    "problem": "operate on the same bytes at another scalar width",
-   "replacement": "a reinterpretation is another layout over the same page map; no storage handle is rebuilt"
+   "replacement": "a reinterpretation is another layout over the same page map; no storage handle is rebuilt",
+   "rows": 9
   },
   "P7": {
    "problem": "give repeated occurrences of a call storage that does not collide, or that reuses pages, across invocations",
-   "replacement": "an invocation -> (virtual page -> physical page) map solved from the occurrences' liveness; the program names no generation, ring, slot stride or invocation index"
+   "replacement": "an invocation -> (virtual page -> physical page) map solved from the occurrences' liveness; the program names no generation, ring, slot stride or invocation index",
+   "rows": 10
   },
   "P8": {
    "problem": "update recurrent state each step without a new tensor or a copy",
-   "replacement": "the step returns new values (a functional collective, a functional cell); the invocation page map decides whether a step's result shares pages with the state it replaces"
+   "replacement": "the step returns new values (a functional collective, a functional cell); the invocation page map decides whether a step's result shares pages with the state it replaces",
+   "rows": 8
   },
   "P9": {
    "problem": "find the region pages a tensor or an address lies in",
-   "replacement": "region tensors carry their page map from the lease; nothing maps an address or an MTLBuffer back to pages"
+   "replacement": "region tensors carry their page map from the lease; nothing maps an address or an MTLBuffer back to pages",
+   "rows": 14
   },
   "P10": {
    "problem": "give a host, CPU or provider entry its operands",
-   "replacement": "the entry is declared over page maps and layouts; the final lowering alone writes its pointer literals"
+   "replacement": "the entry is declared over page maps and layouts; the final lowering alone writes its pointer literals",
+   "rows": 10
   },
   "P11": {
    "problem": "name the part of a collective's operand each segment, cut or fragment covers",
-   "replacement": "segments are layouts over the operand's page map, counted in elements"
+   "replacement": "segments are layouts over the operand's page map, counted in elements",
+   "rows": 7
   },
   "P12": {
    "problem": "address a view's elements inside a kernel",
-   "replacement": "the final lowering specializes the map into pointer literals or base + affine offset from the page table; no mesh_index, mesh_storage_N or division by a layout extent at run time"
+   "replacement": "the final lowering specializes the map into pointer literals or base + affine offset from the page table; no mesh_index, mesh_storage_N or division by a layout extent at run time",
+   "rows": 14
   },
   "P13": {
    "problem": "describe a torch view's position in its allocation",
-   "replacement": "the view is a layout composed onto its lease's page map; storage_offset() is never read"
+   "replacement": "the view is a layout composed onto its lease's page map; storage_offset() is never read",
+   "rows": 3
   },
   "P14": {
-   "problem": "keep pointer-yielding objects in reach of choosers",
-   "replacement": "choosers receive page-map and layout descriptors (meta values with a page map), never a torch storage, a _stream page handle or an ffi pointer"
+   "problem": "reach layouts, device facts and native helpers that live beside pointer-yielding calls",
+   "replacement": "split _stream: choosers import a pointer-free module of layouts, page maps and constants; page_backing, host_page_backing, address, records, page_storage and torch storage handles are reachable from the final lowering only",
+   "rows": 23
   },
   "P15": {
    "problem": "give each value region storage, and give command constants a place",
-   "replacement": "leases are taken once from the compiled page map at load; nothing places storage by the order of run-time requests"
+   "replacement": "leases are taken once from the compiled page map at load; nothing places storage by the order of run-time requests",
+   "rows": 5
   }
  },
  "rows": [
@@ -2065,5 +2080,58 @@
    "handles": "reaches _stream for layouts, device facts and compilation constants.",
    "replacement": "a pointer-free module for layouts, constants and page maps; _stream's pointer-yielding calls reachable from the final lowering only"
   }
+ ],
+ "violation_counts": {
+  "chooser holds pointer": 87,
+  "chooser has access": 36,
+  "chooser picks a map by hand": 19,
+  "effector computes a map": 14,
+  "none (effector)": 6,
+  "effector decides": 4
+ },
+ "program_halves": [
+  {
+   "site": "examples/lstm.py:33-35, 53-55",
+   "form": "one h [L, rows, H]; mine = h.narrow(2, first, HR); allgatherv_out(self.mine, self.h) every tick lands the gather in h, whose slice mine is its own source; the next tick's layers read h",
+   "library_half": [
+    "partition.py:96-105 allgatherv_out",
+    "declarations.py:485-509, 579-580, 850-875, 1208-1210"
+   ]
+  },
+  {
+   "site": "examples/lstm.py:10-15, 45-50",
+   "form": "cell writes c and mine in place with copy_",
+   "library_half": [
+    "declarations.py:850-875"
+   ]
+  },
+  {
+   "site": "rdma/torch-mesh/torch_mesh/chain.py:139-149, 210-235",
+   "form": "generations = empty(2, ...); generation = len(windows) % 2; landings and reads picked by generations[generation, j]",
+   "library_half": [
+    "chain.py:184-217 slots and invocations",
+    "backend.py:118-122 _slots",
+    "page_effects.py:406-415 Plan.append"
+   ]
+  },
+  {
+   "site": "examples/lstm-service.py:113-119",
+   "form": "the input broadcast lands in X, the tensor it sends from",
+   "library_half": [
+    "backend.py:419-439 prepare_fragments"
+   ]
+  }
+ ],
+ "clean": [
+  "rdma/mesh_graph.py",
+  "rdma/torch-mesh/torch_mesh/ownership.py",
+  "reduction.py",
+  "scan.py",
+  "sparse.py",
+  "streamed_relations.py",
+  "configuration.py",
+  "random.py",
+  "shader.py",
+  "attention.py"
  ]
 }
