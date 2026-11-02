@@ -1578,8 +1578,11 @@ static BOOL MetalStamping(void) { static int on=-1;if(on<0)on=getenv("MESH_PREPA
 static void MetalStamp(struct MetalSchedule *s,id<MTL4ComputeCommandEncoder> encoder,NSString *name) {
     if(!s->stamps) {
         MTL4CounterHeapDescriptor *descriptor=[MTL4CounterHeapDescriptor new];
-        descriptor.type=MTL4CounterHeapTypeTimestamp;descriptor.count=8192;
-        s->stamps=[s->root->device newCounterHeapWithDescriptor:descriptor error:nil];[descriptor release];
+        descriptor.type=MTL4CounterHeapTypeTimestamp;descriptor.count=4096;
+        /* the driver writes through the error pointer: a nil one faulted every rank in
+           -[AGXTimestampCounterHeap initWithDevice:descriptor:error:] (2026-11-01, 7a186a62) */
+        NSError *error=nil;
+        s->stamps=[s->root->device newCounterHeapWithDescriptor:descriptor error:&error];[descriptor release];
         s->stampNames=[NSMutableArray new];
     }
     if(!s->stamps||s->stamped>=s->stamps.count)return;
