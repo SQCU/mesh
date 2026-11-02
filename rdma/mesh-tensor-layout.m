@@ -1210,18 +1210,25 @@ static NSArray *TensorInverseAxes(MetalTensorLayout *declared,NSInteger *origin)
 // Added by the LSTM demonstration session: the offset-only rebase below proved containment with a relation preimage,
 // 583 of rebase:'s 1032 samples in a four-step LSTM declaration on m5ult2 (2026-11-01).
 static int TensorAffineWithin(MetalTensorLayout *view,MetalTensorLayout *declared) {
-    if(!view.affine||!declared.affine||!view.count||!declared.count)return -1;
+    if(!declared.affine||!view.count||!declared.count)return -1;
     NSInteger low;NSArray *axes=TensorInverseAxes(declared,&low);NSUInteger width=1;BOOL dense=YES;
     for(NSNumber *axis in [axes reverseObjectEnumerator]) {
         NSUInteger d=axis.unsignedIntegerValue;dense&=(NSUInteger)labs([declared.strides[d] integerValue])==width;
         width*=[declared.shape[d] unsignedIntegerValue];
     }
     if(!dense||width!=declared.count)return -1;
+    /* the view's least and greatest positions, positions it has: from its strides where it is factored without maps,
+       else isl's image bounds. Changed by the layout algebra session: any view that was not affine (a factored view of
+       more index axes than logical ones, a flat-term view) proved its containment by a relation preimage whose points
+       isl enumerated, about 28 ms for each 32 KiB view placement.selected rebases onto its compact root (desk,
+       2026-11-02). What must stay: 1 exactly where every position lies in the declaration's interval. */
     NSInteger first=view.offset,last=view.offset;
-    for(NSUInteger d=0;d<view.shape.count;d++) {
-        const NSInteger span=([view.shape[d] integerValue]-1)*[view.strides[d] integerValue];
-        first+=MIN(0,span);last+=MAX(0,span);
-    }
+    if(view.factored&&!view.maps.count) {
+        for(NSUInteger d=0;d<view.indexShape.count;d++) {
+            const NSInteger span=([view.indexShape[d] integerValue]-1)*[view.strides[d] integerValue];
+            first+=MIN(0,span);last+=MAX(0,span);
+        }
+    } else {const struct MetalTensorSpan span=view.storageSpan;first=span.offset;last=span.offset+(NSInteger)span.count-1;}
     return first>=low&&last<low+(NSInteger)width;
 }
 static MetalTensorLayout *TensorClosedRebase(MetalTensorLayout *view,MetalTensorLayout *declared,MetalTensorLayout *placed) {
