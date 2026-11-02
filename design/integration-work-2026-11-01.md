@@ -513,7 +513,28 @@ boundary, invocation, SEND ordinal, byte selection and generation in MeshRank.
 That map must identify the existing join which installs C1's outputs before
 `mark_records`; it must not invent generation identity from buffer addresses.
 The source/build checkpoint above completes the build part of this substep;
-the mapping and generated coverage consumer remain in progress.
+the generated coverage consumer remains in progress. The merged shared
+libraries also build at mesh `c5e80bc3`
+(`/tmp/mesh-conditional-merged-20261102.log`).
+
+Mapping findings, 2026-11-02 03:32:53 UTC: the early join belongs immediately
+after `source_declarations`, before the first `mark_records` exchange. `Mark.at`
+and `MeshRankProgram.positions` retain the source/numerical boundary;
+`sourceRuns` and `sourceCommands` retain actual invocation declarations. Mark
+domains, layouts and bindings retain local selections, and
+`CrossFragment.sourceWork` retains each fragment's ordered logical bytes.
+`coverage_declare` projects the original transaction/frame/byte interval.
+
+Two operands still need to be connected before implementing that join.
+`MetalPageWriteDemand.before` names a numerical-source boundary;
+`ncclMeshCoverage.before` names an original call boundary. MeshRank currently
+maps the latter's start/end to the emitted calls. They are different coordinates
+and must remain related through that retained mapping. Also, a class's coverage
+record is reused across invocations while its active/expected slots advance.
+Its current single demand pointer therefore cannot name each invocation's
+distinct value generation. C1 and C5 must carry the declaration's occurrence
+binding into the common solve; physical buffer aliases cannot supply it.
+This is preparation data only, with no additional runtime generation token.
 
 ### Next handoff and validation
 
