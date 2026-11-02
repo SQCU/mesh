@@ -180,5 +180,18 @@
   "handles": "Tells an all-to-all's send operand from its receive operand by fixed buffer numbers.",
   "group": "operand-identity",
   "replacement": "a step names the declared source or destination operand, whose page map composed with its layout gives segment q's virtual pages"
+ },
+ {
+  "file": "rdma/mesh-graph.h",
+  "line": 128,
+  "lines": "126-136",
+  "function": "MESH_GRAPH_PREFIX_METAL (mesh_graph_prefix, mesh_graph_settle)",
+  "scope": "effector",
+  "violation": "effector decides",
+  "abstraction": "device atomic_uint *state + head + p and *at: a run-time scan of completion bits with compare-exchange that picks how far to publish",
+  "handles": "Publishes how many output cells are complete so a consumer can read a done prefix while the rest still run.",
+  "group": "progress-words",
+  "replacement": "specialization at final lowering: each cell's completion lands at its compiled word position in the composed map and each consumer's threshold is a compiled constant; no run-time prefix choice",
+  "note": "emitted by metal-page-effects.m:1070-1071 and nccl-mesh-kernels.h:62; the CPU twin is mesh-publication.h:62 (outside this slice)."
  }
 ]
