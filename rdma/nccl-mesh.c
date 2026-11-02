@@ -2211,15 +2211,13 @@ static size_t write_tiles(const struct write_binding *p) {
 static size_t write_tile(const struct write_binding *p, size_t logical) {
   return p->layout.tile_bytes ? logical / p->layout.tile_bytes : 0;
 }
-static size_t tile_offset(ncclMeshTileLayout layout, size_t tile, size_t invocation) {
-  return (invocation % layout.instances) * layout.instance_stride +
-    (tile / layout.columns) * layout.row_stride + (tile % layout.columns) * layout.tile_stride;
+static size_t tile_offset(ncclMeshTileLayout layout, size_t tile) {
+  return (tile / layout.columns) * layout.row_stride + (tile % layout.columns) * layout.tile_stride;
 }
 /* Bound the affine metadata table before any commands are recorded. */
 static int tile_extent(ncclMeshTileLayout layout, size_t tiles, size_t record, size_t *extent) {
-  if (!layout.columns || !layout.instances || !tiles ||
-      layout.tile_stride % sizeof(uint64_t) || layout.row_stride % sizeof(uint64_t) ||
-      layout.instance_stride % sizeof(uint64_t)) return EINVAL;
+  if (!layout.columns || !tiles || layout.tile_stride % sizeof(uint64_t) || layout.row_stride % sizeof(uint64_t))
+    return EINVAL;
   // The final row can be partial. Bound it and the last complete row without
   // imposing a row-major order on the table's affine strides.
   const size_t row=(tiles-1)/layout.columns,column=(tiles-1)%layout.columns;
@@ -2233,8 +2231,7 @@ static int tile_extent(ncclMeshTileLayout layout, size_t tiles, size_t record, s
     at+=r*layout.row_stride;
     if(at>end)end=at;
   }
-  if(layout.instance_stride && layout.instances-1>(SIZE_MAX-end)/layout.instance_stride)return EOVERFLOW;
-  *extent=end+(layout.instances-1)*layout.instance_stride;return 0;
+  *extent=end;return 0;
 }
 static ncclMeshSpan write_selection(const struct write_binding *p,uint64_t logical,uint64_t limit) {
   uint64_t offset=logical,bytes=p?p->bytes-logical:limit;
@@ -4795,7 +4792,7 @@ static ncclResult_t present_group(struct ncclComm *comm, struct issue *owner, st
         entry.word=lease_offset(address_of(m->copied));entry.base=0;entry.step=0;
       } else if (m->c->write_binding && m->c->write_binding->ready_value) {
         const struct write_binding *plan = m->c->write_binding;
-        entry.word = plan->ready_offsets[m->c->invocation % plan->ready_layout.instances * plan->ready_tiles + message_tile(m)];
+        entry.word = plan->ready_offsets[message_tile(m)];
         entry.base = plan->ready_value-1;entry.step=0;
       }
       records[k] = (struct mesh_zwoggle_entry){entry, m->required ? lease_offset(m->requirement) : 0};
@@ -5654,7 +5651,7 @@ static ncclResult_t source_generation_effects(struct metal_program *program,cons
     }
     if(!(write&&write->ready_value))continue;
     const struct where ready=write&&write->ready_value?
-      shifted(write->source_ready,tile_offset(write->ready_layout,message_tile(m),c->invocation)):plans[h].ready;
+      shifted(write->source_ready,tile_offset(write->ready_layout,message_tile(m))):plans[h].ready;
     const ncclMeshPageEffect effect={.kind=ncclMeshPageObserve,.operand=ncclMeshPageSource,
       .word={ready.buffer,ready.offset},.violation={c->comm->violation,0},.polls=program->polls,
       .channel=h,.entry=m->entry,.first=first,.frame=m->frame,.threshold=write&&write->ready_value?write->ready_value:pages_to_word(m->laid),.bytes=m->bytes};
@@ -7748,12 +7745,12 @@ static ncclResult_t write_ready(struct write_binding *plan,ncclMeshBuffer words,
     return fail(ncclInvalidArgument,"source readiness value must cover one declared logical tile");
   if (plan->comm->rank==plan->from && plan->owned.uses) {
     size_t extent=0,tiles=write_tiles(plan);
-    if (tile_extent(layout,tiles,sizeof(uint64_t),&extent) || tiles>SIZE_MAX/sizeof(uint64_t)/layout.instances)
+    if (tile_extent(layout,tiles,sizeof(uint64_t),&extent) || tiles>SIZE_MAX/sizeof(uint64_t))
       return fail(ncclInvalidArgument,"source readiness table geometry");
     struct where ready={words.buffer,words.offset,NULL};
     ncclResult_t result=as_metal(&ready);
     if (result) return result;
-    uint64_t *offsets=malloc(tiles*layout.instances*sizeof *offsets);
+    uint64_t *offsets=malloc(tiles*sizeof *offsets);
     if (!offsets) return fail(ncclSystemError,"allocating source readiness page offsets");
     void *address=address_of(ready);
     pthread_mutex_lock(&attach_lock);
@@ -7765,8 +7762,8 @@ static ncclResult_t write_ready(struct write_binding *plan,ncclMeshBuffer words,
     const size_t held=plan->owned.count;
     if (!error) error=owned_add(&plan->owned,address,OWNED_TABLE|OWNED_SENDS);
     if (!error&&plan->owned.count>held) error=owned_begin(&plan->owned,held);
-    for (size_t i=0;!error&&i<layout.instances;i++) for (size_t tile=0;tile<tiles;tile++)
-      offsets[i*tiles+tile]=lease_page_offset(attachment,owner,offset+tile_offset(layout,tile,i));
+    for (size_t tile=0;!error&&tile<tiles;tile++)
+      offsets[tile]=lease_page_offset(attachment,owner,offset+tile_offset(layout,tile));
     pthread_mutex_unlock(&attach_lock);
     if (error) { free(offsets);return fail(ncclInvalidArgument,"source readiness is not an aligned live page operand"); }
     plan->source_ready=ready;plan->ready_offsets=offsets;plan->ready_tiles=tiles;

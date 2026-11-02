@@ -734,9 +734,10 @@ typedef struct ncclMeshGroup {
 enum { ncclMeshAccessRead = 1, ncclMeshAccessWritten = 2, ncclMeshAccessObserve = 4, ncclMeshAccessNext = 64, ncclMeshAccessAtomic = 128 };
 typedef struct { ncclMeshBuffer storage; size_t bytes; uint32_t access; } ncclMeshAccess;
 /* Affine progress table. Tile t of invocation i names
-   (i % instances)*instance_stride + (t/columns)*row_stride + (t%columns)*tile_stride.
+   (t/columns)*row_stride + (t%columns)*tile_stride, the same words at every occurrence: an occurrence's words are its
+   own pages', never a slot of its index (design/page-maps-2026-11-02.md, integration step 3).
    All strides are bytes; preparation resolves these indices. */
-typedef struct { size_t columns, tile_stride, row_stride, instances, instance_stride; } ncclMeshTileLayout;
+typedef struct { size_t columns, tile_stride, row_stride; } ncclMeshTileLayout;
 /* Local geometry over a call's page binding. Elements have element_bits bits.
    shape and strides describe an affine view. runs, when present, instead names
    pairs of element offsets and counts in logical order. offset and frame_stride
