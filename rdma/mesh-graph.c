@@ -994,6 +994,34 @@ size_t mesh_graph_dependences(size_t n, const struct mesh_graph_access *access, 
 }
 
 /* mesh-graph.h */
+int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                          const void *context, size_t sets, const size_t *source_first, const uint32_t *source,
+                          const size_t *target_first, const uint32_t *target, unsigned char *precedes) {
+  /* reached[v]: how many of set g's sources reach v; v follows all of them where it equals their count */
+  uint32_t *seen = calloc((size_t)vertices + 1, sizeof *seen), *reached = malloc(((size_t)vertices + 1) * sizeof *reached),
+           *stack = malloc(((size_t)vertices + 1) * sizeof *stack);
+  int result = seen && reached && stack ? 0 : ENOMEM;
+  uint32_t stamp = 0;
+  for (size_t g = 0; !result && g < sets; g++) {
+    for (uint32_t v = 0; v < vertices; v++) reached[v] = 0;
+    for (size_t x = source_first[g]; x < source_first[g + 1]; x++) {
+      stack[0] = source[x];
+      mesh_graph_mark(first, head, context, seen, ++stamp, stack, 1);
+      for (uint32_t v = 0; v < vertices; v++) reached[v] += seen[v] == stamp;
+    }
+    const uint32_t sources = (uint32_t)(source_first[g + 1] - source_first[g]);
+    for (size_t h = 0; h < sets; h++) {
+      if (h == g) continue;
+      int all = 1;
+      for (size_t y = target_first[h]; all && y < target_first[h + 1]; y++) all = reached[target[y]] == sources;
+      if (all) precedes[(g * sets + h) / 8] |= (unsigned char)(1u << ((g * sets + h) % 8));
+    }
+  }
+  free(seen); free(reached); free(stack);
+  return result;
+}
+
+/* mesh-graph.h */
 struct placed_item { uint64_t first, size; size_t item; };
 struct place_rank { const uint64_t *size, *key; };
 /* the largest first, then by key, then by number (qsort_r's context: sizes and keys) */

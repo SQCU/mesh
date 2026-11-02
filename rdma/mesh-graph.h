@@ -255,6 +255,15 @@ struct mesh_graph_dependence { uint32_t from, to, kind; uint64_t item, first, by
    adjacent bytes. Returns the count, written up to `capacity`, or SIZE_MAX where memory ran out. */
 size_t mesh_graph_dependences(size_t n, const struct mesh_graph_access *access, struct mesh_graph_dependence *out,
                               size_t capacity);
+/* Sets of vertices over directed rows (first, head; mesh_graph_mark): set g's sources source[source_first[g] ..
+   source_first[g + 1]) and targets target[target_first[g] .. target_first[g + 1]).
+   type: -> precedes, a sets x sets bit matrix (bit g * sets + h of byte (g * sets + h) / 8, the caller's, cleared):
+   for g != h, set when every target of h is reached from every source of g by one edge or more (vacuously where
+   either list is empty). The run's solve reads it as "every access of item g happens before every access of item h"
+   (sources the accesses' ends, targets their begins). One mark from each source; 0 or ENOMEM. */
+int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                          const void *context, size_t sets, const size_t *source_first, const uint32_t *source,
+                          const size_t *target_first, const uint32_t *target, unsigned char *precedes);
 /* type: n x (size, key), pins, bins [first, first + pages) ascending and disjoint, apart -> place[n]: each item within
    one bin, a pinned item at its given place, and every two items sharing a unit apart. apart(k, l) is symmetric: one's
    accesses all happen before the other's. Greedy by size: pins first; then the largest item first, ties by key (a

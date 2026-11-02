@@ -266,13 +266,13 @@ int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t 
   size_t *first = calloc(n + 2, sizeof *first), *cursor = malloc((n + 1) * sizeof *cursor),
          *by_item = calloc(items + 2, sizeof *by_item), *of_item = malloc((accesses + 1) * sizeof *of_item);
   uint32_t *head = malloc((m + 1) * sizeof *head), *indegree = malloc((n + 1) * sizeof *indegree),
-           *ordinal = malloc((n + 1) * sizeof *ordinal), *seen = calloc(n + 1, sizeof *seen),
-           *reached = malloc((n + 1) * sizeof *reached), *stack = malloc((n + 1) * sizeof *stack);
+           *ordinal = malloc((n + 1) * sizeof *ordinal), *ends = malloc((accesses + 1) * sizeof *ends),
+           *begins = malloc((accesses + 1) * sizeof *begins);
   uint64_t *size = malloc((items + 1) * sizeof *size), *key = malloc((items + 1) * sizeof *key),
            (*bounds)[2] = malloc((bins + 1) * sizeof *bounds);
   unsigned char *pinned = malloc(items + 1), *before = calloc((items * items + 7) / 8 + 1, 1);
   int result = plan->edge && plan->order && plan->place && first && cursor && by_item && of_item && head && indegree &&
-               ordinal && seen && reached && stack && size && key && bounds && pinned && before ? 0 : ENOMEM;
+               ordinal && ends && begins && size && key && bounds && pinned && before ? 0 : ENOMEM;
   /* the edges: the dependences, each access's own span, the transport's links; duplicates once */
   if (!result && mesh_graph_dependences(accesses, access, plan->edge, found) != found) result = ENOMEM;
   size_t e = found;
@@ -300,25 +300,18 @@ int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t 
   for (size_t a = 0; !result && a < accesses; a++) of_item[by_item[access[a].item]++] = a;
   for (size_t k = items; !result && k > 0; k--) by_item[k] = by_item[k - 1];
   if (!result) by_item[0] = 0;
-  /* before(a, b): every begin of b is reached from every end of a. reached[v] counts the ends of a that reach v */
-  uint32_t stamp = 0;
-  for (size_t a = 0; !result && a < items; a++) {
-    if (item[a].lives & MESH_RUN_AFTER) continue;
-    for (size_t v = 0; v < n; v++) reached[v] = 0;
-    uint32_t ends = 0;
-    for (size_t x = by_item[a]; x < by_item[a + 1]; x++) {
-      stack[0] = access[of_item[x]].end;
-      mesh_graph_mark(first, run_edge_head, head, seen, ++stamp, stack, 1);
-      for (size_t v = 0; v < n; v++) reached[v] += seen[v] == stamp;
-      ends++;
-    }
-    for (size_t b = 0; b < items; b++) {
-      if (b == a || (item[b].lives & MESH_RUN_BEFORE)) continue;
-      int all = 1;
-      for (size_t y = by_item[b]; all && y < by_item[b + 1]; y++) all = reached[access[of_item[y]].begin] == ends;
-      if (all) before[(a * items + b) / 8] |= (unsigned char)(1u << ((a * items + b) % 8));
-    }
+  /* before(a, b): every access of a happens before every access of b (mesh_graph_precedence over the accesses' ends
+     and begins); nothing is before an item live from before the run, and nothing after one live past it */
+  for (size_t x = 0; !result && x < accesses; x++) {
+    ends[x] = access[of_item[x]].end;
+    begins[x] = access[of_item[x]].begin;
   }
+  if (!result)
+    result = mesh_graph_precedence(events, first, run_edge_head, head, items, by_item, ends, by_item, begins, before);
+  for (size_t a = 0; !result && a < items; a++)
+    for (size_t b = 0; b < items; b++)
+      if ((item[a].lives & MESH_RUN_AFTER) || (item[b].lives & MESH_RUN_BEFORE))
+        before[(a * items + b) / 8] &= (unsigned char)~(1u << ((a * items + b) % 8));
   /* place: pins, then greedy by size; an item with no access, pin or life holds no page */
   for (size_t k = 0; !result && k < items; k++) {
     const int touched = by_item[k + 1] > by_item[k];
@@ -338,8 +331,8 @@ int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t 
     if (plan->place[k] != MESH_RUN_FREE && plan->place[k] >= bin[bins - 1].first &&
         plan->place[k] + size[k] - bin[bins - 1].first > plan->arena)
       plan->arena = plan->place[k] + size[k] - bin[bins - 1].first;
-  free(first); free(cursor); free(by_item); free(of_item); free(head); free(indegree); free(ordinal); free(seen);
-  free(reached); free(stack); free(size); free(key); free(bounds); free(pinned); free(before);
+  free(first); free(cursor); free(by_item); free(of_item); free(head); free(indegree); free(ordinal); free(ends);
+  free(begins); free(size); free(key); free(bounds); free(pinned); free(before);
   if (result) mesh_run_plan_free(plan);
   return result;
 }
