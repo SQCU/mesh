@@ -848,30 +848,6 @@ typedef struct { uint32_t call, what, type, root, element_bytes, directions, law
                  uint64_t up, down, grain, units; } ncclMeshRouteDemand;
 typedef struct { uint32_t demand, adjustable; double initial, share;
                  uint64_t units, bytes; } ncclMeshRouteTree;
-/* Source-level association operands use the same tree columns and page-range
-   allocation as native reductions. Each segment has its own share simplex.
-   A zero-tree declaration seeds that simplex; preparation retains its columns
-   and adds legal association neighbors. Leaves use rank IDs; binary nodes use
-   nodes + local node index. No execution chooses or traverses this graph. */
-typedef struct {
-  uint32_t nodes,laws,segments,trees;
-  const uint64_t* contributors;
-  const uint32_t* segment;
-  const uint32_t* parents;
-  const double* share;
-} ncclMeshFoldBasis;
-typedef struct { uint32_t left,right,owner,round; } ncclMeshFoldNode;
-typedef struct {
-  ncclMeshFoldBasis basis;
-  const uint64_t* first;
-  const uint64_t* cells;
-  const uint32_t* node_first;
-  const uint32_t* result;
-  const ncclMeshFoldNode* node;
-} ncclMeshFoldTopology;
-ncclResult_t ncclMeshFoldPrepare(const ncclMeshFoldBasis* basis,uint64_t cells,
-  uint32_t element_bytes,uint64_t page,const uint64_t* counts,ncclMeshFoldTopology** out);
-void ncclMeshFoldDrop(ncclMeshFoldTopology* topology);
 /* kind 0 routes a WRITE/all-to-all transaction; kind 1 realizes a collective
    tree edge on physical cables. Zero weight disables a choice, not its path.
    units/bytes sum actual allocations over this group's logical transactions.
