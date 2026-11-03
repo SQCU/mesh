@@ -42,3 +42,4 @@ xonotic/.tmp/
 xonotic/solver/strat/runs/
 build/
 *.egg-info/
+tailscale.key
