@@ -50,12 +50,14 @@ READ, WRITE = 1, 2
 # (MESH_ALLREDUCE_GATHER_BELOW, bytes) sets it for a sweep. The planner's all-reduce measured 357-416 us at 256 KB and
 # 163-188 at 4 KB (allreduce-2026-11-03 sweep-21).
 import os
-# whether a part ends after each run of links and releases (settle). Changed by the one-part session from 'all': a part
-# end made a link's or release's copy visible (about 25 us after the part's end on an M5 Ultra, its late part starts at
-# the boundaries: metal-microbench docs/facts.md, gaps.m); a word is now a kernel's coherent store, seen 5-7 us into a
-# running buffer on every member (kernels.store), so a run is one part. The run's configuration (MESH_RUN_CUTS=all, or
-# first) restores the ends for a comparison. What must stay: no part end that only made a store visible.
-CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
+# whether a part ends after each run of links and releases (settle). A word is a kernel's coherent store, seen 5-7 us
+# into a running buffer on every member (kernels.store), so no part end is needed to make it visible; but the one-part
+# LSTM is wrong at one tick on the Mini (0.235 in its block, every run alike; lstm-2026-11-03 store-1 to store-7) where
+# the cut form is right (1.2e-4), and on the Mini a running buffer's ordinary loads of bytes another process rewrote
+# read stale (visible.m "stale"). So the ends stay until that defect is named; the run's configuration
+# (MESH_RUN_CUTS=0) runs one part for that reading, first one end (metal-microbench docs/facts.md). What must stay: no
+# one-part default while it is wrong anywhere.
+CUTS = {'0': 'none', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', 'all'), 'all')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
 
 
