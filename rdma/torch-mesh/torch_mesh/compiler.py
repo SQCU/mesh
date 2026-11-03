@@ -53,7 +53,7 @@ import os
 # whether a part ends after each run of links and releases (settle); the run's configuration (MESH_RUN_CUTS=0) runs it
 # as one part, its order alone keeping a copy behind the waits it follows (an M5 Ultra's late part starts are at part
 # boundaries: metal-microbench docs/facts.md, gaps.m)
-CUTS = os.environ.get('MESH_RUN_CUTS', '1') != '0'
+CUTS = {'0': 'none', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', 'all'), 'all')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
 
 
@@ -954,6 +954,7 @@ class Program:
             if tracing:
                 run.mark()
         cut = [False]  # a part end owed after links and releases, across chunks
+        cuts_made = [0]
         waited = [False]  # observations emitted since the last command: the next command begins a part's compute
         for chunk, (t, lowered) in enumerate(instances):
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
@@ -1013,8 +1014,9 @@ class Program:
                 # only once its encoder's earlier dispatches have ended (an M5 Ultra; stored), so the observations
                 # after it go in the next part, committed ahead, which begins at once
                 if cut[0]:
-                    if CUTS:
+                    if CUTS == 'all' or (CUTS == 'first' and not cuts_made[0]):
                         run.cut()
+                        cuts_made[0] += 1
                     cut[0] = False
 
             def emit_observation(key, t=t, group=group, ids=ids, chunk=chunk, nodes_of=nodes_of):
