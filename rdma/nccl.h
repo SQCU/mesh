@@ -531,11 +531,13 @@ ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *call
 /* its steps at this rank, written up to `capacity`, *count their number */
 ncclResult_t ncclMeshCommSteps(ncclComm_t comm, uint64_t definition, ncclMeshTransfer *out, size_t capacity, size_t *count);
 /* an occurrence lowered onto its placed bytes (address[s]: step s's bytes, a SEND's source, a COPY's destination, a
-   REDUCE's landing): its tables laid and its nodes written up to `capacity`, *count their number. after[a] = (SEND step,
-   landing step): that SEND completes before that landing is posted (the solve's edges). */
+   REDUCE's landing): its tables laid and its nodes written up to `capacity`, *count their number. The solve's edges
+   decide the rest: after[a] = (SEND step, landing step), that SEND completes before that landing is posted;
+   forward[f] = (SEND step, COPY step), that SEND's bytes are what that COPY of this occurrence landed, so each of its
+   units goes once the COPY's unit under it has landed (the bridge's forward, no release). */
 ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, void *const *address,
-                                         const uint32_t (*after)[2], size_t afters, ncclMeshNode *node, size_t capacity,
-                                         size_t *count);
+                                         const uint32_t (*after)[2], size_t afters, const uint32_t (*forward)[2],
+                                         size_t forwards, ncclMeshNode *node, size_t capacity, size_t *count);
 
 /* Gets the number of ranks in the communicator clique. */
 ncclResult_t  ncclCommCount(const ncclComm_t comm, int* count);

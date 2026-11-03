@@ -104,9 +104,16 @@ class Template:
 
     # ---- lower ----
     def _lower(self, graph):
-        values, expression, users = {}, {}, {n: len(n.users) for n in graph.graph.nodes}
+        from mesh_graph import absorbed
+        values, expression = {}, {}
         placeholders = iter(self.args)
         pointwise = set(UNARY) | set(BINARY) | {aten.copy_.default, aten.clamp.default}
+        same = lambda n, u: n.meta.get('val') is not None and u.meta.get('val') is not None and \
+            tuple(n.meta['val'].shape) == tuple(u.meta['val'].shape)
+        # a pointwise node its one pointwise consumer of its shape takes in (mesh_graph.absorbed)
+        users = absorbed([n for n in graph.graph.nodes if n.target in pointwise and n.target not in INPLACE and
+                          n.target is not aten.copy_.default], lambda n: list(n.users),
+                         lambda n, u: u.target in pointwise and same(n, u))
         for node in graph.graph.nodes:
             if node.target not in pointwise:
                 # an expression this node consumes but cannot inline is materialized first
@@ -150,7 +157,7 @@ class Template:
         """a pointwise node as an expression tree; one an equal-shaped, unaliased, single consumer takes is inlined"""
         def operand(arg, shape):
             if isinstance(arg, torch.fx.Node):
-                if arg in expression and expression[arg][1].shape == tuple(shape) and users[arg] == 1:
+                if arg in expression and arg in users and expression[arg][1].shape == tuple(shape):
                     tree, _ = expression.pop(arg)
                     return tree
                 if arg in expression:
@@ -369,6 +376,12 @@ class Template:
         solved = _stream.run_solve(page, len(events), accesses, links, rows, bins)
         self.events, self.items, self.page = events, items, page
         self.edges = sorted({(f, t) for f, t, *_ in solved['edges'] if f != t})
+        # each occurrence's forwards: a SEND reading bytes a COPY of the same occurrence landed (its RAW edge)
+        self.forwards = {}
+        for f, to in self.edges:
+            a, b = events[f], events[to]
+            if a[0] == 'landed' and b[0] == 'send' and a[1] == b[1]:
+                self.forwards.setdefault(a[1], []).append((b[2], a[2]))
         self.order = solved['order']
         arena_first = bins[-1][0]
         self.arena_pages = solved['arena']
@@ -448,8 +461,12 @@ class Program:
                     addresses[k] = ffi.cast('void *', self._address(s['root'], s['at']))
                 room = 4 * len(command.steps) + 64
                 nodes, count = ffi.new('ncclMeshNode[]', room), ffi.new('size_t *')
+                pairs = t.forwards.get(c, [])
+                forwards = ffi.new('uint32_t[][2]', max(1, len(pairs)))
+                for p, (send, copy) in enumerate(pairs):
+                    forwards[p][0], forwards[p][1] = send, copy
                 mesh.check(lib.ncclMeshCommLowerOccurrence(command.comm, command.definition, addresses, ffi.NULL, 0,
-                                                           nodes, room, count))
+                                                           forwards, len(pairs), nodes, room, count))
                 made = []
                 for n in nodes[0:count[0]]:
                     slot = None
@@ -503,25 +520,12 @@ class Program:
                             else:
                                 run.landed(word, value)
                         has_node.add(e)
-            # the solve's edges between nodes, through events with none
-            successors = {}
-            for f, to in t.edges:
-                successors.setdefault(f, []).append(to)
-
-            def reach(e, seen):
-                for n in successors.get(e, ()):
-                    if n in seen:
-                        continue
-                    seen.add(n)
-                    if n in has_node:
-                        yield n
-                    else:
-                        yield from reach(n, seen)
-            own = sorted({(ids[e], ids[n]) for e in has_node for n in reach(e, set())})
-            targets, heads = {b for _, b in own}, {a for a, _ in own}
-            sources = [ids[e] for e in has_node if ids[e] not in targets]
-            edges += own + [(p, s) for p in previous_sinks for s in sources]
-            previous_sinks = [ids[e] for e in has_node if ids[e] not in heads] or previous_sinks
+            # the solve's edges between nodes, through events with none; the instance after the one before
+            from mesh_graph import sinks, sources, through
+            kept = [e for e in t.order if e in has_node]
+            own = through(t.edges, set(kept))
+            edges += [(ids[a], ids[b]) for a, b in own] + [(p, ids[s]) for p in previous_sinks for s in sources(kept, own)]
+            previous_sinks = [ids[e] for e in sinks(kept, own)] or previous_sinks
         run.edges(edges)
         run.finish()
         return run

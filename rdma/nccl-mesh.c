@@ -2327,8 +2327,8 @@ static uint64_t region_offset(const void *address) {
 }
 
 ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, void *const *address,
-                                         const uint32_t (*after)[2], size_t afters, ncclMeshNode *node,
-                                         size_t capacity, size_t *count) {
+                                         const uint32_t (*after)[2], size_t afters, const uint32_t (*forward)[2],
+                                         size_t forwards, ncclMeshNode *node, size_t capacity, size_t *count) {
   const struct definition *d = comm ? definition_find(comm, definition) : NULL;
   if (!d || !count || (d->steps && !address)) return fail(ncclInvalidArgument, "no such declaration, or no placed bytes");
   const struct hdr *m = comm->attach->context.M;
@@ -2346,14 +2346,13 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
     const uint64_t at = bytes ? region_offset(address[s]) : 0;
     if (at == UINT64_MAX) result = fail(ncclInvalidUsage, "step %zu's bytes lie in no region lease of this process", s);
     else if (at % page) result = fail(ncclInvalidUsage, "step %zu's bytes start off a page (design/transport.md section 14)", s);
-    if (step->op != MESH_STEP_SEND) continue;
-    for (size_t r = 0; r < d->steps; r++) {
-      const struct mesh_step *copy = d->step + r;
-      if (copy->op == MESH_STEP_COPY && d->step_call[r] == d->step_call[s] && copy->buffer == step->buffer &&
-          copy->round < step->round && copy->first <= step->first &&
-          step->first + step->piece.elements <= copy->first + copy->piece.elements &&
-          (step->first - copy->first) * step->piece.element_bytes % page == 0) { gate[s] = (int64_t)r; break; }
-    }
+  }
+  for (size_t f = 0; !result && f < forwards; f++) {
+    const size_t s = forward[f][0], r = forward[f][1];
+    if (s >= d->steps || r >= d->steps || d->step[s].op != MESH_STEP_SEND || d->step[r].op != MESH_STEP_COPY ||
+        d->step[s].first < d->step[r].first || (d->step[s].first - d->step[r].first) * d->step[s].piece.element_bytes % page)
+      result = fail(ncclInvalidArgument, "forward %zu does not name a SEND within a COPY's pages", f);
+    else gate[s] = (int64_t)r;
   }
   /* every list's order (mesh_lay: by round, then step order, the one order both ends make) and every entry's base on
      its channel's prefix, before any entry is written: a forward and a landing's after name other channels' bases */

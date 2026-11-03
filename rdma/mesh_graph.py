@@ -338,6 +338,39 @@ def sources(nodes, edges):
     return [node for node in nodes if node not in entered]
 
 
+def sinks(nodes, edges):
+    """type: nodes, edges (earlier, later) -> the nodes no edge leaves, in the nodes' order"""
+    left = {earlier for earlier, _ in edges}
+    return [node for node in nodes if node not in left]
+
+
+def through(edges, kept):
+    """type: edges (earlier, later), kept nodes -> the edges between kept nodes, each a path whose interior nodes are
+    none of them (a run's event with no node passes its edges through: torch_mesh/compiler.py)"""
+    successors = {}
+    for earlier, later in edges:
+        successors.setdefault(earlier, []).append(later)
+    out = set()
+    for start in kept:
+        seen, stack = set(), list(successors.get(start, ()))
+        while stack:
+            node = stack.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            if node in kept:
+                out.add((start, node))
+            else:
+                stack.extend(successors.get(node, ()))
+    return sorted(out)
+
+
+def absorbed(nodes, users, joins):
+    """type: nodes, users(n) -> n's consumers, joins(n, u) -> whether u can take n in -> the nodes their one consumer
+    absorbs (a pointwise chain fused: torch_mesh/compiler.py)"""
+    return {n for n in nodes if len(users(n)) == 1 and joins(n, users(n)[0])}
+
+
 def serialized(at, node, place):
     """type: at, node -> its place in one order; a node to place at `place` -> the edges putting it after every node
     before that place and before every node after it"""
