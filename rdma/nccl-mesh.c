@@ -125,7 +125,7 @@ struct definition {
   size_t calls, steps;
   ncclMeshCollective *call;
   struct mesh_step *step;
-  uint32_t *step_call;
+  uint32_t *step_call, *step_channel; /* each step's call, and its channel (spread: a pair's parallel cables) */
   struct definition *next;
 };
 /* design/whole-function.md#interface */
@@ -267,7 +267,7 @@ static void comm_free(struct ncclComm *comm) {
   bootstrap_close(comm);
   routes_free(comm, 1);
   for (struct definition *d = comm->declared, *next; d; d = next) {
-    next = d->next; free(d->call); free(d->step); free(d->step_call); free(d);
+    next = d->next; free(d->call); free(d->step); free(d->step_call); free(d->step_channel); free(d);
   }
   for (uint32_t h = 0; h < comm->count; h++) MetalRelease(comm->channels[h].buffer);
   ncclMemFree((void *)comm->words);
@@ -2281,6 +2281,65 @@ static int channel_of(ncclComm_t comm, uint32_t peer) {
   return -1;
 }
 
+/* whether the receiving end of a transfer sends it on: a SEND of the receiver's, in a later round, over any of its
+   elements (the receiver's steps from the program, alike at both ends) */
+static int forwarded(const struct mesh_step *steps, uint32_t count, uint32_t round, uint64_t first, uint64_t end) {
+  for (uint32_t k = 0; k < count; k++)
+    if (steps[k].op == MESH_STEP_SEND && steps[k].round > round && steps[k].first < end &&
+        first < steps[k].first + steps[k].piece.elements) return 1;
+  return 0;
+}
+
+/* a call's `made` steps at d->steps spread over their pairs' parallel cables: a SEND or COPY whose receiver does not send
+   it on goes over every channel toward its peer, its piece cut in page quanta (the first ones one more for the
+   remainder), in the channels' order, which is the cables' (fabric_realize: the one order both ends make), so its two
+   ends cut alike; a forwarded transfer stays on the first channel, so a forward's SEND, cut or not, lies within one COPY
+   (the gate the lowering takes). Every step's channel in d->step_channel. Measured need: a pair's parallel cables sat
+   idle under one channel a peer (metal-microbench docs/facts.md, the bandwidth run: one port a peer carried bytes). */
+static ncclResult_t spread(ncclComm_t comm, struct definition *d, const struct mesh_program *program,
+                           struct mesh_operand operand, const uint64_t *segments, uint32_t made, uint32_t call) {
+  const uint64_t q = mesh_page_quantum(comm->page, operand.element_bytes);
+  const uint32_t room = made * (comm->count ? comm->count : 1);
+  struct mesh_step *own = malloc((made + 1) * sizeof *own), *peer = malloc(((size_t)room + 1) * sizeof *peer);
+  struct mesh_step *step = realloc(d->step, (d->steps + room + 1) * sizeof *step);
+  if (step) d->step = step;
+  uint32_t *owner = realloc(d->step_call, (d->steps + room + 1) * sizeof *owner);
+  if (owner) d->step_call = owner;
+  uint32_t *channel = realloc(d->step_channel, (d->steps + room + 1) * sizeof *channel);
+  if (channel) d->step_channel = channel;
+  if (!own || !peer || !step || !owner || !channel) { free(own); free(peer); return fail(ncclSystemError, "a spread's memory"); }
+  memcpy(own, d->step + d->steps, made * sizeof *own);
+  size_t at = d->steps;
+  for (uint32_t s = 0; s < made; s++) {
+    const struct mesh_step x = own[s];
+    int lanes[comm->count + 1], n = 0;
+    for (uint32_t h = 0; h < comm->count; h++) if ((uint32_t)comm->channels[h].peer == x.peer) lanes[n++] = (int)h;
+    int cut = n > 1 && (x.op == MESH_STEP_SEND || x.op == MESH_STEP_COPY) && x.peer != (uint32_t)comm->rank;
+    if (cut) {
+      /* the receiver's steps: this rank's own for a COPY, the peer's for a SEND */
+      const struct mesh_step *theirs = own;
+      uint32_t count = made;
+      if (x.op == MESH_STEP_SEND) { count = mesh_program_steps_cut(program, x.peer, operand, segments, comm->page, peer); theirs = peer; }
+      cut = !forwarded(theirs, count, x.round, x.first, x.first + x.piece.elements);
+    }
+    if (!cut) { d->step[at] = x; d->step_call[at] = call; d->step_channel[at] = x.peer == (uint32_t)comm->rank ? 0 : (uint32_t)channel_of(comm, x.peer); at++; continue; }
+    const uint64_t quanta = (x.piece.elements + q - 1) / q;
+    uint64_t from = x.first;
+    for (int j = 0; j < n; j++) {
+      const uint64_t share = quanta / (uint64_t)n + ((uint64_t)j < quanta % (uint64_t)n);
+      uint64_t elements = share * q;
+      if (from + elements > x.first + x.piece.elements) elements = x.first + x.piece.elements - from;
+      if (!elements) continue;
+      d->step[at] = x; d->step[at].first = from; d->step[at].piece.elements = elements;
+      d->step_call[at] = call; d->step_channel[at] = (uint32_t)lanes[j]; at++;
+      from += elements;
+    }
+  }
+  d->steps = at;
+  free(own); free(peer);
+  return ncclSuccess;
+}
+
 ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *calls, size_t count, uint64_t *definition) {
   if (!comm || !definition || (count && !calls)) return fail(ncclInvalidArgument, "a declaration needs its comm, calls and result");
   ncclResult_t result = comm_trees(comm);
@@ -2321,12 +2380,13 @@ ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *call
             result = fail(ncclInvalidUsage, "call %zu: a step toward rank %u, which no channel reaches", k,
                           d->step[d->steps + s].peer);
         }
-        d->steps += made;
+        if (!result) result = spread(comm, d, &program, operand, call->segments, made, (uint32_t)k);
+        else d->steps += made;
       }
     }
     free(segment); free(first); free(weight); free(latency); free(move);
   }
-  if (result) { free(d->call); free(d->step); free(d->step_call); free(d); return result; }
+  if (result) { free(d->call); free(d->step); free(d->step_call); free(d->step_channel); free(d); return result; }
   d->id = ++comm->definitions;
   d->next = comm->declared; comm->declared = d;
   *definition = d->id;
@@ -2341,7 +2401,7 @@ ncclResult_t ncclMeshCommSteps(ncclComm_t comm, uint64_t definition, ncclMeshTra
   for (size_t s = 0; s < d->steps && s < capacity; s++) {
     const struct mesh_step *step = d->step + s;
     const uint64_t width = step->piece.element_bytes;
-    out[s] = (ncclMeshTransfer){d->step_call[s], (uint32_t)channel_of(comm, step->peer), step->op, step->round,
+    out[s] = (ncclMeshTransfer){d->step_call[s], d->step_channel[s], step->op, step->round,
                                 step->buffer, step->first * width, mesh_step_bytes(step)};
   }
   return ncclSuccess;
@@ -2407,14 +2467,19 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
      its channel's prefix, before any entry is written: a forward and a landing's after name other channels' bases */
   struct mesh_place *placed = calloc(2 * (size_t)comm->count * (d->steps + 1), sizeof *placed);
   uint32_t *listed = calloc(2 * (size_t)comm->count + 1, sizeof *listed);
-  if (!placed || !listed) result = fail(ncclSystemError, "a lowering's lists' memory");
+  struct mesh_step *lay_step = malloc((d->steps + 1) * sizeof *lay_step);
+  uint32_t *lay_index = malloc((d->steps + 1) * sizeof *lay_index);
+  if (!placed || !listed || !lay_step || !lay_index) result = fail(ncclSystemError, "a lowering's lists' memory");
   for (uint32_t h = 0; !result && h < comm->count; h++) for (int land = 0; land < 2; land++) {
     struct channel *ch = comm->channels + h;
     struct mesh_place *list = placed + (2 * (size_t)h + land) * (d->steps + 1);
-    /* a step goes on one channel toward its peer, the first (channel_of): a parallel cable's channel carries none of
-       this occurrence (each would otherwise list, and post, every step of the peer's) */
-    if (channel_of(comm, (uint32_t)ch->peer) != (int)h) continue;
-    mesh_lay(d->step, (uint32_t)d->steps, (uint32_t)ch->peer, !land, 0, list, listed + 2 * h + land);
+    /* a channel's own steps (spread: its pair's transfers cut over the pair's cables, each step one channel's), laid
+       by mesh_lay over them alone and mapped back to the definition's indices */
+    uint32_t mine = 0;
+    for (size_t s = 0; s < d->steps; s++) if (d->step_channel[s] == h && d->step[s].peer == (uint32_t)ch->peer) { lay_step[mine] = d->step[s]; lay_index[mine++] = (uint32_t)s; }
+    if (!mine) continue;
+    mesh_lay(lay_step, mine, (uint32_t)ch->peer, !land, 0, list, listed + 2 * h + land);
+    for (uint32_t i = 0; i < listed[2 * h + land]; i++) list[i].step = lay_index[list[i].step];
     uint64_t position = land ? ch->lands : ch->sends;
     for (uint32_t i = 0; i < listed[2 * h + land]; i++) { base[list[i].step] = position; position += units[list[i].step]; }
   }
@@ -2458,7 +2523,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
           entry[i].entry = (struct mesh_entry){.spans = region_offset(span), .units = units[s], .step = 1,
                                                .spans_word = complete_at, .spans_base = 0, .base = *position};
           if (!land && gate[s] >= 0) { /* a forward: each unit once the COPY's unit under it has landed */
-            const int g = channel_of(comm, d->step[gate[s]].peer);
+            const int g = (int)d->step_channel[gate[s]];
             entry[i].entry.word = (uint64_t)((const char *)comm->channels[g].view.landed - (const char *)m);
             entry[i].entry.base = base[gate[s]] + (step->first - d->step[gate[s]].first) * step->piece.element_bytes / page;
           }
@@ -2467,7 +2532,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
             at += sizeof *list;
             for (size_t a = 0; a < afters; a++) if (after[a][1] == s) {
               const size_t k = after[a][0];
-              const int g = channel_of(comm, d->step[k].peer);
+              const int g = (int)d->step_channel[k];
               ((struct mesh_zwoggle_after *)(list + 1))[n++] = (struct mesh_zwoggle_after){
                 (uint64_t)((const char *)comm->channels[g].view.sent - (const char *)m), base[k] + units[k]};
             }
@@ -2491,7 +2556,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
     }
   }
   #undef NODE
-  free(base); free(units); free(gate); free(placed); free(listed); free(unit_at); free(unit_first);
+  free(base); free(units); free(gate); free(placed); free(listed); free(unit_at); free(unit_first); free(lay_step); free(lay_index);
   *count = written;
   return result;
 }
