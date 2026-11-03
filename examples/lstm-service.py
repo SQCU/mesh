@@ -99,8 +99,10 @@ def main(config=None):
         # rank 0's outputs, every step's now complete, against the reference: the largest error over every step, row
         # and unit, and over the last step
         error = np.abs(O.cpu().float().numpy() - expected)
+        per_step = error.reshape(len(error), -1).max(1)
         print(json.dumps(dict(phase='checked', max_abs_error=float(error.max()), last_step_max_abs_error=float(error[-1].max()),
-                              output_max_abs=float(np.abs(expected).max()))), flush=True)
+                              output_max_abs=float(np.abs(expected).max()), worst_step=int(per_step.argmax()),
+                              steps_over_1e-3=[int(s) for s in np.nonzero(per_step > 1e-3)[0][:32]])), flush=True)
     dist.destroy_process_group()
     return {'output': O, 'configuration': config.get('placement')}
 
