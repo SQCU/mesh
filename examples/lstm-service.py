@@ -39,12 +39,12 @@ def main(config=None):
     if config is None:
         config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
     steps, rows = config['steps'], config['rows']
-    held, expected = None, None
-    # every rank draws the same inputs from the configuration's seed: no broadcast of X into X (design/page-maps-
-    # 2026-11-02.md, Construction 7); rank 0's weights are the ones distributed
+    expected = None
+    # every rank draws the same inputs and weights from the configuration's seed and keeps its own share: no broadcast
+    # of X into X and no scatter of the weights (design/page-maps-2026-11-02.md, Construction 7)
     inputs, values = lstm.inputs(config, steps, rows)
+    held = weights(config, values)
     if os.environ['RANK'] == '0':
-        held = weights(config, values)
         # the outputs the run must give, from the same inputs and weights on the CPU (lstm.reference)
         expected = lstm.reference(config, inputs, values, steps)
     del values
@@ -61,10 +61,7 @@ def main(config=None):
     chosen = configuration['assignment']['operands']
     compiler = {'LINEAR_ROW_CROSSOVER': chosen['LINEAR_ROW_CROSSOVER'],
                 'layout_preferences': chosen['layout_preferences']}
-    shape = lambda l: (4, H, (KIN if l == 0 else H) + H)
-    split = lambda t: partition.distribute_tensor(t, mesh, [Shard(1)], src_data_rank=0)
-    held = held or [(torch_mesh.empty(1, 1, shape(l)[2], dtype=torch.half).expand(shape(l)),
-                     torch_mesh.empty(1, 1, dtype=torch.half).expand(4, H)) for l in range(L)]
+    split = lambda t: partition.distribute_tensor(t, mesh, [Shard(1)])
     tick = lstm.Tick(mesh, [split(w) for w, _ in held], [split(b) for _, b in held], rows, steps)
     del held
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)

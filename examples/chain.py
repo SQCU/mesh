@@ -9,11 +9,9 @@ CHUNK = 1 << 24
 
 # docs/writing-a-service.md#the-step
 def weights(mesh, folds, width):
-    if folds is None:
-        folds = [torch_mesh.empty(1, width, dtype=torch.half).expand(width, width)] * 2
-    else:
-        folds = [torch_mesh.empty(width, width, dtype=torch.half).copy_(torch.from_numpy(w)) for w in folds]
-    return tuple(partition.distribute_tensor(w, mesh, [Shard(0)], src_data_rank=0).to_local() for w in folds)
+    """each rank's rows of the two folds, which every rank holds (drawn from the same seed): no scatter"""
+    folds = [torch_mesh.empty(width, width, dtype=torch.half).copy_(torch.from_numpy(w)) for w in folds]
+    return tuple(partition.distribute_tensor(w, mesh, [Shard(0)]).to_local() for w in folds)
 
 
 # docs/writing-a-service.md#the-configuration

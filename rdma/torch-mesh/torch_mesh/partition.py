@@ -201,41 +201,17 @@ class RaggedShard(Shard):
         block = tensor.narrow(self.dim, offsets[index], sizes[index])
         return block.contiguous() if contiguous or clone else block
 
-    def _shard_tensor(self, tensor, mesh, mesh_dim, src_data_rank=0):
-        """Realize an exact-count scatter of the declared blocks at configuration.
-
-        Mesh ranks bind exact original/final strided views of the source, which
-        lies in the region (its producer's region tensor, torch_mesh.empty); nothing
-        is imported or packed. Other distributed backends retain their scatter API.
-        """
+    def _shard_tensor(self, tensor, mesh, mesh_dim, src_data_rank=None):
+        """This rank's own block of the declared blocks, selected from the whole tensor every rank holds: no
+        collective. An eager scatter from a source rank is no operation of this library (design/page-maps-2026-11-02.md:
+        every collective lowers through the run's solve)."""
+        if src_data_rank is not None:
+            raise ValueError('distribute a tensor every rank holds (src_data_rank=None): no eager scatter')
         coordinate = mesh.get_coordinate()
         if coordinate is None:
             return tensor.new_empty(0, requires_grad=tensor.requires_grad)
-        n, rank, group = mesh.size(mesh_dim), coordinate[mesh_dim], mesh.get_group(mesh_dim)
-        if src_data_rank is None:
-            return self._select_split_tensor(tensor, n, rank, with_padding=False, contiguous=True)
-        sizes, rest = _blocks(self._operand(n), tensor.size(self.dim))[0], tensor.movedim(self.dim, 0).shape[1:]
-        direct = _scatter_spans(tensor, self.dim, sizes, rank, src_data_rank, group)
-        if direct is not None:
-            return direct
-        counts = [s * math.prod(rest) for s in sizes]
-        at = list(itertools.accumulate(counts, initial=0))
-        out, blocks = _empty((counts[rank],), tensor, group), None
-        if rank == src_data_rank:
-            pieces = self._split_tensor(tensor, n, contiguous=False)[0]
-            if self.dim == 0 and tensor.is_contiguous():
-                blocks = list(tensor.reshape(-1).split(counts))
-            else:
-                staged = _empty((at[-1],), tensor, group)
-                for q, piece in enumerate(pieces):
-                    staged[at[q]:at[q] + counts[q]].view((sizes[q],) + rest).copy_(piece.movedim(self.dim, 0))
-                blocks = list(staged.split(counts))
-        outgoing = counts if rank == src_data_rank else [0] * n
-        incoming = [counts[rank] if r == src_data_rank else 0 for r in range(n)]
-        matrix = [counts[b] if a == src_data_rank else 0 for a in range(n) for b in range(n)]
-        with _configuration_exchange(group, outgoing, incoming, tensor.dtype, matrix):
-            dist.scatter(out, blocks, group=group, group_src=src_data_rank)
-        return out[:counts[rank]].view((sizes[rank],) + rest).movedim(0, self.dim)
+        return self._select_split_tensor(tensor, mesh.size(mesh_dim), coordinate[mesh_dim], with_padding=False,
+                                         contiguous=True)
 
     def _reduce_shard_tensor(self, tensor, mesh, reduce_op, mesh_dim):
         """Partial to Shard: the blocks of the logical partial reduce-scattered."""
@@ -289,161 +265,6 @@ def operand(mesh, name):
     return _OPERANDS[_NAMED[mesh, name]]
 
 
-@contextlib.contextmanager
-def _configuration_exchange(group, outgoing, incoming, dtype, matrix=None):
-    """A counted transfer belonging to configuration, preserving the function declaration."""
-    from .backend import ALLTOALL, Call
-    if hasattr(group, 'configuration'):
-        call = Call(ALLTOALL, sum(outgoing), dtype, counts=outgoing + incoming, matrix=matrix)
-        with group.configuration([[call]]):
-            yield
-    else:
-        yield
-
-
-def _scatter_spans(tensor, dim, sizes, rank, source, group):
-    """The exact native span WRITE plan of the source's own views: the source is a region tensor (torch_mesh.empty),
-    read where it lies, never imported into the region by a copy."""
-    if not hasattr(group, 'prepare_writes'):
-        return None
-    from . import _stream
-    dim %= tensor.ndim
-    offsets = list(itertools.accumulate(sizes, initial=0))
-    original = tensor
-    shape = list(tensor.shape)
-    shape[dim] = sizes[rank]
-    result = (original.narrow(dim, offsets[rank], sizes[rank]) if rank == source
-              else _empty(shape, tensor, group))
-    deliveries = []
-    row = _row(tensor, dim)
-    for destination, count in enumerate(sizes):
-        if destination == source or not count * row:
-            continue
-        # a relay is its shape and type alone: the library leases it where a route crosses this rank
-        view = (original.narrow(dim, offsets[destination], count) if rank == source
-                else result if rank == destination else torch.empty((count * row,), dtype=tensor.dtype, device='meta'))
-        deliveries.append((view, source, destination))
-    prepared, calls = group.prepare_writes(deliveries) if deliveries else (None, [])
-    with group.configuration([calls]) if calls else contextlib.nullcontext():
-        schedule = _stream.Schedule()
-        if prepared is not None:
-            from .declarations import execution_sequence
-            from mesh_relation import Algebra
-            execution_sequence((prepared,), result, algebra=Algebra()).append(schedule)
-        schedule.finish()
-        schedule.enqueue()
-    return result
-
-
-def _follow_spans(placement, local, logical_shape, key, rank, group):
-    """Arbitrary regional strides use exact AOT span WRITE bindings."""
-    if not hasattr(group, 'prepare_writes'):
-        return None
-    from .layout import copy_declarations
-    from mesh_relation import Algebra
-    algebra = Algebra()
-    commands = []
-    dim = placement.dim % local.ndim
-    old, new = _OPERANDS[placement.key], _OPERANDS[key]
-    before_sizes, before = _blocks(old, logical_shape[dim])
-    after_sizes, after = _blocks(new, logical_shape[dim])
-    if local.shape[dim] != before_sizes[rank]:
-        raise ValueError('strided migration source does not match its attached partition')
-    shape = list(local.shape)
-    shape[dim] = after_sizes[rank]
-    start = after[rank] - before[rank]
-    result = (local.narrow(dim, start, after_sizes[rank])
-              if 0 <= start and start + after_sizes[rank] <= before_sizes[rank]
-              else _empty(shape, local, group))
-    deliveries = []
-    row = math.prod(local.shape[:dim] + local.shape[dim + 1:])
-    for source in range(len(before)):
-        for destination in range(len(after)):
-            first = max(before[source], after[destination])
-            last = min(before[source] + before_sizes[source], after[destination] + after_sizes[destination])
-            if first >= last:
-                continue
-            count = last - first
-            if source == destination:
-                if source == rank:
-                    commands.extend(copy_declarations(local.narrow(dim, first - before[source], count),
-                                           result.narrow(dim, first - after[destination], count), algebra=algebra))
-                continue
-            if rank == source:
-                view = local.narrow(dim, first - before[source], count)
-            elif rank == destination:
-                view = result.narrow(dim, first - after[destination], count)
-            else:   # a relay is its shape and type alone: the library leases it where a route crosses this rank
-                view = torch.empty((row * count,), dtype=local.dtype, device='meta')
-            deliveries.append((view, source, destination))
-    prepared, calls = group.prepare_writes(deliveries) if deliveries else (None, [])
-    with group.configuration([calls]) if calls else contextlib.nullcontext():
-        schedule = _stream.Schedule()
-        from .declarations import execution_sequence
-        declarations = [dict(commands=tuple(commands), output=result, pages=())]
-        if prepared is not None:
-            declarations.append(prepared)
-        execution_sequence(declarations, result, algebra=algebra).append(schedule)
-        schedule.finish()
-        schedule.enqueue()
-    return result
-
-
-@torch.no_grad()
-def follow(*tensors):
-    """Realize changed shard assignments through typed final page views.
-
-    Mesh deliveries become bound communicator Calls; local relocations use the
-    shared layout-copy commands in the same prepared schedule. Other distributed backends
-    retain their existing staging adapter until their function compiler is
-    connected to the same page declarations.
-    """
-    from . import _stream
-    mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape, t.stride()] for t in tensors]
-    for i in range(mesh.ndim):
-        key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
-        moving = [h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)]
-        rank, group = mesh.get_coordinate()[i], mesh.get_group(i)
-        for h in moving:
-            p, d = h[0][i], h[0][i].dim % h[1].ndim
-            direct = _follow_spans(p, h[1], h[2], key, rank, group)
-            if direct is not None:
-                h[0][i], h[1] = RaggedShard(p.dim, key), direct
-                continue
-            rows = h[1].movedim(d, 0)
-            old, rest = _OPERANDS[p.key], rows.shape[1:]
-            a, b = (partition_bounds(o.capacity, h[2][p.dim]) for o in (old, _OPERANDS[key]))
-            n, row = len(old.capacity), math.prod(rest)
-            span = lambda r, q: max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
-            sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
-            first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
-            out = [0 if q == rank else c * row for q, c in enumerate(sends)]
-            land = [0 if r == rank else c * row for r, c in enumerate(receives)]
-            out_at, land_at = (list(itertools.accumulate(counts, initial=0)) for counts in (out, land))
-            sizes = ((out_at[-1] + sends[rank] * row) * rows.element_size(), land_at[-1] * rows.element_size())
-            pair = [_empty((max(need, 1),), rows, group, torch.uint8) for need in sizes]
-            x, y = (pair[s][:need].view(rows.dtype) for s, need in enumerate(sizes))
-            x, stay = x[:out_at[-1]], x[out_at[-1]:].view((sends[rank],) + rest)
-            new = _empty(h[1].shape[:d] + (into[-1],) + h[1].shape[d + 1:], rows, group)
-            block = new.movedim(d, 0)
-            block[into[rank]:into[rank + 1]].copy_(stay.copy_(rows[first[rank]:first[rank + 1]]))
-            for q in range(n):
-                if q != rank:
-                    x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rest).copy_(rows[first[q]:first[q + 1]])
-            matrix = [0 if r == q else span(r, q) * row for r in range(n) for q in range(n)]
-            with _configuration_exchange(group, out, land, rows.dtype, matrix):
-                dist.all_to_all_single(y, x, land, out, group=group)
-            for r in range(n):
-                if r != rank:
-                    block[into[r]:into[r + 1]].copy_(y[land_at[r]:land_at[r] + receives[r] * row].view((receives[r],) + rest))
-            h[0][i], h[1] = RaggedShard(h[0][i].dim, key), new
-    contiguous = lambda shape: torch.empty(shape, device='meta').stride()
-    return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape, _ in held]
-
-
-# The tensors partition split along each partitioned mesh dimension, re-laid in place where the balancer moves its
-# shares between evaluations (evaluations): weak references by id (a tensor's == is elementwise), so the registry holds
-# nothing alive.
 _SPLIT = {}
 
 
@@ -471,16 +292,6 @@ def empty(mesh, name, shape, dim, dtype=None):
     local = distribute_tensor(torch.empty(shape, dtype=dtype, device='meta'), mesh, placements, src_data_rank=None).to_local()
     held = _empty(local.shape, torch.empty(0, dtype=local.dtype, device=mesh.device_type), mesh.get_group(name))
     return from_local(held, mesh, placements, shape=shape, stride=torch.empty(shape, device='meta').stride())
-
-
-def _relay(mesh, name):
-    """Every live tensor split along mesh dimension `name` moved onto the parts attached now, in place (its local
-    block and spec replaced, the object kept, so a module's parameters move under it): one follow, one coalesced
-    group."""
-    held = [t for r in list(_SPLIT.get((mesh, name), {}).values()) if (t := r()) is not None]
-    if held:
-        for t, moved in zip(held, follow(*held)):
-            t._local_tensor, t._spec = moved._local_tensor, moved._spec
 
 
 def calls(tensor):
@@ -649,9 +460,9 @@ class _ToLocal(torch.autograd.Function):
 
 
 
-def distribute_tensor(tensor, device_mesh, placements, *, src_data_rank=0):
-    """torch's distribute_tensor, a Shard on an attached mesh dimension its RaggedShard: each rank's capacity block,
-    scattered from src_data_rank, or this rank's own exact block where it is None."""
+def distribute_tensor(tensor, device_mesh, placements, *, src_data_rank=None):
+    """torch's distribute_tensor, a Shard on an attached mesh dimension its RaggedShard: this rank's own exact block of
+    the tensor every rank holds (src_data_rank None, torch's form with no communication)."""
     placements = _placements(device_mesh, placements, tensor.ndim)
     if not _ragged(placements) or isinstance(tensor, DTensor):
         made = _distribute_tensor(tensor, device_mesh, placements, src_data_rank=src_data_rank)
