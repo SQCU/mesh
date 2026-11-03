@@ -5170,51 +5170,14 @@ static int spans_add(struct spans *w, uint64_t lo, uint64_t hi) {
   return 0;
 }
 
-/* Resolve every source version at preparation. A fresh reduction reads the
-   original pages directly; later folds read their declared predecessor. A real
-   transform or an overlapping overwritten generation gets explicit output
-   pages and a recorded numerical operation. */
-static int physical_order(const void *left,const void *right) {
-  const struct mesh_page_run *a=left,*b=right;
-  return (a->offset>b->offset)-(a->offset<b->offset);
-}
-/* Both run lists are sorted by physical location. */
-static int physical_overlap(const struct mesh_page_runs *a,const struct mesh_page_runs *b) {
-  for(size_t i=0,j=0;i<a->count&&j<b->count;) {
-    const struct mesh_page_run x=a->at[i],y=b->at[j];
-    const uint64_t xend=x.offset+x.end-x.first,yend=y.offset+y.end-y.first;
-    if(x.offset<yend&&y.offset<xend)return 1;
-    if(xend<=y.offset)i++;else j++;
-  }
-  return 0;
-}
-/* Physical overlap is a page relation, even when local views have different
-   virtual addresses. Resolve it once before direct-placement decisions. */
-static ncclResult_t binding_relations(struct ncclComm *comm,const void *a,size_t sent,
-    const void *b,size_t made,size_t before,int *same,int *overlap) {
-  struct mesh_page_runs source={0},target={0};int error=0;
-  pthread_mutex_lock(&attach_lock);
-  struct attach *owner=NULL;const struct lease *left=lease_at(a,&owner);
-  if(!left||left->returned||owner!=comm->attach)error=EINVAL;
-  else error=lease_runs(owner,left,(uintptr_t)a-(uintptr_t)left->address,sent,&source);
-  const struct lease *right=lease_at(b,&owner);
-  if(!right||right->returned||owner!=comm->attach)error=EINVAL;
-  else if(!error)error=lease_runs(owner,right,(uintptr_t)b-(uintptr_t)right->address,made,&target);
-  pthread_mutex_unlock(&attach_lock);
-  *same=!error&&before<=sent&&made<=sent-before;*overlap=0;
-  for(size_t at=0;*same&&at<made;) {
-    const struct mesh_page_run *x=mesh_page_run_at(&source,before+at),*y=mesh_page_run_at(&target,at);
-    if(!x||!y||x->offset+before+at-x->first!=y->offset+at-y->first){*same=0;break;}
-    const size_t left_bytes=x->end-before-at,right_bytes=y->end-at;
-    at+=left_bytes<right_bytes?left_bytes:right_bytes;
-  }
-  if(!error) {
-    qsort(source.at,source.count,sizeof *source.at,physical_order);
-    qsort(target.at,target.count,sizeof *target.at,physical_order);
-    *overlap=physical_overlap(&source,&target);
-  }
-  free(source.at);free(target.at);
-  return error?fail(error==EINVAL?ncclInvalidUsage:ncclSystemError,"collective page relation: %s",strerror(error)):ncclSuccess;
+/* Two operands' relation as values (design/page-maps-2026-11-02.md): `same` where b's `made` bytes are a's from
+   `before`, `overlap` where their bytes meet. Distinct spaces never meet: the run's solve keeps distinct live items
+   apart, and leases are distinct storages; in one space the byte ranges decide. No page is resolved. */
+static void binding_relations(struct where a,size_t sent,struct where b,size_t made,size_t before,int *same,int *overlap) {
+  const void *ia=a.space?(const void *)a.space:a.buffer,*ib=b.space?(const void *)b.space:b.buffer;
+  const int one=ia==ib;
+  *same=one&&a.offset+before==b.offset&&before<=sent&&made<=sent-before;
+  *overlap=one&&a.offset<b.offset+made&&b.offset<a.offset+sent;
 }
 /* Materialize a specifically selected original value generation: a transform,
    shifted alias, or the source chosen by the compiled overwrite-cycle solve. */
@@ -5253,15 +5216,13 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
   size_t length=0,made=elements(c)*SIZE[c->type];
   const size_t sent=(size_t)(hi-lo)*z;
   const size_t before=st->partial?segment_at(c,c->comm->rank,&length)*SIZE[c->type]:0;
-  const unsigned char *a=address_of(c->send_at),*b=address_of(own);
-  if(st->partial){b+=before;made=length*SIZE[c->type];}
+  struct where b=own;
+  if(st->partial){b=shifted(own,before);made=length*SIZE[c->type];}
   int same=0,overlap=0;
-  ncclResult_t related=sent&&made?binding_relations(c->comm,a,sent,b,made,before,&same,&overlap):ncclSuccess;
-  if(related)return related;
+  if(sent&&made)binding_relations(c->send_at,sent,b,made,before,&same,&overlap);
   if(sent&&c->what==MESH_ALLGATHER) {
     int own_overlap=0;
-    related=binding_relations(c->comm,a,sent,b+lo*z,sent,0,&same,&own_overlap);
-    if(related)return related;
+    binding_relations(c->send_at,sent,shifted(b,lo*z),sent,0,&same,&own_overlap);
   }
   /* A transform makes a new value. A shifted alias also needs the original
      value to survive writes of the result. Both are declared operations over
@@ -5304,8 +5265,7 @@ static ncclResult_t plan_direct(struct call *c, struct where own,int *result) {
       const size_t bytes=(end-at)*z;
       const struct where source=view_at(c,1,(at-lo)*z),destination=shifted(own,at*z);
       int equal=0,intersects=0;
-      related=binding_relations(c->comm,address_of(source),bytes,address_of(destination),bytes,0,&equal,&intersects);
-      if(related)return related;
+      binding_relations(source,bytes,destination,bytes,0,&equal,&intersects);
       if(!equal){uint64_t *x=c->complement+3*c->complements++;x[0]=destination.offset;x[1]=(at-lo)*z;x[2]=bytes;}
     }
     if(k>=w[0].count)break;
