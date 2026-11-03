@@ -1,66 +1,14 @@
 {
-  "schema": 3,
-  "access": {
-    "key": "~/.ssh/primeintellect_ed25519"
-  },
-  "python": "~/.venv-mesh-uv/bin/python",
-  "rank_port": 29600,
-  "hourly_minute": 28,
+  "schema": 1,
   "nodes": {
-    "D7377D82-2E96-5084-A5D3-3139FDF3D6CE": {
-      "name": "Ms-MacBook-Pro",
+    "Ms-MacBook-Pro": {
       "model": "Mac17,6",
-      "serial": "KHQ5KXR9XG",
-      "node": 1980260065,
-      "management": "100.102.120.16",
-      "fabric": "fd6d:6573:68:b5d5:b9dc:d628:b4e3:3141",
-      "roles": ["workstation"],
-      "guard_headroom_gib": 5.5
+      "via": "Ms-MacBook-Pro.local"
     },
-    "06594A7A-3279-5A27-9099-11169DE0D270": {
-      "name": "Ms-Mac-mini",
+    "Ms-Mac-mini": {
       "model": "Mac16,11",
-      "serial": "C9XKWJYXWP",
-      "node": 1974797816,
-      "management": "100.77.188.102",
-      "fabric": "fd6d:6573:68:3af8:1a3c:9700:3034:715d",
-      "guard_headroom_gib": 0.75
-    },
-    "E8F9C574-257D-5425-8501-E5BF6981BEA6": {
-      "name": "m5ult1",
-      "model": "Mac17,15",
-      "serial": "WP6Q97X9Y3",
-      "node": 521750041,
-      "management": "100.103.69.53",
-      "fabric": "fd6d:6573:68:577f:d1f4:93fc:f466:51a6",
-      "guard_headroom_gib": 0.75
-    },
-    "519B8DC8-FF1D-551F-9FC8-0A3168B1ED6A": {
-      "name": "m5ult2",
-      "model": "Mac17,15",
-      "serial": "CJ473V7FJV",
-      "node": 455770905,
-      "management": "100.86.148.87",
-      "fabric": "fd6d:6573:68:91e1:fbe5:72df:9c0b:bf0b",
-      "guard_headroom_gib": 0.75
-    },
-    "FFA75B2F-E060-527E-9CB3-C5816237FD8A": {
-      "name": "m5ult3",
-      "model": "Mac17,15",
-      "serial": "HHKWRYF41Q",
-      "node": 597453729,
-      "management": "100.65.151.124",
-      "fabric": "fd6d:6573:68:353a:d161:f544:3d5a:1df7",
-      "guard_headroom_gib": 0.75
-    },
-    "BC53501D-2E24-5389-96BB-46AFE7D55F1B": {
-      "name": "m5ult4",
-      "model": "Mac17,15",
-      "serial": "PW49RQ6Q0R",
-      "node": 371057962,
-      "management": "100.107.135.46",
-      "fabric": "fd6d:6573:68:5e3b:7204:7848:33de:3c6a",
-      "guard_headroom_gib": 0.75
+      "via": "Ms-Mac-mini.local",
+      "aliases": ["mesh-mini"]
     }
   }
 }

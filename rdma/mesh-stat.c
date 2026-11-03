@@ -1,270 +1,40 @@
-#include "mesh-observe.h"
-#include "mesh-dataflow.h"
-#include <errno.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
+#include "mesh.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
-/* the bridge's ports as it publishes them for its observation tools (mesh-observe.h), mesh-stat being one: each port's
-   peer node, phase and bandwidth, a port one the bridge found (its phase not MESH_UNKNOWN), the bridge finding them in
-   index order; the port count (at most `capacity` written), or -errno (ESRCH: no bridge runs) */
-struct port_view { uint32_t peer,phase; uint64_t bandwidth,landed_ns,landed_bytes; };
-/* port i's bytes landed and the bridge's clock as it counted them (mesh-observe.h mesh_link_landed), the pair read
-   again where the bridge rewrote its slot meanwhile */
-static void landed_read(struct hdr *m,uint32_t i,uint64_t *ns,uint64_t *bytes){
-  struct mesh_link_landed *c=mesh_links_landed(m)+i;
-  for(;;){
-    const uint64_t s=atomic_load_explicit(&c->sequence,memory_order_acquire);
-    *ns=atomic_load_explicit(&c->at[s&1][0],memory_order_relaxed);
-    *bytes=atomic_load_explicit(&c->at[s&1][1],memory_order_relaxed);
-    atomic_thread_fence(memory_order_acquire);
-    if(atomic_load_explicit(&c->sequence,memory_order_relaxed)-s<2)return;
-  }
-}
-/* the region, mapped to read (its size in *bytes), or NULL with errno */
-static struct hdr *region_read(size_t *bytes){
-  const int file=shm_open(MESH_NAME,O_RDONLY,0);
-  if(file<0)return NULL;
-  struct stat info;
-  if(fstat(file,&info) || info.st_size<(off_t)sizeof(struct hdr)){const int error=errno?errno:EINVAL;close(file);errno=error;return NULL;}
-  struct hdr *m=mmap(NULL,(size_t)info.st_size,PROT_READ,MAP_SHARED,file,0);
-  close(file);
-  if(m==MAP_FAILED)return NULL;
-  *bytes=(size_t)info.st_size;
-  return m;
-}
-static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node,uint32_t *layout){
-  size_t size=0;
-  struct hdr *m=region_read(&size);
-  if(!m)return -errno;
-  *layout=m->version;
-  int count=m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT?-EINVAL:mesh_gone((pid_t)atomic_load(&m->bridge_pid))?-ESRCH:0;
-  if(!count)*node=m->node;
-  for(uint32_t i=0;count>=0 && i<MESH_PORTS;i++){
-    const struct mesh_link_info *link=mesh_links(m)+i;
-    const uint32_t phase=atomic_load_explicit(&link->phase,memory_order_acquire);
-    if(phase==MESH_UNKNOWN)break;
-    if((uint32_t)count<capacity){
-      out[count]=(struct port_view){atomic_load_explicit(&link->peer,memory_order_relaxed),phase,
-        atomic_load_explicit(&link->bandwidth,memory_order_relaxed),0,0};
-      landed_read(m,i,&out[count].landed_ns,&out[count].landed_bytes);
-    }
-    count++;
-  }
-  munmap(m,size);
-  return count;
-}
-/* mesh-stat landed <period_us> <seconds>: every port's bytes landed, a line each time any port's pair moves, looked at
-   every period_us for `seconds` from a mapping of the region to read: {"ns": the bridge's clock of the latest pair,
-   "ports": [[port, peer node, ns, bytes], ...]}.  It reads the region alone, so the program it watches runs as it
-   would without it */
-static int landed_watch(uint64_t period_us,double seconds){
-  size_t size=0;
-  struct hdr *m=region_read(&size);
-  if(!m || m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"errno\":%d}\n",m?EINVAL:errno);return 1;}
-  uint64_t seen[MESH_PORTS]={0};
-  const uint64_t end=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(uint64_t)(seconds*1e9);
-  const struct timespec pause={(time_t)(period_us/1000000),(long)(period_us%1000000*1000)};
-  while(clock_gettime_nsec_np(CLOCK_MONOTONIC)<end){
-    uint64_t ns[MESH_PORTS],bytes[MESH_PORTS],latest=0;
-    uint32_t peer[MESH_PORTS],ports=0,moved=0;
-    for(uint32_t i=0;i<MESH_PORTS;i++){
-      const struct mesh_link_info *link=mesh_links(m)+i;
-      if(atomic_load_explicit(&link->phase,memory_order_acquire)==MESH_UNKNOWN)break;
-      peer[i]=atomic_load_explicit(&link->peer,memory_order_relaxed);
-      landed_read(m,i,ns+i,bytes+i);
-      moved|=bytes[i]!=seen[i];seen[i]=bytes[i];
-      if(ns[i]>latest)latest=ns[i];
-      ports++;
-    }
-    if(moved){
-      printf("{\"ns\":%llu,\"ports\":[",(unsigned long long)latest);
-      for(uint32_t i=0;i<ports;i++)printf("%s[%u,%u,%llu,%llu]",i?",":"",i,peer[i],(unsigned long long)ns[i],(unsigned long long)bytes[i]);
-      printf("]}\n");
-    }
-    nanosleep(&pause,NULL);
-  }
-  fflush(stdout);
-  munmap(m,size);
-  return 0;
-}
-/* mesh-stat streams <period_us> <seconds>: every held stream's words, a line each time any of them moves, looked at every
-   period_us (0: without pause, one core spinning) for `seconds` from a mapping of the region to read: {"ns": the clock, "streams": [[stream, peer node, owner,
-   ready, sent, landed, calls left of the send list, of the landing list], ...]}, so a stall's last line is the stall.
-   It reads the region alone */
-static int streams_watch(uint64_t period_us,double seconds){
-  size_t size=0;
-  struct hdr *m=region_read(&size);
-  if(!m || m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"errno\":%d}\n",m?EINVAL:errno);return 1;}
-  static uint64_t seen[MESH_STREAMS][6];
-  const uint64_t end=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(uint64_t)(seconds*1e9);
-  const struct timespec pause={(time_t)(period_us/1000000),(long)(period_us%1000000*1000)};
-  if(!period_us){
-    /* period 0: a spin that keeps each moved word (its pass's time, the stream, the word, its value) in memory and
-       prints the lines below once it ends: printing every held stream at each move took longer than an M5 Ultra's
-       words take to move, so its moves came merged (metal-microbench tools/mesh/tick_words.py, words-1). The clock is
-       CLOCK_UPTIME_RAW's, its nanoseconds a pass apart */
-    struct move { uint64_t ns; uint32_t t,w; uint64_t v; };
-    const size_t cap=(size_t)1<<21;
-    struct move *moves=malloc(cap*sizeof *moves);
-    if(!moves){printf("{\"up\":false,\"errno\":%d}\n",ENOMEM);munmap(m,size);return 1;}
-    size_t n=0;
-    while(n+MESH_STREAMS*6<cap){
-      const uint64_t ns=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-      if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=end)break;
-      for(uint32_t t=0;t<MESH_STREAMS;t++){
-        const struct mesh_stream *x=mesh_stream_at(m,t);
-        const uint64_t words[6]={atomic_load(&x->owner),atomic_load(&x->ready),atomic_load(&x->sent),atomic_load(&x->landed),
-                                 atomic_load(&x->taken[0]),atomic_load(&x->taken[1])};
-        for(uint32_t w=0;w<6;w++)if(words[w]!=seen[t][w]){moves[n++]=(struct move){ns,t,w,words[w]};seen[t][w]=words[w];}
-      }
-    }
-    static uint64_t state[MESH_STREAMS][6];
-    for(size_t i=0;i<n;){
-      const uint64_t ns=moves[i].ns;
-      for(;i<n && moves[i].ns==ns;i++)state[moves[i].t][moves[i].w]=moves[i].v;
-      printf("{\"ns\":%llu,\"streams\":[",(unsigned long long)ns);
-      int first=1;
-      for(uint32_t t=0;t<MESH_STREAMS;t++)if(state[t][0]){
-        printf("%s[%u,%u,%llu,%llu,%llu,%llu,%llu,%llu]",first?"":",",t,atomic_load(&mesh_stream_at(m,t)->peer),
-               (unsigned long long)state[t][0],(unsigned long long)state[t][1],(unsigned long long)state[t][2],
-               (unsigned long long)state[t][3],(unsigned long long)state[t][4],(unsigned long long)state[t][5]);
-        first=0;
-      }
-      printf("]}\n");
-    }
-    free(moves);munmap(m,size);
-    return 0;
-  }
-  while(clock_gettime_nsec_np(CLOCK_MONOTONIC)<end){
-    int moved=0;
-    uint64_t now[MESH_STREAMS][6];
-    for(uint32_t t=0;t<MESH_STREAMS;t++){
-      const struct mesh_stream *x=mesh_stream_at(m,t);
-      const uint64_t words[6]={atomic_load(&x->owner),atomic_load(&x->ready),atomic_load(&x->sent),atomic_load(&x->landed),
-                               atomic_load(&x->taken[0]),atomic_load(&x->taken[1])};
-      for(int w=0;w<6;w++){now[t][w]=words[w];moved|=words[w]!=seen[t][w];seen[t][w]=words[w];}
-    }
-    if(moved){
-      printf("{\"ns\":%llu,\"streams\":[",(unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
-      int first=1;
-      for(uint32_t t=0;t<MESH_STREAMS;t++)if(now[t][0]){
-        const struct mesh_stream *x=mesh_stream_at(m,t);
-        printf("%s[%u,%u,%llu,%llu,%llu,%llu,%llu,%llu]",first?"":",",t,atomic_load(&x->peer),(unsigned long long)now[t][0],
-               (unsigned long long)now[t][1],(unsigned long long)now[t][2],(unsigned long long)now[t][3],
-               (unsigned long long)now[t][4],(unsigned long long)now[t][5]);
-        first=0;
-      }
-      printf("]}\n");
-      fflush(stdout);
-    }
-    nanosleep(&pause,NULL);
-  }
-  munmap(m,size);
-  return 0;
-}
-/* mesh-stat live: every stream toward a node, one line {"ns": the clock, "live": [[stream, peer node, live, owner],
-   ...]}, from a mapping of the region to read: whether a communicator could hold it now (a holding ended with units
-   outstanding leaves its stream not live until the link pairs again, mesh-link.c stream_end) */
-static int live_read(void){
-  size_t size=0;
-  struct hdr *m=region_read(&size);
-  if(!m || m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"errno\":%d}\n",m?EINVAL:errno);return 1;}
-  printf("{\"ns\":%llu,\"live\":[",(unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
-  int first=1;
-  for(uint32_t t=0;t<MESH_STREAMS;t++){
-    const struct mesh_stream *x=mesh_stream_at(m,t);
-    const uint32_t peer=atomic_load(&x->peer);
-    if(!peer)continue;
-    printf("%s[%u,%u,%u,%llu]",first?"":",",t,peer,atomic_load(&x->live),(unsigned long long)atomic_load(&x->owner));
-    first=0;
-  }
-  printf("]}\n");
-  munmap(m,size);
-  return 0;
-}
-/* mesh-stat words <offset>...: the 8-byte words at those region offsets (a plan record's `word`s: nccl-mesh.c
-   plan_record, rdma/plan_cycles.py), one line {"ns": the clock, "words": [[offset, value], ...]}, read from a
-   mapping of the region alone: a stalled program's producer words as they stand */
-static int words_read(int count,char **offsets){
-  size_t size=0;
-  struct hdr *m=region_read(&size);
-  if(!m || m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"errno\":%d}\n",m?EINVAL:errno);return 1;}
-  printf("{\"ns\":%llu,\"words\":[",(unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
-  for(int i=0;i<count;i++){
-    const uint64_t at=strtoull(offsets[i],NULL,10);
-    const int inside=at%sizeof(uint64_t)==0 && at+sizeof(uint64_t)<=size;
-    printf("%s[%llu,",i?",":"",(unsigned long long)at);
-    if(inside)printf("%llu]",(unsigned long long)atomic_load((_Atomic uint64_t *)((char *)m+at)));
-    else printf("null]");
-  }
-  printf("]}\n");
-  munmap(m,size);
-  return 0;
-}
-/* design/transport.md: the node's bridge as it publishes itself, one JSON line: whether it answers
-   (`up`, else the errno), its node, its ports by index (ports_read: each port's peer node, phase, bandwidth and bytes landed with the bridge's clock of them) and the
-   mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
-   numbers with its bandwidth in bits a second, null where none is reported), its region in bytes with the bytes no lease holds (mesh_region), and every node's
-   record as the bridge holds it: its node, its bridge's region, its memory and hardware model, its boot and its
-   available memory (mesh_nodes_health, design/transport.md) */
+#include <stdio.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+/* design/algorithm-sources.md#programcopy */
 int main(int argc,char **argv){
-  if(argc==4 && !strcmp(argv[1],"landed"))return landed_watch(strtoull(argv[2],NULL,10),strtod(argv[3],NULL));
-  if(argc==4 && !strcmp(argv[1],"streams"))return streams_watch(strtoull(argv[2],NULL,10),strtod(argv[3],NULL));
-  if(argc>=3 && !strcmp(argv[1],"words"))return words_read(argc-2,argv+2);
-  if(argc==2 && !strcmp(argv[1],"live"))return live_read();
-  struct port_view port[MESH_PORTS];
-  uint32_t node=0,layout=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
-  uint64_t *bandwidth=NULL;
-  const int ports=ports_read(port,MESH_PORTS,&node,&layout);
-  if(ports<0){printf("{\"up\":false,\"errno\":%d,\"region_layout\":%u,\"expected_layout\":%u}\n",-ports,layout,MESH_LAYOUT);return 0;}
-  struct mesh_link_map map={0};
-  int count=-ENOSPC;
-  while(count==-ENOSPC){
-    nodes=realloc(nodes,(room+1)*sizeof *nodes);link=realloc(link,(links+1)*sizeof *link);bandwidth=realloc(bandwidth,(links+1)*sizeof *bandwidth);
-    if(!nodes || !link || !bandwidth)return 1;
-    map=(struct mesh_link_map){.kind=MESH_LINKS_MESH,.nodes=room,.links=links,.link=link,.bandwidth=bandwidth};
-    count=mesh_map(NULL,0,nodes,&map);
-    room=map.nodes;links=map.links;
+  int readiness=argc>1 && !strcmp(argv[1],"--ready");
+  const char *name=argc>1+readiness?argv[1+readiness]:getenv("MESH_REGION");
+  if(!name) name=MESH_NAME;
+  int f=shm_open(name,O_RDONLY,MESH_MODE);
+  struct stat info;
+  size_t bytes=sizeof(struct hdr);
+  struct hdr *h=MAP_FAILED;
+  if(f>=0 && !fstat(f,&info) && info.st_size>=(off_t)bytes){bytes=(size_t)info.st_size;h=mmap(NULL,bytes,PROT_READ,MAP_SHARED,f,0);}
+  if(h==MAP_FAILED || h->magic!=MESH_MAGIC || h->version!=MESH_VERSION){
+    printf("{\"up\":false,\"ready\":false}\n");
+    if(h!=MAP_FAILED) munmap(h,bytes);
+    if(f>=0) close(f);
+    return readiness?1:0;
   }
-  uint64_t region=0,unleased=0,busy=0,idle_since=0;
-  if(mesh_region(&region,&unleased))region=unleased=0;
-  const int carrying=mesh_busy(&busy,&idle_since);
-  printf("{\"up\":true,\"node\":%u,\"gpu_cores\":%u,\"region\":%llu,\"unleased\":%llu,",node,mesh_gpu_cores(),(unsigned long long)region,
-         (unsigned long long)unleased);
-  if(!carrying)printf("\"idle\":%s,\"idle_since\":%llu,",busy?"false":"true",(unsigned long long)(idle_since/1000000000u));
-  printf("\"peers\":[");
-  static const char *const phase_name[]={[MESH_UNKNOWN]="UNKNOWN",[MESH_PAIRING]="PAIRING",[MESH_PAIRED]="PAIRED",[MESH_STOPPED]="STOPPED"};
-  for(int i=0;i<ports && i<(int)MESH_PORTS;i++)
-    printf("%s{\"port\":%d,\"node\":%u,\"phase\":\"%s\",\"bandwidth\":%llu,\"landed\":[%llu,%llu]}",i?",":"",i,port[i].peer,
-      port[i].phase<=MESH_STOPPED?phase_name[port[i].phase]:"?",(unsigned long long)port[i].bandwidth,
-      (unsigned long long)port[i].landed_ns,(unsigned long long)port[i].landed_bytes);
-  if(count<0)printf("],\"map\":{\"errno\":%d}",-count);
-  else{
-    printf("],\"map\":{\"nodes\":[");
-    for(int i=0;i<count;i++)printf("%s%u",i?",":"",nodes[i]);
-    printf("],\"links\":[");
-    for(uint32_t l=0;l<map.links;l++){
-      printf("%s[%u,%u",l?",":"",nodes[map.link[l][0]],nodes[map.link[l][1]]);
-      if(map.bandwidth[l])printf(",%llu]",(unsigned long long)map.bandwidth[l]);
-      else printf(",null]");
-    }
-    printf("]}");
-  }
-  struct mesh_node_health health[64];
-  const int known=mesh_nodes_health(health,64);
-  printf(",\"nodes\":[");
-  for(int i=0;i<known && i<64;i++){
-    const struct mesh_health *h=&health[i].health;
-    printf("%s{\"node\":%u,\"region\":%llu,\"memory\":%llu,\"model\":\"",i?",":"",health[i].node,(unsigned long long)health[i].region,(unsigned long long)health[i].memory);
-    for(const char *c=health[i].model;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
-    printf("\",\"booted\":%llu,\"available\":%llu}",(unsigned long long)h->booted,(unsigned long long)h->available);
+  uint64_t pid=atomic_load(&h->bridge_pid);
+  int alive=pid && (!kill((pid_t)pid,0) || errno==EPERM);
+  uint32_t paired=0;
+  for(uint32_t i=0;i<h->links;i++)paired+=alive && atomic_load(&mesh_links(h)[i].port.phase)==MESH_PAIRED;
+  printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"client\":%llu,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"qps\":%u,\"links\":%u,\"paired_links\":%u,\"code\":%lld,\"domain\":%u,\"peers\":[",
+    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,(unsigned long long)(uint32_t)atomic_load(&h->client),
+    h->version,h->node,h->pgsz,h->block,h->rows,h->qps,h->links,paired,(long long)h->port.code,h->port.domain);
+  for(uint32_t i=0;i<h->links;i++){
+    struct mesh_link_info *link=&mesh_links(h)[i];
+    printf("%s{\"node\":%u,\"phase\":%u,\"code\":%lld,\"domain\":%u,\"device\":\"%s\",\"bandwidth\":%llu}",i?",":"",link->peer,atomic_load(&link->port.phase),(long long)link->port.code,link->port.domain,link->device,(unsigned long long)__atomic_load_n(&link->bandwidth,__ATOMIC_RELAXED));
   }
   printf("]}\n");
-  free(nodes);free(link);free(bandwidth);
-  return 0;
+  munmap(h,bytes); close(f); return readiness && !alive;
 }

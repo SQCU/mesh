@@ -1,0 +1,1728 @@
+# Algorithm references
+
+The [user's requirements](collective-goals.md) define scope. These sources supply
+mechanisms, not additional features, architecture, tests or prerequisites. Section
+names retain existing source citation anchors; they do not prescribe public APIs.
+The deleted implementation is not an implementation template. No per-function citation is required; prefer established implementations (the collective is Megatron-LM TP2, Shoeybi et al. 2019).
+
+## Program
+
+The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
+reference for higher-order numerical calls over indexed tensor operands.
+The implementation realizes a finite storage capacity once. A section's
+`first + slot * stride` selects its logical row; shared constants have zero
+stride. Working ABI 55 carries invocation labels separately from reusable slots.
+Submission publishes root indices into existing numerical-worker queues,
+while consumers are indexed by operand publication. No function scan or repeated
+realization is required. The [execution description](async-collectives.md#execution-and-ownership)
+separates shared function metadata from each value's operands and uses.
+
+## Program.tensor
+
+The JAX authors, [BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html),
+and Apple [mmap](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/mmap.2.html):
+references for indexed sections and virtual mappings of actual shared backing.
+`mesh_operand.load(at:as:)` applies that logical indexing to naturally aligned,
+fixed-width tensor scalars. Its C address calculation uses the operand's canonical
+mapping and realized page geometry. For byte offset b and transport
+extent C, it reads entry floor(b/C), then addresses b mod C within that backing.
+It does not allocate, check presence, scan pages or materialize the operand. The
+helper is inlined into supplied Swift numerical functions. Indexed operands carry
+one mapping pointer and one realized byte extent; the current operand is 48 bytes,
+including its prepared publication pointer.
+The first-page
+`data` pointer alone does not describe a discontiguous input of `bytes` length.
+Local outputs remain contiguous and retain their direct pointer interface.
+The indexed scalar API describes logical elements; neither its indices nor the
+caller function changes when the bridge's transport extent changes.
+ABI 63 removes ABI 58's redundant page-list offset and `mesh_buffer_pages`.
+Every list starts at its buffer's logical row, so chunk j is directly
+`mesh_page(m)[row + j]`. `mesh_row_page` selects that entry for existing native
+placement paths. Logical
+metadata extent is independent of payload-page extent, and retain/release acts
+on one buffer identity. The [compact-list derivation](pages-and-functions.md#prepared-compact-page-lists)
+gives the address algebra, allocation counts and metadata cost. Neither the
+indexed scalar helper nor receive placement performs packing or allocation.
+The ABI-69 operand representation uses the canonical page array directly:
+`mesh_operand_address` implements arena base + page size × indexed page +
+in-block offset; `mesh_operand_page` selects that same first entry. The Swift
+`data` and `page` accessors use these operations, while `invocation` reads the
+prepared sequence address. These replace dispatch's cached address/page copies
+and per-operand sequence writes. See the
+[explicit address algebra and costs](pages-and-functions.md#operand-addresses-and-sequence-values).
+
+ABI 72's [prepared native view indices](pages-and-functions.md#prepared-native-view-indices)
+apply the same indexed-storage representation to backend view selection.
+`mesh_backing_bind` realizes local indices; receive placement supplies its already
+known pool index. A canonical 64-bit entry carries this result with its physical
+page, without an additional mapping table. `mesh_operand_view` loads its upper
+word, and `MeshBindings.index` replaces the stored Swift indexing closure with
+that direct read. Receive-pool return uses the same value. The mechanism is
+setup specialization of the Pallas-style indexed operands above and the existing
+registered-storage interface, independent of the supplied numerical function.
+
+ABI 75 extends that canonical entry with the terminal client address. Under the
+same Pallas/Apple mapping mechanism, local setup and receive placement compute
+`client_base + page_size * physical_page` once. `mesh_operand_data` reads that
+result; indexed reads add only their within-entry offset. The bridge receives
+the client's mapped base during setup and never dereferences the resulting
+client address. Native copy bindings precompute their source-entry pointers,
+destinations and extents. [Address preparation](pages-and-functions.md#prepared-operand-addresses)
+accounts for the added producer store, storage and remaining canonical read.
+
+George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
+(1960): reference counting. The user explicitly requested automatic ownership
+release and background pool return, without caller free/done calls.
+The implementation groups shared-input ownership by prepared function binding,
+while transient inputs retain one reference per indexed use. Native completion
+releases those input references after publishing outputs; downstream readers own
+the outputs separately. Each prepared call holds its frame's input countdown
+and output storage, selected by the realized consumer records.
+The [lifetime derivation](pages-and-functions.md#what-the-page-table-is) describes
+completion, cancellation and destruction. This is an application of counted
+ownership to known lifetimes, not a new collection algorithm attributed to Collins.
+`TensorPart` contains primitive values and an optional C `mesh_section`, with no
+`MeshSection` object. The descriptor carries its receive channel, with
+`MESH_ABSENT` for local storage; the separate Swift receive-channel field and C
+receive boolean are removed. Setup owns one reference per allocated section in
+`MeshMemory.sections`. `releaseSections` drops those references after binding and
+empties the array; the same method returns outstanding setup ownership during
+destruction. There is no per-part ARC release on the numerical path and no
+descriptor-retention reference outside the declared dataflow. This changes
+ownership representation, not the numerical operand ABI or transport framing.
+Every retain occurs while setup still owns the section, so it is one relaxed
+increment; there is no attempt to resurrect a zero-reference value. Execution
+only releases declared uses. The retain CAS loop, rollback path, sealed flag and
+seal operation are deleted. ABI 49 also removes the reclamation claim, retry stack
+and collector thread. Refzero sets one row bit in the section free pool; setup
+consumes those entries without reading refcounts or zeroing payload. The bridge
+discharges abandoned positive counts at the device-close retirement event.
+ABI 66 arbitrates setup reclamation and forced retirement through the existing
+atomic buffer owner. The bridge publishes the free bit before restoring that
+owner; setup consumes the bit only after claiming the descriptor, and alone
+returns descriptor capacity. Allocation initializes atomic fields individually
+and publishes owner last. These are cold allocation/teardown operations, with
+no new reference category or claim on publication, consumption or RDMA progress.
+The [retirement mechanism and limits](pages-and-functions.md#client-retirement-has-one-owner)
+describe this handoff; it does not establish remote-value reuse or multi-client
+allocation.
+ABI 53 keeps received backing in its RX-owned pool, including when no live value
+occupies a row. Refzero notifies that RX thread; it returns backing through the
+canonical entries. ABI 64 keeps the prepared count in the buffer itself and
+removes the function's count array and the receive record's count copy.
+`mesh_buffer_reset` reinstalls the count and clears presence on final return,
+before another numerical launch or receive repost. The live count is an ordinary
+32-bit atomic; the retirement flag is separate. Reset uses a plain atomic store
+without erasing that flag, an occupancy query, or a retry. First-chunk receipt
+no longer adds ownership or clears presence; the first-chunk conditional and
+flag are deleted. Final-chunk publication stores the sequence before notifying
+consumers. Client/device retirement returns the entire
+receive pool, including zero-count posted rows, only after QP teardown.
+The [event derivation and limits](pages-and-functions.md#reclamation-events)
+distinguish this bitmap pool from the still-required X5/N1 per-worker instance
+rings. Counted ownership follows Collins; the bitmap and teardown epoch are Mesh's
+representation, not a new algorithm attributed to that paper.
+Contiguous sections use chunk-indexed backing and relative numerical byte offsets,
+with one presence bit and ownership record per numerical value. The
+[address and ownership derivation](pages-and-functions.md#block-addressing)
+shows the receive permutation and the producer's single initial reference.
+These are mesh's representation choices, not new algorithms attributed to Pallas
+or Collins. Transport chunk counts do not define tensor partitions.
+The Berkeley/Apple [mmap specification](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2)
+provides shared mappings of file-backed pages. Apple's
+[pshm_mmap implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/posix_shm.c)
+maps the selected object offsets with copy-on-write disabled. `wire_map` uses those mappings to
+give the device a payload-plus-tag address sequence and the numerical function
+a dense address sequence over the same payload pages. Aliases are fixed at bridge
+setup. Runtime receive assignment changes page indices, not virtual mappings.
+Metal buffers cover each operand's page-aligned window, using Apple's
+[no-copy buffer API](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:)).
+The whole-arena Metal buffer and transport-capacity query have been removed.
+
+## MeshError
+
+Saltzer, Reed and Clark's end-to-end argument, cited below, places recovery with
+the caller. The current `MeshError` reports native link/function failures and
+admission status. Its setup error `partialOperand` was deleted at `3bd1eaa`;
+the [restored L5 requirement](deliverables.md#l--library-core) remains unimplemented.
+The end-to-end argument does not authorize removing that requirement. See the
+[algebra and implementation account](distributed-reduce.md#l5-same-function-different-operand-scopes).
+
+## Mesh.result
+
+Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf)
+(1984), motivates keeping recovery with the caller. Mesh records native errors;
+it does not retransmit an operation or make its consumers wait for recovery.
+ABI 62 uses one atomic 16-byte status snapshot inside the existing aligned
+32-byte frame record: `{value, completed}`. `value` retains the two kind bits,
+thirty function/link ordinal bits and thirty-two native-code bits. `completed`
+is the last successful invocation plus one, zero before success, or `UINT64_MAX`
+for completed static-only work. `mesh_calls_result` returns success for that
+completed invocation and otherwise returns the fault or busy. The Swift decoder
+is unchanged. The compile-time assertion requires a lock-free 16-byte snapshot;
+on this ARM64 compiler the acquire read is `ldp` plus `dmb ishld`, with register
+comparisons and no polling loop. This replaces ABI 61's single 64-bit code word,
+which could lose the prior success on link failure and therefore violated F10.
+
+Submission records the invocation before publishing roots. RX records it in the
+buffer before publication, then copies it to the owning frame on storage return,
+before releasing the frame reference declared at setup. That ownership event
+cannot release the frame's final reference before the invocation store.
+The last reference publishes success with that invocation. No passive-arrival
+busy store, extra notification or transport permission check is added.
+
+`mesh_result_conclude` never overwrites an error. Normal success makes one strong
+compare-exchange. Fault publication preserves `completed`; if its compare-exchange
+loses to a concurrent successful completion, it retries with that observed
+snapshot so the completion is retained and the fault is not lost. This retry is
+confined to error reporting; it neither retries a transfer nor waits for remote
+work. An existing error ends it. Consequently a link error can report failure
+for pending work while the last completed invocation still returns success.
+A new explicit submission reassigns its resident slot; callers retain older
+results themselves. This does not establish N1's cross-participant ownership
+bound. A passive rank's explicit `submit` now reads the program fault before
+returning success for its lack of local roots; reception still needs no submit.
+
+The existing Core ML chain now submits a bounded window and observes each
+invocation's result before reusing its window position, including on ranks whose
+work arrives solely from peers. It reports native failure through the same
+public `Result` path. This adds no library scheduling path or numerical kernel;
+it exercises the status API in the existing arbitrary-stage producer/consumer
+composition. No runtime or killed-peer result is claimed.
+
+Collins's reference counting, cited above, supplies the ownership mechanism.
+Setup counts numerical and transfer references per frame. Final function/transfer
+release decrements the frame's atomic count directly; zero restores its recurring
+template, concludes status and marks it available. ABI 65 represents completion
+ownership as a prepared start and count. The same `mesh_instance_release` walks
+every range; the separate shared-release helper is deleted. A long-lived
+transfer releases its initial frame references at completion and has no frame
+reference to release when its buffer is eventually returned. No receiving-data
+predicate selects the reference category. The lifecycle thread and its
+event rings/arena storage are deleted: reference release needs no handoff to a
+second poller. The native SEND record contains its frame-reference pointer and
+count; receive setup assigns the publication and storage-return ranges. These are
+applications of the same direct-address mechanism: completion does not reload
+an invocation label and divide it to reconstruct ownership. There is no hash,
+tombstone, label-to-frame search or
+submission-association event. [Completion ranges](pages-and-functions.md#completion-references-are-declared-at-setup)
+record the exact events, storage cost and remaining limitations. The current selected-frame admission and missing
+whole-plan reuse proof are specified explicitly in
+[frame identity and reuse](pages-and-functions.md#invocation-identity-and-storage-reuse).
+Neither the one-load result nor deleting a stack establishes safe unbounded reuse.
+
+Native post errors other than capacity refusal, CQ poll errors and unsuccessful
+work completions end that link's invocation after publishing its error result.
+The TX/RX loops return on that native error; the controller joins them and closes
+the QPs. It does not re-pair and replay the same invocation. The bridge remains
+available for a newly realized client. The receive-side `failed` latch and its
+publication guard are deleted; successful completions do not consult a software
+health flag. Outstanding references remain owned until normal completion or
+teardown, so publishing an error does not release device storage early.
+
+Owner and worker references keep program metadata alive through native callbacks.
+A forwarding-only rank needs no numerical worker. The frame-indexed representation
+replaces the old assignment-order storage identities. N1 admission/capacity,
+R2 cancellation and driver recovery remain unfinished; ABI 62 implements the
+status snapshot but does not complete N2.
+
+Jonathan Lemon and Apple's [kqueue interface](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/kqueue.2)
+provide socket EOF and process-exit events. The link controller retains
+the pairing socket for the connection's lifetime. The existing link controller
+observes its EOF/error and the local client's `NOTE_EXIT`; either event records
+a link failure and stops that connection. A native CQ/post error uses `link_stop`
+to wake the controller through its preallocated user event. `link_close` shuts
+down the socket, joins TX/RX, and closes QPs/CQs without deleting the process watch.
+Registration precedes pairing; after connection teardown the controller keeps
+observing the client until detach or bridge shutdown. `NOTE_EXIT`, or `ESRCH` at
+registration, invokes the same `mesh_retire` used by detach and dead-client
+replacement. The kqueue interface removes descriptor events on close and defines
+`ESRCH` as a nonexistent target process. Its event queue remains open
+until bridge shutdown, after every controller has joined, so a stop notification
+cannot target a recycled descriptor. Event registration and notification use
+`KEVENT_FLAG_IMMEDIATE`; only the separate controller's event observation blocks.
+No heartbeat, elapsed-time failure inference, or healthy-path TX/RX socket query
+is added. The first program and instance errors and each frame's last completed
+invocation are preserved. The listener closes the moment it accepts, so a peer
+dialing for its next realization is refused, and dials again, until this node's next
+realization listens; nothing lands in a backlog that no pairing accepts. A connection
+reset before the peers' first exchange is an abandoned attempt, and the pairing
+connects again within its deadline.
+This implements event observation in source, not complete R2 cancellation or
+R3–R7 recovery. An unreported silent partition is not detected by inventing a timer.
+No caller-death or cable-loss run accompanies this change.
+
+`mesh_rows_alloc` now records the client owner for metadata rows as well as
+operand rows. `mesh_retire` clears their row ownership even when `pages == 0`;
+only actual operand buffers receive the closed-storage flag. Previously a dead
+client's root and return rows had owner zero and survived replacement, leaking
+row capacity across realizations. Normal client retirement or replacement of a
+dead client now covers both. Retirement claims the exact old client identity
+before clearing its state, uses a fresh generation and the retiring process's live PID during cleanup,
+and publishes vacancy last. This prevents competing exit observers/replacements
+from clearing a newer client's state. The mechanism and limits are documented in
+[client retirement](pages-and-functions.md#client-retirement-has-one-owner).
+Actual backing retains the existing device-close retirement rule.
+Link error alone still does not cancel unissued numerical uses
+or rearm the same program: those R2/R4 steps remain unfinished.
+
+## Index hand-off
+
+Papadopoulos and Culler's
+[Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
+(ISCA, 1990), section 2, assigns graph arcs to explicit frame locations rather
+than discovering matches dynamically. Mesh applies that principle to the
+already realized use/send indices: `mesh_publish_bind` prepares destination
+records, publication sends the final index, and dispatch directly indexes the
+terminal record array. Numerical offset tables and TX cursor arrays are setup
+scratch. Mesh's ring software and compiler are not Monsoon hardware.
+
+ABI 76's [publication operands](pages-and-functions.md#direct-publication-operands)
+apply the same explicit-address principle at the producer: the output and
+receive record hold the terminal publication pointer. Counts are inline before
+the target array rather than read through a lifecycle buffer. The first target
+and counts fit the same aligned 32-byte prefix; stream access still has its
+separately accounted cost.
+
+The [Disruptor paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
+(Thompson, Farley, Barker, Gee and Stewart, 2011), sections 2.2 and 3.1–3.3,
+explains single-writer ownership and preallocated circular storage. Mesh uses
+that principle without importing a consumer gating strategy. Independent
+writers get independent streams; a writer increments its own position and
+release-stores its prepared event. The consumer clears slots after acquiring their values.
+Declared lifetimes provide the reuse order; the producer does not read fullness.
+
+ABI 73 puts each stream's cursor, mask and slots in one aligned extent, applying
+the same preallocated circular-storage mechanism without a separate slot-address
+field. `mesh_stream_bytes` supplies the setup layout rule; reader initialization
+walks those extents once and records their terminal slot pointers. Shared
+producer streams, private reader arrays and numerical-worker mutable state are
+separated at 128-byte boundaries. The [allocation analysis](pages-and-functions.md#costs-and-remaining-work)
+records the substantial reservation increase, actual layout formulas and the
+unchanged O(P) probe count. This is a layout specialization, not a new queue
+algorithm or a claim that padding alone solves handoff latency.
+
+ABI 70 carries the publication's invocation value alongside its final record
+index in the same lock-free eight-byte slot. TX copies that value into the
+prepared SEND record. A numerical use selects it with its setup-defined mask,
+preserving the current call label for a shared input. No destination reads the
+publishing buffer merely to recover this already supplied value. The persisted
+receive-return label is written after publication; the producer's existing
+reference protects that write. This extends the event operand, not the queue's
+admission or synchronization behavior.
+
+`mesh_events_prepare`, `mesh_event_compare`, `mesh_event_root` and
+`mesh_event_remap` implement Mesh's setup-only assignment. They group known
+writers and dependency-ordered native completions, sort binding indices,
+allocate power-of-two ring spans and replace provisional handles with final
+shared-memory offsets. The grouping is greedy and makes no optimality or
+union-find complexity claim. Scratch parents and mappings are discarded.
+`mesh_event_reader_init` prepares private reader addresses before progress;
+`mesh_event_take` polls these independent streams, not the tensor graph.
+
+TX and numerical workers keep their prepared reader headers as thread-local
+values. Each reader has exactly one consumer; its input-array base and count
+are immutable for the thread's lifetime, and its cursor has no outside reader.
+The numerical worker likewise retains its immutable target-array base. This
+removes repeated owner-record loads without allocating another table or changing
+slot publication, stream order or lifetime rules. The generated code keeps the
+polling header fields in registers, with spills across native calls. The
+[assembly account](h-audit-2026-09-16.md#thread-local-reader-headers) reports both
+the removed reads and the increased stack frames; independent stream probing
+and its O(P) cost remain.
+
+The [handoff analysis](pages-and-functions.md#publication-notifications) gives
+the complete source flow, capacity assumption and remaining polling/metadata
+costs. ABI 67's shared-ticket FIFO is deleted: an unpublished reservation could
+delay unrelated published entries. ABI 68's O(E) individual-slot polling is
+replaced by O(P) stream polling, but P can still grow with the declared graph.
+Neither this change nor these citations establish the required latency target.
+
+## Program.kernel_call
+
+The Swift project’s [calling convention](https://github.com/swiftlang/swift/blob/main/docs/ABI/CallingConvention.rst#closures),
+[ARM64 register summary](https://github.com/swiftlang/swift/blob/main/docs/ABI/CallingConventionSummary.rst),
+and [type layout](https://github.com/swiftlang/swift/blob/main/docs/ABI/TypeLayout.rst),
+together with Clang’s [`swiftcall` and `swift_context`](https://clang.llvm.org/docs/AttributeReference.html#swiftcall),
+supply the native invocation ABI. `meshInvocation` realizes ordinary Swift
+functions. `MeshLaunch` stores their concrete, nongeneric function values; setup
+extracts code/context pairs from that value and retains it in the existing
+`MeshMemory`. C calls the prepared target with the context in Swift’s context
+register. It does not invoke a C callback that discovers another Swift function.
+The same representation supplies the optional native rearm function.
+
+The engine's `MatrixOperations.multiply` now binds concrete operands before
+returning the numerical function, using Apple's
+[`setBuffers:offsets:withRange:`](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/setbuffers(_:offsets:range:))
+for contiguous native binding arrays. Fixed calls no longer invoke the indexed
+adapter or reread `MatrixView` descriptors. Indexed callers select from a setup
+array of prepared functions. MPS uses its existing matrix multiplication with
+concrete operands. The source path and compiler comparison are recorded in
+[resolved matrix dispatch](../../../metal-microbench/docs/async_collectives.md#resolved-matrix-dispatch).
+The engine now also records its complete native decode step; see
+[Native Metal program](#native-metal-program).
+
+The invocation ABI passes only the existing call address. The worker no longer
+loads operand-array pointers and input counts to construct unused arguments for
+a resident command. Ordinary CPU/Metal and Core ML functions read the operands
+they consume; their input/output counts are already setup captures. Inline C
+field accessors expose the aligned record to Swift without a second descriptor
+or an out-of-line call. Binding allocates an operand array even for a zero-operand
+call, so its accessor's nonnull result needs no runtime check. The resident thunk
+reads only the frame index before selecting its prepared command. The index read
+moves from C to Swift; the unused operand-pointer/count reads are deleted, not
+deferred. The remaining use-record → call-record → command dependency depth is
+unchanged. C and Swift libraries must be rebuilt together for this private ABI.
+
+This is specific to the existing Darwin 64-bit Swift/Clang ABI. Reading a generic
+function value with `unsafeBitCast` is not equivalent: Swift can introduce an
+indirect-argument reabstraction thunk. Likewise, importing the launch as an Apple
+block introduces a context-retaining conversion thunk. Neither conversion is on
+the committed launch path. The concrete stored representation and the generated
+register assignment must agree; `native-audit` emits both sides for that review.
+See [direct Swift dispatch](pages-and-functions.md#direct-swift-dispatch).
+
+The engine’s `encodePrefillOutput` extraction and `encodeDecodeOutput` binding
+reuse its existing normalization, projection, sampling and logprob functions.
+Their final Mesh call supplies the command buffer and operand dimensions. They
+introduce no numerical algorithm. Engine session ownership uses the existing
+Collins-style page references through Swift ARC; the
+[caller lifecycle](../../../metal-microbench/docs/compute_execution.md#mesh-output-and-session-lifetime)
+describes successful completion and the retained resources of failed work.
+
+The [direct return indices](pages-and-functions.md#direct-native-return-indices)
+at ABI 74 apply Monsoon's explicit frame addressing to native-call reclamation.
+`mesh_call_bind` assigns each resident call a stable array index. Final-reference
+and native terminal events carry that index to the owning numerical worker;
+`mesh_call_progress` addresses the call directly. This deletes the row binding,
+pointer-table discovery and zero-output routing rows. The existing Collins
+reference count still supplies the final-use event; this is not a new ownership
+protocol. Array reservation, event bounds and the setup-only publisher/frame
+storage reuse are accounted for in the linked analysis.
+
+The [prepared completion record](pages-and-functions.md#memoized-numerical-completion)
+memoizes the arena and operand counts at binding. Output publication consumes
+those fields directly; shared function/worker ownership is followed only for
+the subsequent reference releases. This applies the same explicit-record
+mechanism cited below without adding a scheduler or a completion protocol.
+ABI 76 puts the existing reference-release body in `mesh_call_cleanup`, reached
+by a compiler-enforced tail call after publication. It retains Collins's same
+ownership events; the purpose is to move their register spills and metadata
+loads after the handoffs, with the added stack traffic explicitly accounted for.
+
+ABI 59 implements Monsoon's frame-indexed activation directly: the prepared
+consumer record includes the frame, its input updates that call's operand, and
+its countdown reaching zero invokes the supplied function in the same frame.
+The invocation hash, join/free tables and independent native-slot ring are deleted.
+The [current lifetime contract](pages-and-functions.md#native-slot-return) supersedes
+the older slot-assignment descriptions below. N1 remains incomplete.
+
+Collins's reference counting releases a numerical input at the completion of its
+own declared use. `mesh_call_complete` performs those decrements directly for
+CPU, Metal and Core ML, after publishing outputs. Publication retains each
+output's existing producer reference through this cleanup, then completion
+releases those references. Final output return therefore implies that the
+callback has finished using its operand metadata, without an additional native
+completion notice or counter. The success-only completion wrapper is deleted;
+Swift passes zero to the implementation on success. Constants and RX publication
+also release their producer reference explicitly after publication. The worker
+drains publication notices before return cleanup and rearming; both use their
+existing indexed notification queues.
+Within publication, all declared TX notices precede the presence store and local
+consumer-mask load/notifications. Forwarded receives follow the same ordering;
+the wire-facing notification does not depend on local-consumer bookkeeping.
+The [chain and fan-out derivation](pages-and-functions.md#input-lifetime-ends-at-its-own-use)
+distinguishes this local storage fact from unfinished global frame reuse.
+
+Gregory M. Papadopoulos and David E. Culler,
+[Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
+(ISCA, 1990), supplies the operand-associated state-bit mechanism and statically
+assigned token locations. Mesh uses prepared frame/operand locations and declared
+consumer ranges with countdown firing. ABI 68 retains the deletion of the software notification
+summary hierarchy; publication now uses the
+[index hand-off](#index-hand-off) directly. The page table retains canonical
+operand mappings, independently of notification storage.
+The historical ABI 55 implementation kept invocation-keyed join records separate
+from native call slots; ABI 59 deleted these join and slot structures. Linear probing matches an arriving logical row; countdown
+zero binds the accumulated row indices to a native slot and removes the match by
+backward shifting indices. Join and native indices have separate owner-managed
+rings. This is Mesh's software representation of operand matching, not an
+algorithm claimed to have been copied from Monsoon. Input ownership follows
+Collins's counted-lifetime mechanism through final output ownership. The
+[native-slot derivation](pages-and-functions.md#native-slot-return) proves the
+join and native bounds and identifies the still-unfinished receive bound.
+ABI 50 separates lasting presence from the notification set: `mesh_presence`
+addresses one 32-bit word per logical row; `mesh_publish` release-stores one.
+The packed presence bitmap and its read-modify-write are deleted. Setup consumes
+constant presence while realizing dependencies; the host runtime still fires
+through the existing notification ranges and countdowns.
+ABI 53 writes the logical invocation plus one as the presence stamp. This lets
+the explicitly blocking synchronization call find a moved invocation through
+its storage slots without a racy read of mutable buffer identity. Default firing
+does not read these stamps.
+
+Robert A. van de Geijn and Jerrell Watts,
+[SUMMA: Scalable Universal Matrix Multiplication Algorithm](https://www.cs.utexas.edu/~rvdg/abstracts/SUMMA.html)
+(1997), supplies the contraction decomposition into products of operand panels.
+The caller's `contract` in `examples/gram-chain.swift` declares each two-input
+product independently and combines K-panel contributions with `reduceScatter`.
+This uses SUMMA's panel algebra; it does not copy its MPI broadcast schedule.
+The supplied numerical function calls Accelerate's Level-3 BLAS `cblas_sgemm`;
+the supplied combine calls `vDSP_vadd`. The same composition implements the
+rectangular projections and both products of `R(RᵀH)`, with dimensions and
+transpose flags captured at declaration. Mesh contains none of that arithmetic.
+The [G1 derivation](function-chain.md#g1-gram-and-projection-chain) gives the
+operand identities, placements and repeated residual composition.
+
+Apple's [Core ML Tools MIL builder](https://apple.github.io/coremltools/docs-guides/source/model-intermediate-language.html)
+and compiler create the supplied model artifacts in `examples/coreml-models.py`.
+The exporter composes existing `matmul`, `gelu` and `add` operations for the
+[documented FFN residual chain](function-chain.md), with caller-supplied dimensions
+and owners. It does not generate numerical kernels or add model semantics to Mesh.
+
+Yousef Saad, [Iterative Methods for Sparse Linear Systems, second edition](https://www-users.cse.umn.edu/~saad/IterMethBook_2ndEd.pdf),
+SIAM (2003), section 3.4: compressed row storage uses row offsets to index contiguous
+entries. Mesh applies that representation to declared consumer references, not
+numerical sparse-matrix computation. `mesh_calls_start` counts references, forms
+prefix offsets and scatters function/input identities into those ranges before
+transport activation. Publication traverses only its row's range. ABI 52 applies
+Monsoon's explicit activation-address idea to the finite invocation namespace:
+the function worker indexes its call record by the published invocation, then
+selects its prepared native storage independently. This is direct array indexing,
+not associative token matching or Monsoon hardware. Each input publication supplies
+its actual source row. Shared inputs have one consumer entry per binding. Completion
+releases those actual rows; the obsolete slot-derived cleanup and remote-refresh
+paths are removed. The original shared and unissued references end at the existing
+client/device retirement event after native callbacks, without caller release.
+`mesh_row_page` is the direct canonical row lookup used by native placement;
+the redundant section-to-page wrapper is removed. The [identity derivation and
+costs](pages-and-functions.md#invocation-identity-and-storage-reuse) separate this
+finite implementation from unfinished N1 reuse.
+Row 19v realizes the consumer relation for every resident row. Dispatch indexes
+its CSR range directly by the event's row; the section-definition lookup and the
+function-index-to-pointer `program` array are removed. Each consumer record holds
+the prepared function pointer, input position and shared-input classification in
+32 bytes with 32-byte alignment, asserted at compilation. Records use an aligned
+setup allocation. For E varying/root uses, S shared uses, V resident slots and F
+functions, target storage changes from 8(E+S) to 32(VE+S) bytes and the separate
+8F-byte function-pointer array disappears. Row-offset storage is unchanged.
+This spends setup memory to remove dependent runtime reads. The supplied stamp
+argument also removes `mesh_publish`'s read of `buffer.invocation`: native completion
+passes its call's stamp, RX passes the tag's stamp, and constants pass one.
+The current use record packs the submit target, argument, operands/counts,
+completion handle, invocation source and optional remote binding into 64 aligned
+bytes. Setup expands shared-input fan-out into this same contiguous range and
+computes initial and recurring pending counts separately. Arrival has no
+shared-input dispatch branch or function/call-array lookup. Call records occupy
+64 aligned bytes with an asserted layout;
+the former 40-byte array elements could cross cache lines. Setup writes the
+source row, logical index and view's page-list address into every operand.
+`mesh_call_input` and the function's separate placement-flag array are deleted.
+A local input or preallocated contiguous view requires no arrival-time rebinding.
+An unplaced remote input refreshes only its current first page and address;
+that choice is represented by the prepared operand pointer. Its numerical use
+retains the canonical page entries through native completion. A shared remote
+input refreshes each resident call through its prepared use record and decrements
+its dependency count. The recurring template is immutable after setup.
+Source identity remains distinct from a
+contiguous view's storage, including when the input was already present at setup.
+The event record supplies the actual C submit target and arguments without a
+call-record lookup for those fields. Mutable call state and operand binding
+remain separate data accesses; the full one-line path is not claimed.
+Collins's counted ownership applies to the complete declared use set:
+startup preserves the compiled output counts, and final output return restores
+them through the buffer's common reset before releasing the frame. This removes
+refcount increments and presence clearing from launch, as derived in
+[output ownership](pages-and-functions.md#output-ownership-is-prepared-before-launch).
+The former `mesh_call_ready` and shared-input fan-out interpreter are deleted.
+These changes apply Monsoon's prepared activation
+addresses and Saad's contiguous row ranges; they do not complete H1's handoffs,
+H2's remaining records or N1's frame replacement.
+ABI 51 separates dependency rows from contiguous operand
+views. A single-chunk input selects a view by its received page offset; multi-chunk
+inputs use the indexed placement described under [transport](#programcopy).
+Contiguous placement is now requested by the existing `inputViews` factory or
+`prediction` constructor. Raw CPU/Metal callbacks request no such placement.
+This is a setup property of the supplied operand interface, not an inference from
+the numerical operation or a runtime layout branch. The BLAS callers and engine
+host-input parsers explicitly bind native contiguous views. This change exposes
+host indexed scalar reads; device-resident indexed consumption is still X9 work.
+
+Apple [Metal command buffers](https://developer.apple.com/documentation/metal/mtlcommandbuffer)
+and [Core ML prediction](https://developer.apple.com/documentation/coreml/mlmodel):
+existing numerical submission and completion interfaces.
+Apple [pointer-backed MLMultiArray](https://developer.apple.com/documentation/coreml/mlmultiarray/init(datapointer:shape:datatype:strides:deallocator:))
+and [outputBackings](https://developer.apple.com/documentation/coreml/mlpredictionoptions/outputbackings):
+Core ML operand interfaces. Their contracts govern the selected backend's actual
+operands; they do not require a mesh-owned executor or function scan.
+Apple's `MLPredictionOptions.h`, available with the macOS SDK, describes
+`outputBackings` as proposed storage: a model lacking support can return separately
+allocated output. The supplied function's actual output-storage contract governs
+Core ML use. The current path publishes the declared Mesh output after native
+completion; it does not turn separately allocated model output into a registered
+operand.
+Apple's [MLFeatureProvider](https://developer.apple.com/documentation/coreml/mlfeatureprovider)
+protocol supplies named feature lookup. `TensorFunction.prediction` prepares named
+input/output views, feature values, providers and output-backing dictionaries once.
+Each provider reads its call's realized operand array and selects each input view
+independently. The protocol returns nil for an unknown feature name; that lookup
+is native operand access, not a readiness or synchronization mechanism. Native
+completion ends the provider's access to the call's operands. The example uses
+this path for supplied calls with earlier-value inputs, including skip connections,
+and scatters their outputs according to the caller's explicit destinations.
+Apple [MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication)
+accepts independently prepared input and result matrices. The SDK's `MPSKernel.h`
+describes reuse after encoding and separate kernel instances for concurrent host
+encoders. Each mesh call already has one numerical worker. The existing matrix
+implementation now binds input/output arrays separately and encodes their indices
+through one operation; Core ML selects its prepared feature provider and output
+options independently. `MeshBindings` contains the corresponding operand views
+and index function. This removes the Cartesian product of address-bound calls,
+without changing the numerical algorithm or requiring additional synchronization.
+`TensorFunction` owns a preparation function with one view factory per operand.
+Each input and output is prepared independently; no unary function assumption
+or product of operand address combinations is introduced. Calls, maps and
+reductions use this same function value, including when the reduction allocates
+its intermediate outputs. The former native-only `Mesh.map` overload is removed.
+Shared constants are inputs with zero index stride. All preparation completes
+in `start()`; runtime submission receives the realized operand arrays through
+the resolved `MeshInvocation.submit` closure. It does not invoke preparation
+factories or choose a backend during numerical execution.
+Apple's [makeCommandBuffer](https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbuffer())
+documents waiting only when the queue has no free command buffers; its
+[completion handler](https://developer.apple.com/documentation/metal/mtlcommandbuffer/addcompletedhandler(_:))
+runs after GPU execution. The installed `MTLCommandQueueDescriptor` describes
+`maxCommandBufferCount` as the bound on uncompleted command buffers. Mesh owns a
+private queue of V positions for each declared Metal function, prepares V objects,
+and replenishes a slot on its numerical worker after native completion and final
+output ownership. At replenishment, at most V-1 other objects are unfinished.
+No other caller can occupy that queue, no command buffer is recommitted, and no
+callback mutates the command array. This is a capacity argument for the native
+factory, not a claim that command creation or encoding costs nothing.
+CPU functions have no rearm callback; Core ML retains and reuses its prepared
+feature providers and output options. The [native slot-return derivation](pages-and-functions.md#native-slot-return)
+accounts for return events, output lifetimes, non-submitting ranks, metadata cost,
+and the still-finite call/status namespace. Collins's counted ownership and the
+existing row-notification mechanism supply the return events; one numerical
+worker owns each free-index array. This supplies ordinary native storage reuse,
+not X5's unfinished instance-admission rings or R2 failure cancellation.
+
+## Program.map
+
+The JAX authors' [Pallas scalar prefetch](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html)
+and [jax.lax.gather](https://docs.jax.dev/en/latest/_autosummary/jax.lax.gather.html),
+and Gale et al., [MegaBlocks: Efficient Sparse Training with Mixture-of-Experts](https://arxiv.org/abs/2211.15841)
+(2022), supply references for block indices as data, indexed reads, and block-sparse routed experts.
+Indices are ordinary operands of `Mesh.map`; the supplied function performs the indexed
+read and any expert selection or neighbourhood sum inside the caller.
+Mesh implements no indexed gather/scatter or application routing.
+The existing `indexed-gather` caller uses `load(at:as:)` for both table values and
+index operands. Owners, consumers, routes and dimensions come from its JSON plan.
+`examples/indexed-gather-ring.json` sends values from rank 0 and indices from
+rank 2 to consumers on ranks 1 and 3. Each numerical table is 8192 × 513 × 4 =
+16,809,984 bytes, larger than the substrate's maximum single request. Every
+consumer uses the same supplied functions without a transport-size argument,
+contiguous placement section or one-peer branch. This is source usage, not a run
+or a performance claim. With the ring links configured, build with
+`make -C rdma indexed-gather`, then invoke on each rank:
+
+```
+rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
+```
+
+## Program.copy
+
+The [direct TX publication path](pages-and-functions.md#direct-tx-publication)
+uses the same Apple/rdma-core native posting interface cited below. The prepared
+requests reach that interface directly until the provider refuses one; only that
+unaccepted suffix enters the pending ring. One inlined posting body handles both
+direct posts and retries. No pending record, head/tail access or range rotation
+intervenes between successful direct posts. The existing pending-interval capacity
+and counted ownership remain. Dedicated thread roles are selected during setup,
+and their poll target indices are constants. These are partial evaluation and
+removal of intermediate storage, not a replacement collective or transport.
+
+ABI 71's [prepared SEND operands](pages-and-functions.md#prepared-send-operands)
+apply the native WR/SGE mechanism cited below to every native request at setup.
+`link_prepare` assigns contiguous request intervals before progress starts.
+Local address/key bindings are realized in configuration; receive bindings use
+a compiled scatter of `{destination SGE, resolved outgoing registration key}`. The
+posting loop consumes these resolved records directly. Native completion IDs
+name the existing transfer contribution, so preparing separate requests adds
+no new buffer-ownership or completion protocol. This is Mesh's realization of
+the registered SEND/RECV interface, independent of the supplied tensor function.
+
+The [prepared receive forwarding](pages-and-functions.md#prepared-receive-forwarding)
+step specializes those keys by the finite registration regions intersecting
+each queue's pool. Its native completion identifier carries the registered alias
+address itself. The alias map's fixed page arithmetic gives the canonical page
+and region without another lookup; the cited section derives the integer
+multiply/shift quotient for these exact multiples. This is setup specialization
+of the same Apple/rdma-core registered-memory mechanism, with no replacement
+provider, dynamic address cache or new ownership protocol.
+
+The subsequent [prepared physical receive values](pages-and-functions.md#prepared-physical-receive-values)
+remove that physical-page/address reconstruction from completion. The posted
+buffer's known pool index, physical page and client address are stored beside its
+existing local GPU address and received tag. Apple's shared `mmap` mechanism
+cited under [Program.tensor](#programtensor) makes the registered tag alias and
+canonical local metadata refer to the same backing. Completion loads terminal
+values from that one 32-byte span and scatters them into the tag-selected logical
+entry. No extra allocation, lookup, transmitted metadata or readiness condition
+is added. The existing region selector for forwarding keys remains.
+
+Apple's installed SDK `infiniband/verbs.h` implements `ibv_post_send`,
+`ibv_post_recv` and `ibv_poll_cq` as calls through the handle's
+`context->ops` field. Mesh resolves those exact function pointers when the
+native handles are created, storing handles and functions together in its
+prepared queue record and the send target in its existing SEND record.
+The [memoized dispatch implementation](pages-and-functions.md#memoized-native-dispatch)
+calls those provider functions directly with the same arguments and return
+handling; it does not implement a replacement provider or completion protocol.
+Re-pairing fills these records again before progress starts. This is partial
+evaluation of upstream dispatch, not a new transport algorithm.
+
+The [direct completion address](pages-and-functions.md#direct-receive-completion-addresses)
+uses the native `wr_id` return mechanism cited below to carry the prepared local
+tag address. Affine tag-address inversion recovers the physical page without
+reconstructing that address from the arena header. `link_receive_post` submits
+the same prepared native requests for initial posting and returned pages; it
+is inlined, and the return path posts before logical-row and instance cleanup.
+
+The [prepared receive publication](pages-and-functions.md#prepared-receive-publication)
+uses the same direct-index mechanism to bind the exact chunk-entry address,
+completed section row and publication counts in the existing 32-byte receive
+record. Publication is one inline primitive with explicit counts; the separate
+native publisher call is removed. A receive with no notification targets, such
+as the engine's resident FFN input, writes its canonical stamp without reading a
+publication header or notification table. Nonempty ranges still read their
+canonical targets and streams. This specializes fixed graph metadata; it does
+not infer a collective or introduce a receive mode. Native matching, registered
+pages, onward-SGE writes and reference-counted retirement remain as before.
+
+ABI 59 realizes a peer-qualified, source-chunk-indexed table of aligned 32-byte
+receive records. The eight-byte tag names the 32-bit sequence and source chunk.
+ABI 60's record supplies the destination row, buffer address, exact canonical
+page-entry address, reference count and chunk flags. This is direct addressing
+of the known transfer relation, applying
+the existing compressed-row/direct-index mechanisms; it introduces no collective
+algorithm or credit protocol. The [wire layout](pages-and-functions.md#explicit-section-identity-on-the-wire)
+accounts for table storage, shared-tag writers and the unfinished N1 lifetime proof.
+
+Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt),
+MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h),
+and rdma-core's [ibv_post_recv](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_recv.3):
+registered SEND/RECV and work completion. The [hardware notes](collective-dependency-ledger.md)
+distinguish substrate facts from the retained bridge's protocol decisions.
+TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
+`IBV_WR_SEND_WITH_IMM` does not establish hardware support. Both TN3205 and JACCL
+show local `wr_id` values returned with completions. Mesh uses these identifiers
+for buffer lifetime. ABI 59 carries one `(sequence, sourceChunkRow)` word. ABI 60 resolves the
+chunk's local row and page-entry address at setup, alongside its publication flag.
+TN3205 requires paired SEND and RECV requests to occupy the same number of
+4 KiB frames. Setup fixes their extents; posting submits the prepared requests.
+[Byte accounting](pages-and-functions.md#prepared-native-requests) records their
+cost independently of numerical partial boundaries.
+
+`link_configure` prepares a native RECV WR and SGE per pool block and a native
+SEND WR and SGE per resident send edge. RX posts the prepared request selected
+by its pool index. TX selects the current backing address and registration key,
+then posts its prepared request without changing the length. `link_post`, the separate posting wrapper, is deleted. The local Apple SDK defines a 128-byte `ibv_send_wr`,
+32-byte `ibv_recv_wr` and 16-byte SGE: a complete SEND WR plus SGE cannot fit the
+former H2 limit of 64 bytes. The receive request occupies 64 aligned bytes;
+the send record occupies 256 aligned bytes, with its SGE, application fields
+and common SEND header in the first 128 bytes. Compile-time assertions check
+these layouts; they do not prove one-line provider access or the whole H2 path.
+Following ABI 69, `link_configure` also binds the canonical page-entry pointer,
+registered span-array pointer, sequence-word pointer and queue pair directly in
+the existing SEND record. `link_send_ready` reads those prepared operands. The
+selected registered span already starts at the shared tag word, so that same
+address supplies the CPU tag store; no second tag mapping is derived. This uses
+the existing shared alias, not a new mapping or transport operation. The
+[load accounting](pages-and-functions.md#direct-send-record-operands) records the
+remaining indexed inputs and generated-code comparison.
+The send edge counts its signalled chunk completions before releasing its
+existing buffer reference. This is thread-local completion bookkeeping, with
+no new completion event or admission check. TX address resolution and wire-tag
+stores still precede the post; those remaining H3/H6 costs are not hidden by
+request preparation.
+ABI 63 also posts a newly enqueued edge on its selected queue immediately.
+The preceding all-queue CQ scan per publication is deleted. Native capacity
+refusal returns to the existing CQ progress path; other errors retain the
+existing link-failure path. The outer loop still services every configured
+queue. This changes posting order relative to bookkeeping, not collective
+semantics, request extents or the source-lifetime completion rule.
+The tag arrives in the payload's own work request. There is no index QP or
+cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
+on the local Thunderbolt devices. The alias representation uses one SGE and
+does not infer two-entry support from the general verbs API. The
+[record layout and execution path](async-collectives.md#execution-and-ownership)
+describe this mesh-specific representation. Receive storage is preallocated
+and reused by the owning RX thread at final reference release. The existing
+notification mechanism carries the return event; only RX writes its page and
+return ring. Each queue poll returns one completed section's backing,
+rotates unfinished sections and attempts an available post. It reposts actual pages without clearing them and
+indexes the prepared source-chunk record. The [receive-storage proof](pages-and-functions.md#receive-storage-return)
+accounts for receive ownership, bounded metadata, teardown, repeated forwarding,
+and the finite caller namespace still awaiting N1. `link_receive_destroy`
+disposes this setup-owned metadata after its link worker stops. This is an
+application of the cited SEND/RECV and reference-count mechanisms, not a new
+algorithm attributed to JACCL. Posting always uses available pool backing;
+the RX thread does not wait for a particular consumer or return event.
+Apple's [Metal buffer copy](https://developer.apple.com/documentation/metal/mtlblitcommandencoder/copy(from:sourceoffset:to:destinationoffset:size:))
+encodes a copy between existing buffers. ABI 51 uses it to place logical chunks
+into canonical contiguous storage before the supplied encoder in that same
+command buffer. The documented macOS four-byte alignment is satisfied using
+reserved tail padding. CPU and Core ML inputs use the system `memcpy` on their
+numerical worker. Setup resolves both dependency operands and their native input
+views, allocates the canonical placement outputs, and prepares chunk rows and
+views. This changes representation only, performs no tensor arithmetic, and
+adds no queue wait or native completion hop. The [data-flow and cost account](pages-and-functions.md#indexed-receive-runs-and-contiguous-consumers)
+covers ownership, finite-instance storage, and copies per consumer invocation.
+
+The dedicated TX worker consumes publication events and advances the associated
+send edges, rotating unfinished edges after each accepted chunk. RX independently refills receives before publishing each received
+section. Neither constructs a runtime list of all chunks before posting the first.
+
+The rdma-core authors' [ibv_post_send contract](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_send.3)
+returns acceptance or a native error for each posted request. X4 removes Mesh's
+software outstanding-request count and its derived request-capacity gates.
+Each TX/RX progress step polls a completion and posts available requests until
+the prepared ring is empty or the native provider refuses, then continues across queues. A refused request does not advance the cursor.
+`ENOMEM` and `EAGAIN` are deferred to the next step; other post errors conclude
+the link's invocation through [its Result](#meshresult). RX now publishes the
+completion before its return/repost pass. A zero-completion poll still permits posting. Initial receive setup
+posts until the declared list ends or the native queue refuses. Actual QP capacity is
+used only at setup to check that an individual framed request fits. This does
+not claim the remaining receive mapping or publication queues satisfy W2/W3.
+
+Receive posting and returned-page draining now share `link_receive`. After each
+returned section's entries are detached, its backing is immediately offered to
+the NIC. A capacity refusal retains the unposted cursor and still allows the
+return set to drain; it is not a condition on reclaiming other pages. The old
+single-return `link_returns` stage is deleted. This changes when existing
+references and ready pages are processed, not their counts or the wire protocol.
+The receive completion publishes before that drain, so accumulated return work
+cannot precede publication of the already polled completion. TX still offers
+ready sends before processing its completion cleanup.
+
+`Mesh.send` expands [explicit placement routes](#placement) before binding these
+transfers. At an intermediate rank the received section itself is retained by
+the onward SEND. No additional function, operand copy or runtime route lookup
+is introduced.
+
+Dotan Barak's rdma-core [work-completion contract](https://man7.org/linux/man-pages/man3/ibv_poll_cq.3.html)
+defines the valid fields of an unsuccessful completion as its work-request id,
+status, QP number and vendor error. Mesh returns on that native status before
+reading the received tag or resolving a destination. It does not treat an error
+completion as a filled partial tensor.
+
+The compressed-row representation cited under [numerical submission](#programkernel_call)
+also stores each published row's send edges contiguously. Thompson, Farley,
+Barker, Gee and Stewart's [Disruptor technical paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
+(2011), sections 3.1–3.3, describes preallocated ring storage and sequence indexing.
+ABI 50 uses that storage representation for each TX queue, with power-of-two
+capacity covering its configured edge count. One TX thread owns both positions;
+the [edge-lifetime bound](pages-and-functions.md#reusable-send-queue) replaces any
+software fullness gate. No Disruptor wait strategy or sequence barrier is imported.
+Receive targets are grouped by source-chunk row with one advancing cursor per
+group, retaining a target for each declared copy. The contiguous receive page run
+is addressed arithmetically. These replace linked send/target records and the
+receive-address array without changing SEND/RECV ordering or collective semantics.
+
+At the higher-order call interface, each part has an identity assigned at setup.
+Repeated deliveries with the same identity, source rank, destination and queue share one
+receive operand. This is Mesh's setup-level sharing of a declared immutable value;
+numerical input positions and their ownership remain distinct.
+Different source ranks, destinations or queues are not coalesced. The delivery map is discarded
+before execution, so its lookup is not transport or numerical work.
+
+The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_create_qp.3)
+and [memory registration](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)
+associate QPs and registered memory with a protection domain. Mesh now keeps
+those device resources once per named device while realizing a separate connection
+and TX/RX progress pair for every configured link. Configured peer identities,
+channels and operand row ranges are resolved at setup. Publication scatters its
+row index to those links' queues through a precomputed membership bitset, independent
+of collective verb and peer count. Multiple links register the same canonical
+payload backing through their selected devices; they do not create operand copies.
+The [configured-peer description](async-collectives.md#configured-peers) records
+setup, per-link preposting, shared registration, retirement and configuration.
+
+One pairing attempt has a single 30-second monotonic deadline, created in
+`verbs_up` after device registration. `pairing_active` checks that deadline and
+the existing cancellation state. The nonblocking `accept`, `connect`, `read` and
+`write` paths share it across endpoint metadata, every queue's descriptors and
+the initial receive-posting exchange; receiving a byte does not renew it.
+Apple's BSD [connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
+and [accept](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html)
+contracts supply the nonblocking socket mechanism. Every socket's `O_NONBLOCK`
+assignment must succeed before using it. Expiry returns `ETIMEDOUT` through the
+existing link error and QP cleanup owner; it does not terminate the bridge or
+reduce its configured capacity.
+
+The configured control endpoints are numeric IPv4/IPv6 addresses and TCP ports.
+`getaddrinfo` uses `AI_NUMERICHOST | AI_NUMERICSERV`, so pairing performs no host or
+service lookup. Apple's [getaddrinfo](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/getaddrinfo.3.html)
+contract specifies numeric host parsing; the macOS SDK's `netdb.h` specifies the
+corresponding numeric-service flag. Scope-qualified IPv6 addresses remain valid.
+The deadline is setup state only: TX, RX, numerical publication and consumer
+completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
+userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
+
+## Independent native queues
+
+Dotan Barak's rdma-core
+[completion API](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_poll_cq.3)
+and Barak, Majd Dibbiny and Yishai Hadas's
+[posting API](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_send.3)
+describe independently posted requests and retrieved native completions. The
+rdma-core authors' [rping example](https://github.com/linux-rdma/rdma-core/blob/master/librdmacm/examples/rping.c)
+also separates CQ handling from its posting caller. These are references for
+native queue ownership and completion lifetime. Mesh retains the registered
+SEND/RECV operations described under [transport](#programcopy); it adds no native
+transport implementation.
+
+`link_send_completions` owns all SEND CQs for its link and directly publishes
+completed indices to the existing retirement ring. `link_send_progress` owns
+SEND posting and its native-refusal cursors. It discovers a new publication,
+posts its requests directly, and visits each nonempty refusal queue for one
+native attempt before inspecting publications again. Successful attempts advance
+the existing cursor; a native refusal preserves it. The next transfer boundary
+is prepared in each SEND record, so successful posting walks native records
+without loading/reconstructing a separate chunk loop. The retirement chunk count
+remains beside the other cold fields. Continuous publication cannot suppress CQ
+polling, and a CQ sweep cannot precede discovery in the posting thread.
+
+`link_receive_progress` owns all RECV CQs and publishes received operands.
+`link_receive_posting` owns the existing returned-page ring's head and posts its
+prepared requests. It attempts one available receive per QP on each continuous
+sweep, so a batch returned to one QP does not have to finish before another QP is
+visited. Initial configuration still fills native receive queues before pairing
+completes. Runtime reposting no longer executes in the CQ-consumption path.
+
+Each CQ has one reader, each native send/receive queue one posting thread, and
+each software ring retains its existing single writer and reader. Completion
+scratch is a native record on its CQ reader's stack. The shared heap allocation
+and its provider pointer are deleted. This adds two threads per link, from three
+to five including retirement, and zero per-event handoffs, queues, counters,
+locks or payload copies. All progress loops spin; there is no timer, task queue
+or wakeup protocol. The extra threads consume CPU resources; no claim of free
+scheduling or measured latency follows from their separation.
+
+The startup order is retirement, SEND CQ, RECV CQ, receive posting, SEND posting.
+Teardown stops and joins all four native-queue workers before stopping retirement
+and destroying native queues. A partially completed startup uses the same join
+order. Operand references, frame reuse, page return and native-error reporting
+retain their existing mechanisms. The remaining metadata loads and measured
+native bodies are recorded in the
+[structural follow-up](e2b-structural-latency-2026-09-17.md#follow-up-independent-native-queue-progress).
+
+## Transport retirement
+
+George E. Collins's [reference-counting mechanism](#programtensor) supplies the
+existing buffer lifetimes. Thompson, Farley, Barker, Gee and Stewart's
+[preallocated ring representation](#programcopy) supplies the index storage.
+`link_retire_progress` moves native completion retirement onto a dedicated
+thread per link; it does not change the declared references or require callers
+to release operands.
+
+TX publishes the completed SEND index. RX publishes the completed section's
+logical row after publishing its value to consumers. Each direction has one
+writer and a private ring of 32-bit indices; zero denotes an empty slot. The
+retirement thread consumes both rings independently, clears each slot, and
+performs the existing chunk countdown, buffer release and instance accounting.
+The RX record stores its logical row at setup, avoiding another publication
+record load merely to construct the retirement event.
+
+Setup sizes the TX ring for all chunks in all resident SEND frames and the RX
+ring for all resident received sections, rounded up to powers of two. A queued
+event retains the source use or received section's initial reference until this
+thread consumes it. Its frame therefore cannot be recycled while that event is
+queued. Clearing the slot precedes releasing that reference. This is the bound
+that permits unconditional producer stores without a fullness query, retry,
+reservation or shared producer cursor. The cold thread polls for available work;
+its empty RX ring does not withhold TX retirement, or vice versa.
+
+Teardown joins TX and RX before stopping retirement. The retirement thread reads
+the shutdown flag before reading the slots and drains their final publications
+before queue-pair and registered-memory destruction. The thread-start order also
+allows this teardown after a partially successful startup.
+
+The same retirement thread now owns the existing receive-return reader. It
+collects a returned section's physical page indices into the existing pending
+RECV array, clears its old mappings, resets its initial references and presence,
+and finishes the old frame's accounting. Only then does one release store publish
+the array's new tail. RX acquires that tail and posts the already prepared native
+requests. A native capacity refusal leaves the head unchanged. The former
+`link_receive` bookkeeping function is deleted; no replacement call lies between
+RX polling and reposting.
+
+The array still has power-of-two capacity covering every registered page in its
+queue. A page is pending for posting, held by the NIC, or retained by a received
+value; it cannot occupy two pending entries. Thus no producer fullness query is
+needed. RX owns the head and retirement owns the tail, on separate 128-byte
+lines. Setup initially fills the array and preposts receives before either
+thread starts. This introduces a release/acquire queue boundary, not another
+queue or thread. Instance accounting and row reset precede publication to RX,
+preserving their order before the next completion can reuse the returned page.
+
+The retirement change adds one thread per link and one index publication per
+completion. It removes reference/instance bookkeeping and buffer reset from the
+spinners, not from the program. RX publication, address binding and forwarding
+updates remain. The
+[native assembly account](h-audit-2026-09-16.md#follow-up--transport-retirement)
+records the local change without claiming the H budgets or measured latency.
+
+ABI 79 deletes `mesh_buffer.invocation`. The canonical presence stamp already
+contains `invocation + 1`; the retirement thread reads it after the final use
+returns and before clearing it in `mesh_buffer_reset`. The retained RX reference
+prevents reuse while publication is still issuing its declared notifications.
+The return event's release/acquire handoff follows the final reference decrement,
+so retirement can use the existing stamp without another publisher store.
+Local GPU publishers already wrote only that stamp. CPU/RX publication now accepts
+the page entry already held by its completion operand or receive record, eliminating
+the row-to-page lookup inside `mesh_publish` as well.
+
+## Placement
+
+Pitch Patarasuk and Xin Yuan,
+[Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf)
+(2009), motivate supporting sparse connected topologies. `Placement` and its
+directed `Edge` keys represent caller-selected paths; the library does not run
+the paper's route-selection or all-reduce algorithm. A route lists the subsequent
+ranks through its destination, so `Edge(0, 2): [1, 2]` means `0 → 1 → 2`.
+The reverse direction has its own key. `owners` is the caller's section-owner
+list; callers still pass ownership explicitly to tensor and function declarations.
+The same value retains the existing work, traffic, cut and path inputs to `bounds`.
+
+`Mesh.send` walks the supplied path during declaration and registers each directed
+leg through the existing send binding. With no path entry, it requests the direct
+edge. A missing configured physical edge reports the existing setup error; no
+route is guessed from rank count or topology. The queue argument applies to each
+leg's selected pair. Existing identical-leg deduplication remains in effect.
+`Mesh.start` discards its route dictionary before workers run.
+
+For a section s on `v0 → v1 → … → vk`, each intermediate receive section is the
+actual source of the next SEND. Its receive completion publishes that section;
+the existing send-use metadata queues onward transport. The intermediate owns
+one producer reference until receive publication and one transport reference
+until onward SEND completion. It has no extra numerical function or consumer
+stamp. Setup starts compute threads only for workers with declared functions.
+For the distinct realized legs E and a cut C, payload traffic is
+`B(C) = sum(bytes(s) * count(s) for (u,v,s) in E crossing C)`.
+Transport framing remains the separate S3 mechanism. This source construction
+does not establish measured forwarding latency or repair W1–W6.
+
+## Topology
+
+`Topology`: MLX authors' [JACCL hostfile](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/distributed.rst#defining-a-mesh) supplies the full-mesh special case; Patarasuk–Yuan, [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf) (2009), supplies tree-connectivity sufficiency.
+The value stores a node set and lists of parallel links on unordered pairs. Trees,
+rings with spurs, tori and full meshes use the same representation. The paper's
+tree algorithm motivates admitting sparse connected graphs; source forwarding
+is implemented through explicit `Placement` routes. Neither establishes that
+this runtime achieves the paper's bandwidth bound.
+
+### Topology.Pair
+
+`Topology.Pair`: the [graph representation above](#topology), with the smaller endpoint first, gives both endpoint orders the same dictionary key.
+
+### Topology.links
+
+`Topology.links(between:_:)`: the [graph representation above](#topology) represents a missing edge by an empty list; dictionary subscripts remain optional.
+
+### Topology.merging
+
+`Topology.merging`: the [graph representation above](#topology) uses node-set union and per-pair list concatenation; the caller supplies observations and mesh exchanges none.
+Concatenation preserves repeated observations, including both endpoint descriptions
+of the same physical link; this operation does not deduplicate them.
+
+### Link
+
+`Link`: Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
+Bandwidth is bits per second: speed codes 1/2/4/8/16/32/64/128 mean
+2.5/5/10/10/14/25/50/100 Gb/s per lane; width codes 1/2/4/8 mean 1/4/8/12 lanes.
+Unrecognized codes yield zero (unavailable), without withholding the link.
+The bridge publishes bandwidth before the paired phase; atomic scalar access also
+covers re-pairing. Device names come from the configured link. Latency is optional
+seconds and remains nil in observations until the bridge records a measurement.
+Port bandwidth is an attribute, not measured payload throughput.
+
+### Mesh.observe
+
+`Mesh.observe` and `mesh_observe`: Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of bridge pairing metadata.
+The C function returns the link count or negative errno, copies up to capacity into
+plain `mesh_link_view` records, and closes/unmaps without attaching a client.
+Swift resizes if a replacement region has more links, then includes only paired
+links and their peers alongside the local node. Header/layout validation prevents
+invalid reads; it changes no bridge state. Per-link phase reads are acquired
+individually, not a simultaneous fleet snapshot. Before a client configures
+transfers the current bridge has no paired links. Explicit forwarding is described
+under `Placement`; idle pairing and latency measurement remain separate deliverables.
+
+## Program.write
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
+operand production. The user's contract requires publication of completed sections.
+Apple's [vDSP_vramp](https://developer.apple.com/documentation/accelerate/vdsp_vramp)
+is the existing numerical generator called by the configured Core ML chain's
+initial producers. It writes directly into each registered operand.
+
+## Program.export
+
+MLX authors' [Metal evaluation](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/eval.cpp):
+reference for retaining operands through actual operation completion.
+
+## kernels.expression
+
+The JAX authors' [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs):
+values, indices and masks. This is not a requirement for a general expression compiler.
+
+## kernels.dot
+
+Dongarra, Du Croz, Hammarling and Duff, *A Set of Level 3 Basic Linear Algebra
+Subprograms* (1990), Apple [MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication),
+[BNNS matmul](https://developer.apple.com/documentation/accelerate/bnnsfiltercreatelayerbroadcastmatmul(_:_:))
+and [Core ML MIL operations](https://apple.github.io/coremltools/source/coremltools.converters.mil.mil.ops.defs.html):
+existing contractions. The [reduction algebra](distributed-reduce.md) describes
+contributions without prescribing intermediate-buffer or launch counts.
+
+## kernels.add
+
+The JAX authors' [Pallas accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation):
+reference for combining numerical contributions.
+The engine's existing `encAdd` encoder and `add_inplace` shader now live in its
+shared matrix source files, retaining their existing arithmetic and launch
+geometry. Callers prepare their pipeline and dimensions and supply `encAdd` with
+the actual operand buffers and offsets. Mesh implements no addition kernel;
+the unused `MatrixOperations.add` convenience wrapper has been removed.
+Apple's [vDSP_vadd](https://developer.apple.com/documentation/accelerate/vdsp_vadd)
+is the existing float32 vector sum supplied to reduce-scatter by the configured
+Core ML caller. It receives resolved input/output pointers and introduces no
+payload allocation, copy, or replacement sum implementation in Mesh.
+
+## collective.reduce_scatter
+
+Rabenseifner, *Optimization of Collective Reduction Operations* (2004), and the
+MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm):
+reduction semantics and decompositions. A source does not mandate one decomposition
+for every collective or caller placement.
+
+## Collective movement
+
+The MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm)
+and MLX's [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp):
+[distinct communication relations](collective-verbs.md).
+
+## Vocabulary projection
+
+Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and the MLX
+authors' [tensor-parallel linear layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py)
+provide the output-column decomposition. For replicated h and disjoint column
+ranges C_i, each participant computes `logits[C_i] = softcap(h W[:, C_i])`.
+These are disjoint output coordinates; they are placed, not summed. The engine
+reuses its existing packed, transposed GEMV, and matrix launch paths with a
+weight offset/stride or a matrix subview. The selected backend is unchanged.
+
+The [Pallas operand representation](#programtensor) supplies the contiguous
+sampling scopes. Setup prepares each 1024-token sampling tile's canonical page
+array, element offset, presence address and invocation address. The existing
+sampling kernels resolve a contiguous pointer once per tile; logprob candidate
+merging retains its two per-thread pointers across the candidate loop. This is
+ordinary indexed operand access, not a second sampler or a tensor allocation.
+A Metal function constant selects indexed versus ordinary inputs at pipeline
+creation. The ordinary specialization does not poll Mesh or load page metadata.
+The indexed partials pass uses the existing [resident presence mechanism](#resident-metal);
+subsequent passes use their existing command-buffer dependencies.
+
+The implemented engine binding has every rank project its caller-configured
+vocabulary columns, with peers sending directly to rank 0's existing sampler.
+Rank 0 reads both its own and remote logits in canonical storage. It retains the
+existing temperature, global min-p, arbitrary logit biases, Philox/CDF draw,
+tie-breaking and logprob algorithms. No local top-k truncation substitutes for
+categorical sampling. This is an intermediate implementation: E1d's replicated
+sampling and per-rank vocabulary pushes remain open, as do its payload/floor
+checks and E8's complete-forward latency measurement. The engine account is
+[here](../../../metal-microbench/docs/async_collectives.md#distributed-vocabulary-projection).
+
+The same column decomposition now applies over explicit input-row scopes. Setup
+partitions each vocabulary shard into packed rectangles of at most 120 KiB, on
+1024-token sampler boundaries, and binds row offsets in all three existing
+projection backends. Larger batches use multiple row scopes. Each completed
+projection is published from its existing resident command buffer before the
+next projection; the sampler's precomputed operand records name each tile's own
+presence word and local offset. There is no full-shard completion prerequisite
+or dense logit assembly. The [bounded-publication account](../../../metal-microbench/docs/async_collectives.md#bounded-vocabulary-publication)
+records added publication/dispatch work and metadata capacity. Replicated
+sampling, sampling-policy distribution, the full 35+1-push contract and the floor
+latency remain open; per-tile payload bounds do not establish them.
+
+The engine now records the entire supplied projection/publication list using
+Apple's [native Metal program](#native-metal-program). Each output scope carries
+its setup-only continuation commands; the numerical binding remains independent
+of Mesh. Those continuations reuse `mesh_coherent` and `mesh_signal`, with their
+existing payload visibility and publication mechanism. No shader arithmetic,
+payload backing, dispatch count or collective route changes. Native projection
+backends replay one recorded range instead of encoding every tile on the host;
+MPS retains its own encoders and prepared following native segments. The engine's
+[encoding account](../../../metal-microbench/docs/async_collectives.md#recorded-vocabulary-projection-and-publication)
+states the removed host calls and the remaining device/driver costs.
+
+## nn.ffn
+
+Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and MLX's
+[tensor-parallel layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py):
+local numerical functions composed with collectives. Hendrycks and Gimpel,
+[GELU](https://arxiv.org/abs/1606.08415): the activation already supplied by the engine.
+The configured function caller uses `Cij = Fij(Xi)` and `Yj = sum_i Cij`, then
+passes each `Yj` to its supplied consumer. For linear T, Fij is its input-i,
+output-j block. Reduce-scatter places each sum at its caller-selected owner;
+there is no assembled whole-tensor intermediate or global stage barrier.
+The [caller description](function-chain.md) distinguishes this source composition
+from model artifacts and runtime performance evidence.
+
+The engine's E1d binding uses the same FFN column decomposition with a direct
+send of each codomain partial to every consumer, followed by the supplied local
+sum and layer finishing functions. `bindMeshDecodeLayer` declares this graph;
+`bindDecodeAttention` and `bindLayerFinish` reuse the standalone numerical
+functions over explicit buffers. The
+[source account](../../../metal-microbench/docs/async_collectives.md#e2b-decode-direct-partial-exchange)
+records the remaining command-buffer, publication and KV-initialization gaps.
+
+For the required resident GPU handoff, the Apple MLX authors' actual
+[fence implementation](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/fence.cpp)
+and [Metal kernels](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal)
+use system-coherent accesses and a system-scope fence. Cross-device publication
+also dispatches `input_coherent` over the payload before updating the timestamp.
+Its fast wait is a submitted single-thread GPU kernel. This is the reference
+mechanism to account for; a timestamp alone is not evidence that payload stores
+are visible. Mesh has not yet integrated this mechanism, and its latency is not
+established by the engine's direct-send graph.
+
+## nn.rmsnorm
+
+Zhang and Sennrich, [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)
+(2019): normalization used by the existing numerical implementation.
+
+## nn.embedding
+
+The JAX authors' Pallas indexing and the llama.cpp authors'
+[GGUF format](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md):
+references for indexed operands and the existing model loader.
+
+The engine's embedding gather uses grid coordinates `(batch row, section)`:
+`output[(row * sections + section) * width + component] = table[token[row] * stride + section * width + component]`.
+This is the same indexed gather for ordinary embeddings and E2B per-layer inputs.
+One grid replaces the layer-by-layer host dispatch loop. Row/section/component
+storage also lets the engine use one existing matrix contraction for the full
+model projection, by concatenating the per-layer weight columns. Layer consumers
+bind their component slice using an offset and row stride; the existing `gelu_mul`
+specializes the second operand's stride at setup. The
+[projection algebra and consumer addresses](../../../metal-microbench/docs/compute_execution.md#per-layer-inputs)
+account for all row counts and the removed 34 projection launches on E2B.
+Mesh gains no arithmetic kernel or transport behavior from this engine change.
+
+## collective.sync_on_remote_fill
+
+The MPI Forum's [communication completion](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node74.htm):
+explicit completion operations. The user requested an explicit counterexample;
+no default collective may invoke it.
+
+## bounds
+
+`bounds` and its plain value types (`Topology`, `Program`, `Placement`, `Bounds`) follow
+Hockney (1994, `t0 + n/r∞`), Alexandrov et al., [LogGP](https://doi.org/10.1145/215399.215427)
+(1995, startup and per-byte gap), Kwasniewski et al., [COSMA](https://arxiv.org/abs/1908.09606)
+(2019, I/O lower bound), and the four-lower-bounds paragraph of
+`metal-microbench/docs/amdahl_superiority.md`: aggregate and per-node work over
+sustained rate, aggregate and per-node traffic over bandwidth, bytes across each cut
+over that cut's summed bandwidth, and the dependency path's summed startup and
+transfer time; "their maximum is a lower bound, not an exact execution-time formula".
+The caller supplies the placement; `bounds` evaluates it and never chooses one
+(`examples/bounds-table.swift` supplies the proportional placement of the ten-minute table).
+Zero work or traffic takes zero time; positive work or traffic at zero capacity
+yields infinity. Missing nodes and links contribute zero capacity. These rules
+come from the existing `seconds` function; its prose comments now live here.
+
+## report statistics
+
+Optional; reporting count, mean or variance is not required.
+
+B. P. Welford, [Note on a Method for Calculating Corrected Sums of Squares and
+Products](https://doi.org/10.1080/00401706.1962.10490022), *Technometrics* 4(3),
+419–420 (1962). The existing engine public-path report uses the online recurrence
+`n += 1; delta = x - mean; mean += delta/n; M2 += delta*(x - mean)` and reports
+sample variance `M2/(n-1)`. The inputs are observed request completion periods and
+TTFT, outside every tensor function and mesh progress thread. Completion periods
+include the interval from batch submission to the first completion, so their mean
+is total batch time divided by request count. The [report contract](../../../metal-microbench/docs/amdahl_superiority.md#public-prefill-report)
+distinguishes concurrent throughput, request latency, and the units of mesh bounds.
+
+## Device operands
+
+The JAX authors' [Pallas reference and indexing model](https://docs.jax.dev/en/latest/pallas/design/design.html),
+Apple's [Metal buffer GPU addresses](https://developer.apple.com/documentation/metal/mtlbuffer/gpuaddress)
+and [queue residency sets](https://developer.apple.com/documentation/metal/mtlcommandqueue/addresidencyset(_:)),
+and the MLX authors' [system-coherent Metal accesses](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal)
+provide the mechanisms used here. This is operand representation; numerical
+functions remain supplied by the caller.
+
+ABI 77 replaces the separate presence array with a 32-byte page-table entry:
+`{ mapping, hostAddress, deviceAddress, stamp }`, four 64-bit words in that order.
+The table begins at a VM-page boundary and its entry stride is 32 bytes, so every
+entry begins on a 32-byte boundary. The C type retains 16-byte alignment for Swift
+import; C and Metal check the size and C checks the field offsets. Logical rows,
+CPU consumers, constants, reclamation and explicit synchronization all use this
+same stamp. No parallel GPU page table is reconstructed.
+
+`mesh_device_bind` resolves Metal addresses during setup. For a local operand it
+writes its canonical entries. For a receive pool it writes the address immediately
+before each existing wire tag, in receiver-local metadata outside the receive SGE.
+RX loads that address beside the received tag and writes it beside the CPU address
+before release-publishing the stamp. These are the actual registered payload pages,
+not placement copies. The configured Metal device's addresses are used; CPU and GPU
+virtual addresses are never presumed equal. The extra RX address load is in the
+same cache line as the tag, and the stamp store now shares the canonical address
+record's cache line. This is a source-level locality account, not measured latency.
+
+`TensorPart.stamp` is the CPU address of the first instance's canonical word;
+nonlocal parts have no local address. TensorPart remains a value of primitive
+fields and pointers without an owning object. Per-instance Metal bindings below
+provide the corresponding GPU table addresses, including the stamp at byte 24.
+`MeshSpan.metalOffset` is the offset inside its page-aligned `bytesNoCopy` buffer;
+metadata users bind both buffer and offset. Existing page-aligned tensor spans
+retain offset zero.
+
+`TensorFunction.metal(device, operands:)` realizes per-instance `MeshMetalOperand`
+arrays before execution. A Metal operand contains its canonical table binding,
+resource lifetimes and an optional contiguous local buffer. Each received chunk is
+wrapped independently; the whole receive arena need not fit one Metal buffer.
+The native launch owns the backing buffers, and its queue has a residency set
+installed at setup. The shader receives resources through their GPU addresses;
+there is no per-launch walk declaring every possible receive buffer.
+
+`MeshMetalOperand.source` supplies `mesh::contiguous<T>`: it resolves one address
+and length for a contiguous section of the logical operand. `pipeline` specializes
+its indexing with Metal function constant 37. That constant is reserved by this
+shader ABI and does not change the numerical function. Address resolution happens
+per contiguous section, not per scalar. Allocation, Metal wrapping and pipeline
+compilation are setup work. The engine's `add_inplace` uses the same `matrixAdd`
+body for ordinary pointers and for these sections; its arithmetic is not duplicated
+inside Mesh.
+
+This integrates device-side address resolution into the E1d decode sum. The
+[resident Metal path](#resident-metal) now uses those bindings in a command buffer
+submitted before the layer's remote inputs arrive. No floor latency or end-to-end
+improvement follows from the ABI or compilation alone.
+
+## Resident Metal
+
+Apple's MLX authors supply the system-coherent payload accesses and system-scope
+fence mechanism in [fence.metal](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal)
+and [fence.cpp](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/fence.cpp).
+The shader adaptation is attributed to Apple (2024), under the
+[MLX MIT license](../licenses/mlx.txt). GPU command ordering and residency use
+Apple's Metal command-encoder and residency-set APIs. The masked ready-input sum
+uses the Pallas indexed-vector representation and the supplied Megatron-style
+column decomposition described at [nn.ffn](#nnffn); arithmetic remains the engine's
+`matrixAdd`, not a Mesh tensor-operation implementation.
+
+`TensorFunction.metal(device, residentAfter:, body)` binds the same tensor parts
+and lifetimes as the other native functions. Its integer specifies a prefix of
+inputs whose host preparation starts the local step; the rest are retained operands
+whose presence is handled by the supplied GPU program. It is setup metadata,
+not a runtime interpretation of the model. `mesh_call_bind` registers notifications
+only for that prefix. In the decode caller the prefix is one metadata operand.
+A leader's prefix is now the original metadata publication: its token and KV
+operands are already installed by the caller. The redundant local CPU decoder
+and its four-byte readiness output are deleted. Only remote ranks construct the
+decoder that installs received state, removing its runtime owner branch too.
+This uses the same Monsoon dependency edges and supplied functions, with one
+fewer operator on the leader's launch path; see the
+[source account](../../../metal-microbench/docs/async_collectives.md#direct-leader-step-dependency).
+A follower therefore starts from its received/derived step metadata and needs no
+separate host submission scheduler.
+
+At setup, `meshResident` prepares a native command buffer per realized frame and
+`MeshMetalFrame` resolves sequence, operand and publication addresses. The sequence
+is the existing native call's invocation word, exposed through a Metal buffer over
+its owning allocation; there is no extra invocation-copy store at launch. The
+native call allocation outlives the GPU and the Metal view. Indirect payload, table
+and event-buffer resources are retained and registered with the queue's residency
+set before execution. Finalization follows event-stream realization and precedes
+transport start. Send indexes were already fixed by `mesh_transfers_prepare`;
+stream offsets and consumer indexes are resolved by `mesh_calls_start`.
+
+Resident command buffers use Apple's
+[unretained-reference constructor](https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbufferwithunretainedreferences()).
+The realized function already owns its frames and the returned encoder closures;
+frames retain canonical operand/event resources, while the supplied encoders
+capture their working buffers, weights and pipeline objects at binding. Native
+workers retain the function until submitted work completes, and the completion
+handler keeps its memory owner alive through native retirement. These existing
+references bound the GPU resource lifetime. The command buffer therefore need
+not acquire another set of resource references during every recording. Supplied
+resident encoders must retain their setup-bound resources in that realized
+function; a temporary resource created and discarded inside an invocation is
+not a valid setup-bound operand. Ordinary per-invocation encoders retain their
+existing Metal ownership behavior.
+
+`mesh_function_frame` replaces the sequence-only setup accessor, returning the
+existing native call and invocation-word address together. Each `MeshMetalFrame`
+binds its completion handler once to that call. Fresh command buffers attach the
+handler during construction/rearm, so the resident launch only selects its
+prepared command buffer and commits it. No extra native call, completion queue,
+runtime callback factory or forwarding function is added. Metal still registers
+a handler on each new command buffer; Swift's block bridging still occurs there.
+Command re-recording remains.
+
+The command table uses the Swift authors' reference-counted
+[ManagedBuffer](https://github.com/swiftlang/swift/blob/main/stdlib/public/core/ManagedBuffer.swift),
+with native command references in its contiguous element storage. Its header
+counts initialized elements for destruction only. Setup initializes the entries;
+the existing owning numerical worker replaces an entry during rearm. The same
+worker invokes that frame, so replacing the entry cannot interleave with its
+commit call. The index comes from `mesh_call_bind`'s fixed `0..<extent` frame
+indices. No runtime bounds, copy-on-write, array-bridging or exclusivity machinery
+is needed to select it. Pointer access stays inside ManagedBuffer's scoped API;
+no borrowed pointer escapes. The launch closure owns the buffer, and its destructor
+releases initialized command references when the native graph is disposed.
+
+Optimized ARM64 resident launch is exactly:
+
+```
+ldr w8, [x0, #24]
+add x8, x20, x8, lsl #3
+ldr x0, [x8, #24]
+b _objc_msgSend$commit
+```
+
+The captured storage object is the closure context: no second descriptor is
+followed. This deletes the launch's Swift access calls, array count/type checks,
+temporary command-object retain/release and stack frame. The frame-index load is
+from the call record already accessed for its pending count. The C worker no
+longer reads operand fields for this path. Earlier use/call accesses, Metal's own
+submission work and command-buffer rearm remain; these four instructions do not
+establish the complete H7 path or a latency pass.
+
+Apple's [indirect command buffers](https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer)
+support recording commands once and executing them repeatedly. That is distinct
+from [Metal 4 command-buffer reuse](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api),
+whose documented lifecycle begins a new recording. Neither a Metal 4 migration
+nor wrapping the current per-kernel encoder callbacks removes their recording
+work. The engine now composes native numerical commands at setup and replays
+the complete decode range; see [Native Metal program](#native-metal-program).
+
+The existing `Mesh.bindings` setup constructor is public so a supplied function
+can bind working storage without declaring it as an externally consumed output.
+It uses the same registered tensor allocation and view constructor described at
+[program.tensor](#programtensor), not a second store. `MeshMetalFrame.index` is
+the prepared frame index used to select those views during setup. The engine's
+resident E2B function now declares only its FFN partials, vocabulary result and
+optional diagnostic output. Its internal intermediates have graph-lifetime
+storage, with no per-invocation output-release, return event or reset. This is
+ordinary function-local storage lifetime; the numerical operations and the
+existing frame completion rule do not change.
+
+`MeshMetalFrame.publication` binds the payload spans, counts and terminal target
+bindings at setup and returns the encoder used by the supplied numerical function.
+The old per-recording operand-to-buffer-array construction and geometry queries
+are deleted. The bound encoder still encodes the MLX-style coherent payload pass, a device
+buffer ordering operation and GPU publication. The GPU sends directly to the
+prepared TX streams, then writes the canonical presence word and local consumer
+streams. Each GPU target is 32 bytes containing the terminal position/slot
+addresses, mask and destination. There is no host completion callback in that
+handoff. A GPU slot writes the invocation word before the nonzero index word;
+ABI 78's CPU reader accepts a slot only when that index word is nonzero. CPU
+writers retain their native eight-byte release publication. A frame cannot reuse
+its ring capacity until its known uses retire.
+
+The same publication is now available to a supplied shader in
+`MeshMetalFrame.publications`. Setup prepends the canonical page address,
+invocation address and send/use counts to the existing target allocation. Targets
+follow that header inline; there is no second target lookup structure. The frame
+retains the allocation in its residency set. `mesh::publish` contains the same
+send-before-stamp-before-local-use operations as `mesh_signal`, which calls it.
+`mesh::cohere` contains the MLX visibility accesses and system-scope fence. These
+are memory/publication primitives, independent of numerical operations.
+
+The engine's existing `mesh_add` now performs that visibility work and publication
+on entry, before considering remote presence. All threads in one cooperative
+threadgroup cover the local partial; after their system fences, a
+[`threadgroup_barrier(mem_device)`](https://developer.apple.com/documentation/apple-silicon/porting-your-metal-code-to-apple-silicon)
+orders those local accesses before its first thread publishes. There is no
+cross-threadgroup counter or waiting workgroup. SIMD groups then consume separate
+batch rows, each with its own consumed-peer mask; additional rows use a fixed
+stride. Every peer remains eligible independently. The numerical `matrixAdd`
+body and the projection backend are unchanged.
+
+Thus the FFN path removes both standalone publication dispatches and their
+encoder barrier: 70 dispatches per 35-layer E2B step. The local cooperative
+barrier and visibility accesses still execute, and the sum now uses one
+threadgroup instead of one per batch row. Their latency must be included in the
+floor measurement; dispatch deletion alone does not establish that floor.
+Vocabulary publication and opaque numerical producers retain the standalone
+encoder. No transport field, queue, reference count or host callback is added.
+
+One serial Metal command stream owns a resident function's publications.
+`completion_publication` is setup-only information: early publishers do not
+contribute the old "last declared output implies all publications finished"
+ordering edge. This prevents unsafe cursor sharing between a GPU publisher and a
+CPU consumer. Independent frames and unordered writers retain independent streams.
+It does not establish the full H1 load budget, which remains open.
+
+`MeshMetalFrame.wait` exposes an explicit device-stamp wait when the supplied
+program needs one. The decode caller instead supplies `mesh_add`: a SIMD group
+assigned to a row tracks a private mask of consumed peers, picks a present unconsumed input,
+applies the existing add body to its contiguous sections, and repeats. Only
+presence and the consumed mask select inputs; payload values do not select control
+flow. No missing peer prevents a present peer from being added. The output reaches
+the nonlinear finishing operations only after all contributions have been added.
+The mask and peer-table addresses are lane-private arrays, with peer `p` assigned
+to lane `p % 32`, element `p / 32`. The configured mesh size fixes their extent at
+shader compilation; Metal's SIMD minimum selects a present peer and SIMD shuffle
+broadcasts its saved address. This uses Apple's Metal SIMD intrinsics alongside
+the same supplied addition. It deletes the threadgroup flag array and its SIMD
+barriers. Every output element has the same writer lane across contributions, so
+the next accumulation reads its own preceding write; different rows are disjoint.
+The publication barrier and system-scope visibility fences remain. See the
+[source account](../../../metal-microbench/docs/async_collectives.md#resident-sum-state)
+for the removed loads and encoding calls. Compiler spilling is not ruled out.
+The consumed mask is numerical state, not a shared completion or reclamation
+protocol. A failed producer can leave the resident consumer waiting; X9's stated
+GPU-watchdog failure behavior has not been exercised by this change.
+
+The supplied resident function publishes its externally consumed outputs at the
+points where they are complete. Native `mesh_call_finish` retires its input/output
+references after the command buffer finishes; it does not republish early outputs.
+The E1d function's externally consumed numerical outputs are its FFN partials and
+vocabulary tile; its intermediate scratch and hidden values stay within the same
+supplied function unless an explicit diagnostic consumer requests a snapshot.
+The native return path prepares the next command buffer before marking that frame
+reusable. Re-recording commands remains host work per step; it is not charged away
+or assumed free in the pending end-to-end measurement.
+
+Engine `bindMeshDecodeStep` supplies embedding, every decode layer, and the current
+leader output path in one resident command buffer. `bindMeshDecodeLayer` uses the
+existing attention, gate/up/down, add and finishing functions. It publishes its
+partial directly, then consumes any ready remote partials. The old embedding,
+per-layer producer/consumer and tail Mesh calls are removed. Embedding writes its
+canonical output directly, and final normalization reads the last layer's output
+directly; the two hidden-state placement copies are gone. Per-layer inputs bind to
+that realized embedding buffer. The configured batch runs in full; the existing
+sampling-active mask identifies live rows.
+
+Compilation covers the resident handoff shaders, streaming sum, Mesh ABI, native
+C warnings and engine integration. No RDMA workload, GPU numerical execution,
+watchdog exercise, floor timing or speedup is implied. Vocabulary sharding, imported prefix-cache propagation and numerical validation
+of the [prefill KV path](#prefill-kv) remain required before the E1d/E8 comparison;
+coherent publication dispatches and command re-recording remain costs to measure.
+
+## Native Metal program
+
+Apple, [Encoding indirect command buffers on the CPU](https://developer.apple.com/documentation/metal/encoding-indirect-command-buffers-on-the-cpu),
+supplies the native command reuse mechanism. Apple's
+[`MTLIndirectComputeCommand`](https://developer.apple.com/documentation/metal/mtlindirectcomputecommand),
+[`setBarrier`](https://developer.apple.com/documentation/metal/mtlindirectcomputecommand/setbarrier()),
+and [`supportIndirectCommandBuffers`](https://developer.apple.com/documentation/metal/mtlcomputepipelinedescriptor/supportindirectcommandbuffers)
+define compute recording, dependencies and pipeline compilation. This is native
+Metal replay, not recommitting an ordinary command buffer.
+
+The engine's `MetalProgram.bind` consumes setup-only dispatch descriptions.
+The earlier `bindMetalProgram` entry point is replaced by setup composition. For
+multiple commands or indirect reads, it records the supplied pipelines, buffer
+bindings, scalar constants and grids into one `MTLIndirectCommandBuffer`.
+Constants are packed UInt32 metadata in shared
+storage; tensor payloads retain their supplied storage. Setup deduplicates read
+and write resource declarations, captures pipeline lifetimes, and discards the
+dispatch descriptions. Invocation creates one compute encoder, declares two
+prepared resource arrays through Metal's native bulk API, executes the recorded
+command range and ends encoding. There is no runtime dispatch-description walk,
+pipeline selection, scalar packing, buffer rebinding or Swift resource walk.
+The native resource declarations still incur Metal's own work and are not free.
+
+A single command without indirect reads instead captures direct pipeline, grid
+and bulk buffer bindings at setup. Invocation creates an encoder, sets the
+pipeline and prepared buffers, dispatches and ends encoding. There is no native
+indirect command or separate resource-declaration call in this lowering. Ordinary
+matrix products use the same direct implementation, replacing their duplicate
+closure. This setup choice adds no runtime branch or descriptor traversal.
+
+The actual five-stage engine sampler uses this program in ordinary decode,
+prefill and the resident Mesh decode function. `sampleTokenCommands` and
+`logprobCommands` describe the existing numerical functions; `bindSampling`
+records them together. The four explicit device command barriers preserve their
+data dependencies: local statistics precede mass computation and sampling, and
+candidate/logprob reads follow remote-input acquisition. These replace the
+prior separate serial compute passes. No host wait, remote-fill library guard,
+or transport synchronization is introduced. Indexed sampling additionally
+declares its local projection output as a read resource; a metadata buffer alone
+would hide that dependency from Metal. Existing Mesh frame residency covers the
+remote payload, and the supplied shader retains its remote visibility fences.
+
+`bindDecodeOutput` binds final normalization, projection and the prepared sampler
+during setup. The ordinary output encoders use the same prepared sampler. The
+existing numerical sampler entry point also uses this construction instead of
+retaining a second imperative implementation.
+
+Source review and optimized Swift SIL show five native calls in sampler rearm:
+encoder creation, two bulk resource declarations, range execution and encoder
+completion. All five ordinary and all five indexed pipelines compile with native
+indirect-command support. These are compilation and source observations, not
+numerical execution or latency evidence. The existing one-in-flight engine
+limitation is unchanged.
+
+The same construction records each complete FFN sequence in
+`DenseFFNWeights.bind`: normalization, the existing fused gate/up matrix operation
+and down projection, or the existing three/five-kernel batched GEMV sequence.
+`gateUpCommands`, `denseGemvPipeline` and `rmsNormCommand` realize native pipeline,
+operand, offset, grid and scalar bindings once. `MatrixOperations.dispatch`
+shares its preparation with ordinary `multiply`; the latter still captures direct
+native calls, without an indirect program around an individual kernel. The old
+split `bindFFN` wrapper and paired up/down invocation are deleted. CPU encoding
+shrinks from three/five encoders to one per replayed FFN, with five native calls
+per invocation. Native device barriers preserve the existing normalization,
+activation and down-projection dependencies. The MPS and ordinary matrix-prefill
+branch retains its existing native encoders.
+
+The [matrix product](#kernelsdot) sums over exactly the operand's inner
+dimension. The pre-existing
+FP16 GEMV implementation read complete 32-element groups even for a shorter final
+group; it now bounds that loop by the actual input width. Output launches cover
+`ceil(columns/32)` groups, and inactive lanes use a valid weight address before
+the common threadgroup reduction and masked store. `BatchPipelines` supplies the
+actual occupancy as a Metal function constant; `ENTRY_DENSE_GEMV` specializes its
+existing bounded implementation for non-power-of-two batches. This preserves
+caller placement and prevents reads/writes of absent rows without adding a
+readiness guard, transport condition or runtime pipeline choice.
+
+The engine's [FFN source account](../../../metal-microbench/docs/async_collectives.md#prepared-ffn-programs)
+records the before/after encoding counts and limitations. Both engine libraries
+build; 126 affected native pipelines compile, and Metal/tensor FFN projection
+programs record with 1, 8 and 128 rows and nonzero offsets without GPU submission.
+The native Metal branch of `bindLayerFinish` records the six existing E2B
+post-sum operations together, using the same matrix setup factory and existing
+normalization, activation and scaling shaders. MPS retains its native path;
+non-PLE models retain their existing single fused encoder. Fixed PLE offsets,
+strides and launch grids are recorded once. The five local dependency boundaries
+replace the former separate serial passes. The engine's
+[finishing account](../../../metal-microbench/docs/async_collectives.md#prepared-layer-finishing)
+counts six encoders/45 native calls becoming one encoder/five calls per layer.
+Resource-array lengths are captured at setup too: optimized invocation SIL
+contains neither of the former two array-header count loads. This does not remove
+native resource tracking or captured-value loads. The three additional pipeline
+configurations compile with indirect support, and both engine libraries build.
+`qkvCommands` realizes the existing staged/batched/separate projection sequence;
+`bindDecodeAttention` records that sequence together with the existing Q/K
+normalization and RoPE and V normalization. Matrix projection configurations
+retain their numerical encoders and record the following transforms. KV-sharing
+layers record only their query preparation. Current positions remain buffer data,
+and QKV capture still follows preparation. Native recording neither changes
+attention arithmetic nor expands the declared KV resource set.
+
+`PerLayerInputs.begin` records the seven-operation prefix on native Metal matrix
+backends, using the existing projection views, embedding layout and numerical
+functions. MPS retains its encoder sequence. There is no new tensor storage or
+copy. The [source account](../../../metal-microbench/docs/async_collectives.md#prepared-qkv-and-ple-prefix)
+states the removed native encoding calls and the unchanged argument/launch
+contracts. Both engine libraries build; 35 affected pipeline configurations
+compile with indirect support without GPU submission.
+
+Apple's [residency sets](https://developer.apple.com/documentation/metal/simplifying-gpu-resource-management-with-residency-sets)
+and [`MTLResidencySet`](https://developer.apple.com/documentation/metal/mtlresidencyset)
+supply persistent allocation declarations and setup residency requests. The
+engine now fills its existing KV set once with the unique configured cache
+buffers, attaches it to the ordinary queue and captures it for one attachment
+per Mesh step. It deletes the decode page scan, per-layer KV buffer walk,
+visited-chunk set and pin-on-growth callback. Full configured capacity is now
+requested at setup; the engine's [cache account](../../../metal-microbench/docs/async_collectives.md#prepared-cache-and-attention)
+reports that resident-memory scope explicitly. Residency does not track hazards:
+`attentionCommands` records the existing attention/reduction pair, and the
+producer prepends the existing KV scatter with a device dependency before
+attention. Reduction retains its numerical dependency too. No kernel arithmetic,
+tensor backing or remote-fill rule is added. The bound row count determines the
+KV grid. Vocabulary projection and publication are now recorded together;
+token embedding and streaming sums now join the complete native step recording.
+Replicated sampling and the E1d/E8 floor remain open.
+
+
+Engine `fb3bab4` uses `MetalProgram` to compose its existing command
+descriptions before native recording. `append` resolves relative command and external-encoder positions and
+preserves each numerical dependency. `bind` stores native commands, packed scalar
+constants and deduplicated resources once. Its inline native encoder body makes
+five Metal calls without a command-description walk. Ordinary single commands
+retain direct bulk binding. Apple's
+[`setThreadgroupMemoryLength`](https://developer.apple.com/documentation/metal/mtlindirectcomputecommand/setthreadgroupmemorylength(_:index:))
+records the dense-prefill kernels' existing dynamic threadgroup storage too.
+
+`decodeAttentionProgram`, `DenseFFNWeights.program`, `layerFinishProgram`,
+`unembedProgram` and `samplingCommands` supply the existing numerical sequences.
+`denseMmProgram` and `realizedMatrixProgram` share native matrix preparation with
+the ordinary engine; MPS remains an actual native external encoder where selected.
+`meshDecodeLayerProgram` includes the unchanged supplied streaming sum. The full
+`bindMeshDecodeStep` now binds one concatenated sequence: embedding, PLE prefix,
+all layers, output normalization, vocabulary publications and rank-0 sampling.
+Prepared diagnostic ranges refer to the same recording. The one runtime
+inspection predicate preserves changing QKV capture/ablation requests; its
+ordinary branch enters the native body directly. Only explicit instrumentation
+or real external MPS calls execute a segmented callback sequence.
+
+The [whole-step source account](../../../metal-microbench/docs/async_collectives.md#whole-step-native-recording)
+records the 251/250-to-one encoder reduction, corresponding native call counts,
+source growth, exact scope and remaining limitations. This deletes per-layer
+rearm invocation and repeated binding; it does not change the collective routes,
+shader arithmetic, operand backing or device visibility dependencies. Source and
+compilation evidence are not a measured floor-latency pass.
+
+## Prefill KV
+
+Vaswani et al., [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
+(2017), supplies the projected query/key/value algebra. Dao et al.,
+[FlashAttention](https://arxiv.org/abs/2205.14135) (2022), supplies the tiled
+attention reference. This change reuses the engine's existing projections,
+normalization, rotary transform, KV scatter and attention kernel; it adds no
+numerical operation to Mesh.
+
+E1d's replicated decode attention consumes all KV heads on every rank. The
+engine's head-partitioned prefill formerly wrote only its assigned heads, with
+that smaller head count as the physical cache stride. A rank assigned no heads
+wrote nothing. Those caches could not be read as full-head caches at decode.
+
+`bindPrefillKV` now binds the existing full K/V projection and write sequence,
+shared by standalone prefill and Mesh. A rank computing attention executes it
+inside its existing attention command buffer. A rank with no attention heads
+executes it before its FFN stage, using the original hidden inputs already bound
+to that stage; `missingKV` prepares that input normalization and the existing KV
+function. The Metal and Core ML FFN compositions both use this preparation.
+The existing prefill matrix views request half-precision conversion explicitly
+from `realizeDenseMatrix` at setup; the packed weight buffers and decode functions
+remain unchanged. Prefill can therefore be constructed without switching the
+engine-wide backend just to satisfy its weight-view representation.
+The FFN partial is published only after that command buffer completes, so the
+existing FFN reduction dependency also carries the completed KV write. No extra
+collective, host callback or command buffer is introduced.
+
+Prefill readers keep their local query/KV grouping while specialization constants
+bind the full physical KV head stride and the first selected head. For page p,
+position t, head h and component d, the address is
+`((p * PAGE + t) * fullKVHeads + firstHead + h) * headDimension + d`.
+The same reader remains the standalone kernel when those constants are absent.
+Shared-KV layers reuse their configured source layer and do not recompute KV.
+
+The existing caller placement accepts an explicit `prefillRows` partition of
+`B * MAX_Q_LEN`; `placement.py --prefill-rows` writes that partition from the
+same caller-supplied rates. Decode's replicated batch and prefill's token-row
+partition are distinct dimensions, so B=1 no longer forces an empty prefill
+operand for the second rank. The old batch-row interpretation remains the
+fallback for existing placements. Setup checks the complete token-row partition.
+
+Distributed decode now always constructs its associated prefill graph. The
+prefill region defaults to the decode region plus `-prefill`; its instance count
+defaults to the decode count. The existing explicit prefill region/count settings
+still override those defaults. Both regions must be supplied by the bridge setup.
+The switch that left all prompt computation on the leader is removed.
+
+The source path covers ordinary and continued distributed prefill, not imported
+leader-only prefix-cache snapshots. Numerical KV equivalence, public decode,
+latency and speedup are still unmeasured. It implements E1d's replicated cache
+preparation, not F11's separate sequence partition; F11 remains open.

@@ -1,99 +1,113 @@
-# design/whole-function.md
+"""Online share allocator: writes the configuration operand of a mesh function's next call.
+
+metal-microbench docs/principles.md §4, "Adaptive configuration without synchronization or cold
+start".  A share group of W units at grain g is split over n ranks from a given config_t0.  Rank
+i's segment time is nearly linear in its share, t_i = a_i + b_i x_i with x_i = kappa c_i: c_i the
+units it applied in the call, kappa the call's cost scale (1 for columns, MB per unit for KV
+positions).  After each call every caller passes the same segment times and gets the same shares
+back, so the next call's configuration is one more value in the dataflow: no root, no lock.
+
+1. Recursive least squares with forgetting factor lambda on theta_i = (a_i, b_i), regressor
+   u = (1, x_i) [Haykin 2014, Table 10.1]: pi = P u, k = pi / (lambda + u'pi),
+   theta += k (t_i - theta'u), P = (P - k pi') / lambda.  trace(P) is capped at its prior's, the
+   bound the constant-trace modification holds it at [Goodwin & Sin 1984], so P cannot wind up
+   while a share stands still and still shrinks under excitation.  b_i is floored at the
+   roofline time per unit.
+2. g_i = t_i + b_i (kappa' s_i - kappa c_i): the observed time moved along the model to the
+   continuous iterate s at the next call's scale kappa'.  It is the gradient of
+   F(s) = sum_i integral t_i, whose minimum on sum s = W is equal finish [Beckmann 1956]; at
+   kappa' = kappa and s = c it is the observed time itself.
+3. A projected online gradient step preconditioned by b [Zinkevich 2003]:
+   s'_i = s_i - eta (g_i - mu) / (b_i kappa'), mu keeping sum s' = W.  It is equal_finish below
+   with a_i = eta g_i - b_i kappa' s_i and T = eta mu; eta = 1 is the equal-finish solve.
+4. c_i = low_i + g floor((s'_i - low_i) / g), then each leftover grain to the rank finishing
+   earliest with it, a_i + b_i (c_i + g), ties to the lower rank [Beaumont et al. 2001, Alg. 3.1]:
+   the least largest finish on the grain, which the largest remainders are not (W 12, b (1, 2.4):
+   [8, 4] finishes at 9.6, [9, 3] at 9).  s' stays the iterate; c is the next call's operand and
+   regressor.
+
+equal_finish(W, g, low, high, a, b) is steps 3-4 alone: rank i finishing at a_i + b_i s_i, the
+shares s_i = (T - a_i) / b_i with sum s = W; ranks outside their bounds are held at them and T
+re-solved, the side with the larger total violation first [Bitran & Hax 1981].  The mesh's
+programs take config_t0 from it (metal-microbench tools/mesh/programs.py).
+
+min_max(W, g, low, high, cost, shared) is step 4 for any nondecreasing finish cost[i](c_i): each
+grain in turn to the rank finishing earliest with it, optimal for the largest finish [Ibaraki &
+Katoh 1988]; shared(c), when given, is the time of the collectives the shares wait for, priced
+by the largest share: the same fill under each cap m on the largest share, the least
+max cost + shared kept [HAP, EuroSys 2024, §2.4].  A rank's high bound is what it can hold
+(its window over its bytes per unit).
+
+capacity(W, g, low, high) is each rank's largest share of W at grain g within [low_i, high_i]: its
+high bound, or W less every other rank's low bound, whichever is less.  A partitioned dimension's
+local buffers are shaped to it, so that any parts the bounds allow fit without a shape change
+(torch_mesh/partition.py; design/heterogeneity.md R14).
+
+O(n) plain floats in a fixed order (min_max O((W/g)^2 n)): identical inputs give identical
+shares on every rank.
+"""
 import math
-import itertools
-
-RESOLUTION = 0.01  # Configuration-time memory-fit resolution.
 
 
-def partition_bounds(parts, extent):
-    """Exact adjacent cuts of a declared extent, weighted by rank shares.
+class Allocator:
+    """shares: config_t0, units per rank (multiples of grain); W = sum(shares).  low: each rank's
+    minimum (a multiple of grain, at least grain).  prior: per rank (a, b, var_a, var_b) in the
+    units of the times, x at scale 1.  floor: per rank, the least b (roofline time per unit).
+    forget: lambda in (0, 1].  step: eta in (0, 1].  .shares is the next call's configuration
+    operand; .a and .b are the estimates, for the run record."""
 
-    Integer prefix rounding preserves coverage, including tails and empty
-    shares. Divisible extents retain the original capacity-block boundaries.
-    This relation is consumed during preparation, never by numerical replay.
-    """
-    total = sum(parts)
-    return tuple(extent * prefix // total for prefix in itertools.accumulate(parts, initial=0))
+    def __init__(self, shares, grain, low, prior, floor, forget, step):
+        self.shares, self.grain, self.low, self.floor = list(shares), grain, list(low), list(floor)
+        self.total, self.forget, self.step = sum(shares), forget, step
+        if (len({len(shares), len(low), len(prior), len(floor)}) != 1 or sum(low) >= self.total
+                or any(c % grain or l % grain or l < grain or c < l for c, l in zip(shares, low))
+                or min(floor) <= 0 or not 0 < forget <= 1 or not 0 < step <= 1):
+            raise ValueError('allocator: shares and lower bounds on the grain with room above the bounds, '
+                             'one prior and positive floor per rank, forget and step in (0, 1]')
+        self.s = [float(c) for c in shares]
+        self.a, self.b = [float(p[0]) for p in prior], [float(p[1]) for p in prior]
+        self.P = [(float(p[2]), 0.0, float(p[3])) for p in prior]
+        self.trace = [p00 + p11 for p00, _, p11 in self.P]
 
-
-def min_max(total, grain, low, high, times):
-    """Shares of `total` units at `grain` within [low_i, high_i] (multiples of grain, a high may be math.inf) minimising
-    the largest of times[i](c_i), each nondecreasing: each grain to the rank finishing earliest with it, ties to the
-    lower rank [Ibaraki & Katoh 1988; Beaumont et al. 2001, Alg. 3.1].  That greedy takes the (total - sum low) / grain
-    least of the ranks' grain times (rank i's k-th grain's times[i](low_i + k grain), a sorted list a rank), so it
-    is found as that order statistic of the sorted lists [Frederickson & Johnson 1982]: a pivot the weighted median of
-    the lists' middle times, every list cut at it by bisection, until the pivot is the statistic; O(n log^2(total /
-    grain)) evaluations where a grain at a time took total / grain.  A time that dips is the caller's to pass as the
-    largest it has reached (its least nondecreasing majorant, which the grain-at-a-time greedy took; metal-microbench
-    tools/mesh/balance_sim.py envelope): every time here is read as sorted.  (c, T), T the largest time, each rank's at
-    its low counted; grains no rank can hold are left unplaced."""
-    n = len(low)
-    want = max(0, (total - sum(low)) // grain)
-    top = [max(0, want if h == math.inf else min(want, (h - lo) // grain)) for lo, h in zip(low, high)]
-    seen = {}
-
-    def at(i, k):
-        if (i, k) not in seen:
-            seen[i, k] = times[i](low[i] + k * grain)
-        return seen[i, k]
-
-    def cut(i, v, a, b, strict):
-        while a < b:
-            m = (a + b + 1) // 2
-            if at(i, m) < v or not strict and at(i, m) == v:
-                a = m
-            else:
-                b = m - 1
-        return a
-
-    floor = max((times[i](low[i]) for i in range(n)), default=0.0)
-    if sum(top) <= want:
-        return [low[i] + top[i] * grain for i in range(n)], max([floor] + [at(i, top[i]) for i in range(n) if top[i]])
-    if not want:
-        return list(low), floor
-    a, b, need = [0] * n, list(top), want
-    while True:
-        middles = sorted((at(i, (a[i] + b[i] + 1) // 2), i) for i in range(n) if b[i] > a[i])
-        half, reach = sum(b[i] - a[i] for i in range(n)) / 2, 0
-        for pivot, i in middles:
-            reach += b[i] - a[i]
-            if reach >= half:
-                break
-        below = [cut(i, pivot, a[i], b[i], True) for i in range(n)]
-        through = [cut(i, pivot, a[i], b[i], False) for i in range(n)]
-        if need <= sum(x - y for x, y in zip(below, a)):
-            b = below
-        elif need > sum(x - y for x, y in zip(through, a)):
-            need -= sum(x - y for x, y in zip(through, a))
-            a = through
-        else:
-            need -= sum(x - y for x, y in zip(below, a))
-            c = []
-            for i in range(n):
-                tied = min(need, through[i] - below[i])
-                need -= tied
-                c.append(low[i] + (below[i] + tied) * grain)
-            return c, max(floor, pivot)
+    def __call__(self, times, scale=1.0, next_scale=1.0):
+        """Steps on each rank's segment time of the call that ran .shares at cost scale `scale`;
+        returns the shares of the next call, whose cost scale is `next_scale`."""
+        n, lam, eta = len(self.shares), self.forget, self.step
+        g, w = [], []
+        for i in range(n):
+            x = scale * self.shares[i]
+            p00, p01, p11 = self.P[i]
+            pi0, pi1 = p00 + p01 * x, p01 + p11 * x
+            den = lam + pi0 + pi1 * x
+            k0, k1 = pi0 / den, pi1 / den
+            e = times[i] - self.a[i] - self.b[i] * x
+            self.a[i] += k0 * e
+            self.b[i] += k1 * e
+            p00, p01, p11 = (p00 - k0 * pi0) / lam, (p01 - k0 * pi1) / lam, (p11 - k1 * pi1) / lam
+            if p00 + p11 > self.trace[i]:
+                f = self.trace[i] / (p00 + p11)
+                p00, p01, p11 = p00 * f, p01 * f, p11 * f
+            self.P[i] = (p00, p01, p11)
+            b = max(self.b[i], self.floor[i])
+            g.append(times[i] + b * (next_scale * self.s[i] - x))
+            w.append(1.0 / (b * next_scale))
+        B = [1.0 / x for x in w]
+        c, self.s, _ = equal_finish(self.total, self.grain, self.low, [math.inf] * n,
+                                    [eta * g[i] - B[i] * self.s[i] for i in range(n)], B)
+        self.shares = c
+        return list(c)
 
 
 def equal_finish(total, grain, low, high, a, b):
-    """Affine equal-finish shares, restored from fa36bea6^; min_max realizes tiles.
-
-    a includes measured fixed cost and dependency delivery tail; b is measured
-    work cost per unit. Neither is an assumed price for DMA/compute interference.
-    """
-    if not (len(a) == len(b) == len(low) == len(high)) or not a:
-        raise ValueError('equal-finish dimensions')
-    if any(not math.isfinite(v) or v <= 0 for v in b):
-        raise ValueError('equal-finish slopes must be positive')
-    if not sum(low) <= total <= sum(high):
-        raise ValueError('infeasible equal-finish bounds')
-    held = {}
+    """Shares of `total` units at `grain` over ranks finishing at a_i + b_i s_i, within
+    [low_i, high_i] (multiples of grain): (c, s, T), c the integer shares, s the continuous ones
+    and T their common finish (steps 3-4 above)."""
+    n, held = len(a), {}
     while True:
-        free = [i for i in range(len(a)) if i not in held]
-        T = ((total - sum(held.values()) + sum(a[i] / b[i] for i in free)) /
-             sum(1 / b[i] for i in free) if free else max(a[i] + b[i] * held[i] for i in held))
-        s = [held[i] if i in held else (T - a[i]) / b[i] for i in range(len(a))]
+        free = [i for i in range(n) if i not in held]
+        T = ((total - sum(held.values()) + sum(a[i] / b[i] for i in free)) / sum(1.0 / b[i] for i in free)
+             if free else math.inf)
+        s = [held[i] if i in held else (T - a[i]) / b[i] for i in range(n)]
         below = [i for i in free if s[i] < low[i]]
         above = [i for i in free if s[i] > high[i]]
         if not below and not above:
@@ -102,107 +116,35 @@ def equal_finish(total, grain, low, high, a, b):
             held.update((i, float(low[i])) for i in below)
         else:
             held.update((i, float(high[i])) for i in above)
-    c, _ = min_max(total, grain, low, high, [lambda u, i=i: a[i] + b[i] * u for i in range(len(a))])
+    c = [low[i] + grain * math.floor((s[i] - low[i]) / grain) for i in range(n)]
+    c, _ = min_max(total, grain, c, high, [lambda x, i=i: a[i] + b[i] * x for i in range(n)])
     return c, s, T
 
 
-def pareto(rows, coordinate=('ctx_in', 'ctx_out')):
-    """The two throughputs' frontier (metal-microbench docs/principles.md §3, "Two throughputs, a frontier, and the
-    placer on it"), from the calls' own records alone (no solo run, no fit): each row one call's, its configuration
-    (`program`, `backend`, batch `bs`), its workload coordinate (`coordinate`'s keys, by default ctx_in and ctx_out)
-    and its two measured throughputs, `aggregate_tok_s` (its tokens over its wall seconds) and `per_sequence_tok_s`
-    (that over its streams).  Per coordinate, the rows no other row of it beats in both throughputs (at least as high
-    in each and higher in one), highest aggregate first; and of two backends of one program, whether one's aggregate is
-    higher at every (bs, coordinate) both ran.  (frontier {"ctx_in/ctx_out": [row...]}, dominance [...]).
-    metal-microbench 4efbbff^ tools/mesh/grid.py pareto; its frontier 16384/1024 at bs 4: 564.6 aggregate, 141.1 per
-    sequence (output_data/confirm-20260924/summary.json)."""
-    key = lambda r: tuple(r[k] for k in coordinate)
-    groups = {}
-    for r in rows:
-        groups.setdefault(key(r), []).append(r)
-    frontier = {}
-    for at in sorted(groups):
-        group = groups[at]
-        keep = [r for r in group if not any(
-            o['aggregate_tok_s'] >= r['aggregate_tok_s'] and o['per_sequence_tok_s'] >= r['per_sequence_tok_s']
-            and (o['aggregate_tok_s'] > r['aggregate_tok_s'] or o['per_sequence_tok_s'] > r['per_sequence_tok_s'])
-            for o in group)]
-        frontier['/'.join(str(v) for v in at)] = sorted(
-            [{'program': r['program'], 'backend': r['backend'], 'bs': r['bs'], 'aggregate_tok_s': r['aggregate_tok_s'],
-              'per_sequence_tok_s': r['per_sequence_tok_s']} for r in keep], key=lambda r: -r['aggregate_tok_s'])
-    table = {(r['program'], r['backend'], r['bs'], *key(r)): r['aggregate_tok_s'] for r in rows}
-    labels = sorted({(r['program'], r['backend']) for r in rows})
-    dominance = []
-    for (pa, a), (pb, b) in ((x, y) for x in labels for y in labels if x != y):
-        if pa != pb:
-            continue
-        shared = [k[2:] for k in table if k[:2] == (pa, a) and (pa, b, *k[2:]) in table]
-        if not shared:
-            continue
-        wins = sum(1 for k in shared if table[(pa, a, *k)] > table[(pa, b, *k)])
-        dominance.append({'program': pa, 'backend': a, 'over': b, 'coordinates': len(shared), 'higher_at': wins,
-                          'dominates': wins == len(shared)})
-    return frontier, dominance
+def min_max(total, grain, low, high, cost, shared=None):
+    """Shares of `total` units at `grain` within [low_i, high_i] (multiples of grain) over ranks
+    finishing at cost[i](c_i), nondecreasing, plus shared(c) when given: (c, T), T the largest
+    finish (above).  Grains that fit no rank are left unplaced."""
+    n = len(low)
+
+    def fill(cap):
+        c = list(low)
+        for _ in range((total - sum(low)) // grain):
+            fits = [i for i in range(n) if c[i] + grain <= min(high[i], cap)]
+            if not fits:
+                break
+            i = min(fits, key=lambda i: (cost[i](c[i] + grain), i))
+            c[i] += grain
+        return c, max(cost[i](c[i]) for i in range(n))
+
+    if shared is None:
+        return fill(math.inf)
+    fills = [fill(cap) for cap in range(max(low), total + 1, grain)]
+    c, t = min((f for f in fills if sum(f[0]) == sum(fills[-1][0])), key=lambda f: f[1] + shared(f[0]))
+    return c, t + shared(c)
 
 
-def project_parts(parts, total, grain):
-    """Configuration-only proportional projection onto a changed extent."""
-    scale = total / sum(parts) if sum(parts) else 0
-    values = [p * scale for p in parts] if scale else [total / len(parts)] * len(parts)
-    return project(values, total, grain, [0] * len(parts), [total] * len(parts))
-
-
-SHARE_TICKS = 1 << 40
-
-
-def project(values, total, grain, low, high):
-    """design/whole-function.md#finite-differences"""
-    grain, total = int(grain), int(total)
-    if grain <= 0 or not values or len(values) != len(low) or len(values) != len(high):
-        raise ValueError('allocation dimensions and grain must be valid')
-    lower = [math.ceil(x / grain) for x in low]
-    upper = [math.floor(x / grain) for x in high]
-    units = total // grain
-    if total % grain or not sum(lower) <= units <= sum(upper):
-        raise ValueError('infeasible allocation lattice')
-    values = [float(x) / grain for x in values]
-    left = min(x - hi for x, hi in zip(values, upper)) - 1
-    right = max(x - lo for x, lo in zip(values, lower)) + 1
-    for _ in range(64):
-        middle = (left + right) / 2
-        if sum(max(lo, min(hi, x - middle)) for x, lo, hi in zip(values, lower, upper)) > units:
-            left = middle
-        else:
-            right = middle
-    real = [max(lo, min(hi, x - right)) for x, lo, hi in zip(values, lower, upper)]
-    result = [math.floor(x) for x in real]
-    order = sorted(range(len(result)), key=lambda i: (-(real[i] - result[i]), i))
-    for i in order:
-        if sum(result) == units:
-            break
-        if result[i] < upper[i]:
-            result[i] += 1
-    if sum(result) != units:
-        raise ArithmeticError('allocation projection lost units')
-    return [x * grain for x in result]
-
-
-def simplex(values, total, low, high):
-    """Project linear shares onto a bounded simplex with 40 fractional bits.
-
-    The precision is explicit (9.1e-13 of a decision), with exact zero/one and
-    conservation, without exponential tails or a positive allocation floor.
-    The transport's coarser allocation is separate.
-    """
-    if not total > 0 or not all(math.isfinite(v) for v in [total, *values, *low, *high]):
-        raise ValueError('simplex operands must be finite with a positive total')
-    ticks = SHARE_TICKS
-    from fractions import Fraction
-    ratio = Fraction(ticks) / Fraction(total)
-    # Tiny operands are explicitly below representation precision. Do not
-    # divide them into subnormals on the way to an inevitable rounded zero.
-    scaled = [0.0 if abs(v) < total / ticks else v / total * ticks for v in values]
-    result = project(scaled, ticks, 1,
-                     [math.ceil(Fraction(v) * ratio) for v in low],
-                     [math.floor(Fraction(v) * ratio) for v in high])
-    return [v / ticks * total for v in result]
+def capacity(total, grain, low, high):
+    """Each rank's largest share of `total` units at `grain` within [low_i, high_i] (multiples of
+    grain): min(high_i, total - sum of the other ranks' low bounds)."""
+    return [min(high[i], total - sum(low) + low[i]) // grain * grain for i in range(len(low))]

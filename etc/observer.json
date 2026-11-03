@@ -1,4 +1,0 @@
-{
- "purpose": "The observer's cadence (viz/serve.py): a sample of this node's own telemetry (127.0.0.1) each period_s seconds, the other nodes as this node's bridge's map and records name them; no node's telemetry is read across nodes.",
- "period_s": 2
-}

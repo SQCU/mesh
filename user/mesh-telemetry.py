@@ -1,18 +1,16 @@
 #!/usr/bin/env mesh-python
-import collections, copy, ctypes, json, math, os, platform, plistlib, pwd, re, select, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
+import collections, copy, ctypes, json, math, os, platform, plistlib, re, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path[:0] = [HERE, os.path.join(ROOT, "bin"), os.path.join(ROOT, "rdma")]
-import peers
-RATE = int(os.environ.get("MESH_TELEMETRY_RATE", "1000"))
-BANDWIDTH_RATE = int(os.environ.get("MESH_BANDWIDTH_RATE", str(RATE)))
+RATE = max(100, int(os.environ.get("MESH_TELEMETRY_RATE", "1000")))
+BANDWIDTH_RATE = max(100, int(os.environ.get("MESH_BANDWIDTH_RATE", str(RATE))))
 PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 RING = max(2, int(os.environ.get("MESH_TELEMETRY_RING", "4096")))
 PRODUCERS = max(1, int(os.environ.get("MESH_TELEMETRY_PRODUCERS", "256")))
+LEASE = max(RATE / 1000 * 2, float(os.environ.get("MESH_WORKLOAD_LEASE", "10")))
 STOP = threading.Event()
-INGEST = None
 POWER = None
 BANDWIDTH = None
 CPU_TICKS = None
@@ -53,22 +51,18 @@ def parse(lines):
     if clusters: metrics["cpu_clusters"] = clusters
     return metrics
 
-def account():
-    """The bridge's account (/usr/local/mesh/admin-user), as which a root process runs the bridge's reader: bin/mesh-stat
-    runs no reader as root."""
-    if os.geteuid() != 0: return {}
-    try:
-        with open("/usr/local/mesh/admin-user") as stream: entry = pwd.getpwnam(stream.read().strip())
-    except (OSError, KeyError): return {}
-    return {"user": entry.pw_uid, "group": entry.pw_gid, "extra_groups": []}
+def run(command, timeout=3, text=False):
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True) as process:
+        try: return process.communicate(timeout=timeout)[0]
+        except BaseException:
+            try: os.killpg(process.pid, signal.SIGTERM)
+            except OSError: pass
+            process.wait()
+            raise
 
-def run(command, text=False, **as_account):
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True, **as_account) as process:
-        return process.communicate()[0]
-
-def output(command):
+def output(command, timeout=3):
     try:
-        return run(command, True).strip()
+        return run(command, timeout, True).strip()
     except Exception:
         return ""
 
@@ -130,27 +124,31 @@ def bandwidth():
         "/usr/local/mesh/bin/mesh-bandwidth",
     ])
     if path:
-        try: return json.loads(run([path, "-i", "200"], True))
+        try: return json.loads(run([path, "-i", "200"], 3, True))
         except Exception as error: return {"up": False, "error": f"memory bandwidth sampler: {type(error).__name__}: {error}"}
     return {"up": False, "error": "memory bandwidth sampler unavailable"}
 
 def bridge():
     path = executable([
         os.environ.get("MESH_STAT", ""),
+        os.path.join(ROOT, "rdma", "mesh-stat"),
         os.path.join(HERE, "mesh-stat"),
-        os.path.join(ROOT, "bin", "mesh-stat"),
         "/usr/local/mesh/bin/mesh-stat",
     ])
     if path:
-        try: return json.loads(run([path], True, **account()).splitlines()[-1])
+        try: return json.loads(run([path], 3, True).splitlines()[-1])
         except Exception as error: return {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
     return {"up": False, "error": "mesh-stat unavailable"}
 
 CENSUS = re.compile(r"link (\d+) census queue=(\d+) requests=(\d+) frames=(\d+) retired=(\d+) send_completions=(\d+) records=(\d+) posted=(\d+) landed=(\d+) bytes=(\d+)")
-INFO = ("bridge node ",)
+RECEIVE_RING = re.compile(r"receive ring=\d+ records=(\d+) posted=(\d+)")
+TRACE = re.compile(r'\{"native_trace":(\d+),.*"ns":\[(\d+),\d+,(\d+)\]')
+INFO = ("wire window=", "bridge node ", "pair capacity ", "pair up: ", '{"trace_', "session link ", "session capacity ", "session up: ")
 COUNTS = ("requests", "frames", "retired", "send_completions", "records", "posted", "landed", "bytes")
+FABRIC_KEEP = float(os.environ.get("MESH_FABRIC_KEEP", "600"))
 FABRIC_READ = int(os.environ.get("MESH_FABRIC_READ", str(16 << 20)))
 BRIDGES = {}
+SLOW = {}
 
 def bridge_log(entry, final=False):
     try:
@@ -174,18 +172,31 @@ def bridge_log(entry, final=False):
             total = entry["census"].setdefault(link, dict.fromkeys(("calls",) + COUNTS, 0))
             if queue == 0:
                 total["calls"] += 1
-                entry["last_call"][link] = dict.fromkeys(COUNTS, 0)
+                span = entry["spans"].pop(link, None)
+                entry["last_call"][link] = {**dict.fromkeys(COUNTS, 0), "span_ns": span[1] - span[0] if span else None}
             for key, value in zip(COUNTS, values):
                 total[key] += value
                 entry["last_call"].setdefault(link, dict.fromkeys(COUNTS, 0))[key] += value
             continue
-        if ": paired with node " in line: entry["pairs"] += 1
-        elif line.strip() and not line.startswith(INFO) and ": paired with node " not in line:
+        match = TRACE.match(line)
+        if match:
+            span = entry["spans"].get(match.group(1))
+            begin, end_ns = int(match.group(2)), int(match.group(3))
+            entry["spans"][match.group(1)] = (min(begin, span[0]), max(end_ns, span[1])) if span else (begin, end_ns)
+            entry["traces"] += 1
+        elif line.startswith("receive ring="):
+            entry["rings"] += 1
+            match = RECEIVE_RING.match(line)
+            if match and int(match.group(1)) > int(match.group(2)): entry["credit_limited"] += 1
+        elif line.startswith("pair up: "): entry["pairs"] += 1
+        elif line.startswith("exchange failed"): entry["retries"] += 1
+        elif line.startswith("exchange reset"): entry["resets"] += 1
+        elif line.strip() and not line.startswith(INFO) and not (line.startswith("register ") and ": " not in line):
             entry["errors"] += 1
             entry["last_error"] = line[:240]
 
 def bridge_counters():
-    return {"log_offset": 0, "census": {}, "last_call": {}, "pairs": 0, "errors": 0, "last_error": None}
+    return {"log_offset": 0, "census": {}, "last_call": {}, "spans": {}, "traces": 0, "rings": 0, "credit_limited": 0, "pairs": 0, "retries": 0, "resets": 0, "errors": 0, "last_error": None}
 
 def processes(pids):
     table = {}
@@ -196,25 +207,29 @@ def processes(pids):
 
 def fabric_bridges(now):
     table = processes([int(pid) for pid in output(["/usr/bin/pgrep", "-x", "mesh-flow"]).split()])
-    stat = executable([os.environ.get("MESH_STAT", ""), os.path.join(HERE, "mesh-stat"), os.path.join(ROOT, "bin", "mesh-stat"), "/usr/local/mesh/bin/mesh-stat"])
+    stat = executable([os.environ.get("MESH_STAT", ""), os.path.join(ROOT, "rdma", "mesh-stat"), os.path.join(HERE, "mesh-stat"), "/usr/local/mesh/bin/mesh-stat"])
     for pid, process in table.items():
         argv = process["argv"]
-        if os.path.basename(argv[0]) != "mesh-flow" or argv[1:2] == ["--agent"]: continue
+        if os.path.basename(argv[0]) != "mesh-flow": continue
         entry = BRIDGES.get(pid)
         if entry is None:
+            option = lambda flag, default=None: next((argv[i + 1] for i in range(len(argv) - 1) if argv[i] == flag), default)
+            links = [dict(zip(("device", "peer", "local", "remote", "service", "net_service"), argv[i + 1].split(","))) for i in range(len(argv) - 1) if argv[i] == "--link"]
             log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)
-            entry = BRIDGES[pid] = {"pid": pid, "log": log, "log_size": None, **bridge_counters()}
+            entry = BRIDGES[pid] = {"pid": pid, "rank": option("-I"), "region": option("-s", "/mesh0"), "links": links, "log": log, "log_size": None, **bridge_counters()}
         entry.update({"state": process["stat"], "elapsed": process["elapsed"], "exited_at": None})
-        try: entry["stat"] = json.loads(run([stat], True, **account()).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
+        try: entry["stat"] = json.loads(run([stat, entry["region"]], 3, True).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
         except Exception as error: entry["stat"] = {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
+        entry["flow"] = [{"node": peer.get("node"), "session": (peer.get("session") or {}).get("phase"), **(peer.get("flow") or {})} for peer in entry["stat"].get("peers") or []]
+        entry["communicators"] = entry["stat"].get("communicators") or []
         if entry["log"]: bridge_log(entry)
     for pid, entry in list(BRIDGES.items()):
-        if pid in table or entry["exited_at"] is not None: continue
-        entry.update({"exited_at": now, "state": "exited"})
-        if entry["log"]: bridge_log(entry, True)
-        for other, older in list(BRIDGES.items()):
-            if other != pid and older["exited_at"] is not None: BRIDGES.pop(other)
-    return [copy.deepcopy(entry) for entry in BRIDGES.values()]
+        if pid in table: continue
+        if entry["exited_at"] is None:
+            entry.update({"exited_at": now, "state": "exited"})
+            if entry["log"]: bridge_log(entry, True)
+        elif now - entry["exited_at"] > FABRIC_KEEP: BRIDGES.pop(pid)
+    return [copy.deepcopy({key: value for key, value in entry.items() if key != "spans"}) for entry in BRIDGES.values()]
 
 def fabric_ports():
     try: tree = plistlib.loads(run(["/usr/sbin/ioreg", "-r", "-c", "AppleThunderboltIPPort", "-l", "-a"]))
@@ -260,37 +275,42 @@ def fabric_services():
             found.setdefault(match.group(3), []).append({"domain": domain, "pid": int(match.group(1)) if match.group(1).isdigit() else 0, "status": match.group(2)})
         for match in re.finditer(r'"(io\.mesh\.[^"]+)" => disabled', text):
             found.setdefault(match.group(1), []).append({"domain": domain, "disabled": True})
-    return {"services": found, "booted_at": number(output(["/usr/sbin/sysctl", "-n", "kern.boottime"]), r"sec = (\d+)")}
+    keeper = {"path": "/usr/local/mesh/log/keeper.log"}
+    try:
+        with open(keeper["path"], "rb") as stream:
+            stream.seek(max(0, os.fstat(stream.fileno()).st_size - 4096))
+            lines = [line for line in stream.read().decode(errors="replace").splitlines() if line.strip()]
+        keeper.update({"last": lines[-1] if lines else None, "alarms": [line for line in lines if re.search(r"DEGRADED|ALARM", line)][-3:], "modified": os.path.getmtime(keeper["path"])})
+    except Exception as error: keeper["error"] = f"{type(error).__name__}: {error}"
+    return {"services": found, "keeper": keeper, "booted_at": number(output(["/usr/sbin/sysctl", "-n", "kern.boottime"]), r"sec = (\d+)")}
 
 def fabric(now):
-    return {"bridges": fabric_bridges(now), "ports": fabric_ports(), **fabric_services()}
-
+    if now - SLOW.get("ports_at", 0) >= 5: SLOW.update(ports_at=now, ports=fabric_ports())
+    if now - SLOW.get("services_at", 0) >= 10: SLOW.update(services_at=now, services=fabric_services())
+    return {"bridges": fabric_bridges(now), "ports": SLOW["ports"], "ports_at": SLOW["ports_at"], **SLOW["services"], "services_at": SLOW["services_at"]}
 
 class TelemetryRecord(dict):
+    def __init__(self, value):
+        super().__init__(value)
+        self.wire = {}
+        self.wire_lock = threading.Lock()
+
     def encode(self, projected=False):
         def scalars(value):
             return {key: scalars(child) for key, child in value.items()} if isinstance(value, dict) else {"array_length": len(value)} if isinstance(value, list) else value
-        sample = self["sample"]
-        workload = sample.get("workload", {})
-        value = {**self, "sample": {**sample, "workload": {**workload, "measure_projection": "scalars_and_array_lengths", "producers": [{**row, "measures": scalars(row.get("measures", {}))} for row in workload.get("producers", [])]}}} if projected else self
-        return json.dumps(value, separators=(",", ":")).encode()
-
-
-def shared(value, prior):
-    """`value` with each part equal to `prior`'s the prior object itself (records are never changed in place)"""
-    if value == prior:
-        return prior
-    if isinstance(value, dict) and isinstance(prior, dict):
-        return {key: shared(child, prior[key]) if key in prior else child for key, child in value.items()}
-    if isinstance(value, list) and isinstance(prior, list) and len(value) == len(prior):
-        return [shared(child, old) for child, old in zip(value, prior)]
-    return value
+        with self.wire_lock:
+            if projected not in self.wire:
+                sample = self["sample"]
+                workload = sample.get("workload", {})
+                value = {**self, "sample": {**sample, "workload": {**workload, "measure_projection": "scalars_and_array_lengths", "producers": [{**row, "measures": scalars(row.get("measures", {}))} for row in workload.get("producers", [])]}}} if projected else self
+                self.wire[projected] = json.dumps(value, separators=(",", ":")).encode()
+            return self.wire[projected]
 
 
 class TelemetryRing:
-    def __init__(self, size=RING):
+    def __init__(self, size=RING, lease=LEASE):
         self.records = collections.deque(maxlen=size)
-        self.exits = select.kqueue()
+        self.lease = lease
         self.sequence = 0
         self.lock = threading.RLock()
         self.power = {"up": False, "sampled_at": None, "source": "powermetrics", "error": "sampler starting", "metrics": {}}
@@ -300,7 +320,7 @@ class TelemetryRing:
         self.unkeyed_producers = collections.deque(maxlen=size)
         self.protocol_events = collections.deque(maxlen=size)
         self.ingest_sequence = 0
-        self.exited_producers = 0
+        self.expired_producers = 0
         self.evicted_producers = 0
 
     def set_power(self, payload):
@@ -322,11 +342,6 @@ class TelemetryRing:
         with self.lock: return list(self.protocol_events)[-16:]
 
     def keep(self, key, row):
-        if key not in self.producers:
-            try: self.exits.control([select.kevent(key[0], select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT)], 0)
-            except OSError:
-                self.exited_producers += 1
-                return
         self.producers.pop(key, None)
         self.producers[key] = row
         while len(self.producers) > self.capacity:
@@ -366,19 +381,15 @@ class TelemetryRing:
             self.keep(key, current)
             return sequence
 
-    def exited(self):
-        while True:
-            for event in self.exits.control(None, 64):
-                with self.lock:
-                    gone = [key for key in self.producers if key[0] == event.ident]
-                    for key in gone: self.producers.pop(key)
-                    self.exited_producers += len(gone)
-
-    def workload_sample(self):
+    def workload_sample(self, now=None):
+        now = time.time() if now is None else float(now)
         with self.lock:
+            expired = [key for key, row in self.producers.items() if now - float(row.get("sampled_at", 0)) > self.lease]
+            for key in expired: self.producers.pop(key, None)
+            self.expired_producers += len(expired)
             active = [dict(row) for row in self.producers.values()]
             unkeyed = [dict(row) for row in self.unkeyed_producers]
-            exited_total, evicted_total = self.exited_producers, self.evicted_producers
+            expired_total, evicted_total = self.expired_producers, self.evicted_producers
         for row in active:
             measures = row.get("measures", {})
             artifacts = measures.get("artifacts", {}) if isinstance(measures, dict) else {}
@@ -395,7 +406,7 @@ class TelemetryRing:
             "up": bool(active),
             "sampled_at": max([row.get("sampled_at", 0) for row in active], default=None),
             "active_producers": len(active),
-            "exited_producers": exited_total,
+            "expired_producers": expired_total,
             "evicted_producers": evicted_total,
             "unkeyed_producers": unkeyed,
             "rows": numeric_sum(row.get("rows") for row in active),
@@ -425,10 +436,6 @@ class TelemetryRing:
                 self.records[-1] = TelemetryRecord({**previous, "sample": {**previous["sample"], "workload": compact}})
             self.sequence += 1
             sample = dict(sample)
-            if self.records:   # what did not change since the last sample is that sample's own objects: one copy in the ring
-                prior = self.records[-1]["sample"]
-                sample = {key: value if key in ("workload", "stream") or key not in prior else shared(value, prior[key])
-                          for key, value in sample.items()}
             sample["stream"] = {"schema": 1, "sequence": self.sequence, "sampled_at": time.time(), "monotonic_ns": time.monotonic_ns()}
             record = TelemetryRecord(sample["stream"])
             record["sample"] = sample
@@ -452,39 +459,19 @@ class TelemetryRing:
             reset = latest is not None and since > latest
             return {"schema": 1, "capacity": self.records.maxlen, "since": since, "oldest_sequence": oldest, "latest_sequence": latest, "gap": gap, "reset": reset, "records": records}
 
-def capacity(doc, model, chip, cores):
-    """etc/mesh-capacity.json: the model's characterized figures, else, for a model it does not list (a node class that
-    arrived after the table was written), its GPU's from its own GPU core count at the per-core figures of the listed
-    chip of its generation (the brand's first two words), with the chip's fabric figure; its CPU and memory figures
-    stay absent until the model is characterized (the document's derived_rule)."""
-    models = (doc or {}).get("models") or {}
-    if model in models: return "characterized", models[model]
-    generation = " ".join(chip.split()[:2]) + " "
-    peer = next((m for m in models.values() if (m.get("chip") or "").startswith(generation) and m.get("gpu_cores")), None)
-    if not peer or not cores: return "characterized", None
-    scale = cores / peer["gpu_cores"]
-    return "derived", {"chip": chip, "gpu_cores": cores, "derived_from": peer["chip"], "fabric_gbs": peer.get("fabric_gbs"),
-                       **{k: round(peer[k] * scale, 1) for k in ("gpu_fp32_gflops", "gpu_bf16_gflops") if k in peer}}
-
 def host_facts():
     model = output(["/usr/sbin/sysctl", "-n", "hw.model"])
     memory = output(["/usr/sbin/sysctl", "-n", "hw.memsize"])
-    chip = output(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"])
-    cores = bridge().get("gpu_cores")   # the bridge's one reading (mesh-stat: libmesh mesh_gpu_cores)
-    own = peers.host()
-    name = peers.label(own["node"], peers.table(os.environ.get("MESH_NODES", ""), os.path.join(ROOT, "etc", "mesh-nodes.json"), "/usr/local/mesh/etc/mesh-nodes.json"))
+    name = output(["/usr/sbin/scutil", "--get", "LocalHostName"]) or socket.gethostname().split(".")[0]
     capacity_doc, capacity_path = document([
         os.environ.get("MESH_CAPACITY", ""),
         os.path.join(ROOT, "etc", "mesh-capacity.json"),
         "/usr/local/mesh/etc/mesh-capacity.json",
     ])
-    kind, metrics = capacity(capacity_doc, model, chip, int(cores) if cores else None)
     return {
         "name": name,
-        "node": own["node"],
-        "node_id": own["node_id"],
-        "host": {"model": model, "chip": chip, "gpu_cores": int(cores) if cores else None, "memory_bytes": int(memory) if memory.isdigit() else None, "system": platform.platform()},
-        "capacity": {"kind": kind, "source": (capacity_doc or {}).get("source"), "path": capacity_path, "metrics": metrics},
+        "host": {"model": model, "memory_bytes": int(memory) if memory.isdigit() else None, "system": platform.platform()},
+        "capacity": {"kind": "characterized", "source": (capacity_doc or {}).get("source"), "path": capacity_path, "metrics": ((capacity_doc or {}).get("models") or {}).get(model)},
     }
 
 def snapshot(store, facts=None):
@@ -565,7 +552,7 @@ def power_loop(store):
                 store.set_power({"schema": 1, "up": False, "sampled_at": time.time(), "source": "powermetrics", "error": error, "metrics": {}})
         except Exception as error:
             store.set_power({"schema": 1, "up": False, "sampled_at": time.time(), "source": "powermetrics", "error": type(error).__name__, "metrics": {}})
-        STOP.wait(RATE / 1000)
+        STOP.wait(2)
 
 def bandwidth_loop(store):
     global BANDWIDTH
@@ -578,7 +565,7 @@ def bandwidth_loop(store):
         ])
         if not path:
             store.set_bandwidth({"up": False, "source": "IOReport", "error": "memory bandwidth sampler unavailable"})
-            STOP.wait(BANDWIDTH_RATE / 1000)
+            STOP.wait(2)
             continue
         try:
             BANDWIDTH = subprocess.Popen([path, "-s", str(BANDWIDTH_RATE)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -589,7 +576,7 @@ def bandwidth_loop(store):
             if not STOP.is_set(): store.set_bandwidth({"up": False, "source": "IOReport", "error": "sampler exited"})
         except Exception as error:
             store.set_bandwidth({"up": False, "source": "IOReport", "error": type(error).__name__})
-        STOP.wait(BANDWIDTH_RATE / 1000)
+        STOP.wait(2)
 
 def sample_loop(store):
     facts = host_facts()
@@ -601,19 +588,23 @@ def sample_loop(store):
         except Exception as error:
             store.publish_protocol({"event": "sample_error", "error": f"{type(error).__name__}: {error}", "at": time.time()})
             print(f"telemetry sample: {type(error).__name__}: {error}", flush=True)
-        STOP.wait(max(0.0, period - (time.monotonic() - started)))
+        STOP.wait(max(0.01, period - (time.monotonic() - started)))
 
 def ingest_loop(store):
-    global INGEST
-    INGEST = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    INGEST.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    INGEST.bind(("127.0.0.1", PORT))
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", PORT))
+    server.settimeout(1)
     while not STOP.is_set():
         payload = b""
-        try: payload, _ = INGEST.recvfrom(65535)
-        except OSError: break
-        try: store.publish_workload(json.loads(payload))
-        except Exception: store.publish_workload({"source": "udp", "received_at": time.time(), "payload_bytes": len(payload)})
+        try:
+            payload, _ = server.recvfrom(65535)
+            store.publish_workload(json.loads(payload))
+        except socket.timeout:
+            continue
+        except Exception:
+            store.publish_workload({"source": "udp", "received_at": time.time(), "payload_bytes": len(payload)})
+    server.close()
 
 class TelemetryHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -669,15 +660,17 @@ class TelemetryHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
-        if urllib.parse.urlsplit(self.path).path != "/v1/workload-measures":
-            self.send_json({"schema": 1, "error": "unknown endpoint", "measures": "/v1/workload-measures"}, 404)
-            return
         try:
             payload = json.loads(body)
         except Exception as error:
             payload = {"source": "http", "body": body.decode(errors="replace"),
                        "parse_error": type(error).__name__}
-        self.send_json({"schema": 1, "ingest_sequence": self.server.store.publish_measures(payload)}, 202)
+        sequence = (
+            self.server.store.publish_measures(payload)
+            if urllib.parse.urlsplit(self.path).path == "/v1/workload-measures"
+            else self.server.store.publish_workload(payload)
+        )
+        self.send_json({"schema": 1, "ingest_sequence": sequence}, 202)
 
     def log_message(self, *args):
         self.server.store.publish_protocol({"at":time.time(),"client":self.client_address[0],"message":args[0] % args[1:]})
@@ -708,17 +701,16 @@ def stop(*_):
     STOP.set()
     if POWER and POWER.poll() is None: POWER.terminate()
     if BANDWIDTH and BANDWIDTH.poll() is None: BANDWIDTH.terminate()
-    if INGEST: INGEST.close()
 
 def serve():
     store = TelemetryRing()
-    threading.Thread(target=store.exited, daemon=True).start()
     for target in (power_loop, bandwidth_loop, sample_loop, ingest_loop): threading.Thread(target=target, args=(store,), daemon=True).start()
-    host = os.environ.get("MESH_TELEMETRY_HOST", "127.0.0.1")
+    host = os.environ.get("MESH_TELEMETRY_HOST", "::")
     server_class = TelemetryHTTPServer6 if ":" in host else TelemetryHTTPServer
     server = server_class((host, PORT), TelemetryHandler, store)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    STOP.wait()
+    while not STOP.is_set():
+        STOP.wait(1)
     server.shutdown()
     server.server_close()
 

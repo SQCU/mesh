@@ -8,8 +8,9 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tarfile
 
-SSH = ['ssh', '-o', 'BatchMode=yes']
+SSH = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8']
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -21,9 +22,13 @@ def command(values, host=None, **kwargs):
 
 # ../design/algorithm-sources.md#programtensor
 def checkout(root, host=None):
+    if not host and not (Path(root) / '.git').exists():
+        archive = Path(root) / 'source.tgz'
+        return tarfile.open(archive).pax_headers.get('comment') if archive.exists() else None
     dirty = command(['git', '-C', root, 'status', '--porcelain'], host, capture_output=True, text=True).stdout.strip()
     if dirty:
         raise RuntimeError(f'{host or "local"}:{root}: commit source changes before deployment')
+    command(['git', '-C', root, 'checkout', 'main'], host, stdout=sys.stderr)
     return command(['git', '-C', root, 'rev-parse', 'HEAD'], host, capture_output=True, text=True).stdout.strip()
 
 
@@ -47,17 +52,15 @@ def deploy(args):
     destination = Path(args.checkout) if args.host else source
     if args.host:
         checkout(destination, args.host)
-        command(['git', '-C', destination, 'fetch', 'origin', 'main'], args.host, stdout=sys.stderr)
-        command(['git', '-C', destination, 'merge-base', '--is-ancestor', revision, 'FETCH_HEAD'], args.host)
-        command(['git', '-C', destination, 'checkout', '--detach', revision], args.host, stdout=sys.stderr)
+        command(['git', '-C', source, 'push', f'{args.host}:{destination}', 'main'],
+            env={**os.environ, 'GIT_SSH_COMMAND': shlex.join(SSH)})
         remote = checkout(destination, args.host)
         if remote != revision:
             raise RuntimeError(f'git revision mismatch: local={revision}, remote={remote}')
     with ThreadPoolExecutor(max_workers=2) as pool:
-        builds = [pool.submit(command, ['make', '-C', source / 'rdma', 'all', 'install'], stdout=sys.stderr)]
+        builds = [pool.submit(command, ['make', '-C', source / 'rdma', 'all'], stdout=sys.stderr)]
         if args.host:
-            builds.append(pool.submit(command, ['make', '-C', destination / 'rdma', 'all', 'install'], args.host,
-                                      stdout=sys.stderr))
+            builds.append(pool.submit(command, ['make', '-C', destination / 'rdma', 'all'], args.host, stdout=sys.stderr))
         for build in builds: build.result()
     if args.host:
         command([destination / 'bin/mesh-python', destination / 'bin/mesh-application.py', 'activate',
@@ -99,7 +102,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('operation', choices=('deploy', 'activate', 'launch', 'run'))
     parser.add_argument('--source', default=str(ROOT))
-    parser.add_argument('--checkout', default='mesh', help='the remote checkout, relative to its home (ssh starts there)')
+    parser.add_argument('--checkout', default='/Users/mdot/mesh')
     parser.add_argument('--target', required=True)
     parser.add_argument('--host')
     parser.add_argument('--ssh-command', default=shlex.join(SSH))

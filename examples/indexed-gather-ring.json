@@ -1,0 +1,9 @@
+{
+  "valuesOwner": 0,
+  "indicesOwner": 2,
+  "consumers": [1, 3],
+  "rows": 8192,
+  "columns": 513,
+  "neighbours": 2,
+  "routes": [[0, 1], [0, 3], [2, 1], [2, 3]]
+}

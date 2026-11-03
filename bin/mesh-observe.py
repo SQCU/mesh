@@ -1,13 +1,11 @@
 #!/usr/bin/env mesh-python
-import json, os, subprocess, sys, urllib.request
+import json, os, socket, subprocess, sys, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path[:0] = [HERE, os.path.join(HERE, "..", "rdma")]
-import peers
 BASE = os.environ.get("MESH_TELEMETRY_URL", "http://127.0.0.1:8788")
 
 def fetch(path):
-    with urllib.request.urlopen(BASE.rstrip("/") + path) as response:
+    with urllib.request.urlopen(BASE.rstrip("/") + path, timeout=3) as response:
         return json.load(response)
 
 def direct():
@@ -20,12 +18,12 @@ def direct():
     for path in candidates:
         if not os.path.isfile(path): continue
         try:
-            result = subprocess.run([sys.executable, path, "--once"], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, path, "--once"], capture_output=True, text=True, timeout=7)
             if result.returncode == 0: return json.loads(result.stdout.strip().splitlines()[-1])
             attempts.append({"path": path, "returncode": result.returncode, "error": result.stderr.strip()})
         except Exception as error:
             attempts.append({"path": path, "error": f"{type(error).__name__}: {error}"})
-    return {"schema": 2, "up": False, "reachable": True, "name": peers.label(peers.host()["node"], peers.table(os.path.join(HERE, "..", "etc", "mesh-nodes.json"), "/usr/local/mesh/etc/mesh-nodes.json")), "error": "resident telemetry stream unavailable", "attempts": attempts}
+    return {"schema": 2, "up": False, "reachable": True, "name": socket.gethostname().split(".")[0], "error": "resident telemetry stream unavailable", "attempts": attempts}
 
 try:
     if len(sys.argv) > 2 and sys.argv[1] == "--since":

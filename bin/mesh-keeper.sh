@@ -1,0 +1,53 @@
+#!/bin/bash
+LOG=/usr/local/mesh/log/keeper.log
+[ -f "$LOG" ] && [ "$(stat -f%z "$LOG")" -gt 10485760 ] && { tail -c 2000000 "$LOG" >"$LOG.tmp"; mv "$LOG.tmp" "$LOG"; }
+FLOOR=$(awk '$1=="#define" && $2=="MESH_DISK_FLOOR_GIB"{print $3}' /usr/local/mesh/bin/mesh-disk.h 2>/dev/null)
+FREE=$(df -k /usr/local/mesh/log 2>/dev/null | awk 'NR==2{print $4}')
+if [ -n "$FLOOR" ] && [ -n "$FREE" ] && [ "$FREE" -lt $((FLOOR << 20)) ]; then
+  echo "mesh-disk: $LOG not written: /usr/local/mesh/log has $((FREE * 1024)) bytes free, under the floor of $FLOOR GiB (mesh-disk.h)" >&2
+  exec >/dev/null 2>&1
+else exec >>"$LOG" 2>&1; fi
+ts(){ date '+%F %T'; }
+FW=/usr/libexec/ApplicationFirewall/socketfilterfw
+drift=0
+POLICY=/usr/local/mesh/policy
+[ -f "$POLICY" ] || cp /usr/local/mesh/policy.default "$POLICY" 2>/dev/null
+while read -r k v; do
+  [ -n "$k" ] || continue
+  have=$(pmset -g custom | awk -v k="$k" '$1==k{print $2;exit}')
+  [ -n "$have" ] && [ "$have" != "$v" ] && { echo "[$(ts)] DRIFT $k=$have -> $v"; pmset -a "$k" "$v"; drift=1; }
+done < <(grep -v '^firewall' "$POLICY")
+fw_want=$(awk '$1=="firewall"{print $2;exit}' "$POLICY")
+fw_have=$("$FW" --getglobalstate 2>/dev/null | grep -q 'State = 1' && echo on || echo off)
+[ "$fw_have" = "$fw_want" ] || { echo "[$(ts)] DRIFT firewall=$fw_have -> $fw_want"; "$FW" --setglobalstate "$fw_want" >/dev/null 2>&1; drift=1; }
+nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1 || {
+  echo "[$(ts)] DRIFT sshd down"
+  launchctl enable system/com.openssh.sshd >/dev/null 2>&1
+  launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1
+  drift=1; }
+nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1 || {
+  echo "[$(ts)] DRIFT screensharing down"
+  launchctl enable system/com.apple.screensharing >/dev/null 2>&1
+  launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1
+  drift=1; }
+pgrep -qf "dns-sd -R" || {
+  echo "[$(ts)] DRIFT beacon down"
+  launchctl kickstart -k system/io.mesh.beacon >/dev/null 2>&1
+  drift=1; }
+[ "$(systemsetup -getusingnetworktime 2>/dev/null | awk '{print $NF}')" = On ] || {
+  echo "[$(ts)] DRIFT ntp off"; systemsetup -setusingnetworktime on >/dev/null 2>&1; drift=1; }
+_lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+_lanok=0; [ -n "$_lan" ] && [ -n "$(ipconfig getifaddr "$_lan" 2>/dev/null)" ] && _lanok=1
+_fab=0
+for _d in $(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{print $1}'); do
+  [ "$(ifconfig "${_d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" = active ] && _fab=1
+done
+[ $((_lanok+_fab)) -lt 2 ] && { echo "[$(ts)] DEGRADED planes=$((_lanok+_fab)) lan=$_lanok fabric_link=$_fab rdma_state=unmeasured"; drift=1; }
+[ -x /usr/local/mesh/bin/mesh-networks.sh ] && /usr/local/mesh/bin/mesh-networks.sh
+[ -x /usr/local/mesh/bin/mesh-fabric-init.sh ] && /usr/local/mesh/bin/mesh-fabric-init.sh
+pgrep -qf /usr/local/mesh/bin/babeld || {
+  echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
+[ "$(rdma_ctl status 2>&1)" = enabled ] || {
+  echo "[$(ts)] ALARM rdma disabled, physical Recovery OS visit required"; drift=1; }
+[ "$drift" -eq 0 ] || echo "[$(ts)] pass complete"
+exit 0

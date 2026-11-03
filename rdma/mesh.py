@@ -1,254 +1,133 @@
-"""The mesh from Python: mesh-plan.h through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
-no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
-node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait); link maps,
-their routes and a communicator's members' map are the header's own.
-Collectives run through libnccl-mesh in prepared whole functions (torch-mesh); lease() is its ncclMemAlloc, the
-memory they move taken from the node's bridge's region (rdma/NCCL.md "Memory")."""
-import errno
+import ctypes as C
 import os
-import sys
-from types import SimpleNamespace
+import time
 
-RDMA = os.path.dirname(os.path.abspath(__file__))
-if RDMA not in sys.path:
-    sys.path.insert(0, RDMA)
-try:
-    from _mesh_c import ffi, lib  # noqa: E402
-except ImportError as missing:
-    raise ImportError(f'_mesh_c is not built for {sys.executable} (Python {sys.version.split()[0]}): '
-                      f'make -C {RDMA} mesh-c PYTHON={sys.executable}') from missing
+import numpy as np
+
+U, Q, Z = C.c_uint32, C.c_uint64, C.c_size_t
 
 
-def _named(prefix, names):
-    """The header's constants `prefix`NAME for `names`, as a tuple in their values' order (each value its index)."""
-    values = {name: getattr(lib, prefix + name.upper()) for name in names}
-    ordered = tuple(sorted(names, key=values.get))
-    assert [values[n] for n in ordered] == list(range(len(ordered))), prefix
-    return ordered
+class Context(C.Structure):
+    _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('client', 'send_off', 'send_bytes')),
+                *((k, U) for k in ('rows', 'arena', 'wire', 'shared_pages', 'row_cursor', 'wire_cursor', 'bulk_cursor')),
+                ('fd', C.c_int)]
 
 
-KINDS = _named('MESH_LINKS_', ('mesh', 'ring', 'tree', 'graph'))
+class Header(C.Structure):
+    _fields_ = [(k, U) for k in ('magic', 'version', 'pgsz', 'block', 'rows', 'node', 'qps', 'links')]
 
 
-class LinkMap:
-    """mesh-plan.h's struct mesh_link_map (`c`, a pointer to it) of `kind` (KINDS) over `nodes`, the links `pairs`
-    and each one's bandwidth in bits a second in `bandwidth` (None: none given; 0: that link's unknown), the hardware
-    fact the routes and the packed trees read, with `relays` more nodes (numbered from `nodes`, holding no rank), each
-    node's `mark` (None: its number; the bridges mark a node by its node number) and the routing table `next` (each
-    node b's in-tree, next[v * N + b] v's parent in it, for N = nodes + relays; None: none), the storage held here;
-    refused where mesh_link_map_check refuses it (no map).  A graph need not join its nodes (the bridges' records while
-    a cable is out); mesh_link_map_joined says whether it does, and the trees and collectives run only where it does."""
-
-    def __init__(self, kind, nodes, pairs, bandwidth=None, relays=0, next=None, mark=None):
-        pairs = [tuple(p) for p in pairs]
-        self.kind, self.nodes, self.pairs = kind, nodes, pairs
-        self.bandwidth = None if bandwidth is None else [int(b) for b in bandwidth]
-        self.relays = relays
-        self.next, self.mark = (None if x is None else [int(v) for v in x] for x in (next, mark))
-        self._link = ffi.new('uint32_t[][2]', [list(p) for p in pairs] or [[0, 0]])
-        self._bandwidth = ffi.new('uint64_t[]', self.bandwidth or [0]) if bandwidth is not None else ffi.NULL
-        self._next = ffi.new('uint32_t[]', self.next) if self.next else ffi.NULL
-        self._mark = ffi.new('uint32_t[]', self.mark) if self.mark else ffi.NULL
-        self.c = ffi.new('struct mesh_link_map *')
-        self.c.kind, self.c.nodes, self.c.links, self.c.link = KINDS.index(kind), nodes, len(pairs), self._link
-        self.c.bandwidth = self._bandwidth
-        self.c.relays, self.c.next, self.c.mark = relays, self._next, self._mark
-        status = lib.mesh_link_map_check(self.c)
-        if status:
-            raise ValueError(f'a {kind} of {nodes} nodes and {relays} relays with links {pairs} is not one its algorithms run on: '
-                             f'{os.strerror(status)}')
+class Section(C.Structure):
+    _fields_ = [('first', U), ('pages', U), ('bytes', Z), ('count', U), ('stride', U)]
 
 
-def link_map(kind, nodes, pairs, bandwidth=None, relays=0, next=None, mark=None):
-    """A LinkMap (above)."""
-    return LinkMap(kind, nodes, pairs, bandwidth, relays, next, mark)
+class Operand(C.Structure):
+    _fields_ = [('type', U), ('element_bytes', U), ('elements', Q)]
 
 
-def routes(lmap):
-    """mesh_routes: the routing table of lmap's links by its marks (each node's in-tree of shortest routes, a parent
-    among equals the one of the least hash of its mark, the parent's and the root's: a route moves only where the
-    shortest routes between its ends change), as a flat list N x N (LinkMap's `next`)."""
-    N = lmap.nodes + lmap.relays
-    made = ffi.new('uint32_t[]', max(1, N * N))
-    status = lib.mesh_routes(lmap.c, made)
+class Step(C.Structure):
+    _fields_ = [('op', U), ('peer', U), ('round', U), ('padding', U), ('first', Q), ('piece', Operand)]
+
+
+class LinkMap(C.Structure):
+    _fields_ = [('kind', U), ('nodes', U), ('links', U), ('link', U * 2 * (32 * 31 // 2))]
+
+
+SEND, REDUCE, COPY = range(3)
+DIRECT, CANCELLED = 0, 2 ** 64 - 1
+LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
+CONTEXT = C.POINTER(Context)
+for name, result, arguments in (
+        ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
+        ('mesh_detach', C.c_int, [CONTEXT]),
+        ('mesh_link_map_read', C.c_int, [C.c_char_p, C.POINTER(LinkMap)]),
+        ('mesh_allreduce_plan', U, [C.POINTER(LinkMap), U, Operand, C.POINTER(Step)]),
+        ('mesh_section_create', C.c_int, [CONTEXT, Z, U, C.c_int, C.POINTER(Section)]),
+        ('mesh_section_slice', C.c_int, [CONTEXT, Section, Z, Z, U, U, C.POINTER(Section)]),
+        ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
+        ('mesh_allreduce_bind', C.c_int, [CONTEXT, C.POINTER(Step), U, U, Section, C.POINTER(Section), U, U,
+                                          C.POINTER(Section)]),
+        ('mesh_transfers_prepare', C.c_int, [CONTEXT, U, U, U]),
+        ('mesh_host_inputs', C.c_int, [CONTEXT]),
+        ('mesh_transfers_start', C.c_int, [CONTEXT]),
+        ('mesh_host_publish', None, [CONTEXT, Section, U]),
+        ('mesh_host_arrived', Q, [CONTEXT, Section, U])):
+    function = getattr(LIB, name)
+    function.restype, function.argtypes = result, arguments
+
+
+def check(status):
     if status:
-        raise ValueError(f'mesh_routes: {os.strerror(status)}')
-    return [made[k] for k in range(N * N)]
+        raise OSError(status, os.strerror(status))
 
 
-def route(lmap, a, b):
-    """mesh_route_path: the nodes a message between a and b crosses (the one from b to a reversed), a and b included
-    ([] where none)."""
-    made = ffi.new('uint32_t[]', lmap.nodes + lmap.relays + 1)
-    return [made[i] for i in range(lib.mesh_route_path(lmap.c, a, b, made))]
+class AllReduce:
+    """One rank's all-reduce of a typed array over an explicit link map (mesh-collective.h), prepared
+    once for `invocations` calls.  The rank is the bridge's node; storage rings over `depth` slots."""
 
+    def __init__(self, shape, dtype, links, invocations, depth=4, identity=1, region=None):
+        self.context = Context()
+        context = C.byref(self.context)
+        check(LIB.mesh_attach(context, os.fsencode(region) if region else None))
+        header = Header.from_address(self.context.M)
+        link_map = LinkMap()
+        check(LIB.mesh_link_map_read(os.fsencode(links), C.byref(link_map)))
+        self.rank, self.shape, self.dtype, self.depth = header.node, tuple(shape), np.dtype(dtype), depth
+        self.direct = link_map.kind == DIRECT
+        steps = (Step * (4 * link_map.nodes))()
+        count = LIB.mesh_allreduce_plan(C.byref(link_map), self.rank,
+            Operand(ord(self.dtype.char), self.dtype.itemsize, int(np.prod(shape))), steps)
+        self.steps = steps[:count]
 
-def _members(whole, members, current):
-    """mesh_map_members (current False) or mesh_map (current True): the room grown until it fits."""
-    asked = list(members or ())
-    room = ffi.new('struct mesh_link_map *', {'nodes': max(1, len(asked)), 'links': max(1, len(asked) * (len(asked) - 1) // 2)})
-    while True:
-        node = ffi.new('uint32_t[]', max(1, room.nodes))
-        link, bandwidth = ffi.new('uint32_t[][2]', max(1, room.links)), ffi.new('uint64_t[]', max(1, room.links))
-        table, mark = ffi.new('uint32_t[]', max(1, room.nodes * room.nodes)), ffi.new('uint32_t[]', max(1, room.nodes))
-        made = ffi.new('struct mesh_link_map *', {'nodes': room.nodes, 'links': room.links, 'link': link, 'bandwidth': bandwidth,
-                                                  'next': table, 'mark': mark})
-        given = ffi.new('uint32_t[]', asked) if asked else ffi.NULL
-        if current:
-            count = lib.mesh_map(given, len(asked), node, made)
-        else:
-            count = lib.mesh_map_members(whole.c, given, len(asked), node, made)
-        if count != -errno.ENOSPC:
-            break
-        room = made
-    if count < 0:
-        return count, None, None
-    N = count + made.relays
-    lmap = LinkMap(KINDS[made.kind], count, link[0:made.links], bandwidth[0:made.links], made.relays, table[0:N * N],
-                   mark[0:N])
-    return count, lmap, list(node[0:N])
+        def ring(nbytes):
+            pages = -(-nbytes // (header.pgsz * header.block)) * header.block
+            section = Section()
+            check(LIB.mesh_section_create(context, depth * pages * header.pgsz, 1, 1, C.byref(section)))
+            memory = (C.c_char * (depth * pages * header.pgsz)).from_address(LIB.mesh_section_address(context, section, 0))
+            return section, pages, np.frombuffer(memory, np.uint8).reshape(depth, -1)
 
+        self.bytes = int(np.prod(shape)) * self.dtype.itemsize
+        self.operand, pages, self.slots = ring(self.bytes)
+        received, self.received = [], []
+        for step in self.steps:
+            if step.op == REDUCE:
+                section, step_pages, slots = ring(step.piece.elements * step.piece.element_bytes)
+                received.append(Section())
+                check(LIB.mesh_section_slice(context, section, 0, step.piece.elements * step.piece.element_bytes,
+                                             depth, step_pages, C.byref(received[-1])))
+                self.received.append(slots)
+        self.pieces = (Section * count)()
+        check(LIB.mesh_allreduce_bind(context, steps, count, identity, self.operand,
+                                      (Section * max(1, len(received)))(*received), depth, pages, self.pieces))
+        check(LIB.mesh_transfers_prepare(context, 1, invocations, depth))
+        check(LIB.mesh_host_inputs(context))
+        check(LIB.mesh_transfers_start(context))
 
-def members(whole, among, marks=None):
-    """mesh_map_members: the map a communicator of the whole map's nodes `among` (map node i the whole map's among[i])
-    reads, the whole map's other nodes its relays, its marks and table the whole map's (routes(whole) where it has
-    none), so two members are linked where their route crosses no other member: the rule mesh_map reads the bridges'
-    records by.  `marks` (None: the whole map's own) each whole-map node's mark, as the bridges mark each node by its
-    node number, so the table is the bridges' (a whole map given links and bandwidths alone, link_map('graph', N, links,
-    bandwidths), takes them here; its table, made by other marks, is made again by these).  The map as it is, whether
-    or not it joins its members (mesh_link_map_joined names two it leaves apart)."""
-    if marks is not None:
-        whole = LinkMap(whole.kind, whole.nodes, whole.pairs, whole.bandwidth, whole.relays, None, marks)
-    among = None if among is None else list(among)
-    count, lmap, _ = _members(whole, among, False)
-    if count < 0:
-        raise ValueError(f'mesh_map_members over {among}: {os.strerror(-count)}')
-    return lmap
+    def slot(self, invocation):
+        """Where this rank writes its contribution to `invocation`, in registered pages."""
+        return self.slots[invocation % self.depth, :self.bytes].view(self.dtype).reshape(self.shape)
 
+    def __call__(self, invocation, deadline=float('inf')):
+        """Runs this rank's steps in plan order and returns the reduced array.  A direct exchange
+        sums into a copy, because its SEND may still be reading the slot; a ring or tree sums in place."""
+        own = self.slot(invocation)
+        total = own.copy() if self.direct else own
+        flat, context, received = total.reshape(-1), C.byref(self.context), iter(self.received)
+        for step, piece in zip(self.steps, self.pieces):
+            if step.op == SEND:
+                LIB.mesh_host_publish(context, piece, invocation)
+                continue
+            while not (arrived := LIB.mesh_host_arrived(context, piece, invocation)):
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f'invocation {invocation} step {step.op} from {step.peer}')
+            if arrived == CANCELLED:
+                raise ConnectionAbortedError(f'invocation {invocation} cancelled on the link to {step.peer}')
+            if step.op == REDUCE:
+                count = step.piece.elements
+                flat[step.first:step.first + count] += next(received)[invocation % self.depth, :count * self.dtype.itemsize].view(self.dtype)
+        return total
 
-def wait(serial=0, seconds=None):
-    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), waited
-    for on the serial's word, which the bridge wakes as it moves the map, within its deadline of `seconds` (None: 5 s),
-    past which the program ends (design/eager-execution.md, assumption A4).  OSError naming the bridge where it is unreachable,
-    ESRCH where it exits while waited on."""
-    made = ffi.new('uint64_t *', serial)
-    status = lib.mesh_map_wait(made, 5_000_000_000 if seconds is None else max(1, min(int(seconds * 1e9), (1 << 64) - 1)))
-    if status:
-        raise OSError(status, f"this node's bridge is unreachable: {os.strerror(status)}")
-    return made[0]
-
-
-def current(members=None):
-    """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
-    node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
-    `map` the members' map as libnccl-mesh reads it (its relays, a link where two nodes' bridges reach each other, at its bandwidth, `mark` each node's
-    bridge node number, `next` the routing table; members(map, ...) of the whole map is the
-    map over any of them), `nodes` each map node's (then each relay's) bridge node (a node is its number;
-    a name a person reads is peers.label's, from the name table), `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
-    a node no bridge reaches among its nodes, and the members' map as it is, joined or not (mesh_link_map_joined names
-    two it leaves apart).  OSError naming the bridge where it is unreachable."""
-    serial, own = wait(), ffi.new('uint32_t *')
-    lib.mesh_reached(ffi.NULL, 0, own)
-    count, lmap, nodes = _members(None, members, True)
-    if count < 0:
-        raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0], serial=serial)
-
-
-def nodes():
-    """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node (a
-    name a person reads is peers.label's), its bridge's region and its memory (bytes), its model, its boot (`booted`, ns since the epoch) and its
-    `available` memory as its bridge last sampled it (what the kernel can give without pressure, its reclaimable cache
-    counted).  What a client asks its own daemon about its node and its neighbours, carried over the fabric by the
-    bridges, never probed over another network.  OSError naming the bridge where it is unreachable."""
-    held, own = ffi.new('struct mesh_node_health[64]'), ffi.new('uint32_t *')
-    count = lib.mesh_nodes_health(held, 64)
-    if count < 0:
-        raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    lib.mesh_reached(ffi.NULL, 0, own)
-    text = lambda chars: ffi.string(chars).decode('utf-8', 'replace')
-    return [{'node': r.node, 'region': r.region, 'memory': r.memory, 'model': text(r.model),
-             'booted': r.health.booted, 'available': r.health.available, 'own': r.node == own[0]} for r in held[0:count]]
-
-
-def footprint(pid=0):
-    """The physical footprint of a process (this one where pid is 0), bytes: what the kernel charges it for (its
-    ri_phys_footprint, proc_pid_rusage RUSAGE_INFO_V0), the measure Activity Monitor's Memory column and jetsam use."""
-    import ctypes
-    proc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
-    info = (ctypes.c_uint64 * 14)()
-    if proc.proc_pid_rusage(pid or os.getpid(), 0, ctypes.byref(info)):
-        raise OSError(ctypes.get_errno(), f'proc_pid_rusage({pid or os.getpid()})')
-    return info[2 + 7]
-
-
-def check(result):
-    """A libnccl-mesh result: RuntimeError with the library's reason where it is not ncclSuccess."""
-    if result:
-        raise RuntimeError(f'libnccl-mesh: {ffi.string(lib.ncclGetErrorString(result)).decode()}: '
-                           f'{ffi.string(lib.ncclGetLastError(ffi.NULL)).decode()}')
-
-
-def exchange_configuration(comm, value):
-    """Gather explicit preparation operands on the existing configuration channel."""
-    import json
-    count = ffi.new('int *')
-    check(lib.ncclCommCount(comm, count))
-    local, size = json.dumps(value).encode(), int(count[0])
-    lengths = ffi.new('uint64_t[]', size)
-    check(lib.ncclMeshCommConfigGather(comm, ffi.new('uint64_t *', len(local)), lengths,
-                                      ffi.sizeof('uint64_t')))
-    room = max(lengths)
-    reports = ffi.new('char[]', size * room)
-    check(lib.ncclMeshCommConfigGather(comm, ffi.from_buffer(local.ljust(room, b'\0')), reports, room))
-    return [json.loads(ffi.unpack(reports + rank * room, lengths[rank])) for rank in range(size)]
-
-
-def broadcast_configuration(comm, value, root=0):
-    """Broadcast one prepared operand; this is never an execution-time barrier."""
-    import json
-    rank = ffi.new('int *')
-    check(lib.ncclCommUserRank(comm, rank))
-    local = json.dumps(value).encode() if rank[0] == root else b''
-    length = ffi.new('uint64_t *', len(local))
-    check(lib.ncclMeshCommConfigBroadcast(comm, root, length, ffi.sizeof('uint64_t')))
-    data = ffi.new('char[]', local if rank[0] == root else length[0])
-    check(lib.ncclMeshCommConfigBroadcast(comm, root, data, length[0]))
-    return json.loads(ffi.unpack(data, length[0]))
-
-
-def configuration_members(comm):
-    """Actual bridge member IDs in communicator order, declared during preparation."""
-    member = ffi.new('uint32_t *')
-    lib.mesh_reached(ffi.NULL, 0, member)
-    return exchange_configuration(comm, int(member[0]))
-
-
-def lease(nbytes):
-    """ncclMemAlloc: `nbytes` (at least one) of this node's bridge's region, whole pages already registered on its
-    devices (design/transport.md), as a writable buffer (numpy.frombuffer and torch.frombuffer take it),
-    returned to the region (ncclMemFree) once it and every object over it are gone.  RuntimeError with the library's
-    reason where the region cannot meet it (the bytes asked and the pages free), the node runs no bridge, or this
-    process still holds a lease of a bridge that stopped (rdma/NCCL.md "Memory")."""
-    held, size = ffi.new('void **'), max(1, nbytes)
-    check(lib.ncclMemAlloc(held, size))
-    return ffi.buffer(ffi.gc(ffi.cast('char *', held[0]), lib.ncclMemFree), size)
-
-
-def view_layout(shape, strides, itemsize):
-    """A strided view's bytes in logical (C) element order, the order a WRITE binds them (mesh-write-compiler.h
-    mesh_view_layout): ``(base_shift, (row_bytes, rows, pitch), spans)``, offsets relative to the lowest addressed
-    byte at ``base_shift`` from the first element; an affine view's rows and no span, else zero rows and the spans,
-    a broadcast view's repeated bytes repeated.  Strides are bytes; no value is read."""
-    import operator
-    shape, strides = [operator.index(n) for n in shape], [operator.index(s) for s in strides]
-    itemsize = operator.index(itemsize)
-    if len(shape) != len(strides) or itemsize < 0 or any(n < 0 for n in shape):
-        raise ValueError('a byte view needs matching nonnegative shape and element width')
-    dims = ffi.new('uint64_t[]', shape or [0]), ffi.new('int64_t[]', strides or [0])
-    shift, rows = ffi.new('int64_t *'), ffi.new('uint64_t[3]')
-    needed = lib.mesh_view_layout(dims[0], dims[1], len(shape), itemsize, shift, rows, ffi.NULL, 0)
-    spans = ffi.new('ncclMeshSpan[]', max(needed, 1))
-    if needed > 0:
-        lib.mesh_view_layout(dims[0], dims[1], len(shape), itemsize, shift, rows, spans, needed)
-    return shift[0], (rows[0], rows[1], rows[2]), [(spans[k].offset, spans[k].bytes) for k in range(needed)]
+    def close(self, linger=0.5):
+        """Holds the pair open while the peer's last receive lands, then retires this client."""
+        time.sleep(linger)
+        return LIB.mesh_detach(C.byref(self.context))
