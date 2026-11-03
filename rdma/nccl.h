@@ -284,6 +284,20 @@ typedef struct {
   size_t invocation;
 } ncclMeshStream;
 
+/* design/zorvek.md: the collective's lowering. A call of a declared group: its collective (mesh-plan.h MESH_ALLREDUCE,
+   MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER), element type (ncclDataType_t), reduction op, root
+   and elements. */
+typedef struct { uint32_t what, type, op, root; uint64_t elements; } ncclMeshCollective;
+/* a step of a declared group at this rank (mesh-plan.h struct mesh_step): its call, its channel (the communicator's
+   channel toward its peer), op (MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY), round, buffer (0 the call's
+   operand and result, 1 and more its scratch) and its bytes [first, first + bytes) in that buffer: the run's transport
+   accesses, placed by the solve */
+typedef struct { uint32_t call, channel, op, round, buffer; uint64_t first, bytes; } ncclMeshTransfer;
+/* a node an occurrence gives the run: a link (`word` the chain's link word, `value` the table's region offset), a
+   release (`word` the channel's ready, stored `value` once the step's bytes are written) or a landing (present once
+   the channel's landed `word` reaches `value`); `transfer` its step (UINT32_MAX for a link) */
+enum { ncclMeshNodeLink, ncclMeshNodeRelease, ncclMeshNodeLanding };
+typedef struct { uint32_t kind, transfer, channel; void *word; uint64_t value; } ncclMeshNode;
 /* Opaque handle to communicator */
 typedef struct ncclComm* ncclComm_t;
 #define NCCL_COMM_NULL NULL
@@ -510,6 +524,16 @@ const char* pncclGetLastError(ncclComm_t comm);
 /* Checks whether the comm has encountered any asynchronous errors */
 ncclResult_t  ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError);
 ncclResult_t pncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError);
+/* design/zorvek.md: a group of `count` calls declared once, routed along the communicator's trees; *definition names it */
+ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *calls, size_t count, uint64_t *definition);
+/* its steps at this rank, written up to `capacity`, *count their number */
+ncclResult_t ncclMeshCommSteps(ncclComm_t comm, uint64_t definition, ncclMeshTransfer *out, size_t capacity, size_t *count);
+/* an occurrence lowered onto its placed bytes (address[s]: step s's bytes, a SEND's source, a COPY's destination, a
+   REDUCE's landing): its tables laid and its nodes written up to `capacity`, *count their number. after[a] = (SEND step,
+   landing step): that SEND completes before that landing is posted (the solve's edges). */
+ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, void *const *address,
+                                         const uint32_t (*after)[2], size_t afters, ncclMeshNode *node, size_t capacity,
+                                         size_t *count);
 
 /* Gets the number of ranks in the communicator clique. */
 ncclResult_t  ncclCommCount(const ncclComm_t comm, int* count);

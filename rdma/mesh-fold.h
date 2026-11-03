@@ -5,13 +5,13 @@
 #define MESH_FOLD_H
 #include <stdint.h>
 #include <stddef.h>
-#include "mesh-isl-memory.h"
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 
 struct mesh_fold_node { uint32_t left,right,owner,round; };
 struct mesh_fold { uint32_t nodes,count,result,leaves; struct mesh_fold_node *node; };
-static inline void mesh_fold_free(struct mesh_fold *fold) { mesh_isl_free(fold->node);*fold=(struct mesh_fold){0}; }
+static inline void mesh_fold_free(struct mesh_fold *fold) { free(fold->node);*fold=(struct mesh_fold){0}; }
 struct mesh_fold_visit {
   const uint32_t *parent; uint32_t *state; struct mesh_fold *fold; int ordered;
 };
@@ -45,9 +45,9 @@ static inline int mesh_fold_visit(struct mesh_fold_visit *visit,uint32_t rank,st
 }
 static inline int mesh_fold_decode(uint32_t nodes,const uint32_t *parent,int ordered,struct mesh_fold *out) {
   *out=(struct mesh_fold){.nodes=nodes};
-  out->node=mesh_isl_calloc((size_t)nodes+1,sizeof *out->node);
-  uint32_t *state=mesh_isl_calloc((size_t)nodes+1,sizeof *state),root=UINT32_MAX,leaves=0;
-  if(!out->node||!state){mesh_isl_free(state);mesh_fold_free(out);return ENOMEM;}
+  out->node=calloc((size_t)nodes+1,sizeof *out->node);
+  uint32_t *state=calloc((size_t)nodes+1,sizeof *state),root=UINT32_MAX,leaves=0;
+  if(!out->node||!state){free(state);mesh_fold_free(out);return ENOMEM;}
   int error=0;
   for(uint32_t r=0;r<nodes;r++)if(parent[r]!=UINT32_MAX) {
     leaves++;
@@ -60,7 +60,7 @@ static inline int mesh_fold_decode(uint32_t nodes,const uint32_t *parent,int ord
     error=mesh_fold_visit(&visit,root,&value);
     if(!error&&value.leaves!=leaves)error=EINVAL;
   } else if(!error)error=EINVAL;
-  mesh_isl_free(state);
+  free(state);
   if(error){mesh_fold_free(out);return error;}
   out->result=value.id;out->leaves=leaves;return 0;
 }
@@ -83,7 +83,7 @@ typedef int (*mesh_fold_emit)(void *,const uint32_t *);
 static inline int mesh_fold_rotations(uint32_t nodes,const uint32_t *parent,mesh_fold_emit emit,void *context) {
   struct mesh_fold fold={0};int error=mesh_fold_decode(nodes,parent,1,&fold);
   if(error)return error;
-  uint32_t *made=mesh_isl_malloc(((size_t)nodes+1)*sizeof *made);
+  uint32_t *made=malloc(((size_t)nodes+1)*sizeof *made);
   if(!made){mesh_fold_free(&fold);return ENOMEM;}
   for(uint32_t i=0;!error&&i<fold.count;i++)for(int right=0;!error&&right<2;right++) {
     const struct mesh_fold_node saved=fold.node[i];
@@ -100,6 +100,6 @@ static inline int mesh_fold_rotations(uint32_t nodes,const uint32_t *parent,mesh
     mesh_fold_encode(&fold,made);error=emit(context,made);
     fold.node[i]=saved;fold.node[j]=nested;
   }
-  mesh_isl_free(made);mesh_fold_free(&fold);return error;
+  free(made);mesh_fold_free(&fold);return error;
 }
 #endif

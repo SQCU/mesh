@@ -14,8 +14,8 @@ MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
 # one's deprecation must not leave a node's bridge unbuilt)
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
-$(IMAGES:%=.build/%) .build/nccl-mesh-kernels: $(METAL_CONFIGURATION)
-$(IMAGES:%=.build/%) .build/nccl-mesh-kernels: metal-capabilities.h ../etc/compute/metal.def ../etc/bridge/layout.h ../etc/bridge/thunderbolt.h
+$(IMAGES:%=.build/%): $(METAL_CONFIGURATION)
+$(IMAGES:%=.build/%): metal-capabilities.h ../etc/compute/metal.def ../etc/bridge/layout.h ../etc/bridge/thunderbolt.h
 all: $(IMAGES:%=.build/%) .build/libsleef.a
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
@@ -42,100 +42,30 @@ install-images: $(OTHERS:%=.build/%)
 	  else [ $$f != libmesh.dylib ] || moved=1; fi; \
 	  cp .build/$$f $$f.install && mv -f $$f.install $$f || exit 1; echo "rdma/$$f installed"; \
 	done
-# libnccl-mesh's kernel files under the kernels' SHA-256 (the AIR checked or built: kernels; this node's binary
-# archive made anew: below), then libnccl-mesh.dylib, so a new library finds its own; after install-images, whose
-# libmesh it links.  Earlier kernels' files stay, for a process that mapped an earlier library and has not yet loaded
-# its kernels (clean-kernels removes them)
-install-nccl: install-images .build/libnccl-mesh.dylib .build/libnccl-mesh.metallib .build/libnccl-mesh.binarchive
-	@h=$$(cat .build/libnccl-mesh.sha256); for f in $(KERNEL_FILES); do \
-	  cmp -s .build/libnccl-mesh.$$f libnccl-mesh.$$h.$$f && continue; \
-	  cp .build/libnccl-mesh.$$f libnccl-mesh.$$h.$$f.install && mv -f libnccl-mesh.$$h.$$f.install libnccl-mesh.$$h.$$f || exit 1; \
-	  echo "rdma/libnccl-mesh.$$h.$$f installed"; \
-	done
+# libnccl-mesh.dylib, after install-images, whose libmesh it links
+install-nccl: install-images .build/libnccl-mesh.dylib
 	@cmp -s .build/libnccl-mesh.dylib libnccl-mesh.dylib || { cp .build/libnccl-mesh.dylib libnccl-mesh.dylib.install && \
 	  mv -f libnccl-mesh.dylib.install libnccl-mesh.dylib && echo "rdma/libnccl-mesh.dylib installed"; }
-# every other kernels' files in rdma/, which the installed libnccl-mesh.dylib does not load: run by hand where no
-# process of an earlier library still runs (one that has not loaded its kernels would fail its first collective)
-clean-kernels: .build/libnccl-mesh.sha256
-	@h=$$(cat .build/libnccl-mesh.sha256); for f in $(KERNEL_FILES:%=libnccl-mesh.*.%); do \
-	  [ -e "$$f" ] || continue; case $$f in libnccl-mesh.$$h.*) ;; *) rm -f "$$f" && echo "rdma/$$f removed";; esac; \
-	done
 # NCCL's API (nccl.h) on the prepared transfers and the collective planner of libmesh.dylib; every function also
 # under its pncclX profiling name, as NCCL exports both
 NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitRankConfig ncclCommInitRank \
-  ncclCommInitAll ncclCommFinalize ncclCommDestroy ncclCommAbort ncclCommSplit ncclCommShrink ncclGetErrorString \
+  ncclCommInitAll ncclCommFinalize ncclCommDestroy ncclCommAbort ncclGetErrorString \
   ncclGetLastError ncclCommGetAsyncError ncclCommCount ncclCommCuDevice ncclCommUserRank ncclCommRegister \
-  ncclCommDeregister ncclRedOpCreatePreMulSum ncclRedOpDestroy ncclCommRevoke ncclCommGetUniqueId ncclCommGrow
-# rdma/mesh.metal, the GPU transport primitives, is libnccl-mesh's kernels' one copy of them: its text embedded in
-# the build tool's source (nccl-mesh-kernels.m) as the header mesh_metal.h
-.build/mesh_metal.h: mesh.metal
-	mkdir -p .build
-	xxd -i mesh.metal > $@
-# libnccl-mesh's kernels, compiled when the library is built and never in a process it serves (rdma/NCCL.md "The
-# library's kernels"; nccl-mesh-kernels.h): KERNEL_FILES, the two files a libnccl-mesh.dylib loads beside itself, each
-# named libnccl-mesh.<SHA-256>.<kind> by the kernels' SHA-256, of their compile line (METAL) and their text, which is
-# compiled into the library that loads them (KERNELS_SHA256; nccl-mesh-metal.m kernels_of)
-KERNEL_FILES = metallib binarchive
-# the build tool (nccl-mesh-kernels.m), the kernels' text it writes (rdma/mesh.metal's primitives, then
-# nccl-mesh-kernels.h's) and the kernels' SHA-256
-.build/nccl-mesh-kernels: nccl-mesh-kernels.m nccl-mesh-kernels.h mesh-page-sites.h nccl-mesh-metal.h .build/mesh_metal.h Makefile
-	cc -O2 $(WARN) -I .build -o $@ nccl-mesh-kernels.m -framework Metal -framework Foundation
-.build/libnccl-mesh.metal: .build/nccl-mesh-kernels
-	.build/nccl-mesh-kernels $@
-.build/libnccl-mesh.sha256: .build/libnccl-mesh.metal Makefile $(METAL_CONFIGURATION)
-	h=$$({ echo '$(METAL)'; cat $<; } | shasum -a 256) && echo "$${h%% *}" > $@
-# kernels: the kernels' AIR, which every Apple GPU's driver takes: vendor/libnccl-mesh.metallib, committed with
-# vendor/libnccl-mesh.sha256 (the kernels' SHA-256 it was compiled from, then the AIR's own; vendor/PROVENANCE.md), so
-# that a node with no Metal toolchain still installs.  The Metal toolchain is an Xcode with its Metal toolchain
-# component (XCODE): DEVELOPER_DIR's, or else the last /Applications/Xcode*.app, which bin/mesh-devtools-init.sh readies
-# on every node.  The two commands below alone run under it and its own SDK (SDKROOT=macosx; xcrun otherwise takes a
-# newer Command Line Tools' SDK, whose version the AIR records), and every other command here keeps the active developer
-# directory (the Command Line Tools: verbs.h, librdma).  Metal 4.0; floating point as MTLMathModeSafe; macOS 26.0's
-# AIR, the floor the library's Metal 4 calls need; every warning an error but an unused function (mesh.metal is every
-# consumer's header of primitives, and these kernels call some of them).  Where the record is these kernels' and that
-# AIR's, the committed AIR is used; where it is not, the kernels are compiled here into .build/ (a node's checkout stays
-# its branch's: a pull is never blocked by a rewritten vendor/), `kernels` puts them in vendor/ for a commit, and a
-# machine that cannot compile fails naming that build: never an AIR of other kernels.  Not in `all`, so that no image
-# waits on it (install-nccl takes it)
-METAL = xcrun metal -std=metal$(MESH_METAL_LANGUAGE) -fmetal-math-mode=$(MESH_METAL_MATH) -mmacosx-version-min=$(MESH_MACOS_MIN) -Wall -Werror -Wno-unused-function \
-  -Wno-error=deprecated-declarations
-XCODE = DEVELOPER_DIR=$(or $(DEVELOPER_DIR),$(lastword $(wildcard /Applications/Xcode*.app/Contents/Developer))) \
-  SDKROOT=macosx
-VENDOR = ../vendor
-kernels: .build/libnccl-mesh.metallib
-	@a=$$(shasum -a 256 < $<) && { cat .build/libnccl-mesh.sha256; echo "$${a%% *}"; } | cmp -s - $(VENDOR)/libnccl-mesh.sha256 || { \
-	  cp $< $(VENDOR)/libnccl-mesh.metallib && { cat .build/libnccl-mesh.sha256; echo "$${a%% *}"; } > $(VENDOR)/libnccl-mesh.sha256 && \
-	  echo "rdma/Makefile: vendor/libnccl-mesh.metallib and vendor/libnccl-mesh.sha256 compiled anew: commit them" >&2; }
-.build/libnccl-mesh.metallib: .build/libnccl-mesh.sha256 $(wildcard $(VENDOR)/libnccl-mesh.sha256 $(VENDOR)/libnccl-mesh.metallib)
-	@[ -f $(VENDOR)/libnccl-mesh.metallib ] && a=$$(shasum -a 256 < $(VENDOR)/libnccl-mesh.metallib) && \
-	  { cat $<; echo "$${a%% *}"; } | cmp -s - $(VENDOR)/libnccl-mesh.sha256 && cp $(VENDOR)/libnccl-mesh.metallib $@ || { \
-	  $(XCODE) $(METAL) -c -o .build/libnccl-mesh.air .build/libnccl-mesh.metal && \
-	  $(XCODE) xcrun metallib -o $@ .build/libnccl-mesh.air || { echo \
-	    "rdma/Makefile: vendor/libnccl-mesh.metallib is not these kernels' AIR (vendor/libnccl-mesh.sha256 against" \
-	    "$<), and compiling them here ($(XCODE)) failed (above): where an Xcode has its Metal toolchain" \
-	    "(bin/mesh-devtools-init.sh), make -C rdma kernels, then commit vendor/libnccl-mesh.metallib and" \
-	    "vendor/libnccl-mesh.sha256 (rdma/NCCL.md, The library's kernels)" >&2; exit 1; }; \
-	  echo "rdma/Makefile: vendor/libnccl-mesh.metallib is not these kernels' AIR: compiled here into $@;" \
-	    "make -C rdma kernels puts it in vendor/ for a commit" >&2; }
-# this node's binary archive: every kind's pipeline compiled from the metallib for this machine's GPU by the build
-# tool, made at every install (the system's GPU compiler may change under an unchanged metallib: an OS update), by the
-# person or agent who runs it; a process looks each pipeline up in it and compiles none
-.build/libnccl-mesh.binarchive: .build/nccl-mesh-kernels .build/libnccl-mesh.metallib
-	rm -f $@ && .build/nccl-mesh-kernels .build/libnccl-mesh.metallib $@
+  ncclCommDeregister ncclRedOpCreatePreMulSum ncclRedOpDestroy ncclCommRevoke ncclCommGetUniqueId
 # A changed OS or SDK invalidates native products; an unchanged install retains them.
 .build/metal-environment: FORCE
 	@mkdir -p .build; environment="$$(sw_vers -buildVersion) $$(xcrun --show-sdk-build-version)"; \
 	  [ "$$(cat $@ 2>/dev/null)" = "$$environment" ] || printf '%s\n' "$$environment" > $@
-$(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .build/metal-environment
-.PHONY: FORCE kernels install-images install-nccl clean-kernels
+$(IMAGES:%=.build/%): .build/metal-environment
+.PHONY: FORCE install-images install-nccl
 .build/mesh-cpu-source.o: mesh-cpu-source.m mesh-cpu-source.h mesh-cpu-kernels.h mesh-host.h Makefile .build/metal-environment
 	mkdir -p .build
 	cc -fobjc-arc -fblocks -O2 $(WARN) -c mesh-cpu-source.m -o $@
-.build/libnccl-mesh.dylib: .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-run.m metal-run.h metal-recording.m metal-recording.h metal-page-effects.m metal-page-effects.h mesh-page-sites.h mesh-host.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-index-relation.m mesh-index-relation.h mesh-isl-memory.c mesh-isl-memory.h mesh-sparse.c mesh-sparse.h $(ISL_ARCHIVE) mesh-span-plan.h mesh-landing.h mesh-fold.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h mesh-publication.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-graph.h mesh-write-compiler.h \
+.build/libnccl-mesh.dylib: .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c mesh-statistics.h metal.m metal.h mesh-page-sites.h mesh-host.h mesh-span-plan.h mesh-landing.h mesh-fold.h mesh-lease-retire.h mesh-publication.h nccl.h mesh-graph.h mesh-write-compiler.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h mesh-fabric.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
-	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -DMESH_ISL_SLAB_BYTES=$(MESH_ISL_SLAB_BYTES) -dynamiclib $(ISL_HEADERS) -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
+	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -dynamiclib -I .build \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
-	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-run.m metal-recording.m metal-page-effects.m mesh-tensor-layout.m mesh-index-relation.m mesh-isl-memory.c mesh-sparse.c $(ISL_ARCHIVE) -L.build -lmesh \
+	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c metal.m -L.build -lmesh \
 	  -framework Metal -framework Foundation -framework Accelerate
 .build/libmesh-coreml.dylib: mesh-coreml.m mesh-coreml.h mesh-cpu-source.h mesh-host.h mesh-cpu-kernels.h mesh-ane-entry.h mesh-ane-entry.inc mesh-tensor-layout.h .build/libnccl-mesh.dylib Makefile
 	mkdir -p .build
@@ -153,7 +83,7 @@ statistics: .build/libmesh-statistics.dylib
 	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-graph.c mesh-page-map.c mesh-dataflow.c mesh-call.c mesh-collective.c mesh-fabric.c mesh-routed.c mesh-diagnostics.c -framework IOKit -framework CoreFoundation
 # the built images; never an installed image (the launchd job's binary and the libraries clients map)
 clean:
-	rm -rf $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.metal .build/libnccl-mesh.sha256 \
+	rm -rf $(IMAGES:%=.build/%) \
 	  .build/libnccl-mesh.air $(KERNEL_FILES:%=.build/libnccl-mesh.%)
 .PHONY: all install clean
 

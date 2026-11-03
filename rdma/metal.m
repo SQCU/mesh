@@ -1,16 +1,59 @@
-// metal-run.h: the run's effector. Sources: mesh_graph_realize for every decision (mesh-graph.h); Apple's Metal 4 API
+// metal.h: the library's Metal interface. 1 and 2 from the SDK (MTLDevice.h newBufferWithBytesNoCopy; MTL4Compiler.h,
+// MTL4LibraryDescriptor.h, MTL4LibraryFunctionDescriptor.h, MTL4SpecializedFunctionDescriptor.h); 3, the run's effector. Sources: mesh_graph_realize for every decision (mesh-graph.h); Apple's Metal 4 API
 // for encoding and submission (MTL4CommandBuffer.h, MTL4ComputeCommandEncoder.h: the argument table is snapshotted at
 // each dispatch, MTL4CommandEncoder.h: barriers and fences, MTL4CommandQueue.h: queue events and commit feedback);
 // libdispatch groups for host joins.
-#import "metal-run.h"
-#import "metal-recording.h"
+#import "metal.h"
 #include <mach/mach_time.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include "mesh-graph.h"
 #include "mesh-statistics.h"
 #include "nccl.h"
+
+id<MTLDevice> MetalDevice(void) {
+    static id<MTLDevice> device;
+    static dispatch_once_t made;
+    dispatch_once(&made,^{device=MTLCreateSystemDefaultDevice();});
+    return device;
+}
+
+id<MTLBuffer> MetalWrap(void *address,size_t bytes) {
+    return [MetalDevice() newBufferWithBytesNoCopy:address length:bytes
+        options:MTLResourceStorageModeShared|MTLResourceHazardTrackingModeUntracked deallocator:nil];
+}
+
+void MetalRelease(id object) { [object release]; }
+void *MetalContents(id<MTLBuffer> buffer) { return buffer.contents; }
+
+id<MTLComputePipelineState> MetalPipeline(NSString *source,NSString *function,NSArray<NSArray *> *constants,NSError **error) {
+    static id<MTL4Compiler> compiler;
+    static dispatch_once_t made;
+    dispatch_once(&made,^{compiler=[MetalDevice() newCompilerWithDescriptor:[[MTL4CompilerDescriptor new] autorelease] error:nil];});
+    MTLCompileOptions *options=[[MTLCompileOptions new] autorelease];
+    options.languageVersion=MTLLanguageVersion4_0;options.mathMode=MTLMathModeSafe;
+    MTL4LibraryDescriptor *text=[[MTL4LibraryDescriptor new] autorelease];
+    text.source=source;text.options=options;
+    id<MTLLibrary> library=[[compiler newLibraryWithDescriptor:text error:error] autorelease];
+    if(!library)return nil;
+    MTL4LibraryFunctionDescriptor *named=[[MTL4LibraryFunctionDescriptor new] autorelease];
+    named.name=function;named.library=library;
+    MTL4FunctionDescriptor *chosen=named;
+    if(constants.count) {
+        MTLFunctionConstantValues *values=[[MTLFunctionConstantValues new] autorelease];
+        for(NSArray *constant in constants)
+            [values setConstantValue:((NSData *)constant[2]).bytes type:(MTLDataType)[constant[1] unsignedIntegerValue]
+                             atIndex:[constant[0] unsignedIntegerValue]];
+        MTL4SpecializedFunctionDescriptor *specialized=[[MTL4SpecializedFunctionDescriptor new] autorelease];
+        specialized.functionDescriptor=named;specialized.constantValues=values;
+        chosen=specialized;
+    }
+    MTL4ComputePipelineDescriptor *pipeline=[[MTL4ComputePipelineDescriptor new] autorelease];
+    pipeline.computeFunctionDescriptor=chosen;
+    return [compiler newComputePipelineStateWithDescriptor:pipeline compilerTaskOptions:nil error:error];
+}
 
 enum { RunDispatch, RunCopy, RunHost, RunInput };
 
@@ -29,6 +72,68 @@ struct RunNode {
 };
 struct RunResult { __unsafe_unretained id<MTLBuffer> buffer; NSUInteger offset; uint32_t bytes; uint64_t threshold; };
 struct RunWait { __unsafe_unretained id<MTLSharedEvent> event; uint64_t value; };
+
+// A landing's presence. The process's one watcher reads the bridge's `landed` words of enqueued runs' landings and
+// sets each landing's event once its word reaches its threshold (or the link's loss, all-ones); it parks while none
+// is outstanding. Records reach it by a lock-free stack; a freed run cancels its own. The run and the watcher each hold
+// one reference.
+enum { LandingWaiting, LandingPresent, LandingLost, LandingCancelled };
+struct RunLanding {
+    const _Atomic uint64_t *word;
+    uint64_t threshold;
+    id<MTLSharedEvent> event;
+    _Atomic int state, references;
+    struct RunLanding *next;
+};
+static _Atomic(struct RunLanding *) landingStack;
+static dispatch_semaphore_t landingPosted;
+static void RunLandingRelease(struct RunLanding *landing) {
+    if(atomic_fetch_sub_explicit(&landing->references,1,memory_order_acq_rel)==1){[landing->event release];free(landing);}
+}
+static void *RunLandingWatch(void *unused) {
+    (void)unused;
+    struct RunLanding **watched=NULL;size_t count=0,capacity=0;
+    for(;;) {
+        for(struct RunLanding *taken=atomic_exchange_explicit(&landingStack,NULL,memory_order_acquire);taken;) {
+            struct RunLanding *next=taken->next;
+            if(count==capacity){capacity=capacity?2*capacity:64;watched=realloc(watched,capacity*sizeof *watched);}
+            watched[count++]=taken;taken=next;
+        }
+        if(!count){dispatch_semaphore_wait(landingPosted,DISPATCH_TIME_FOREVER);continue;}
+        size_t kept=0;
+        for(size_t k=0;k<count;k++) {
+            struct RunLanding *landing=watched[k];
+            const uint64_t landed=atomic_load_explicit(landing->word,memory_order_acquire);
+            int state=atomic_load_explicit(&landing->state,memory_order_acquire);
+            if(state==LandingWaiting&&(landed==UINT64_MAX||landed>=landing->threshold)) {
+                state=landed==UINT64_MAX?LandingLost:LandingPresent;
+                atomic_store_explicit(&landing->state,state,memory_order_release);
+                landing->event.signaledValue=1;
+            }
+            if(state==LandingWaiting)watched[kept++]=landing;else RunLandingRelease(landing);
+        }
+        count=kept;
+    }
+    return NULL;
+}
+static void RunLandingStart(void) {
+    landingPosted=dispatch_semaphore_create(0);
+    pthread_t watcher;
+    pthread_attr_t attributes;pthread_attr_init(&attributes);
+    pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
+    pthread_attr_setdetachstate(&attributes,PTHREAD_CREATE_DETACHED);
+    if(pthread_create(&watcher,&attributes,RunLandingWatch,NULL))[NSException raise:NSMallocException format:@"the landing watcher"];
+    pthread_attr_destroy(&attributes);
+}
+static void RunLandingPost(struct RunLanding *landing) {
+    static pthread_once_t started=PTHREAD_ONCE_INIT;
+    pthread_once(&started,RunLandingStart);
+    atomic_fetch_add_explicit(&landing->references,1,memory_order_relaxed); // the watcher's
+    struct RunLanding *head=atomic_load_explicit(&landingStack,memory_order_relaxed);
+    do landing->next=head;
+    while(!atomic_compare_exchange_weak_explicit(&landingStack,&head,landing,memory_order_release,memory_order_relaxed));
+    dispatch_semaphore_signal(landingPosted);
+}
 
 // a host node at run time: its prepared task, the join its producers leave, the joins it leaves on completion
 struct RunHostState {
@@ -55,7 +160,7 @@ struct MetalRun {
     id<MTLDevice> device;
     id<MTLResidencySet> residency;
     NSMutableArray *held;
-    NSMutableData *nodes, *bindings, *constants, *edges, *results, *comms;
+    NSMutableData *nodes, *bindings, *edges, *results, *comms, *landings; // landings: struct RunLanding *
     uint64_t event;
     uint32_t parts;
     struct RunPart *part;
@@ -92,8 +197,9 @@ struct MetalRun *MetalRunCreate(id<MTL4CommandQueue> queue) {
     run->residency=[run->device newResidencySetWithDescriptor:descriptor error:&error];
     if(!run->residency)[NSException raise:NSMallocException format:@"run residency: %@",error];
     run->held=[NSMutableArray new];
-    run->nodes=[NSMutableData new];run->bindings=[NSMutableData new];run->constants=[NSMutableData new];
+    run->nodes=[NSMutableData new];run->bindings=[NSMutableData new];
     run->edges=[NSMutableData new];run->results=[NSMutableData new];run->comms=[NSMutableData new];
+    run->landings=[NSMutableData new];
     return run;
 }
 id<MTLDevice> MetalRunDevice(struct MetalRun *run) { return run->device; }
@@ -129,10 +235,12 @@ void MetalRunInput(struct MetalRun *run,id<MTLSharedEvent> event,uint64_t value)
     [run->held addObject:event];
     RunAppend(run,(struct RunNode){.kind=RunInput,.signal=event,.value=value});
 }
-struct MetalRunBinding MetalRunConstant(struct MetalRun *run,const void *bytes,size_t length,uint32_t index) {
-    const NSUInteger offset=(run->constants.length+15)&~(NSUInteger)15;
-    [run->constants setLength:offset];[run->constants appendBytes:bytes length:length];
-    return (struct MetalRunBinding){nil,offset,index};
+void MetalRunLanded(struct MetalRun *run,const void *word,uint64_t threshold) {
+    struct RunLanding *landing=calloc(1,sizeof *landing);
+    landing->word=word;landing->threshold=threshold;landing->event=[run->device newSharedEvent];
+    atomic_init(&landing->state,LandingWaiting);atomic_init(&landing->references,1); // the run's
+    [run->landings appendBytes:&landing length:sizeof landing];
+    MetalRunInput(run,landing->event,1);
 }
 void MetalRunEdges(struct MetalRun *run,const uint64_t (*edges)[2],size_t count) {
     [run->edges appendBytes:edges length:count*sizeof *edges];
@@ -187,14 +295,6 @@ const char *MetalRunFinish(struct MetalRun *run) {
     const struct RunNode *nodes=run->nodes.bytes;
     const uint32_t n=(uint32_t)(run->nodes.length/sizeof *nodes);
     run->nodeCount=n;
-    // the constants lease, and every constants binding resolved to it
-    if(run->constants.length) {
-        id<MTLBuffer> constants=[MetalLeaseBuffer(run->device,run->constants.length) autorelease];
-        memcpy(constants.contents,run->constants.bytes,run->constants.length);
-        [run->held addObject:constants];RunResident(run,constants);
-        struct MetalRunBinding *binding=run->bindings.mutableBytes;
-        for(size_t k=0;k<run->bindings.length/sizeof *binding;k++)if(!binding[k].buffer)binding[k].buffer=constants;
-    }
     const struct RunResult *result=run->results.bytes;
     for(size_t k=0;k<run->results.length/sizeof *result;k++)RunResident(run,result[k].buffer);
     [run->residency commit];
@@ -303,9 +403,6 @@ const char *MetalRunFinish(struct MetalRun *run) {
         pending++;
     }
     atomic_store_explicit(&run->pending,pending,memory_order_relaxed);
-    struct ncclComm *const *comm=run->comms.bytes;
-    for(size_t k=0;!defect&&k<run->comms.length/sizeof *comm;k++)
-        if(ncclMeshCommRealized(comm[k])!=ncclSuccess)defect="realizing a communicator's occurrences";
     free(host);free(barrier);free(fence);free(part);free(deferred);
     run->wait=wait;run->waits=count;
     return defect;
@@ -347,6 +444,8 @@ void MetalRunEnqueue(struct MetalRun *run) {
         struct MetalRun *owner=run;const uint32_t at=p;
         dispatch_group_notify(run->part[p].join,run->commits,^{RunCommit(owner,at);});
     }
+    struct RunLanding *const *landing=run->landings.bytes;
+    for(size_t k=0;k<run->landings.length/sizeof *landing;k++)RunLandingPost(landing[k]);
     for(uint32_t p=0;p<run->parts;p++)if(!run->part[p].join)RunCommit(run,p);
     for(size_t v=0;v<run->nodeCount;v++)if(nodes[v].kind==RunHost)dispatch_group_leave(run->host[v].join);
 }
@@ -356,6 +455,16 @@ int MetalRunEnd(struct MetalRun *run,double *ended,NSError **error) {
     const uintptr_t failure=atomic_load_explicit(&run->failure,memory_order_acquire);
     if(failure){if(error)*error=(NSError *)failure;return -1;}
     if(atomic_load_explicit(&run->pending,memory_order_acquire)>0)return 0;
+    struct RunLanding *const *landing=run->landings.bytes;
+    for(size_t k=0;k<run->landings.length/sizeof *landing;k++) {
+        const int state=atomic_load_explicit(&landing[k]->state,memory_order_acquire);
+        if(state==LandingWaiting)return 0;
+        if(state==LandingLost) {
+            RunFail(run,@"a landing's link was lost (its stream's landed is all-ones)");
+            if(error)*error=(NSError *)atomic_load(&run->failure);
+            return -1;
+        }
+    }
     struct ncclComm *const *comm=run->comms.bytes;
     for(size_t k=0;k<run->comms.length/sizeof *comm;k++) {
         ncclResult_t state=ncclSuccess;ncclCommGetAsyncError(comm[k],&state);
@@ -398,9 +507,16 @@ void MetalRunFree(struct MetalRun *run) {
     }
     (void)nodes;
     free(run->part);free(run->host);free(run->wait);
+    struct RunLanding *const *landing=run->landings.bytes;
+    for(size_t k=0;k<run->landings.length/sizeof *landing;k++) {
+        int waiting=LandingWaiting;
+        atomic_compare_exchange_strong(&landing[k]->state,&waiting,LandingCancelled);
+        RunLandingRelease(landing[k]);
+    }
+    [run->landings release];
     if(run->commits)dispatch_release(run->commits);
     [run->listener release];[(NSError *)atomic_load(&run->failure) release];
-    [run->held release];[run->nodes release];[run->bindings release];[run->constants release];[run->edges release];
+    [run->held release];[run->nodes release];[run->bindings release];[run->edges release];
     [run->results release];[run->comms release];[run->residency release];[run->device release];[run->queue release];
     free(run);
 }
