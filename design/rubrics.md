@@ -122,8 +122,7 @@ layers; see Inversions.
 
 Every layer between a producer and its consumer (the collectives, the bridge, torch-mesh) takes contiguous and
 non-contiguous tensors alike: a tensor that crosses is a list of page runs on each side, scattered or gathered as its
-layout is. Contiguity is made only at the one consumer that requires it, in the page table, when it asks (design/
-SPECIFICATION.md, the operator 2026-09-14: "copy pages into a literal contiguous span and expose views to that
+layout is. Contiguity is made only at the one consumer that requires it, in the page table, when it asks (the operator 2026-09-14: "copy pages into a literal contiguous span and expose views to that
 contiguous view if an allocator or user says 'this one has to be contiguous'").
 
 ## M. Mesh code
@@ -385,7 +384,7 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
   next call must repair.
 - Upper pole: the call returns an error, and the caller runs it again on the map as it is then.
 - The operator's pair: lower, "overwrought bullshit to pretend *within-call* state is recoverable, *synchronically*";
-  upper, "recover from any error *across* calls, *diachronically*" (10-01, docs/principles.md section 4).
+  upper, "recover from any error *across* calls, *diachronically*" (10-01).
 - Ranked:
   - within-call resumption ≺ "return an error (which a caller can presumably retry against immediately)" (10-14);
   - a protocol of refusals, stuck states and errors that spread to other parties (a member's stale leases refusing the

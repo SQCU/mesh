@@ -7,10 +7,6 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 ## Start here
 
-- [SCOPE.md](SCOPE.md): what the library has to do, in the operator's statements of 2026-11-03 and Claude's answers
-  to them, verbatim. The library balances collective work across devices and transactions along edges, and describes
-  memory on every machine by pages for AOT compilation. It captures, transduces and fuses programs so that no
-  interpreter or lock sits on the DMA path. It composes calls and never defines what a call computes.
 - [design/rubric-actionable.md](design/rubric-actionable.md): the short form of the rubrics. It gives the review
   procedure, what crosses each interface between mesh, collective and data code, and one line for each dimension of
   rubrics M, C and D, with that dimension's line in design/rubrics.md.
@@ -18,74 +14,9 @@ other projects, such as a game bot, and old dated records; they are not listed h
   the three kinds of source, how a change is ranked against the form it replaces, and each dimension with its poles and
   the operator's ranked pairs and quotes. Later sections cover the inversions between kinds, the two channels, failure
   across interfaces, strings as messages and how the operator reviews.
-- [THREAT-MODEL.md](THREAT-MODEL.md): the operator's statements on access, quoted verbatim from 2026-08-27. They cover
-  nodes that stay reachable and keep working, the false negative as the main class of compromise, and the two kinds of
-  version-control ref that code and configuration name: `main` or a named branch.
 
 ## The bridge and transport
 
 - [design/data-model.md](design/data-model.md): the hardware and the paths bytes take through it.
   These facts explain why writes use pages and masks, and why their work is compiled before a call.
   The later sections derive the limits on bridge code, routes, and collectives in plain prose near grades 4-6.
-- [design/quiet-link.md](design/quiet-link.md): an adjunct to data-model.md section 3: what a link's first SEND after
-  a quiet stretch costs, where mesh runs meet it, and the transfer size above which the cost is under 1%, filed as an
-  idiosyncrasy that moves no kernel on the (throughput, latency) frontier.
-- [design/transport.md](design/transport.md): the transport as the code holds it: the registered region, the page
-  table, links, posted receives, SENDs and readiness words, and who owns each. It explains why SEND and RECV do not
-  fail and what happens on a hang, a lost cable or a stopped bridge, and gives the data path (section 14).
-- [design/pages-and-functions.md](design/pages-and-functions.md): the memory model in the operator's terms: pages, the
-  page table, rows, stamps, use counts and functions. It works one step through on two peers, then on any number of Mac
-  minis, with freeing, link errors and waiting on data instead of on messages about data.
-- [design/extents-and-liveness.md](design/extents-and-liveness.md): how the mesh knows which pages a collective program
-  uses and when each page is free, point by point from the operator's statements of 2026-10-22, with the literature
-  behind each. It explains why the bridge assumes no arbitrary access pattern and waits on data alone.
-- [etc/bridge/README.md](etc/bridge/README.md): the bridge's configuration document, its keys, the two didactic
-  examples that ship with it and the E2B pair's sized configurations, and the heartbeat's signals that release,
-  restart or end the bridge. It explains how each device registers the region in extents of 1 GiB.
-- [design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md): links between devices that hold different numbers
-  of queue pairs: the failure that showed it (2026-10-21), each end's budget stated in its HELLO, and the plan of lanes
-  and streams both ends make from the lesser budget. Section 10 records the keepalive's deletion at version 133.
-
-## The collective and bindings
-
-- [GOAL.md](GOAL.md): the collective goal: collective operations of the lowest attainable overhead for any program on
-  Apple GPUs, on any number of Macs in any cabling. It quotes the operator's statements that set it.
-- [rdma/NCCL.md](rdma/NCCL.md): the contract of libnccl-mesh, NCCL's C API over the bridges. It covers building and
-  running, communicators, what each program owns, memory, routes between unlinked ranks, the rules a program keeps,
-  failures, the environment and what is not implemented.
-- [design/heterogeneity.md](design/heterogeneity.md): work split over nodes of different speeds and moved over links
-  of different costs: torch-mesh's partition operand, the parts `examples/balance-service.py`'s `Balancer` moves from
-  each rank's measured stretches, and the literature's requirements R1-R14 beside what the code does for each but R14.
-- [design/deliverables.md](design/deliverables.md): the streaming partial-tensor collective library: its definition,
-  its invariants with the operator's statements behind them, its public surface and deliverables, and what is not part
-  of the library, with the three program types of 2026-10-17.
-- [design/eager-execution.md](design/eager-execution.md): why an eager, undeclared collective cannot be made safe on
-  one-sided writes. It ranks a guarded eager call below the grouped-GEMM form called eagerly, and that below the same
-  form compiled, which is meshlib's own. It shows that a guard can halt a call with no party at fault, that a routing
-  operand over a declared range needs no guard, and that no program we run needs an eager call, with the code that
-  follows.
-- [design/algorithm-sources.md](design/algorithm-sources.md): the published prior art behind each part of the program
-  surface (its Python form, python/mesh, deleted 2026-10-30), its kernels and the transport, under the section names the source cites as anchors. It
-  opens with the operator's statements on prior literature and on deleted implementations.
-
-## Examples and services
-
-- [design/prepared-machine.md](design/prepared-machine.md): the prepared objects of metal-microbench's LiteRT program
-  run on the mesh, each with its address, extent, constructor and use at run time. Its reference baseline is the
-  unchanged litert-lm 0.17.1 GPU benchmark.
-
-## Nodes and hardware
-
-- [design/hardware-and-discipline.md](design/hardware-and-discipline.md): the operator's five statements of 2026-10-22
-  on the hardware, each with the measured facts, literature and mechanisms behind it. They cover how Apple silicon
-  differs from CUDA GPUs, why DMA is fundamental, the level of a streaming multiprocessor, trade-offs that differ from
-  NCCL's, and data semantics in the transport.
-- [design/ACCESS-TOPOLOGY-SPEC.md](design/ACCESS-TOPOLOGY-SPEC.md): how every node gets the same list of known
-  networks (the gitignored `networks.conf`, applied by `bin/mesh-networks.sh`). It treats reachability as a graph of
-  Wi-Fi, wired, tailnet, Thunderbolt and point-to-point edges, not one preferred address.
-- [README.md](README.md): provisioning a fabric of Macs: the one step that takes a physical visit (`rdma_ctl enable`
-  in Recovery OS), bringing up and adding a node, the Thunderbolt fabric's addressing and routing, the repository's
-  layout, and how a node's installed branch is read and a new bridge installed.
-- [design/claims/ACCESSIBILITY.md](design/claims/ACCESSIBILITY.md): the implementation surfaces behind the
-  operator's statements on access (THREAT-MODEL.md): the installers, the network inventory, the bridge's registration
-  across pairings, the bridge threads' wait while a link serves nothing, and installation that keeps loaded jobs.

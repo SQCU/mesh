@@ -1,7 +1,7 @@
 # The data model
 
-These sections say what the hardware is. Each number names its source. The files measurement.md and facts.md and the
-folder output_data/ are in the metal-microbench repo. The papers are listed at the end.
+These sections say what the hardware is. Each number names its source. The folder output_data/ is in the
+metal-microbench repo. The papers are listed at the end.
 
 The hardware paths explain how we share work through one-sided writes. Sections 5 and 6 connect that work to
 page lists and compilation.
@@ -11,13 +11,11 @@ that range. Explain the hardware first, then how we use it to share work.
 
 ## 1. The M-series accelerator
 
-An M-series chip's CPU, GPU, Neural Engine and Thunderbolt RDMA engines share one DRAM. There is no device memory
-(design/hardware-and-discipline.md). A Studio's M5 Ultra is two dies with 64 GPU cores (the chain's 64 threadgroups, one
-a core, output_data/chain-20261022/t134-studios-rank0.log). Each core has one large on-chip cache for its registers,
-threadgroup memory, stack and buffer data. The core hands it out as a shader runs. If a shader needs more than fits, the
-core runs fewer SIMD groups to keep the data on chip (Apple tech talks 111375 and 111431). Past that cache come the GPU
-L2, a system-level cache shared with the CPU and the RDMA engine, and DRAM (design/hardware-and-discipline.md). On an
-M2 Pro's GPU, the system-level cache answers in 234 ns and DRAM in 342 ns or more (Chips and Cheese 2023).
+A Studio's M5 Ultra is two dies with 64 GPU cores (the chain's 64 threadgroups, one a core,
+output_data/chain-20261022/t134-studios-rank0.log). Each core has one large on-chip cache for its registers, threadgroup
+memory, stack and buffer data. The core hands it out as a shader runs. If a shader needs more than fits, the core runs
+fewer SIMD groups to keep the data on chip (Apple tech talks 111375 and 111431). On an M2 Pro's GPU, the system-level
+cache answers in 234 ns and DRAM in 342 ns or more (Chips and Cheese 2023).
 
 An H100 has 132 SMs. Each SM has a 256 KB register file, then 256 KB of L1 and shared memory. The SMs share a split
 50 MB L2, then 80 GB of HBM3. Host DRAM is past PCIe Gen 5, at 64 GB/s each way (NVIDIA 2022). So sm90 has one level
@@ -36,11 +34,8 @@ through device memory. Within one dispatch they see each other's writes only in 
 works on one die and fails across the Ultra's two (output_data/chain-20261022/RESULTS.md). So there is no tile path to
 congest. The pressure is inside the core, where all data shares one cache.
 
-The floors measured here are these. A GPU kernel that fences before each poll sees a store from outside the GPU in
-0.58 µs. A dispatch in an open command buffer costs 0.9-1.4 µs. A new command buffer costs 13.7-18.7 µs
-(measurement.md:414, 3233-3235). Apple gives the M5 Ultra 1.2 TB/s of memory bandwidth, for the Studios' 64-core
-model and its 80-core model alike (Apple, Mac Studio specs). At width 16,384 the chain's kernel streams its weights at
-about 620 GB/s, about half of that
+Apple gives the M5 Ultra 1.2 TB/s of memory bandwidth, for the Studios' 64-core model and its 80-core model alike
+(Apple, Mac Studio specs). At width 16,384 the chain's kernel streams its weights at about 620 GB/s, about half of that
 (output_data/chain-20261022/RESULTS.md). An H800 reads HBM at 1,861.5 GB/s (Luo et al. 2025).
 
 ## 2. From one GPU's memory to another's
@@ -54,35 +49,25 @@ milliseconds. The GPU and the NIC need to share a PCIe root complex (NVIDIA, GPU
 registers each buffer on every rank (Hamidouche et al. 2025). A running kernel may see the NIC's writes stale, partial
 or out of order until a CUDA sync call (NVIDIA, GPUDirect RDMA).
 
-On the M-series there is no HBM, no BAR and no PCIe peer-to-peer path. The CPU, the GPU and the RDMA engine use one DRAM
-(design/hardware-and-discipline.md). Each Thunderbolt controller sees memory through its own IOMMU (TN3205). The bridge
-registers one region with each device once, when the port comes up. A Studio wires 82 of its 96 GiB this way, as 82
-extents of 1 GiB, registered in 0.44-0.48 s on 2026-10-23 (etc/bridge/m5ultra-headless.toml; the bridge's log). An
-86-extent region once registered in 0.165 s (design/HETEROGENEOUS-LINKS.md section 1).
-Every page a program uses lies in that region, so nothing is pinned at a call. A SEND lands in the peer's DRAM about
-3.6 µs after it is posted (measurement.md:3238). A GPU kernel that fences before each poll sees a store from outside
-the GPU 0.58 µs after it is made (section 1). The GPU's plain stores reach the NIC only when their command buffer ends.
-System-coherent stores reach it at once (design/hardware-and-discipline.md).
+On the M-series there is no HBM, no BAR and no PCIe peer-to-peer path. Each Thunderbolt controller sees memory through
+its own IOMMU (TN3205). The bridge registers one region with each device once, when the port comes up. A Studio wires 82
+of its 96 GiB this way, as 82 extents of 1 GiB, registered in 0.44-0.48 s on 2026-10-23
+(etc/bridge/m5ultra-headless.toml; the bridge's log). Every page a program uses lies in that region, so nothing is
+pinned at a call.
 
 ## 3. The Thunderbolt RDMA driver
 
 The driver has SEND and RECV on unreliable-connected queue pairs. It has no remote write, no remote read and no atomics
-(TN3205; design/HETEROGENEOUS-LINKS.md section 1). A SEND fills the oldest receive posted on its queue pair. Both must
-span the same number of 4 KB credit frames. A credit frame is how the driver counts queue space. It is not a rule
-that all bytes in a page must be copied. Both ends fix the bytes to move and the same credit count before the call.
-Each request stays within one registered range. The hardware holds the SEND in credit until that receive is posted,
-and it sends no acknowledgement (TN3205; design/transport.md section 1). Each request names one range (max_sge 1). A device takes
-100 registrations (max_mr 100). The driver keeps only an address's low 32 bits. So a registration across a 4 GiB
-boundary lands its receives 4 GiB low (design/transport.md section 1). A device reports max_qp 3 on the Studios' macOS
-27, and 11 on macOS 26 (design/HETEROGENEOUS-LINKS.md section 1). One queue pair carries one line of receives. There is
-no shared receive queue.
+(TN3205). A SEND fills the oldest receive posted on its queue pair. Both must span the same number of 4 KB credit
+frames. A credit frame is how the driver counts queue space. It is not a rule that all bytes in a page must be copied.
+Both ends fix the bytes to move and the same credit count before the call. Each request stays within one registered
+range. The hardware holds the SEND in credit until that receive is posted, and it sends no acknowledgement (TN3205).
+Each request names one range (max_sge 1). A device takes 100 registrations (max_mr 100). One queue pair carries one line
+of receives. There is no shared receive queue.
 
 So the receiver fixes where each frame lands, and in what order, before it comes. A program that picks addresses just in
-time has two ways to send. It can ask first, which costs a round trip: 10.29 µs for 3 KB between hosts
-(measurement.md:363). Or it can land the bytes in staging with a header, then copy them. That spends memory bandwidth
-twice. A quiet controller is slow too. After 40-50 µs with nothing sent, a SEND took 6.2 µs to complete. On a link kept
-busy it took 1.9 µs (measurement.md:3165-3177). A process that exits while it holds queue pairs can hang in the driver
-until the node resets (README.md; facts.md).
+time has two ways to send. It can ask first, which costs a round trip. Or it can land the bytes in staging with a
+header, then copy them. That spends memory bandwidth twice.
 
 On InfiniBand a reliable-connected queue pair also has RDMA WRITE, RDMA READ and atomics (IBTA). A sender writes any
 registered address of its peer at any time. The peer posts nothing. With GPU-initiated networking, a GPU thread rings
@@ -92,16 +77,12 @@ name their pages and their order before the call. The bridge posts receives into
 ## 4. What the chain and the LSTM cost
 
 The chain and the LSTM are dependency chains. Each step needs the last step from every node. The chain takes 27.2-28.8
-µs a step on two nodes, with 8 rows of width 1,024. That time includes its matrix work (measurement.md:3261-3266;
-output_data/chain-20261022/t134-studios-rank0.log). A crossing takes about 3.6 µs from post to landing
-(measurement.md:3238). A 16 KB all-reduce alone takes 10.4 µs (t134-studios-rank0.log). The two-layer LSTM of width
-1,024 takes 84 µs a tick on three nodes (output_data/lstm-20261022/t134-n3-lstm-rank0.log).
+µs a step on two nodes, with 8 rows of width 1,024. That time includes its matrix work
+(output_data/chain-20261022/t134-studios-rank0.log). A 16 KB all-reduce alone takes 10.4 µs (t134-studios-rank0.log).
+The two-layer LSTM of width 1,024 takes 84 µs a tick on three nodes (output_data/lstm-20261022/t134-n3-lstm-rank0.log).
 
 On sm90 with InfiniBand, bytes take about 8 µs from one GPU's HBM to a kernel on another GPU. The load from HBM to L1
-adds about 0.37 µs (sections 1 and 2). The chain's crossing, 3.6-10.4 µs, is in that same range. That holds when the
-code fits the hardware. A 3 KB crossing takes 11.7 µs as plain dispatches in a fixed order. It takes 24.1 µs when each
-completion runs a scheduling kernel, the operand is copied to scratch, and the waits read gate words
-(measurement.md:3230-3238).
+adds about 0.37 µs (sections 1 and 2).
 
 ## 5. Sharing work through one-sided writes
 
@@ -155,7 +136,7 @@ Each step then finds its data through the list.
 
 The receiver uses the lists to set the places where data will land (section 3). The sender can then write
 there as each part is ready. This gives us one-sided writes. A node can use a part or send it on from that
-same page, since its compute units and links share memory (section 1).
+same page, since its compute units and links share memory.
 
 We can use a good plan for many sets of inputs. If we change who does which work, we compile new lists and
 steps before the next run.
