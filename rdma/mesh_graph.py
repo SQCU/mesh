@@ -431,3 +431,16 @@ def carried(history, accesses):
     last SEND had completed (torch_mesh/compiler.py; metal-microbench docs/facts.md, the LSTM's chunk boundaries)"""
     return sorted({(end, begin) for end, w0, lo0, hi0 in history for begin, w1, lo1, hi1 in accesses
                    if (w0 or w1) and lo0 < hi1 and lo1 < hi0 and end != begin})
+
+
+def largest(items):
+    """type: items [(node, words [(word, count)])] -> {node: the node it is implied by}: of the nodes that each watch one
+    word, every one but the largest count's for that word, mapped to it (a count that only rises: a run's observations
+    of a channel's `sent` or `landed`, torch_mesh/compiler.py)"""
+    best = {}
+    for node, words in items:
+        if len(words) == 1:
+            word, count = words[0]
+            if word not in best or count > best[word][1]:
+                best[word] = (node, count)
+    return {node: best[words[0][0]][0] for node, words in items if len(words) == 1 and best[words[0][0]][0] != node}

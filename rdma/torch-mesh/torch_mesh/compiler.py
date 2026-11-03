@@ -856,17 +856,12 @@ class Program:
         alias = {}
 
         def emit_carry(batch):
-            best = {}
-            for _, _, i, words in batch:
-                if len(words) == 1:
-                    word, value = words[0]
-                    if word not in best or value > best[word][1]:
-                        best[word] = (i, value)
-            for f, k, i, words in batch:
-                if len(words) == 1 and best[words[0][0]][0] != i:
-                    alias[i] = best[words[0][0]][0]
-                    continue
-                f(k)
+            from mesh_graph import largest
+            implied = largest([(i, words) for _, _, i, words in batch])
+            alias.update(implied)
+            for f, k, i, _ in batch:
+                if i not in implied:
+                    f(k)
             batch.clear()
         watched = self.watched[id(run)] = []
 
@@ -1077,7 +1072,8 @@ class Program:
             edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
             previous_sinks = [x for x in sinks(kept, own) if named[x][1][0] not in ('sent', 'landed')] or previous_sinks
         emit_carry(carry)  # the last chunk's
-        edges = sorted({(alias.get(a, a), alias.get(b, b)) for a, b in edges if alias.get(a, a) != alias.get(b, b)})
+        from mesh_graph import contract
+        edges = contract(edges, lambda e: alias.get(e, e))
         run.edges(edges)
         try:
             run.finish()
