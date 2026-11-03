@@ -473,3 +473,34 @@ def unfollowed(order, waits, copies, edges):
         if node in waits:
             seen_waits.append(node)
     return out
+
+
+def unordered(order, edges, accesses):
+    """type: order [event] (a run's, as emitted, each once), edges [(from, to)] forward in it, accesses [(befores, afters,
+    writes, lo, hi)] -> the index pairs (j, i) of accesses over overlapping bytes [lo, hi), one a write, that no path of
+    edges orders either way. An access starts after any event at or before one of its `befores` and ends before any at
+    or after one of its `afters` (an event with no node of its own stands for the nodes it passes through). In one part
+    the edges are the run's only order (its barriers), so each pair is a hazard the run does not hold (torch_mesh
+    compiler.py MESH_RUN_ORDER_CHECK, the one-part reading; metal-microbench docs/facts.md)"""
+    position = {e: k for k, e in enumerate(order)}
+    into = {}
+    for a, b in edges:
+        into.setdefault(b, []).append(a)
+    reach = {}  # each event's set of events at or before it, as bits by position
+    for e in order:
+        bits = 1 << position[e]
+        for a in into.get(e, ()):
+            bits |= reach.get(a, 0)
+        reach[e] = bits
+
+    def precedes(afters, befores):
+        return any(a in position and b in reach and reach[b] >> position[a] & 1 for a in afters for b in befores)
+    active, found = [], []
+    for i in sorted(range(len(accesses)), key=lambda k: accesses[k][3]):
+        befores, afters, writes, lo, hi = accesses[i]
+        active = [j for j in active if accesses[j][4] > lo]
+        for j in active:
+            if (writes or accesses[j][2]) and not precedes(accesses[j][1], befores) and not precedes(afters, accesses[j][0]):
+                found.append((j, i))
+        active.append(i)
+    return found

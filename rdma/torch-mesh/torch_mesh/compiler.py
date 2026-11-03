@@ -920,6 +920,7 @@ class Program:
         # every earlier chunk's accesses (each its node, whether it writes, its bytes in the region) and the last chunk's
         # observations no node of it followed, which go out in the next chunk (below)
         history, carry = [], []
+        checked_spans = []  # MESH_RUN_ORDER_CHECK: every instance's accesses, (befores, afters, writes, lo, hi, names)
         # a chunk's unfollowed observations of one word (a channel's `sent` or `landed`, a count that only rises) want
         # its largest count alone: the others' events take its node (alias, applied to the run's edges), so a 16-tick
         # chunk's 48 SEND completions end it as 3 observations (metal-microbench docs/facts.md, the GPU trace)
@@ -1088,6 +1089,9 @@ class Program:
                 tensor, base = self._binding(t.items[item])
                 lo = _stream.address(tensor) + base + first_byte
                 spans.append((begin, end, mode == WRITE, lo, lo + length))
+            if os.environ.get('MESH_RUN_ORDER_CHECK'):
+                checked_spans += [(at_or_before(begin), at_or_after(end), w, lo, hi, (named[ids[begin]], named[ids[end]]))
+                                  for begin, end, w, lo, hi in spans]
             from mesh_graph import carried
             crossing = carried(history, [(b, w, lo, hi) for begin, _, w, lo, hi in spans for b in at_or_after(begin)])
             edges += crossing
@@ -1192,6 +1196,15 @@ class Program:
             # observation they do not follow (a release after such a command is held by it)
             held_commands = unfollowed(order, {e for e, k in kinds.items() if 'observe' in k},
                                        {e for e, k in kinds.items() if 'command' in k}, edges)
+            # every pair of accesses over the same bytes, one a write, that the run's edges do not order: in one part
+            # the edges are its only order
+            from mesh_graph import unordered
+            aliased = lambda es: [alias.get(x, x) for x in es]
+            hazards = unordered(order, edges, [(aliased(b), aliased(a), w, lo, hi) for b, a, w, lo, hi, _ in checked_spans])
+            base = min((lo for *_, lo, _, _ in checked_spans), default=0)
+            print(json.dumps(dict(phase='hazards', count=len(hazards), first=[
+                [[checked_spans[k][5], 'write' if checked_spans[k][2] else 'read', checked_spans[k][3] - base,
+                  checked_spans[k][4] - checked_spans[k][3]] for k in pair] for pair in hazards[:16]])), flush=True)
             print(json.dumps(dict(phase='order_check', pairs=len(bad), releases=len(sends), commands=len(held_commands),
                                   first_commands=[[named.get(w), named.get(c)] for w, c in held_commands[:12]],
                                   first=[[named.get(w), named.get(c)] for w, c in bad[:6]],
