@@ -1281,18 +1281,15 @@ class Program:
             # node that follows it (flush), so a stretch went observation, fold, observation, fold: no two folds
             # adjacent, a dispatch each. Now a stretch's first fold flushes every fold's of the stretch, so its folds
             # meet in one run (folded). What must stay: an observation before every fold that follows it.
-            stretches = {}
-            for of_folds, stretch in itertools.groupby(emitted_order, lambda e: t.events[e][0] == 'fold'):
-                stretch = list(stretch)
-                if of_folds:
-                    stretches[stretch[0]] = stretch
+            from mesh_graph import stretches
+            stretch = stretches(emitted_order, lambda e: t.events[e][0] == 'fold')
             for e in emitted_order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
                 release_carry(e)
                 if kind == 'fold':
                     # a REDUCE's fold into the run of folds (folded), after its stretch's held observations
-                    flush(stretches.get(e, [e]))
+                    flush(stretch.get(e, [e]))
                     settle()
                     folded(ids[e], command.steps[rest[0]], command.dtype)
                 elif kind == 'command':

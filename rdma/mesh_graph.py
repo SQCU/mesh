@@ -420,6 +420,18 @@ def held_before(held, members, after, targets):
     return [k for k in held if k in needed]
 
 
+def stretches(order, member):
+    """type: order [node], member(node) -> whether it is one of a kind -> {first: [node]}: each maximal stretch of
+    members consecutive in `order`, by its first (torch_mesh/compiler.py: a stretch of folds in the emitted order takes
+    every one's held observations before its first, held_before, so its folds meet in one dispatch)"""
+    out = {}
+    for of_members, stretch in itertools.groupby(order, member):
+        stretch = list(stretch)
+        if of_members:
+            out[stretch[0]] = stretch
+    return out
+
+
 def backward(edges, order):
     """type: edges (a, b), order (nodes as emitted, a node repeated for each of its parts) -> the edges whose head is first
     emitted before their tail is last: a run's order its realize refuses (torch_mesh/compiler.py names them)"""
