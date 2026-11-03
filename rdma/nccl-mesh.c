@@ -2281,7 +2281,7 @@ static int channel_of(ncclComm_t comm, uint32_t peer) {
   return -1;
 }
 
-#define MESH_SPREAD_QUANTA 32 /* the spread's grid cell, in page quanta (512 KiB at 16 KiB pages): a choice to measure */
+#define MESH_SPREAD_QUANTA 8 /* the spread's grid cell, in page quanta (128 KiB at 16 KiB pages): a choice to measure */
 /* a call's `made` steps at d->steps spread over their pairs' parallel cables: each SEND or COPY cut at a grid of
    MESH_SPREAD_QUANTA page quanta over the operand (mesh-graph.h mesh_graph_grid_cut), the piece in cell g on the
    (g mod n)-th of the n channels toward its peer, in the channels' order, which is the cables' (fabric_realize: the
