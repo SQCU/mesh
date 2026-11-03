@@ -62,6 +62,20 @@ def main(config=None):
         if summed:
             torch.ops.torch_mesh.allreduce_(y, group)
         t.add_(1)
+    if config.get('baseline'):
+        # torch's own MPS products at this rank's shapes, outside the program: the single-case program's rate (each
+        # product's mean over 64 back to back, after a synchronize)
+        for label, (left, right) in (('first', (x, w1)), ('second', (a2, w2))):
+            for _ in range(8):
+                torch.mm(left, right)
+            torch.mps.synchronize()
+            began = now()
+            for _ in range(64):
+                torch.mm(left, right)
+            torch.mps.synchronize()
+            us = (now() - began) / 64 * 1e6
+            print(json.dumps(dict(phase='baseline', rank=rank, product=label, us=round(us, 2),
+                                  tflops=round(2 * B * D * blocks[rank] / us / 1e6, 2))), flush=True)
     program = Program([(ffn, (t,))] * layers)
     repeats = config.get('repeats', 3)
     begun = now()
