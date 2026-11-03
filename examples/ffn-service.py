@@ -117,8 +117,11 @@ def main(config=None):
             # spans by GPU timestamps
             run = program.done[-1]
             at = lambda x: round((x - started) * 1e6, 1) if x else None
+            # each landing [presence, kind (landed or sent), chunk, channel, the ranks whose segments it carries]
             print(json.dumps(dict(phase='timeline', rank=rank, parts=[[at(c), at(s), at(e)] for c, s, e in run.parts()],
-                                  spans=[round(x, 2) for x in run.spans()])), flush=True)
+                                  spans=[round(x, 2) for x in run.spans()],
+                                  landings=[[at(p), *w] for (_, p), w in zip(run.landings(), program.watched[id(run)])])),
+                  flush=True)
         emit({**measure(started, ended, flops, layers), 'workload': 'ffn_column_separable', 'rank': rank, 'size': size,
               'report': dict(tokens=B, dim=D, hidden=F, block=blocks[rank], layers=layers, repeat=repeat,
                              gflops=round(flops / (ended - started) / 1e9, 2), us_per_layer=round((ended - started) / layers * 1e6, 1))})
