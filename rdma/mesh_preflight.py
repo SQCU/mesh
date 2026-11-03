@@ -199,12 +199,9 @@ def main():
         return [(d, owner.get(d)) for d in facts[n]['far']]
 
     targets = [name_of.get(t, t) for t in (a.target or ['local'])]
-    collective, frontier = set(), [t for t in targets if t in facts]
-    while frontier:
-        n = frontier.pop()
-        if n not in collective:
-            collective.add(n)
-            frontier += [o for _, o in cables(n) if o]
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import mesh_graph  # the graph module (C9); the launcher's side only, after --probe has returned
+    collective = mesh_graph.reach([t for t in targets if t in facts], lambda n: [o for _, o in cables(n) if o])
 
     busy, blocked = [], {t: [] for t in targets}
     for n in sorted(collective):
