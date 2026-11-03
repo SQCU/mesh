@@ -168,7 +168,7 @@ mDNS's pointer to the node's address records.
 The fabric's nodes are the bridge's map, so a node cabled to this one is known along its cable (the operator,
 2026-10-16: "you should never be using networking over wifi etc when it is physically and literally tethered / cabled
 to a host machine"); its facts are node-info's, which its resident rank answers (metal-microbench
-docs/elastic.md#call-delivery). Discovery on the shared LAN is its mDNS (git 1587656: control
+docs/elastic.md#calls-and-memberships). Discovery on the shared LAN is its mDNS (git 1587656: control
 traffic needs no fabric), so it is not limited to one cable hop; a node on no shared LAN is found only over its own
 cables. Every line arrives when its event does: a slow node delays only its own lines, and a node that is not there
 is simply absent.
@@ -369,7 +369,7 @@ A Bonjour `<LocalHostName>.local` name is not identity: macOS renames a running 
 That link-local is *exactly* the value the paired RDMA device reports as one of its GIDs (`GID[0]` on macOS 26;
 on macOS 27 the M5 Ultra's devices list another address first, `23ff:…`, then the link-local at `GID[1]`), so a port's
 IP address and its RDMA identity are the same number. The bridge chooses the GID that is the link-local
-(`rdma/mesh-link.c` `device_gid`), not an index, and the address encodes node identity rather than cable position — it
+(`rdma/mesh-verbs.h` `device_gid`), not an index, and the address encodes node identity rather than cable position — it
 survives being unplugged and replugged into a different port on a different machine.
 
 macOS does not autoconfigure link-local on an interface with no network service, so
@@ -407,7 +407,7 @@ the node's uplink.
 
 | path | what |
 |---|---|
-| `install.sh` | provision/converge a node, run by hand. Idempotent — re-running is the drift fix, and nothing reruns it. Each run sets the power policy, the firewall, sshd, screen sharing and NTP, runs the networks, fabric and tailnet inits and the health report, loads every unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and the admin user's LaunchAgents that declare the Background session type (into user/<uid>), and starts the beacon, telemetry and the observer where they are not running. It deletes `io.mesh.update`, `io.mesh.keeper`, `io.mesh.cartlane.learner` and `io.mesh.cartlane.viewer` where they remain, the update's bootout last since that job may be the run's own parent. It runs with root's home: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
+| `install.sh` | provision/converge a node, run by hand. Idempotent — re-running is the drift fix, and nothing reruns it. Each run sets the power policy, the firewall, sshd, screen sharing and NTP, runs the networks, fabric and tailnet inits and the health report, loads every unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted), and starts the beacon where it is not running. It deletes `io.mesh.update`, `io.mesh.keeper`, `io.mesh.cartlane.learner` and `io.mesh.cartlane.viewer` where they remain, the update's bootout last since that job may be the run's own parent. It runs with root's home: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
 | `bin/mesh-serve-bootstrap.sh` | run by hand on a node with a new Mac on its cable: serves `bootstrap.sh` on that cable's link-local address as `m.local` (an mDNS proxy record) until stopped, so the new Mac's Terminal takes `curl m.local\|sh`. No launchd job runs it. |
 | `enable-autologin.sh` | boot into a GUI session so session-bound workloads survive a reboot. |
@@ -424,21 +424,19 @@ the node's uplink.
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code, and every `/Applications/Xcode*.app` readied for the library's kernels (license, first launch, Metal toolchain). Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it after a failure; with no RDMA port it exits 0 and stays down until the next boot. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
-| `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
+| `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#calls-and-memberships). |
 | `bin/mesh-hourly-agent.sh` | `mesh-hourly-agent.sh CHECKOUT` (bin/mesh-user.sh runs it) loads the system job `io.mesh.hourly` (run as the user; a user agent's calendar never fires on a headless node, and a system job is outside Local Network privacy), which runs `rdma/mesh_hourly.py` at `hourly_minute` every hour: the node's ~/mesh and ~/metal-microbench as they are checked out (it moves neither; its line before each program names both commits), built (node prepare), then each program metal-microbench's `tools/mesh/hourly/workloads.json` lists, run as anyone runs it (one rank a node, as torchrun launches one) on the members this node's bridge links (a workstation runs none), each one's outcome a line of the node's report, `~/.cache/mesh/hourly.jsonl`, its output in the job's log (docs/live-observations.md). |
 | `bin/mesh-launchd-agent.sh` | `mesh-launchd-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy can hold too: where it does, the bridge's sends to its cables fail with EHOSTUNREACH until someone logged in at the node's screen allows `mesh-heartbeat` once, in its dialog or in System Settings, Privacy & Security, Local Network, and SIP keeps that decision from root; which nodes it held is in NODE-STANDUPS.md) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** No job runs on a schedule but the hourly (`bin/mesh-hourly-agent.sh`). The router is KeepAlive after a failure only (`SuccessfulExit` false; it exits 0 where there is no RDMA port), and the tailnet's `tailscaled`, loaded only where it was built, KeepAlive; launchd starts either again at most every 10 s, its default (a `ThrottleInterval` of 1 respawned a router with no port every second); the beacon runs from its load (`RunAtLoad`), once a boot, and launchd does not start it again after an exit (`install.sh` starts it when it is not running); the bridge's is its own: its job runs its heartbeat (`ThrottleInterval` 60,
 KeepAlive {SuccessfulExit: false}), which restarts the bridge, and itself, on a deploy's SIGHUP (design/transport.md
 section 2). The beacon and the router take a new program by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed. Telemetry and the observer are not resident (2026-10-29: a sampler on every node spawned processes several times a second for a dashboard nothing else read): `mesh-top` starts telemetry for its own lifetime, and the observer runs when someone runs it (`user/mesh-telemetry.py`, then `viz/serve.py etc/observer.json`). The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL; the heartbeat
-ends when its bridge has ended after its SIGTERM, and expires the region (ASKED_END): the bridge's stop has no wait, and
-a bridge whose loop has stopped turning is ended by the heartbeat's watch (design/transport.md section 16); a bridge the
-watch cannot end (a thread inside a kernel call) leaves the heartbeat to launchd's SIGKILL at the `ExitTimeOut`. |
+ends when its bridge has ended after its SIGTERM, and expires the region (ASKED_END). |
 | `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another layout (MESH_LAYOUT). It runs the reader as the admin user, root's call through `sudo -n -u` that user, never as root; any other caller is refused (`"errno":1`), as is a node with no bridge of that user's (`"errno":3`) or a reader that user does not own (`"errno":2`). |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`; a port whose cable link is up with no RDMA peer is logged and held, never brought down (design/rubrics.md M3). Idempotent; run at boot (`io.mesh.fabric`) and by each run of `install.sh`. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `viz/` | the whole-fabric observer (:8787, run by hand beside `user/mesh-telemetry.py`; nothing runs it in the background) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
-| `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-link.c`, `mesh-observe.h` and `mesh-bridge.h` (the bridge), `mesh-heartbeat.c` (its heartbeat), `mesh-dataflow.c` and `mesh-call.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
-| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its communicators and groups), `nccl-mesh-metal.m`/`.h`, `nccl-mesh-kernels.h`/`.m` (its kernels), `mesh-collective.c`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py`, `attention.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
+| `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-link.c`, `mesh-observe.h` and `mesh-bridge.h` (the bridge), `mesh-heartbeat.c` (its heartbeat), `mesh-dataflow.c` and `mesh-call.h`, `mesh.metal` (payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
+| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its communicators and groups), `mesh-collective.c`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py` and its kernels (`kernels.py`) |
 | `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_reached`, `mesh_region`, `mesh_map`, `mesh_nodes_health`, defined in `mesh-dataflow.c`) and the collectives' planning |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
 
@@ -526,15 +524,14 @@ path 1980260065 kind=fabric-routed addr=fd6d:6573:68:<c>
 
 A node's own facts (`node_id=<host UUID> serial=... name=<the name table's> boot_id=... ula=fd6d:6573:68:<d>` and the rest below) come from
 `mesh-nodeinfo.sh`, which the node's resident rank runs for a `{"facts"}` request (metal-microbench
-docs/elastic.md#call-delivery), as the rank's user, so no root process runs the user's checkouts or bridge reader. Every value is one token (a space in it is written `_`: `chip=Apple_M4_Pro`), so a reader
+docs/elastic.md#calls-and-memberships), as the rank's user, so no root process runs the user's checkouts or bridge reader. Every value is one token (a space in it is written `_`: `chip=Apple_M4_Pro`), so a reader
 that splits a line on whitespace reads it whole; `rdma/peers.py` `fields` reads a value to the next `key=` of its line
 and takes either form.
 Each node reports its name, hardware (its chip and GPU core count among it), macOS, RDMA enablement and SDK state, its
-bridge's region (`region`, mesh-stat's own top-level figure: since mesh-stat prints every node's record, the last
-`"window"` (now `"region"`) of its line was another node's, and from 67d50f2 each of the pair published the other's), its admin account,
+bridge's region (`region`, mesh-stat's own top-level figure), its admin account,
 the maker of its instance evidence (`instances`, `<chip>/<cores>`, written `incomplete:<chip>/<cores>` where the file
 lacks its fit (coefficients and bandwidth), its served and attention readings (a fit before torch-mesh 771ae16) or an
-attention line of either plan: torch-mesh refuses the first two and cannot price a layer's plan without the third), what each of its
+attention line of either plan), what each of its
 layers installed as that layer's install last recorded it (`revisions` and `images`, `<label>:<revision>` and
 `<label>:<digest>`, from `~/.cache/mesh/facts/<label>`, whose other lines it publishes as they are), the model files it holds
 (`models`, `<dir>/<file>:<bytes>` under `~/models`, links followed), its health report's numbers, each fabric
@@ -567,7 +564,7 @@ wait, not a fault: it clears itself, and a node that needs the newest definition
 sooner can simply be reached and re-run.
 
 Each node records the branch its last `install.sh` run installed and when that run ended, in
-`/usr/local/mesh/revision` (install.sh:218), and prints both under the name `converged`:
+`/usr/local/mesh/revision` (install.sh:204), and prints both under the name `converged`:
 
 ```
 mesh-status         branch main converged 2026-08-28T00:56:27Z
@@ -576,7 +573,7 @@ node-info           branch=main converged=2026-08-28T00:56:27Z
 
 `mesh-status` reads the node's own file (bin/mesh-status.sh:4). node-info's lines are `bin/mesh-nodeinfo.sh`'s
 (lines 28-29), which the node's resident rank runs for a `{"facts"}` request (metal-microbench
-docs/elastic.md#call-delivery); the bridge carries no request. Whether a node was installed since a push reads from
+docs/elastic.md#calls-and-memberships); the bridge carries no request. Whether a node was installed since a push reads from
 its own `mesh-status` or from its rank's node-info.
 
 ## A new bridge on a node
