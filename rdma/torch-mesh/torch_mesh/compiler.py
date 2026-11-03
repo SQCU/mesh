@@ -134,7 +134,7 @@ class Template:
                 values[node] = [_meta(base.root, v) for v in val] if isinstance(val, (list, tuple)) else _meta(base.root, val)
             elif node.target in pointwise:
                 self._pointwise(node, values, expression, users)
-            elif node.target in (aten.addmm.default, aten.mm.default):
+            elif node.target in (aten.addmm.default, aten.mm.default, aten.linear.default):
                 self._product(node, values)
             elif node.target in (aten.cat.default, aten.stack.default):
                 self._joined(node, values)
@@ -214,6 +214,15 @@ class Template:
             bias, a, b = (values[x] for x in node.args[:3])
             beta, alpha = node.kwargs.get('beta', 1), node.kwargs.get('alpha', 1)
             reads = [a, b, _broadcast(bias, out.shape)]
+        elif node.target is aten.linear.default:
+            # x W^T (+ bias): W [N, K] read as its transpose [K, N]
+            a, w = values[node.args[0]], values[node.args[1]]
+            if len(a.shape) != 2:
+                raise NotImplementedError('a linear of an input of rank other than 2')
+            b = Value(w.root, w.dtype, (w.shape[1], w.shape[0]), (w.stride[1], w.stride[0]), w.offset)
+            bias = node.args[2] if len(node.args) > 2 else node.kwargs.get('bias')
+            beta, alpha = (1 if bias is not None else 0), 1
+            reads = [a, b] + ([_broadcast(values[bias], out.shape)] if bias is not None else [])
         else:
             a, b = values[node.args[0]], values[node.args[1]]
             beta, alpha, reads = 0, 1, [a, b]
