@@ -518,3 +518,36 @@ def labelling(names, adjacent, labels):
                 all((label[m] in adjacent[n]) == (label[n] in adjacent[m]) for n in names for m in names if n != m):
             return label
     return {}
+
+
+def waits_late(order, edges, waits, fences):
+    """type: order [event] (topological over edges), edges [(from, to)], waits {event}, fences {event} -> the order with,
+    in each segment between fences (a fence a segment's last), the events that follow none of its waits (over the edges,
+    within the segment) first and those that do after them, each kind in its given order. A Metal 4 barrier waits for
+    every dispatch before it, so a node emitted after an observation behind a barrier waits for the observation though it
+    does not follow it: on the LSTM's rank 0 the step counter's update and the next tick's input selection went after
+    the tick's landings with the output's copy, three barriers more on the relay cycle that sets the period
+    (metal-microbench docs/facts.md, the tick on the Mini). Every edge stays forward: no event that follows a wait moves
+    before one that does not, and segments keep their order (torch_mesh compiler.py, the emitted order)"""
+    after = {}
+    for a, b in edges:
+        after.setdefault(a, []).append(b)
+    out, segment = [], []
+
+    def close():
+        inside = set(segment)
+        late, stack = set(), [w for w in segment if w in waits]
+        while stack:
+            for b in after.get(stack.pop(), ()):
+                if b in inside and b not in late:
+                    late.add(b)
+                    stack.append(b)
+        out.extend(e for e in segment if e not in late)
+        out.extend(e for e in segment if e in late)
+        segment.clear()
+    for e in order:
+        segment.append(e)
+        if e in fences:
+            close()
+    close()
+    return out

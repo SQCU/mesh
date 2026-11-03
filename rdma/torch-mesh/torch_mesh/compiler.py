@@ -1115,7 +1115,12 @@ class Program:
             def release_carry(e):
                 if carry and (t.events[e][0] != 'post' or any((i, ids[e]) in crossing_set for _, _, i, _ in carry)):
                     emit_carry(carry)
-            for e in t.order:
+            # the emitted order: in each segment between releases, what follows none of its landings or completions
+            # first (mesh_graph.waits_late: a barrier waits for every earlier dispatch, the observations among them)
+            from mesh_graph import waits_late
+            emitted_order = waits_late(t.order, t.edges, {e for e in t.order if t.events[e][0] in ('landed', 'sent')},
+                                       {e for e in t.order if t.events[e][0] == 'send'})
+            for e in emitted_order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
                 release_carry(e)
