@@ -106,6 +106,13 @@ TENSOR_STRIDE_BOUND = 1 << 16
 # a simdgroup's output block (docs/kernels.md: a simdgroup accumulates a 32 x 32 block, the dense kernel 0.82 of MPS
 # on the M5 Max): 32 columns, and 32, 16 or 8 rows, whichever the product's rows fill
 TENSOR_COLUMNS = 32
+# the simdgroups a product keeps in flight (k split among a threadgroup's simdgroups where its blocks are fewer): the
+# FFN's 64 x 2048 x 1127 as 72 one-simdgroup blocks ran 172 us a layer on an M5 Ultra, 3.4 TFLOP/s, its 9.2 MB of
+# weights a layer at 54 GB/s (docs/facts.md), each simdgroup's loads one at a time along all of k
+TENSOR_SIMDGROUPS = 1024
+TENSOR_SPLIT_MOST = 8          # a threadgroup's simdgroups over k
+TENSOR_SPLIT_LEAST_K = 128     # the least k a simdgroup takes
+THREADGROUP_BYTES = 32768      # a threadgroup's memory (Apple GPUs' maxThreadgroupMemoryLength)
 
 
 def _tensor_operand(view):
@@ -115,11 +122,11 @@ def _tensor_operand(view):
             and all(0 <= s < TENSOR_STRIDE_BOUND for s, n in zip(view.stride, view.shape) if n != 1))
 
 
-def _tensor(view, pointer, rows, columns, row_axis=0, column_axis=1, offset=0):
-    """a tensor over `view`'s elements from element `offset` on: `columns` its x extent (stride along column_axis),
-    `rows` its y (MPP's order: the fastest index first)"""
+def _tensor(view, pointer, rows, columns, offset='0', row_axis=0, column_axis=1):
+    """a tensor over `view`'s elements from element `offset` (an expression) on: `columns` its x extent (stride along
+    column_axis), `rows` its y (MPP's order: the fastest index first)"""
     stride = lambda axis: view.stride[axis] if view.shape[axis] != 1 else 0
-    return (f'tensor(const_cast<device {TENSOR_TYPES[view.dtype]} *>({pointer}) + {view.offset + offset}l, '
+    return (f'tensor(const_cast<device {TENSOR_TYPES[view.dtype]} *>({pointer}) + {view.offset}l + long({offset}), '
             f'dextents<int, 2>({columns}, {rows}), array<int, 2>{{{stride(column_axis)}, {stride(row_axis)}}})')
 
 
@@ -130,11 +137,12 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
 
     Two forms, chosen by the operands at compile time. Where every operand is a tensor's (_tensor_operand) and the rows
     are a multiple of 8 (Metal 4 tensor operations need it on the M4 Pro: docs/kernels.md), the M5's neural
-    accelerators: MetalPerformancePrimitives matmul2d, a simdgroup's 32 x 32 (or 16, or 8 rows) block over all of k
-    with float accumulation, the epilogue (alpha, bias, the store) in its registers; the form mesh 1f794b8f^
-    matrix.metal had, which that commit replaced with the other. Otherwise (a landing's system-coherent loads, which a
-    tensor does not express; fewer than 8 rows): one simdgroup an output, its lanes over k, summed with simd_sum
-    (tools/mesh/lstm_metal.m's shape)."""
+    accelerators: MetalPerformancePrimitives matmul2d, a simdgroup's 32 x 32 (or 16, or 8 rows) block with float
+    accumulation, the form mesh 1f794b8f^ matrix.metal had, which that commit replaced with the other. Where the blocks
+    are fewer than TENSOR_SIMDGROUPS, k is split among a threadgroup's simdgroups, each over its range (across the parts
+    it meets), their partials summed through threadgroup memory into the first, whose registers hold the epilogue
+    (alpha, bias, the store). Otherwise (a landing's system-coherent loads, which a tensor does not express; fewer
+    than 8 rows): one simdgroup an output, its lanes over k, summed with simd_sum (tools/mesh/lstm_metal.m's shape)."""
     M, N = out.shape
     parts = a if isinstance(a, list) else [a]
     parameters = [out.parameter(True)] + [p.parameter(False) for p in parts] + [b.parameter(False)] + \
@@ -143,14 +151,41 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     if M % 8 == 0 and all(_tensor_operand(v) for v in parts + [b]):
         rows = 32 if M % 32 == 0 else 16 if M % 16 == 0 else 8
         K = sum(p.shape[1] for p in parts)
+        blocks = -(-N // TENSOR_COLUMNS) * (M // rows)
+        block = rows * TENSOR_COLUMNS
+        split = 1
+        while (split * 2 <= TENSOR_SPLIT_MOST and blocks * split < TENSOR_SIMDGROUPS
+               and K // (split * 2) >= TENSOR_SPLIT_LEAST_K and (split * 2 - 1) * block * 4 <= THREADGROUP_BYTES):
+            split *= 2
+        span = -(-K // split)
         runs, first = [], 0
         for k, p in enumerate(parts):
-            runs.append(f'    {{\n        auto left = {_tensor(p, f"a{p.index}", M, p.shape[1])}.slice(0, row);\n'
-                        f'        auto right = {_tensor(b, f"a{b.index}", p.shape[1], N, offset=first * b.stride[0])}.slice(col, 0);\n'
+            lo, hi = f'max(k0, {first})', f'min(k1, {first + p.shape[1]})'
+            runs.append(f'    if ({lo} < {hi}) {{\n        const int lo = {lo}, hi = {hi};\n'
+                        f'        auto left = {_tensor(p, f"a{p.index}", M, "hi - lo", f"(lo - {first}) * {p.stride[1]}")}.slice(0, row);\n'
+                        f'        auto right = {_tensor(b, f"a{b.index}", "hi - lo", N, f"lo * {b.stride[0]}")}.slice(col, 0);\n'
                         f'        op.run(left, right, total);\n    }}')
             first += p.shape[1]
         p0 = parts[0]
-        body = f'''    const int col = int(at.x / 32u) * {TENSOR_COLUMNS}, row = int(at.y) * {rows};
+        reduce = '' if split == 1 else f'''
+    threadgroup float partials[{(split - 1) * block}];
+    if (s) {{
+        #pragma unroll
+        for (uint i = 0; i < total.get_capacity(); i++) if (total.is_valid_element(i)) {{
+            const auto e = total.get_multidimensional_index(i);
+            partials[(s - 1) * {block} + e[1] * {TENSOR_COLUMNS} + e[0]] = total[i];
+        }}
+    }}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (s) return;
+    #pragma unroll
+    for (uint i = 0; i < total.get_capacity(); i++) if (total.is_valid_element(i)) {{
+        const auto e = total.get_multidimensional_index(i);
+        for (uint t = 0; t < {split - 1}u; t++) total[i] += partials[t * {block} + e[1] * {TENSOR_COLUMNS} + e[0]];
+    }}'''
+        body = f'''    const uint s = (at.x / 32u) % {split}u;
+    const int col = int(at.x / {32 * split}u) * {TENSOR_COLUMNS}, row = int(at.y) * {rows};
+    const int k0 = int(s) * {span}, k1 = min(k0 + {span}, {K});
     constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor({rows}, {TENSOR_COLUMNS}, static_cast<int>(dynamic_extent),
         false, false, false, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
     mpp::tensor_ops::matmul2d<descriptor, execution_simdgroup> op;
@@ -159,7 +194,7 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     auto total = op.get_destination_cooperative_tensor<Left, Right, float>();
     #pragma unroll
     for (uint i = 0; i < total.get_capacity(); i++) total[i] = 0.0f;
-{chr(10).join(runs)}
+{chr(10).join(runs)}{reduce}
     #pragma unroll
     for (uint i = 0; i < total.get_capacity(); i++) if (total.is_valid_element(i)) {{
         const auto e = total.get_multidimensional_index(i);
@@ -168,7 +203,7 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     }}'''
         source = ('#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n'
                   + _source(name, parameters, body))
-        return source, (-(-N // TENSOR_COLUMNS) * 32, M // rows, 1), (32, 1, 1)
+        return source, (-(-N // TENSOR_COLUMNS) * 32 * split, M // rows, 1), (32 * split, 1, 1)
     loops, first = [], 0
     for p in parts:
         K = p.shape[1]
