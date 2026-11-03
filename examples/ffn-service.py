@@ -77,7 +77,24 @@ def main(config=None):
             e1 = x_cpu.half().float() @ w1_cpu[:, :blocks[0]].half().float()
             print(json.dumps(dict(phase='stages', x_w1_error=float((a1.float().cpu() - e1).abs().max()), x_w1_max=float(e1.abs().max()),
                                   relu_error=float((a2.float().cpu() - torch.relu(a1.float().cpu())).abs().max()),
-                                  y_from_a2_error=float((y.float().cpu() - a2.float().cpu() @ w2_cpu[:blocks[0]].half().float()).abs().max()))), flush=True)
+                                  y_from_a2_error=float((y.float().cpu() - a2.float().cpu() @ w2_cpu[:blocks[0]].half().float()).abs().max()),
+                                  w2_error=float((w2.float().cpu() - w2_cpu[:blocks[0]].half().float()).abs().max()),
+                                  y_max=float(y.float().abs().max()), y_zero=float((y == 0).float().mean()))), flush=True)
+    if staged and not summed:
+        # the second product alone, its operand written before the run: its kernel apart from the order it follows
+        alone = torch_mesh.empty(B, D, dtype=torch.half)
+        program2 = Program([(lambda t: (alone.copy_(a2 @ w2), t.add_(1)), (t,))])
+        program2.prepare(1)
+        started = now()
+        program2.forward()
+        while program2.completion() is None:
+            if now() - started > 8.0:
+                raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
+            time.sleep(0)
+        torch.mps.synchronize()
+        if rank == 0:
+            print(json.dumps(dict(phase='alone', error=float((alone.float().cpu() - a2.float().cpu() @ w2.float().cpu()).abs().max()),
+                                  max=float(alone.float().abs().max()))), flush=True)
     dist.destroy_process_group()
 
 
