@@ -124,9 +124,12 @@ THREADGROUP_BYTES = 32768      # a threadgroup's memory (Apple GPUs' maxThreadgr
 
 def _tensor_operand(view):
     """whether a product reads `view` through a tensor: an ordinary (not system-coherent) load of a tensor element
-    type, every stride non-negative and under the bound"""
+    type, every stride non-negative and under the bound, its fastest axis (the last) of unit stride: the training
+    LSTM's products of transposed views (linear's W, linear_backward's grad^T) came out wrong through matmul2d by 0.012
+    (metal-microbench lstm-train-2026-11-03 sweep-1-3)"""
     return (not view.coherent and view.dtype in TENSOR_TYPES
-            and all(0 <= s < TENSOR_STRIDE_BOUND for s, n in zip(view.stride, view.shape) if n != 1))
+            and all(0 <= s < TENSOR_STRIDE_BOUND for s, n in zip(view.stride, view.shape) if n != 1)
+            and (view.shape[-1] == 1 or view.stride[-1] == 1))
 
 
 def _tensor(view, pointer, rows, columns, offset='0', row_axis=0, column_axis=1):
