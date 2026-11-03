@@ -29,16 +29,11 @@ A document has these keys:
 - the region, exactly one of `region_gib` (GiB) or `region_percent` (of the node's physical memory).
 
 The region is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
-when the device comes up, before any queue pair exists. The bridge does not deregister it: the kernel releases the
-registration at the port's child's exit (design/transport.md section 5). Each device registers the region in extents
-of 2^k bytes: the least power of two, from the arena's page up to the 4 GiB bank, at which the region's extents number
-no more than that device's `max_mr` (rdma/mesh-link.c:538-541, `device_up`; design/transport.md section 1). On the
-Studios' 86 GiB under `max_mr` 100 that is 1 GiB. The bank is the hardware's fact: `tbt_post_recv` keeps only the low
-32 bits of an SGE address, so no extent crosses a 4 GiB boundary. Every input is the node's own (the region's size,
-`max_mr`, the bank), so the count of extents fits `max_mr` by construction (02002590). A registration that fails
-returns its errno as the port's open's value: the port is not open, the extents already registered stay, and it opens
-again at the events that open any port, its link's coming on, a hello heard on it or its child's end (rdma/mesh-link.c
-`port_opened`, line 895; 02002590 deleted the refusal's backoff). The bridge starts and serves the node either way;
+when the device comes up, before any queue pair exists. Each device registers the region in extents of 1 GiB
+(`MESH_DMA_EXTENT`, etc/bridge/thunderbolt.h:7; rdma/mesh-verbs.h:139, `device_up`; design/transport.md section 1).
+`tbt_post_recv` keeps only the low 32 bits of an SGE address, so no extent crosses a 4 GiB boundary. A registration
+that fails returns its errno as the port's open's value: the port is not open and the extents already registered stay
+(rdma/mesh-link.c:941, `port_opened`). The bridge starts and serves the node either way;
 the region is not clamped. Clients lease from it; a lease that does not fit fails at its start with an error naming
 the execution, and the region does not grow.
 
@@ -48,9 +43,7 @@ These two ship with the bridge to show the form. Neither is likely to be what an
 didactic programming exercises.
 
 - `example-1pct.json`: one percent of the node's memory (245 MiB on a 24 GiB Mac mini, 1.3 GiB on a 128 GiB M5). It
-  allows small streaming transfers. A libnccl-mesh communicator leases one page for its gate, and a pool for the
-  pages its groups send from and land in that are not the caller's (a reduce-scatter's operand, a tree's scratch, a
-  combine's landing area; rdma/nccl.h, Memory). Every operand that crosses a link is the program's own lease. It does
+  allows small streaming transfers. Every operand that crosses a link is the program's own lease. It does
   not allow programs that keep large operands in the region.
 - `example-10pct.yaml`: ten percent of the node's memory. It holds the operands of many crossings, and it is too
   small for many applications: a model's weights and KV pool in the region, or a long reduction's operands.
@@ -63,16 +56,15 @@ the user to derive".
 These two are written for the source as it stands (metal-microbench d27fcd9): the rank leases its weights, its KV
 pool and every buffer a crossing takes from the region (metal-microbench docs/placement.md#memory; the operator,
 2026-10-15: "why would weights or kv be outside of the memory pinned pool? being outside of it means that they cannot
-be zero copy passed to peers"). Until metal-microbench 773cead the rank kept them outside it, and a region beside them
-overcommitted the Mini (M09: at a 9 GiB region its userspace starved and its watchdog reset it). What a member leases
+be zero copy passed to peers"). What a member leases
 is one computation, metal-microbench tools/mesh/programs.py `plans` of the call's record: the planner derives no call
-whose members' leases their regions do not hold (node-info `region`) and the driver places no finished record that does
+whose members' leases their regions do not hold (its bridge's record's `region`, metal-microbench
+tools/mesh/grid.py:76) and the driver places no finished record that does
 not fit, each call's record carries each member's, and the rank holds its part's load to the record's to the byte and
 its calls within the record's total. The same count from the model file's header (2026-10-15, before programs.py
 plans was first run) gives the leases lease5's ranks took before their Neural Engine shares to the byte.
 
-- `m4pro-headless.toml`: the Mac mini, 16 GiB, the most that left it a 2 GiB margin beside the region's tables of
-  MESH_VERSION 110 (1.11 GiB); beside 111's (0.06 GiB) it leaves 3.47 GiB, and 17 GiB would leave 2.46.
+- `m4pro-headless.toml`: the Mac mini, 16 GiB, the most that left it a 2 GiB margin.
 - `m5-low.toml`: the M5 Max, 14 GiB, below the Mini's: the least whole GiB that holds its rank's leases and the whole
   model alone.
 
@@ -82,12 +74,9 @@ header (2026-10-15, before programs.py plans was first run): its weights (a Neur
 norm are its layer's own buffers, the down read at the layer's row pitch), the KV pool at the engine's whole page geometry
 (16000 pages and the strip, with their chunk tables; a call leases its own pages, 36 MiB for each 2048 positions of a
 row), the crossed capacity set, the conversion staging, a call's per-layer inputs, its communicator's session (the
-library's, beside the computation), and the whole model alone. Beside the arena: the region's tables (64.5 bytes an
-arena page, a row's page-table entry, buffer record and delivery word and its plane bits, and 0.5 MiB of header,
-ports and client slots, rdma/mesh.h `mesh_layout`, from MESH_VERSION 111: 0.06 GiB at 16 GiB, 0.056 at 14; at 110 every row
-also carried a publication's targets, 1,136.5 bytes an arena page and 0.5 MiB, 1.11 GiB at 16 GiB, touched as rows were leased; from
-111 a program's targets followed its SEND cells in their lease; at MESH_LAYOUT 135 there are neither, and a row has no delivery
-word: its page-table entry, buffer record and plane bits, 48.5 bytes an arena page on one-page rows), the node's base wired and macOS
+library's, beside the computation), and the whole model alone. Beside the arena: the region's tables (a row's page-table entry of 16 bytes and
+buffer record of 32, its three plane bits and its arena page's occupancy bit, 48.5 bytes an arena page on one-page rows:
+etc/bridge/layout.h:43, 41; rdma/mesh.h:68, 275 `mesh_layout`), the node's base wired and macOS
 memory, the rank's process, the Neural Engine's own copy of its columns, and a 2 GiB margin. A served engine (metal-microbench server/bridge.py) leases its model and pool
 from its node's region too; neither file holds one.
 
@@ -98,10 +87,9 @@ Mini's region is and one as the M5's.
 
 `m5ultra-headless.toml`, sized as the Mini's (the operator, 2026-10-15: "allocate essentially all of the memory on the
 entire device"): the most whole GiB that leaves a 2 GiB margin, 82 GiB. Beside it
-the node keeps 2.98 GiB: the region's tables (0.323 GiB, 331.1 MiB), base wired (2.61, the Studios' reading on
+the node keeps the region's tables, base wired (2.61, the Studios' reading on
 2026-10-23), macOS's anonymous memory (1.5), the rank's process (3.64, wired at the chain's run in m5ult2's panic of
-03:08 that day) and the Neural Engine's own copy (2.95); 83 GiB would leave 1.97. At 86 GiB those readings left -1.02,
-and both Studios reset. It holds 26B-A4B whole at the engine's whole page geometry (81.11 GiB) on one Studio and 12B's
+03:08 that day) and the Neural Engine's own copy (2.95). At 86 GiB both Studios reset. It holds 26B-A4B whole at the engine's whole page geometry (81.11 GiB) on one Studio and 12B's
 (97.18 GiB) on any two members, and the six regions (four Studios at 82, the M5 at 14, the Mini at 16) hold 358 GiB.
 
 `m5ultra-low.toml`, sized as the M5's (the operator, 2026-10-15, below: "the m5 system could even have a m5_low
@@ -110,23 +98,20 @@ and benefits less from memoization than a flops starved and bandwidth starved pe
 its region is the least whole GiB
 that holds the whole E2B model alone at the engine's whole page geometry, 14 GiB (13.27 GiB counted by programs.py `plans`
 of a membership of one from the model file's header; 10.56 on the streamed codes export), and any part of E2B on any
-membership holds in it. Beside it the node keeps 71.24 GiB: the region's tables (0.056 GiB), base wired (2.61, the Studios'
+membership holds in it. Beside it the node keeps the region's tables, base wired (2.61, the Studios'
 reading), macOS's anonymous memory (1.5), the rank's process (3.64) and the Neural Engine's own copy
-(at most every FFN column at fp16, 2.95). The Mini's sizing, the most that leaves a 2 GiB margin, gives 82 GiB. The larger
+(at most every FFN column at fp16, 2.95). The larger
 models alone at a call's own pages take more than 14 GiB (12B 16.46 GiB at 4,096 positions, 26B-A4B 28.25 GiB): a Studio
 holds its part of them on memberships whose regions together hold the whole, and the planner fits each member's part to
 its region; at the engine's whole page geometry they take 97.18 GiB (12B) and 81.11 GiB (26B-A4B), more than the six
-regions at these documents hold together (four Studios at 14, the M5 at 14, the Mini at 16: 86 GiB). Counted with
-metal-microbench tools/mesh/programs.py under `MESH_MODEL=e2b-engine` (12b, 26b-a4b):
-`plans({'bs': 1, 'ctx_max': 256000}, structure(), pages=16000)[0]['total']`, and at a call's pages
-`pages=pool_request(1, 4096)` with `ctx_max` 4096 (metal-microbench output_data/lifecycle-20261015/studio_window.py).
+regions at these documents hold together (four Studios at 14, the M5 at 14, the Mini at 16: 86 GiB). Counted
+(metal-microbench output_data/lifecycle-20261015/studio_window.py).
 
 The region is the operator's: "will the user ever 'give permission' to pin 96gb of memory preemptively on a userspace
 machine for no reason? they *might not*" (2026-10-15, below). Each document states the arithmetic it follows from. A Studio's base wired
 memory and its devices' `max_mr` are read when it arrives: the pair's devices report `max_mr` 100, and a region
-registers as 2 GiB extents and a family shifted by half an extent (design/transport.md), 62 at 82 GiB, and a device
-that registers fewer than its region's extents pairs no port until the region is lowered (its refusal logged with the
-extent, above); the region is not clamped. Each of a node's devices registers the whole region, so a Studio cabled on
+registers as 1 GiB extents (etc/bridge/thunderbolt.h:7; design/transport.md section 1), 82 at 82 GiB, and a device
+that registers fewer than its region's extents pairs no port until the region is lowered; the region is not clamped. Each of a node's devices registers the whole region, so a Studio cabled on
 several ports registers it once a device.
 
 ## The operator's words
