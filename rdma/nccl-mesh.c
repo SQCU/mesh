@@ -2492,7 +2492,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
       struct channel *ch = comm->channels + h;
       struct mesh_zwoggle *table = (struct mesh_zwoggle *)at; at += sizeof *table;
       for (int land = 0; land < 2; land++) {
-        uint64_t own_end = 0;
+        uint64_t own_end = 0, released = 0;
         const struct mesh_place *list = placed + (2 * (size_t)h + land) * (d->steps + 1);
         const uint32_t n_listed = listed[2 * h + land];
         struct mesh_zwoggle_entry *entry = (struct mesh_zwoggle_entry *)at; at += n_listed * sizeof *entry;
@@ -2530,16 +2530,19 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
           }
           *position += units[s];
           if (!land && gate[s] < 0) own_end = *position;
+          /* the channel's nodes at each round's end (the list is in round order, mesh_lay): its landing at the
+             round's landings' end, its SENDs' completion at theirs, its release at its own units' end where the
+             round has own units; a multi-round collective's later rounds follow an earlier round's nodes (an
+             all-reduce's folds and partials sent up), so one node a channel for every round would make a cycle */
+          const int ends = i + 1 == n_listed || d->step[list[i + 1].step].round != step->round;
+          if (ends && land) NODE(ncclMeshNodeLanding, h, h, (void *)ch->view.landed, *position, step->round);
+          if (ends && !land) NODE(ncclMeshNodeSent, h, h, (void *)ch->view.sent, *position, step->round);
+          if (ends && !land && own_end > released) { NODE(ncclMeshNodeRelease, h, h, (void *)ch->view.ready, own_end, step->round); released = own_end; }
         }
-        /* the channel's nodes, one each (a consumer reads the occurrence's landings whole; `ready` is one prefix):
-           its landing at its landings' end, its SENDs' completion at their end, its release at its own units' end */
-        if (land && n_listed) NODE(ncclMeshNodeLanding, h, h, (void *)ch->view.landed, *position);
-        if (!land && n_listed) NODE(ncclMeshNodeSent, h, h, (void *)ch->view.sent, *position);
-        if (!land && own_end) NODE(ncclMeshNodeRelease, h, h, (void *)ch->view.ready, own_end);
       }
       if (!table->count[0] && !table->count[1]) continue;
       /* zinth: this table stored where the channel's chain left off, the stream's root or the last table's next */
-      NODE(ncclMeshNodeLink, UINT32_MAX, h, ch->link ? ch->link : (void *)ch->view.zwoggle, region_offset(table));
+      NODE(ncclMeshNodeLink, UINT32_MAX, h, ch->link ? ch->link : (void *)ch->view.zwoggle, region_offset(table), 0);
       ch->link = &table->next;
     }
   }

@@ -739,7 +739,7 @@ class Program:
                     stores.append(n.value)
                     if n.kind in (lib.ncclMeshNodeLanding, lib.ncclMeshNodeSent):
                         stores.append(slot)  # an observation's own slot beside its count: a defect names it
-                    made.append((n.kind, n.transfer, int(ffi.cast('uintptr_t', n.word)), n.value, slot))
+                    made.append((n.kind, n.transfer, int(ffi.cast('uintptr_t', n.word)), n.value, slot, n.round))
                 lowered[c] = made
                 run.communicator(int(ffi.cast('uintptr_t', command.comm)))
             instances.append((t, lowered))
@@ -780,7 +780,9 @@ class Program:
                 if kind == 'send' and (c, rest[0]) in forwarded:
                     continue
                 if kind in ('send', 'sent', 'landed'):
-                    group.setdefault((kind, c, t.commands[c].steps[rest[0]]['channel']), []).append(e)
+                    step = t.commands[c].steps[rest[0]]
+                    # a channel's node a round (the lowering's: an all-reduce's rounds follow one another)
+                    group.setdefault((kind, c, step['channel'], step['round']), []).append(e)
             last = {}
             for key, members in group.items():
                 for e in members:
@@ -788,16 +790,16 @@ class Program:
                 last[members[-1]] = key
             from mesh_graph import contract, held_before, sinks, sources, through
 
-            def nodes_of(c, kind, channel):
+            def nodes_of(c, kind, channel, round_):
                 wanted = {'send': lib.ncclMeshNodeRelease, 'sent': lib.ncclMeshNodeSent,
                           'landed': lib.ncclMeshNodeLanding}[kind]
-                return [n for n in lowered[c] if n[0] == wanted and n[1] == channel]
+                return [n for n in lowered[c] if n[0] == wanted and n[1] == channel and n[5] == round_]
             # the events with nodes, then their edges through the events with none
             for e in t.order:
                 kind, c, *rest = t.events[e]
                 if kind in ('command', 'fold') or (kind == 'post' and any(n[0] == lib.ncclMeshNodeLink for n in lowered[c])):
                     has_node.add(e)
-                elif e in last and nodes_of(c, *last[e][::2]):
+                elif e in last and nodes_of(c, last[e][0], last[e][2], last[e][3]):
                     has_node.update(group[last[e]])
             after = {}
             for a, b in through(t.edges, has_node):
@@ -819,12 +821,12 @@ class Program:
                     cut[0] = False
 
             def emit_observation(key):
-                kind, c, channel = key
+                kind, c, channel, round_ = key
                 settle()
                 run.event(ids[group[key][0]])
                 command = t.commands[c]
                 steps = [command.steps[t.events[m][2]] for m in group[key]]
-                for _, _, word, value, slot in nodes_of(c, kind, channel):
+                for _, _, word, value, slot, _ in nodes_of(c, kind, channel, round_):
                     observed(slot, word)
                     self.observations.setdefault(id(run), {})[slot] = (kind, chunk, channel, sorted({command.origin(s) for s in steps}),
                                                                       value, word)
@@ -868,16 +870,16 @@ class Program:
                     if links:
                         flush(e)
                         run.event(ids[e])
-                        for _, _, word, _, slot in links:
+                        for _, _, word, _, slot, _ in links:
                             stored(slot, word)
                         cut[0] = True
-                elif e in last and nodes_of(c, *last[e][::2]):
+                elif e in last and nodes_of(c, last[e][0], last[e][2], last[e][3]):
                     key = last[e]
                     if key[0] == 'send':
                         for m in group[key]:
                             flush(m)
                         run.event(ids[e])
-                        for _, _, word, value, slot in nodes_of(c, 'send', key[2]):
+                        for _, _, word, value, slot, _ in nodes_of(c, 'send', key[2], key[3]):
                             stored(slot, word)
                         cut[0] = True
                     else:

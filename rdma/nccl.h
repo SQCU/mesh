@@ -300,7 +300,7 @@ typedef struct { uint32_t call, channel, op, round, buffer; uint64_t first, byte
    `value`: its source bytes may be written again); one of each a channel an occurrence, `transfer` its channel
    (UINT32_MAX for a link) */
 enum { ncclMeshNodeLink, ncclMeshNodeRelease, ncclMeshNodeLanding, ncclMeshNodeSent };
-typedef struct { uint32_t kind, transfer, channel; void *word; uint64_t value; } ncclMeshNode;
+typedef struct { uint32_t kind, transfer, channel; void *word; uint64_t value; uint32_t round; } ncclMeshNode; /* round: the steps' round it ends */
 /* Opaque handle to communicator */
 typedef struct ncclComm* ncclComm_t;
 #define NCCL_COMM_NULL NULL
