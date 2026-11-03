@@ -93,7 +93,7 @@ static int landed_watch(uint64_t period_us,double seconds){
   return 0;
 }
 /* mesh-stat streams <period_us> <seconds>: every held stream's words, a line each time any of them moves, looked at every
-   period_us for `seconds` from a mapping of the region to read: {"ns": the clock, "streams": [[stream, peer node, owner,
+   period_us (0: without pause, one core spinning) for `seconds` from a mapping of the region to read: {"ns": the clock, "streams": [[stream, peer node, owner,
    ready, sent, landed, calls left of the send list, of the landing list], ...]}, so a stall's last line is the stall.
    It reads the region alone */
 static int streams_watch(uint64_t period_us,double seconds){
@@ -125,7 +125,8 @@ static int streams_watch(uint64_t period_us,double seconds){
       printf("]}\n");
       fflush(stdout);
     }
-    nanosleep(&pause,NULL);
+    /* period 0: a spin, each move timed to within a pass (a few us), for a tick's releases and landings */
+    if(period_us)nanosleep(&pause,NULL);
   }
   munmap(m,size);
   return 0;
