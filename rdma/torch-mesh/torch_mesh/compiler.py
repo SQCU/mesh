@@ -60,6 +60,11 @@ import os
 # (metal-microbench docs/facts.md). What must stay: no part end that only made a store visible.
 CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
+# a fused kernel's bound (Template._fuse): its products' outputs at most this many (0: no fusion). One threadgroup
+# computing the LSTM's tick's products and cell was right but 80-101 us a tick against 25.5 unfused (lstm-2026-11-03
+# fused-3, fused-4): one core at a light load's clock against the products' 800 simdgroups over every core; the form
+# now is a simdgroup a consumer element. What must stay: a fused form only where it is measured faster than the parts.
+FUSED_OUTPUTS = int(os.environ.get('MESH_FUSED_OUTPUTS', 4096))
 
 
 class Root:
@@ -179,6 +184,7 @@ class Template:
         graph = make_fx(lambda *a: fn(*a), tracing_mode='fake', _allow_non_fake_inputs=True)(*args)
         self.roots, self.commands, self.collectives, self.order, self.current, self.node = {}, [], [], [], {}, None
         self._lower(graph)
+        self._fuse()
         self._declare()
         self._solve()
 
@@ -415,9 +421,11 @@ class Template:
         text = render(tree)
         texts = [x for _, x in shared]
         W = 1 + len(shared)
-        return self._command([out] + [v for v, _ in shared], list(loads), lambda name, c, x=text, texts=texts: kernels.pointwise(
+        written = self._command([out] + [v for v, _ in shared], list(loads), lambda name, c, x=text, texts=texts: kernels.pointwise(
             name, c.writes[0].view(0), [v.view(W + k) for k, v in enumerate(c.reads)], x,
             shared=[(c.writes[1 + k].view(1 + k), texts[k], f's{k}') for k in range(len(texts))]))[0]
+        self.commands[-1].pointwise = (text, texts)  # _fuse's operands
+        return written
 
     def _widening(self, node):
         if node.target is not aten._to_copy.default or set(node.kwargs) - {'dtype'} or node.kwargs.get('dtype') is not torch.float32:
@@ -462,6 +470,7 @@ class Template:
             self._command([out], reads, lambda name, c: kernels.product(
                 name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
                 c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))
+            self.commands[-1].product = (P, float(alpha), float(beta), len(reads) > P + 1)  # _fuse's operands
             values[node] = out
             return
         if out.root.tensor is None and kernels.accumulates(out.shape[0], [x.view(0) for x in parts], b.view(0)):
@@ -477,6 +486,7 @@ class Template:
         values[node] = self._command([out], reads, lambda name, c: kernels.product(
             name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
             c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))[0]
+        self.commands[-1].product = (P, float(alpha), float(beta), len(reads) > P + 1)
 
     def _linear_backward(self, node, values):
         """autograd's linear_backward(input, grad, weight, mask) as products and a sum: the input's gradient grad W, the
@@ -632,6 +642,80 @@ class Template:
                 root.base.coherent = True
         self.collectives.append(collective)
         values[node] = None
+
+    # ---- fuse ----
+    def _fuse(self):
+        """a run of products whose outputs, together exactly one small root of the arena, one pointwise command after
+        them alone reads, each output once, merged with it into one kernel (kernels.fused): one simdgroup a consumer
+        element computes the outputs it reads, then the pointwise. The LSTM's tick lowered its layers' products and its
+        cell to three dependent dispatches, 2-4 us each at a light load's clock on every member (metal-microbench
+        docs/facts.md, chain.m); fused, one, and its stack of gates holds no page. A product over more than
+        FUSED_OUTPUTS outputs (the FFN's) keeps its own kernel and matmul2d's rate."""
+        commands = self.commands
+        values_of = lambda c: [c.out, c.mine] if isinstance(c, Collective) else list(c.writes) + list(c.reads)
+        out, k = [], 0
+        while k < len(commands):
+            j = k
+            while j < len(commands) and getattr(commands[j], 'product', None) is not None:
+                j += 1
+            consumer = commands[j] if k < j < len(commands) else None
+            if consumer is not None and getattr(consumer, 'pointwise', None) is not None and self._fusable(commands, k, j):
+                out.append(self._fused(commands[k:j], consumer, commands[k].writes[0].root))
+                k = j + 1
+                continue
+            out.append(commands[k])
+            k += 1
+        self.commands = out
+
+    def _fusable(self, commands, k, j):
+        """whether commands[k:j] (products) and commands[j] (a pointwise) fuse: the products' outputs rows of one small
+        arena root, together all of it; the consumer reads each element of it once and writes none; nothing else
+        touches it"""
+        if FUSED_OUTPUTS <= 0:
+            return False
+        run, consumer = commands[k:j], commands[j]
+        R = run[0].writes[0].root
+        values_of = lambda c: [c.out, c.mine] if isinstance(c, Collective) else list(c.writes) + list(c.reads)
+        outs = [p.writes[0] for p in run]
+        if not all(o.root is R and len(o.shape) == 2 and tuple(o.stride) == (o.shape[1], 1) for o in outs):
+            return False
+        if R.tensor is not None or R.base is not None or R.coherent or sum(math.prod(o.shape) for o in outs) > FUSED_OUTPUTS:
+            return False
+        if sum(math.prod(o.shape) for o in outs) * outs[0].dtype.itemsize != R.nbytes:
+            return False
+        if any(v.root is R for p in run for v in p.reads) or any(v.root is R for v in consumer.writes):
+            return False
+        if any(v.root is R for c in commands if c is not consumer and all(c is not p for p in run) for v in values_of(c)):
+            return False
+        shape = consumer.writes[0].shape
+        named = []
+        for v in consumer.reads:
+            if v.root is R:
+                stride = v.stride[-len(shape):] if len(v.stride) >= len(shape) else (0,) * (len(shape) - len(v.stride)) + tuple(v.stride)
+                named += [v.offset + sum(a * s for a, s in zip(at, stride)) for at in itertools.product(*(range(n) for n in shape))]
+        return len(named) == len(set(named)) == R.nbytes // outs[0].dtype.itemsize
+
+    def _fused(self, run, consumer, R):
+        """the command of kernels.fused over `run`'s products and their `consumer`"""
+        products = []
+        for p in sorted(run, key=lambda p: p.writes[0].offset):
+            P, alpha, beta, biased = p.product
+            products.append((p.writes[0], list(p.reads[:P]), p.reads[P], p.reads[P + 1] if biased else None, alpha, beta))
+        reads = [v for p in run for v in p.reads] + [v for v in consumer.reads if v.root is not R]
+        command = Command(list(consumer.writes), reads, None)
+        text, texts = consumer.pointwise
+
+        def make(name, c, products=products, operands=list(consumer.reads), text=text, texts=texts):
+            index = {id(v): len(c.writes) + k for k, v in enumerate(c.reads)}
+            device = lambda v: v.view(index[id(v)])
+            computed = lambda v: kernels.View(0, v.dtype, v.shape, v.stride, v.offset, tg='products')
+            return kernels.fused(
+                name, [(computed(o), [device(x) for x in parts], device(b), device(bias) if bias is not None else None,
+                        alpha, beta) for o, parts, b, bias, alpha, beta in products],
+                c.writes[0].view(0), [computed(v) if v.root is R else device(v) for v in operands], text,
+                [(c.writes[1 + k].view(1 + k), texts[k], f's{k}') for k in range(len(texts))])
+        command.make = lambda name, c=command: make(name, c)
+        return command
 
     # ---- declare ----
     def _declare(self):
