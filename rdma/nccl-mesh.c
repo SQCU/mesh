@@ -2423,13 +2423,8 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
     return fail(ncclSystemError, "a lowering's memory");
   }
   ncclResult_t result = ncclSuccess;
-  /* a step's units: the region pages its bytes touch (its first and last may be partial), the same cut at both ends,
-     each rank's operand laid on the same pages. Changed from a page of the piece from its start, whose units crossed
-     pages wherever a piece starts in one (an LSTM of width 4096, metal-microbench balance-2026-11-03 sweep-1: a landing
-     that never came); what must stay: a SEND's units and its receive's alike */
   for (size_t s = 0; s < d->steps; s++) {
-    const uint64_t bytes = mesh_step_bytes(d->step + s), o = region_offset(address[s]) % page;
-    units[s] = bytes ? (o + bytes + page - 1) / page : 0;
+    units[s] = (mesh_step_bytes(d->step + s) + page - 1) / page;
     unit_first[s + 1] = unit_first[s] + units[s];
   }
   uint64_t *unit_at = calloc(unit_first[d->steps] + 1, sizeof *unit_at);
@@ -2438,29 +2433,27 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
     const struct mesh_step *step = d->step + s;
     const uint64_t bytes = mesh_step_bytes(step);
     gate[s] = -1;
-    /* a unit is a region page of the piece, the same cut at both ends (TN3205: a SEND and its receive cover the same
-       frames); its first starts where the piece does and its last ends where it does (design/transport.md section
-       1), and each unit's bytes lie in one page, one SGE */
-    const uint64_t o = region_offset(address[s]) % page;
+    /* a unit is a page of the piece from its start, the same cut at both ends (TN3205: a SEND and its receive cover
+       the same frames); a span may start inside a page (design/transport.md section 1), and each unit's bytes lie
+       contiguous in the region, one SGE */
     for (uint64_t u = 0; !result && u < units[s]; u++) {
-      const uint64_t from = u ? u * page - o : 0, to = (u + 1) * page - o < bytes ? (u + 1) * page - o : bytes;
-      const char *first = (const char *)address[s] + from;
-      const uint64_t length = to - from;
+      const char *first = (const char *)address[s] + u * page;
+      const uint64_t length = bytes - u * page < page ? bytes - u * page : page;
       const uint64_t a = region_offset(first), b = region_offset(first + length - 1);
       unit_at[unit_first[s] + u] = a;
       if (a == UINT64_MAX || b == UINT64_MAX)
         result = fail(ncclInvalidUsage, "step %zu's bytes lie in no region lease of this process", s);
       else if (b != a + length - 1 || a / MESH_DMA_EXTENT != b / MESH_DMA_EXTENT)
-        result = fail(ncclInvalidUsage, "step %zu's unit %llu (a region page's bytes of it, %llu bytes into its page) "
-                      "does not lie contiguous in the region", s, (unsigned long long)u, (unsigned long long)o);
+        result = fail(ncclInvalidUsage, "step %zu's unit %llu crosses a region page or extent its next bytes do not "
+                      "continue: its piece starts %llu bytes into a page (place it on a page)", s,
+                      (unsigned long long)u, (unsigned long long)(region_offset(address[s]) % page));
     }
   }
   for (size_t f = 0; !result && f < forwards; f++) {
     const size_t s = forward[f][0], r = forward[f][1];
     if (s >= d->steps || r >= d->steps || d->step[s].op != MESH_STEP_SEND || d->step[r].op != MESH_STEP_COPY ||
-        d->step[s].first < d->step[r].first ||
-        (d->step[s].first + d->step[s].piece.elements) > (d->step[r].first + d->step[r].piece.elements))
-      result = fail(ncclInvalidArgument, "forward %zu does not name a SEND within a COPY's bytes", f);
+        d->step[s].first < d->step[r].first || (d->step[s].first - d->step[r].first) * d->step[s].piece.element_bytes % page)
+      result = fail(ncclInvalidArgument, "forward %zu does not name a SEND within a COPY's pages", f);
     else gate[s] = (int64_t)r;
   }
   /* every list's order (mesh_lay: by round, then step order, the one order both ends make) and every entry's base on
@@ -2525,8 +2518,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
           if (!land && gate[s] >= 0) { /* a forward: each unit once the COPY's unit under it has landed */
             const int g = (int)d->step_channel[gate[s]];
             entry[i].entry.word = (uint64_t)((const char *)comm->channels[g].view.landed - (const char *)m);
-            /* its first unit's page among the COPY's: both cut at the region's pages, each forward unit in one */
-            entry[i].entry.base = base[gate[s]] + region_offset(address[s]) / page - region_offset(address[gate[s]]) / page;
+            entry[i].entry.base = base[gate[s]] + (step->first - d->step[gate[s]].first) * step->piece.element_bytes / page;
           }
           if (land) { /* each SEND that must complete before this landing is posted (the solve's edges) */
             uint64_t *list = (uint64_t *)at, n = 0;
