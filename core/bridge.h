@@ -124,6 +124,20 @@ struct bridge_link {
   uint64_t next_receive, next_send;      /* the table index past the last one posted (a cursor a link) */
 };
 static struct bridge_link bridge_link_[BRIDGE_LINKS];
+static uint32_t bridge_links_open_;
+
+/* "A process that exits while it holds queue pairs can hang in the driver until the node resets" (data-model.md
+   section 3): on any termination or fault the bridge destroys its queue pairs, then exits */
+#include <signal.h>
+static void bridge_release(int signal_number) {
+  for (uint32_t l = 0; l < bridge_links_open_; l++) if (bridge_link_[l].qp) ibv_destroy_qp(bridge_link_[l].qp);
+  bridge_links_open_ = 0;
+  _exit(128 + signal_number);
+}
+static void bridge_on_signals(void) {
+  const int signals[] = { SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+  for (size_t i = 0; i < sizeof signals / sizeof *signals; i++) signal(signals[i], bridge_release);
+}
 
 static int bridge_exchange(const char *host, const char *port, int listen_end, const void *mine, void *theirs, size_t n) {
   struct addrinfo hints = { .ai_socktype = SOCK_STREAM, .ai_flags = listen_end ? AI_PASSIVE : 0 }, *ai;
@@ -184,6 +198,7 @@ static uint32_t bridge_lkey(struct bridge_link *L, size_t offset) { return L->mr
 int bridge_serve(const char *configuration) {
   FILE *f = fopen(configuration, "r");
   if (!f) return errno;
+  bridge_on_signals();
   char name[128] = "/bridge", device[64], host[256], port[16];
   unsigned gib = 1; int gid, listen_end; uint32_t links = 0;
   char line[512];
@@ -208,8 +223,8 @@ int bridge_serve(const char *configuration) {
     } else if (sscanf(line, "link %63s %d %255s %15s %d", device, &gid, host, port, &listen_end) == 5) {
       if (!region || links == BRIDGE_LINKS) return EINVAL;
       int e = bridge_link_open(&bridge_link_[links], device, gid, host, port, listen_end, region, bytes);
-      if (e) { fprintf(stderr, "bridge: link %u (%s): %s\n", links, device, strerror(e)); return e; }
-      links++;
+      if (e) { fprintf(stderr, "bridge: link %u (%s): %s\n", links, device, strerror(e)); bridge_release(0); }
+      links++; bridge_links_open_ = links;
     }
   }
   fclose(f);
