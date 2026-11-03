@@ -41,6 +41,15 @@ CONSTANT = {aten.zeros.default: 0.0, aten.zeros_like.default: 0.0, aten.ones_lik
 INPLACE = {aten.copy_.default, aten.add_.Tensor, aten.mul_.Tensor, aten.index_copy_.default}
 _EVENTS = itertools.count(1)
 READ, WRITE = 1, 2
+# an all-reduce of fewer bytes than this is a gather of every rank's operand and a sum over the ranks (compiler
+# _reduced). Its finish is a GPU round and (size - 1) x B in at a rank's rate; the planner's all-reduce's is about
+# 2 x depth rounds and 2 (size - 1) / size x B. With a round about 40 us (the five-member LSTM's tick, its wait and
+# compute: metal-microbench docs/facts.md), 24.4 GB/s a rank in (the bandwidth service) and depth 2 at five ranks, they
+# meet at (2 depth - 1) x round x rate x size / ((size - 1)(size - 2)), about 1.2 MB; the run's configuration
+# (MESH_ALLREDUCE_GATHER_BELOW, bytes) sets it for a sweep. The planner's all-reduce measured 357-416 us at 256 KB and
+# 163-188 at 4 KB (allreduce-2026-11-03 sweep-21).
+import os
+GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
 
 
 class Root:
@@ -517,13 +526,37 @@ class Template:
         values[node] = None
 
     def _reduced(self, node, values):
-        """allreduce_(x, group): x summed over every rank in place, one call over x (one contiguous run), its segments
-        the planner's cut; it reads all of x (this rank's part of the sum) and writes all of it, so its version is
-        completed from x before any of its SENDs or folds (no covered bytes)"""
+        """allreduce_(x, group): x summed over every rank in place, one call over x (one contiguous run). Two lowerings,
+        chosen at compile time by their modeled finish (GATHER_BELOW): below it every rank's x gathered into a [size, n]
+        root and summed over the ranks (one round, (size - 1) x the bytes in); at and above it the planner's all-reduce,
+        its segments the planner's cut (a reduce-scatter's rounds up the trees and an all-gather's down, 2 (size - 1) /
+        size x the bytes). The latter reads all of x (this rank's part of the sum) and writes all of it, so its version
+        is completed from x before any of its SENDs or folds (no covered bytes)"""
         x, group = values[node.args[0]], node.args[1]
         runs = x.runs()
         if len(runs) != 1:
             raise NotImplementedError('an all-reduce of a view that is not one contiguous run')
+        n = math.prod(x.shape)
+        if n * x.dtype.itemsize < GATHER_BELOW:
+            pg = torch.distributed.distributed_c10d._resolve_process_group(group)
+            size, rank = pg.size(), pg.rank()
+            flat = Value(x.root, x.dtype, (1, n), (n, 1), x.offset)
+            gathered = Value(Root(size * n * x.dtype.itemsize), x.dtype, (size, n), (n, 1), 0)
+            mine = Value(gathered.root, x.dtype, (1, n), (n, 1), rank * n)
+            self._copy(flat, mine)
+            collective = Collective(gathered, [0], [n] * size, x.dtype, group)
+            landed = [(a, b) for a, b in [(0, rank * n * x.dtype.itemsize),
+                                          ((rank + 1) * n * x.dtype.itemsize, size * n * x.dtype.itemsize)] if b > a]
+            self._command([gathered], [mine], None, collective, covered=landed)
+            for root in (collective.out.root, collective.mine.root):
+                root.coherent = True
+                if root.base is not None:
+                    root.base.coherent = True
+            self.collectives.append(collective)
+            out = Value(x.root, x.dtype, (n,), (1,), x.offset)
+            self._command([out], [gathered], lambda name, c: kernels.summed(name, c.writes[0].view(0), c.reads[0].view(1), [0]))
+            values[node] = None
+            return
         collective = Collective(x, [x.offset], None, x.dtype, group, what='allreduce', elements=math.prod(x.shape))
         self._command([x], [x], None, collective, covered=[])
         for root in (collective.out.root, collective.mine.root):
