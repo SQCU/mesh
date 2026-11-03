@@ -60,11 +60,6 @@ import os
 # (metal-microbench docs/facts.md). What must stay: no part end that only made a store visible.
 CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
-# a channel's release stored by its payload's producer where that is a pointwise command of at most this many elements
-# (one threadgroup), every predecessor of the release's SENDs it or before it; MESH_RELEASE_IN_PRODUCER=0 stores every
-# release in a dispatch of its own for a comparison
-RELEASE_IN_PRODUCER = os.environ.get('MESH_RELEASE_IN_PRODUCER', '1') != '0'
-FUSED_RELEASE_ELEMENTS = 1024
 
 
 class Root:
@@ -420,11 +415,9 @@ class Template:
         text = render(tree)
         texts = [x for _, x in shared]
         W = 1 + len(shared)
-        written = self._command([out] + [v for v, _ in shared], list(loads), lambda name, c, x=text, texts=texts: kernels.pointwise(
+        return self._command([out] + [v for v, _ in shared], list(loads), lambda name, c, x=text, texts=texts: kernels.pointwise(
             name, c.writes[0].view(0), [v.view(W + k) for k, v in enumerate(c.reads)], x,
             shared=[(c.writes[1 + k].view(1 + k), texts[k], f's{k}') for k in range(len(texts))]))[0]
-        self.commands[-1].pointwise = (text, texts)  # a release stored in it (the emitted order's fusion)
-        return written
 
     def _widening(self, node):
         if node.target is not aten._to_copy.default or set(node.kwargs) - {'dtype'} or node.kwargs.get('dtype') is not torch.float32:
@@ -1149,40 +1142,6 @@ class Program:
             from mesh_graph import waits_late
             emitted_order = waits_late(t.order, t.edges, {e for e in t.order if t.events[e][0] in ('landed', 'sent')},
                                        {e for e in t.order if t.events[e][0] == 'send'})
-            # a channel's release stored by the pointwise command just before it in the emitted order, where that
-            # command is one threadgroup's and every predecessor of the release's SENDs is it or before it: one
-            # dependent dispatch fewer a tick (kernels.pointwise releases; metal-microbench tools/mesh/tick.m)
-            fused, fusing = {}, {}
-            if RELEASE_IN_PRODUCER:
-                preds = t.__dict__.setdefault('preds', {})
-                if not preds:
-                    for a, b in t.edges:
-                        preds.setdefault(b, set()).add(a)
-                ancestry = t.__dict__.setdefault('ancestry', {})
-
-                def ancestors(x, preds=preds, ancestry=ancestry):
-                    if x not in ancestry:
-                        seen, stack = set(), [x]
-                        while stack:
-                            for a in preds.get(stack.pop(), ()):
-                                if a not in seen:
-                                    seen.add(a)
-                                    stack.append(a)
-                        ancestry[x] = seen
-                    return ancestry[x]
-                previous = None
-                for e in emitted_order:
-                    kind, c, *rest = t.events[e]
-                    if kind == 'command':
-                        previous = e
-                    elif e in last and last[e][0] == 'send' and previous is not None:
-                        key, producer = last[e], t.commands[t.events[previous][1]]
-                        if (getattr(producer, 'pointwise', None) is not None
-                                and math.prod(producer.writes[0].shape) <= FUSED_RELEASE_ELEMENTS
-                                and nodes_of(c, 'send', key[2], key[3])
-                                and all(a == previous or a in ancestors(previous) for m in group[key] for a in preds.get(m, ()))):
-                            fused[key] = previous
-                            fusing.setdefault(previous, []).append(key)
             for e in emitted_order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
@@ -1215,28 +1174,7 @@ class Program:
                     for index, value in enumerate([*command.writes, *command.reads]):
                         tensor, base = self._binding(value.root)
                         operands.append((index, tensor, base))
-                    if e in fusing:
-                        # its channels' releases stored by it once its elements are: each word and its value slot past
-                        # its views, each word's stores in order (an edge from its last), the releases' events its
-                        released = [(word, slot) for key in fusing[e] for _, _, word, _, slot, _ in nodes_of(key[1], 'send', key[2], key[3])]
-                        text, texts = command.pointwise
-                        W = len(command.writes)
-                        source, grid, group_size = kernels.pointwise(
-                            'mesh_command', command.writes[0].view(0), [v.view(W + k) for k, v in enumerate(command.reads)], text,
-                            shared=[(command.writes[1 + k].view(1 + k), texts[k], f's{k}') for k in range(len(texts))],
-                            releases=len(released))
-                        first = len(command.writes) + len(command.reads)
-                        for j, (word, slot) in enumerate(released):
-                            operands += [(first + 2 * j, word, 0), (first + 2 * j + 1, values, 8 * slot)]
-                            if word in last_store and last_store[word] != ids[e]:
-                                edges.append((last_store[word], ids[e]))
-                            last_store[word] = ids[e]
-                            self.stores.setdefault(id(run), []).append((named.get(ids[e]), word, int(_stream.address(values)) + 8 * slot))
-                        for key in fusing[e]:
-                            alias[ids[group[key][0]]] = ids[e]
-                        run.dispatch(_pipeline(source, 'mesh_command'), operands, grid, group_size, True)
-                    else:
-                        run.dispatch(command.pipeline, operands, command.grid, command.group, True)
+                    run.dispatch(command.pipeline, operands, command.grid, command.group, True)
                     # a traced command names its writes' and reads' shapes and whether each is system-coherent, so a
                     # trace tells its commands apart and names an ordinary load of a landing's bytes
                     labels.append(('command', named.get(current[0]), [list(v.shape) for v in command.writes],
@@ -1262,10 +1200,9 @@ class Program:
                     if key[0] == 'send':
                         for m in group[key]:
                             flush(m)
-                        if key not in fused:  # else stored by its producer (above)
-                            ev(ids[e])
-                            for _, _, word, value, slot, _ in nodes_of(c, 'send', key[2], key[3]):
-                                stored(slot, word, ids[e], release=True)
+                        ev(ids[e])
+                        for _, _, word, value, slot, _ in nodes_of(c, 'send', key[2], key[3]):
+                            stored(slot, word, ids[e], release=True)
                         cut[0] = True
                         if posts:
                             emit_post(*posts.pop(0))

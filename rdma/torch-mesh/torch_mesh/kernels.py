@@ -65,16 +65,12 @@ def _source(name, parameters, body):
     return f'{prelude()}\nusing namespace metal;\nkernel void {name}({", ".join(parameters)}, uint3 at [[thread_position_in_grid]]) {{\n{body}\n}}\n'
 
 
-def pointwise(name, out, operands, expression, extra=(), shared=(), releases=0):
+def pointwise(name, out, operands, expression, extra=(), shared=()):
     """out[c] = expression over the operands loaded at c (each a View broadcast over out's shape: `x{k}` names operand
     k's value as float); `extra` the parameters of an indexed operand (index views). `shared`: (view, expression, name)
     each, a value computed once (as float, rounded through its view's type as its store is), stored to its view at c and
     named in the expressions after it: a write the next kernel would read back (compiler.py _emit). One thread an
-    element. `releases`: that many release words stored by the kernel once its elements are (compiler.py, a channel's
-    release in its payload's producer): the kernel one threadgroup, after a threadgroup barrier its first thread
-    stores each word from its value slot as store() does (arguments past the views: the word, then its slot, each).
-    One dependent dispatch fewer a tick: 6.31 against 7.53 us a tick on an M5 Ultra, 6.57 against 7.49 on the Mini
-    (metal-microbench tools/mesh/tick.m); the payload complete behind the release on both (visible.m shaped form 6)"""
+    element."""
     count = 1
     for extent in out.shape:
         count *= extent
@@ -82,23 +78,11 @@ def pointwise(name, out, operands, expression, extra=(), shared=(), releases=0):
     loads = '\n'.join(f'    const float x{k} = float({view.load(c)});' for k, view in enumerate(operands))
     pre = ''.join(f'\n    const float {named} = float({MSL[view.dtype]}({text}));\n    {view.store(c, named)}'
                   for view, text, named in shared)
+    body = (f'    const ulong i = at.x;\n    if (i >= {count}ul) return;\n{loads}{pre}\n'
+            f'    {out.store(c, expression)}')
     parameters = [out.parameter(True)] + [view.parameter(True) for view, _, _ in shared] + \
         [view.parameter(False) for view in operands] + list(extra)
-    if not releases:
-        body = (f'    const ulong i = at.x;\n    if (i >= {count}ul) return;\n{loads}{pre}\n'
-                f'    {out.store(c, expression)}')
-        return _source(name, parameters, body), (count, 1, 1), (min(256, max(1, count)), 1, 1)
-    first = 1 + max([out.index] + [v.index for v, _, _ in shared] + [v.index for v in operands])
-    for j in range(releases):
-        parameters += [f'volatile coherent(system) device ulong *r{j} [[buffer({first + 2 * j})]]',
-                       f'device const ulong *v{j} [[buffer({first + 2 * j + 1})]]']
-    indent = lambda text: '\n'.join('    ' + line if line else line for line in text.split('\n'))
-    stores = ' '.join(f'r{j}[0] = v{j}[0];' for j in range(releases))
-    body = (f'    const ulong i = at.x;\n    if (i < {count}ul) {{\n{indent(loads + pre)}\n        {out.store(c, expression)}\n    }}\n'
-            f'    threadgroup_barrier(mem_flags::mem_device);\n'
-            f'    if (i == 0ul) {{\n        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
-            f'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));\n        {stores}\n    }}')
-    return _source(name, parameters, body), (count, 1, 1), (count, 1, 1)
+    return _source(name, parameters, body), (count, 1, 1), (min(256, max(1, count)), 1, 1)
 
 
 def indexed(name, out, source, index, axis, writes_through_index):
