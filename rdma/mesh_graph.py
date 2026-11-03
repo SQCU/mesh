@@ -5,6 +5,7 @@ Views name their shared storage root; regions describe the positions each value
 reads or writes there. Selection preserves the given order. Cuts introduce no
 operation or dependency. None of these objects reaches numerical execution.
 """
+import itertools
 from bisect import bisect_right
 
 
@@ -588,3 +589,42 @@ def superseded(history, newer):
         k = bisect.bisect_right(starts, lo) - 1
         return k >= 0 and merged[k][1] >= hi
     return [h for h in history if not covered(h[2], h[3])]
+
+
+def arborescences(nodes, root, capacity, depth=None):
+    """every spanning arborescence of range(nodes) from `root` over the pairs capacity[u][v] > 0 joins (u v's parent),
+    as {v: u}, each within `depth` edges of the root where it is given; by enumeration of each node's parent, so for
+    a collective of a few nodes (5: at most 4^4 assignments a root)"""
+    others = [v for v in range(nodes) if v != root]
+    for chosen in itertools.product(range(nodes), repeat=len(others)):
+        parent = dict(zip(others, chosen))
+        if any(u == v or capacity[u][v] <= 0 for v, u in parent.items()):
+            continue
+        deepest = 0
+        for v in others:
+            walked, u = 0, v
+            while u != root and walked <= nodes:
+                u, walked = parent[u], walked + 1
+            deepest = max(deepest, walked)
+        if deepest <= (nodes - 1 if depth is None else depth):
+            yield parent
+
+
+def trees_bound(nodes, capacity, depth=None):
+    """the most every root can broadcast at once over spanning arborescences (an all-gather's per-root rate, in
+    capacity's units), the trees within `depth` where given: the linear program over every arborescence's rate,
+    each directed pair's summed load at most its capacity (scipy's HiGHS, the workstation's analysis venv). Returns
+    (rate, [(root, parent, rate)] of the trees it uses). Against the planner's packing (mesh-graph.c
+    mesh_graph_pack): the bound a packing's trees can reach on the same cables."""
+    import numpy
+    from scipy.optimize import linprog
+    trees = [(r, t) for r in range(nodes) for t in arborescences(nodes, r, capacity, depth)]
+    pairs = [(u, v) for u in range(nodes) for v in range(nodes) if capacity[u][v] > 0]
+    count = len(trees)
+    cost = numpy.zeros(count + 1)
+    cost[-1] = -1
+    loads = numpy.array([[1.0 if t.get(v) == u else 0.0 for (_, t) in trees] + [0.0] for (u, v) in pairs])
+    shares = numpy.array([[1.0 if r == root else 0.0 for (r, _) in trees] + [-1.0] for root in range(nodes)])
+    out = linprog(cost, A_ub=loads, b_ub=[capacity[u][v] for (u, v) in pairs], A_eq=shares, b_eq=numpy.zeros(nodes),
+                  bounds=[(0, None)] * (count + 1), method='highs')
+    return out.x[-1], [(r, t, x) for (r, t), x in zip(trees, out.x[:-1]) if x > 1e-9]
