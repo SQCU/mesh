@@ -17,8 +17,6 @@ extern "C" {
    lowest addressed byte, *shift bytes from its first element, up to `room` of them written.  Strides are bytes;
    trailing dense dimensions are one row.  The spans needed (0 for an affine or empty view, its rows 0 when empty), or
    -1 where shape or strides are missing.  Preparation only: no value is read. */
-long mesh_view_layout(const uint64_t* shape, const int64_t* strides, size_t rank, uint64_t itemsize,
-    int64_t* shift, uint64_t* rows, ncclMeshSpan* spans, size_t room);
 #ifdef __cplusplus
 }
 #endif

@@ -483,23 +483,7 @@ ncclResult_t pncclCommDestroy(ncclComm_t comm);
 ncclResult_t  ncclCommAbort(ncclComm_t comm);
 ncclResult_t pncclCommAbort(ncclComm_t comm);
 
-/* Creates one or more communicators from an existing one.
- * Ranks with the same color will end up in the same communicator.
- * Within the new communicator, key will be used to order ranks.
- * NCCL_SPLIT_NOCOLOR as color will indicate the rank will not be part of any group
- * and will therefore return a NULL communicator.
- * If config is NULL, the new communicator will inherit the original communicator's
- * configuration*/
-ncclResult_t  ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t* config);
-ncclResult_t pncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t* config);
 
-/* Shrink existing communicator.
- * Ranks in excludeRanksList will be removed form the existing communicator.
- * Within the new communicator, ranks will be re-ordered to fill the gap of removed ones.
- * If config is NULL, the new communicator will inherit the original communicator's configuration
- * The flag enables NCCL to adapt to various states of the parent communicator, see NCCL_SHRINK flags.*/
-ncclResult_t  ncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
-ncclResult_t pncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
 
 /* Revoke: comm's operations in flight end with an error and none is issued after it (NCCL 2.29). */
 ncclResult_t  ncclCommRevoke(ncclComm_t comm, int revokeFlags);
@@ -509,8 +493,6 @@ ncclResult_t pncclCommRevoke(ncclComm_t comm, int revokeFlags);
    and nRanks - comm's count more, made at that id's bootstrap (NCCL 2.29). */
 ncclResult_t  ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId* uniqueId);
 ncclResult_t pncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId* uniqueId);
-ncclResult_t  ncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId* uniqueId, int rank, ncclComm_t* newcomm, ncclConfig_t* config);
-ncclResult_t pncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId* uniqueId, int rank, ncclComm_t* newcomm, ncclConfig_t* config);
 
 /* Returns a string for each error code. */
 const char*  ncclGetErrorString(ncclResult_t result);
@@ -687,32 +669,25 @@ typedef struct {
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
 /* design/whole-function.md#interface: the communicator's fabric and a pair's write paths (mesh-fabric.h) */
 ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);
-ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths* paths);
 /* Configuration-time inspection of the installed paths, including exact integer
    weights. The borrowed value remains valid until that pair is reconfigured or
    the communicator is destroyed. Execution does not query routing policy. */
-ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination, const struct mesh_paths** paths);
 /* The channels this rank's lists lay, a cable each that ends here: the count every kernel's per-channel records hold. */
 ncclResult_t ncclMeshCommChannels(ncclComm_t comm, int* channels);
 /* The most entries one repeat of a group of WRITEs, `root` to each of the n `destinations` with `count` elements of
    `element_bytes`, lays on any directed cable: every rank's transfers as the library compiles a WRITE's steps (its
    fabric, installed paths and page), each SEND an entry on its cable's send list at one end and its landing list at the
    other. A group of R repeats lays R times this on that list (configuration time only). */
-ncclResult_t ncclMeshCommWriteEntries(ncclComm_t comm, int root, const int* destinations, int n, size_t count,
-                                      size_t element_bytes, uint64_t* most);
 /* Realization metadata only, before function execution: each rank's fixed
    bytes gathered into rank-major reports. Uses the retained configuration
    channel, with the communicator's deadline; never a payload receipt. */
-ncclResult_t ncclMeshCommConfigGather(ncclComm_t comm, const void* local, void* reports, size_t bytes);
 /* Realization metadata only, before function execution: the root's fixed
    bytes at `data` on every rank, no other rank sending any. Uses the retained
    configuration channel, with the communicator's deadline; every rank passes
    the same root and bytes. */
-ncclResult_t ncclMeshCommConfigBroadcast(ncclComm_t comm, int root, void* data, size_t bytes);
 /* Finish realization after encoding the complete function. Peers exchange the
    compiled send/landing list ends on every cable and match both directions.
    This is a compiler operation, before submission; no runtime invocation calls it. */
-ncclResult_t ncclMeshCommRealized(ncclComm_t comm);
 /* Page tables bind local storage during preparation. A message names pages
    and masks confined to those pages. It never supplies a remote address or an
    extent that crosses a page. Each peer uses its own page size and page list;
@@ -721,20 +696,16 @@ ncclResult_t ncclMeshCommRealized(ncclComm_t comm);
    once the WRITE has been prepared; its immutable descriptors own the binding. */
 typedef struct ncclMeshPageTable *ncclMeshPageTable_t;
 typedef struct { uint64_t page, first, count; } ncclMeshPageMask;
-ncclResult_t ncclMeshPageTableCreate(const void* local, ncclComm_t comm, int metal, ncclMeshPageTable_t* out);
 /* the region bytes [local, local + bytes) of a live local lease lie in: each physically contiguous run, {its first
    byte's region offset, its bytes}, in order, into `runs` (capacity *count in, the runs out: those past the capacity
    not written); those of the range alone, never the lease's whole table.  ncclInvalidArgument where `local` lies in
    no live lease (ordinary storage) */
 typedef struct { uint64_t offset, bytes; } ncclMeshRegionRun;
-ncclResult_t ncclMeshRegionRuns(const void* local, size_t bytes, ncclMeshRegionRun* runs, size_t* count);
-ncclResult_t ncclMeshPageTableShape(ncclMeshPageTable_t table, size_t* pages, size_t* page_bytes);
 /* Local compute preparation may pass a NULL communicator to Create. Binding
    returns the backend view over those same bridge pages, never new storage.
    These objects describe storage during preparation. Recorded bindings may
    name pages containing indices produced during execution; a fixed binding
    and fixed index-list width do not make those index values constant. */
-ncclResult_t ncclMeshPageTableBinding(ncclMeshPageTable_t table, ncclMeshBuffer* binding);
 /* A selection of a table's pages. Page composition into a remapped view (ncclMeshPageTableCompose) is deleted
    (design/page-maps-2026-11-02.md): a chooser composes page maps (mesh-page-map.h), never views. */
 typedef struct { ncclMeshPageTable_t storage; uint64_t first, count; } ncclMeshPageSelection;
@@ -744,10 +715,6 @@ typedef struct { ncclMeshPageTable_t storage; uint64_t first, count; } ncclMeshP
 typedef struct { uint64_t first, count, page; } ncclMeshPageBacking;
 ncclResult_t ncclMeshLeasePages(const void *lease, ncclMeshPageBacking *runs, size_t *count);
 ncclResult_t ncclMeshRegionPageBytes(uint64_t *bytes);
-ncclResult_t ncclMeshPageTableBacking(ncclMeshPageTable_t table, ncclMeshPageBacking* runs, size_t* count);
-/* Local base of the prepared page view; creates no backend resource. */
-ncclResult_t ncclMeshPageTableAddress(ncclMeshPageTable_t table, const void** address);
-ncclResult_t ncclMeshPageTableDestroy(ncclMeshPageTable_t table);
 /* Declaration metadata retained by the common command recorder. Accesses
    belong to individual lowered commands, not an enclosing collective group. */
 typedef struct ncclMeshGroup {
@@ -951,13 +918,10 @@ typedef struct { uint32_t first, count; uint64_t repeat; } ncclMeshPlanRun;
    sequence without duplicating calls for each invocation. Issued groups bind
    their prepared operands to these definitions; execution does not replan.
    count=0 and runs=0 drop the declaration. Every rank supplies the same order. */
-ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count,
-    const ncclMeshPlanRun* order, size_t runs, const ncclMeshPlan** plan);
 /* Local source compiler operands, installed before preparing numerical leaves.
    compiler is the CPU implementation's explicit build JSON; resources is its
    declared resource array (including [] when empty). Execution never reads
    these strings. A CPU leaf has no inferred compiler or provider defaults. */
-ncclResult_t ncclMeshCommCompiler(ncclComm_t comm,const char* compiler,const char* resources);
 /* Lower the next declared group occurrence before binding numerical programs.
    CommPlan owns the selected issue, page cuts, word operands and channel
    predecessor snapshots. The callback consumes typed source/landing effects;
@@ -999,15 +963,6 @@ typedef struct { uint32_t call, channel, op, round, peer, buffer; uint64_t offse
 /* ncclMeshCommDefinitionAhead: the declared group (an index of the plan's groups) that the occurrence `ahead` lowerings
    past the next one will lower, by the plan's own order (definition_at), so the run's solve reads each occurrence's
    transfers before any is lowered. */
-ncclResult_t ncclMeshCommDefinitionAhead(ncclComm_t comm, uint64_t ahead, uint32_t *group);
-ncclResult_t ncclMeshCommTransfers(ncclComm_t comm, uint32_t group, ncclMeshTransferRecord *records, size_t capacity,
-                                   size_t *count, uint64_t *area_bytes);
-ncclResult_t ncclMeshCommOwnSpace(ncclComm_t comm, uint32_t group, uint32_t call, uint32_t buffer,
-                                  struct ncclMeshSpace *space);
-ncclResult_t ncclMeshCommAreaSpace(ncclComm_t comm, uint32_t group, struct ncclMeshSpace *space);
-ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, unsigned char *owned,
-                                 uint32_t capacity, uint32_t *count, uint32_t *initialized, uint64_t *send_origin,
-                                 uint64_t *result_origin);
 /* design/page-maps-2026-11-02.md, integration step 5: each command of a lowered occurrence's source program, in its
    program order, tagged with the role it realizes, so the run's solve gives it its event: the link posting a
    channel's receives, a call's publications (its SENDs' release), operand copies (the start copies), sums (its
@@ -1015,11 +970,6 @@ ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call,
 enum { ncclMeshSourceLink, ncclMeshSourcePublish, ncclMeshSourceCopy, ncclMeshSourceSum, ncclMeshSourceComplement,
        ncclMeshSourceEpilogue, ncclMeshSourceMask };
 typedef struct { uint32_t role, call, channel; } ncclMeshSourceTag;
-ncclResult_t ncclMeshCommSourceTags(ncclComm_t comm, uint64_t occurrence, ncclMeshSourceTag *tags, size_t capacity,
-                                    size_t *count);
-ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
-    int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
-    uint64_t* occurrence);
 struct isl_ctx;
 /* Borrowed preparation arrays of MetalPageCommand and MetalPageTransfer.
    They use the enclosing compiler's relation context and retain local source
@@ -1054,35 +1004,25 @@ typedef struct {
   const size_t* call_first;
   size_t calls;
 } ncclMeshSources;
-ncclResult_t ncclMeshCommSources(ncclComm_t comm,uint64_t occurrence,
-    struct isl_ctx* context,const ncclMeshSources** sources);
-ncclResult_t ncclMeshCommSpecialize(ncclComm_t comm,uint64_t occurrence,void* sources);
 /* Complete the source dependency solve for a lowered occurrence. Input spans
    use the same logical coordinates as PageEffect. This runs before Encode and
    extends the occurrence's immutable descriptor prerequisites. */
-ncclResult_t ncclMeshCommSourceInputs(ncclComm_t comm, uint64_t occurrence,
-    const ncclMeshSourceInput* inputs, size_t count);
 /* Bind the explicitly selected retained command ordinals into the enclosing
    recorder. The compiler interleaves these leaves with external numerical
    source before dependency compilation. Whole occurrences supply every ordinal;
    there is no implicit whole-occurrence or alternate execution mode. */
-ncclResult_t ncclMeshCommEncode(ncclComm_t comm, uint64_t occurrence,
-    const size_t* commands, size_t count, cudaStream_t stream);
 /* Compiler-derived useful directed bytes for one entire declared function.
    demand has nranks*nranks entries (source-major); group repeats are included.
    Relay amplification is excluded. Query after configuration, before execution;
    the same declarations and route vectors are then realized for the next call. */
-ncclResult_t ncclMeshCommPlanDemands(ncclComm_t comm, uint64_t* demand, size_t entries);
 /* Finest observable route allocation in the declared graph: maximum independent
    units in any single logical transaction for each ordered pair. Repeats do not
    increase this number. A weight change smaller than 1/units may compile to the
    identical schedule; this is probe resolution, never a minimum path share. */
-ncclResult_t ncclMeshCommPlanRouteUnits(ncclComm_t comm, uint64_t* units, size_t entries);
 /* The shared Metal payload and page-effect primitives as built into the loaded
    library. Frontends retain their numerical source and exact page relations;
    the common source pass supplies observations and publications before binding.
    No caller receives a second executable protocol or physical binding records. */
-const char* ncclMeshMetalPrelude(void);
 /* The Metal buffer (an id<MTLBuffer>) over the whole lease (ncclMemAlloc) holding `ptr`, any byte of it, and ptr's offset
    in it: the library's, made at the lease's first such call and released during deferred lease retirement after
    ncclMemFree, the buffer a tensor allocator

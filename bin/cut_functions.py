@@ -15,7 +15,12 @@ import sys
 def _depths(lines):
     """the brace depth at the end of each line, outside strings, character literals and comments"""
     depth, state, out = 0, None, []
-    for line in lines:
+    for k, line in enumerate(lines):
+        # a C++ linkage block (a header's extern "C" { under #ifdef __cplusplus, and its lone closing brace) is no
+        # nesting: its declarations are top-level
+        if line.strip() == 'extern "C" {' or (line.strip() == '}' and k and lines[k - 1].strip() == '#ifdef __cplusplus'):
+            out.append(depth)
+            continue
         i = 0
         while i < len(line):
             c, d = line[i], line[i:i + 2]
