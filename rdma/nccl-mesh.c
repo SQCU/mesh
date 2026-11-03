@@ -1819,11 +1819,6 @@ struct routing {
   struct mesh_paths **paths[2];
   uint32_t **path_first[2];
 };
-static void routing_members(uint64_t *out,const uint64_t *in,uint32_t n) {
-  const uint32_t words=(n+63)/64;
-  for(uint32_t w=0;w<words;w++)out[w]=in?in[w]:UINT64_MAX;
-  if(n%64)out[words-1]&=(UINT64_C(1)<<(n%64))-1;
-}
 struct route_prior { const ncclMeshRouting *route; uint32_t index; };
 struct route_catalog { const ncclMeshRouting *at[2]; uint32_t count[2]; };
 /* route_demand_equal's fields as a total order: equal demands are adjacent in it, so a plan finds every demand equal to
