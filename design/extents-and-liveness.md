@@ -1,9 +1,8 @@
 # Extents and liveness: what a program's pages are, and when they are free
 
 This document states, with the literature behind it, how the mesh knows which pages a collective program uses and when
-each page is free. It is why the bridge assumes no arbitrary access pattern, uses no error state, and waits on data
-alone. The memory model is [pages-and-functions.md](pages-and-functions.md); the transport is
-[transport.md](transport.md) section 14.
+each page is free. It is why the bridge assumes no arbitrary access pattern and waits on data alone. The memory model
+is [pages-and-functions.md](pages-and-functions.md); the transport is [transport.md](transport.md) section 14.
 
 The operator, 2026-10-22: "some algorithm tries to assume that all prorgams have arbitrary access patterns and
 communication schedules for the sake of breadth, but in so doing relaxes the problem socpe they are working on so
@@ -58,11 +57,9 @@ U(P, t) ⊆ D(P). A call may pass fewer elements than its extent holds. The coun
 difference is known when the call is made, not discovered later.
 
 Literature:
-- **v-collectives.** `MPI_Allgatherv` and its kind take per-rank counts within declared buffers. Our
-  `ncclMeshAllGatherV` and `ncclMeshReduceScatterV` are the same.
+- **v-collectives.** `MPI_Allgatherv` and its kind take per-rank counts within declared buffers.
 - **Partitioned communication** moves only the partitions marked ready ([MPI 4.1][mpi-part]).
-- **Uneven partitioning** pads each shard to a static capacity, and only the valid part carries values ([GSPMD][gspmd];
-  torch-mesh `partition.py`, capacities and parts).
+- **Uneven partitioning** pads each shard to a static capacity, and only the valid part carries values ([GSPMD][gspmd]).
 
 ## c. The access pattern follows from the graph
 
@@ -105,8 +102,7 @@ The live set computed with more knowledge is contained in the live set computed 
 operands and that its functions are data-independent (pages to pages) shrinks the over-approximation. In the limit it
 is exact.
 - **Last use.** When a row's last use is known statically, the row is released at that use. That can be partway
-  through a dataflow, asynchronously, as the dependent's stamps arrive: steps 6 and 7 of pages-and-functions.md
-  ("release ... when the dependent's rows are stamped").
+  through a dataflow, asynchronously, as the dependent's stamps arrive (data-model.md section 5, lines 120-122).
 - **Memory schedules.** Chen et al. trade recomputation for memory by schedule ([Chen et al. 2016][chen]), and
   Checkmate solves for optimal rematerialization schedules on arbitrary graphs ([Jain et al. 2020][checkmate]). Both
   rest on knowing every tensor's uses from the graph.
@@ -160,59 +156,20 @@ route lost. From the halted hops:
 
 No extent in F or B has a future use (d). Each is free at once, except what that node's W(t) holds.
 
-**Earliest knowledge.** By happened-before, a node can learn of the halt no earlier than a chain of messages from the
-halt reaches it ([Lamport 1978][lamport]). The pieces themselves would have travelled the routes. So a notice that
-travels the same routes, cut-through, reaches each node at the earliest time any signal could.
-
-**The fastest propagation is:**
-1. The halted hops' nodes originate a notice for the call that names the hops that ended.
-2. A node that receives it forwards it at once, before anything else, with no batching and no wait. It goes along
-   every out-hop in F (downstream) and every in-hop in B (upstream), by the plan's feeds relation.
-3. As it forwards, the node acts locally:
-   - it ends the call's holdings on those edges, posting nothing further for them;
-   - it frees every extent of the cones outside its W(t);
-   - it reports the status in its callers' `meta`.
-4. A notice names its call, so a second copy is dropped. Each node acts once per call.
-
-**What the notice is.**
-- It is a fact about the call's plan, not a message about data: no node waits on it to use data, it only ends and
-  frees (pages-and-functions.md, the addendum on messages about data).
-- It travels on the bridges' control channel, never on a data lane, because a lane carries only plan pages.
-- ULFM's revoke propagates over the communicator by reliable broadcast, and Ray's ownership carries a failure from
-  owners to borrowers; both carry the failure along the system's own graph ([ULFM][ulfm-sc18];
-  [Ray ownership][ray-own]). Here that graph is the plan's feeds relation, already compiled, so the cones are computed
-  rather than discovered. The broader setting is distributed garbage collection's reference graphs
-  ([Abdullahi and Ringwood 1998][dgc]).
-
 ### What W(t) holds under a halt
 At a node, W(t) holds the requests already posted on the cones' edges: receives posted toward an upstream hop that
 will never send, and SENDs its downstream will never receive. Their rows are released when the requests complete or
 when their queue pair is gone (d).
-- The notice reaches both ends of each cone edge, so both end that edge's stream. No stream is left dead at one end
-  and live at the other.
 - On a link with one stream, that stream's end loses the link: the port process exits, and the next one pairs from 0.
 - On a link with several streams, a dead stream stays dead until its port process ends. Its W(t) is bounded by one
   window.
 
 ### Topology changes during a call
-A link lost on a route is itself a halt. Its two ends originate notices into their cones. A node that joins during a
-call holds no hop of that call's plan; it joins the next call's plan.
+A link lost on a route is itself a halt. A node that joins during a call holds no hop of that call's plan; it joins
+the next call's plan.
 
 ### What each layer does
-- **The collective** compiles, with each call's plan, each node's feeds relation per piece. For each holding it gives
-  its bridge the edges that depend on each edge.
-- **The bridge**, on a holding's unclean end or on a notice:
-  - ends the dependent holdings;
-  - frees rows outside W(t);
-  - forwards the notice on the dependent edges' control channels.
-  
-  No timing, no inference, no waiting.
 - **The caller** reads the status in `meta` and decides whether to rerun.
-
-### Not yet measured
-- **The control channel's hop latency,** which bounds the notice: h hops cost h of it. Data lanes would be faster,
-  and plan-only lanes rule them out.
-- **The time from a halt to the last row freed** in its cones, on graphs of several shapes.
 
 ## What follows for the mesh
 
@@ -220,14 +177,13 @@ call holds no hop of that call's plan; it joins the next call's plan.
    W(t), the plan's window. Nothing else is pinned.
 2. **When a holder gives or dies (d), every row of its holding outside W(t) is free at once.** A row in W(t) is free
    when its unit completes, or when the link's port process exits and its queue pairs are gone.
-3. **No error state is used.** The documented queue-pair flush (move to Error, poll every `IBV_WC_WR_FLUSH_ERR`)
-   would only end W(t) early. The operator, 2026-10-22, of that flush as the literature states it: "you can do this and nothing else with
-   error states and if and only if it is exactly what is supported by the literature". The plan bounds W(t), and the
-   flush is unused.
+3. **Open:** the queue-pair error state. transport.md:572-573: "It is not used: it would only end W(t) early, the
+   plan bounds W(t), and the child's exit ends it". transport.md:609-611: "a child's end ... flushes the lanes that hold
+   work (moved to the error state, their completions taken, at most MESH_PLATFORM_NS) before its exit".
 4. **A row is released at its last planned use (e), not at a holding's end.** The use count of pages-and-functions.md
    is this analysis's result.
 5. **A prediction's mismatch is a statistic in `meta`.** A compiler's prediction of the page-table mapping can be
-   checked against the facts the bridge reports: its page size, its rows' pages and stamps. Examples are contiguity, or
+   checked against the facts the bridge reports: its page size and its rows' pages. Examples are contiguity, or
    which rows a crossing lands in. A mismatch is "an error channel return kind of statistic, not a data dependent
    control flow for a collective verb or a bridge transaction" (the operator, 2026-10-22), returned in `meta`.
 
@@ -248,20 +204,7 @@ Strictly dominating:
 Choices:
 - **Rematerialization.** It trades recomputation for memory ([Chen et al. 2016][chen]; [Checkmate][checkmate]). Only a
   memory budget decides it.
-- **The documented flush.** It ends W(t) early at the cost of a dead stream. The plan bounds W(t), so it is not chosen
-  here.
 - **The size of the posting window.** A larger window hides more latency and keeps more rows in W(t) at a halt.
-
-## What the rejected designs did
-
-Each took the most general program as its model, against (a)–(e):
-- **A pin on every row a dead client owned (2fb2b270, corrected).** It treats D(P) as everything P held and ignores
-  (d).
-- **A stream waiting for a future, unrelated communicator's filler before its rows were free (2fb2b270, deleted).** It
-  treats W(t) as unknown, which the plan already names.
-- **Deadlines, keepalives and lane counts sampled at a holding's start (before 2fb2b270, deleted).** They treat time
-  and racing samples as information about the program, which the program's declaration (a) and counts (b) already
-  give exactly.
 
 [mpi-part]: https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node87.htm
 [part-coll]: https://www.sandia.gov/research/publications/details/partitioned-collective-communication-2021-10-01/
@@ -278,7 +221,3 @@ Each took the most general program as its model, against (a)–(e):
 [taccl]: https://arxiv.org/abs/2111.04867
 [msccl]: https://arxiv.org/abs/2408.11008
 [ds]: https://www.cs.utexas.edu/~EWD/transcriptions/EWD06xx/EWD687.html
-[lamport]: https://amturing.acm.org/p558-lamport.pdf
-[ulfm-sc18]: https://icl.utk.edu/files/print/2018/ulfm-sc18.pdf
-[ray-own]: https://www.usenix.org/conference/nsdi21/presentation/cheng
-[dgc]: https://www.cs.kent.ac.uk/people/staff/rej/gcbib/gcbib.pdf
