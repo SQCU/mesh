@@ -128,11 +128,19 @@ def main(config=None):
     if expected is not None:
         # rank 0's outputs, every step's now complete, against the reference: the largest error over every step, row
         # and unit, and over the last step
-        error = np.abs(O.cpu().float().numpy() - expected)
+        got = O.cpu().float().numpy()
+        error = np.abs(got - expected)
         per_step = error.reshape(len(error), -1).max(1)
+        # the worst step's error in each rank's block of units, and against the steps beside it (a block whose bytes
+        # came a step early or late reads near 0 against that step)
+        w, cuts = int(per_step.argmax()), np.cumsum([0] + blocks)
+        beside = {d: [float(np.abs(got[w][:, a:b] - expected[w + d][:, a:b]).max()) for a, b in zip(cuts, cuts[1:])]
+                  for d in (-1, 1) if 0 <= w + d < len(expected)}
         print(json.dumps(dict(phase='checked', max_abs_error=float(error.max()), last_step_max_abs_error=float(error[-1].max()),
-                              output_max_abs=float(np.abs(expected).max()), worst_step=int(per_step.argmax()),
-                              steps_past_1e3=[int(s) for s in np.nonzero(per_step > 1e-3)[0][:32]])), flush=True)
+                              output_max_abs=float(np.abs(expected).max()), worst_step=w,
+                              steps_past_1e3=[int(s) for s in np.nonzero(per_step > 1e-3)[0][:32]],
+                              worst_blocks=[float(error[w][:, a:b].max()) for a, b in zip(cuts, cuts[1:])],
+                              worst_against={str(d): v for d, v in beside.items()})), flush=True)
     dist.destroy_process_group()
     return {'output': O, 'configuration': config.get('placement')}
 
