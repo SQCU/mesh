@@ -36,15 +36,17 @@ struct program { const struct program_item *items; uint32_t count; const char *l
    buffer ending in collective_next_run; each program_run executes it `repeats` times: 0, or an errno. The node's
    bridge region must be attached (bridge_attach). */
 int program_prepare(const struct program *program, const struct collective_fabric *fabric, uint32_t repeats);
-/* Run the recorded run `repeats` times in one commit; the microseconds a run, measured on this rank from commit to
-   completion. Each call runs the next `repeats` runs of the same plan. */
-double program_run(void);
+/* Run the recorded run `repeats` times in one commit: the microseconds a run on the GPU, from the commit's start to
+   its end there (MTL4CommitFeedback), and in `host`, if not NULL, the microseconds a run from this rank's commit to
+   its seeing completion, the commit's own latency included. Each call runs the next `repeats` runs of the plan. */
+double program_run(double *host);
 #endif
 
 #ifdef DATAPROCESSING_IMPLEMENTATION
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <time.h>
+#include <stdatomic.h>
 
 static id<MTLDevice> program_device_;
 static id<MTL4CommandQueue> program_queue_;
@@ -201,7 +203,7 @@ int program_prepare(const struct program *program, const struct collective_fabri
   return 0;
 }
 
-double program_run(void) {
+double program_run(double *host) {
   /* one command buffer: the recorded run executed `repeats` times, each after the last */
   [program_allocator_ reset];
   [program_buffer_ beginCommandBufferWithAllocator:program_allocator_]; [program_buffer_ useResidencySet:program_residency_];
@@ -211,14 +213,20 @@ double program_run(void) {
     [enc executeCommandsInBuffer:program_commands_ withRange:NSMakeRange(0, program_count_)];
   }
   [enc endEncoding]; [program_buffer_ endCommandBuffer];
+  __block double gpu = 0; __block _Atomic int fed = 0;
+  MTL4CommitOptions *options = [MTL4CommitOptions new];
+  [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+    gpu = (feedback.GPUEndTime - feedback.GPUStartTime) * 1e6; atomic_store(&fed, 1); }];
   const uint64_t value = ++program_value_;
   struct timespec a, b;
   clock_gettime(CLOCK_UPTIME_RAW, &a);
   id<MTL4CommandBuffer> buffers[1] = { program_buffer_ };
-  [program_queue_ commit:buffers count:1];
+  [program_queue_ commit:buffers count:1 options:options];
   [program_queue_ signalEvent:program_done_ value:value];
   while (program_done_.signaledValue < value) {}
   clock_gettime(CLOCK_UPTIME_RAW, &b);
-  return ((b.tv_sec - a.tv_sec) * 1e6 + (b.tv_nsec - a.tv_nsec) / 1e3) / program_repeats_;
+  while (!atomic_load(&fed)) {}          /* the feedback follows the completion */
+  if (host) *host = ((b.tv_sec - a.tv_sec) * 1e6 + (b.tv_nsec - a.tv_nsec) / 1e3) / program_repeats_;
+  return gpu / program_repeats_;
 }
 #endif
