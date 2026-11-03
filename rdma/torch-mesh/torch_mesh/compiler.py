@@ -757,7 +757,6 @@ class Program:
         from . import empty
         ffi, lib = mesh.ffi, mesh.lib
         run = _stream.Run()
-        store = _pipeline(kernels.store(), kernels.STORE)
         # pass 1: each chunk's occurrences lowered onto their bytes (their channels' positions move each time), and
         # each word store's value (a link's table offset, a release's count) given its slot
         instances, stores = [], []
@@ -807,8 +806,21 @@ class Program:
         edges, previous_sinks = [], [start]
         watched = self.watched[id(run)] = []
 
-        def stored(slot, word):
-            run.dispatch(store, [(0, word, 0), (1, values, 8 * slot)], (1, 1, 1), (1, 1, 1), True)
+        # a link's or release's word written by a copy from its value slot. Changed by the FFN demonstration session
+        # from a kernel's store (mesh_publish) with its part ended after each run of links and releases (1a33dfa5,
+        # ecc3e6fe): a kernel's store reaches the bridge only at its part's end, about 25 us after it on an M5 Ultra, in
+        # every round; a copy's write reaches it about 6 us into the running part, with a kernel's system-coherent
+        # stores before it (behind its barrier) complete (metal-microbench docs/facts.md, visible.m "copied" and
+        # "ordered"). A copy writes where mesh_publish took a maximum, so each word's stores are ordered: its next
+        # follows its last (an edge). What must stay: a word's store is one the CPU sees in a running part, after the
+        # data it releases, its stores in order.
+        last_store = {}
+
+        def stored(slot, word, event):
+            if word in last_store and last_store[word] != event:
+                edges.append((last_store[word], event))
+            last_store[word] = event
+            run.copy(values, 8 * slot, word, 0, 8)
 
         # a landing and a SEND's completion observed on the GPU (kernels.observe), a node like any other, so a chunk
         # has no outside input and the GPU is already in the part when its data lands (docs/facts.md: a CPU-signalled
@@ -817,7 +829,6 @@ class Program:
 
         def observed(slot, word):
             run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
-        cut = [False]  # a part end owed after links and releases, across chunks
         waited = [False]  # observations emitted since the last command: the next command begins a part's compute
         for chunk, (t, lowered) in enumerate(instances):
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
@@ -872,18 +883,8 @@ class Program:
             # it follows; the chunk's last go at its end.
             held = []
 
-            def settle():
-                # a part ends after its links and releases, once, before the next node of another kind: a store in a
-                # running part reaches the bridge late (docs/facts.md, visible.m: tens of ms on an M5 Ultra, seconds
-                # beside spinning observations on the Mini, run-38), a part's end makes it visible (about 27 us after
-                # it on an M5 Ultra, at once on the Mini); the next part, committed ahead, begins at once
-                if cut[0]:
-                    run.cut()
-                    cut[0] = False
-
             def emit_observation(key):
                 kind, c, channel, round_ = key
-                settle()
                 ev(ids[group[key][0]])
                 command = t.commands[c]
                 steps = [command.steps[t.events[m][2]] for m in group[key]]
@@ -905,7 +906,6 @@ class Program:
                     # a REDUCE's fold: its bytes plus its landing, coherent both (the landing the NIC wrote, the
                     # bytes a later SEND reads)
                     flush(e)
-                    settle()
                     s = command.steps[rest[0]]
                     width = command.dtype.itemsize
                     n, at = s['bytes'] // width, s['at'] // width
@@ -921,7 +921,6 @@ class Program:
                                                                     (2, landing, landing_base)], grid, group_size, True)
                 elif kind == 'command':
                     flush(e)
-                    settle()
                     ev(ids[e])
                     operands = []
                     for index, value in enumerate([*command.writes[:1], *command.reads]):
@@ -937,8 +936,7 @@ class Program:
                         flush(e)
                         ev(ids[e])
                         for _, _, word, _, slot, _ in links:
-                            stored(slot, word)
-                        cut[0] = True
+                            stored(slot, word, ids[e])
                 elif e in last and nodes_of(c, last[e][0], last[e][2], last[e][3]):
                     key = last[e]
                     if key[0] == 'send':
@@ -946,8 +944,7 @@ class Program:
                             flush(m)
                         ev(ids[e])
                         for _, _, word, value, slot, _ in nodes_of(c, 'send', key[2], key[3]):
-                            stored(slot, word)
-                        cut[0] = True
+                            stored(slot, word, ids[e])
                     else:
                         held.append(key)
             for k in list(held):

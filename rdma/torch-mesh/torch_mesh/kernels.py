@@ -3,9 +3,9 @@
 Every operand is a strided view: its shape, strides and element offset are literal constants of its kernel, so the
 Metal compiler folds each index (a power-of-two extent's digit is a shift and a mask). A SEND source's stores and a
 landing's loads are system-coherent (rdma/mesh.metal); every other access is an ordinary one. One kernel a command:
-a pointwise map (a fused expression over its operands), a matrix product with its bias (one simdgroup an output, as
-tools/mesh/lstm_metal.m's floor kernel), an indexed read or write through a device index, a sum over axes, and the
-run's store of a word (a link's or a release's: mesh_publish, a system fence and a maximum).
+a pointwise map (a fused expression over its operands), a matrix product with its bias (product's two forms), an
+indexed read or write through a device index, a sum over axes, and the run's observation of a word (a landing's or a
+SEND's completion). A link's or release's word is written by a copy, not a kernel (compiler.py stored).
 """
 import functools
 import pathlib
@@ -243,17 +243,6 @@ def summed(name, out, source, axes, scale=1.0):
             f'    {" ".join(loops)} total += float({source.load(coordinates)});\n    {out.store(c, f"total * {scale}f" if scale != 1.0 else "total")}')
     parameters = [out.parameter(True), source.parameter(False)]
     return _source(name, parameters, body), (count, 1, 1), (min(256, max(1, count)), 1, 1)
-
-
-STORE = 'mesh_store'
-
-
-@functools.cache
-def store():
-    """a word's store: argument 0 the word, argument 1 its value (a link's table offset or a release's count), stored
-    after a system fence as a maximum (mesh_publish), so a count never moves backwards"""
-    return (f'{prelude()}\nusing namespace metal;\nkernel void {STORE}(volatile coherent(system) device ulong *word '
-            f'[[buffer(0)]], device const ulong *value [[buffer(1)]]) {{ mesh_publish(word, *value); }}\n')
 
 
 OBSERVE = 'mesh_observe'

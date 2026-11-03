@@ -168,11 +168,11 @@ struct Run {
     MetalRunDispatch(run.get(), (*pipelines_)[handle], bindings.data(), bindings.size(),
                      MTLSizeMake(grid[0], grid[1], grid[2]), MTLSizeMake(group[0], group[1], group[2]), threads);
   }
-  void copy(const at::Tensor &source, const at::Tensor &destination, uint64_t bytes) {
-    held.push_back(source); held.push_back(destination);
-    MetalRunCopy(run.get(), at::native::mps::getMTLBufferStorage(source), source.storage_offset() * source.element_size(),
-                 at::native::mps::getMTLBufferStorage(destination), destination.storage_offset() * destination.element_size(),
-                 bytes);
+  // a copy of `bytes` from `source` to `destination`, each a region tensor or a word's address (a binding's operand),
+  // `from` and `to` bytes past it
+  void copy(const pybind11::object &source, uint64_t from, const pybind11::object &destination, uint64_t to, uint64_t bytes) {
+    const MetalRunBinding read = bound(source, 0, from, held), written = bound(destination, 0, to, held);
+    MetalRunCopy(run.get(), read.buffer, read.offset, written.buffer, written.offset, bytes);
   }
   void landed(uint64_t word, uint64_t threshold) { MetalRunLanded(run.get(), (const void *)(uintptr_t)word, threshold); }
   // torch's work so far, an outside producer of this event's pages
