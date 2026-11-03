@@ -2,7 +2,7 @@
 
 ## Fabric
 
-The collective layer owns a physical multigraph. A `mesh_cable` names one
+A `mesh_cable` names one
 reciprocal cable, its two rank endpoints, and its capacity. A `mesh_fabric`
 contains all these cables, including parallel cables. It has no mapping from a
 peer to one channel. The bootstrap exchanges every live endpoint, groups streams
@@ -17,15 +17,20 @@ index and buffer interval. Parallel capacities add.
 The compiler apportions payload using the selected path weights and preserves
 the total exactly. It does not reserve a mandatory page or quantum for every
 cable: a forced floor changes the solver's vector and can introduce unnecessary
-relay work. Exact byte spans can be smaller than allocation pages or hardware
-credit frames. Packet and datatype constraints are explicit realization inputs;
+relay work. Packet and datatype constraints are explicit realization inputs;
 all-link use is assessed across a complete function's transactions, rather than
 duplicating a tiny operand to manufacture cable activity. There is no byte-size
 threshold selecting a separate single-cable implementation.
 
-The native executor binds a transfer by cable index. It never resolves a peer
-to a preferred channel. Both ends independently compile identical per-cable
-orders. Overlapping receive/write ranges create dependencies; disjoint receive
+Open: who names cables. whole-function.md:5 and :26-28 at a6617e1a: "The collective layer owns a physical
+multigraph." "The native executor binds a transfer by cable index. It never resolves a peer to a preferred channel.
+Both ends independently compile identical per-cable orders." zorvek.md:285-287 and :332-333 at a6617e1a: "The
+defect: the collective names a cable (a stream per wire, routes as cable lists, a transfer's cable index), so the
+order the program compiles becomes the order of that cable's queue pairs." "Links, cables, queue pairs and lanes,
+and the order in which a link's queue pairs carry positions, are the bridge's alone, chosen by a rule independent of
+data and program".
+
+Overlapping receive/write ranges create dependencies; disjoint receive
 ranges do not. Cable resources remain separate from node compute resources:
 two cables incident on one node are not mutually exclusive.
 
@@ -47,11 +52,7 @@ solver-imposed restriction, and it must not be counted as an active resource.
 ## Interface
 
 The NCCL calls remain the data-program interface. The collective compiler can
-read the immutable physical fabric with `ncclMeshCommFabric`, install complete
-physical paths and their weights with `ncclMeshCommWriteRoutes`, and compile a
-complete call sequence with `ncclMeshCommPlan`. Installing routes invalidates
-the previous compiled sequence. The caller completes its previous function,
-installs the next routes, and compiles the next sequence before starting it.
+read the immutable physical fabric with `ncclMeshCommFabric`.
 No route decision belongs inside a tensor operation or recurrent timestep.
 
 All collective front ends must lower into the same physical fragment, relay,
@@ -82,7 +83,7 @@ lowering into execution. For C4, the previous-receive chain is below buffer-rang
 dependencies: independent ranges on different cables need no ordering edge.
 C5 and C7 require a fixed compiled sequence during one evaluation and identical
 configuration and evidence at every participant. M is unchanged by this routing
-interface: its existing ordered stream entries and supplied/landed words remain
+interface: its existing ordered stream entries and landed words remain
 the transport primitive. D retains NCCL and registered buffers as its interface.
 
 Performance is the complete function's elapsed time and useful output rate on
@@ -93,15 +94,11 @@ the actual cluster. Extra transfer accounting is not required to report that pai
 `mesh_paths` specifies simple paths as physical cable indices. `mesh_write_compile`
 splits a typed operand among them. It emits one matching send and copy per path
 hop, with no reduction or payload transformation at a
-relay. Every rank declares `ncclMeshCallWrite` with the same source, destination,
-and element count. Source and destination supply their local buffer slots and optional typed views.
+relay.
 Only the source reads its source values and only the destination writes its output.
 The communicator compiler allocates relay storage for the selected routes.
 
-`ncclMeshCommWriteRoutes` installs paths in the communicator's configuration.
-`ncclMeshCommPlan` binds exact source/landing views and jointly compiles registration/packet cuts
-with the complete function. Frames and producer progress are explicit Call fields.
-`ncclMeshCommEncode` records its next group; no separate WRITE plan or execution interface exists. A relay's send reads its receive's registered
+A relay's send reads its receive's registered
 interval directly and uses the incoming stream's landed prefix as its supplied
 word. It can forward a completed span without a host round trip or whole-operand
 join. Path weights describe total flow; realization conserves bytes without a
@@ -111,29 +108,6 @@ Multi-hop execution declares its participating relays in the compiled fabric.
 Directed transfers use that declaration. There is no separate paired
 Send/Recv executor with endpoint-only participation.
 
-### Fused physical writes
-
-`torch_mesh.fused.writes` declares a group of those writes and returns publication
-and landing bindings in physical channel order. Parallel cables remain separate.
-The producer releases one cumulative publication per active cable after writing
-its data; the consumer awaits the last landing addressed to this rank on each
-cable that carries its inputs. Later relay-only arrivals do not delay that
-consumer. Relay entries use incoming landed prefixes directly. Neither a relay
-GPU wait nor a publication of an unlanded relay page is introduced.
-
-These writes use leases owned by the complete data function. Previous users of
-landing leases must have finished **before the group is encoded**: reception is
-posted immediately, without waiting for that node's own producer. Source and
-relay leases remain immutable through downstream uses. Overlapping landing
-ranges, or landing ranges overlapping local sources, fail during realization.
-The DNN uses distinct leases per layer. Reuse waits on the source's DMA-read
-completion and its destination consumers (below), not a peer rendezvous.
-Its producer publishes from its last threadgroup; its consumer reads the
-received values directly. The ordinary write interface remains available for
-the control comparison.
-
-The plan compiles all ranks' actual path fragments into a common dependency
-graph. `ncclMeshCommWriteRelease` supplies predicted producer release times.
 `mesh_graph_schedule` (mesh-graph.h) moves every fragment as its page units on
 its directed cable: each time a cable frees, of the units ready on it the one with
 the most cables below it goes, and a relay's unit waits only for the landing unit
@@ -156,17 +130,7 @@ comparison for continuously submitted calls. Native source retirement follows th
 existing final DMA-read evidence asynchronously; destination consumer lifetime
 is separate. The typed rules below specify exactly which proof is needed.
 
-The native scratch pool distinguishes GPU payload storage from CPU-written DMA
-descriptor storage. Encoding the last GPU use makes a payload available for a
-later use on the same ordered GPU stream; it does not prove that use has already
-executed. Descriptor construction runs on the CPU and cannot borrow this stream
-ordering. A descriptor allocation therefore never reuses a payload allocation.
-Both roles use the same allocator and transport-retirement bookkeeping, with no
-new synchronization, and descriptor reuse requires its preceding transport uses
-to have completed.
-
-A GPU producer stores its published result through `mesh_step_write`, and a GPU
-consumer reads NIC-written bytes through `mesh_step_read`. Ordinary cached stores
+Ordinary cached stores
 can be invisible to the NIC while a command buffer is running; ordinary loads
 can retain old contents of a reused receive buffer. The collective's own payload
 producers follow the same coherent-store rule. No staging copy is added to repair
@@ -175,14 +139,10 @@ into the published lease using the existing Metal tensor-operation pattern.
 
 ### Typed one-sided lifetimes
 
-A page's reuse waits on its last outgoing DMA read's completion, the bridge's own
-`sent` prefix: a landing into bytes a SEND reads is posted only once that SEND
-completed (mesh.h struct mesh_zwoggle_entry `after`, design/pages-and-functions.md
-Freeing 6-7). `rdma/lifetimes.py` and `prove_recurrent_gather`, which proved
-reuse instead from a returning data dependency (a peer's later publication as a
-witness of the read), are deleted with the C library's witness proofs
-(design/zorvek.md item 2): both re-derived from the program what the transport
-reports.
+data-model.md:120-122: "Other rules tell us when work sent back by our peers means they have finished with a page.
+We can then reuse that page or start the next calculation. The work they send back already tells us what we need to
+know. We do not ask for a separate receipt. These rules are part of the plan, just like the rules that split a
+message."
 
 `mesh-lease-retire.h` supplies native source ownership bookkeeping. It records
 the maximum final **DMA-unit** prefix for each physical stream/holding before
@@ -196,34 +156,8 @@ Such a dependency stays retained until an explicit actual-DMA/quiescent-driver
 proof. The helper is nonblocking and adds no transport traffic. Its metadata
 destructor is not a proof that the underlying pages may be overwritten.
 
-### Exact sub-page writes and historical masked frames
-
 `migration.compile_rows` represents a partition intersection by an affine byte
-map: base, row width, row count and stride at each endpoint. The current
-`ncclMeshWriteRowsPrepare` lowering resolves that map directly into immutable
-`mesh_dma_span {offset, bytes}` descriptors, with one exact payload SGE per
-span. It splits actual registration crossings at each participant's row phase;
-allocation pages and 4 KiB hardware credit charges do not pad the payload.
-One table covers all rows, with no per-row host execution call. See
-[the transport contract](transport.md#1-the-objects) and
-[live byte-span validation](transport.md#exact-byte-validation-on-2026-10-24).
-
-`ncclMeshWriteSpansPrepare` extends that same plan with an ordered interval
-list inside one lease. Local lists can have different counts, gaps, and physical
-ordering while naming the same logical byte sequence. Common cuts are the
-union of all participants' view boundaries, packet cuts and actual registration
-crossings. Repeated source bytes are permitted; overlapping landing intervals
-are rejected. The metadata-only `mesh_view_layout` compiler (rdma/mesh-write-compiler.h) maps ndarray/tensor
-shapes and byte strides to this contract, including negative strides. Distinct
-leases use ordered shared WRITE declarations. Neither form adds a numerical
-packing pass or runtime metadata exchange. Indexed preparation has local
-sanitizer tests; the live results above cover the contiguous/affine forms.
-
-The earlier masked-frame implementation carried logical payload intervals in
-separate padded transport storage. GPU pack/unpack masks preserved neighboring
-values, and its measured cost included those extra memory passes and padding
-on every hop. Those tests remain evidence for that historical realization;
-they do not require the exact-span path to introduce padding or copies.
+map: base, row width, row count and stride at each endpoint.
 
 Ownership needs no new event kind. Original sources and relay intervals retain
 all future and posted DMA reads; destination intervals retain their arithmetic
@@ -233,15 +167,14 @@ output's publication follows all stores required by its declared extent. In an
 isolated one-way stream, serial receiver consumers do not order already
 preposted remote writes, and source DMA retirement does not retire a destination
 consumer. Distinct landing generations or an existing causal descendant proof
-are required; the recurrent gather's two-slot theorem cannot be assumed.
+are required.
 
 ## Ahead of time
 
 `routing.Fabric` reads the communicator's physical multigraph and each pair's simple paths from the library
-(mesh-fabric.c enumerates them once, as the communicator starts; nccl.h ncclMeshCommWritePaths). The planner's one
-solver routes a declared function's traffic over them as each group compiles (nccl-mesh.c plan_calls, mesh-plan.h
-mesh_solve; design/collective-solver-2026-10-30.md names the exact packing it is to become). The Python linear program
-and equal-finish projection that allocated path flows here were deleted with the route install (b441f820).
+(mesh-fabric.c enumerates them once, as the communicator starts). The planner's one
+solver routes a declared function's traffic over them as each group compiles (nccl-mesh.c ncclMeshCommDeclare, mesh-plan.h
+mesh_trees_pack, mesh_page_moves; design/collective-solver-2026-10-30.md names the exact packing it is to become).
 
 ## Numerical operands
 
@@ -287,16 +220,14 @@ hourly supplies those same configuration documents and calls the demos.
 
 The fitted per-source envelope also informs producer scheduling. `producer_seconds` maps declared holder groups
 to physical ranks. Preparation divides that envelope across the actual repeated producer groups, and the shared
-`ncclMeshProductionTimes` function maps each group's existing traversal onto that interval. Both Torch and native
-call it before `ncclMeshCommPlan`. These are inferred release times used to order descriptors, not measured tile
+`ncclMeshProductionTimes` function maps each group's existing traversal onto that interval.
+These are inferred release times used to order descriptors, not measured tile
 completion times. Actual publications remain the data dependencies. No timer, wait or polling operation is added.
 The initial graph has its declared traversal and no measured time distinction.
 
 ## Compilation
 
-`configuration.placement` solves the parts on the collective as it is, before tensors are built, or takes the
-placement its caller passes (a run's 'placed' record names its fit). `configuration.bind` declares the complete
-function and installs the resulting page placements and routes. The numerical function is absent from execution.
+The numerical function is absent from execution.
 More routes change the compiled tables; they do not add a controller around each transfer.
 
 `rates.step`, the engine example, and the Xonotic planner and solver consume the same assignment operands. They keep
@@ -331,7 +262,7 @@ record only after all workloads end. Seeded inputs, weights and full outputs sta
 or disk path. Code installation and compilation happen before execution. Unchanged committed code is reused.
 
 Blocking filesystem reads also stay outside execution. Load source and configuration during preparation, then pass
-memory operands to the running function. A page transfer may beat an SSD's first-byte delay (data-model.md section 5);
+memory operands to the running function. A page transfer may beat an SSD's first-byte delay;
 disk staging and per-call file updates cannot stand in for page-to-page DMA.
 
 ## Measurements
@@ -340,9 +271,8 @@ A completed function supplies its elapsed time and useful output bytes together.
 microseconds and useful GB/s; row workloads also store rows/s. The committed workload configuration fixes the
 shape order and useful byte count. Three significant figures fit the coarse host observation.
 
-There is no per-transfer byte ledger, trace observer, timing event, or timing-only GPU gate. The old
-`ncclMeshTrace*`, `ncclMeshCommSample`, and LSTM split-timing interfaces were removed. Their bookkeeping ran on
-transfers even when no trace was requested. Historical trace analysis does not belong in the execution path.
+There is no per-transfer byte ledger, trace observer, timing event, or timing-only GPU gate.
+Historical trace analysis does not belong in the execution path.
 
 The record contains commit IDs, installed node IDs, executed configuration operands, and these completion measurements.
 The caller explicitly supplies available observations to a later preparation. Their family names the source,
