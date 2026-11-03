@@ -101,6 +101,15 @@ class Collective:
     def __init__(self, out, frames, segments, dtype, group):
         self.out, self.frames, self.segments, self.dtype, self.group = out, frames, segments, dtype, group
 
+    def origin(self, step):
+        """the rank whose segment a step's bytes lie in (the segments packed in rank order, `first` a byte offset)"""
+        at, end = step['first'] // self.dtype.itemsize, 0
+        for rank, size in enumerate(self.segments):
+            end += size
+            if at < end:
+                return rank
+        return len(self.segments) - 1
+
 
 def _caller(roots, current, tensor):
     """`tensor`'s value on its storage's current version (the caller's own root before any write renames it)"""
@@ -559,6 +568,9 @@ class Program:
         self.arena = empty((max(1, max((t.arena_pages for t in templates.values()), default=1)) * page,),
                            dtype=torch.uint8)
         self.runs, self.done = [], []
+        # each run's watched words in their order (run.landings()'s): (kind 'landed' or 'sent', chunk, channel, the
+        # ranks whose segments its steps carry), so a timeline names what each landing was
+        self.watched = {}
 
     def _binding(self, root):
         return (_whole(root.tensor), 0) if root.tensor is not None else (self.arena, root.at)
@@ -618,10 +630,11 @@ class Program:
         run.event(start)
         run.inputs()
         edges, previous_sinks = [], [start]
+        watched = self.watched[id(run)] = []
 
         def stored(slot, word):
             run.dispatch(store, [(0, word, 0), (1, values, 8 * slot)], (1, 1, 1), (1, 1, 1), True)
-        for t, lowered in instances:
+        for chunk, (t, lowered) in enumerate(instances):
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
             has_node = set()
             # a step's send, sent and landed events are its channel's node's: one id a (occurrence, kind, channel)
@@ -666,6 +679,8 @@ class Program:
                                 stored(slot, word)
                             else:
                                 run.landed(word, value)
+                                steps = [command.steps[t.events[m][2]] for m in group[kind, c, channel]]
+                                watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
                         has_node.update(group[kind, c, channel])
             # the solve's edges between nodes, through events with none; the instance after the one before
             from mesh_graph import contract, sinks, sources, through
