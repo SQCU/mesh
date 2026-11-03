@@ -5,7 +5,7 @@ Metal compiler folds each index (a power-of-two extent's digit is a shift and a 
 landing's loads are system-coherent (rdma/mesh.metal); every other access is an ordinary one. One kernel a command:
 a pointwise map (a fused expression over its operands), a matrix product with its bias (product's two forms), an
 indexed read or write through a device index, a sum over axes, and the run's observation of a word (a landing's or a
-SEND's completion), and a link's word store (a release's word is written by a copy: compiler.py stored).
+SEND's completion). A link's or release's word is written by a copy, not a kernel (compiler.py stored).
 """
 import functools
 import pathlib
@@ -243,20 +243,6 @@ def summed(name, out, source, axes, scale=1.0):
             f'    {" ".join(loops)} total += float({source.load(coordinates)});\n    {out.store(c, f"total * {scale}f" if scale != 1.0 else "total")}')
     parameters = [out.parameter(True), source.parameter(False)]
     return _source(name, parameters, body), (count, 1, 1), (min(256, max(1, count)), 1, 1)
-
-
-STORE = 'mesh_store'
-
-
-@functools.cache
-def store():
-    """a link's word store: argument 0 the word, argument 1 its value (a link's table offset), stored after a system
-    fence as a maximum (mesh_publish). Restored by the FFN demonstration session for links alone (compiler.py
-    published): a run of links as copies ran one after another, about 0.8 us each, 80 us at every 16-tick chunk's start
-    on an M5 Ultra (metal-microbench docs/facts.md); as stores they run together and are seen at the part's end that
-    follows them. A release stays a copy (compiler.py stored), seen about 6 us after it runs."""
-    return (f'{prelude()}\nusing namespace metal;\nkernel void {STORE}(volatile coherent(system) device ulong *word '
-            f'[[buffer(0)]], device const ulong *value [[buffer(1)]]) {{ mesh_publish(word, *value); }}\n')
 
 
 OBSERVE = 'mesh_observe'
