@@ -89,6 +89,11 @@ def main(config=None):
                 # a run that ended with a defect: its GPU trace first, where traced (MESH_RUN_TRACE)
                 if os.environ.get('MESH_RUN_TRACE'):
                     print(json.dumps(dict(phase='trace', rank=rank, nodes=program.trace(program.done[-1]))), flush=True)
+                    import ctypes
+                    # each copy's word as this process reads it and the value its slot holds
+                    print(json.dumps(dict(phase='copies', rank=rank, copies=[
+                        [event, ctypes.c_uint64.from_address(word).value, ctypes.c_uint64.from_address(slot).value]
+                        for event, word, slot in program.copies.get(id(program.done[-1]), [])[:24]])), flush=True)
                 raise
         while (ended := completion()) is None:
             if now() - started > 8.0:

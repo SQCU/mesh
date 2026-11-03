@@ -817,6 +817,7 @@ class Program:
         # each run's watched words in their order (run.landings()'s): (kind 'landed' or 'sent', chunk, channel, the
         # ranks whose segments its steps carry), so a timeline names what each landing was
         self.watched = {}
+        self.copies = {}  # a run's copies: each one's event, its word's address and its value slot's (the stall's reading)
         self.labels = {}  # a traced run's nodes in the order appended: each one's kind and its event's name (trace)
         # the run's defect word, its observations' (kernels.observe): 0, or 1 a give-up, 2 a lost word
         self.defect = empty((2,), dtype=torch.int64)
@@ -938,6 +939,7 @@ class Program:
             last_store[word] = event
             run.copy(values, 8 * slot, word, 0, 8)
             labels.append(('copy', named.get(current[0])))
+            self.copies.setdefault(id(run), []).append((named.get(current[0]), word, int(_stream.address(values)) + 8 * slot))
             node_events.append(current[0])
             if tracing:
                 run.mark()
