@@ -365,6 +365,18 @@ def through(edges, kept):
     return sorted(out)
 
 
+def joined(edges, label, earlier, later):
+    """type: edges (a, b), label(node) -> (kind, group, item), the kinds `earlier` and `later` -> for each edge from an
+    `earlier` node to a `later` node of the same group, (later's item, earlier's item): a COPY's landing to a SEND of
+    its occurrence (torch_mesh/compiler.py's forwards), by occurrence"""
+    out = {}
+    for a, b in edges:
+        x, y = label(a), label(b)
+        if x[0] == earlier and y[0] == later and x[1] == y[1]:
+            out.setdefault(x[1], []).append((y[2], x[2]))
+    return out
+
+
 def absorbed(nodes, users, joins):
     """type: nodes, users(n) -> n's consumers, joins(n, u) -> whether u can take n in -> the nodes their one consumer
     absorbs (a pointwise chain fused: torch_mesh/compiler.py)"""

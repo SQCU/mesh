@@ -387,11 +387,8 @@ class Template:
         self.events, self.items, self.page = events, items, page
         self.edges = sorted({(f, t) for f, t, *_ in solved['edges'] if f != t})
         # each occurrence's forwards: a SEND reading bytes a COPY of the same occurrence landed (its RAW edge)
-        self.forwards = {}
-        for f, to in self.edges:
-            a, b = events[f], events[to]
-            if a[0] == 'landed' and b[0] == 'send' and a[1] == b[1]:
-                self.forwards.setdefault(a[1], []).append((b[2], a[2]))
+        from mesh_graph import joined
+        self.forwards = joined(self.edges, lambda e: (events[e] + (None, None))[:3], 'landed', 'send')
         self.order = solved['order']
         arena_first = bins[-1][0]
         self.arena_pages = solved['arena']
