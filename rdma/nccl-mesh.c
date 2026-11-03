@@ -2226,7 +2226,9 @@ ncclResult_t ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId *uniqueId) {
    bytes are this rank's, and a landing a receive. A COPY's consumption needs no kernel: its landing is the copy. A
    SEND of bytes an earlier COPY landed is gated on that landing (zirrupel, the bridge's forward), with no release. */
 #define MESH_TREE_EPS 0.1 /* Garg and Konemann's eps for the trees (mesh-plan.h mesh_trees_pack): a choice to measure */
-#define MESH_TREES_MOST 4 /* each root's heaviest trees kept */
+#define MESH_TREES_MOST 16 /* each root's heaviest trees kept: at 4 the unrestricted packing's 20 trees carried 25.2 GB/s
+   into a rank on the 13 cables and the union 27.6 with the shallow packing's (mesh-graph.c mesh_graph_pack), at 16 its
+   78 carry 30.0 and the union 30.0, the Mini's cut (metal-microbench tools/mesh/trees.c, 2026-11-03) */
 #define MESH_HOP_NS 8200.0 /* a hop's price: a release to its landing one-way, 8.2 us (metal-microbench docs/measurement.md u4) */
 /* The communicator's trees: both of the map's packings, the unrestricted one and each root's shortest-path one
    (mesh-graph.h mesh_graph_pack `shallow`), each root's shares halved (the two flows' mean, a flow the links carry),

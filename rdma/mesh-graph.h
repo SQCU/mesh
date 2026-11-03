@@ -53,6 +53,14 @@ int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *hea
    edge into the same node). */
 int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
                             const double *weight, int32_t *chosen);
+/* The least-weight spanning arborescence of nodes [0, N) rooted at `root` in which every node lies within `depth`
+   edges of the root (a hop-bounded arborescence; Chu-Liu/Edmonds' has no bound): chosen[v] the edge into v, the
+   root's -1; 0, or -1 where no such arborescence spans.  Exact, by depth-first search over each node's edges in, a
+   branch cut where its weight with each node left's lightest edge in reaches the best found or a node's walk to the
+   root passes `depth`: its cost the product of the nodes' in-degrees at worst (the problem is NP-hard for depth 2
+   and beyond), a few hundred leaves on a collective of five. */
+int mesh_graph_arborescence_within(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
+                                   const double *weight, uint32_t depth, int32_t *chosen);
 /* The walk up a parent table from `from` (parent[v]: v's next vertex up): `visit(consumer, at, step)` for each vertex
    it meets, `from` at step 0, until one that is `root` (UINT32_MAX: none) or whose parent names none
    (parent[at] >= vertices), visited last; a vertex its own parent (outside a tree) climbs in place.  The steps to that vertex; UINT32_MAX where `vertices` steps meet none (a
@@ -201,9 +209,10 @@ uint32_t mesh_graph_flow(uint32_t vertices, uint32_t edges, const uint32_t *from
    of one, packed along least-weight arborescences (mesh_graph_arborescence) until the hops' lengths reach one. Each
    root's `most` heaviest distinct trees are kept, root by root: root[k], parents parent[k * vertices ..] and log
    weight log_weight[k], the log of its share of its root's kept flow. Their count; 0 where no arborescence spans.
-   `shallow`: each root's arborescences are its shortest-path ones alone, every edge from a vertex d edges from the root
-   to one d + 1 from it (the edges of its breadth-first layering), so each tree is as shallow as a tree from that root
-   can be: where a hop costs a fixed time far past its bytes' (a small collective), a tree's time is its depth's hops. */
+   `shallow`: each root's arborescences are those within its eccentricity's depth alone (the most edges its
+   breadth-first layering puts between it and a vertex; mesh_graph_arborescence_within), so each tree is as shallow as
+   a tree from that root can be: where a hop costs a fixed time far past its bytes' (a small collective), a tree's
+   time is its depth's hops. */
 uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const uint32_t *through,
                          const uint32_t *crossing, uint32_t hops, const double *capacity,
                          int (*rooted)(const void *context, uint32_t r), const void *context, double eps, uint32_t most,
