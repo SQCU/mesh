@@ -1,4 +1,5 @@
 #import "metal-recording.h"
+#include "mesh-graph.h"
 #include "nccl.h"
 #import <objc/runtime.h>
 #include <stdatomic.h>
@@ -1276,6 +1277,7 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
     NSUInteger scope;
     BOOL prepared, external, declaredInput, hostConsumer, exported, hostProducer, needsFence;
     NSUInteger declaredCommand;
+    NSUInteger realizedPart; // its command buffer, mesh_graph_realize's
     _Atomic unsigned remaining;
     _Atomic int status;
     NSError *error;
@@ -1295,6 +1297,7 @@ struct MetalSchedule {
     // the run's solve's edges between this flush's nodes, by their place in the expanded order (MetalScheduleEdges):
     // where given, the only order; the nodes' reaches decide none (design/page-maps-2026-11-02.md, step 5)
     NSMutableData *edges;
+    BOOL realized; NSUInteger realizedPart; // parts are mesh_graph_realize's, cut where its part changes
     struct MetalSchedule *submit, *firstSubmission, *lastSubmission;
     id<MTLDevice> device;
     enum MetalForm form;
@@ -1777,9 +1780,10 @@ static void MetalScheduleExpandHost(struct MetalSchedule *root,MetalWork *work,N
 
 static BOOL MetalWorkHost(MetalWork *work) { return work->hostProducer; }
 
-// The flush's nodes ordered by the run's solve's edges (MetalScheduleEdges), already in a linear extension of them: each
-// node's dependencies are its edges in, and one pass in node order carries every node's host and GPU predecessors to
-// its consumers. No reach decides an order here (design/page-maps-2026-11-02.md, integration step 5).
+// The flush's nodes ordered by the run's solve's edges (MetalScheduleEdges), already a linear extension of them: each
+// node's dependencies are its edges in, a GPU producer's its GPU dependencies and a host producer's its host ones,
+// nothing transitive (a fence and an event order their waiters after everything before their producer). No reach
+// decides an order, and nothing is sorted (design/page-maps-2026-11-02.md, integration step 5).
 static NSUInteger MetalWorkOrdered(struct MetalSchedule *root,NSArray *work) {
     const NSUInteger first=root->history.count;
     for(NSUInteger i=0;i<work.count;i++) {
@@ -1790,22 +1794,11 @@ static NSUInteger MetalWorkOrdered(struct MetalSchedule *root,NSArray *work) {
     for(NSUInteger k=0;k<root->edges.length/sizeof *edge;k++) {
         if(edge[k][0]>=edge[k][1]||edge[k][1]>=work.count)
             [NSException raise:NSInvalidArgumentException format:@"a solve edge outside this flush's order"];
-        [((MetalWork *)work[edge[k][1]])->dependencies addIndex:first+edge[k][0]];
-        [((MetalWork *)work[edge[k][0]])->successors addIndex:edge[k][1]];
+        MetalWork *producer=work[edge[k][0]],*consumer=work[edge[k][1]];
+        [consumer->dependencies addIndex:first+edge[k][0]];[producer->successors addIndex:edge[k][1]];
+        if(MetalWorkHost(producer))[consumer->hostDependencies addIndex:first+edge[k][0]];
+        else { [consumer->gpuDependencies addIndex:first+edge[k][0]]; if(consumer->operation)producer->hostConsumer=YES; }
     }
-    [root->edges release];root->edges=nil;
-    for(MetalWork *w in work)
-        [w->dependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
-            (void)stop;MetalWork *producer=root->history[p];
-            [w->hostDependencies addIndexes:producer->hostDependencies];
-            if(MetalWorkHost(producer)) {
-                [w->hostDependencies addIndex:p];
-                [w->gpuDependencies addIndexes:producer->gpuDependencies];
-            } else {
-                [w->gpuDependencies addIndex:p];
-                if(w->operation)producer->hostConsumer=YES;
-            }
-        }];
     return first;
 }
 
@@ -1965,7 +1958,10 @@ static struct MetalSchedule *MetalSchedulePart(struct MetalSchedule *root,MetalW
         [hosts addIndexes:part->hostDependencies];
     }];
     struct MetalSchedule *s=MetalScheduleWritable(root);
-    if(s->commands) {
+    if(root->realized) {
+        if(s->commands&&s->realizedPart!=work->realizedPart){MetalScheduleFinishPart(s);s=MetalScheduleWritable(root);}
+        s->realizedPart=work->realizedPart;
+    } else if(s->commands) {
         BOOL additional=![s->hostDependencies containsIndexes:hosts];
         BOOL inherited=![hosts containsIndexes:s->hostDependencies];
         if(additional||(inherited&&![parts containsIndex:s->ordinal])) {
@@ -2090,7 +2086,9 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
     for(MetalWork *work in nodes)MetalScheduleExpandHost(root,work,expanded);
     [root->work removeAllObjects];nodes=expanded;
     BOOL hosts=NO;for(MetalWork *work in nodes)hosts|=work->operation!=nil;
-    const NSUInteger first=root->edges?MetalWorkOrdered(root,nodes):MetalWorkDependencies(root,nodes);
+    NSData *solved=root->edges?[[root->edges copy] autorelease]:nil;
+    const NSUInteger first=solved?MetalWorkOrdered(root,nodes):MetalWorkDependencies(root,nodes);
+    if(root->edges){[root->edges release];root->edges=nil;}
     [MetalScheduleFrontierNodes(root) enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
         (void)stop;((MetalWork *)root->history[p])->exported=YES;
     }];
@@ -2102,6 +2100,31 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
         work->event=[root->device newSharedEvent];
         if(!work->event)[NSException raise:NSMallocException format:@"preparing host output event"];
         atomic_init(&work->status,0);[root->hosts addObject:work];atomic_fetch_add(&root->pending,1);
+    }
+    if(solved) {
+        // mesh_graph_realize's decisions, encoded: the nodes in their order, a part each command buffer, a barrier
+        // before each flagged node, a fence on each GPU producer whose consumer is in another part
+        const uint32_t n=(uint32_t)nodes.count;const uint32_t (*edge)[2]=solved.bytes;const size_t m=solved.length/sizeof *edge;
+        NSMutableData *hostData=[NSMutableData dataWithLength:n+1],*barrierData=[NSMutableData dataWithLength:n+1],
+            *partData=[NSMutableData dataWithLength:(n+1)*sizeof(uint32_t)];
+        unsigned char *host=hostData.mutableBytes,*barrier=barrierData.mutableBytes;uint32_t *part=partData.mutableBytes,parts=0;
+        for(uint32_t i=0;i<n;i++)host[i]=((MetalWork *)nodes[i])->operation!=nil||((MetalWork *)nodes[i])->external;
+        size_t crossings=0;
+        if(mesh_graph_realize(n,host,m,edge,part,&parts,barrier,NULL,0,&crossings))
+            [NSException raise:NSInvalidArgumentException format:@"the solve's edges do not follow this flush's order"];
+        for(size_t k=0;k<m;k++)if(!host[edge[k][0]]&&!host[edge[k][1]]&&part[edge[k][0]]!=part[edge[k][1]])
+            ((MetalWork *)nodes[edge[k][0]])->needsFence=YES;
+        NSMutableArray *sequence=[NSMutableArray array];
+        for(uint32_t i=0;i<n;i++) {
+            MetalWork *work=nodes[i];
+            if(host[i]){[sequence addObject:work];continue;}
+            work->scope=part[i]+1;work->realizedPart=part[i];
+            if(barrier[i]){work->barrierAfter=MTLStageDispatch|MTLStageBlit;work->barrierBefore=work->stages;}
+            [sequence addObject:@[work]];
+        }
+        root->realized=YES;
+        MetalScheduleEmit(root,sequence);
+        return;
     }
     NSMutableData *counts=[NSMutableData dataWithLength:nodes.count*sizeof(NSUInteger)];NSUInteger *left=counts.mutableBytes;
     NSMutableIndexSet *ready=[NSMutableIndexSet indexSet];
