@@ -70,7 +70,8 @@ struct RunNode {
     __unsafe_unretained id<MTLComputePipelineState> pipeline;
     size_t first, count;
     MTLSize groups, threads;
-    BOOL threadGrid, ends, stamp; // ends: the node ends its part (MetalRunCut); stamp: a timestamp before it (MetalRunStamp)
+    BOOL threadGrid, ends, stamp, mark; // ends: the node ends its part (MetalRunCut); stamp: a timestamp before it
+                                       // (MetalRunStamp); mark: a traced run's timestamp after it (MetalRunMark)
     __unsafe_unretained id<MTLBuffer> source, destination;
     NSUInteger from, to, bytes;
     __unsafe_unretained MetalHostOperation operation;
@@ -260,6 +261,9 @@ void MetalRunLanded(struct MetalRun *run,const void *word,uint64_t threshold) {
     atomic_init(&landing->state,LandingWaiting);atomic_init(&landing->references,1); // the run's
     [run->landings appendBytes:&landing length:sizeof landing];
     RunAppend(run,(struct RunNode){.kind=RunInput,.signal=landing->event,.value=1}); // no input of MetalRunInputValue's
+}
+void MetalRunMark(struct MetalRun *run) {
+    if(run->nodes.length)((struct RunNode *)run->nodes.mutableBytes)[run->nodes.length/sizeof(struct RunNode)-1].mark=YES;
 }
 void MetalRunStamp(struct MetalRun *run) {
     if(run->nodes.length)((struct RunNode *)run->nodes.mutableBytes)[run->nodes.length/sizeof(struct RunNode)-1].stamp=YES;
@@ -463,8 +467,8 @@ const char *MetalRunFinish(struct MetalRun *run) {
             if(node->threadGrid)[encoder dispatchThreads:node->groups threadsPerThreadgroup:node->threads];
             else [encoder dispatchThreadgroups:node->groups threadsPerThreadgroup:node->threads];
         }
-        if(traced&&run->stamps)
-            [encoder writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed intoHeap:run->stamps atIndex:2*(NSUInteger)run->parts+v];
+        if(traced&&run->stamps&&node->mark)
+            [encoder writeTimestampWithGranularity:MTL4TimestampGranularityPrecise intoHeap:run->stamps atIndex:2*(NSUInteger)run->parts+v];
         if(lastFenced[open]==v)[encoder updateFence:run->part[open].fence afterEncoderStages:stages];
     }
     free(lastFenced);free(begun);

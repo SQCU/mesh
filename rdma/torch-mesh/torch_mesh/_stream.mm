@@ -310,6 +310,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("cut", [](Run &r) { MetalRunCut(r.run.get()); }, pybind11::call_guard<Drained>())
     .def("stamp", [](Run &r) { MetalRunStamp(r.run.get()); }, pybind11::call_guard<Drained>())
     .def("trace", [](Run &r) { MetalRunTrace(r.run.get()); }, pybind11::call_guard<Drained>())
+    .def("mark", [](Run &r) { MetalRunMark(r.run.get()); }, pybind11::call_guard<Drained>())
     .def("times", [](Run &r) {
       std::vector<double> out(MetalRunTimes(r.run.get(), nullptr, 0));
       MetalRunTimes(r.run.get(), out.data(), out.size());

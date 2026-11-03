@@ -793,7 +793,8 @@ class Program:
         run = _stream.Run()
         # with the run's configuration's MESH_RUN_TRACE, a GPU timestamp after every node (MetalRunTrace) and each node's
         # label, the order they are appended in (Program.trace)
-        if os.environ.get('MESH_RUN_TRACE'):
+        tracing = bool(os.environ.get('MESH_RUN_TRACE'))
+        if tracing:
             run.trace()
         labels = self.labels[id(run)] = []
         current = [None]
@@ -870,6 +871,8 @@ class Program:
             last_store[word] = event
             run.copy(values, 8 * slot, word, 0, 8)
             labels.append(('copy', named.get(current[0])))
+            if tracing:
+                run.mark()
 
         # a landing and a SEND's completion observed on the GPU (kernels.observe), a node like any other, so a chunk
         # has no outside input and the GPU is already in the part when its data lands (docs/facts.md: a CPU-signalled
@@ -879,6 +882,8 @@ class Program:
         def observed(slot, word):
             run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
             labels.append(('observe', named.get(current[0])))
+            if tracing:
+                run.mark()
         cut = [False]  # a part end owed after links and releases, across chunks
         waited = [False]  # observations emitted since the last command: the next command begins a part's compute
         for chunk, (t, lowered) in enumerate(instances):
@@ -1023,6 +1028,8 @@ class Program:
                     if waited[0]:
                         run.stamp()  # this part's compute begins here, its waits done (MetalRunSpans)
                         waited[0] = False
+                        if tracing:
+                            run.mark()
                 elif kind == 'post':
                     links = [n for n in lowered[c] if n[0] == lib.ncclMeshNodeLink]
                     if links:

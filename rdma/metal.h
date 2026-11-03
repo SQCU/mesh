@@ -87,9 +87,11 @@ void MetalRunCut(struct MetalRun *);
    MetalRunSpans gives each part's span from it to the part's end, in microseconds (0 where a part has none) */
 void MetalRunStamp(struct MetalRun *);
 size_t MetalRunSpans(struct MetalRun *, double *us, size_t capacity);
-/* a GPU timestamp after every node, relaxed (a precise one serialized the GPU, the LSTM tick 40 -> 180 us), before
-   MetalRunFinish: MetalRunTimes gives each node's, in microseconds from the
-   run's earliest stamp (-1 where a node has none: host and input nodes), in the order appended */
+/* a traced run (MetalRunTrace, before MetalRunFinish): a precise GPU timestamp after each node MetalRunMark marked
+   (the node appended last), where the work after it waits anyway (an observation, a copy); precise ones after every node
+   serialized the GPU (the LSTM tick 40 -> 180 us) and relaxed ones came coalesced or not at all. MetalRunTimes gives
+   each node's, in microseconds from the run's earliest stamp (-1 where it has none), in the order appended */
+void MetalRunMark(struct MetalRun *);
 void MetalRunTrace(struct MetalRun *);
 size_t MetalRunTimes(struct MetalRun *, double *us, size_t capacity);
 /* a returned page with no local reader: the run is complete once the `bytes`-wide word at `offset` reaches
