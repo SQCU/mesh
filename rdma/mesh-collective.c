@@ -291,462 +291,148 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
 
 /* -- trees --------------------------------------------------------------------------------------------- */
 
-int mesh_trees_check(const struct mesh_link_map *map,const struct mesh_trees *trees){
+/* a climb's last vertex (mesh-graph.h mesh_graph_climb's visit) */
+static void mesh_climb_last(void *consumer,uint32_t at,uint32_t step){ (void)step; *(uint32_t *)consumer=at; }
+
+int mesh_trees_check(const struct mesh_link_map *map,const struct mesh_trees *trees,const uint64_t *roots){
   const uint32_t n=trees->nodes;
   if(!n || n!=map->nodes || (trees->count && (!trees->root || !trees->parent || !trees->log_weight)))return EINVAL;
-  for(uint32_t r=0;n>1 && r<n;r++){
-    uint32_t t=0;
-    while(t<trees->count && trees->root[t]!=r)t++;
-    if(t==trees->count)return EINVAL;
-  }
+  unsigned char rooted[n];
+  memset(rooted,0,n);
   for(uint32_t t=0;t<trees->count;t++){
     const uint32_t r=trees->root[t],*parent=trees->parent+(size_t)t*n;
     if(r>=n || parent[r]!=r || !isfinite(trees->log_weight[t]))return EINVAL;
+    rooted[r]=1;
+    /* each node's hop to its parent a link of the map, and its climb (mesh-graph.h) ending at the root */
     for(uint32_t v=0;v<n;v++){
-      if(v!=r && !mesh_link_between(map,v,parent[v]))return EINVAL;
-      uint32_t at=v,hops=0;
-      while(at!=r && hops<n){at=parent[at];hops++;}
-      if(at!=r)return EINVAL;
+      uint32_t last=v;
+      if(v!=r && (!mesh_link_between(map,v,parent[v]) ||
+                  mesh_graph_climb(parent,n,r,v,mesh_climb_last,&last)==UINT32_MAX || last!=r))return EINVAL;
     }
   }
+  for(uint32_t r=0;n>1 && r<n;r++)if(mesh_member(roots,r) && !rooted[r])return EINVAL;
   return 0;
 }
 
-/* Root r's heaviest tree (the lowest-numbered of equals), count where r roots none. */
-static uint32_t mesh_trees_heaviest(const struct mesh_trees *trees,uint32_t r){
-  uint32_t best=trees->count;
-  for(uint32_t t=0;t<trees->count;t++)
-    if(trees->root[t]==r && (best==trees->count || trees->log_weight[t]>trees->log_weight[best]))best=t;
-  return best;
-}
+/* -- moves: the trees' routes as page moves (mesh-plan.h mesh_page_moves) ------------------------------------------ */
 
-/* A tree's shape: each node's height (its longest path up from a leaf below it), depth, whether its subtree holds a
-   contributor (`live`) and whether a child's does (`inner`) */
-struct mesh_shape { uint32_t height,depth; int live,inner; };
-static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,const uint64_t *contributors,struct mesh_shape *shape){
-  const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n;
-  /* the tree's levels and its contributors' ancestors (mesh-graph.h) */
-  uint32_t depth[n?n:1],height[n?n:1];
-  unsigned char live[n?n:1];
-  mesh_graph_tree_levels(parent,n,r,depth,height);
-  memset(live,0,sizeof live);
-  for(uint32_t v=0;v<n;v++)if(mesh_member(contributors,v))mesh_graph_ancestors(parent,n,r,v,live);
-  for(uint32_t v=0;v<n;v++)shape[v]=(struct mesh_shape){height[v],depth[v],live[v],0};
-  for(uint32_t v=0;v<n;v++)if(v!=r && shape[v].live)shape[parent[v]].inner=1;
-}
-
-/* Whether u is the first of w's live children in tree t (by height, then number): a node outside the contributors
-   takes its first child's partial as it comes (COPY) and combines the rest */
-static int mesh_first_child(const struct mesh_trees *trees,uint32_t t,const struct mesh_shape *shape,uint32_t w,uint32_t u){
-  const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n;
-  for(uint32_t c=0;c<n;c++)
-    if(c!=r && c!=u && parent[c]==w && shape[c].live &&
-       (shape[c].height<shape[u].height || (shape[c].height==shape[u].height && c<u)))return 0;
-  return 1;
-}
-
-/* A message the compile places: from -> to in a round over parts [part, part + parts), the sender's buffer, the
-   receiver's buffer and step, and its order among the pair's messages of the round */
-struct mesh_message { uint32_t from,to,round,part,parts,out,in,op,key; };
-static int mesh_message_order(const void *a,const void *b){
-  const struct mesh_message *x=a,*y=b;
-  const uint32_t l[5]={x->from,x->to,x->round,x->key,x->part},r[5]={y->from,y->to,y->round,y->key,y->part};
-  for(int i=0;i<5;i++)if(l[i]!=r[i])return l[i]<r[i]?-1:1;
-  return 0;
-}
-/* a rank's move with its order: by round, a round's SENDs first, then by peer and the message's order */
-struct mesh_ordered { uint32_t rank,round,receive,peer,key; struct mesh_move move; };
-static int mesh_move_order(const void *a,const void *b){
-  const struct mesh_ordered *x=a,*y=b;
-  const uint32_t l[6]={x->rank,x->round,x->receive,x->peer,x->key,x->move.part},r[6]={y->rank,y->round,y->receive,y->peer,y->key,y->move.part};
-  for(int i=0;i<6;i++)if(l[i]!=r[i])return l[i]<r[i]?-1:1;
-  return 0;
-}
-
-void mesh_compile_room(const struct mesh_trees *trees,uint32_t *parts,uint32_t *moves){
-  const uint32_t n=trees->nodes,T=trees->count;
-  *parts=T>1?T:1;
-  *moves=4*T*n+2*n*n+2;
-}
-
-static int mesh_compile_sets(const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,
-                 const uint64_t *contributors,const uint64_t *recipients,int global_segments,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move,
-                 double *latency){
-  const uint32_t n=trees->nodes,T=trees->count;
-  if(!n || what>MESH_ALLGATHER || ((what==MESH_REDUCE || what==MESH_BROADCAST) && root>=n))return EINVAL;
-  uint32_t room_parts,room;
-  mesh_compile_room(trees,&room_parts,&room);
-  const uint64_t *mine=contributors,*owners=what==MESH_ALLGATHER?contributors:recipients;
-  /* The two reachability closures are different: a relay may read incoming
-     partials without owning an input, and a recipient may have no input at all. */
-  struct mesh_shape *shape=malloc((2*(size_t)T*n+1)*sizeof *shape);
-  struct mesh_message *message=malloc((room+1)*sizeof *message);
-  struct mesh_ordered *ordered=malloc((2*(size_t)room+1)*sizeof *ordered);
-  /* part_of[t]: tree t's part (UINT32_MAX: the program moves none along t) */
-  uint32_t *part_of=malloc(((size_t)T+1)*sizeof *part_of),*buffer=calloc((size_t)n*n+1,sizeof *buffer);
-  uint32_t messages=0,parts=0,scratch=0;
-  int status=EINVAL;
-  if(!shape || !message || !ordered || !part_of || !buffer)goto done;
-  int inputs=0,outputs=0;
-  for(uint32_t u=0;u<n;u++){inputs|=mesh_member(mine,u);outputs|=mesh_member(recipients,u);}
-  if(global_segments && ((!outputs && what!=MESH_REDUCE) || (!inputs && what==MESH_ALLGATHER))){
-    memset(first,0,((size_t)n+1)*sizeof *first);
-    *program=(struct mesh_program){what,root,n,0,0,
-      what==MESH_ALLGATHER || what==MESH_REDUCE_SCATTER?n:0,segment,log_weight,first,move,NULL,0};
-    status=0;goto done;
+/* Tree t's pages [first, first + pages) along each of its edges, from move k (move NULL: counted only): node v's edge
+   to or from its parent u the (v - (v > root))-th of the tree's up moves (a REDUCE v -> u linked to u's own up move,
+   none where u is the root), then of its down moves (a TRANSFER from the root, else a FORWARD from u linked to the
+   move landing on u).  The moves made. */
+static uint32_t mesh_tree_moves(const struct mesh_trees *trees,uint32_t t,uint64_t first,uint64_t pages,int up,int down,
+                                uint32_t k,struct mesh_page_move *move){
+  const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n,edges=n-1,lower=k+(up?edges:0);
+  for(uint32_t v=0;move && v<n;v++){
+    if(v==r)continue;
+    const uint32_t u=parent[v],mine=v-(v>r),its=u-(u>r);
+    if(up)move[k+mine]=(struct mesh_page_move){v,u,MESH_MOVE_REDUCE,u==r?UINT32_MAX:k+its,first,pages};
+    if(down)move[lower+mine]=(struct mesh_page_move){u,v,u==r?MESH_MOVE_TRANSFER:MESH_MOVE_FORWARD,
+                                                      u==r?UINT32_MAX:lower+its,first,pages};
   }
-  if(global_segments && ((!inputs && what!=MESH_BROADCAST) ||
-      (what==MESH_BROADCAST && !mesh_member(mine,root))))goto done;
-  for(uint32_t t=0;t<T;t++){
-    mesh_tree_shape(trees,t,mine,shape+(size_t)t*n);
-    mesh_tree_shape(trees,t,recipients,shape+((size_t)T+t)*n);
-  }
-  for(size_t k=0;k<T;k++)part_of[k]=UINT32_MAX;
-  if(what==MESH_ALLREDUCE && whole){
-    /* the whole operand toward every recipient v up v's heaviest tree: u's partial for v from scratch of its own
-       where it has children there, else its own operand, from buffer[u * n + u]: the operand itself (buffer 0) where u
-       sends it to one node only, forwards nothing and is not a recipient. A
-       recipient's original source is a distinct immutable binding (buffer 1),
-       while buffer 0 may already receive its reduced result; one part. */
-    parts=1;
-    segment[0]=0;log_weight[0]=0;
-    for(uint32_t u=0;u<n;u++){
-      uint32_t next=2,own=0;
-      for(uint32_t v=0;v<n;v++){
-        if(!mesh_member(recipients,v))continue;
-        const uint32_t t=mesh_trees_heaviest(trees,v);
-        if(t==T)goto done;
-        if(u==v || !shape[(size_t)t*n+u].live)continue;
-        if(shape[(size_t)t*n+u].inner)buffer[(size_t)u*n+v]=next++;
-        else own++;
-      }
-      /* A recipient's result is mutable independently of its
-         original source DMA reads. Keep that source binding separate even for
-         one outgoing leaf send; SEND submission is not read retirement. */
-      buffer[(size_t)u*n+u]=own==1 && next==2 && !mesh_member(recipients,u)?0:1;
-      const uint32_t used=next>2?next-1:own && buffer[(size_t)u*n+u]?1:0;
-      if(used>scratch)scratch=used;
-    }
-    for(uint32_t v=0;v<n;v++){
-      if(!mesh_member(recipients,v))continue;
-      const uint32_t t=mesh_trees_heaviest(trees,v),*parent=trees->parent+(size_t)t*n;
-      const struct mesh_shape *s=shape+(size_t)t*n;
-      for(uint32_t u=0;u<n;u++){
-        if(u==v || !s[u].live)continue;
-        const uint32_t w=parent[u],op=!mesh_member(mine,w) && mesh_first_child(trees,t,s,w,u)?MESH_STEP_COPY:MESH_STEP_REDUCE;
-        message[messages++]=(struct mesh_message){u,w,s[u].height,0,1,s[u].inner?buffer[(size_t)u*n+v]:buffer[(size_t)u*n+u],w==v?0:buffer[(size_t)w*n+v],op,v};
-      }
-    }
-  }else{
-    /* Gather segments belong to contributors; scatter and all-reduce segments
-       belong to recipients. V forms retain global rank indices, including zero
-       gaps. Legacy mesh_compile retains its compact contributor numbering. */
-    const int rooted=what==MESH_REDUCE || what==MESH_BROADCAST;
-    for(uint32_t g=0,index=0;g<(rooted?1:n);g++){
-      if(!rooted && !mesh_member(owners,g))continue;
-      const uint32_t before=parts;
-      for(uint32_t t=0;t<T;t++)
-        if(trees->root[t]==(rooted?root:g)){
-          part_of[t]=parts;
-          segment[parts]=rooted?0:global_segments && (what==MESH_ALLGATHER || what==MESH_REDUCE_SCATTER)?g:index;
-          log_weight[parts]=trees->log_weight[t];
-          if(latency)latency[parts]=trees->latency?trees->latency[t]:0;
-          parts++;
-        }
-      if(global_segments && parts==before)goto done;
-      index++;
-    }
-    if(!parts)goto done;
-    const int up=what==MESH_ALLREDUCE || what==MESH_REDUCE || what==MESH_REDUCE_SCATTER;
-    const int down=what==MESH_ALLREDUCE || what==MESH_BROADCAST || what==MESH_ALLGATHER;
-    uint32_t base=0;
-    for(uint32_t t=0;up && down && t<T;t++)
-      if(part_of[t]!=UINT32_MAX && shape[(size_t)t*n+trees->root[t]].height>base)base=shape[(size_t)t*n+trees->root[t]].height;
-    for(uint32_t t=0;t<T;t++){
-      if(part_of[t]==UINT32_MAX)continue;
-      const uint32_t r=trees->root[t],*parent=trees->parent+(size_t)t*n,p=part_of[t];
-      const struct mesh_shape *s=shape+(size_t)t*n,*d=shape+((size_t)T+t)*n;
-      for(uint32_t u=0;up && u<n;u++){
-        if(u==r || !s[u].live)continue;
-        const uint32_t w=parent[u],op=!mesh_member(mine,w) && mesh_first_child(trees,t,s,w,u)?MESH_STEP_COPY:MESH_STEP_REDUCE;
-        message[messages++]=(struct mesh_message){u,w,s[u].height,p,1,0,0,op,p};
-      }
-      for(uint32_t u=0;down && u<n;u++)
-        if(u!=r && d[u].live)message[messages++]=(struct mesh_message){parent[u],u,base+d[u].depth-1,p,1,0,0,MESH_STEP_COPY,p};
-    }
-  }
-  /* coalesced: a message joins the one before it between the same two nodes in the same round where their parts adjoin
-     and each end's buffer and step are the same */
-  qsort(message,messages,sizeof *message,mesh_message_order);
-  /* and, for a COPY, where both parts reached the sending node by one message (the same sender, the same round), so a
-     relay never sends as one step parts two parents sent it: a forward is gated on one COPY's landing, and a SEND over
-     two COPYs could be gated on neither (libnccl-mesh refused it: "forward does not name a SEND within a COPY's pages",
-     a 32 MB all-gather cut over a root's trees, metal-microbench output_data/bandwidth-2026-11-02 run-1). came[v x
-     parts + p] is the message that brought part p to node v, its sender plus one and its round; 0 where v owns it. */
-  uint64_t *came=calloc((size_t)n*(parts+1)+1,sizeof *came);
-  if(!came){status=ENOMEM;goto done;}
-  for(uint32_t i=0;i<messages;i++)
-    if(message[i].op==MESH_STEP_COPY && message[i].part<parts)
-      came[(size_t)message[i].to*parts+message[i].part]=((uint64_t)(message[i].from+1)<<32)|message[i].round;
-  uint32_t kept=0;
-  for(uint32_t i=0;i<messages;i++){
-    struct mesh_message *last=kept?message+kept-1:NULL;
-    const struct mesh_message *m=message+i;
-    const int alike=m->op!=MESH_STEP_COPY || (last && last->part<parts && m->part<parts &&
-                    came[(size_t)m->from*parts+last->part]==came[(size_t)m->from*parts+m->part]);
-    if(last && last->from==m->from && last->to==m->to && last->round==m->round && last->part+last->parts==m->part &&
-       last->out==m->out && last->in==m->in && last->op==m->op && alike)last->parts+=m->parts;
-    else message[kept++]=*m;
-  }
-  free(came);
-  /* each rank's moves: its SENDs and its receives, in order */
-  uint32_t moves=0;
-  for(uint32_t i=0;i<kept;i++){
-    const struct mesh_message *m=message+i;
-    ordered[moves++]=(struct mesh_ordered){m->from,m->round,0,m->to,m->key,{MESH_STEP_SEND,m->to,m->round,m->out,m->part,m->parts}};
-    ordered[moves++]=(struct mesh_ordered){m->to,m->round,1,m->from,m->key,{m->op,m->from,m->round,m->in,m->part,m->parts}};
-  }
-  qsort(ordered,moves,sizeof *ordered,mesh_move_order);
-  for(uint32_t r=0,k=0;r<=n;r++){
-    while(k<moves && ordered[k].rank<r)k++;
-    first[r]=k;
-  }
-  for(uint32_t k=0;k<moves;k++)move[k]=ordered[k].move;
-  *program=(struct mesh_program){what,root,n,parts,scratch,
-    global_segments && (what==MESH_ALLGATHER || what==MESH_REDUCE_SCATTER)?n:0,segment,log_weight,first,move,
-    latency && trees->latency && trees->rate>0?latency:NULL,latency && trees->latency?trees->rate:0};
-  status=0;
-done:
-  free(shape);free(message);free(ordered);free(part_of);free(buffer);
-  return status;
+  return ((up?1:0)+(down?1:0))*edges;
 }
 
-int mesh_compile_members(const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,
-                 const uint64_t *contributors,const uint64_t *recipients,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move){
-  return mesh_compile_sets(trees,what,root,whole,contributors,recipients,1,program,segment,log_weight,first,move,NULL);
+/* Root r's `units` pages over its trees by earliest finish (mesh-graph.h mesh_graph_fill: tree t's first release[t]
+   after the start, then one each 1 / rate[t]): count[t] for each of r's trees (the others' untouched, `alone` and
+   `got` scratch a tree); the last one's finish. */
+static double mesh_root_fill(const struct mesh_trees *trees,uint32_t r,const double *release,const double *rate,uint64_t units,
+                             double *alone,uint64_t *got,uint64_t *count){
+  const uint32_t c=trees->count;
+  for(uint32_t t=0;t<c;t++)alone[t]=trees->root[t]==r?rate[t]:0;
+  const double end=mesh_graph_fill(c,release,alone,units,got);
+  for(uint32_t t=0;t<c;t++)if(trees->root[t]==r)count[t]=got[t];
+  return end;
 }
 
-int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move,
-                 double *latency){
-  return mesh_compile_sets(trees,what,root,whole,contributors,contributors,0,program,segment,log_weight,first,move,latency);
-}
-
-/* Explicit global rank extent for member-aware V forms, otherwise the legacy
-   extent inferred from the highest segment a part names. */
-static uint32_t mesh_program_segments(const struct mesh_program *program){
-  if(program->segments)return program->segments;
-  uint32_t segments=1;
-  for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]+1>segments)segments=program->segment[p]+1;
-  return segments;
-}
-
-
-/* The operand's segments: `sizes` where given (segment g the sizes[g] elements after the segments before it: mesh
-   430cf7b2^ mesh_cut's rule, MPI_Reduce_scatter's and MPI_Allgatherv's counts), else its quanta of `q` elements cut
-   units / segments each, the first units % segments one quantum longer, the last segment ending at the operand's end
-   (q 1: elements / segments each, the first elements % segments one element longer); 0 where the sizes do not sum to
-   the operand's elements */
-static uint64_t mesh_cut_next(uint32_t segments,uint64_t elements,const uint64_t *sizes,uint64_t q,uint32_t g,uint64_t *at){
-  const uint64_t units=(elements+q-1)/q;
-  const uint64_t end=q*((g+1)*(units/segments)+(g+1<units%segments?g+1:units%segments));
-  const uint64_t length=sizes?sizes[g]:(end<elements?end:elements)-*at;
-  *at+=length;return length;
-}
-static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *base,uint64_t *length){
-  uint64_t at=0;
-  for(uint32_t g=0;g<segments;g++){
-    base[g]=at;length[g]=mesh_cut_next(segments,elements,sizes,q,g,&at);
+/* An all-reduce of `pages` pages, b of them summed at every node at once (up a tree of every root) and the rest up and
+   down a tree: across[t] tree t's up-and-down pages, by earliest finish over every tree, its first at twice its
+   latency; toward[t] its root's share of the b, by earliest finish over the root's trees, a tree's first after its
+   up-and-down pages have crossed it and its latency (the shared up path's pages of the longer tail first: Jackson's
+   rule [J. R. Jackson, "Scheduling a production line to minimize maximum tardiness", UCLA 1955]).  *tail the b
+   pages' end; returns the rest's. */
+static double mesh_reduce_all_ends(const struct mesh_trees *trees,const double *latency,const double *rate,uint64_t pages,
+                                   uint64_t b,double *release,double *alone,uint64_t *got,uint64_t *across,uint64_t *toward,
+                                   double *tail){
+  const uint32_t n=trees->nodes,c=trees->count;
+  for(uint32_t t=0;t<c;t++)release[t]=2*latency[t];
+  const double end=mesh_graph_fill(c,release,rate,pages-b,across);
+  for(uint32_t t=0;t<c;t++){toward[t]=0;release[t]=latency[t]+(rate[t]>0?(double)across[t]/rate[t]:0);}
+  *tail=0;
+  for(uint32_t r=0;b && r<n;r++){
+    const double e=mesh_root_fill(trees,r,release,rate,b,alone,got,toward);
+    if(e>*tail)*tail=e;
   }
-  return at==elements;
+  return end;
 }
 
-/* Each part's elements of an operand cut by mesh_cut: [lo[p], lo[p] + count[p]), a segment's parts by the program's
-   weights (its trees': the caller's, a configured form's shares, or equal; libnccl-mesh never compiles the packing's
-   flows into them), each a whole number of quanta of `q` elements from the segment's start but the segment's last,
-   the remainder's quanta one each to the first parts of weight above 0 (a part of weight 0, a tree of share 0, takes
-   none); 0 where the cut is none */
-int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,
-                        uint32_t element_bytes,uint64_t *lo,uint64_t *count){
-  const uint32_t segments=mesh_program_segments(program);
-  uint64_t next=0;
-  for(uint32_t g=0;g<segments;g++){
-    const uint64_t base=next,length=mesh_cut_next(segments,elements,sizes,q,g,&next),units=(length+q-1)/q;
-    double most=-INFINITY,total=0;
-    for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g && program->log_weight[p]>most)most=program->log_weight[p];
-    for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g)total+=mesh_graph_exp(program->log_weight[p]-most);
-    /* A skipped global rank is a zero-length segment, never permission to
-       silently discard a caller's nonzero count. */
-    if(program->segments && length && !(total>0)){return 0;}
-    if(program->latency && program->rate>0 && element_bytes && length){
-      /* by earliest finish (mesh-graph.h mesh_graph_fill): part p's units a time its share of the root's rate over a
-         unit's bytes, its first after its tree's latency; the parts' ranges in part order */
-      double *latency=malloc((program->parts+1)*sizeof *latency),*rate=malloc((program->parts+1)*sizeof *rate);
-      uint64_t *units_of=malloc((program->parts+1)*sizeof *units_of);
-      uint32_t *index=malloc((program->parts+1)*sizeof *index),m=0;
-      if(!latency || !rate || !units_of || !index){free(latency);free(rate);free(units_of);free(index);return 0;}
-      for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g){
-        latency[m]=program->latency[p];
-        rate[m]=program->rate*mesh_graph_exp(program->log_weight[p]-most)/total/((double)q*element_bytes);
-        index[m++]=p;
-      }
-      mesh_graph_fill(m,latency,rate,units,units_of);
-      uint64_t at=base;
-      for(uint32_t k=0;k<m;k++){
-        uint64_t share=units_of[k]*q;
-        if(at+share>base+length)share=base+length-at;
-        lo[index[k]]=at;count[index[k]]=share;at+=share;
-      }
-      free(latency);free(rate);free(units_of);free(index);
-      continue;
-    }
-    uint64_t floors=0;
-    for(uint32_t p=0;p<program->parts;p++)
-      if(program->segment[p]==g)floors+=(uint64_t)floor((double)units*mesh_graph_exp(program->log_weight[p]-most)/total);
-    uint64_t remainder=floors<units?units-floors:0,at=base;
-    for(uint32_t p=0;p<program->parts;p++){
-      if(program->segment[p]!=g)continue;
-      const double weight=mesh_graph_exp(program->log_weight[p]-most);
-      uint64_t share=(uint64_t)floor((double)units*weight/total);
-      if(remainder && weight>0 && at+share*q<base+length){share++;remainder--;}
-      share*=q;
-      if(at+share>base+length)share=base+length-at;
-      lo[p]=at;count[p]=share;at+=share;
-    }
+uint32_t mesh_page_moves(const struct mesh_trees *trees,uint32_t what,const uint64_t *segment,struct mesh_page_move *move){
+  const uint32_t n=trees->nodes,c=trees->count,C=c?c:1;
+  if(what>MESH_ALLGATHER)return UINT32_MAX;
+  if(n<2)return 0;
+  const int all=what==MESH_ALLREDUCE,up=what!=MESH_BROADCAST && what!=MESH_ALLGATHER,down=what!=MESH_REDUCE && what!=MESH_REDUCE_SCATTER;
+  const int timed=trees->latency && trees->rate>0;
+  const double joint=trees->rate>0?trees->rate:1;
+  double most[n],sum[n],rate[C],latency[C],release[C],alone[C];
+  uint64_t across[C],toward[C],got[C],at[n],pages=0;
+  /* tree t's rate: its share exp(log_weight[t]) of its root's trees' (none where its weight is none) x the trees' rate */
+  for(uint32_t r=0;r<n;r++){most[r]=-INFINITY;sum[r]=0;pages+=segment[r];}
+  for(uint32_t t=0;t<c;t++){
+    const uint32_t r=trees->root[t];
+    if(r<n && trees->log_weight[t]>most[r])most[r]=trees->log_weight[t];
   }
-  return next==elements;
-}
-
-uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,const uint64_t *segments,
-                                uint64_t page,struct mesh_step *steps){
-  if(rank>=program->nodes || !program->parts)return 0;
-  uint64_t *lo=malloc(program->parts*sizeof *lo),*count=malloc(program->parts*sizeof *count);
+  for(uint32_t t=0;t<c;t++){
+    const uint32_t r=trees->root[t];
+    rate[t]=r<n && isfinite(most[r])?mesh_graph_exp(trees->log_weight[t]-most[r]):0;
+    if(r<n)sum[r]+=rate[t];
+    latency[t]=timed?trees->latency[t]:0;
+    across[t]=toward[t]=0;
+  }
+  for(uint32_t t=0;t<c;t++)rate[t]=rate[t]>0?rate[t]*joint/sum[trees->root[t]]:0;
+  if(!pages)return 0;
+  /* every node the pages go up toward or down from roots a tree: an all-reduce's every node, the others' each node of
+     a segment (mesh_trees_check's `roots`); else the segment would cross no link */
+  for(uint32_t r=0;r<n;r++)if((all || segment[r]) && !(sum[r]>0))return UINT32_MAX;
   uint32_t k=0;
-  if(lo && count && mesh_program_ranges(program,operand.elements,segments,mesh_page_quantum(page,operand.element_bytes),
-                                       operand.element_bytes,lo,count)){
-    /* a move's parts in one segment are one step: no step spans two segments, so a rank's own segment of a
-       reduce-scatter or an all-gather is a buffer of its own (libnccl-mesh partial_split) */
-    for(uint32_t i=program->first[rank];i<program->first[rank+1];i++){
-      const struct mesh_move *m=program->move+i;
-      for(uint32_t p=m->part,end;p<m->part+m->parts;p=end){
-        for(end=p+1;end<m->part+m->parts && program->segment[end]==program->segment[p];end++);
-        struct mesh_operand piece=operand;
-        piece.elements=lo[end-1]+count[end-1]-lo[p];
-        if(piece.elements)steps[k++]=(struct mesh_step){m->op,m->peer,m->round,m->buffer,lo[p],piece};
-      }
+  if(!all){
+    /* root r's segment over its trees, each tree's pages one way along it */
+    uint64_t first=0;
+    for(uint32_t r=0;r<n;first+=segment[r++]){
+      at[r]=first;
+      if(segment[r])mesh_root_fill(trees,r,latency,rate,segment[r],alone,got,toward);
     }
+    for(uint32_t t=0;t<c;t++)if(toward[t]){
+      k+=mesh_tree_moves(trees,t,at[trees->root[t]],toward[t],up,down,k,move);
+      at[trees->root[t]]+=toward[t];
+    }
+    return k;
   }
-  free(lo);free(count);
+  /* the all-reduce's cut: b, of the least where the summed-at-every-node pages end no sooner than the rest, and the one
+     before it, the one whose later end is sooner (the fewer of equals: a page summed at every node crosses every
+     tree of every root) */
+  double tail,lower_tail;
+  uint64_t lo=0,hi=pages;
+  while(hi-lo>1){
+    const uint64_t mid=lo+(hi-lo)/2;
+    if(mesh_reduce_all_ends(trees,latency,rate,pages,mid,release,alone,got,across,toward,&tail)<=tail)hi=mid;else lo=mid;
+  }
+  const double lower_end=mesh_reduce_all_ends(trees,latency,rate,pages,lo,release,alone,got,across,toward,&lower_tail);
+  const double higher_end=mesh_reduce_all_ends(trees,latency,rate,pages,hi,release,alone,got,across,toward,&tail);
+  uint64_t b=hi;
+  if(!((higher_end>tail?higher_end:tail)<(lower_end>lower_tail?lower_end:lower_tail))){
+    b=lo;
+    mesh_reduce_all_ends(trees,latency,rate,pages,lo,release,alone,got,across,toward,&tail);
+  }
+  /* the up-and-down pages first, each tree's after the trees' before it; then each root's share of the b pages
+     summed at every node, from the same first page at every root, up its trees */
+  uint64_t first=0;
+  for(uint32_t t=0;t<c;first+=across[t++])if(across[t])k+=mesh_tree_moves(trees,t,first,across[t],1,1,k,move);
+  for(uint32_t r=0;r<n;r++)at[r]=pages-b;
+  for(uint32_t t=0;t<c;t++)if(toward[t]){
+    k+=mesh_tree_moves(trees,t,at[trees->root[t]],toward[t],1,0,k,move);
+    at[trees->root[t]]+=toward[t];
+  }
   return k;
-}
-
-/* Configuration-only definite initialization. Keep unions of intervals, not a
-   bitmap proportional to the tensor. A COPY defines its exact destination;
-   publication alone never defines another local buffer or retires a source. */
-struct mesh_defined_range { uint64_t first,last; };
-struct mesh_defined { struct mesh_defined_range *range; size_t count,room; };
-
-static int mesh_defined_has(const struct mesh_defined *set,uint64_t first,uint64_t last){
-  if(first==last)return 1;
-  for(size_t i=0;i<set->count && set->range[i].first<=first;i++)
-    if(set->range[i].last>=last)return 1;
-  return 0;
-}
-
-static int mesh_defined_add(struct mesh_defined *set,uint64_t first,uint64_t last){
-  if(first==last)return 0;
-  size_t begin=0,end;
-  while(begin<set->count && set->range[begin].last<first)begin++;
-  end=begin;
-  while(end<set->count && set->range[end].first<=last){
-    if(set->range[end].first<first)first=set->range[end].first;
-    if(set->range[end].last>last)last=set->range[end].last;
-    end++;
-  }
-  if(begin==end && set->count==set->room){
-    const size_t room=set->room?2*set->room:4;
-    if(room<set->room || room>SIZE_MAX/sizeof *set->range)return EOVERFLOW;
-    struct mesh_defined_range *grown=realloc(set->range,room*sizeof *grown);
-    if(!grown)return ENOMEM;
-    set->range=grown;set->room=room;
-  }
-  memmove(set->range+begin+1,set->range+end,(set->count-end)*sizeof *set->range);
-  set->count-=end-begin;
-  set->range[begin]=(struct mesh_defined_range){first,last};set->count++;
-  return 0;
-}
-
-int mesh_program_check_members(const struct mesh_program *program,struct mesh_operand operand,const uint64_t *cut,
-                                uint64_t page,const uint64_t *contributors,const uint64_t *recipients){
-  if(!program || !program->nodes || program->what>MESH_ALLGATHER || !program->first ||
-     program->scratch==UINT32_MAX || !operand.element_bytes ||
-     (program->parts && (!program->segment || !program->log_weight)) ||
-     (program->first[program->nodes] && !program->move))return EINVAL;
-  if(operand.elements>UINT64_MAX/operand.element_bytes)return EOVERFLOW;
-  if((program->what==MESH_REDUCE || program->what==MESH_BROADCAST) && program->root>=program->nodes)return EINVAL;
-  if(program->what==MESH_BROADCAST && !mesh_member(contributors,program->root))return EINVAL;
-  if(program->first[0])return EINVAL;
-  for(uint32_t r=0;r<program->nodes;r++)if(program->first[r]>program->first[r+1])return EINVAL;
-  for(uint32_t p=0;p<program->parts;p++)
-    if(program->segment[p]==UINT32_MAX || (program->segments && program->segment[p]>=program->segments) ||
-       isnan(program->log_weight[p]) || program->log_weight[p]==INFINITY)return EINVAL;
-  const uint32_t segments=mesh_program_segments(program),buffers=program->scratch+1;
-  const int gathered=program->what==MESH_ALLGATHER,scattered=program->what==MESH_REDUCE_SCATTER;
-  if((gathered || scattered) && segments!=program->nodes)return EINVAL;
-  for(uint32_t g=0;g<segments;g++){
-    int found=0,positive=0;
-    for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g){
-      found=1;positive|=isfinite(program->log_weight[p]);
-    }
-    if(found && !positive)return EINVAL;
-  }
-  const uint64_t quantum=mesh_page_quantum(page,operand.element_bytes);
-  if(operand.elements>UINT64_MAX-(quantum-1))return EOVERFLOW;
-  if(cut){
-    uint64_t sum=0;
-    for(uint32_t g=0;g<segments;g++){
-      if(cut[g]>operand.elements-sum)return EINVAL;
-      sum+=cut[g];
-    }
-    if(sum!=operand.elements)return EINVAL;
-  }
-  if((size_t)segments>SIZE_MAX/(2*sizeof(uint64_t)) ||
-     (size_t)program->parts>SIZE_MAX/(2*sizeof(uint64_t)) ||
-     (size_t)buffers>SIZE_MAX/sizeof(struct mesh_defined))return EOVERFLOW;
-  uint64_t *bounds=calloc(2*(size_t)segments,sizeof *bounds);
-  uint64_t *ranges=calloc(2*(size_t)program->parts+1,sizeof *ranges);
-  int result=bounds && ranges?0:ENOMEM;
-  if(!result && !mesh_cut(segments,operand.elements,cut,quantum,bounds,bounds+segments))result=EINVAL;
-  if(!result && program->parts &&
-     !mesh_program_ranges(program,operand.elements,cut,quantum,operand.element_bytes,ranges,ranges+program->parts))result=EINVAL;
-  for(uint32_t r=0;!result && r<program->nodes;r++){
-    struct mesh_defined *defined=calloc(buffers,sizeof *defined);
-    if(!defined){result=ENOMEM;break;}
-    const int contributes=mesh_member(contributors,r),receives=mesh_member(recipients,r);
-    uint64_t from=gathered?bounds[r]:0,length=gathered?bounds[segments+r]:operand.elements;
-    if((gathered && !contributes && length) || (scattered && !receives && bounds[segments+r]))result=EINVAL;
-    const int initial=contributes && (program->what!=MESH_BROADCAST || r==program->root);
-    for(uint32_t b=0;initial && !result && b<buffers;b++)result=mesh_defined_add(defined+b,from,from+length);
-    for(uint32_t i=program->first[r];!result && i<program->first[r+1];i++){
-      const struct mesh_move *m=program->move+i;
-      if(m->op>MESH_STEP_COPY || m->peer>=program->nodes || m->peer==r || m->buffer>=buffers ||
-         !m->parts || m->part>=program->parts || m->parts>program->parts-m->part){result=EINVAL;break;}
-      const uint32_t last=m->part+m->parts-1;
-      const uint64_t first=ranges[m->part],end=ranges[last]+ranges[program->parts+last];
-      if(end<first || end>operand.elements){result=EINVAL;break;}
-      if(m->op==MESH_STEP_COPY)result=mesh_defined_add(defined+m->buffer,first,end);
-      else if(!mesh_defined_has(defined+m->buffer,first,end))result=EINVAL;
-    }
-    const int required=program->what==MESH_REDUCE?r==program->root:receives;
-    from=scattered?bounds[r]:0;length=scattered?bounds[segments+r]:operand.elements;
-    if(!result && required && !mesh_defined_has(defined,from,from+length))result=EINVAL;
-    for(uint32_t b=0;b<buffers;b++)free(defined[b].range);
-    free(defined);
-  }
-  free(bounds);free(ranges);
-  return result;
 }
 
 /* A packed tree while packing: its root, parents and the flow it carries */
@@ -872,47 +558,4 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,d
 done:
   free(from);free(to);free(through);free(crossing);free(hop);free(capacity);free(parallel);free(aggregate);
   return written;
-}
-
-/* -- the lists: the entries a program's steps take on a holding's send list and landing list --------------------------- */
-
-
-/* whether steps are in round order (mesh_program_steps_cut's order: a compiled program's are) */
-static int mesh_rounds_sorted(const struct mesh_step *steps,uint32_t count){
-  for(uint32_t k=1;k<count;k++)if(steps[k].round<steps[k-1].round)return 0;
-  return 1;
-}
-
-uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int send,uint64_t at,struct mesh_place *made,uint32_t *placed){
-  const int sorted=mesh_rounds_sorted(steps,count);
-  uint32_t rounds=0;
-#define MESH_LAID(k) (steps[k].peer==peer && mesh_step_bytes(steps+(k)) && (steps[k].op==MESH_STEP_SEND)==(send!=0))
-  for(uint32_t k=0;sorted && k<count;k++)if(MESH_LAID(k))made[(*placed)++]=(struct mesh_place){k,send!=0,at++};
-  for(uint32_t k=0;!sorted && k<count;k++)if(MESH_LAID(k) && steps[k].round+1>rounds)rounds=steps[k].round+1;
-  for(uint32_t r=0;!sorted && r<rounds;r++)
-    for(uint32_t k=0;k<count;k++)if(MESH_LAID(k) && steps[k].round==r)made[(*placed)++]=(struct mesh_place){k,send!=0,at++};
-#undef MESH_LAID
-  return at;
-}
-
-/* Counted exchanges describe logical transactions. Physical routing and range
-   dependencies are supplied by the same compiler as ordinary collectives. */
-uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps){
-  uint32_t k=0;
-  for(uint32_t q=0;q<2*nodes;q++)
-    if(q%nodes!=rank && segments[q])
-      steps[k++]=(struct mesh_step){q<nodes?MESH_STEP_SEND:MESH_STEP_COPY,q%nodes,0,q>=nodes,mesh_segment_first(segments+(q<nodes?0:nodes),q%nodes),
-                                    {element.type,element.element_bytes,segments[q]}};
-  return k;
-}
-uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
-                        struct mesh_group_place *made,uint32_t *placed){
-  *placed=0;
-  for(uint32_t i=0;i<g->calls;i++){
-    const struct mesh_group_call *c=g->call+i;
-    uint32_t laid=0;
-    at=mesh_lay(c->steps[rank],c->count[rank],peer,send,at,scratch,&laid);
-    for(uint32_t k=0;k<laid;k++)made[(*placed)++]=(struct mesh_group_place){i,0,scratch[k]};
-  }
-  return at;
 }

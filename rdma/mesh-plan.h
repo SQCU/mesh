@@ -41,8 +41,8 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
    cross and that hold no rank with work: a collective's working ranks are the map's first `nodes`, and its links may
    join any of its nodes and relays.  A route through a node is carried only by the node's rank of the communicator
    that runs the collective, so a communicator's map, whose nodes are its ranks, lists such a node among them and has
-   no relays (nccl-mesh.c map_of); that rank sends on what lands alone (the identity) only where a program's
-   mesh_compile left it out of `contributors`, which libnccl-mesh's own table never does.
+   no relays (nccl-mesh.c map_of); that rank's own value counts in every sum (mesh_page_moves: every node of the trees
+   contributes).
    `mark` (NULL: each node's number) is each node's and relay's mark, distinct (mesh_map's: its bridge's node number,
    the same wherever it is numbered).
    `next` (NULL: none, and no relays) is the routing table, an operand (mesh_routes makes one): of N = nodes + relays,
@@ -118,19 +118,23 @@ int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
 /* Spanning trees over a map's nodes: the routes every collective and every message take (Blink's tree packing
    [Wang et al., MLSys 2020]; ForestColl [Zhao et al. 2024]).  Tree t is rooted at root[t]; node v's parent in it is
    parent[t * nodes + v], a node the map links v to (the root's is the root); log_weight[t] is its unnormalised log
-   share of what its root gathers and sends.  The trees of one root split that root's elements by exp(log_weight), in
-   tree order, each the floor of its share and the first ones one element more for the remainder.  A reduction toward
-   r runs up r's trees, a broadcast from r down them, a message to r along the path from its sender in r's heaviest
-   tree (the lowest-numbered of equals).  The trees are an operand, made ahead of time (mesh_trees_pack, or the
-   caller's own) and changed only by making them again; they span a map that joins its nodes (mesh_link_map_joined).
-   latency[t] (NULL: none) is tree t's time from its root's release to its deepest leaf's first landing (its hops at a
-   hop's cost), and `rate` the bytes a time every root's segment crosses its trees at together (mesh-graph.h
-   mesh_graph_trees_rate); where both are given, a segment's units are cut over its root's trees by earliest finish
-   (mesh-graph.h mesh_graph_fill: a unit goes where it lands soonest), else by the shares as above. */
+   share of what its root gathers and sends.  A reduction toward r runs up r's trees, a broadcast from r down them
+   (mesh_page_moves).  The trees are an operand, made ahead of time (mesh_trees_pack, or the caller's own) and changed
+   only by making them again; they span a map that joins its nodes (mesh_link_map_joined).  latency[t] (NULL: none) is
+   tree t's time from its root's release to its deepest leaf's first landing (its hops at a hop's cost), and `rate`
+   the pages a time every root's segment crosses its trees at together (mesh-graph.h mesh_graph_trees_rate over
+   capacities in pages a time; 0: none, and then no latency either).  A root's pages are cut over its trees by
+   earliest finish (mesh-graph.h mesh_graph_fill: a page goes where it lands soonest), tree t taking pages one each
+   1 / (its share exp(log_weight[t]) of its root's trees' x rate) after latency[t]; without a rate, by the shares
+   alone. */
 struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const double *log_weight; const double *latency; double rate; };
-/* 0 where the trees fit the map: each spans every node over the map's links and reaches its root, and every node
-   roots at least one (a collective reduces toward and broadcasts from every node); else EINVAL. */
-int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *);
+/* 0 where the trees fit the map: each spans every node over the map's links and reaches its root, its weight finite,
+   and every node of `roots` (a bit a node, 64 a word; NULL: every node) roots at least one: the nodes a collective's
+   pages go up toward or down from (mesh_page_moves: a reduce's or a broadcast's root, each node of a reduce-scatter's
+   or an all-gather's nonzero segments, an all-reduce's every node).  So a rooted collective takes trees packed for its
+   root alone (mesh_trees_pack's `roots`), every link of the map in them carrying its pages, not its root's few of an
+   every-root packing; else EINVAL. */
+int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *,const uint64_t *roots);
 /* Each root's spanning in-arborescences packed fractionally into the map's links, each way, the roots the nodes of
    `roots` (a bit a node, 64 a word; NULL: every node): Garg and Konemann's maximum
    concurrent flow [FOCS 1998], every root's trees together carrying one unit, each phase sending every root's unit
@@ -162,8 +166,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *,const uint64_t *roots,doub
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
-/* One step of one rank's part of a collective, in that rank's order (a compiled program's moves made elements,
-   mesh_program_steps_cut).
+/* One step of one rank's part of a routed WRITE program, in that rank's order (mesh_fabric_refine, mesh_routed_compile).
    SEND   publishes elements [first, first + piece.elements) of `buffer` to peer.
    REDUCE receives that typed piece from peer and combines it into `buffer` at `first`.
    COPY   receives that typed piece from peer into `buffer` at `first`.
@@ -173,12 +176,11 @@ struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
    receive; the ordered wire-page sequence, rather than entry count, agrees. */
 enum { MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY };
 struct mesh_step { uint32_t op,peer,round,buffer; uint64_t first; struct mesh_operand piece; };
-/* a step's piece's bytes; the first element of rank q's segment, the segments packed in rank order */
+/* a step's piece's bytes */
 static inline uint64_t mesh_step_bytes(const struct mesh_step *step){ return step->piece.elements*step->piece.element_bytes; }
 /* The elements a page-aligned cut lies on: the least multiple of `page` bytes and of an element's bytes, in elements
    (1 where a page is 0 or 1 byte, any element; an element of 0 bytes counted as 1) */
 static inline uint64_t mesh_page_quantum(uint64_t page,uint64_t element){ if(page<=1)return 1; uint64_t a=page,b=element?element:1; while(b){const uint64_t t=a%b;a=b;b=t;} return page/a; }
-static inline uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){ uint64_t at=0; for(uint32_t r=0;r<q;r++)at+=segment[r]; return at; }
 
 /* design/whole-function.md#fabric */
 struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
@@ -282,108 +284,74 @@ int mesh_routed_compile(const struct mesh_fabric *,const struct mesh_paths *,
                          struct mesh_routed_program *);
 void mesh_routed_free(struct mesh_routed_program *);
 
-/* A compiled collective, the operand a call runs: every rank's moves, as MSCCL-IR is the program the MSCCL runtime
-   interprets [Cowan et al., ASPLOS 2023].  `what` it computes (MESH_*), its `root` (a reduce's or a broadcast's) and
-   `nodes`; its operand cut into `parts` parts in order, part p within segment segment[p] at log_weight[p], its share
-   there (the operand cut in as many segments as the parts name, the first elements % segments one element longer, so
-   that a reduce-scatter's and an all-gather's segment s is node s's NCCL segment; within a segment each part the floor
-   of its share, the first ones one element more for the remainder).  Rank r's moves are move[first[r]] ..
-   move[first[r + 1] - 1], each over parts [part, part + parts) of a buffer (struct mesh_step's); `scratch` is the most
-   scratch buffers a rank uses.  Every rank runs the same program; nothing about it is decided where it runs. */
+/* What a collective computes (mesh_page_moves) */
 enum { MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER };
-struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
-struct mesh_program { uint32_t what,root,nodes,parts,scratch,segments; const uint32_t *segment; const double *log_weight;
-                      const uint32_t *first; const struct mesh_move *move; const double *latency; double rate; };
 
-/* Exact per-part allocation used by mesh_program_steps_cut; q is in elements. */
-int mesh_program_ranges(const struct mesh_program *,uint64_t elements,const uint64_t *sizes,uint64_t q,uint32_t element_bytes,
-                        uint64_t *first,uint64_t *count);
-
-/* The room mesh_compile needs: parts and moves. */
-void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves);
-/* Separate operand contributors and result recipients; excluded physical ranks
-   remain available as identity relays. Gather/ReduceScatter segments retain
-   full rank numbering, including trailing zero-size owners. NULL masks mean
-   every rank. A rooted Reduce's root may lie outside its contributor set. */
-int mesh_compile_members(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,
-                           const uint64_t *contributors,const uint64_t *recipients,
-                           struct mesh_program *,uint32_t *segment,double *log_weight,
-                           uint32_t *first,struct mesh_move *move);
-/* Validate a fixed program's initialized ranges and required outputs against
-   the operand roles at configuration. No topology or transfer is replaced. */
-int mesh_program_check_members(const struct mesh_program *,struct mesh_operand,const uint64_t *cut,uint64_t page,
-                                const uint64_t *contributors,const uint64_t *recipients);
-/* A collective compiled along `trees` into `program` (arrays of mesh_compile_room's room: segment and log_weight a
-   part, first nodes + 1, move a move):
-     MESH_REDUCE           the whole operand up root's trees, a part a tree (its weight);
-     MESH_BROADCAST        the whole operand down root's trees;
-     MESH_REDUCE_SCATTER   segment s up s's trees;  MESH_ALLGATHER  segment s down s's trees;
-     MESH_ALLREDUCE        whole 0: the reduce-scatter and then the all-gather (each link a share once each way; its
-                           dependent crossings twice the trees' heights) [Patarasuk & Yuan 2009; Blink];
-                           whole 1: the whole operand reduced toward every contributor at once, up its heaviest tree,
-                           a node forwarding each partial from distinct scratch. Its original contribution has a
-                           separate immutable source binding whenever its result can change concurrently; publishing
-                           a SEND does not prove its DMA source was read. Its dependent crossings are the heaviest
-                           trees' height, 1 where they are stars; each node
-                           sends the whole operand once for every other) [single-phase all-reduce: Trivance 2026].
-   A tree's part is one move a hop, uncut: a node that sends on unchanged what it received (a COPY, the identity at a
-   rank, design/data-model.md section 9) sends each page as it lands (libnccl-mesh presents the SEND gated page by page
-   on that receive's landed count), so such a path pipelines by the page and no count of chunks exists; a node that
-   combines sends its sum once its part is combined.  Going up a
-   tree a node sends at round its height, after its children; coming down, a node at depth d receives at base + d - 1
-   and sends at base + d, base the highest of the trees' heights (the reduce-scatter's last round plus one); a round's
-   SENDs come before its receives, so a SEND waits on lower rounds alone.  A
-   message is coalesced with the next between the same two nodes in the same round where their parts adjoin and each
-   end's buffer and step are the same.  `contributors` (a bit a node, 64 a word; NULL: every node) are the nodes with
-   work: those whose operands a reduction combines, whose segments a reduce-scatter, an all-reduce and an all-gather
-   cut (in node order: the operand is theirs, the others holding none), and toward which a result goes.  Every other
-   node runs the identity: up a tree it takes its first child's partial as it comes and combines the rest into it, and
-   sends it on; down a tree it is sent a piece only where a contributor lies below it, and sends it on.  0, or
-   EINVAL. */
-int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move,
-                 double *latency);
-/* A rank's steps of a program for an operand, a step a move's parts in one segment (none where its elements are
-   none: no step spans two segments), at most (first[rank + 1] - first[rank]) x parts, over an operand cut into segments of the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts, one
-   a segment in segment order: a reduce-scatter's and an all-gather's segment s is node s's, node s's of its
-   contributors where it has them): segment s the segments[s] elements after the segments before it, the sizes as many
-   as the program's segments (the most segment a part names, plus one) and summing to the operand's elements, a size 0
-   a segment whose steps carry nothing (none made); NULL the program's own cut.  Every cut the program makes itself (its
-   segments where none are given, and its parts within a segment by their weights) lies on a multiple of `page` bytes
-   from the operand's start, the least multiple of both the page and the element (0 or 1: any element), so that a
-   step's piece starts on a page wherever its buffer does (design/transport.md section 14: an entry starts on a page);
-   a cut that the sizes fix lies where they put it.  Within a segment each part takes the floor of its share of the
-   segment's quanta, the first ones one quantum more for the remainder, the last part of the segment ending at its end.
-   0 where the sizes do not sum to the operand (mesh 430cf7b2^ mesh_cut, 3ab709aa: the planner's `segments`, cut alike
-   by every program). */
-uint32_t mesh_program_steps_cut(const struct mesh_program *,uint32_t rank,struct mesh_operand,const uint64_t *segments,uint64_t page,
-                                struct mesh_step *steps);
-/* A step's entry on its channel (design/transport.md section 14: a holding's send list and landing list, each in its
-   own order): its index among the rank's steps, whether it is a SEND (the send list) or a receive (the landing list),
-   and its entry's index in that list.  A step is one entry, whatever its bytes: the bridge cuts it into SENDs. */
-struct mesh_place { uint32_t step,send; uint64_t entry; };
-/* The entries a rank's steps of one collective take on its channel toward `peer`, its SENDs to it on the send list
-   (`send` 1) or its receives from it on the landing list (`send` 0), from entry `at`: by round, a round's steps in their
-   order, a step of no bytes none; the end, and each step placed in made[*placed ..], *placed counting them.  The one
-   order both ends make of their ranks' logical steps; physical SEND refinement
-   preserves that order and the peer's exact wire-page sequence (libnccl-mesh schedule_group). */
-uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int send,uint64_t at,struct mesh_place *made,uint32_t *placed);
-/* A declared group preserves call order for every operation. Each rank's
-   physical steps have the compiler's dependency-safe ordinal. mesh_group_lay
-   assigns entries on the directed peer list from `at`, retaining every stripe;
-   scratch holds the largest local call and made holds the complete local group.
-   Runtime dependencies are overlapping prior receives, not an operation-kind
-   ordering rule or a whole-operand join. */
-struct mesh_group_call { const uint32_t *count; const struct mesh_step *const *steps; };
-struct mesh_group { uint32_t nodes,calls; const struct mesh_group_call *call; uint64_t page; };
-struct mesh_group_place { uint32_t call,padding; struct mesh_place place; };
-uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
-                        struct mesh_group_place *made,uint32_t *placed);
-/* A counted all-to-all's steps at `rank` of `nodes`, all of round 0 (libnccl-mesh ncclMeshAlltoAllV, nccl-mesh.c
-   counted_steps; both ends hold the counts): segments[q] the entries toward rank q, segments[nodes + q] those from it;
-   to each other rank q one SEND of its entries of `element` (buffer 0 at q's segment) and from each one COPY (buffer 1
-   at q's).  Their count, at most 2 (nodes - 1). */
-uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps);
+/* The collective's joint interface (design/drift-2026-11-03.md, the one solver): the planner states page moves, the
+   run's solve orders, places and guards them, the bridge executes channel entries.  Pages only: no byte, offset or
+   address here.  A page move, the planner's output per route edge: rank `source` SENDs the collective operand's pages
+   [first, first + pages) (page indices of the operand) to rank `destination`, which lands them.  Every landing is a
+   version of its own of those operand pages (renaming), placed by the solve: a TRANSFER's or a FORWARD's in the
+   destination's result pages where they are not its input's, else in fresh pages, a REDUCE's in fresh pages.  So no
+   landing writes a page a SEND reads, and a landing's one edge is post -> landed, never a SEND's completion: the
+   all-reduce's write-after-read hold at a lane's head (its down landing into the pages its up SEND read, every later
+   landing of the channel behind it: metal-microbench facts 53a0e600, bdceb04f) cannot be stated, as c5e62f6e's
+   all-gather in pages of its own removed it.  `kind`:
+   - MESH_MOVE_TRANSFER: the source's value of those pages (its own, or the sum its reduce landings made final there);
+     `link` UINT32_MAX;
+   - MESH_MOVE_FORWARD: the version a move landing on this move's source landed: `link`, that move (its pages hold
+     these);
+   - MESH_MOVE_REDUCE: folded at the destination into its sum of those operand pages, one fold a grain over all its
+     inputs (the destination's own value and every reduce landing of the grain there; never a fold a landing, k passes
+     over the sum where one does); `link`, the move that carries the sum on from the destination (its pages hold these;
+     UINT32_MAX where the sum is final there).  A reduce move's source sends its sum where a reduce move links to it,
+     else its own value (its version before the collective, whatever has landed there since).
+   The planner decides nothing more: every move's order, region pages, grains and guards are the solve's, and so is its
+   channel, which of the pair's parallel cables carries each page: page by page (struct mesh_channel_entry `channel`),
+   each cable a share of the pair's pages by its rate, so a FORWARD's pages stay within the one landing its link names
+   however the cables cut them. */
+enum { MESH_MOVE_TRANSFER, MESH_MOVE_FORWARD, MESH_MOVE_REDUCE };
+struct mesh_page_move { uint32_t source,destination,kind,link; uint64_t first,pages; };
+/* The trees' routes of collective `what` (MESH_*) as page moves, every node's value in every sum.  A tree's pages cross
+   each of its edges as one move each way they go: up, a REDUCE from a node to its parent, linked to its parent's
+   REDUCE (none at the root); down, a TRANSFER from the root to its children and a FORWARD from every other node to its
+   children, linked to the move landing on it.
+   - A reduce, a broadcast, a reduce-scatter and an all-gather: the operand's pages cut into segments in node order,
+     node r's the segment[r] pages after the segments before it (a reduce's or a broadcast's root holds them all, every
+     other node none); root r's segment cut over r's trees by earliest finish (struct mesh_trees), each tree's pages up
+     it (a reduce, a reduce-scatter) or down it (a broadcast, an all-gather).
+   - An all-reduce: its pages, the segments' sum (no node owns them), each page one of two forms over the same trees:
+     up and down a tree (summed at its root and sent back down it: the page crosses each link of it once each way, its
+     hops twice the tree's height), or up a tree of every root (summed at every node at once: no down half, one hop on
+     a star, a REDUCE from every node to every other).  One earliest finish over both, on the trees' capacity, cuts
+     them: the up-and-down pages over every tree, a tree's first at twice its latency (mesh-graph.h mesh_graph_fill);
+     the others over each root's trees after them, a tree's first once its up-and-down pages have crossed it, plus its
+     latency (on the shared up path the pages of the longer tail first: Jackson's rule [Jackson 1955]); their count the
+     one whose later end is soonest, the fewer of equals.  So an operand of a hop's pages or fewer is summed at every
+     node in one hop, and a long one up and down the trees with a hop's pages of the other at its tail: one cost, no
+     case.
+   The pages' cut over the trees and the forms is the planner's routing, and nothing else is.  Writes move[0 ..] (move
+   NULL: counted only) and returns their count, at most 3 (nodes - 1) x the trees' count for an all-reduce and
+   (nodes - 1) x the trees' count for the others (0 at one node or no pages; an all-reduce's up-and-down moves first,
+   then those summed at every node); UINT32_MAX where `what` is none or a node the collective's pages go up toward or
+   down from roots no tree of finite weight (mesh_trees_check's `roots`: its segment would cross no link).  The moves'
+   order in `move` is none: every order, the relays' and the forms' among them, is the solve's (its dependences: a
+   FORWARD's and a REDUCE's link, and the operand pages' versions). */
+uint32_t mesh_page_moves(const struct mesh_trees *,uint32_t what,const uint64_t *segment,struct mesh_page_move *move);
+/* A channel entry, the solve's output and the bridge's table row, one page a unit: on this rank's channel `channel`
+   (one of the cables that end at this rank, a stream toward its peer over it, with its `ready`, `sent` and `landed`
+   unit counts: mesh.h struct mesh_stream; which of a pair's cables a page takes is the solve's, page by page), `op`
+   MESH_CHANNEL_SEND, a SEND from region page `page` (the page table's index, the solve's placement), or
+   MESH_CHANNEL_LANDING, a receive posted into it.  A rank's table is its entries in the solve's one order; a
+   channel's entries in it are that channel's unit order, so its k-th SEND is unit k of its `ready` and `sent` and its
+   k-th landing unit k of its `landed`.  The guard, the solve's (a consumer's landed-prefix threshold; SEND ->
+   completion where placement reuses pages an earlier SEND read; produced pages; a landing's none but that reuse, its
+   pages a version of its own: struct mesh_page_move): the entry is posted once count `word` (MESH_WORD_*) of channel
+   `guard` reaches `threshold` (0: at once).  The bridge turns `page` into an address through the page table and
+   decides nothing. */
+enum { MESH_CHANNEL_SEND, MESH_CHANNEL_LANDING };
+enum { MESH_WORD_READY, MESH_WORD_SENT, MESH_WORD_LANDED };
+struct mesh_channel_entry { uint32_t op,channel; uint64_t page; uint32_t guard,word; uint64_t threshold; };
 
 /* design/transport.md: what a node's record carries of its health to every bridge: `booted`, the wall
    clock of the node's boot (ns since the epoch), and its `available` memory as its bridge last sampled it (the bytes
