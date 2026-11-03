@@ -131,11 +131,11 @@ $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.binarchive: .b
 .build/mesh-cpu-source.o: mesh-cpu-source.m mesh-cpu-source.h mesh-cpu-kernels.h mesh-host.h Makefile .build/metal-environment
 	mkdir -p .build
 	cc -fobjc-arc -fblocks -O2 $(WARN) -c mesh-cpu-source.m -o $@
-.build/libnccl-mesh.dylib: .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-recording.m metal-recording.h metal-page-effects.m metal-page-effects.h mesh-page-sites.h mesh-host.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-index-relation.m mesh-index-relation.h mesh-isl-memory.c mesh-isl-memory.h mesh-sparse.c mesh-sparse.h $(ISL_ARCHIVE) mesh-span-plan.h mesh-landing.h mesh-fold.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h mesh-publication.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-graph.h mesh-write-compiler.h \
+.build/libnccl-mesh.dylib: .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c mesh-statistics.h metal-run.m metal-run.h metal-recording.m metal-recording.h metal-page-effects.m metal-page-effects.h mesh-page-sites.h mesh-host.h mesh-tensor-layout.m mesh-tensor-layout.h mesh-index-relation.m mesh-index-relation.h mesh-isl-memory.c mesh-isl-memory.h mesh-sparse.c mesh-sparse.h $(ISL_ARCHIVE) mesh-span-plan.h mesh-landing.h mesh-fold.h mesh-lease-retire.h nccl-mesh-metal.m nccl-mesh-metal.h mesh-publication.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h mesh-graph.h mesh-write-compiler.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h mesh-fabric.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
 	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -DMESH_ISL_SLAB_BYTES=$(MESH_ISL_SLAB_BYTES) -dynamiclib $(ISL_HEADERS) -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
-	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-recording.m metal-page-effects.m mesh-tensor-layout.m mesh-index-relation.m mesh-isl-memory.c mesh-sparse.c $(ISL_ARCHIVE) -L.build -lmesh \
+	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c nccl-mesh-metal.m metal-run.m metal-recording.m metal-page-effects.m mesh-tensor-layout.m mesh-index-relation.m mesh-isl-memory.c mesh-sparse.c $(ISL_ARCHIVE) -L.build -lmesh \
 	  -framework Metal -framework Foundation -framework Accelerate
 .build/libmesh-coreml.dylib: mesh-coreml.m mesh-coreml.h mesh-cpu-source.h mesh-host.h mesh-cpu-kernels.h mesh-ane-entry.h mesh-ane-entry.inc mesh-tensor-layout.h .build/libnccl-mesh.dylib Makefile
 	mkdir -p .build

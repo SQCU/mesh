@@ -1035,7 +1035,7 @@ static int realize_wait_order(const void *left, const void *right) {
 }
 int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const uint32_t (*edge)[2], uint32_t *part,
                        uint32_t *parts, unsigned char *barrier, unsigned char *fence, struct mesh_graph_crossing *waits,
-                       size_t capacity, size_t *count) {
+                       size_t capacity, size_t *count, unsigned char *deferred) {
   for (size_t k = 0; k < m; k++) if (edge[k][0] >= edge[k][1] || edge[k][1] >= n) return EINVAL;
   uint32_t (*sorted)[2] = malloc((m + 1) * sizeof *sorted);
   struct mesh_graph_crossing *found = malloc((m + 1) * sizeof *found);
@@ -1083,6 +1083,13 @@ int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const ui
     if (!kept || realize_wait_order(found + kept - 1, found + j)) found[kept++] = found[j];
   for (size_t j = 0; j < kept && j < capacity; j++) waits[j] = found[j];
   *count = kept;
+  /* deferral: the rows sort by kind, then waiter; a host operation's rows (kind 4) mark their parts, then the part rows
+     (kind 0), whose producers precede their waiters, carry it forward */
+  for (uint32_t p = 0; p < *parts; p++) deferred[p] = 0;
+  for (size_t j = 0; j < kept; j++)
+    if (found[j].kind == 4 && host[found[j].producer] == 1) deferred[found[j].waiter] = 1;
+  for (size_t j = 0; j < kept; j++)
+    if (found[j].kind == 0 && deferred[found[j].producer]) deferred[found[j].waiter] = 1;
   free(sorted); free(found); free(waited);
   return 0;
 }

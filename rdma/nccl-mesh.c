@@ -5606,7 +5606,7 @@ static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
    operations nor solves their page relations again. */
 static ncclResult_t record_group(struct issue *u,const size_t *commands,size_t count,const ncclMeshStream *on) {
   if(!u->source)return fail(ncclInvalidUsage,"declare and specialize native sources before recording");
-  if(!on||!on->commandEncoder||!on->argumentTable||!on->residencySet||u->recorded)
+  if(!on||!on->run||u->recorded)
     return fail(ncclInvalidUsage,"record one prepared occurrence into its function");
   ncclResult_t result=gpu(metal_record(u->source,commands,count,on),"recording the specialized collective source");
   if(!result){u->recorded_commands+=count;u->recorded=u->recorded_commands==metal_command_count(u->source);}

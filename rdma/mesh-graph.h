@@ -266,8 +266,9 @@ int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*hea
                           const size_t *target_first, const uint32_t *target, unsigned char *precedes);
 /* The realization of a run's order on its agents (design/page-maps-2026-11-02.md, integration step 5): the decisions
    an effector encodes, made here and nowhere in it.
-   type: n nodes in issue order (a linear extension of the edges), host[v] whether node v runs on the host (else on the
-   GPU queue), m edges (from, to) with from before to ->
+   type: n nodes in issue order (a linear extension of the edges), host[v] whether node v runs on the host (1, a host
+   operation; 2, an outside producer whose event the queue can wait on; 0, a GPU node), m edges (from, to) with from
+   before to ->
    - part[v] for each GPU node: its command buffer, consecutive in the order; a new part starts only at a GPU node
      with a host node among its predecessors not already waited on by the part (a queue waits on an event only between
      command buffers); UINT32_MAX for a host node. *parts their count;
@@ -276,13 +277,16 @@ int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*hea
      algorithm for optimal barrier placement", PPoPP 2005);
    - waits: each part's or host node's predecessors on other parts or other host nodes, as (waiter, kind, producer)
      rows, waiter a part (kind 0) or a host node (kind 1), producer a part (kind bit 2 clear) or a host node (bit 2
-     set), each pair once; written up to `capacity`, *count the number needed.
+     set), each pair once; written up to `capacity`, *count the number needed;
+   - deferred[p] for each part (the caller's, n entries): a host operation, or a deferred part, among its producers, so
+     it is submitted once they have completed or been submitted, never at the run's start; an outside producer defers
+     nothing (the queue waits on its event).
    0, EINVAL where an edge runs backward in the order, ENOMEM. */
 struct mesh_graph_crossing { uint32_t waiter, kind, producer; };
 /* fence[v]: GPU node v has a GPU consumer in another part, so it publishes a fence that consumer waits on. */
 int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const uint32_t (*edge)[2], uint32_t *part,
                        uint32_t *parts, unsigned char *barrier, unsigned char *fence, struct mesh_graph_crossing *waits,
-                       size_t capacity, size_t *count);
+                       size_t capacity, size_t *count, unsigned char *deferred);
 /* Greedy by size (mesh-graph.c's section ported from TensorFlow Lite's GreedyBySizeAssignment, Apache-2.0):
    `count` items (indices into size and offset) on one line of units from 0, the `placed` pinned items already at their
    offsets. The largest first (ties in the given order), each in the smallest gap left of an item it is not apart from

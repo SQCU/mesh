@@ -277,9 +277,8 @@ typedef struct {
   size_t count;
 } ncclMeshSourceInput;
 typedef struct {
-  void *commandEncoder;
-  void *argumentTable;
-  void *residencySet;
+  /* the run being recorded (metal-run.h): the occurrence's commands are appended to it as nodes */
+  void *run;
   uint32_t polls;
   /* the realized occurrence this stream records (ncclMeshCommLower's invocation) */
   size_t invocation;

@@ -6,6 +6,7 @@
 #include "metal-capabilities.h"
 #include "nccl.h"
 #include "metal-recording.h"
+#include "metal-run.h"
 #include "mesh-landing.h"
 #include "mesh-fabric.h"
 #include "mesh-graph.h"
@@ -57,7 +58,6 @@ struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[KIN
 @implementation MeshArgumentPages
 - (void)dealloc { for (size_t k = 0; k < count; k++) metal_piece_give(held[k]); free(held);[sources release];[super dealloc]; }
 @end
-static char argumentPagesKey;
 _Static_assert(sizeof(struct args) <= RECORD, "an argument record");
 
 /* Preparation retains the equation's input identities and fixed value cells.
@@ -331,7 +331,7 @@ static struct kernels *kernels_of(id<MTLDevice> device, const char **message) {
 /* the program's device's kernels (kernels_of), found at its first step and kept with it */
 static struct kernels *program_kernels(struct metal_program *program, const char **message) {
   if (!program->kernels)
-    program->kernels = kernels_of(program->residency.device, message);
+    program->kernels = kernels_of(MetalRunDevice(program->run), message);
   return program->kernels;
 }
 
@@ -466,7 +466,7 @@ static struct metal_result fold_coverage(struct metal_program *program,
       NSString *predicate;
       if(gpu) {
         NSMutableData *bound=[command->bindings mutableCopy];
-        struct MetalCommandBinding *arguments=bound.mutableBytes;
+        struct MetalRunBinding *arguments=bound.mutableBytes;
         arguments[3].buffer=indices.buffer;arguments[3].offset=indices.offset;
         [command->bindings release];command->bindings=bound;
         predicate=[NSString stringWithFormat:@"#define MESH_FOLD_ACTIVE(k,q) (mesh_step_read<uint>((device uchar *)mesh_step_read<ulong>(a,ulong(q)*%luul+(k)),0)!=0)\n#define MESH_FOLD_OWN(q) MESH_FOLD_ACTIVE(%luul,q)\n",(unsigned long)K,(unsigned long)(K-1)];
@@ -485,7 +485,7 @@ static struct metal_result fold_coverage(struct metal_program *program,
   return METAL_DONE;
 }
 static struct metal_result record4(struct metal_program *program,id<MTLBuffer> d,id<MTLBuffer> s,id<MTLBuffer> a,id<MTLBuffer> words,
-    struct args p,struct MetalCommandBinding *bindings) {
+    struct args p,struct MetalRunBinding *bindings) {
   struct metal_bytes record;
   const int failed=argument_pages(program,sizeof p,&record);
   if(failed)return metal_failed(failed);
@@ -497,9 +497,8 @@ static struct metal_result record4(struct metal_program *program,id<MTLBuffer> d
   for (int k = 0; k < 4; k++) metal_resident(program, used[k]);
   {
     const id<MTLBuffer> buffers[6]={d,s?s:d,(id<MTLBuffer>)record.buffer,a?a:d,v,(id<MTLBuffer>)record.buffer};
-    for(uint32_t k=0;k<6;k++)bindings[k]=(struct MetalCommandBinding){.buffer=buffers[k],
-      .offset=(k==2||k==5)?record.offset:0,.length=k==2?sizeof p:0,
-      .index=k,.access=k==2?MetalReachRead:0};
+    for(uint32_t k=0;k<6;k++)bindings[k]=(struct MetalRunBinding){.buffer=buffers[k],
+      .offset=(k==2||k==5)?record.offset:0,.index=k};
   }
   return METAL_DONE;
 }
@@ -507,7 +506,7 @@ static struct metal_result record4(struct metal_program *program,id<MTLBuffer> d
 /* Transport leaves enter the same prepared command graph as numerical leaves.
    Bindings carry storage; accesses name the exact data relation. */
 static void command_emit(struct metal_program *program,uint32_t kind,
-    const struct MetalCommandBinding *bindings,MTLSize grid,MTLSize threads,BOOL threadGrid) {
+    const struct MetalRunBinding *bindings,MTLSize grid,MTLSize threads,BOOL threadGrid) {
   NSMutableData *accesses=(NSMutableData *)program->accesses;
   NSMutableArray *relations=program->group_accesses;
   const NSUInteger groups=threadGrid?(grid.width+threads.width-1)/threads.width:grid.width*grid.height*grid.depth;
@@ -545,7 +544,7 @@ static void command_emit(struct metal_program *program,uint32_t kind,
 
 static struct metal_result dispatch4(struct metal_program *program,uint32_t kind,id<MTLBuffer> d,id<MTLBuffer> s,
     id<MTLBuffer> a,id<MTLBuffer> words,struct args p,uint64_t units,int group) {
-  struct MetalCommandBinding bindings[6];
+  struct MetalRunBinding bindings[6];
   const struct metal_result recorded=record4(program,d,s,a,words,p,bindings);
   if(recorded.status)return recorded;
   const NSUInteger most=group?MESH_TRANSPORT_GROUP_THREADS:MESH_TRANSPORT_ELEMENT_THREADS;
@@ -857,7 +856,7 @@ struct metal_result metal_zelloth(struct metal_program *program,int type,int op,
       metal_accesses(program,&use,1);
       cell_access(program,input->data,input->data_offset,bytes,-1,MetalReachRead,cells,blocks,2+K,element_bytes);
     }
-    struct MetalCommandBinding bindings[6];
+    struct MetalRunBinding bindings[6];
     const struct args args={.src=table.offset,.scalar=sum->identity,.op=(uint32_t)op};
     const struct metal_result recorded=record4(program,(id<MTLBuffer>)sum->out,(id<MTLBuffer>)table.buffer,nil,
       program->violation,args,bindings);
@@ -924,12 +923,8 @@ struct metal_result metal_specialize(struct metal_program *program,void *sources
 }
 struct metal_result metal_record(struct metal_program *program,const size_t *selected,size_t count,const ncclMeshStream *on) {
   if(!program->sources)return (struct metal_result){EINVAL,"complete the whole-function source solve before recording"};
-  program->encoder=(id<MTL4ComputeCommandEncoder>)on->commandEncoder;
-  program->table=(id<MTL4ArgumentTable>)on->argumentTable;
-  program->residency=(id<MTLResidencySet>)on->residencySet;
-  NSMutableArray *held=objc_getAssociatedObject(program->residency,&argumentPagesKey);
-  if(!held){held=[NSMutableArray array];objc_setAssociatedObject(program->residency,&argumentPagesKey,held,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
-  [held addObject:argument_owner(program)];
+  program->run=(struct MetalRun *)on->run;
+  MetalRunHold(program->run,argument_owner(program));
   struct metal_result result=METAL_DONE;
   @try {
     NSArray<MeshCollectiveCommand *> *commands=program->commands;
@@ -963,21 +958,21 @@ struct metal_result metal_record(struct metal_program *program,const size_t *sel
         bound->program=mesh_cpu_program_create(&instruction,1,program->cpu_resources);
         if(!bound->program){result=(struct metal_result){EINVAL,say("collective CPU binding: %s",mesh_cpu_error())};break;}
         [argument_owner(program)->sources addObject:bound];
-        MetalEncoderHost(program->encoder,reaches.bytes,reaches.length/sizeof(struct MetalReach),
-          ^const char *(MeshHostCompletion complete,void *context,MeshHostTask *out) {
+        MetalRunHost(program->run,^const char *(MeshHostCompletion complete,void *context,MeshHostTask *out) {
             return mesh_cpu_program_prepare(bound->program,complete,context,out);
           });
         continue;
       }
       if(source->metadata||command->sourceSpecialized) {
         NSError *error=nil;
-        id<MTLLibrary> library=[[program->residency.device newLibraryWithSource:source->source
-          options:MetalDeviceCompilerOptions(program->residency.device) error:&error] autorelease];
+        id<MTLDevice> device=MetalRunDevice(program->run);
+        id<MTLLibrary> library=[[device newLibraryWithSource:source->source
+          options:MetalDeviceCompilerOptions(device) error:&error] autorelease];
         pipeline=library?[MetalPipelineMake(library,command->source->function,@[],@{},@[],&error) autorelease]:nil;
         if(!pipeline){result=(struct metal_result){EINVAL,say("collective source preparation: %s",error.localizedDescription.UTF8String)};break;}
         if(source->metadata) {
-          const struct MetalCommandBinding metadata={.buffer=source->metadata,.offset=source->metadataOffset,
-            .length=source->metadata.length-source->metadataOffset,.index=command->source->metadataSlot,.access=MetalReachRead};
+          const struct MetalRunBinding metadata={.buffer=source->metadata,.offset=source->metadataOffset,
+            .index=command->source->metadataSlot};
           [bindings appendBytes:&metadata length:sizeof metadata];
         }
       }
@@ -986,16 +981,12 @@ struct metal_result metal_record(struct metal_program *program,const size_t *sel
         if(!compiled){result=(struct metal_result){EINVAL,message};break;}
         pipeline=compiled->pipelines[command->kind];
       }
-      const struct MetalCommandDescription emitted={.pipeline=pipeline,.bindings=bindings.bytes,
-        .bindingCount=bindings.length/sizeof(struct MetalCommandBinding),.reaches=reaches.bytes,
-        .reachCount=reaches.length/sizeof(struct MetalReach),.groups=command->grid,
-        .threads=command->threads,.threadGrid=command->threadGrid};
-      MetalEncoderCompute(program->encoder,&emitted);
+      MetalRunDispatch(program->run,pipeline,bindings.bytes,bindings.length/sizeof(struct MetalRunBinding),command->grid,
+        command->threads,command->threadGrid);
     }
   } @catch(NSException *failure) { result=(struct metal_result){EINVAL,say("collective page lowering: %s",failure.reason.UTF8String)}; }
-  for(id<MTLBuffer> buffer in (NSSet *)program->resources)
-    if(![program->residency containsAllocation:buffer])[program->residency addAllocation:buffer];
-  [program->residency commit];return result;
+  for(id<MTLBuffer> buffer in (NSSet *)program->resources)MetalRunHold(program->run,buffer);
+  return result;
 }
 void metal_end(struct metal_program *program) {
   [(id)program->accesses release];[(id)program->commands release];[(id)program->transfers release];

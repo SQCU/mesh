@@ -40,10 +40,9 @@ static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){wo
 #define METAL_HANDLE(type) void *
 #endif
 struct kernels;
+struct MetalRun;
 struct metal_program {
-  METAL_HANDLE(id<MTL4ComputeCommandEncoder>) encoder;
-  METAL_HANDLE(id<MTL4ArgumentTable>) table;
-  METAL_HANDLE(id<MTLResidencySet>) residency;
+  struct MetalRun *run; /* the run being recorded (metal-run.h) */
   METAL_HANDLE(id<MTLBuffer>) violation;
   int added;
   uint32_t polls, frame;

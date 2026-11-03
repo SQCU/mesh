@@ -9,33 +9,11 @@
 extern "C" {
 #endif
 
-struct MetalReplay {
-    _Alignas(MESH_REPLAY_ALIGNMENT) id<MTLIndirectCommandBuffer> commands;
-    id<MTLResidencySet> residency;
-    id owner;
-    uint32_t count;
-    uint16_t buffers, memory;
-};
-_Static_assert(sizeof(struct MetalReplay) == MESH_REPLAY_BYTES, "prepared native replay");
-_Static_assert(_Alignof(struct MetalReplay) == MESH_REPLAY_ALIGNMENT, "prepared native replay alignment");
-
-// docs/kernels.md E2, Any program
-enum MetalForm { MetalFormIndirect, MetalFormEncoded };
 // Build operands from the selected Metal configuration, shared by frontends.
 MTLCompileOptions *MetalDeviceCompilerOptions(id<MTLDevice> device);
 
-// docs/kernels.md Any program.  A host program's operand whose storage holds `instances` slots of
-// `stride` bytes: invocation t binds slot t % instances (0 instances: slot t).
-// Each command already supplies its selected input/output binding offsets;
-// storage naming never relocates writes to other values sharing that buffer.
-struct MetalOperand { const char *name; __unsafe_unretained id<MTLBuffer> buffer; NSUInteger stride, instances; };
 // Preparation storage from the shared bridge region. The caller owns the buffer.
 id<MTLBuffer> MetalLeaseBuffer(id<MTLDevice>, NSUInteger bytes) NS_RETURNS_RETAINED;
-static inline NSUInteger MetalInvocationOffset(NSUInteger offset, NSUInteger stride, NSUInteger instances, NSUInteger invocation, NSInteger displacement) {
-    return offset + ncclMeshInvocationIndex(invocation, displacement, instances) * stride;
-}
-// tools/mesh/schedule.py: whether MetalReplayDescribed lists its commands
-void MetalRecordingList(int on);
 // docs/kernels.md Any program
 // Observe qualifies only monotone progress reads. Initializing the word remains
 // a dependency; concurrent Atomic publications do not order these observations.
@@ -106,14 +84,6 @@ NSDictionary<NSString *, NSData *> *MetalViewBlockSlice(const int32_t *present, 
 // stored block can be named more than once when it supplies repeated outputs.
 NSDictionary<NSString *, NSData *> *MetalViewBlockGather(const int32_t *present, const int32_t *order, size_t count,
     size_t stored, const int32_t *selected, size_t selectedCount, NSUInteger block);
-// One dependency compiler for recorded commands and fused producer/consumer
-// tiles. Each entry contains MetalReach records in execution order. The result
-// names writers/readers of overlapping ranges, including declared next versions;
-// shared aliases share keys.
-NSArray<NSIndexSet *> *MetalViewDependencies(NSArray<NSData *> *accesses);
-// A fused bipartite relation: first `producers` entries write, the remaining
-// entries read. Emit fixed adjacency/arrival counts from those dependencies.
-NSString *MetalViewDependencyDeclaration(NSString *name, NSArray<NSIndexSet *> *dependencies, NSUInteger producers);
 NSString *MetalViewIndexDeclaration(NSUInteger binding, const NSUInteger *shape, const NSInteger *strides,
     size_t rank, NSUInteger elementOffset);
 // Axis maps contain signed offsets, in the same units as strides. A mapped
@@ -141,170 +111,10 @@ NSData *MetalViewMappedReaches(id<MTLBuffer> buffer, NSUInteger offset, const NS
 // Union prepared element spans with the same byte-access representation.
 NSData *MetalTensorSpanReaches(id<MTLBuffer> buffer, NSUInteger base, NSData *spans,
     NSUInteger elementBytes, uint32_t access, int32_t binding);
-// docs/kernels.md#collectives
-typedef int (^MetalCrossing)(id<MTL4ComputeCommandEncoder> encoder, id<MTL4ArgumentTable> table, id<MTLResidencySet> residency,
-    NSUInteger invocation, NSUInteger mark);
-// docs/kernels.md#collectives
-struct MetalSchedule;
-struct ncclComm;
-struct ncclMeshGroup;
-// The execution context supplies its queue. Preparing invocation slots cannot
-// create more queues; the number of slots is not a hardware resource count.
-struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum MetalForm);
-// A producer outside this function publishes these exact page ranges. Only
-// commands consuming or replacing those pages inherit its event dependency.
-// No command, observer or whole-function gate is added for the declaration.
-void MetalScheduleInput(struct MetalSchedule *, const struct MetalReach *, size_t count, id<MTLEvent>, uint64_t value);
-// Preparation records the function's collective result sources. Observers read
-// their existing failure state; this adds no command or transfer-time check.
-void MetalScheduleCommunicator(struct MetalSchedule *, struct ncclComm *);
-// Preparation binds each invocation's completion and retained task. Submission
-// never allocates a task and never stands for output completion.
-typedef const char *(^MetalHostOperation)(MeshHostCompletion, void *, MeshHostTask *);
-// A host operation over its declared page views.
-void MetalScheduleHost(struct MetalSchedule *, const struct MetalReach *, size_t count, MetalHostOperation);
-id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *);
-// Preparation-owned page objects live as long as this recorded function.
-void MetalScheduleRetainObject(struct MetalSchedule *, id object);
-// Explicit bindings from a compiler which already has its pipelines. These
-// enter the same access ordering and encoding as described commands.
-struct MetalCommandBinding {
-    __unsafe_unretained id<MTLBuffer> buffer;
-    NSUInteger offset, length;
-    uint32_t index, access;
-    NSInteger invocation; // Signed phase of this value: slot (t + invocation) modulo instances.
-};
-// length is the exact dense extent, including zero for an empty view. Binding
-// reaches replace it with a union of strided/masked regions. Neither form is an
-// instruction to access the remainder of a buffer.
-// A pointer word inside one uniform argument. Preparation writes its target
-// address for each invocation; the numerical command reads only prepared pages.
-// Other uniform bytes are preparation constants. Runtime-produced values and
-// page indices remain ordinary page operands, not bytes captured in this table.
-struct MetalCommandAddress {
-    uint32_t binding;
-    NSUInteger offset;
-    __unsafe_unretained id<MTLBuffer> buffer;
-    NSUInteger origin;
-    NSInteger invocation;
-};
-// Every frontend supplies its commands as these records, to the one access-order
-// and replay compiler (MetalReplayCommands, MetalReplayDescribed).
-struct MetalCommandDescription {
-    __unsafe_unretained id<MTLComputePipelineState> pipeline;
-    const struct MetalCommandBinding *bindings;
-    size_t bindingCount;
-    const NSUInteger *memory;
-    size_t memoryCount;
-    const struct MetalReach *reaches;
-    size_t reachCount;
-    const struct MetalCommandAddress *addresses;
-    size_t addressCount;
-    MTLSize groups, threads;
-    BOOL threadGrid;
-    // An optional page of MTLDispatch{Threadgroups,Threads}IndirectArguments.
-    // Its producer is an ordinary dependency; CPU submission never reads it.
-    __unsafe_unretained id<MTLBuffer> indirectGrid;
-    NSUInteger indirectOffset;
-    NSInteger indirectInvocation;
-};
-// Collective preparation uses the same command declaration as every frontend.
-// The encoder identifies its preparation context; this records a command and
-// never dispatches it or builds a second execution-order interface.
-void MetalEncoderCompute(id<MTL4ComputeCommandEncoder>, const struct MetalCommandDescription *);
-// Preparation callback's enclosing function, for appending ordinary commands.
-struct MetalSchedule *MetalEncoderSchedule(id<MTL4ComputeCommandEncoder>);
-void MetalEncoderHost(id<MTL4ComputeCommandEncoder>, const struct MetalReach *, size_t count,
-    MetalHostOperation);
-struct MetalReplay *MetalReplayCommands(id<MTLDevice>, const struct MetalCommandDescription *, size_t count, enum MetalForm);
-// docs/kernels.md#collectives: a host operation of a described program, run in each invocation before its command `at`
-// (after those before it). Host operations declare the same read/write views as GPU commands. The
-// compiler orders their producers and consumers; there are no consume markers.
-// These are prepared native operations, not callbacks into a frontend. CPU-only
-// views use a nil buffer and their address as offset; Metal views use buffer-relative
-// offsets. The bound operation retains any CPU storage it uses. The replay holds Metal
-// buffers. Every binding is prepared over its exact page operands. Preparation
-// selects (t + invocation) modulo instances, just as for numerical operands;
-// an operation over fixed pages has one binding. No binding selection occurs
-// when the completed schedule is enqueued.
-struct MetalHostBinding {
-    const struct MetalReach *reaches;
-    size_t count;
-    __unsafe_unretained MetalHostOperation operation;
-};
-struct MetalHostDescription {
-    NSUInteger at;
-    const struct MetalHostBinding *bindings;
-    size_t instances;
-    NSInteger invocation;
-};
-// docs/kernels.md Any program: a program's `count` commands as one invocation, each named operand bound by its slots,
-// and its host operations in command order, prepared as `invocations` of them in `form` (the indirect form's command
-// buffers optimized), with the program's census on stdout.  The replay, or NULL with the reason on stderr.
-// MetalReplayCommands is its single invocation with no operands or host operations, and no census.
-struct MetalReplay *MetalReplayDescribed(id<MTLDevice>, const struct MetalCommandDescription *, size_t count,
-    const struct MetalHostDescription *hosts, size_t hostCount, const struct MetalOperand *operands, size_t operandCount,
-    NSUInteger invocations, enum MetalForm);
 /* The bytes of the type a pipeline's kernel declares at buffer `index` (its reflection's bufferDataSize; 0 where its
    pipeline was not made by MetalPipelineMake, or the kernel uses no buffer there), and its label */
 NSUInteger MetalPipelineDeclaredBytes(id<MTLComputePipelineState>, NSUInteger index);
 NSString *MetalPipelineName(id<MTLComputePipelineState>);
-// design/page-maps-2026-11-02.md, integration step 5, the solve-recorder contract: MetalScheduleEvent names the solve
-// event the nodes appended after it realize (a replay range's commands and a host operation's parts inherit it);
-// MetalScheduleEdges gives the solve's edges between events, the flush's only order. A node with no event, or an edge
-// that does not run forward in the nodes' order, is a defect at the producer, refused.
-void MetalScheduleEvent(struct MetalSchedule *, uint64_t event);
-// the solve events of the next appended replay's commands, by command index in the replay (count 0: none)
-void MetalScheduleCommandEvents(struct MetalSchedule *, const uint64_t *events, size_t count);
-void MetalScheduleEdges(struct MetalSchedule *, const uint64_t (*edges)[2], size_t count);
-struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *, const void *, size_t bytes, uint32_t index);
-void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
-    const struct MetalCommandBinding *, size_t count, MTLSize groups, MTLSize threads);
-// A crossing's actual local accesses, compiled with the same dependency frontier
-// as numerical work. Encoding still completes during preparation: callers may
-// consume the publication records it produces. A fused descriptor publication
-// names residency here; its producer/consumer commands declare payload accesses.
-// The group supplies active transport progress words before dependency ordering.
-// Templates rebuild that operand after relocation; they never store its raw words.
-int MetalScheduleCross(struct MetalSchedule *, const struct MetalReach *, size_t count,
-    const struct ncclMeshGroup *, MetalCrossing);
-// A range of a prepared replay's commands (MetalReplayCommands, MetalReplayDescribed), its first invocation's, as the schedule's
-// next work, in the replay's form and ordered by its recorded reaches.
-void MetalScheduleReplay(struct MetalSchedule *, struct MetalReplay *, NSRange commands);
-// `bytes` from `source` at `from` into `destination` at `to`, the Metal 4 encoder's copy, ordered after and before the
-// schedule's other work.
-void MetalScheduleCopy(struct MetalSchedule *, id<MTLBuffer> source, NSUInteger from, id<MTLBuffer> destination, NSUInteger to,
-    NSUInteger bytes);
-typedef NSData *(^MetalCrossingViews)(NSUInteger invocation, NSUInteger mark, struct ncclMeshGroup *group);
-NSError *MetalScheduleAppend(struct MetalSchedule *, struct MetalReplay *, NSRange invocations,
-    NSArray<NSNumber *> *marks, MetalCrossingViews, MetalCrossing);
-// Finish all local parts and exchange their compiled list ends with peers.
-// Returns the collective preparation error, or zero. Enqueue does no exchange.
-int MetalScheduleFinish(struct MetalSchedule *, void (^completed)(NSError *error));
-// Returned pages with no local numerical reader contribute result words, not
-// empty dispatches. Completion observation reads these prepared thresholds.
-// A result-bearing function is observed through MetalScheduleStatus/End; its
-// callback runs when that observation sees all results (or a failure).
-struct MetalResult {
-    __unsafe_unretained id<MTLBuffer> buffer;
-    NSUInteger offset;
-    uint64_t threshold;
-};
-void MetalScheduleResults(struct MetalSchedule *, const struct MetalResult *, size_t count);
-void MetalScheduleEnqueue(struct MetalSchedule *);
-// 0 pending, 1 complete, -1 failed.
-int MetalScheduleStatus(const struct MetalSchedule *, NSError **error);
-// Nonblocking result observation: 0 pending, 1 complete, -1 failed (*error).
-// Once complete, *ended is the
-// latest GPU end of its parts (MTL4CommitFeedback GPUEndTime), host tasks, and
-// observation of returned remote pages, in the statistics clock
-// (mesh-statistics.c mesh_statistics_now). An empty function records its
-// completion observation, so it has a valid end after its submission.
-int MetalScheduleEnd(const struct MetalSchedule *, double *ended, NSError **error);
-void MetalScheduleFree(struct MetalSchedule *);
-// A replay MetalReplayCommands or MetalReplayDescribed returned, destroyed and freed.
-void MetalReplayFree(struct MetalReplay *);
-
 // An arithmetic pipeline's declaration: the library it is specialized from, its function,
 // its function-constant values ([index, MTLDataType, bytes] each) and its descriptor's fields (label; threads, the most
 // threads a threadgroup holds; multiple, a threadgroup size a multiple of the execution width; indirect, support for
