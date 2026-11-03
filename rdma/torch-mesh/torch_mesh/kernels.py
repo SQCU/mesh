@@ -254,8 +254,12 @@ OBSERVE_POLLS = 1 << 22
 # 0.1-1.7 ms late now and then (the LSTM's tail); wide work in the part keeps it (metal-microbench docs/facts.md, gaps.m:
 # 640 threadgroups beside a narrow buffer clean in most rounds, 2560 in all but one of 16; a keepalive on another queue
 # time-slices with the run instead). The user's word: a keepalive the hardware needs for its rate is to be built.
-OBSERVE_THREADGROUPS = 640
-OBSERVE_SPIN = 256
+# Both the run's configuration (the environment's MESH_OBSERVE_THREADGROUPS and MESH_OBSERVE_SPIN), constants of the
+# kernel's text: 640 threadgroups looking every 256 steps cost the LSTM's tick 20 us in its median (61-64 us against
+# 37-46) while its late starts went (lstm-2026-11-03 run-3), so the width is the operand a sweep sets.
+import os
+OBSERVE_THREADGROUPS = int(os.environ.get('MESH_OBSERVE_THREADGROUPS', 640))
+OBSERVE_SPIN = int(os.environ.get('MESH_OBSERVE_SPIN', 256))
 
 
 @functools.cache
