@@ -111,7 +111,7 @@ TENSOR_COLUMNS = 32
 # weights a layer at 54 GB/s (docs/facts.md), each simdgroup's loads one at a time along all of k
 TENSOR_SIMDGROUPS = 1024
 TENSOR_SPLIT_MOST = 8          # a threadgroup's simdgroups over k
-TENSOR_ROWS_MOST = 32          # a block's rows at most (32, 16 or 8)
+TENSOR_ROWS_MOST = 16          # a block's rows at most (32, 16 or 8): 16 the FFN sweep's best (docs/facts.md, ffn run-23)
 TENSOR_SPLIT_LEAST_K = 128     # the least k a simdgroup takes
 THREADGROUP_BYTES = 32768      # a threadgroup's memory (Apple GPUs' maxThreadgroupMemoryLength)
 
