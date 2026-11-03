@@ -63,6 +63,17 @@ class Root:
         self.base, self.prev, self.covered, self.readers = base, prev, [], set()
 
 
+def _tree_loads(tree):
+    """an expression tree's loaded values, a shared value's own among them"""
+    if not isinstance(tree, tuple) or not tree:
+        return []
+    if tree[0] == 'load':
+        return [tree[1]]
+    if tree[0] == 'shared':
+        return _tree_loads(tree[1])
+    return [v for t in tree[1:] for v in _tree_loads(t)]
+
+
 class Value:
     """a strided view of a root: element type, shape, strides and element offset (torch's)"""
     def __init__(self, root, dtype, shape, stride, offset):
@@ -165,6 +176,7 @@ class Template:
     def _lower(self, graph):
         from mesh_graph import absorbed
         values, expression = {}, {}
+        self.values = values
         # a copy_ whose one user is pointwise, held so that user's kernel computes and stores it (_emit's shared): the
         # LSTM's c, which its h reads back, written in h's kernel rather than by one before it (a dependent dispatch
         # less a tick: metal-microbench docs/facts.md, the GPU trace)
@@ -275,6 +287,16 @@ class Template:
     def _command(self, writes, reads, make, collective=None, covered=None):
         """a command's reads and writes on their storages' versions: a read takes the current version (completed
         first); a write after another node's read of its storage starts a version of its own"""
+        # a held copy_ goes out before any command touching the storage it writes or reads: its consumer's kernel would
+        # store it after a reader of its bytes through another view (the training LSTM: wrong by 0.012 without this),
+        # or read operands a write between them changed
+        if self.held:
+            storage = lambda v: id(v.root.base if v.root.base is not None else v.root)
+            touched = {storage(v) for v in list(writes) + list(reads)}
+            for held_node, (tree, out) in list(self.held.items()):
+                if ({storage(out)} | {storage(v) for v in _tree_loads(tree)}) & touched:
+                    del self.held[held_node]
+                    self.values[held_node] = self._emit(tree, out)
         node = self.node
         # writes first: a version this command writes is covered by its writes before its own reads complete it
         bound_writes = []
