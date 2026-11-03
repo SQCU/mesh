@@ -111,6 +111,7 @@ TENSOR_COLUMNS = 32
 # weights a layer at 54 GB/s (docs/facts.md), each simdgroup's loads one at a time along all of k
 TENSOR_SIMDGROUPS = 1024
 TENSOR_SPLIT_MOST = 8          # a threadgroup's simdgroups over k
+TENSOR_ROWS_MOST = 32          # a block's rows at most (32, 16 or 8)
 TENSOR_SPLIT_LEAST_K = 128     # the least k a simdgroup takes
 THREADGROUP_BYTES = 32768      # a threadgroup's memory (Apple GPUs' maxThreadgroupMemoryLength)
 
@@ -149,7 +150,7 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
         ([bias.parameter(False)] if bias else [])
     bias_term = f' + {beta}f * float({bias.load(["n"] if len(bias.shape) == 1 else ["m", "n"])})' if bias else ''
     if M % 8 == 0 and all(_tensor_operand(v) for v in parts + [b]):
-        rows = 32 if M % 32 == 0 else 16 if M % 16 == 0 else 8
+        rows = next(r for r in (32, 16, 8) if r <= TENSOR_ROWS_MOST and M % r == 0)
         K = sum(p.shape[1] for p in parts)
         blocks = -(-N // TENSOR_COLUMNS) * (M // rows)
         block = rows * TENSOR_COLUMNS

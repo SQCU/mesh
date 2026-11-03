@@ -76,6 +76,29 @@ def main(config=None):
             us = (now() - began) / 64 * 1e6
             print(json.dumps(dict(phase='baseline', rank=rank, product=label, us=round(us, 2),
                                   tflops=round(2 * B * D * blocks[rank] / us / 1e6, 2))), flush=True)
+    if config.get('sweep'):
+        # each product's GPU time alone (16 back to back, the last repeat's part) under each block geometry the sweep
+        # names (kernels' TENSOR_ROWS_MOST, TENSOR_SPLIT_MOST, TENSOR_SIMDGROUPS), compiled afresh for each
+        from torch_mesh import kernels
+        for geometry in config['sweep']:
+            kernels.TENSOR_ROWS_MOST, kernels.TENSOR_SPLIT_MOST, kernels.TENSOR_SIMDGROUPS = (
+                geometry['rows'], geometry['split'], geometry.get('simdgroups', 1 << 20))
+            for label, stage in (('first', lambda t: (a1.copy_(x @ w1), t.add_(1))),
+                                 ('second', lambda t: (y.copy_(a2 @ w2), t.add_(1)))):
+                swept = Program([(stage, (t,))] * 16)
+                swept.prepare(2)
+                for _ in range(2):
+                    begun = now()
+                    swept.forward()
+                    while swept.completion() is None:
+                        if now() - begun > 8.0:
+                            raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
+                        time.sleep(0)
+                (_, gpu_start, gpu_end), = swept.done[-1].parts()[:1]
+                print(json.dumps(dict(phase='sweep', rank=rank, product=label, **geometry,
+                                      us=round((gpu_end - gpu_start) / 16 * 1e6, 2))), flush=True)
+        dist.destroy_process_group()
+        return
     program = Program([(ffn, (t,))] * layers)
     repeats = config.get('repeats', 3)
     begun = now()
