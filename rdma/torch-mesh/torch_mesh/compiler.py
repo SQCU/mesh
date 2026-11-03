@@ -571,6 +571,9 @@ class Program:
         # each run's watched words in their order (run.landings()'s): (kind 'landed' or 'sent', chunk, channel, the
         # ranks whose segments its steps carry), so a timeline names what each landing was
         self.watched = {}
+        # the run's defect word, its observations' (kernels.observe): 0, or 1 a give-up, 2 a lost word
+        self.defect = empty((1,), dtype=torch.int64)
+        self.defect.zero_()
 
     def _binding(self, root):
         return (_whole(root.tensor), 0) if root.tensor is not None else (self.arena, root.at)
@@ -616,9 +619,9 @@ class Program:
                 made = []
                 for n in nodes[0:count[0]]:
                     slot = None
-                    if n.kind in (lib.ncclMeshNodeLink, lib.ncclMeshNodeRelease):
-                        slot = len(stores)
-                        stores.append(n.value)
+                    # every node's value a slot: a link's table offset, a release's count, an observation's count
+                    slot = len(stores)
+                    stores.append(n.value)
                     made.append((n.kind, n.transfer, int(ffi.cast('uintptr_t', n.word)), n.value, slot))
                 lowered[c] = made
                 run.communicator(int(ffi.cast('uintptr_t', command.comm)))
@@ -634,6 +637,14 @@ class Program:
 
         def stored(slot, word):
             run.dispatch(store, [(0, word, 0), (1, values, 8 * slot)], (1, 1, 1), (1, 1, 1), True)
+
+        # a landing and a SEND's completion observed on the GPU (kernels.observe), a node like any other, so a chunk
+        # has no outside input and the GPU is already in the part when its data lands (docs/facts.md: a CPU-signalled
+        # part start costs an M5 Ultra 100-180 us, a running observation 1-4 us)
+        observing = _pipeline(kernels.observe(), kernels.OBSERVE)
+
+        def observed(slot, word):
+            run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
         for chunk, (t, lowered) in enumerate(instances):
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
             has_node = set()
@@ -686,7 +697,7 @@ class Program:
                             if kind == 'send':
                                 stored(slot, word)
                             else:
-                                run.landed(word, value)
+                                observed(slot, word)
                                 steps = [command.steps[t.events[m][2]] for m in group[kind, c, channel]]
                                 watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
                         has_node.update(group[kind, c, channel])
@@ -708,5 +719,12 @@ class Program:
         return run
 
     def completion(self):
-        """the latest run's end (mesh_statistics_now's clock) once it has completed, else None"""
-        return self.done[-1].end() if self.done else None
+        """the latest run's end (mesh_statistics_now's clock) once it has completed, else None; a run whose observation
+        gave up or read a lost word raises"""
+        end = self.done[-1].end() if self.done else None
+        if end is not None:
+            import ctypes
+            defect = ctypes.c_int64.from_address(_stream.address(self.defect)).value
+            if defect:
+                raise RuntimeError(f'a run\'s observation {"gave up after kernels.OBSERVE_POLLS reads" if defect == 1 else "read a lost word (its port lost)"}')
+        return end

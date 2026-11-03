@@ -143,3 +143,26 @@ def store():
     after a system fence as a maximum (mesh_publish), so a count never moves backwards"""
     return (f'{prelude()}\nusing namespace metal;\nkernel void {STORE}(volatile coherent(system) device ulong *word '
             f'[[buffer(0)]], device const ulong *value [[buffer(1)]]) {{ mesh_publish(word, *value); }}\n')
+
+
+OBSERVE = 'mesh_observe'
+# an observation's bound: at most this many fenced reads, so a word that never comes ends the dispatch (about a second
+# or more on the members) and the run reports it, never a GPU held
+OBSERVE_POLLS = 1 << 24
+
+
+@functools.cache
+def observe():
+    """a landing's or a SEND completion's presence on the GPU: argument 0 the channel's `landed` or `sent` word, argument
+    1 the count it must reach, argument 2 the run's defect word. Read through volatile coherent(system) loads, each after
+    a system-scope fence (mesh 1f794b8f^ mesh_wait_bounded's form: a part already running sees a CPU's store in 1-4 us,
+    metal-microbench docs/facts.md, where a CPU-signalled start costs an M5 Ultra 100-180 us); present where the word
+    reaches the count, lost where it reads ~0 (a lost port's words, as the bridge stores them), each giving up at
+    OBSERVE_POLLS: the defect word 1 a give-up, 2 a lost word"""
+    return (f'{prelude()}\nusing namespace metal;\nkernel void {OBSERVE}(volatile coherent(system) device const ulong *word '
+            f'[[buffer(0)]], device const ulong *value [[buffer(1)]], device ulong *defect [[buffer(2)]]) {{\n'
+            f'    const ulong want = *value;\n    ulong seen;\n    uint n = 0u;\n'
+            f'    do {{\n        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
+            f'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));\n        seen = *word;\n'
+            f'    }} while (seen < want && ++n < {OBSERVE_POLLS}u);\n'
+            f'    if (seen == ~0ul) *defect = 2ul;\n    else if (seen < want) *defect = 1ul;\n}}\n')
