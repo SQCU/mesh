@@ -13,11 +13,15 @@
 #define CORE_DATAPROCESSING_H
 #include "collective.h"
 
-/* A function over pages: its kernel, its operands (each a contiguous run of pages, bound in order as buffers 0..), its
-   grid and threadgroup sizes. */
+/* An operand: its pages. A contiguous-typed operand (a function that requires contiguous reads or writes) is one run of
+   pages from pages[0], bound as one pointer; every other operand is a paged view of arbitrarily placed pages, bound as
+   a constant array of its pages' device pointers (resolved from the page table at recording: the kernel reads literal
+   pointers, a tile a page, as a paged attention's block table does). */
+struct page_operand { const bridge_page *pages; uint32_t count, contiguous; };
+/* A function over pages: its kernel, its operands (bound in order as buffers 0..), its grid and threadgroup sizes. */
 struct page_function {
   const char *kernel;
-  const bridge_page *operands; uint32_t operand_count;
+  const struct page_operand *operands; uint32_t operand_count;
   uint32_t grid[3], group[3];
 };
 
@@ -122,8 +126,13 @@ int program_prepare(const struct program *program, const struct collective_fabri
       const struct page_function *fn = &it->function;
       [enc barrierAfterEncoderStages:stages beforeEncoderStages:stages visibilityOptions:MTL4VisibilityOptionDevice];
       [enc setComputePipelineState:pipeline(fn->kernel)];
-      for (uint32_t k = 0; k < fn->operand_count; k++)
-        [table setAddress:region.gpuAddress + head_bytes + (uint64_t)fn->operands[k] * BRIDGE_PAGE atIndex:k];
+      for (uint32_t k = 0; k < fn->operand_count; k++) {
+        const struct page_operand *op = &fn->operands[k];
+        if (op->contiguous) { [table setAddress:region.gpuAddress + head_bytes + (uint64_t)op->pages[0] * BRIDGE_PAGE atIndex:k]; continue; }
+        uint64_t pointers[op->count];
+        for (uint32_t q = 0; q < op->count; q++) pointers[q] = region.gpuAddress + head_bytes + (uint64_t)op->pages[q] * BRIDGE_PAGE;
+        [table setAddress:constant(pointers, sizeof pointers) atIndex:k];
+      }
       [enc dispatchThreadgroups:MTLSizeMake(fn->grid[0], fn->grid[1], fn->grid[2]) threadsPerThreadgroup:MTLSizeMake(fn->group[0], fn->group[1], fn->group[2])];
       continue;
     }
@@ -163,5 +172,54 @@ double program_run(void) {
   while (program_done_.signaledValue < value) {}
   clock_gettime(CLOCK_UPTIME_RAW, &b);
   return ((b.tv_sec - a.tv_sec) * 1e6 + (b.tv_nsec - a.tv_nsec) / 1e3) / program_repeats_;
+}
+#endif
+
+#ifdef DATAPROCESSING_DEMO
+/* The demonstration: `demo <fabric file> <rank> allgather|allreduce <bytes> <repeats>`. The fabric file: "nodes <n>",
+   then one line a cable, "cable <a> <b> <bytes a second>", in the one order every node holds. The program fills this
+   rank's part of a buffer (one kernel), then makes the call; it reports the microseconds a repeat and the bytes this
+   rank received a second, against its cables' rate. */
+#include <stdio.h>
+static const char *demo_kernels =
+  "kernel void demo_fill(device half *x [[buffer(0)]], uint i [[thread_position_in_grid]]) { x[i] = half(1); }\n";
+int main(int argc, char **argv) {
+  if (argc != 6) { fprintf(stderr, "usage: demo <fabric> <rank> allgather|allreduce <bytes> <repeats>\n"); return 2; }
+  FILE *ff = fopen(argv[1], "r");
+  if (!ff) { perror("fabric"); return 1; }
+  static struct collective_link cables[64]; uint32_t nodes = 0, count = 0; char line[256];
+  while (fgets(line, sizeof line, ff)) {
+    unsigned a, b; double rate;
+    if (sscanf(line, "nodes %u", &nodes) == 1) continue;
+    if (sscanf(line, "cable %u %u %lf", &a, &b, &rate) == 3 && count < 64) cables[count++] = (struct collective_link){ a, b, rate };
+  }
+  fclose(ff);
+  const uint32_t rank = (uint32_t)atoi(argv[2]), what = strcmp(argv[3], "allreduce") ? COLLECTIVE_ALLGATHER : COLLECTIVE_ALLREDUCE;
+  const uint64_t bytes = strtoull(argv[4], NULL, 10);
+  const uint32_t repeats = (uint32_t)atoi(argv[5]);
+  int e = bridge_attach("/bridge");
+  if (e) { fprintf(stderr, "demo: no bridge region (%s)\n", strerror(e)); return 1; }
+  /* the buffer: the call's bytes, and for an all-reduce (nodes - 1) scratch copies */
+  void *buffer = collective_alloc(bytes * (what == COLLECTIVE_ALLREDUCE ? nodes : 1));
+  const bridge_page first = (bridge_page)(((char *)buffer - (char *)bridge_address(0)) / BRIDGE_PAGE);
+  const uint64_t pages = (bytes + BRIDGE_PAGE - 1) / BRIDGE_PAGE, share = (pages + nodes - 1) / nodes;
+  const bridge_page mine_page = first + (bridge_page)(what == COLLECTIVE_ALLREDUCE ? 0 : rank * share);
+  const struct page_operand mine = { .pages = &mine_page, .count = 1, .contiguous = 1 };
+  const uint64_t fill = what == COLLECTIVE_ALLREDUCE ? bytes / 2 : share * BRIDGE_PAGE / 2;
+  struct program_item items[2] = {
+    { .is_call = 0, .function = { .kernel = "demo_fill", .operands = &mine, .operand_count = 1,
+                                  .grid = { (uint32_t)((fill + 255) / 256), 1, 1 }, .group = { 256, 1, 1 } } },
+    { .is_call = 1, .call = { .what = what, .receive = buffer, .bytes = bytes } },
+  };
+  struct program prog = { .items = items, .count = 2, .library_source = demo_kernels };
+  struct collective_fabric fabric = { .nodes = nodes, .rank = rank, .links = cables, .count = count };
+  if ((e = program_prepare(&prog, &fabric, repeats))) { fprintf(stderr, "demo: prepare: %s\n", strerror(e)); return 1; }
+  const double us = program_run();
+  double in_rate = 0;
+  for (uint32_t c = 0; c < count; c++) if (cables[c].a == rank || cables[c].b == rank) in_rate += cables[c].bytes_a_second;
+  const double received = (double)(what == COLLECTIVE_ALLREDUCE ? 2.0 * bytes * (nodes - 1) / nodes : (double)bytes * (nodes - 1) / nodes);
+  printf("{\"rank\":%u,\"call\":\"%s\",\"bytes\":%llu,\"repeats\":%u,\"us_a_repeat\":%.1f,\"received_GBps\":%.2f,\"cables_in_GBps\":%.1f}\n",
+         rank, argv[3], (unsigned long long)bytes, repeats, us, received / us / 1e3, in_rate / 1e9);
+  return 0;
 }
 #endif
