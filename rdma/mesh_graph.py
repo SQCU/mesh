@@ -394,21 +394,3 @@ def serialized(at, node, place):
     before that place and before every node after it"""
     return [(other, node) for other, where in at.items() if where < place] + \
            [(node, other) for other, where in at.items() if where > place]
-
-
-def held_before(held, members, after, target):
-    """type: held items in order, members(item) -> its nodes, after (node -> the nodes that follow it), a target node ->
-    the held items that must come before `target`: those a member of which `target` follows, and those a member of which
-    one of theirs follows, transitively, in `held`'s order (torch_mesh/compiler.py: an observation goes just before the
-    first node that follows it, each after the held ones it follows)"""
-    def reaches(item, nodes):
-        return any(x in after.get(m, ()) for m in members(item) for x in nodes)
-    needed = [k for k in held if reaches(k, [target])]
-    grew = True
-    while grew:
-        grew = False
-        for k in held:
-            if k not in needed and reaches(k, [x for n in needed for x in members(n)]):
-                needed.append(k)
-                grew = True
-    return [k for k in held if k in needed]

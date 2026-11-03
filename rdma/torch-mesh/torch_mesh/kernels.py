@@ -142,32 +142,4 @@ def store():
     """a word's store: argument 0 the word, argument 1 its value (a link's table offset or a release's count), stored
     after a system fence as a maximum (mesh_publish), so a count never moves backwards"""
     return (f'{prelude()}\nusing namespace metal;\nkernel void {STORE}(volatile coherent(system) device ulong *word '
-            f'[[buffer(0)]], device const ulong *value [[buffer(1)]], volatile coherent(system) device ulong *defect '
-            f'[[buffer(2)]]) {{ mesh_publish(word, value[0]); mesh_publish(defect + 2, value[1]); }}\n')
-
-
-OBSERVE = 'mesh_observe'
-# an observation's bound: at most this many fenced reads (well under a second on the members), and none once the run's
-# defect word is set, so a word that never comes ends the run and names itself, never a GPU held
-OBSERVE_POLLS = 1 << 22
-
-
-@functools.cache
-def observe():
-    """a landing's or a SEND completion's presence on the GPU: argument 0 the channel's `landed` or `sent` word, argument
-    1 the count it must reach (in the run's value slots), argument 2 the run's defect word and the word read at a
-    give-up beside it. Read through volatile coherent(system) loads, each after a system-scope fence (mesh 1f794b8f^
-    mesh_wait_bounded's form: a part already running sees a CPU's store in 1-4 us, metal-microbench docs/facts.md,
-    where a CPU-signalled start costs an M5 Ultra 100-180 us); present where the word reaches the count, lost where it
-    reads ~0 (a lost port's words, as the bridge stores them). A give-up at OBSERVE_POLLS, or a lost word, sets the
-    defect word to the observation's slot x 4 + 1 (a give-up) or + 2 (a lost word) if none is set, and an observation
-    of a run with a defect set ends at once"""
-    return (f'{prelude()}\nusing namespace metal;\nkernel void {OBSERVE}(volatile coherent(system) device const ulong *word '
-            f'[[buffer(0)]], device const ulong *value [[buffer(1)]], volatile coherent(system) device ulong *defect '
-            f'[[buffer(2)]], uint at [[thread_position_in_grid]]) {{\n'
-            f'    mesh_publish(defect + 2, value[2]);\n    if (defect[0]) return;\n'
-            f'    const ulong want = value[0], slot = value[1];\n    ulong seen;\n    uint n = 0u;\n'
-            f'    do {{\n        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
-            f'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));\n        seen = *word;\n'
-            f'    }} while (seen < want && ++n < {OBSERVE_POLLS}u && ((n & 4095u) || !defect[0]));\n'
-            f'    if (seen < want || seen == ~0ul) {{ if (!defect[0]) {{ defect[1] = seen; defect[0] = slot * 4ul + (seen == ~0ul ? 2ul : 1ul); }} }}\n}}\n')
+            f'[[buffer(0)]], device const ulong *value [[buffer(1)]]) {{ mesh_publish(word, *value); }}\n')
