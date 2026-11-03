@@ -973,7 +973,23 @@ class Program:
                 watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
                 waited[0] = True
 
+            # a chunk's posts (each occurrence's links) are held like its observations: every occurrence's post comes
+            # first in the order, and their copies one after another (about 1.7 us each on an M5 Ultra) held the
+            # chunk's first tick about 50 us at every boundary (metal-microbench docs/facts.md, the GPU trace). A post
+            # goes out before its first follower, or after a run of releases one at a time, an occurrence ahead.
+            posts = []
+
+            def emit_post(e, links):
+                ev(ids[e])
+                for _, _, word, _, slot, _ in links:
+                    stored(slot, word, ids[e])
+                cut[0] = True
+
             def flush(target):
+                for p in held_before([pe for pe, _ in posts], lambda x: [x], after, target):
+                    links = next(l for pe, l in posts if pe == p)
+                    posts[:] = [(pe, l) for pe, l in posts if pe != p]
+                    emit_post(p, links)
                 for k in held_before(held, lambda k: group[k], after, target):
                     held.remove(k)
                     emit_observation(k)
@@ -1045,10 +1061,7 @@ class Program:
                     links = [n for n in lowered[c] if n[0] == lib.ncclMeshNodeLink]
                     if links:
                         flush(e)
-                        ev(ids[e])
-                        for _, _, word, _, slot, _ in links:
-                            stored(slot, word, ids[e])
-                        cut[0] = True
+                        posts.append((e, links))
                 elif e in last and nodes_of(c, last[e][0], last[e][2], last[e][3]):
                     key = last[e]
                     if key[0] == 'send':
@@ -1058,8 +1071,13 @@ class Program:
                         for _, _, word, value, slot, _ in nodes_of(c, 'send', key[2], key[3]):
                             stored(slot, word, ids[e])
                         cut[0] = True
+                        if posts:
+                            emit_post(*posts.pop(0))
                     else:
                         held.append(key)
+            for pe, links in posts:
+                emit_post(pe, links)
+            posts.clear()
             emit_carry(carry)  # a chunk of posts alone
             carry = [(emit_observation, k, ids[group[k][0]], [(n[2], n[3]) for n in nodes_of(k[1], k[0], k[2], k[3])])
                      for k in held]
