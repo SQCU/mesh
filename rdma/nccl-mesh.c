@@ -2343,9 +2343,20 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
     const uint64_t bytes = mesh_step_bytes(step);
     units[s] = (bytes + page - 1) / page;
     gate[s] = -1;
-    const uint64_t at = bytes ? region_offset(address[s]) : 0;
-    if (at == UINT64_MAX) result = fail(ncclInvalidUsage, "step %zu's bytes lie in no region lease of this process", s);
-    else if (at % page) result = fail(ncclInvalidUsage, "step %zu's bytes start off a page (design/transport.md section 14)", s);
+    /* a unit is a page of the piece from its start, the same cut at both ends (TN3205: a SEND and its receive cover
+       the same frames); a span may start inside a page (design/transport.md section 1), and each unit's bytes lie
+       contiguous in the region, one SGE */
+    for (uint64_t u = 0; !result && u < units[s]; u++) {
+      const char *first = (const char *)address[s] + u * page;
+      const uint64_t length = bytes - u * page < page ? bytes - u * page : page;
+      const uint64_t a = region_offset(first), b = region_offset(first + length - 1);
+      if (a == UINT64_MAX || b == UINT64_MAX)
+        result = fail(ncclInvalidUsage, "step %zu's bytes lie in no region lease of this process", s);
+      else if (b != a + length - 1 || a / MESH_DMA_EXTENT != b / MESH_DMA_EXTENT)
+        result = fail(ncclInvalidUsage, "step %zu's unit %llu crosses a region page or extent its next bytes do not "
+                      "continue: its piece starts %llu bytes into a page (place it on a page)", s,
+                      (unsigned long long)u, (unsigned long long)(region_offset(address[s]) % page));
+    }
   }
   for (size_t f = 0; !result && f < forwards; f++) {
     const size_t s = forward[f][0], r = forward[f][1];

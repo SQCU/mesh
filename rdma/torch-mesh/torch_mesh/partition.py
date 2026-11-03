@@ -31,6 +31,7 @@ class Block:
     """this rank's block of a distributed tensor: to_local() its tensor; shape the whole tensor's"""
     def __init__(self, local, shape):
         self._local, self.shape = local, torch.Size(shape)
+        self.dtype, self.device = local.dtype, local.device
 
     def to_local(self):
         return self._local
