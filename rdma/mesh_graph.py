@@ -628,3 +628,15 @@ def trees_bound(nodes, capacity, depth=None):
     out = linprog(cost, A_ub=loads, b_ub=[capacity[u][v] for (u, v) in pairs], A_eq=shares, b_eq=numpy.zeros(nodes),
                   bounds=[(0, None)] * (count + 1), method='highs')
     return out.x[-1], [(r, t, x) for (r, t), x in zip(trees, out.x[:-1]) if x > 1e-9]
+
+
+def release_gaps(releases, arrivals):
+    """one rank's ticks' critical path: tick j's gap from its last arrival (the latest of each stream's arrival
+    arrivals[s][j]) to the next release releases[j + 1], for each tick whose arrivals are all known and precede that
+    release (mesh_statistics.StreamWords.chains: a rank's compute in a run, from its stream words)"""
+    out = []
+    for j in range(len(releases) - 1):
+        last = [a[j] for a in arrivals]
+        if last and None not in last and releases[j + 1] > max(last):
+            out.append(releases[j + 1] - max(last))
+    return out

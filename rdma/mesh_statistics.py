@@ -56,11 +56,12 @@ class StreamWords:
         b = self.buffer
         return [(b[4 * k], b[4 * k + 1], b[4 * k + 2], b[4 * k + 3]) for k in range(self.count)]
 
-    def chains(self):
+    def chains(self, ticks=None):
         """each tick's chain on this host, microseconds from its last landing (every held stream's `landed` at that
-        tick's count) to its next release (`ready`'s next rise on the stream releasing least often, a stream carrying
-        a forward as well rising twice a tick): the rank's compute in the run itself, as tools/mesh/tick_words.py
-        reads it from mesh-stat (metal-microbench)"""
+        tick's count) to its next release (`ready`'s next rise on the stream rising nearest `ticks` times, the run's
+        ticks: one carrying a forward as well rises twice a tick, one toward a peer the rank sends nothing to rises a
+        few times; without `ticks`, the one rising least often), mesh_graph.release_gaps over them: the rank's
+        compute in the run itself, as tools/mesh/tick_words.py reads it from mesh-stat (metal-microbench)"""
         owner, series = {}, {}
         for ns, t, w, v in self.moves():
             if w == 0:
@@ -72,20 +73,16 @@ class StreamWords:
         rises = {t: r for t, r in rises.items() if len(r) > 2}
         if not rises:
             return []
-        releases = min(rises.values(), key=len)
-        ticks = len(releases)
+        releases = min(rises.values(), key=(lambda r: (abs(len(r) - ticks), len(r))) if ticks else len)
+        count = len(releases)
         arrivals = []
         for (t, w), s in series.items():
             if w != 3 or s[-1][1] <= s[0][1]:
                 continue
-            base, step = s[0][1], (s[-1][1] - s[0][1]) / ticks
-            arrivals.append([next((ns for ns, v in s if v >= base + round((j + 1) * step)), None) for j in range(ticks)])
-        out = []
-        for j in range(ticks - 1):
-            last = [a[j] for a in arrivals]
-            if last and None not in last and releases[j + 1] > max(last):
-                out.append((releases[j + 1] - max(last)) / 1e3)
-        return out
+            base, step = s[0][1], (s[-1][1] - s[0][1]) / count
+            arrivals.append([next((ns for ns, v in s if v >= base + round((j + 1) * step)), None) for j in range(count)])
+        from mesh_graph import release_gaps
+        return [gap / 1e3 for gap in release_gaps(releases, arrivals)]
 
 
 def measure(started, observed, useful_bytes, units=0):

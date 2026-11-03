@@ -153,7 +153,7 @@ def main(config=None):
                 if now() - started > 8.0:
                     raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
                 time.sleep(0)
-        chains = words.chains()
+        chains = words.chains(steps)
         per_tick = chains[len(chains) // 4:] or [0.0]
         run = program.done[-1]
         # the tick period: the full run's last part (its ticks after the first function's) over its ticks
