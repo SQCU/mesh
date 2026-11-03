@@ -369,14 +369,27 @@ class Template:
         each a contiguous run of its root (out's later axes row-major)"""
         mine, out, axis, sizes, group = values[node.args[0]], values[node.args[1]], node.args[2], node.args[3], node.args[4]
         axis %= len(out.shape)
-        inner = math.prod(out.shape[axis + 1:])
-        dense = 1
-        for d in reversed(range(axis, len(out.shape))):
-            if out.shape[d] != 1 and out.stride[d] != dense:
-                raise NotImplementedError('an all-gather whose gathered axis and later ones are not row-major')
-            dense *= out.shape[d]
-        frames = [out.offset + sum(c * s for c, s in zip(at, out.stride[:axis]))
-                  for at in itertools.product(*(range(n) for n in out.shape[:axis]))]
+        # the gathered axis outermost over a dense view (an operand stored units first): one call, each rank's segment
+        # every other axis of its block, contiguous
+        order = sorted((d for d in range(len(out.shape)) if out.shape[d] != 1), key=lambda d: out.stride[d])
+        span, dense = 1, True
+        for d in order:
+            dense &= out.stride[d] == span
+            span *= out.shape[d]
+        if dense and order and order[-1] == axis:
+            inner = math.prod(n for d, n in enumerate(out.shape) if d != axis)
+            frames = [out.offset]
+        else:
+            # else a call a frame of the axes before it, each a contiguous run (the axis and later ones row-major)
+            inner = math.prod(out.shape[axis + 1:])
+            run = 1
+            for d in reversed(range(axis, len(out.shape))):
+                if out.shape[d] != 1 and out.stride[d] != run:
+                    raise NotImplementedError('an all-gather whose gathered axis is neither outermost over a dense view '
+                                              'nor row-major with the axes after it')
+                run *= out.shape[d]
+            frames = [out.offset + sum(c * s for c, s in zip(at, out.stride[:axis]))
+                      for at in itertools.product(*(range(n) for n in out.shape[:axis]))]
         collective = Collective(out, frames, [s * inner for s in sizes], out.dtype, group)
         # an in-place gather writes its peers' segments alone: its own is its SEND's source, read
         own, landed = mine.runs(), []

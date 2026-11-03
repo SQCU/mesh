@@ -26,13 +26,10 @@ class Tick:
         self.W, self.b = [held(w) for w in weights], [held(b) for b in biases]
         self.group, self.sizes = mesh.get_group('tp').group_name, partition.split(mesh, 'tp', H)
         self.c = torch_mesh.empty(self.L, rows, HR, dtype=torch.float32)
-        # row-major. Stored units first (H, L, rows permuted), the gather is one collective a tick
-        # (declarations._outer: one frame). The layout unions that stalled it are kept in coordinates since 212f8e8e
-        # and 62df13f9, but every rank then stalled in placement itself: MetalTensorPlace -> TensorFunctionLayout ->
-        # -[MetalTensorLayout shaped:coordinates:] -> TensorBound -> MeshIndexExpression, IndexExpression recursing
-        # about 30 levels through isl conditions (metal-microbench output_data/lstm-2026-11-02/d-u2, every sample,
-        # 2026-11-02). Units first returns once that passes on the whole collective, not on a desk check.
-        self.h = torch_mesh.empty(self.L, rows, H, dtype=torch.half)
+        # stored units first (H, L, rows permuted): each rank's block of every layer and row is one contiguous run, so a
+        # tick's gather is one call, one unit a peer (torch_mesh/compiler.py, an outermost gathered axis); row-major it
+        # was a call a (layer, row) frame, 16 SENDs a peer a tick at two layers and 8 rows (docs/facts.md, run-20)
+        self.h = torch_mesh.empty(H, self.L, rows, dtype=torch.half).permute(1, 2, 0)
         first = sum(self.sizes[:mesh.get_group('tp').rank()])
         self.mine = self.h.narrow(2, first, HR)
         self.reset()
