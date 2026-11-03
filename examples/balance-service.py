@@ -106,8 +106,8 @@ def main(config=None):
     X.copy_(torch.from_numpy(inputs[:]))
     O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
     # every rank's (median, spread) gathered through the compiler: a row a rank
-    mine = torch_mesh.empty(1, 2, dtype=torch.float32)
     every = torch_mesh.empty(size, 2, dtype=torch.float32)
+    mine = every.narrow(0, rank, 1)  # the gather is in place: a rank's row is its SEND's source
     partition.attach(mesh, tp=size)
     g = torch.empty(1, dtype=torch.int64, device='mps').fill_(0)
 
