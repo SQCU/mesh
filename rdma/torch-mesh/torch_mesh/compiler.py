@@ -153,6 +153,15 @@ class Template:
         users = absorbed([n for n in graph.graph.nodes if n.target in pointwise and n.target not in INPLACE and
                           n.target is not aten.copy_.default], lambda n: list(n.users),
                          lambda n, u: u.target in pointwise and same(n, u))
+        # a cat along k its one consumer, a product, reads as A in place (its parts over their k ranges); a product
+        # whose one consumer is a stack writes its slice of the stack (mesh_graph.absorbed): no copy either way, each
+        # copy a dispatch a barrier serializes (a tick's 12 before its release, metal-microbench docs/facts.md)
+        products = (aten.linear.default, aten.mm.default)
+        self.cats = absorbed([n for n in graph.graph.nodes if n.target is aten.cat.default and
+                              (n.args[1] if len(n.args) > 1 else 0) in (1, -1)], lambda n: list(n.users),
+                             lambda n, u: u.target in products and u.args[0] is n)
+        self.stacked = absorbed([n for n in graph.graph.nodes if n.target in products], lambda n: list(n.users),
+                                lambda n, u: u.target is aten.stack.default)
         for node in graph.graph.nodes:
             if node.target not in pointwise:
                 # an expression this node consumes but cannot inline is materialized first
@@ -315,7 +324,17 @@ class Template:
             name, c.writes[0].view(0), [v.view(k + 1) for k, v in enumerate(c.reads)], x))[0]
 
     def _product(self, node, values):
-        out = self._new(node)
+        if node in self.stacked:
+            # its slice of the stack it alone feeds, the stack's value made at its first part
+            stack = next(iter(node.users))
+            if stack not in values:
+                values[stack] = self._new(stack)
+            whole, axis = values[stack], (stack.args[1] if len(stack.args) > 1 else 0) % len(values[stack].shape)
+            at = stack.args[0].index(node)
+            out = Value(whole.root, whole.dtype, whole.shape[:axis] + whole.shape[axis + 1:],
+                        whole.stride[:axis] + whole.stride[axis + 1:], whole.offset + at * whole.stride[axis])
+        else:
+            out = self._new(node)
         if node.target is aten.addmm.default:
             bias, a, b = (values[x] for x in node.args[:3])
             beta, alpha = node.kwargs.get('beta', 1), node.kwargs.get('alpha', 1)
@@ -323,28 +342,44 @@ class Template:
         elif node.target is aten.linear.default:
             # x W^T (+ bias): W [N, K] read as its transpose [K, N]
             a, w = values[node.args[0]], values[node.args[1]]
-            if len(a.shape) != 2:
+            parts = a if isinstance(a, list) else [a]
+            if any(len(x.shape) != 2 for x in parts):
                 raise NotImplementedError('a linear of an input of rank other than 2')
             b = Value(w.root, w.dtype, (w.shape[1], w.shape[0]), (w.stride[1], w.stride[0]), w.offset)
             bias = node.args[2] if len(node.args) > 2 else node.kwargs.get('bias')
             beta, alpha = (1 if bias is not None else 0), 1
-            reads = [a, b] + ([_broadcast(values[bias], out.shape)] if bias is not None else [])
+            reads = parts + [b] + ([_broadcast(values[bias], out.shape)] if bias is not None else [])
         else:
             a, b = values[node.args[0]], values[node.args[1]]
-            beta, alpha, reads = 0, 1, [a, b]
+            parts = a if isinstance(a, list) else [a]
+            beta, alpha, reads = 0, 1, parts + [b]
+        P = len(parts)  # A's parts: views 1..P, B view P + 1, the bias view P + 2
+        if node in self.stacked:
+            self._command([out], reads, lambda name, c: kernels.product(
+                name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
+                c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))
+            values[node] = out
+            return
         values[node] = self._command([out], reads, lambda name, c: kernels.product(
-            name, c.writes[0].view(0), c.reads[0].view(1), c.reads[1].view(2), c.reads[2].view(3) if len(c.reads) > 2 else None,
-            float(alpha), float(beta)))[0]
+            name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
+            c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))[0]
 
     def _joined(self, node, values):
-        """cat and stack: each operand copied into its part of a new value"""
-        out = self._new(node)
+        """cat and stack: each operand copied into its part of a new value; a cat its product reads in place is its
+        parts, and a stack's parts its products wrote in place are not copied"""
+        if node in self.cats:
+            values[node] = [values[part] for part in node.args[0]]
+            return
+        out = values[node] if node in values else self._new(node)
         values[node] = out
         parts, axis = node.args[0], node.args[1] if len(node.args) > 1 else 0
         axis %= len(out.shape)
         at = 0
         for part in parts:
             value = values[part]
+            if node.target is aten.stack.default and part in self.stacked:
+                at += 1
+                continue
             if node.target is aten.stack.default:
                 shape = out.shape[:axis] + out.shape[axis + 1:]
                 stride = out.stride[:axis] + out.stride[axis + 1:]

@@ -99,16 +99,25 @@ def indexed(name, out, source, index, axis, writes_through_index):
 
 
 def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
-    """out[m, n] = beta bias[n] + alpha sum_k a[m, k] b[k, n], each a View of rank 2 (bias of rank 1 or broadcast); one
-    simdgroup an output, its lanes over k, summed with simd_sum (tools/mesh/lstm_metal.m's shape)"""
+    """out[m, n] = beta bias[n] + alpha sum_k a[m, k] b[k, n], each a View of rank 2 (bias of rank 1 or broadcast); `a` a
+    View or a list of Views, the parts of a concatenation along k (a cat the product reads in place, compiler.py), part p
+    over b's rows from the sum of the parts before it; one simdgroup an output, its lanes over k, summed with simd_sum
+    (tools/mesh/lstm_metal.m's shape)"""
     M, N = out.shape
-    K = a.shape[1]
-    parameters = [out.parameter(True), a.parameter(False), b.parameter(False)] + ([bias.parameter(False)] if bias else [])
+    parts = a if isinstance(a, list) else [a]
+    parameters = [out.parameter(True)] + [p.parameter(False) for p in parts] + [b.parameter(False)] + \
+        ([bias.parameter(False)] if bias else [])
     bias_term = f' + {beta}f * float({bias.load(["n"] if len(bias.shape) == 1 else ["m", "n"])})' if bias else ''
+    loops, first = [], 0
+    for p in parts:
+        K = p.shape[1]
+        loops.append(f'    for (ulong k = lane; k < {K}ul; k += 32ul) total += float({p.load(["m", "k"])}) * '
+                     f'float({b.load([f"(k + {first}ul)", "n"])});')
+        first += K
     body = f'''    const ulong n = at.x / 32ul, m = at.y, lane = at.x % 32ul;
     if (n >= {N}ul || m >= {M}ul) return;
     float total = 0.0f;
-    for (ulong k = lane; k < {K}ul; k += 32ul) total += float({a.load(["m", "k"])}) * float({b.load(["k", "n"])});
+{chr(10).join(loops)}
     total = simd_sum(total);
     if (lane == 0ul) {{ {out.store(["m", "n"], f"{alpha}f * total{bias_term}")} }}'''
     return _source(name, parameters, body), (N * 32, M, 1), (32, 1, 1)
