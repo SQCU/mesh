@@ -6321,131 +6321,9 @@ static void plan_free(struct ncclComm *comm, struct plan *plan) {
   free(plan);
 }
 
-/* The physical transfer ID is the common graph's call/rank row followed by
-   its local step. WRITE retains its own all-rank tables; collectives retain
-   those same tables in steps. */
-static ncclResult_t transfer_first(const struct ncclComm *comm,const struct issue *u,uint32_t **out) {
-  const size_t nodes=(size_t)comm->nranks,rows=u->n*nodes;
-  uint32_t *first=calloc(rows+1,sizeof *first);
-  if(!first)return fail(ncclSystemError,"allocating transfer row offsets");
-  ncclResult_t result=ncclSuccess;
-  for(size_t row=0;!result&&row<rows;row++) {
-    const struct call *c=u->calls+row/nodes;const uint32_t rank=(uint32_t)(row%nodes);
-    uint32_t count=0;
-    if(c->target) {
-      struct mesh_transfer *transfers=NULL;int owned=0;
-      const int error=call_transfers(comm,c,rank,&transfers,&count,&owned);
-      if(owned)free(transfers);
-      if(error)result=fail(ncclSystemError,"declared transfer row: %s",strerror(error));
-    } else if(c->bound)count=c->bound->order_first[rank+1]-c->bound->order_first[rank];
-    if(count>UINT32_MAX-first[row])result=fail(ncclInvalidUsage,"transfer row extent");
-    first[row+1]=first[row]+count;
-  }
-  if(result)free(first);else *out=first;
-  return result;
-}
-static int transfer_alias_compare(const void *left,const void *right) {
-  const struct mesh_transfer_alias *a=left,*b=right;
-  if(a->read!=b->read)return a->read<b->read?-1:1;
-  if(a->write!=b->write)return a->write<b->write?-1:1;
-  return (a->preserve>b->preserve)-(a->preserve<b->preserve);
-}
 /* A page can hold successive values. A produced SEND reads its preceding
    producer, not the older generation that producer overwrote. Only later
    writes constrain that read. Original inputs have no such local producer. */
-/* Alias ordering consumes the same selected page runs as descriptor emission.
-   A WRITE's byte count is its logical payload, not a contiguous physical
-   extent: its immutable packet spans already include masks, pitch, frames and
-   binding slots. A separated source instead names its new compact pages. */
-static ncclResult_t message_backing(struct ncclComm *comm,const struct message *m,struct mesh_page_runs *out) {
-  const struct call *c=m->c;const struct steps *st=c->bound;
-  const struct mesh_step *step=st->steps+m->step;
-  const struct write_binding *write=c->write_binding;
-  ncclResult_t result=ncclSuccess;
-  if(write&&!(step->op==MESH_STEP_SEND&&c->input_pages)) {
-    const size_t index=write_span_index(write,m->step,c->invocation);
-    const size_t units=write->step_units[index].n;
-    const struct mesh_dma_span *spans=write->spans+write->span_first[index]+m->frame*units;
-    uint64_t logical=0;
-    for(size_t k=0;!result&&k<units;k++) {
-      const int error=mesh_page_run_add(out,logical,spans[k].bytes,spans[k].offset-comm->attach->context.M->data_off);
-      if(error)result=fail(ncclSystemError,"binding selected WRITE alias pages: %s",strerror(error));
-      logical+=spans[k].bytes;
-    }
-  } else {
-    const struct where binding=step->op==MESH_STEP_REDUCE?shifted(st->buffer[step->buffer],m->offset):m->data;
-    result=binding_backing(comm,binding,m->bytes,out);
-  }
-  if(!result)qsort(out->at,out->count,sizeof *out->at,physical_order);
-  return result;
-}
-static ncclResult_t issue_aliases(struct ncclComm *comm,const struct issue *u,const uint32_t *first,
-    struct mesh_transfer_alias **out,size_t *count) {
-  struct mesh_transfer_alias *local=NULL;size_t used=0,room=0;
-  const size_t nodes=(size_t)comm->nranks;
-  struct alias_source { const struct message *message; struct mesh_page_runs pages; };
-  size_t reads=0;
-  for(uint32_t h=0;h<comm->count;h++)reads+=u->plans[h].outs;
-  struct alias_source *sources=calloc(reads+1,sizeof *sources);
-  ncclResult_t result=sources?ncclSuccess:fail(ncclSystemError,"allocating declared alias sources");
-  size_t at=0;
-  for(uint32_t h=0;!result&&h<comm->count;h++)for(size_t k=0;!result&&k<u->plans[h].outs;k++,at++) {
-    sources[at].message=u->plans[h].out+k;
-    result=message_backing(comm,sources[at].message,&sources[at].pages);
-  }
-  for(uint32_t h=0;!result&&h<comm->count;h++)for(size_t k=0;!result&&k<u->plans[h].ins;k++) {
-    const struct message *write=u->plans[h].in+k;
-    if(!write->bytes)continue;
-    struct mesh_page_runs destination={0};
-    result=message_backing(comm,write,&destination);
-    const size_t writing=(size_t)(write->c-u->calls);
-    for(size_t j=0;!result&&j<reads;j++) {
-      const struct message *read=sources[j].message;const size_t reading=(size_t)(read->c-u->calls);
-      const int original=original_send(read);
-      /* Frame order is already fixed; aliases within one frame determine its
-         common schedule, which is then repeated in that same order. */
-      if(read->frame!=write->frame||!read->bytes||writing<reading||
-         (!original&&writing==reading&&write->step<=read->step))continue;
-      if(!physical_overlap(&sources[j].pages,&destination))continue;
-      if(grow(&local,&room,used,sizeof *local)){result=fail(ncclSystemError,"allocating physical overwrite relations");break;}
-      local[used++]=(struct mesh_transfer_alias){first[reading*nodes+comm->rank]+read->step,
-        first[writing*nodes+comm->rank]+write->step,(uint32_t)original};
-    }
-    free(destination.at);
-  }
-  for(size_t i=0;sources&&i<reads;i++)free(sources[i].pages.at);
-  free(sources);
-  uint64_t local_count=used,*counts=calloc(nodes,sizeof *counts);
-  struct mesh_transfer_alias *send=NULL,*all=NULL;size_t most=0;
-  int error=counts?0:ENOMEM;
-  pthread_mutex_lock(&comm->prepare);atomic_fetch_add(&comm->runs,1);
-  comm->until=mesh_deadline("libnccl-mesh: physical overwrite relations",MESH_PREPARATION_NS);
-  if(!result&&!error)error=prepare_exchange_locked(comm,&local_count,sizeof local_count,counts);
-  for(size_t r=0;!error&&r<nodes;r++)if(counts[r]>most)most=counts[r];
-  if(!result&&!error&&most) {
-    if(most>SIZE_MAX/nodes/sizeof *all)error=EOVERFLOW;
-    else if(!(send=calloc(most,sizeof *send))||!(all=calloc(nodes*most,sizeof *all)))error=ENOMEM;
-    if(!error) {
-      if(used)memcpy(send,local,used*sizeof *send);
-      error=prepare_exchange_locked(comm,send,most*sizeof *send,all);
-    }
-  }
-  atomic_fetch_sub(&comm->runs,1);pthread_mutex_unlock(&comm->prepare);
-  size_t total=0;
-  if(!result&&!error) {
-    for(size_t r=0;r<nodes;r++) {
-      if(counts[r])memmove(all+total,all+r*most,counts[r]*sizeof *all);
-      total+=counts[r];
-    }
-    if(total)qsort(all,total,sizeof *all,transfer_alias_compare);
-    size_t kept=0;
-    for(size_t i=0;i<total;i++)
-      if(!kept||transfer_alias_compare(all+i,all+kept-1))all[kept++]=all[i];
-    *out=all;*count=kept;all=NULL;
-  }
-  free(local);free(counts);free(send);free(all);
-  return result?result:error?fail(ncclSystemError,"physical overwrite relations: %s",strerror(error)):ncclSuccess;
-}
 static ncclResult_t issue_order_finish(const struct ncclComm *comm,struct issue *u) {
   for(uint32_t h=0;h<comm->count;h++) {
     struct schedule *p=u->plans+h;
@@ -6457,35 +6335,12 @@ static ncclResult_t issue_order_finish(const struct ncclComm *comm,struct issue 
   }
   return ncclSuccess;
 }
-/* Page bindings are now final. Add their actual overwrite relations to the
-   same transfer graph, and split only an original source selected by a cycle.
-   Each split removes that source's aliases, so this preparation terminates
-   after at most one split per call/rank. No execution asks these questions. */
+/* an occurrence's order is its declaration's (compile_group's schedules, copied by issue_lay): its entries numbered
+   and its units and consumption laid. No alias is exchanged and no order predicted again: versions keep a SEND's
+   source apart from the landings that would overwrite it (design/page-maps-2026-11-02.md) */
 static ncclResult_t issue_order(struct ncclComm *comm,struct issue *u,double *seconds) {
-  uint32_t *first=NULL;ncclResult_t result=transfer_first(comm,u,&first);
-  for(int changed=1;!result&&changed;) {
-    struct mesh_transfer_alias *alias=NULL;size_t count=0;changed=0;
-    result=issue_aliases(comm,u,first,&alias,&count);
-    unsigned char *separate=result?NULL:calloc(count+1,1);
-    if(!result&&!separate)result=fail(ncclSystemError,"allocating overwrite choices");
-    if(!result)result=order_transfers(comm,u->calls,u->n,u->plans,alias,count,separate,seconds);
-    for(size_t e=0;!result&&e<count;e++)if(separate[e]) {
-      changed=1;
-      for(size_t i=0;i<u->n;i++) {
-        const size_t row=i*(size_t)comm->nranks+comm->rank;
-        if(alias[e].read>=first[row]&&alias[e].read<first[row+1]) {
-          result=source_generation(u->calls+i);break;
-        }
-      }
-    }
-    free(alias);free(separate);
-    if(!result&&changed) {
-      result=bind_calls(u->calls,u->n);
-      if(!result)place_data(comm,u,u->area);
-    }
-  }
-  free(first);
-  return result?result:issue_order_finish(comm,u);
+  (void)seconds;
+  return issue_order_finish(comm,u);
 }
 /* Every endpoint and relay contributes physical backing cuts in the declared
    operand or transaction coordinates. Union every laid issue's placement (each binding instance) before
