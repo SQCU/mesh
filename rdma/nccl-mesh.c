@@ -2281,28 +2281,31 @@ static int channel_of(ncclComm_t comm, uint32_t peer) {
   return -1;
 }
 
-/* a call's `made` steps at d->steps spread over their pairs' parallel cables: a SEND or COPY whose receiver does not send
-   it on goes over every channel toward its peer, its piece cut in page quanta (the first ones one more for the
-   remainder), in the channels' order, which is the cables' (fabric_realize: the one order both ends make), so its two
-   ends cut alike; a forwarded transfer stays on the first channel, so a forward's SEND, cut or not, lies within one COPY
-   (the gate the lowering takes). Every step's channel in d->step_channel; the overlap and the cut are the graph
-   module's (mesh_graph_later_overlap, mesh_graph_quanta_cut). Measured need: a pair's parallel cables sat
-   idle under one channel a peer (metal-microbench docs/facts.md, the bandwidth run: one port a peer carried bytes). */
-static ncclResult_t spread(ncclComm_t comm, struct definition *d, const struct mesh_program *program,
-                           struct mesh_operand operand, const uint64_t *segments, uint32_t made, uint32_t call) {
-  const uint64_t q = mesh_page_quantum(comm->page, operand.element_bytes);
-  const uint32_t room = made * (comm->count ? comm->count : 1);
-  struct mesh_step *own = malloc((made + 1) * sizeof *own), *peer = malloc(((size_t)room + 1) * sizeof *peer);
-  struct mesh_step *step = realloc(d->step, (d->steps + room + 1) * sizeof *step);
+#define MESH_SPREAD_QUANTA 32 /* the spread's grid cell, in page quanta (512 KiB at 16 KiB pages): a choice to measure */
+/* a call's `made` steps at d->steps spread over their pairs' parallel cables: each SEND or COPY cut at a grid of
+   MESH_SPREAD_QUANTA page quanta over the operand (mesh-graph.h mesh_graph_grid_cut), the piece in cell g on the
+   (g mod n)-th of the n channels toward its peer, in the channels' order, which is the cables' (fabric_realize: the
+   one order both ends make), so both ends cut and place alike, and a forward's piece lies within one COPY's piece (a
+   forward's range lies within its COPY's, the gate the lowering takes) for any cable counts either side. Every step's
+   channel in d->step_channel. Measured need: a pair's parallel cables sat idle under one channel a peer
+   (metal-microbench docs/facts.md, the bandwidth run: one port a peer carried bytes). */
+static ncclResult_t spread(ncclComm_t comm, struct definition *d, struct mesh_operand operand, uint32_t made, uint32_t call) {
+  const uint64_t cell = mesh_page_quantum(comm->page, operand.element_bytes) * MESH_SPREAD_QUANTA;
+  uint64_t most = 1;
+  for (uint32_t s = 0; s < made; s++) {
+    const struct mesh_step *x = d->step + d->steps + s;
+    most += x->piece.elements / cell + 2;
+  }
+  struct mesh_step *own = malloc((made + 1) * sizeof *own);
+  struct mesh_step *step = realloc(d->step, (d->steps + most + made + 1) * sizeof *step);
   if (step) d->step = step;
-  uint32_t *owner = realloc(d->step_call, (d->steps + room + 1) * sizeof *owner);
+  uint32_t *owner = realloc(d->step_call, (d->steps + most + made + 1) * sizeof *owner);
   if (owner) d->step_call = owner;
-  uint32_t *channel = realloc(d->step_channel, (d->steps + room + 1) * sizeof *channel);
+  uint32_t *channel = realloc(d->step_channel, (d->steps + most + made + 1) * sizeof *channel);
   if (channel) d->step_channel = channel;
-  uint32_t *rounds = malloc(((size_t)room + 1) * sizeof *rounds);
-  uint64_t *lows = malloc(((size_t)room + comm->count + 1) * sizeof *lows), *highs = malloc(((size_t)room + comm->count + 1) * sizeof *highs);
-  if (!own || !peer || !step || !owner || !channel || !rounds || !lows || !highs) {
-    free(own); free(peer); free(rounds); free(lows); free(highs); return fail(ncclSystemError, "a spread's memory");
+  uint64_t *start = malloc((most + 1) * sizeof *start), *count = malloc((most + 1) * sizeof *count), *index = malloc((most + 1) * sizeof *index);
+  if (!own || !step || !owner || !channel || !start || !count || !index) {
+    free(own); free(start); free(count); free(index); return fail(ncclSystemError, "a spread's memory");
   }
   memcpy(own, d->step + d->steps, made * sizeof *own);
   size_t at = d->steps;
@@ -2310,28 +2313,18 @@ static ncclResult_t spread(ncclComm_t comm, struct definition *d, const struct m
     const struct mesh_step x = own[s];
     int lanes[comm->count + 1], n = 0;
     for (uint32_t h = 0; h < comm->count; h++) if ((uint32_t)comm->channels[h].peer == x.peer) lanes[n++] = (int)h;
-    int cut = n > 1 && (x.op == MESH_STEP_SEND || x.op == MESH_STEP_COPY) && x.peer != (uint32_t)comm->rank;
-    if (cut) {
-      /* the receiver's SENDs (this rank's own for a COPY, the peer's for a SEND), whether one later sends any of it on
-         (mesh-graph.h mesh_graph_later_overlap) */
-      const struct mesh_step *theirs = own;
-      uint32_t count = made, sends = 0;
-      if (x.op == MESH_STEP_SEND) { count = mesh_program_steps_cut(program, x.peer, operand, segments, comm->page, peer); theirs = peer; }
-      for (uint32_t k = 0; k < count; k++) if (theirs[k].op == MESH_STEP_SEND) {
-        rounds[sends] = theirs[k].round; lows[sends] = theirs[k].first; highs[sends++] = theirs[k].first + theirs[k].piece.elements;
-      }
-      cut = !mesh_graph_later_overlap(sends, rounds, lows, highs, x.round, x.first, x.first + x.piece.elements);
+    if (x.peer == (uint32_t)comm->rank || !n || (x.op != MESH_STEP_SEND && x.op != MESH_STEP_COPY)) {
+      d->step[at] = x; d->step_call[at] = call;
+      d->step_channel[at] = x.peer == (uint32_t)comm->rank || !n ? 0 : (uint32_t)lanes[0]; at++; continue;
     }
-    if (!cut) { d->step[at] = x; d->step_call[at] = call; d->step_channel[at] = x.peer == (uint32_t)comm->rank ? 0 : (uint32_t)channel_of(comm, x.peer); at++; continue; }
-    /* the piece over the pair's channels in page quanta (mesh-graph.h mesh_graph_quanta_cut), in the channels' order */
-    const uint32_t pieces = mesh_graph_quanta_cut(x.first, x.piece.elements, q, (uint32_t)n, lows, highs);
+    const uint32_t pieces = mesh_graph_grid_cut(x.first, x.piece.elements, cell, start, count, index);
     for (uint32_t j = 0; j < pieces; j++) {
-      d->step[at] = x; d->step[at].first = lows[j]; d->step[at].piece.elements = highs[j];
-      d->step_call[at] = call; d->step_channel[at] = (uint32_t)lanes[j]; at++;
+      d->step[at] = x; d->step[at].first = start[j]; d->step[at].piece.elements = count[j];
+      d->step_call[at] = call; d->step_channel[at] = (uint32_t)lanes[index[j] % (uint64_t)n]; at++;
     }
   }
   d->steps = at;
-  free(own); free(peer); free(rounds); free(lows); free(highs);
+  free(own); free(start); free(count); free(index);
   return ncclSuccess;
 }
 
@@ -2375,7 +2368,7 @@ ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *call
             result = fail(ncclInvalidUsage, "call %zu: a step toward rank %u, which no channel reaches", k,
                           d->step[d->steps + s].peer);
         }
-        if (!result) result = spread(comm, d, &program, operand, call->segments, made, (uint32_t)k);
+        if (!result) result = spread(comm, d, operand, made, (uint32_t)k);
         else d->steps += made;
       }
     }

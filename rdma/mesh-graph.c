@@ -844,22 +844,13 @@ void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *ro
     }
 }
 
-/* mesh-graph.h mesh_graph_later_overlap */
-int mesh_graph_later_overlap(size_t n, const uint32_t *round, const uint64_t *first, const uint64_t *end, uint32_t after,
-                             uint64_t lo, uint64_t hi){
-  for(size_t k=0;k<n;k++)if(round[k]>after && first[k]<hi && lo<end[k])return 1;
-  return 0;
-}
-/* mesh-graph.h mesh_graph_quanta_cut */
-uint32_t mesh_graph_quanta_cut(uint64_t first, uint64_t length, uint64_t quantum, uint32_t parts, uint64_t *start,
-                               uint64_t *count){
-  const uint64_t q=quantum?quantum:1,quanta=(length+q-1)/q;
-  uint64_t from=first;uint32_t made=0;
-  for(uint32_t j=0;parts && j<parts;j++){
-    uint64_t take=(quanta/parts+(j<quanta%parts))*q;
-    if(from+take>first+length)take=first+length-from;
-    if(!take)continue;
-    start[made]=from;count[made++]=take;from+=take;
+/* mesh-graph.h mesh_graph_grid_cut */
+uint32_t mesh_graph_grid_cut(uint64_t first, uint64_t length, uint64_t cell, uint64_t *start, uint64_t *count, uint64_t *index){
+  const uint64_t g=cell?cell:1,end=first+length;
+  uint32_t made=0;
+  for(uint64_t at=first;at<end;){
+    const uint64_t k=at/g,edge=(k+1)*g<end?(k+1)*g:end;
+    start[made]=at;count[made]=edge-at;index[made++]=k;at=edge;
   }
   return made;
 }
