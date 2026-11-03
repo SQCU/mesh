@@ -96,7 +96,8 @@ class Template:
 
     def __init__(self, fn, args):
         self.args = args
-        graph = make_fx(fn, tracing_mode='fake', _allow_non_fake_inputs=True)(*args)
+        # traced through a variadic wrapper: make_fx counts a callable's parameters, defaults among them
+        graph = make_fx(lambda *a: fn(*a), tracing_mode='fake', _allow_non_fake_inputs=True)(*args)
         self.roots, self.commands, self.collectives, self.order = {}, [], [], []
         self._lower(graph)
         self._declare()
