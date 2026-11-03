@@ -49,6 +49,10 @@ READ, WRITE = 1, 2
 # (MESH_ALLREDUCE_GATHER_BELOW, bytes) sets it for a sweep. The planner's all-reduce measured 357-416 us at 256 KB and
 # 163-188 at 4 KB (allreduce-2026-11-03 sweep-21).
 import os
+# whether a part ends after each run of links and releases (settle); the run's configuration (MESH_RUN_CUTS=0) runs it
+# as one part, its order alone keeping a copy behind the waits it follows (an M5 Ultra's late part starts are at part
+# boundaries: metal-microbench docs/facts.md, gaps.m)
+CUTS = os.environ.get('MESH_RUN_CUTS', '1') != '0'
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
 
 
@@ -1004,7 +1008,8 @@ class Program:
                 # only once its encoder's earlier dispatches have ended (an M5 Ultra; stored), so the observations
                 # after it go in the next part, committed ahead, which begins at once
                 if cut[0]:
-                    run.cut()
+                    if CUTS:
+                        run.cut()
                     cut[0] = False
 
             def emit_observation(key, t=t, group=group, ids=ids, chunk=chunk, nodes_of=nodes_of):

@@ -277,36 +277,6 @@ size_t MetalRunSpans(struct MetalRun *run,double *us,size_t capacity) {
         us[p]=e&&e[2*p].timestamp&&e[2*p+1].timestamp>e[2*p].timestamp?(double)(e[2*p+1].timestamp-e[2*p].timestamp)/frequency*1e6:0;
     return run->parts;
 }
-// A part's ballast, where the run's configuration names one (MESH_BALLAST="threadgroups,iterations"): an encoder of
-// its own at the part's start, beside the part's encoder (encoders of one buffer run together: metal-microbench
-// visible.m "across"), `threadgroups` simdgroups of a fixed arithmetic loop that end after `iterations` steps, none of
-// its work in the part's barrier chain. An M5 Ultra whose parts are narrow loses its GPU's performance state between
-// them, its next part starting 0.1-1.7 ms late now and then; wide work in the part keeps it (gaps.m); in the barrier
-// chain (a wide observation) it cost a tick 10 us (docs/facts.md). Its loop is to end before its part does: a buffer
-// still running holds the queue's next.
-static void RunBallast(struct MetalRun *run,id<MTL4CommandBuffer> buffer) {
-    static id<MTLComputePipelineState> pipeline;static NSUInteger threadgroups,iterations;static dispatch_once_t made;
-    static id<MTLBuffer> word;static id<MTL4ArgumentTable> table;
-    dispatch_once(&made,^{
-        const char *named=getenv("MESH_BALLAST");
-        if(!named||sscanf(named,"%lu,%lu",&threadgroups,&iterations)!=2||!threadgroups)return;
-        NSError *error=nil;
-        pipeline=[MetalPipeline(@"#include <metal_stdlib>\nusing namespace metal;\nkernel void mesh_ballast(device uint *x [[buffer(0)]], "
-            "constant uint &n [[buffer(1)]], uint t [[thread_position_in_grid]]) {\n  uint a = t; for (uint i = 0; i < n; i++) "
-            "a = a * 1664525u + 1013904223u;\n  if (a == 7u) x[0] = a; }\n",@"mesh_ballast",@[],&error) retain];
-        word=[MetalDevice() newBufferWithLength:16 options:MTLResourceStorageModeShared];
-        ((uint32_t *)word.contents)[1]=(uint32_t)iterations;
-        MTL4ArgumentTableDescriptor *d=[[MTL4ArgumentTableDescriptor new] autorelease];d.maxBufferBindCount=2;
-        table=[MetalDevice() newArgumentTableWithDescriptor:d error:&error];
-        [table setAddress:word.gpuAddress atIndex:0];[table setAddress:word.gpuAddress+4 atIndex:1];
-    });
-    if(!pipeline)return;
-    if(![run->residency containsAllocation:word]){[run->residency addAllocation:word];[run->residency commit];}
-    id<MTL4ComputeCommandEncoder> aside=[buffer computeCommandEncoder];
-    [aside setComputePipelineState:pipeline];[aside setArgumentTable:table];
-    [aside dispatchThreadgroups:MTLSizeMake(threadgroups,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
-    [aside endEncoding];
-}
 void MetalRunTrace(struct MetalRun *run) { run->traced=YES; }
 size_t MetalRunTimes(struct MetalRun *run,double *us,size_t capacity) {
     const size_t n=run->nodes.length/sizeof(struct RunNode);
@@ -466,7 +436,6 @@ const char *MetalRunFinish(struct MetalRun *run) {
             open=part[v];struct RunPart *p=&run->part[open];
             p->allocator=[run->device newCommandAllocator];p->buffer=[run->device newCommandBuffer];
             [p->buffer beginCommandBufferWithAllocator:p->allocator];[p->buffer useResidencySet:run->residency];
-            RunBallast(run,p->buffer);
             encoder=[p->buffer computeCommandEncoder];
             NSError *error=nil;table=[[run->device newArgumentTableWithDescriptor:tableDescriptor error:&error] autorelease];
             if(!table){defect="a run part's argument table";break;}
