@@ -1043,8 +1043,18 @@ class Program:
                     has_node.add(e)
                 elif e in last and nodes_of(c, last[e][0], last[e][2], last[e][3]):
                     has_node.update(group[last[e]])
+            # a template's edges through its events with no node, once a template and kept set (each instance
+            # contracted them again, and the bounds below for every event: lstm-2026-11-03 profile-2)
+            cache = t.__dict__.setdefault('through', {})
+            kept_key = frozenset(has_node)
+
+            def passed(extra=None, t=t, cache=cache, kept_key=kept_key, has_node=has_node):
+                key = (kept_key, extra)
+                if key not in cache:
+                    cache[key] = through(t.edges, has_node | ({extra} if extra is not None else set()))
+                return cache[key]
             after = {}
-            for a, b in through(t.edges, has_node):
+            for a, b in passed():
                 after.setdefault(a, set()).add(b)
             # an observation is emitted just before the first node that follows it, not where its event falls in the
             # order: the GPU runs a part's nodes in order, so an observation the order put early (a landing follows
@@ -1103,11 +1113,11 @@ class Program:
             # held behind its last SENDs' completions, and with a copy behind every earlier dispatch of its part every
             # rank waited about 100 us at each chunk boundary (metal-microbench docs/facts.md, the LSTM's tail). What
             # must stay: every byte a later chunk touches ordered after an earlier chunk's conflicting access.
-            def at_or_after(e, has_node=has_node, t=t, ids=ids):
-                return [ids[e]] if e in has_node else sorted({ids[b] for a, b in through(t.edges, has_node | {e}) if a == e})
+            def at_or_after(e, has_node=has_node, ids=ids, passed=passed):
+                return [ids[e]] if e in has_node else sorted({ids[b] for a, b in passed(e) if a == e})
 
-            def at_or_before(e, has_node=has_node, t=t, ids=ids):
-                return [ids[e]] if e in has_node else sorted({ids[a] for a, b in through(t.edges, has_node | {e}) if b == e})
+            def at_or_before(e, has_node=has_node, ids=ids, passed=passed):
+                return [ids[e]] if e in has_node else sorted({ids[a] for a, b in passed(e) if b == e})
             spans = []
             for begin, end, mode, item, first_byte, length in t.accesses:
                 tensor, base = self._binding(t.items[item])
@@ -1209,7 +1219,7 @@ class Program:
             # the solve's edges between nodes, through events with none; the instance after the one before, from its
             # sinks but its observations (their order is the bytes', carried above)
             kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))
-            own = contract(through(t.edges, has_node), lambda e: ids[e])
+            own = contract(passed(), lambda e: ids[e])
             edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
             previous_sinks = [x for x in sinks(kept, own) if named[x][1][0] not in ('sent', 'landed')] or previous_sinks
             # a part ends where the run passes to another compiled function: each places its items over the same arena
