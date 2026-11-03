@@ -99,6 +99,7 @@ def main(config=None):
             # the ranks whose segments its steps carry]
             print(json.dumps(dict(phase='timeline', parts=[[at(s), at(e)] for _, s, e in run.parts()],
                                   committed=[at(m) for m, _, _ in run.parts()],
+                                  spans=[round(x, 2) for x in run.spans()],
                                   landings=[[at(p), *w] for (_, p), w in zip(run.landings(), program.watched[id(run)])])),
                   flush=True)
         summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows, repeat=repeat, input_width=KIN,

@@ -815,6 +815,7 @@ class Program:
         def observed(slot, word):
             run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
         cut = [False]  # a part end owed after links and releases, across chunks
+        waited = [False]  # observations emitted since the last command: the next command begins a part's compute
         for chunk, (t, lowered) in enumerate(instances):
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
             for e, i in ids.items():
@@ -885,6 +886,7 @@ class Program:
                 steps = [command.steps[t.events[m][2]] for m in group[key]]
                 for _, _, word, value, slot, _ in nodes_of(c, kind, channel, round_):
                     observed(slot, word)
+                waited[0] = True
                     self.observations.setdefault(id(run), {})[slot] = (kind, chunk, channel, sorted({command.origin(s) for s in steps}),
                                                                       value, word)
                 watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
@@ -923,6 +925,9 @@ class Program:
                         tensor, base = self._binding(value.root)
                         operands.append((index, tensor, base))
                     run.dispatch(command.pipeline, operands, command.grid, command.group, True)
+                    if waited[0]:
+                        run.stamp()  # this part's compute begins here, its waits done (MetalRunSpans)
+                        waited[0] = False
                 elif kind == 'post':
                     links = [n for n in lowered[c] if n[0] == lib.ncclMeshNodeLink]
                     if links:

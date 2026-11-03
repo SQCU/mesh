@@ -63,7 +63,7 @@ struct RunNode {
     __unsafe_unretained id<MTLComputePipelineState> pipeline;
     size_t first, count;
     MTLSize groups, threads;
-    BOOL threadGrid, ends; // ends: the node ends its part (MetalRunCut)
+    BOOL threadGrid, ends, stamp; // ends: the node ends its part (MetalRunCut); stamp: a timestamp before it (MetalRunStamp)
     __unsafe_unretained id<MTLBuffer> source, destination;
     NSUInteger from, to, bytes;
     __unsafe_unretained MetalHostOperation operation;
@@ -167,6 +167,7 @@ struct MetalRun {
     size_t input; // the last outside producer MetalRunInput appended
     uint32_t parts;
     struct RunPart *part;
+    id<MTL4CounterHeap> stamps; // two a part: its compute's start (its first stamped node) and its end
     struct RunHostState *host; // by node
     size_t nodeCount;
     struct mesh_graph_crossing *wait; // realize's rows, wired into joins at enqueue
@@ -251,6 +252,18 @@ void MetalRunLanded(struct MetalRun *run,const void *word,uint64_t threshold) {
     atomic_init(&landing->state,LandingWaiting);atomic_init(&landing->references,1); // the run's
     [run->landings appendBytes:&landing length:sizeof landing];
     RunAppend(run,(struct RunNode){.kind=RunInput,.signal=landing->event,.value=1}); // no input of MetalRunInputValue's
+}
+void MetalRunStamp(struct MetalRun *run) {
+    if(run->nodes.length)((struct RunNode *)run->nodes.mutableBytes)[run->nodes.length/sizeof(struct RunNode)-1].stamp=YES;
+}
+size_t MetalRunSpans(struct MetalRun *run,double *us,size_t capacity) {
+    if(!run->stamps)return 0;
+    NSData *entries=[run->stamps resolveCounterRange:NSMakeRange(0,2*(NSUInteger)run->parts)];
+    const MTL4TimestampHeapEntry *e=entries.bytes;
+    const double frequency=(double)[run->device queryTimestampFrequency];
+    for(uint32_t p=0;p<run->parts&&p<capacity;p++)
+        us[p]=e&&e[2*p].timestamp&&e[2*p+1].timestamp>e[2*p].timestamp?(double)(e[2*p+1].timestamp-e[2*p].timestamp)/frequency*1e6:0;
+    return run->parts;
 }
 void MetalRunCut(struct MetalRun *run) {
     if(run->nodes.length)((struct RunNode *)run->nodes.mutableBytes)[run->nodes.length/sizeof(struct RunNode)-1].ends=YES;
@@ -365,6 +378,16 @@ const char *MetalRunFinish(struct MetalRun *run) {
         run->commits=dispatch_queue_create("mesh.run.commits",DISPATCH_QUEUE_SERIAL);
     }
 
+    // a part's compute span: two timestamps a part (metal-microbench docs/facts.md: a count past 4096 with no error slot
+    // faulted the driver; two a part with the slot)
+    if(!defect&&run->parts&&2*run->parts<=4096) {
+        MTL4CounterHeapDescriptor *stampsDescriptor=[[MTL4CounterHeapDescriptor new] autorelease];
+        stampsDescriptor.type=MTL4CounterHeapTypeTimestamp;stampsDescriptor.count=2*run->parts;
+        NSError *error=nil;
+        run->stamps=[run->device newCounterHeapWithDescriptor:stampsDescriptor error:&error];
+        if(run->stamps)[run->held addObject:run->stamps];
+    }
+    unsigned char *begun=calloc(run->parts+1,1);
     // encode each part: fences its producers updated, then its nodes with realize's barriers
     for(uint32_t v=0;!defect&&v<n;v++)if(!host[v]&&fence[v]&&!run->part[part[v]].fence)run->part[part[v]].fence=[run->device newFence];
     uint32_t *lastFenced=malloc((run->parts+1)*sizeof *lastFenced);
@@ -377,7 +400,10 @@ const char *MetalRunFinish(struct MetalRun *run) {
     for(uint32_t v=0;!defect&&v<=n;v++) {
         if(v<n&&host[v])continue;
         if(v==n||part[v]!=open) {
-            if(encoder){[encoder endEncoding];[run->part[open].buffer endCommandBuffer];encoder=nil;}
+            if(encoder){
+                if(run->stamps)[encoder writeTimestampWithGranularity:MTL4TimestampGranularityPrecise intoHeap:run->stamps atIndex:2*(NSUInteger)open+1];
+                [encoder endEncoding];[run->part[open].buffer endCommandBuffer];encoder=nil;
+            }
             if(v==n)break;
             open=part[v];struct RunPart *p=&run->part[open];
             p->allocator=[run->device newCommandAllocator];p->buffer=[run->device newCommandBuffer];
@@ -400,6 +426,9 @@ const char *MetalRunFinish(struct MetalRun *run) {
         }
         if(barrier[v])[encoder barrierAfterEncoderStages:stages beforeEncoderStages:stages visibilityOptions:MTL4VisibilityOptionDevice];
         const struct RunNode *node=&nodes[v];
+        if(run->stamps&&node->stamp&&!begun[open]){
+            [encoder writeTimestampWithGranularity:MTL4TimestampGranularityPrecise intoHeap:run->stamps atIndex:2*(NSUInteger)open];begun[open]=1;
+        }
         if(node->kind==RunCopy) {
             [encoder copyFromBuffer:node->source sourceOffset:node->from toBuffer:node->destination
                   destinationOffset:node->to size:node->bytes];
@@ -412,7 +441,7 @@ const char *MetalRunFinish(struct MetalRun *run) {
         }
         if(lastFenced[open]==v)[encoder updateFence:run->part[open].fence afterEncoderStages:stages];
     }
-    free(lastFenced);
+    free(lastFenced);free(begun);
 
     // each host operation prepared once, its completion bound; deferred parts and host operations fire on their joins
     long pending=run->parts;

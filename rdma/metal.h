@@ -83,6 +83,10 @@ void MetalRunEdges(struct MetalRun *, const uint64_t (*edges)[2], size_t count);
 /* the node appended last ends its part (mesh-graph.h mesh_graph_realize `ends`): its stores reach the host at the part's
    end, where a store in a running part reaches it late (metal-microbench docs/facts.md, visible.m) */
 void MetalRunCut(struct MetalRun *);
+/* the node appended last begins its part's compute (after its waits): a timestamp before it, the part's first such;
+   MetalRunSpans gives each part's span from it to the part's end, in microseconds (0 where a part has none) */
+void MetalRunStamp(struct MetalRun *);
+size_t MetalRunSpans(struct MetalRun *, double *us, size_t capacity);
 /* a returned page with no local reader: the run is complete once the `bytes`-wide word at `offset` reaches
    `threshold` */
 void MetalRunResult(struct MetalRun *, id<MTLBuffer>, NSUInteger offset, uint32_t bytes, uint64_t threshold);
