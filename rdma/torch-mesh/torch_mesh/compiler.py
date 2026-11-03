@@ -582,13 +582,25 @@ class Template:
                     for k, s in enumerate(command.steps):
                         if s['kind'] == 'copy' and (r is None or s['round'] == r):
                             s['event'] = event('landed', c, k)
-                            s['after'] = [j for j, x in enumerate(command.steps) if r is not None and x['kind'] == 'send' and
-                                          x['round'] < r and x['root'] is s['root'] and x['at'] < s['at'] + s['bytes'] and
-                                          s['at'] < x['at'] + x['bytes']]
-                            begin = max([command.steps[j]['completion'] for j in s['after']], default=post)
-                            access(begin, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
-                            links.append((post, s['event']))
-                            links.extend((command.steps[j]['completion'], s['event']) for j in s['after'])
+                            over = r is not None and any(x['kind'] == 'send' and x['round'] < r and x['root'] is s['root'] and
+                                                         x['at'] < s['at'] + s['bytes'] and s['at'] < x['at'] + x['bytes']
+                                                         for x in command.steps)
+                            if over:
+                                # an all-reduce's gathered sum over bytes an earlier round sent (a partial sent up): it
+                                # lands in a root of its own and a copy places it once those SENDs have completed (the
+                                # solve's write after their reads). A receive held for a SEND's completion deadlocked
+                                # against the hold of a SEND until its peer's receive is posted, both ends' first landing
+                                # on a channel a held one (allreduce-2026-11-03 run-6, m5ult4's cables to m5ult3)
+                                s['landing'], s['place'] = Root(s['bytes']), True
+                                s['landing'].coherent = True
+                                access(post, s['event'], WRITE, s['landing'], 0, s['bytes'])
+                                links.append((post, s['event']))
+                                s['fold'] = event('fold', c, k)
+                                access(s['fold'], s['fold'], READ, s['landing'], 0, s['bytes'])
+                                access(s['fold'], s['fold'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
+                            else:
+                                access(post, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
+                                links.append((post, s['event']))
                         elif s['kind'] == 'reduce' and (r is None or s['round'] == r):
                             # its landing into its own root, then its fold: the step's bytes plus the landing
                             s['event'] = event('landed', c, k)
@@ -714,7 +726,7 @@ class Program:
                     continue
                 addresses = ffi.new('void *[]', max(1, len(command.steps)))
                 for k, s in enumerate(command.steps):
-                    addresses[k] = ffi.cast('void *', self._address(s['landing'], 0) if s['kind'] == 'reduce'
+                    addresses[k] = ffi.cast('void *', self._address(s['landing'], 0) if 'landing' in s
                                             else self._address(s['root'], s['at']))
                 room = 4 * len(command.steps) + 64
                 nodes, count = ffi.new('ncclMeshNode[]', room), ffi.new('size_t *')
@@ -722,14 +734,7 @@ class Program:
                 forwards = ffi.new('uint32_t[][2]', max(1, len(pairs)))
                 for p, (send, copy) in enumerate(pairs):
                     forwards[p][0], forwards[p][1] = send, copy
-                # each landing's after list: the SENDs whose completion its receive's posting waits for (an all-reduce's
-                # gathered sums over the partials sent up)
-                afters = [(j, k) for k, s in enumerate(command.steps) for j in s.get('after', ())]
-                after = ffi.new('uint32_t[][2]', max(1, len(afters)))
-                for a, (j, k) in enumerate(afters):
-                    after[a][0], after[a][1] = j, k
-                mesh.check(lib.ncclMeshCommLowerOccurrence(command.comm, command.definition, addresses,
-                                                           after if afters else ffi.NULL, len(afters),
+                mesh.check(lib.ncclMeshCommLowerOccurrence(command.comm, command.definition, addresses, ffi.NULL, 0,
                                                            forwards, len(pairs), nodes, room, count))
                 made = []
                 for n in nodes[0:count[0]]:
@@ -862,7 +867,8 @@ class Program:
                     out = kernels.View(0, command.dtype, (n,), (1,), at, coherent=True)
                     reads = [kernels.View(1, command.dtype, (n,), (1,), at, coherent=True),
                              kernels.View(2, command.dtype, (n,), (1,), 0, coherent=True)]
-                    source, grid, group_size = kernels.pointwise('mesh_command', out, reads, 'x0 + x1')
+                    source, grid, group_size = kernels.pointwise('mesh_command', out, reads,
+                                                                 'x1' if s.get('place') else 'x0 + x1')
                     tensor, base = self._binding(s['root'])
                     landing, landing_base = self._binding(s['landing'])
                     ev(ids[e])
