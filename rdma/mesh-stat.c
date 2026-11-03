@@ -100,26 +100,29 @@ static int streams_watch(uint64_t period_us,double seconds){
   size_t size=0;
   struct hdr *m=region_read(&size);
   if(!m || m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"errno\":%d}\n",m?EINVAL:errno);return 1;}
-  static uint64_t seen[MESH_STREAMS][6];
+  static uint64_t seen[MESH_STREAMS][14];
   const uint64_t end=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(uint64_t)(seconds*1e9);
   const struct timespec pause={(time_t)(period_us/1000000),(long)(period_us%1000000*1000)};
   while(clock_gettime_nsec_np(CLOCK_MONOTONIC)<end){
     int moved=0;
-    uint64_t now[MESH_STREAMS][6];
+    uint64_t now[MESH_STREAMS][14];
     for(uint32_t t=0;t<MESH_STREAMS;t++){
       const struct mesh_stream *x=mesh_stream_at(m,t);
-      const uint64_t words[6]={atomic_load(&x->owner),atomic_load(&x->ready),atomic_load(&x->sent),atomic_load(&x->landed),
-                               atomic_load(&x->taken[0]),atomic_load(&x->taken[1])};
-      for(int w=0;w<6;w++){now[t][w]=words[w];moved|=words[w]!=seen[t][w];seen[t][w]=words[w];}
+      /* and its lanes' requests (posts: sends posted, done; receives posted, got), as a bridge publishing them stores */
+      const uint64_t words[14]={atomic_load(&x->owner),atomic_load(&x->ready),atomic_load(&x->sent),atomic_load(&x->landed),
+                                atomic_load(&x->taken[0]),atomic_load(&x->taken[1]),
+                                atomic_load(&x->posts[0].posted[0]),atomic_load(&x->posts[0].posted[1]),atomic_load(&x->posts[0].done[0]),atomic_load(&x->posts[0].done[1]),
+                                atomic_load(&x->posts[1].posted[0]),atomic_load(&x->posts[1].posted[1]),atomic_load(&x->posts[1].done[0]),atomic_load(&x->posts[1].done[1])};
+      for(int w=0;w<14;w++){now[t][w]=words[w];moved|=words[w]!=seen[t][w];seen[t][w]=words[w];}
     }
     if(moved){
       printf("{\"ns\":%llu,\"streams\":[",(unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
       int first=1;
       for(uint32_t t=0;t<MESH_STREAMS;t++)if(now[t][0]){
         const struct mesh_stream *x=mesh_stream_at(m,t);
-        printf("%s[%u,%u,%llu,%llu,%llu,%llu,%llu,%llu]",first?"":",",t,atomic_load(&x->peer),(unsigned long long)now[t][0],
-               (unsigned long long)now[t][1],(unsigned long long)now[t][2],(unsigned long long)now[t][3],
-               (unsigned long long)now[t][4],(unsigned long long)now[t][5]);
+        printf("%s[%u,%u",first?"":",",t,atomic_load(&x->peer));
+        for(int w=0;w<14;w++)printf(",%llu",(unsigned long long)now[t][w]);
+        printf("]");
         first=0;
       }
       printf("]}\n");
