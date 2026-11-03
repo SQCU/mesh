@@ -54,20 +54,23 @@ class Tick:
         torch.ops.torch_mesh.allgatherv_out(self.mine, self.h, 2, self.sizes, self.group)
 
     # docs/writing-a-service.md#the-lstm
-    def starting(self, s, x):
-        """Tick s < L - 1, while the layers above s have not begun (their h stays h(-1))."""
+    def starting(self, s, x, gather=True):
+        """Tick s < L - 1, while the layers above s have not begun (their h stays h(-1)); without the gather (`gather`
+        False) a rank's compute alone (balance-service's observation)."""
         self.layers(s + 1, x)
-        self.gather()
+        if gather:
+            self.gather()
 
     # docs/writing-a-service.md#the-lstm
-    def stepper(self, X, O, steps=1):
+    def stepper(self, X, O, steps=1, gather=True):
         """A fixed number of later ticks for AOT declaration: the input at the step counter t held on
         the GPU (the last one past the input's end), every layer, the gather, the top layer's h of step t - L + 1 into
         the output O (where this rank holds it), t advanced."""
         def chunk(t):
             for _ in range(steps):
                 self.layers(self.L, X.index_select(0, t.clamp(max=self.steps - 1))[0])
-                self.gather()
+                if gather:
+                    self.gather()
                 if O is not None:
                     O.index_copy_(0, t - (self.L - 1), self.h[self.L - 1][None])
                 t.add_(1)
