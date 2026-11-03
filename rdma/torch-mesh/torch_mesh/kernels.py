@@ -281,7 +281,7 @@ def fused(name, products, out, operands, expression, shared, tg, tg_dtype, tg_el
             loops.append(f'        for (ulong k = lane; k < {K}ul; k += 32ul) total += float({part.load(["m", "k"])}) * '
                          f'float({b.load([f"(k + {first}ul)", "n"])});')
             first += K
-        code += [f'    for (ulong o = group; o < {M * N}ul; o += {groups}ul) {{',
+        code += [f'    for (ulong o = sg; o < {M * N}ul; o += {groups}ul) {{',
                  f'        const ulong m = o / {N}ul, n = o % {N}ul;',
                  '        float total = 0.0f;',
                  *loops,
@@ -297,10 +297,10 @@ def fused(name, products, out, operands, expression, shared, tg, tg_dtype, tg_el
     for view, text, named in shared:
         pre += [f'        const float {named} = float({MSL[view.dtype]}({text}));', f'        {view.store(c, named)}']
     body = [f'    threadgroup {MSL[tg_dtype]} {tg}[{tg_elements}];',
-            '    const ulong thread = tid, group = thread / 32ul, lane = thread % 32ul;',
+            '    const ulong me = tid, sg = me / 32ul, lane = me % 32ul;',
             *code,
             '    threadgroup_barrier(mem_flags::mem_threadgroup);',
-            f'    for (ulong i = thread; i < {count}ul; i += {FUSED_THREADS}ul) {{',
+            f'    for (ulong i = me; i < {count}ul; i += {FUSED_THREADS}ul) {{',
             *loads, *pre,
             f'        {out.store(c, expression)}',
             '    }']
