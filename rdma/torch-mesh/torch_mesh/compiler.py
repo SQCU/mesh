@@ -831,9 +831,15 @@ class Program:
         # part start costs an M5 Ultra 100-180 us, a running observation 1-4 us)
         observing = _pipeline(kernels.observe(), kernels.OBSERVE)
 
+        # an observation is wide (kernels.OBSERVE_THREADGROUPS beside its poller) where the run's configuration says:
+        # every one ('all'), or a part's first alone ('first', MESH_OBSERVE_WIDE), where the part's waiting begins
+        fresh = [True]  # no observation yet in the part being emitted
+
         def observed(slot, word):
+            wide = kernels.OBSERVE_WIDE == 'all' or (kernels.OBSERVE_WIDE == 'first' and fresh[0])
+            fresh[0] = False
             run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)],
-                         (kernels.OBSERVE_THREADGROUPS * 32, 1, 1), (32, 1, 1), True)
+                         ((kernels.OBSERVE_THREADGROUPS if wide else 1) * 32, 1, 1), (32, 1, 1), True)
         cut = [False]  # a part end owed after links and releases, across chunks
         waited = [False]  # observations emitted since the last command: the next command begins a part's compute
         for chunk, (t, lowered) in enumerate(instances):
@@ -896,6 +902,7 @@ class Program:
                 if cut[0]:
                     run.cut()
                     cut[0] = False
+                    fresh[0] = True
 
             def emit_observation(key):
                 kind, c, channel, round_ = key

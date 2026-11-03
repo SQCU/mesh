@@ -260,6 +260,7 @@ OBSERVE_POLLS = 1 << 22
 import os
 OBSERVE_THREADGROUPS = int(os.environ.get('MESH_OBSERVE_THREADGROUPS', 640))
 OBSERVE_SPIN = int(os.environ.get('MESH_OBSERVE_SPIN', 256))
+OBSERVE_WIDE = os.environ.get('MESH_OBSERVE_WIDE', 'all')  # which observations are wide: 'all' or a part's 'first'
 
 
 @functools.cache
@@ -271,16 +272,19 @@ def observe():
     docs/facts.md, where a CPU-signalled start costs an M5 Ultra 100-180 us); present where the word reaches the count,
     lost where it reads ~0 (a lost port's words, as the bridge stores them). A give-up at OBSERVE_POLLS, or a lost word,
     sets the defect word to the observation's slot x 4 + 1 (a give-up) or + 2 (a lost word) if none is set, and an
-    observation of a run with a defect set ends at once. Thread 0 sets the flag as it ends; every other thread (the
-    dispatch's OBSERVE_THREADGROUPS) runs arithmetic, looking at the flag every OBSERVE_SPIN steps, and ends with it:
-    the GPU loaded while it waits (OBSERVE_THREADGROUPS)"""
+    observation of a run with a defect set ends at once. Thread 0 sets the flag as it ends; the rest of its simdgroup
+    ends at once (a simdgroup may run its divergent paths one after the other, so none of thread 0's lanes waits on
+    it), and every thread of the dispatch's other simdgroups (OBSERVE_THREADGROUPS) runs arithmetic, looking at the flag
+    every OBSERVE_SPIN steps, and ends with it or at as many looks as thread 0 has polls: the GPU loaded while it
+    waits"""
     return (f'{prelude()}\nusing namespace metal;\nkernel void {OBSERVE}(volatile coherent(system) device const ulong *word '
             f'[[buffer(0)]], device ulong *value [[buffer(1)]], volatile coherent(system) device ulong *defect '
             f'[[buffer(2)]], uint at [[thread_position_in_grid]]) {{\n'
             f'    device atomic_uint *done = (device atomic_uint *)(value + 2);\n'
             f'    if (at) {{\n'
+            f'        if (at < 32u) return;\n'
             f'        uint a = at;\n'
-            f'        for (uint n = 0u; n < (1u << 30); n++) {{\n'
+            f'        for (uint n = 0u; n < {OBSERVE_POLLS}u; n++) {{\n'
             f'            for (uint i = 0u; i < {OBSERVE_SPIN}u; i++) a = a * 1664525u + 1013904223u;\n'
             f'            if (atomic_load_explicit(done, memory_order_relaxed) || a == 7u) break;\n'
             f'        }}\n'
