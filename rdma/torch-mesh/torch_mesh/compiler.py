@@ -205,6 +205,8 @@ class Template:
                 self._pointwise(node, values, expression, users)
             elif node.target in (aten.addmm.default, aten.mm.default, aten.linear.default):
                 self._product(node, values)
+            elif node.target is aten.linear_backward.default:
+                self._linear_backward(node, values)
             elif node.target in (aten.cat.default, aten.stack.default):
                 self._joined(node, values)
             elif node.target in (aten.index_select.default, aten.index_copy_.default):
@@ -399,6 +401,26 @@ class Template:
         values[node] = self._command([out], reads, lambda name, c: kernels.product(
             name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
             c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))[0]
+
+    def _linear_backward(self, node, values):
+        """autograd's linear_backward(input, grad, weight, mask) as products and a sum: the input's gradient grad W, the
+        weight's grad^T input, the bias's grad summed over its rows, each where its mask asks for it"""
+        x, grad, w = (values[a] for a in node.args[:3])
+        mask = node.args[3]
+        vals = node.meta['val']
+        outs = [_meta(Root(v.untyped_storage().nbytes()), v) if v is not None and wanted else None
+                for v, wanted in zip(vals, mask)]
+        t = lambda v: Value(v.root, v.dtype, (v.shape[1], v.shape[0]), (v.stride[1], v.stride[0]), v.offset)
+        if outs[0] is not None:
+            self._command([outs[0]], [grad, w], lambda name, c: kernels.product(
+                name, c.writes[0].view(0), [c.reads[0].view(1)], c.reads[1].view(2), None, 1.0, 0.0))
+        if outs[1] is not None:
+            self._command([outs[1]], [t(grad), x], lambda name, c: kernels.product(
+                name, c.writes[0].view(0), [c.reads[0].view(1)], c.reads[1].view(2), None, 1.0, 0.0))
+        if outs[2] is not None:
+            self._command([outs[2]], [grad], lambda name, c: kernels.summed(
+                name, c.writes[0].view(0), c.reads[0].view(1), [0]))
+        values[node] = outs
 
     def _joined(self, node, values):
         """cat and stack: each operand copied into its part of a new value; a cat its product reads in place is its
