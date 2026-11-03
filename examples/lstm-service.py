@@ -81,6 +81,8 @@ def main(config=None):
         program.forward()
         while (ended := program.completion()) is None:
             if now() - started > 8.0:
+                parts, landings = program.done[-1].waiting()
+                print(json.dumps(dict(phase='timeout', parts_pending=parts, landings_waiting=len(landings), landings=[dict(word=hex(w), value=v, threshold=t) for w, v, t in landings[:16]])), flush=True)
                 raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
             time.sleep(0)
         summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows, repeat=repeat, input_width=KIN,

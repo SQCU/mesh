@@ -200,6 +200,14 @@ struct Run {
     TORCH_CHECK(!defect, "preparing the run: ", defect ? defect : "");
   }
   void enqueue() { MetalRunEnqueue(run.get()); }
+  // what the run still waits on: (pending parts and host tasks, [(word, value now, threshold)] of each landing not present)
+  std::pair<long, std::vector<std::array<uint64_t, 3>>> waiting() {
+    long parts = 0;
+    const size_t count = MetalRunWaiting(run.get(), nullptr, 0, &parts);
+    std::vector<std::array<uint64_t, 3>> landings(count);
+    MetalRunWaiting(run.get(), reinterpret_cast<uint64_t (*)[3]>(landings.data()), count, &parts);
+    return {parts, landings};
+  }
   // nonblocking: None while pending, else the latest end (mesh_statistics_now's clock); raises a failure
   std::optional<double> end() {
     double ended = 0;
@@ -302,5 +310,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("communicator", &Run::communicator)
     .def("finish", &Run::finish, pybind11::call_guard<Drained>())
     .def("enqueue", &Run::enqueue, pybind11::call_guard<Drained>())
-    .def("end", &Run::end, pybind11::call_guard<Drained>());
+    .def("end", &Run::end, pybind11::call_guard<Drained>())
+    .def("waiting", &Run::waiting, pybind11::call_guard<Drained>());
 }

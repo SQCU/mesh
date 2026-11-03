@@ -505,6 +505,21 @@ int MetalRunEnd(struct MetalRun *run,double *ended,NSError **error) {
 }
 
 void MetalRunFree(struct MetalRun *run) { if(run)RunRelease(run); }
+size_t MetalRunWaiting(struct MetalRun *run,uint64_t (*out)[3],size_t capacity,long *parts) {
+    struct RunLanding *const *landing=run->landings.bytes;
+    size_t count=0;
+    for(size_t k=0;k<run->landings.length/sizeof *landing;k++) {
+        if(atomic_load_explicit(&landing[k]->state,memory_order_acquire)!=LandingWaiting)continue;
+        if(count<capacity) {
+            out[count][0]=(uint64_t)(uintptr_t)landing[k]->word;
+            out[count][1]=atomic_load_explicit(landing[k]->word,memory_order_acquire);
+            out[count][2]=landing[k]->threshold;
+        }
+        count++;
+    }
+    *parts=atomic_load_explicit(&run->pending,memory_order_acquire);
+    return count;
+}
 // the run's memory, once the caller and every part and host task it committed have let it go
 static void RunRelease(struct MetalRun *run) {
     if(atomic_fetch_sub_explicit(&run->references,1,memory_order_acq_rel)!=1)return;

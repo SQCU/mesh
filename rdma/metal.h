@@ -94,6 +94,9 @@ void MetalRunEnqueue(struct MetalRun *);
    mesh_statistics_now's clock), -1 failed (*error) */
 int MetalRunEnd(struct MetalRun *, double *ended, NSError **error);
 void MetalRunFree(struct MetalRun *);
+/* what a run still waits on, for a failure's report: each landing not yet present (its word, the word's value now and
+   its threshold), written up to `capacity`; the count of such landings. *parts the parts not yet complete. */
+size_t MetalRunWaiting(struct MetalRun *, uint64_t (*landing)[3], size_t capacity, long *parts);
 
 #endif
 #ifdef __cplusplus
