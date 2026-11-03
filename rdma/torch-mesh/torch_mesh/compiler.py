@@ -1215,7 +1215,11 @@ class Program:
             carry = [(emit_observation, k, ids[group[k][0]], [(n[2], n[3]) for n in nodes_of(k[1], k[0], k[2], k[3])])
                      for k in held]
             held.clear()
-            history += [(a, w, lo, hi) for _, end, w, lo, hi in spans for a in at_or_before(end)]
+            # the accesses a newer write covers order nothing more (mesh_graph.superseded): the history stays a page's
+            # last writes and the reads since, not every chunk instance's
+            from mesh_graph import superseded
+            newer = [(a, w, lo, hi) for _, end, w, lo, hi in spans for a in at_or_before(end)]
+            history = superseded(history, newer) + newer
             # the solve's edges between nodes, through events with none; the instance after the one before, from its
             # sinks but its observations (their order is the bytes', carried above)
             kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))

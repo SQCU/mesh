@@ -566,3 +566,25 @@ def waits_late(order, edges, waits, fences):
             close()
     close()
     return out
+
+
+def superseded(history, newer):
+    """type: history [(end, writes, lo, hi)], newer [(node, writes, lo, hi)] (accesses carried() has just ordered after
+    `history`) -> history without the accesses whose bytes [lo, hi) the newer writes cover (their union): such an
+    access precedes a write over its bytes (carried's edge), which precedes any later access over them that conflicts
+    with it, so it orders nothing more. The history of every earlier chunk instance, on the same pages, made carried
+    quadratic in a run's chunks (a 512-step LSTM's preparation 7.8 s, lstm-2026-11-03 profile-3)"""
+    spans = sorted((lo, hi) for _, w, lo, hi in newer if w and hi > lo)
+    merged = []
+    for lo, hi in spans:
+        if merged and lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    starts = [lo for lo, _ in merged]
+    import bisect
+
+    def covered(lo, hi):
+        k = bisect.bisect_right(starts, lo) - 1
+        return k >= 0 and merged[k][1] >= hi
+    return [h for h in history if not covered(h[2], h[3])]
