@@ -1168,7 +1168,9 @@ class Program:
             sends = [(w, c) for w, c in bad if (named.get(c) or (None, ('',)))[1][0] == 'send']
             print(json.dumps(dict(phase='order_check', pairs=len(bad), releases=len(sends),
                                   first=[[named.get(w), named.get(c)] for w, c in bad[:6]],
-                                  first_releases=[[named.get(w), named.get(c)] for w, c in sends[:12]])), flush=True)
+                                  first_releases=[[named.get(w), named.get(c)] for w, c in sends[:12]],
+                                  head=[[k, *(n or ())] for (k, n) in [(lab[0], lab[1] if len(lab) > 1 else None) for lab in labels[:48]]])),
+                  flush=True)
         run.edges(edges)
         try:
             run.finish()
