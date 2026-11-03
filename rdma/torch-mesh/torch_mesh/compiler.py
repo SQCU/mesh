@@ -445,7 +445,11 @@ class Program:
 
     def _address(self, root, at):
         tensor, base = self._binding(root)
-        return _stream.address(tensor) + base + at
+        start = _stream.address(tensor)
+        if not start:
+            raise ValueError(f'a collective step\'s bytes lie outside the region: {"a caller tensor" if root.tensor is not None else "the arena"}'
+                             f' of {root.nbytes} bytes ({tuple(tensor.shape)} {tensor.dtype} on {tensor.device})')
+        return start + base + at
 
     def prepare(self, count=1):
         for _ in range(count):

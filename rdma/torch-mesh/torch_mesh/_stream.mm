@@ -141,8 +141,8 @@ static int64_t pipeline(const std::string &source, const std::string &function,
 // address (the lease or stream page holding it: nccl.h ncclMeshMemBuffer)
 static MetalRunBinding bound(const pybind11::handle &operand, uint32_t index, uint64_t offset,
                              std::vector<at::Tensor> &held) {
-  if (pybind11::isinstance<at::Tensor>(operand)) {
-    const at::Tensor t = operand.cast<at::Tensor>();
+  if (THPVariable_Check(operand.ptr())) { // torch's caster is no registered pybind type: isinstance<at::Tensor> is false
+    const at::Tensor t = THPVariable_Unpack(operand.ptr());
     TORCH_CHECK(t.is_mps(), "a run binding is an MPS region tensor");
     held.push_back(t);
     return {at::native::mps::getMTLBufferStorage(t), (NSUInteger)(t.storage_offset() * t.element_size() + offset), index};
