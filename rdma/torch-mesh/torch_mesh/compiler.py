@@ -622,9 +622,12 @@ class Template:
                     for k, s in enumerate(command.steps):
                         if s['kind'] == 'copy' and (r is None or s['round'] == r):
                             s['event'] = event('landed', c, k)
-                            over = r is not None and any(x['kind'] == 'send' and x['round'] < r and x['root'] is s['root'] and
-                                                         x['at'] < s['at'] + s['bytes'] and s['at'] < x['at'] + x['bytes']
-                                                         for x in command.steps)
+                            # every all-reduce COPY lands in a root of its own and is placed by a copy the solve orders: a
+                            # landing straight into the operand is a write from the chunk's post, so it could come before
+                            # the program's own write of the operand and be overwritten by it (allreduce-2026-11-03 run-9:
+                            # x written in the program before its sum, every element wrong on two ranks in a skewed
+                            # repeat), and a sum over bytes an earlier round sent must wait for those SENDs (run-6)
+                            over = r is not None
                             if over:
                                 # an all-reduce's gathered sum over bytes an earlier round sent (a partial sent up): it
                                 # lands in a root of its own and a copy places it once those SENDs have completed (the
