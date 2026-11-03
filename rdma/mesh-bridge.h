@@ -97,17 +97,10 @@ static inline int gate_holds(const struct send_gate *gate,struct frames f){
 }
 static inline void gate_post(struct send_gate *gate,struct frames f){ gate->posted.n+=f.n; }
 static inline void gate_retire(struct send_gate *gate,struct frames f){ gate->retired.n+=f.n;gate->completions++; }
-/* A lane counts requests and frame credits separately. Variable byte lengths
-   consume ceil(bytes/MESH_FRAME) frames; MESH_LANE_UNITS limits outstanding
-   requests independently. Both directions'
-   WR IDs carry the region offset of their retained descriptor. */
+/* A lane counts requests and frame credits separately (the queue's depths): a unit, one page, consumes
+   ceil(page/MESH_FRAME) frames; MESH_LANE_UNITS limits outstanding requests independently.  Both directions' WR IDs
+   carry the unit's position on its list over the holding (struct walk). */
 struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; };
-/* An entry as the walk reads it from its call's tables: its resolved span table, `unit` its first unit over
-   this holding; every dependency/completion prefix counts units. `after` is the
-   length of the compiled prerequisite list, identical for both directions */
-struct taken { struct mesh_dma_span *spans; struct mesh_units base,unit,spans_base; uint64_t step;
-               const _Atomic uint64_t *word,*spans_word;
-               uint64_t after; const struct mesh_zwoggle_after *afters; };
 /* Unit p goes on lane p mod MESH_STREAM_LANES as unit p/lanes there.
    Only the contiguous completed prefix across both lanes becomes available. */
 _Static_assert(MESH_STREAM_LANES>=1 && MESH_STREAM_LANES<=2*MESH_STREAM_PAIRS,"a stream's lanes, of its pair");
@@ -116,19 +109,13 @@ static inline uint64_t lanes_through(const uint64_t *u){
   for(uint32_t j=1;j<MESH_STREAM_LANES;j++)g=MIN(g,u[j]);
   return g;
 }
-/* A list's walk over its holding's linked call tables (design/zorvek.md zinth, mesh.h struct mesh_zwoggle):
-   `count` the logical units completed told; next/through each lane's logical
-   next/completed positions, independent of physical requests. tail is the
-   last outstanding span on that lane, or NULL. Masked cuts extend that span's
-   completion coverage; with no request outstanding they complete directly.
-   `chain` its place in the tables
-   (mesh-graph.h mesh_graph_chain: a node a call's tables, an item an entry of its list, its positions the holding's
-   units, the nodes left the list's calls left), `current` the entry holding the unit last asked for, read from the
-   call's tables (mesh-link.c walk_chain). The bridge's 4,096-entry rings of entries copied from the holder's
-   presented lists are deleted: every holder links its tables */
+/* A list's walk over its holding's linked occurrence tables (mesh.h struct mesh_zwoggle): `count` the units completed
+   told; next/through each lane's next unit to post and the position its completions reached (a lane's units in order:
+   unit q, posted with q its work request's id, completes the lane through q + MESH_STREAM_LANES); `chain` each lane's
+   place in the tables (mesh-graph.h mesh_graph_chain: a node an occurrence's table, an item a row of its list, a row a
+   unit, the nodes left the tables the list left).  Every holder links its tables; the bridge copies nothing. */
 struct walk { struct mesh_units count; uint64_t next[MESH_STREAM_LANES],through[MESH_STREAM_LANES];
-              struct mesh_dma_span *tail[MESH_STREAM_LANES];
-              struct mesh_graph_chain chain[MESH_STREAM_LANES]; struct taken current; };
+              struct mesh_graph_chain chain[MESH_STREAM_LANES]; };
 /* design/transport.md section 14: a holding's state on its stream at its port's progress thread: none (`HOLD_NONE`);
    served (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the next pass has taken its lanes'
    completions (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served

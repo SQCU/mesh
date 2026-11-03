@@ -64,32 +64,16 @@
    none, so it needs the node's bridge running and fails as ncclMemAlloc does (Memory, below): every client slot held,
    no region of a bridge that runs, or a lease of a bridge that stopped still held.
 
-   Programs.  A communicator's programs are a table of compiled collectives, operands made ahead of time (mesh-plan.h
-   struct mesh_program): the caller's own (ncclMeshCommInitRank), or else the structural one, compiled on its map at its
-   first call that needs it, along the caller's paths (ncclMeshCommInitRank) or else the map's shortest-path trees (each
-   member's in-tree of the routes between its members): the single-phase all-reduce (each member's sum up its own tree; the
-   direct exchange where every two members are linked), the reduce-scatter and the all-gather (segment s up and down
-   s's trees) and each root's reduce and broadcast, every one uncut (a step's piece one entry, any size, which the
-   bridge alone cuts into SENDs).  The communicator's configuration names other forms of a collective ahead of these
-   (ncclMeshCommForms, below: the packed trees, the two-phase all-reduce, chunked pipelining, each below a size bound),
-   compiled first in the same table.  A call runs its table's first program of its collective (and root) whose size
-   bound its operand is under; these choices are resolved during declaration preparation.  Every member compiles the same programs from the same map and the same
-   operands (every rank passes the same paths, programs and forms), so nothing is compared at run time.  A declared group
-   walks each call's program (mesh_program_steps_cut: the
-   program's typed cuts and declared WRITE endpoints), lowered to explicit physical cable/range
-   records on its communicator's channels: one holding per cable, each transfer one entry of its send
-   list or landing list of immutable exact byte spans. Each direction has one
-   matching DMA-unit sequence at both ends, in compiled dependency order,
-   its tables linked to the bridge at the group's place in its program (mesh.h struct mesh_zwoggle,
-   design/zorvek.md zinth).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
-   waits end at a revoke, the link's loss or their deadlines, and their GPU waits at their bounds (a deadline past
-   which the program ends: design/eager-execution.md, assumption A4), and its holding's end with units outstanding takes its stream out of its link's pairing
-   (design/transport.md section 14).  A publication
-   raises the holding's `ready` past the entry; a landing is awaited on its `landed`.
-   The data program owns source/relay lifetimes; there are no `sent` waits (design/pages-and-functions.md, Freeing 6-7).  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
-   payload is checked, so calls that do not pair (unequal counts, different collectives or orders) are the caller's
-   error and are not detected. Uneven segments are declared by the same collective kinds
-   with an explicit count vector shared by the ranks.
+   Collectives (design/drift-2026-11-03.md, the one solver).  A group of calls is declared once, in pages
+   (ncclMeshCommDeclare): the planner states each call's page moves over the communicator's trees (mesh-plan.h
+   mesh_page_moves), every rank alike from the same map and segments, so nothing is compared at run time.  The run's
+   solve orders, places, puts on channels and guards them; each occurrence's channel entries are written as tables on
+   the pages the solve placed and linked to each channel's chain at once (ncclMeshCommLowerOccurrence), every row's
+   guard a word and an absolute threshold (a landed prefix, a SEND's completion, the run's production word), which the
+   bridge checks and nothing else.  A member that fails, is revoked or ends mid-group sends nothing more, and its
+   holding's end with units outstanding takes its stream out of its link's pairing (design/transport.md section 14).
+   Nothing credits a SEND: the hardware holds it until its receive is posted.  No payload is checked, so calls that do
+   not pair (unequal segments, different collectives or orders) are the caller's error and are not detected.
 
    Recording. ncclMeshCommPlan declares a complete function's collective calls and bindings.
    ncclMeshCommLower selects an occurrence's pages and transfers. ncclMeshCommSources
@@ -185,7 +169,7 @@
    Mutating them earlier is invalid. The compiled page assignment includes local GPU reads,
    incoming writes and destination consumers before it assigns an overwrite. A landing into bytes a SEND reads (an
    in-place collective's later step, a later call over the same pages) is posted by the bridge only once that SEND
-   completed, its channel's `sent` at its end (mesh.h struct mesh_zwoggle_entry `after`), a wait the compiler states
+   completed, its channel's `sent` at its end (the entry's guard, mesh-plan.h struct mesh_channel_entry), a wait the compiler states
    and orders (an exchange in place, each side's landing on its own SEND, is refused as a value). Logical free defers
    physical reuse under these source obligations without adding a receipt, acknowledgment or data-program wait.
    ncclCommRegister refuses a buffer outside the region.  Design: design/transport.md.
@@ -228,8 +212,9 @@ extern "C" {
 #include <limits.h>
 #include <stdint.h>
 #include <stddef.h>
-struct mesh_program;
 struct mesh_trees;
+struct mesh_page_move;
+struct mesh_channel_entry;
 
 /* design/transport.md: the most loads any GPU wait makes, and the bound of a stream whose polls is 0 or
    above it: MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock
@@ -284,23 +269,21 @@ typedef struct {
   size_t invocation;
 } ncclMeshStream;
 
-/* design/zorvek.md: the collective's lowering. A call of a declared group: its collective (mesh-plan.h MESH_ALLREDUCE,
-   MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER), element type (ncclDataType_t), reduction op, root,
-   elements, and each rank's elements of an all-gather or a reduce-scatter (a size a rank, summing to `elements`;
-   NULL: the program's own cut) */
-typedef struct { uint32_t what, type, op, root; uint64_t elements; const uint64_t *segments; } ncclMeshCollective;
-/* a step of a declared group at this rank (mesh-plan.h struct mesh_step): its call, its channel (the communicator's
-   channel toward its peer), op (MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY), round, buffer (0 the call's
-   operand and result, 1 and more its scratch) and its bytes [first, first + bytes) in that buffer: the run's transport
-   accesses, placed by the solve */
-typedef struct { uint32_t call, channel, op, round, buffer; uint64_t first, bytes; } ncclMeshTransfer;
-/* a node an occurrence gives the run: a link (`word` the chain's link word, `value` the table's region offset), a
-   release (`word` the channel's ready, stored `value` once the step's bytes are written), a landing (present once the
-   channel's landed `word` reaches `value`) or a SEND's completion (present once the channel's sent `word` reaches
-   `value`: its source bytes may be written again); one of each a channel an occurrence, `transfer` its channel
-   (UINT32_MAX for a link) */
-enum { ncclMeshNodeLink, ncclMeshNodeRelease, ncclMeshNodeLanding, ncclMeshNodeSent };
-typedef struct { uint32_t kind, transfer, channel; void *word; uint64_t value; uint32_t round; } ncclMeshNode; /* round: the steps' round it ends */
+/* design/drift-2026-11-03.md: the collective's lowering. A call of a declared group, in pages: its collective `what`
+   (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER) and `segment`, each of
+   the communicator's ranks' pages of its operand, rank r's at segment[r] (mesh-plan.h mesh_page_moves's operand: a
+   reduce's or a broadcast's root holds all of them and every other rank none; an all-reduce's are summed alone), the
+   program's compile's page map, read at the declaration alone.  Changed from elements of an element type at a root,
+   with each rank's elements or none (an even cut of the operand's pages over the ranks, each rank's rounded up on its
+   own, decided in the library by kind): the library holds no byte algebra and makes no cut. */
+typedef struct { uint32_t what; const uint64_t *segment; } ncclMeshCollective;
+/* The counts of one of the communicator's channels that the run reads (ncclMeshCommCounts): its stream's `sent` and
+   `landed` (mesh.h struct mesh_stream), its SENDs completed and its landings landed in unit order, units over the
+   holding (a row of its lists a unit, in the order its tables are linked: ncclMeshCommLowerOccurrence).  Changed from
+   ncclMeshLink: its link word and table (the run's store published an occurrence), its counts' values at the
+   occurrence's start (every threshold counted from them) and its `ready` (each channel's own release of what the run
+   produced) are deleted. */
+typedef struct { const void *sent, *landed; } ncclMeshCounts;
 /* Opaque handle to communicator */
 typedef struct ncclComm* ncclComm_t;
 #define NCCL_COMM_NULL NULL
@@ -509,18 +492,37 @@ const char* pncclGetLastError(ncclComm_t comm);
 /* Checks whether the comm has encountered any asynchronous errors */
 ncclResult_t  ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError);
 ncclResult_t pncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError);
-/* design/zorvek.md: a group of `count` calls declared once, routed along the communicator's trees; *definition names it */
+/* design/drift-2026-11-03.md: a group of `count` calls declared once, each routed along the communicator's trees as
+   page moves (mesh-plan.h mesh_page_moves, the planner); *definition names it */
 ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *calls, size_t count, uint64_t *definition);
-/* its steps at this rank, written up to `capacity`, *count their number */
-ncclResult_t ncclMeshCommSteps(ncclComm_t comm, uint64_t definition, ncclMeshTransfer *out, size_t capacity, size_t *count);
-/* an occurrence lowered onto its placed bytes (address[s]: step s's bytes, a SEND's source, a COPY's destination, a
-   REDUCE's landing): its tables laid and its nodes written up to `capacity`, *count their number. The solve's edges
-   decide the rest: after[a] = (SEND step, landing step), that SEND completes before that landing is posted;
-   forward[f] = (SEND step, COPY step), that SEND's bytes are what that COPY of this occurrence landed, so each of its
-   units goes once the COPY's unit under it has landed (the bridge's forward, no release). */
-ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, void *const *address,
-                                         const uint32_t (*after)[2], size_t afters, const uint32_t (*forward)[2],
-                                         size_t forwards, ncclMeshNode *node, size_t capacity, size_t *count);
+/* call `call`'s page moves, every rank's (mesh-plan.h struct mesh_page_move: pages of the call's operand, a link the
+   index of a move of the same list), written up to `capacity`, *count their number: what the run's solve orders,
+   places, puts on channels and guards */
+ncclResult_t ncclMeshCommSteps(ncclComm_t comm, uint64_t definition, size_t call, struct mesh_page_move *out,
+                               size_t capacity, size_t *count);
+/* an occurrence lowered from the run's solve: entry[0 .. entries), this rank's channel entries in the solve's one
+   order (mesh-plan.h struct mesh_channel_entry).  A channel's entries, in that order, are cut into tables of
+   ncclMeshCommTableRows rows each (mesh.h struct mesh_zwoggle: its SENDs one list, its landings the other), a table a
+   page: table[0 ..) the region pages (page-table rows) the solve placed for them, the channels' in channel order and a
+   channel's in its tables' order, ceil(n / rows) of them for a channel of n entries.  A table's page is the bridge's
+   until both of its stream's `taken` counts have passed it.  A row is its entry translated and nothing else: its page's
+   region offset; and where its threshold is not 0, its guard's word's region offset and the threshold as given.  The
+   guard's word: MESH_WORD_SENT or MESH_WORD_LANDED, that count of this rank's channel `guard` (ncclMeshCommCounts); or
+   MESH_WORD_READY, the first word of region page `guard`, the run's own, which it stores once a production event
+   (every channel's SENDs of what that event produced guard on it) and which starts below every threshold naming it.
+   The thresholds are absolute, the solve's: a channel's k-th SEND over the holding is unit k of its `sent` and its
+   k-th landing unit k of its `landed` (k from 0, the holding's first; a channel's units are its tables' rows in the
+   order the occurrences are lowered), so a guard names any unit of any occurrence: a forward on what an earlier one
+   landed, a landing on an earlier one's SEND of its page.  Each channel's tables are linked to its chain here, their
+   rows written first (one release store a channel): the bridge posts their unguarded landings as soon as the lane's
+   queue has room, so a SEND is guarded on what produced its page.  It decides nothing: the solve's order, channels,
+   pages, guards and table pages are the tables'. */
+ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, const struct mesh_channel_entry *entry, size_t entries,
+                                         const uint64_t *table);
+/* the rows a table page holds (ncclMeshCommLowerOccurrence: the page table's quantum less a table's header, in rows) */
+ncclResult_t ncclMeshCommTableRows(ncclComm_t comm, size_t *rows);
+/* counts[h] for each of the communicator's channels h (ncclMeshCommChannels' count): the words the run reads */
+ncclResult_t ncclMeshCommCounts(ncclComm_t comm, ncclMeshCounts *counts);
 
 /* Gets the number of ranks in the communicator clique. */
 ncclResult_t  ncclCommCount(const ncclComm_t comm, int* count);
@@ -618,56 +620,22 @@ ncclResult_t pncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm);
    bootstrap at `commId`, the root's host:port (ncclGetUniqueId, or NCCL_COMM_ID's form; the root listens on that host
    alone where it is an IPv6 address), which the caller hands every rank, its two gathers holding the communicator's
    streams, rank `rank` of `nranks` on the bridge of its own node (each rank's node its bridge's, gathered there).
-   `programs` its compiled collectives (mesh-plan.h struct mesh_program, copied, kept for its life; a call runs the
-   first whose collective, and a rooted one's root, is the call's and whose `below` its bytes are under, 0 any size), or
-   with none (count 0) the structural table (above), every collective along `paths` (its routing tables: each member's
-   trees; NULL: the map's shortest-path trees), checked against its map; `small` not read; `name` the communicator's
-   (NULL: commId's).  Every rank passes the same commId,
-   nranks, paths, programs and name.  `config` NULL, or its `blocking` not 0, is a blocking init.  With `blocking` 0 it
+   `paths` (NULL: none) copied and kept for its life, checked against its map; `name` the communicator's (NULL:
+   commId's).  Every rank passes the same commId, nranks, paths and name.  `config` NULL, or its `blocking` not 0, is
+   a blocking init.  With `blocking` 0 it
    is NCCL's non-blocking init: *comm is set at once and the init runs on a thread of its own, the call returning
    ncclInProgress (ncclSystemError where no thread could run it); ncclCommGetAsyncError gives ncclInProgress until the
    init ends, then its result, its failure named (ncclGetLastError).  No call takes comm before then but
    ncclCommGetAsyncError, ncclCommRevoke, ncclCommAbort and ncclCommDestroy: a revoke shuts its bootstrap's sockets
    down, and its connect and its root's accept read the revoke at each 100 ms look, so the init ends as a value with
    what it held let go; ncclCommAbort or ncclCommDestroy then joins its thread and frees comm, failed or not.
-   ncclCommInitRank is this call with no paths, no programs, small 0, no name and no config, and ncclCommInitRankConfig
-   the same with the caller's config (of which only `blocking` is read). */
-typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
+   ncclCommInitRank is this call with no paths, no name and no config, and ncclCommInitRankConfig the same with the
+   caller's config (of which only `blocking` is read).  Deleted with the declared groups' page moves
+   (design/drift-2026-11-03.md): its `programs` (ncclMeshProgram, compiled mesh-plan.h struct mesh_program, deleted
+   there) and `small`, and the configuration's forms (ncclMeshForm, ncclMeshCommForms): a call ran the first program
+   or form whose byte bound it was under, a size case and a second routing beside mesh_page_moves. */
 ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, const struct mesh_trees* paths,
-                                  const ncclMeshProgram* programs, int count, uint64_t small, const char* name, ncclConfig_t* config);
-/* A collective's form, an entry of a communicator's configuration (ncclMeshCommForms): `collective` (mesh-plan.h
-   MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER) at `root` (a reduce's or a
-   broadcast's; -1 every root; not read for the others), for calls of fewer bytes than `below` (0: any size), compiled
-   (mesh-plan.h mesh_compile) along `trees`: ncclMeshTreesOwn the communicator's own (its paths, else the map's packed
-   trees, the default's), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
-   both the caller's: Blink's packing [Wang et al. 2020], every link a share), a segment cut among its root's trees by
-   `shares` (root r's k-th tree in the packing's order, heaviest first, or the communicator's trees' order, shares[r x
-   most + k], each 0 or more, a tree of 0 or past `most` carrying none, for the communicator's ranks; NULL: the
-   packing's flows); an all-reduce `whole` (1: single-phase, each member's sum up its own tree, its heaviest share's; 0: the
-   reduce-scatter and then the all-gather [Patarasuk & Yuan 2009; Rabenseifner 2004]); each tree's part one entry a
-   hop, a relay sending each page on as it lands (mesh-plan.h mesh_compile). */
-typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1 } ncclMeshTrees;
-typedef struct {
-  int collective;
-  int root;
-  uint64_t below;
-  ncclMeshTrees trees;
-  int whole;
-  uint32_t most;
-  double eps;
-  const double* shares;
-} ncclMeshForm;
-/* A communicator's configuration operand: its forms, in order, compiled ahead of its structural table at each map read
-   (Programs, above), so a call runs the first form of its collective (and root) whose bound its bytes are under, else
-   the caller's programs (a communicator over its own, ncclMeshCommInitRank's) or the default; no entry, no form (the
-   default for every collective and size).  Taken at the communicator's next group (or ncclMeshCommPlan), copied
-   with their shares; count 0 clears them.  Every rank passes the same forms at the same point between its groups (its
-   members compile its table alike from them); its splits and shrinks keep them (a form at a root past a split's ranks
-   makes no entry there).  A share is 0 or more (a tree of share 0 carries none of its root's segment); a form whose
-   root's trees all take share 0 fails as a value where it is compiled.  The forms of mesh cc8a6f8e^'s default table (its tree sets, single-phase or two-phase, 1 to 64 chunks,
-   by size class), named by the caller's configuration where a price chose them: the caller's configuration document
-   is the one place a form is decided (metal-microbench docs/principles.md section 6). */
-ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
+                                  const char* name, ncclConfig_t* config);
 /* design/whole-function.md#interface: the communicator's fabric and a pair's write paths (mesh-fabric.h) */
 ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);
 /* Configuration-time inspection of the installed paths, including exact integer

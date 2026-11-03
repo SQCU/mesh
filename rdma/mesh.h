@@ -22,7 +22,8 @@
    its pairing on its lane p mod 2, posted in that order (design/transport.md section 14).  134: a holding ends with
    nothing outstanding on its stream's lanes, or the stream is never live again in the pairing (a link none of whose
    streams is live is lost and pairs again from 0); no communicator presents filler. 135: each lane unit is an exact
-   compiler-declared byte extent; matching SEND/receive lengths and order are fixed by the shared plan. */
+   compiler-declared byte extent; matching SEND/receive lengths and order are fixed by the shared plan.  136: every lane
+   unit is one whole page again (132), its row the run's solve's channel entry (mesh.h struct mesh_zwoggle_entry). */
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
    154 replaces row-range transport entries and row pins with immutable byte spans and interval pins. */
@@ -80,46 +81,22 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==MESH_SIZEOF_MESH_PAGE_ENTRY && _Alignof(struct mesh_page_entry)==MESH_ALIGNOF_MESH_PAGE_ENTRY &&
   offsetof(struct mesh_page_entry,address)==MESH_OFFSET_MESH_PAGE_ENTRY_ADDRESS,"mesh_page_entry");
-/* Layout 162: resolved page payloads, in the jointly compiled unit order.
-   offset is relative to the region base and never crosses a registration
-   extent. A numerical mask producer may set bytes to zero; both endpoints
-   consume the same mask before using that unit. No filler DMA is posted.
-   through starts at the next position on this unit's lane. The bridge extends
-   it across subsequent masked units while this request is outstanding. A
-   completion names this descriptor directly; no completion lookup list is
-   built. Full pages and masked pages use this same representation. */
+/* A byte span of the region, `offset` from its base (mesh_dma_span_valid: within one registration extent).  Layout
+   163: no bridge table holds spans (struct mesh_zwoggle_entry), and nothing reads `through`. */
 struct mesh_dma_span { uint64_t offset,bytes,through; };
-struct mesh_entry { uint64_t spans,units,word,base,step,spans_word,spans_base; };
 _Static_assert(sizeof(struct mesh_dma_span)==MESH_SIZEOF_MESH_DMA_SPAN,"mesh_dma_span ABI");
-_Static_assert(sizeof(struct mesh_entry)==MESH_SIZEOF_MESH_ENTRY,"mesh_entry ABI");
-/* Descriptor i is available at spans_word >= spans_base+i+1 in both
-   directions. Static descriptors name an explicitly completed word; computed
-   lengths name their producer's prefix. An active SEND additionally requires
-   word > base+i*step (word 0: stream ready). Packet prefixes use step 1;
-   one scalar producer for the whole selection uses step 0. A receive's
-   word/base/step are unused.
-   Masked units touch no payload and need neither payload nor overwrite
-   prerequisites. Descriptor storage outlives every posted DMA and completion
-   read. `taken` does not release this table. */
-/* A prepared occurrence's tables on one stream: SEND and landing entries
-   (`entries`, region offsets; `count` of each list), and `next`, the region
-   offset of the next occurrence's tables. Preparation writes every entry's
-   absolute readiness base once. Execution only publishes the prepared link;
-   the bridge reads the base directly, with no per-call base table.
-   The stream's `zwoggle` is its first occurrence's tables. The bridge walks
-   this chain in order and counts in `taken` the lists it has left. Links may
-   be published in any order; their prepared predecessors fix the chain order.
-   An entry's `after` is the region offset of its own list (0: none): a count n, then n struct
-   mesh_zwoggle_after, every one holding (its word at its base) before any unit of the entry is posted, the holder
-   fixing each base during preparation. A SEND's: the whole consumption of each receive its step follows and does not
-   forward (a COPY's channel's `landed`, a combine's summed word, at that receive's end).  A landing's
-   (design/pages-and-functions.md Freeing 6-7, a page written again only once its last outgoing DMA read ended): on
-   each channel a SEND reads bytes it writes, that channel's `sent` at the end of the last such SEND, an earlier step's
-   of its call or an earlier call's of another issue over the caller's pages, so that SEND has completed.
-   Preparation resolves the complete relation. There is no channel-mask decoding or fixed prerequisite count in
-   execution; SEND and landing lists have the same counted representation. */
-struct mesh_zwoggle_after { uint64_t word, base; };
-struct mesh_zwoggle_entry { struct mesh_entry entry; uint64_t after; };
+/* Layout 163 (design/drift-2026-11-03.md): an occurrence's table on one stream, the lowering's translation of the
+   run's solve's channel entries (mesh-plan.h struct mesh_channel_entry) on that stream, its SENDs (`land` 0) and its
+   landings (`land` 1) each a list in the solve's order: `entries[land]` the region offset of the list's rows and
+   `count[land]` their number; `next` the region offset of the next occurrence's table on the stream (0 until it is
+   linked), the stream's `zwoggle` its first.  A row is one unit, one whole page (the page table's quantum, block x
+   pgsz bytes): `offset` the page's region offset, a SEND's source or a landing's destination; posted once the count
+   at region offset `word` (a stream's `ready`, `sent` or `landed`) reaches `threshold` (0: at once), the solve's
+   guard.  The k-th row of a stream's lists over its holding is unit k of its `ready` and `sent` (SENDs) or of its
+   `landed` (landings), on lane k mod MESH_STREAM_LANES.  The bridge posts a list's rows in order, checks each row's
+   guard and nothing else of it, and counts in `taken` the tables it has left. */
+struct mesh_zwoggle_entry { uint64_t offset, word, threshold; };
+_Static_assert(sizeof(struct mesh_zwoggle_entry)==MESH_SIZEOF_MESH_ZWOGGLE_ENTRY,"mesh_zwoggle_entry ABI");
 struct mesh_zwoggle { _Atomic uint64_t next; uint64_t entries[2], count[2]; };
 struct mesh_units { uint64_t n; };
 static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }

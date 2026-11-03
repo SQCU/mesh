@@ -25,28 +25,21 @@ static int wait_for(const struct mesh_stream_view *v,uint64_t value,uint64_t thr
 /* No timed request reads or changes a descriptor. One immutable source is read
    repeatedly; every preposted landing has separate backing, so even two hardware
    lanes can never overwrite the same destination. Tables are local metadata.
-   design/zorvek.md zinth: the probe is one call, its tables (mesh.h struct mesh_zwoggle: its SEND entry and its landing
-   entry, then their spans) linked as the holding's first, the stream's `zwoggle`; its SENDs go as `ready` allows */
+   The probe is one occurrence, its table (mesh.h struct mesh_zwoggle: its `rounds` SEND rows, then its `rounds`
+   landing rows, a page each) linked as the holding's first, the stream's `zwoggle`; SEND k's guard `ready` at k + 1 */
 static void lay(struct mesh_ctx *c,const struct mesh_stream_view *v,uint32_t rounds,
                 struct mesh_section data,struct mesh_section table){
   struct mesh_zwoggle *tables=mesh_section_address(c,table,0);
-  struct mesh_zwoggle_entry *entries=(struct mesh_zwoggle_entry *)(tables+1);
-  struct mesh_dma_span *spans=(struct mesh_dma_span *)(entries+2);
-  _Atomic uint64_t *span_ready=(_Atomic uint64_t *)(spans+2*rounds);
-  atomic_store_explicit(span_ready,rounds,memory_order_relaxed);
-  const uint64_t source=mesh_page_offset(c->M,data.first,0);
+  struct mesh_zwoggle_entry *rows=(struct mesh_zwoggle_entry *)(tables+1);
+  const uint64_t source=mesh_page_offset(c->M,data.first,0),ready=(uint64_t)((char *)v->ready-(char *)c->M);
   for(uint32_t k=0;k<rounds;k++){
-    spans[k]=(struct mesh_dma_span){.offset=source,.bytes=data.bytes,.through=(uint64_t)k+MESH_STREAM_LANES};
-    spans[rounds+k]=(struct mesh_dma_span){
-      .offset=mesh_page_offset(c->M,data.first+(k+1)*data.stride,0),.bytes=data.bytes,.through=(uint64_t)k+MESH_STREAM_LANES};
+    rows[k]=(struct mesh_zwoggle_entry){source,ready,(uint64_t)k+1};
+    rows[rounds+k]=(struct mesh_zwoggle_entry){mesh_page_offset(c->M,data.first+(k+1)*data.stride,0),0,0};
   }
-  const uint64_t metadata=mesh_page_offset(c->M,table.first,0),first=metadata+(uint64_t)((char *)spans-(char *)tables);
-  const uint64_t ready=metadata+(uint64_t)((char *)span_ready-(char *)tables);
-  entries[0]=(struct mesh_zwoggle_entry){.entry={.spans=first,.units=rounds,.step=1,.spans_word=ready}};
-  entries[1]=(struct mesh_zwoggle_entry){.entry={.spans=first+rounds*sizeof *spans,.units=rounds,.spans_word=ready}};
+  const uint64_t metadata=mesh_page_offset(c->M,table.first,0);
   atomic_store_explicit(&tables->next,0,memory_order_relaxed);
-  tables->entries[0]=metadata+sizeof *tables;tables->entries[1]=tables->entries[0]+sizeof *entries;
-  tables->count[0]=tables->count[1]=1;
+  tables->entries[0]=metadata+sizeof *tables;tables->entries[1]=tables->entries[0]+rounds*sizeof *rows;
+  tables->count[0]=tables->count[1]=rounds;
   atomic_store_explicit(v->zwoggle,metadata,memory_order_release);
 }
 
@@ -95,7 +88,7 @@ int mesh_diagnostic_quiet(int argc,char **argv){
   struct mesh_stream_view v;
   if(role<0 || role>1 || !rounds || !ngaps ||
      mesh_section_create(&c,page,rounds+1,MESH_BACKING_PAGES,&data) ||
-     mesh_section_create(&c,sizeof(struct mesh_zwoggle)+2*sizeof(struct mesh_zwoggle_entry)+2*rounds*sizeof(struct mesh_dma_span)+sizeof(uint64_t),1,
+     mesh_section_create(&c,sizeof(struct mesh_zwoggle)+2*rounds*sizeof(struct mesh_zwoggle_entry),1,
                          MESH_BACKING_LINEAR,&table) ||
      mesh_stream_take(&c,wire,&stream) || mesh_stream_view(&c,stream,&v)){
     fprintf(stderr,"quiet: no lease or no stream %llu\n",(unsigned long long)wire);
