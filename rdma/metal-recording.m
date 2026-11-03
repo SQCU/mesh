@@ -1237,6 +1237,7 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
     NSUInteger declaredCommand;
     NSUInteger realizedPart; // its command buffer, mesh_graph_realize's
     uint64_t solveEvent; // the run's solve's event it realizes (MetalScheduleEvent); UINT64_MAX none
+    NSData *commandEvents; // a replay range's: each command's event, by its index in the replay
     _Atomic unsigned remaining;
     _Atomic int status;
     NSError *error;
@@ -1246,7 +1247,7 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
 @implementation MetalWork
 - (void)dealloc {
     if(task.release)task.release(task.context);
-    [accesses release];[encode release];[operation release];[dependencies release];[successors release];
+    [accesses release];[commandEvents release];[encode release];[operation release];[dependencies release];[successors release];
     [event release];[fence release];[error release];[hostDependencies release];[gpuDependencies release];[super dealloc];
 }
 @end
@@ -1257,6 +1258,7 @@ struct MetalSchedule {
     // where given, the only order; the nodes' reaches decide none (design/page-maps-2026-11-02.md, step 5)
     NSMutableData *edges; // uint64_t pairs: (earlier event, later event), the solve's
     uint64_t solveEvent;  // the event the next appended nodes realize
+    NSData *commandEvents; // the next appended replay's commands' events (MetalScheduleCommandEvents)
     BOOL realized; NSUInteger realizedPart; // parts are mesh_graph_realize's, cut where its part changes
     struct MetalSchedule *submit, *firstSubmission, *lastSubmission;
     id<MTLDevice> device;
@@ -1387,6 +1389,11 @@ id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *s) { return Met
 // metal-recording.h MetalScheduleEvent
 void MetalScheduleEvent(struct MetalSchedule *s,uint64_t event) {
     struct MetalSchedule *root=s->root?s->root:s;root->solveEvent=event;
+}
+// metal-recording.h MetalScheduleCommandEvents
+void MetalScheduleCommandEvents(struct MetalSchedule *s,const uint64_t *events,size_t count) {
+    struct MetalSchedule *root=s->root?s->root:s;
+    [root->commandEvents release];root->commandEvents=count?[[NSData alloc] initWithBytes:events length:count*sizeof *events]:nil;
 }
 // metal-recording.h MetalScheduleEdges
 void MetalScheduleEdges(struct MetalSchedule *s,const uint64_t (*edges)[2],size_t count) {
@@ -1569,6 +1576,7 @@ static void MetalScheduleRange(struct MetalSchedule *root,struct MetalReplay *re
     [root->owners addObject:replay->owner];[root->owners addObject:replay->residency];
     MetalWork *work=MetalScheduleWork(root,nil,nil,nil);
     memcpy(work->replay,replay,sizeof *replay);work->invocation=t;work->first=from;work->end=to;
+    work->commandEvents=[root->commandEvents retain];
 }
 
 // metal-recording.h MetalScheduleReplay: commands `commands` of a replay's first invocation, a range of the schedule's work
@@ -1612,6 +1620,11 @@ static NSArray *MetalScheduleExpand(struct MetalSchedule *root,NSArray *ranges) 
             MetalWork *work=MetalScheduleWork(root,accesses,nil,nil);
             memcpy(work->replay,&replay,sizeof replay);work->invocation=range->invocation;work->first=c;work->end=c+1;
             work->solveEvent=range->solveEvent;
+            if(range->commandEvents) {
+                if((c+1)*sizeof(uint64_t)>range->commandEvents.length)
+                    [NSException raise:NSInvalidArgumentException format:@"a replay command with no solve event"];
+                work->solveEvent=((const uint64_t *)range->commandEvents.bytes)[c];
+            }
         }
     }
     NSArray *nodes=[[root->work copy] autorelease];[root->work removeAllObjects];return nodes;
@@ -2213,7 +2226,7 @@ void MetalScheduleFree(struct MetalSchedule *s) {
     [s->event release];[s->start release];[s->listener release];[s->work release];[s->hosts release];[s->waits release];
     [s->declarations release];
     [s->hostDependencies release];[s->partDependencies release];
-    [s->history release];
+    [s->history release];[s->commandEvents release];[s->edges release];
     [s->queueAccesses release];[s->parts release];[s->stamps release];[s->stampNames release];
     [s->completed release];[s->completionError release];[s->error release];[s->device release];[s->communicators release];
     [s->fenceStages release];[s->results release];free(s);

@@ -254,6 +254,8 @@ NSString *MetalPipelineName(id<MTLComputePipelineState>);
 // MetalScheduleEdges gives the solve's edges between events, the flush's only order. A node with no event, or an edge
 // that does not run forward in the nodes' order, is a defect at the producer, refused.
 void MetalScheduleEvent(struct MetalSchedule *, uint64_t event);
+// the solve events of the next appended replay's commands, by command index in the replay (count 0: none)
+void MetalScheduleCommandEvents(struct MetalSchedule *, const uint64_t *events, size_t count);
 void MetalScheduleEdges(struct MetalSchedule *, const uint64_t (*edges)[2], size_t count);
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *, const void *, size_t bytes, uint32_t index);
 void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
