@@ -7,12 +7,12 @@ source. The files measurement.md and the folders output_data/ and tools/ are in 
 ## What was measured
 
 A Thunderbolt controller that has sent nothing for a while is slow on its next frame. On the Mac mini, after 40-50 µs
-with nothing sent, a SEND took 6.2 µs to complete. With a frame every 5 µs it took 1.9 µs (measurement.md:3165-3178,
+with nothing sent, a SEND took 6.2 µs to complete. With a frame every 5 µs it took 1.9 µs (measurement.md:3184-3197,
 2026-10-17). Since version 133 the bridge sends no keepalive, by the operator's ruling of 2026-10-22
 (design/HETEROGENEOUS-LINKS.md section 10). So a link's first SEND after a quiet stretch pays this cost.
 
-tools/mesh/hourly/quiet.c times it through the bridge's interface (measurement.md:3451-3467; output_data/quiet-20261023,
-mesh 3d849a16, 2026-10-23 20:58Z). Each trip sends one 16 KiB page and gets one back. Before each trip the sender waits
+rdma/mesh-diagnostics.c `mesh_diagnostic_quiet` times it through the bridge's interface (measurement.md:3488-3511;
+output_data/quiet-20261023, mesh 3d849a16, 2026-10-23 20:58Z). Each trip sends one 16 KiB page and gets one back. Before each trip the sender waits
 0, 200, 2,000 or 5,000 µs, taken in turn trip by trip, about 198 trips a gap. "SEND" is the time from the page marked
 ready to its SEND done. "Trip" runs until the reply lands. A gap of 0 is the warm case. Medians, µs:
 
@@ -26,7 +26,7 @@ So quiet adds 1.8 to 4.9 µs to a SEND at the median. It adds 5.2 to 8.9 µs to 
 (output_data/quiet-20261023).
 
 On the m5ult2-Mini link alone, after 2 ms or more of quiet, about one trip in ten took 0.6 to 2.7 ms
-(measurement.md:3464-3467). After 0 or 200 µs its p90 trip was under 29 µs. From m5ult2 the SEND itself still ended in
+(measurement.md:3508-3511). After 0 or 200 µs its p90 trip was under 29 µs. From m5ult2 the SEND itself still ended in
 time (p90 9.88 µs after 2 ms), but the trip's p90 was 2,648 µs. From the Mini the SEND's p90 was 1,758.83 µs after
 2 ms (output_data/quiet-20261023). Its cause is not known.
 
@@ -48,7 +48,7 @@ Not within a run of the chain or the LSTM. Each crosses every step. The chain on
 The LSTM on three nodes takes 71.3-84.0 µs a tick (output_data/hourly/log.jsonl, run 20261023T2113Z). So no link they
 use is quiet 200 µs while they run. Shorter stretches can still cost. After 40-50 µs of quiet the Mini's SEND took
 6.2 µs, 4.3 µs more than with a frame every 5 µs (above). After 0-10 µs a 3 KB round trip read 12.8-13.8 µs, and
-after 40-160 µs it read 16.5-18.8 µs (gapprobe2, measurement.md:3171-3172). Stretches of 10-40 µs are not measured.
+after 40-160 µs it read 16.5-18.8 µs (gapprobe2, measurement.md:3190-3191). Stretches of 10-40 µs are not measured.
 Whatever they cost comes every step, so it is inside the measured step time.
 
 Four cases meet a quiet link. Costs are medians on the SEND unless the row says otherwise.
@@ -73,13 +73,13 @@ Four cases meet a quiet link. Costs are medians on the SEND unless the row says 
 ## 2. The size above which it doesn't matter
 
 "Doesn't matter" here means the cost is under 1% of the transfer's time on one cable. One cable moves 9.21-9.25 GB/s a
-direction (measurement.md:364, 2026-10-01). At 9.25 GB/s, each µs of cost needs 0.925 MB of transfer to fall under 1%.
+direction (measurement.md:383, 2026-10-01). At 9.25 GB/s, each µs of cost needs 0.925 MB of transfer to fall under 1%.
 Only the wire time is counted. A real transfer takes longer, so these sizes are upper bounds.
 
-The cost is fixed per transfer, paid once at its first page. It does not grow with size. The bridge sends every page,
-16 KiB, as a SEND of its own (design/transport.md sections 1 and 14). Only a transfer's first SEND follows the quiet.
+The cost is fixed per transfer, paid once at its first page. It does not grow with size. The bridge sends every page
+as a SEND of its own (rdma/mesh-link.c:85-95). Only a transfer's first SEND follows the quiet.
 The link is busy from then on, a page every 1.8 µs at 9.25 GB/s. A frame every 5 µs kept the Mini's SEND at 1.9 µs
-(measurement.md:3176-3178). So pages 1.8 µs apart stay warm. This is read from the records, not measured: no record
+(measurement.md:3195-3197). So pages 1.8 µs apart stay warm. This is read from the records, not measured: no record
 times a quiet transfer of more than one page.
 
 Each cell is the cost, then the size above which it is under 1% (output_data/quiet-20261023):
@@ -102,12 +102,13 @@ So above about 8 MB the cost is under 1% on every link, at the median and at the
 
 ## Sources
 
-- metal-microbench docs/measurement.md:363-364: round trips by size and the one-cable bandwidth, 2026-10-01.
-- metal-microbench docs/measurement.md:3165-3178: the Mini's controller after 40-50 µs of quiet, gapprobe2, and the
+- metal-microbench docs/measurement.md:382-383: round trips by size and the one-cable bandwidth, 2026-10-01.
+- metal-microbench docs/measurement.md:3184-3197: the Mini's controller after 40-50 µs of quiet, gapprobe2, and the
   keepalive's figures, 2026-10-17.
-- metal-microbench docs/measurement.md:3451-3467 (#the-quiet-probe): the quiet probe and its reading, 2026-10-23.
-- metal-microbench tools/mesh/hourly/quiet.c and output_data/quiet-20261023/: mesh 3d849a16, 2026-10-23 20:58Z.
+- metal-microbench docs/measurement.md:3488-3511 (#the-quiet-probe): the quiet probe and its reading, 2026-10-23.
+- rdma/mesh-diagnostics.c `mesh_diagnostic_quiet` and metal-microbench output_data/quiet-20261023/: mesh 3d849a16,
+  2026-10-23 20:58Z.
 - metal-microbench output_data/hourly/log.jsonl, run 20261023T2113Z: the chain's steady step and the LSTM's steady tick.
 - design/HETEROGENEOUS-LINKS.md section 10: the keepalive deleted at version 133, and the operator's ruling.
-- design/transport.md sections 1 and 14: a row is one 16 KiB page, and every SEND is one page.
+- rdma/mesh-link.c:85-95: a row is one page, and every SEND is one page.
 - design/data-model.md section 3: the quiet controller, 6.2 µs against 1.9 µs.
