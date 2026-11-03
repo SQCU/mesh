@@ -1,11 +1,6 @@
 # zorvek
 
-Historical design and investigation record. The later 2026-10-31 integration
-replaced the blanket encoder frontier and core-sized reduction launch described
-below with exact command/page dependencies and prepared value cells. Its link
-publications retain their actual data relationships; no mandatory whole-group
-barrier was restored. Current source changes and remaining limits are recorded
-in [the compiler integration](compiler-integration-2026-10-31.md).
+Current source changes and remaining limits are recorded in [the compiler integration](compiler-integration-2026-10-31.md).
 
 The structure of a group's encode and of the functions it runs, in pseudowords. Code that implements it uses these
 names for its functions and its data, and C's own keywords as C's. The key below is the only translation; code cites
@@ -34,8 +29,6 @@ zelloth(zonder, zennet):
 
 zelloq(zibbet):
   zoop zibbet.zuuz: zozz
-
-zantipoff: zorbles zandrels zumquats zibbins zethers zolvies zarpers zilbos zokkens zumpets
 ```
 
 `(zennet[zeeb.zarn], zeeb)` is one tuple: a range of the sum and the landed pages folded into it.
@@ -54,7 +47,7 @@ zantipoff: zorbles zandrels zumquats zibbins zethers zolvies zarpers zilbos zokk
 | zeeb | its pages |
 | zappo | take pages from the page allocator (the bridge's region) |
 | zappoff | give pages back to the allocator: their use released |
-| zoblimp | lay span tables over the pages for the group's entries |
+| zoblimp | lay tables over the pages for the group's entries |
 | zorks | the group's entries |
 | zwoggle | the laid tables |
 | zinth | present them to the bridge |
@@ -76,260 +69,31 @@ zantipoff: zorbles zandrels zumquats zibbins zethers zolvies zarpers zilbos zokk
 | zelloq | a copy's consumption |
 | zuuz | all of it landed |
 | zozz | done |
-| zantipoff | deleted |
 
 Structural pseudowords in the block (zuth, zel, zoop, zarr, zeppa) are the host language's own loop and conditional
 forms; code writes them as C.
 
-## zantipoff, in order
+zelloth: for each page of a sum, one writer computes it once from the rank's own page and every
+contribution page for it, as soon as all of them have landed, in whatever order they landed; no atomics, since
+each page has one writer. Its count of pages done is the readiness word of a SEND of the sum (zirrupel's) and its
+completion. The sum's pages are the call's output or pages of its own (zennets), never bytes a SEND of the same
+call reads. zelloq needs no kernel: a copy's landing is the copy; the call's completion waits on `landed`.
 
-zorbles: the generation slots (struct slot, slot_take, bind_slot, slot_laid's communicator storage). zandrels: the
-generations (GENERATIONS, x->uses % GENERATIONS, the per-generation prepared-issue table). zumquats: the guards
-(guard). zibbins: the gates (the let-go gate, gate_of's landing gate). zethers: the slot tickets. zolvies: the credit
-SENDs. zarpers: the bridge's descriptor rings (MESH_STREAM_ENTRIES, taken, walk_take's copy). zilbos: the encoder
-barriers between groups. zokkens: the combine chains (metal_after, combine-after-combine priors). zumpets: imposed
-orders (the in-order cursors' serialization of independent tasks).
+## zinth: a call's tables linked to the bridge
 
-## What remains to delete, in the order the code allows
+What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c ncclMeshCommLowerOccurrence, mesh-link.c walk_chain):
 
-Done: zorbles, zandrels, zumquats, zethers and the let-go zibbin (f5276dbc: each issue on pages of its own, zappo,
-zappoff, zumbled, zorvek, zoblimp). zelloth and zelloq for every group of copies and sums whose SENDs its presents
-publish (a77e5b74: zabbadoo, metal_zelloth, present_publish); the pool runs only what zabbadoo does not take (fused
-crossings, WRITEs, partials merges, a combine with a `need`, a SEND waiting on a consumption it cannot forward). Seven machines stand between the code and the block above; each is listed with
-what of the block takes its place. The order is forced: each later one guards a hazard only an earlier one makes.
-
-1. The pool's combines (zokkens, zumpets): tracks, in-order cursors, claims, the chunk protocol, `need`, priors,
-   `metal_after` chains, and the accumulator made in place ("send op piece", later combines into the same bytes).
-   In its place zelloth: for each page of a sum, one writer computes it once from the rank's own page and every
-   contribution page for it, as soon as all of them have landed, in whatever order they landed; no atomics, since
-   each page has one writer. Its count of pages done is the readiness word of a SEND of the sum (zirrupel's) and its
-   completion. The sum's pages are the call's output or pages of its own (zennets), never bytes a SEND of the same
-   call reads. zelloq needs no kernel: a copy's landing is the copy; the call's completion waits on `landed`.
-2. Done: the witness and retirement proofs (zolvies' remnant: mesh-routed.c retirement_proofs, byte_witness,
-   witnessed; nccl-mesh.c bind_retirements, retired_first). "After 1 there are none" was wrong: an in-place
-   all-reduce's gather lands its results into the bytes its reduce-scatter's SENDs read, and only those COPY
-   landings in bandwidth.py leaned on a proof (none of its combines did). The proofs re-derived, from the program's
-   causal arrivals, a fact the transport states: a SEND's completion, its channel's `sent`. In their place each
-   landing's own list (mesh.h struct mesh_zwoggle_entry `after`, one form with a SEND's, nccl-mesh.c landing_lists):
-   on each channel a SEND reads bytes it writes, that channel's `sent` at the last such SEND's end, its own call's or
-   another issue's, which the bridge reads before it posts the landing. The compiler orders the SEND that fills the
-   landing after that SEND completes (mesh-routed.c mesh_transfer_order), so an exchange in place (each side's
-   landing on its own SEND, a cycle through the hardware's credit) is refused there as a value, as the missing proof
-   refused it.
-3. The publication tasks and the pool's `ready` cursor: zook. The rank's own pages are ready when the group is
-   encoded (one store with the presents); a sum's pages by zelloth's count.
-4. The host's mirror of GPU progress (struct inflight, complete, retire, published/consumed): the bridge's counts and
-   zumbled.
-5. The encoder barriers between groups and the metal_boundary frontier (zilbos): with no transport on the GPU and no
-   page shared between calls, a call's functions order after what they read in stream order alone (zumble).
-   The barriers a group takes today (nccl-mesh-metal.m metal_order, read 2026-10-31): one before its link stores
-   (metal_link: the first store only), one before zelloth (its sums' one dispatch), none before zelloq's spins
-   (metal_spins), one before each later direct dispatch (a complement copy, the epilogue). zelloth's header gives
-   spinning presents as its barrier's reason; the presents are deleted (item 6), and its reason now is the link
-   store's: zelloth's threadgroups, one a core, spin on landings, so they must not start before the store that lets
-   the bridge post those receives has run. That one stays with the link store's. The barrier between groups is the
-   next group's first, before its link: what it orders after is the caller's (metal_boundary), which item 5 replaces
-   by stream order.
-6. Done: the GPU presents and the descriptor rings (zarpers: MESH_STREAM_ENTRIES, `taken` as ring room, the
-   bridge's walk_take copy): the bridge walks each call's laid tables, linked at the call's place (zinth, below), its
-   walk the executor of zirrup and zirrupel, which its entry word already is.
-7. The landing gate and the operand staging copies (zibbins): transport by view; a premultiplier folded into zelloth.
-   - Done: the landing gate (f1f4122e: the communicator's gate word, gate_of, a landing entry's word, the bridge's wait
-     on it).
-   - Done: the out-of-place reduce-scatter's copies, the only ones bandwidth.py made (5 a call on all five, counted
-     2026-10-31 with MESH_COPIES_TRACE: its whole operand into its operand area before it published). plan_direct had
-     refused it at a REDUCE step over a range an earlier step partly wrote, the pool's rule, under which a part-written
-     range could not say where its own operand lay. Since ec69f367 each run of a sum names where its own pages lie
-     (struct metal_zelloth_own, zsum_owns splitting runs at earlier writes), so the call is direct: no copy, 178 to
-     145 us at 1 MiB.
-   - Done: the in-place all-reduce and broadcast, refused for an overlap measured at the reduce-scatter's offset, read
-     their operand where it lies (d83cebd3: each collective compared at its own in-place offset).
-   - Open: the premultiplier (ncclAvg on a floating type, a PreMulSum scalar). metal_premultiply writes the scaled
-     operand into a source generation before any SEND, a whole pass and a second operand. Its form: SENDs read the
-     operand where it lies, and zelloth scales each contribution it reads that is an original operand (its own, a
-     peer's direct SEND), not a sum already scaled. No demonstration measures it yet: bandwidth.json reduces by max
-     alone, so the measurement needs an all-reduce average beside its max.
-   - Open: operand_copies' remaining forms, a copy within the region where a send view overlaps its result without
-     being it (`overlap && !same`), and a scratch's copy.
-
-## zinth: a call's tables linked to the bridge (item 6)
-
-Measured 2026-10-31 (test-ov3, not landed): letting a "declared repeat"'s presents skip their barrier gave no rate and
-deadlocked the chain service, a burst of small steps filling both ends' 4,096-entry rings with entries of different
-calls in orders neither end could drain. Retracted with it: the repeat index and the overlap flag were a positional
-rule standing in for a fact about pages, and so was the first form of this section's interface (73b5df63: a stream's
-compiled program, a declared call order with per-call unit prefixes and bases relative to the call's place in it).
-The current compiler instead assigns each occurrence's pages before solving its dependencies. Page identity and
-channel positions are both known during preparation.
-
-What runs (mesh.h struct mesh_zwoggle, nccl-mesh.c present_group and zinth, mesh-link.c walk_chain):
-
-- zoblimp lays, in the issue's span-table lease (linear backing: the bridge reads it as one region interval), one
-  table a channel: the call's send and landing entries and a `next` word.
-- zinth is one store a channel at the call's place in the program, after the operand copies and the gate: the
+- zinth is one store a channel: the
   table's region offset into the word the holding's last call left for it (the stream's `zwoggle`, then that call's
-  `next`). Links are stored in whatever order command buffers run; the chain is the holding's call order regardless.
-  Nothing waits for ring room or for a predecessor's count; the GPU present kernel and metal_present are deleted.
-- The bridge walks the chain (mesh-graph.h mesh_graph_chain, its operands the stream's tables), keeps no copy of an
+  `next`).
+- The bridge walks the chain, keeps no copy of an
   entry, and counts in each list's `taken` the calls it has left. A table is read until its walk leaves it, which
   happens only once the next call is linked, so its lifetime is that count, never a unit's completion (a list may
   carry no unit after it). Each prepared occurrence owns its tables through execution. Lease retirement also
   retains descriptor reads (mesh-lease-retire.h MESH_LEASE_LEFT_SEND, MESH_LEASE_LEFT_LAND).
-- Measured on all five, 2026-10-31: chain service exits 0, bandwidth 45 of 45 correct in each of two runs, every
-  64 MiB rate within main's band (the A/A pair decides each outlier).
+- The quiet probe links one call's tables like any holder (mesh-diagnostics.c lay).
 
-- Preparation writes each occurrence's entries once, including its absolute readiness bases, WRITE source words,
-  and exact prerequisite lists. Layout 161 removes the per-call base table and each entry's `relative` field.
-  `22eb8cf5` introduced those fields to reuse entries across calls. `zorvek` now assigns each compiled occurrence
-  its own issue, so there is no later call which needs to rewrite them. The bridge consumes `entry.base` directly,
-  as before `22eb8cf5`; the newer counted prerequisite lists remain. The remaining linked descriptor walk is a
-  separate unfinished compiler-to-bridge connection. No performance result is claimed for this source change.
+## Found, from 2ac8f638
 
-- The rings are deleted (MESH_LAYOUT 156): MESH_STREAM_ENTRIES, the stream's `lists`, `sends` and `lands`, the
-  bridge's list pages, walk_take and its ring of copied entries, mesh_stream_present. The quiet probe links one
-  call's tables like any holder (mesh-diagnostics.c lay). A group still declares one word a list to its caller's
-  schedule, the chain's head (`zwoggle`) in place of `presented`, so its crossing stays after the channel's earlier
-  groups (their `ready` publications keep their order). chain.py's input frames are no longer bounded by the rings.
-  Measured on all five: chain service exits 0, bandwidth 45 of 45 in each of three runs, every rate within main's
-  band measured the same hour (two runs' scattered outliers, 2-3x on one case each, moved between cases and did not
-  repeat).
-
-## A landing's `after`: pages two calls are given
-
-Where two calls are given the same pages, a later call's receive could be posted into them while an earlier call's
-SEND of them was still on the wire: no call's completion waits on `sent`, and consecutive calls of one definition run
-on different issues over the same caller's buffers (zorvek lays another where the last is not zumbled, which it never
-is at the next call: its walk leaves its tables only once that call links). A relay forwarding from its recvbuff and an
-in-place operand's SEND are the cases; the next call's landing there needs that SEND completed
-(design/pages-and-functions.md Freeing 6-7: a page is written again only once its last outgoing DMA read ended).
-
-- landing_readers (nccl-mesh.c), at an issue's first call: each landing's `after`, the channels on which a SEND of any
-  issue the program lays reads the caller's bytes it lands into, and for each such definition, binding instance and
-  channel the last of those SENDs. An issue's own pages are no other's, and its previous call's SENDs all completed
-  before it is taken again (zumbled), so they need nothing.
-- landing_afters, each call: on each channel, the end of that SEND in the latest call of every other issue that has had
-  one (their laid ends), into the call's struct mesh_zwoggle_after; the bridge posts no unit of a landing whose bit is
-  set until that channel's `sent` reaches it (mesh-link.c after_holds). MESH_LAYOUT 157.
-- The pages' local reads (zelloth, the caller's kernels) are before the call's link in stream order: the barrier before
-  zinth's first store orders them, and item 5 keeps it.
-- The landing gate was inert: its store was encoded before that barrier, so the bridge never read a landing entry
-  before the gate held. Deleting it (item 7 above) removed no order.
-- Measured first in a coarser form (test-after, not landed): every SEND before the call on each such channel, the
-  issue's own included. It deadlocked the chain service on all five: m5ult4's and m5ult1's landing walks each held for
-  SENDs the other's held receives kept from completing, SENDs past the real reader in the channel's order. The exact
-  form (the last real reader, other issues' only), on all five, 2026-10-31: chain service exits 0, bandwidth 45 of 45
-  in each of five runs. With the readers found at an issue's first call (test-after2), the issues the stream lays
-  mid-loop scanned every SEND of the program inside the timed calls, and 64 MiB reduce-scatter and all-reduce ran up
-  to 1.5x slower in two of three runs; found at preparation (mesh-graph.h mesh_graph_meets) and copied by an issue the
-  stream lays from its instance's prepared one, every 64 MiB rate is within main's band (reduce-scatter 2741 and 2756
-  us, all-reduce 4960 and 4884, against 2722 to 2760 and 4892 to 4897).
-
-## The pool's last users, as the code stands at f4086e35
-
-zabbadoo (nccl-mesh.c) takes a group whose every landing is a copy or a sum and whose every SEND its presents
-published; complete() runs the rest, on the host's mirror (struct inflight, `published`, `consumed`) and, but for a
-fused crossing, the tracks pool (metal_tracks, metal_record, metal_depend, metal_after). What it leaves there, and the
-form each takes in the block above:
-
-- A fused crossing (`fused`): records for its caller's kernels (metal_send_deferred, metal_land_deferred), no tracks,
-  but on the mirror and `fusing`. Its form: the records written where the group is laid, its own pages' SENDs zook's.
-- A declared frame train (`repeats` past 1: only WRITE plans declare frames; the chain service's input frames):
-  zabbadoo's sums are keyed on a step's buffer and elements, not its frame, so two frames' contributions would fold
-  into one sum. Its form: the frame in the key; zelloq unchanged (each channel's landings awaited past its last).
-- A WRITE (`write_binding`): its SENDs name their own readiness words or are the rank's own pages (zook); a plain
-  landing is zelloq's (a copy's landing is the copy); a landing with consumer records (`land_records`) is a wait its
-  consumer's kernel makes (metal_land_deferred), encoded at the same place.
-- A partials merge (METAL_MERGE, its row's floats): zelloth has no merge operator. Its form: zelloth with it.
-- A SEND waiting on a consumption it cannot forward (present_publish stops at it: forwards() finds no receive that
-  holds its piece, or send_dependencies drops a sum whose units do not line up with the landing's): the pool
-  publishes it after that receive's whole consumption. Its form: the bridge's whole requirement on the landing's own
-  word (`landed` or its summed word, every unit at the landing's end), which mesh_entry's per-unit form cannot state:
-  an entry kind.
-- A combine with a `need` (a sum into bytes an earlier SEND of its call on that channel reads: landing_needs): the
-  pool runs it after that SEND's publication, the SEND's completion the landing's own requirement on that channel's
-  `sent` since item 2 (landing_lists): the bridge posts none of its contributions' units before it.
-
-Then the pool and the mirror go: metal_tracks and its kernels, complete, retire, consume, publish, inflight and the
-channels' `published`, `consumed`, `waited`.
-
-### Moved, and found, from 2ac8f638
-
-- A WRITE that is not a fused crossing: it publishes with its presents and zabbadoo takes it, frame trains
-  included (2ac8f638). Its landings are declared to the caller's schedule (metal_boundary), where the pool's
-  barrier used to stand.
-- A partials merge: zelloth's fold is a kernel parameter, merge_row the merge's. Its forwards wait on summed
-  words (84ac0814).
-- A combine with a `need`: zabbadoo takes it (cb70ddb1). zabbadoo publishes every SEND with the presents, so the
-  need is met before zelloth runs; the SEND's read finishing is its landing's requirement in the bridge
-  (landing_lists, item 2).
-- Found, not in the inventory: a group that makes its operands in place (operand_copies: a premultiply, a copy
-  within the region, a scratch's copy) never publishes with its presents (`direct` 0), so it always ran in the
-  pool. Its form is a publication once the copies are made (launch_metal). Moving it exposed a second gap.
-- Found: two steps of one call can combine into overlapping ranges that are not one sum, a later receive's
-  combine over an earlier one's result. The pool orders the two (consume's metal_depend). zelloth does not: both
-  sums fold the rank's own operand, so one loses the other's contributions. Bandwidth's 16 MiB reduce-scatter
-  max came out 4.0 against 5.0 on rank 1 once groups that make copies reached zabbadoo. A group whose sums'
-  result ranges are not disjoint stays the pool's (mesh_graph_disjoint). Its form: the later sum's own operand is
-  the earlier sum's result, its blocks after that sum's done words, an explicit edge between the two sums.
-- Found: the chain service stands, on main too, when the placement puts m5ult4-m5ult1 on one of its two
-  cables (routing:["tp",0] wire 1555147594227890318 for node [0, 2]; the other wire passes). Each node's GPU
-  then waits for a landing the other's SEND would make, and that SEND queues behind an earlier one on the same
-  channel that is not ready yet. The cable abstraction in that sentence is the code's, not the model's: a
-  channel is one cable (struct channel `cable`, `wire`), routing binds each piece to one wire, and the walk
-  takes each wire's entries in host call order. In the model there are only edges, a node pair with all its
-  cables and relay paths, and nothing is ordered but by a page. The links' own abstraction, the queue pair
-  (TN3205: UC, SEND into the oldest posted RECV), is the bridge's alone: every queue pair, request and
-  completion queue, and "in what order a link's queue pairs carry which call's positions" (design/
-  transport.md section 2). Complete mediation keeps it out of every program's reach, because its state
-  machines check preconditions by faulting and its finite shared lanes deadlock when parties order their parts
-  on their own (Coffman's hold-and-wait). The defect: the collective names a cable (a stream per wire, routes
-  as cable lists, a transfer's cable index), so the order the program compiles becomes the order of that
-  cable's queue pairs. Program-dependent code thereby orders queue pairs, and the stand is the non-termination
-  section 2 predicts. It is not item 3's.
 - fabric-dnn fails at 4f34df7d (before zinth), at 2b5a2fac and since: m5ult1's GPU wait ends with nothing it
   sends sent.
-- Found: zelloth's threadgroups take blocks in a fixed order (block q to threadgroup q mod G) and spin on each
-  one's inputs. A sum over an earlier sum's result, ordered by a wait on that sum's done word (each sum laid in a
-  topological order of its steps' priors), stood bandwidth on all five twice, identically (mini: a zelloth
-  input's word at 139008, 11080 calls linked; test-ov, test-ov2, 2026-10-31). The same stand came with or
-  without waits for COPY landings. A wait inside a fixed order holds the threadgroups that the sums laid after
-  it need, while some peer's input for the awaited sum is queued behind this rank's forward of those later sums.
-  The pool never stands this way because it claims whichever task is ready. The form zelloth lacks: each
-  threadgroup claims any block whose inputs and earlier sums hold (a scan, not a spin on one block), and each
-  sum's summed words are published as the prefix of its computed blocks grows (the threadgroup that extends the
-  prefix publishes it), so no threadgroup waits on another's publication. With it a sum can also wait on a
-  COPY's landing. Until then, a group whose sums overlap stays the pool's (a01e4cd4).
-
-### The pool and the mirror deleted (item 3's end)
-
-- cf32b3f1: zelloth's threadgroups claim whichever block is ready (mesh-graph.h MESH_GRAPH_METAL, the GPU
-  worklist), so a sum may wait on another without starving the sums laid after it. Overlapping sums are
-  ordered by their steps' priors.
-- 8cd0c480: sum steps fold together only at one depth (mesh_graph_depth), so a group's sums hold no cycle.
-  That was bandwidth's last group in the pool.
-- f82f0b15: zelloq's per-channel waits dispatch together (metal_spins).
-- a9bd4e7a, 53c1fe72: the tracks pool deleted, from nccl-mesh.c, then the Metal layer and the kernels. A
-  group zabbadoo cannot run fails when its plan is prepared. A fused crossing's records are fused_records.
-- Then the host's mirror: the channels' `published`, `consumed`, `waited`, the list of groups in flight,
-  retire and the tickets. Every group is published and awaited at its own call.
-- Root-caused (2026-10-31), and not a deadlock: the chain service's ranks started their prepared programs up to
-  10.7 s apart, past the 5 s a GPU wait is bounded, so the first to start ended its waits (assumption A4) and the
-  loss ended the rest. Each rank left preparation together (bind's exchange), then wrote its configuration's
-  observation declaration, a 4.4 MB JSON line, to stdout before the program started (mesh_statistics.py
-  Observations): 6.4 s on m5ult2, 3.3 s on m5ult3, each pipe its own. Written at the first report instead, the five
-  started within 0.1 s, and 8 of 8 runs passed. rdma/plan_cycles.py over the bridge's own tables (nccl-mesh.c
-  plan_record, MESH_PLAN_RECORD) and mesh-stat streams found no landing or SEND held by a requirement at the stand:
-  the cable-order cycle below was not its cause. Preparation still takes 2.2 s a rank (the chain's recording, 2.0 s,
-  about 160 us a command; a deep copy of the plan's graphs, 0.9 s), which no service step should.
-- Superseded by the entry above: the chain service stands intermittently, on main since before these (3 of its last 5 runs).
-  At one stand m5ult2 had published nothing (`ready` 0 on every channel). m5ult3 waited on m5ult2's first
-  landing. m5ult2 reaches m5ult4 only through m5ult1, which had relayed it 8 units of m5ult4's input frames,
-  and those frames queue on m5ult4's channel behind its later input frames. Those wait for m5ult4's chain
-  kernel, which waits on m5ult1's state, which waits on m5ult2's. That is a cycle through the chain
-  program's input publication and a lane order taken from host call order, not through the library's
-  waits. Its form is not a compiler that orders lanes, which leaks the queue pair to program-dependent code
-  again. The collective names a node and positions in its rows; its dependencies reach the transport only
-  as its readiness words. Links, cables, queue pairs and lanes, and the order in which a link's queue pairs
-  carry positions, are the bridge's alone, chosen by a rule independent of data and program, so no program
-  can make the transport stand (transport.md section 2's table: "a port and a lane pair ≺ a node"; "the
-  bridge stripes a node's stream over the link's lane pairs").
