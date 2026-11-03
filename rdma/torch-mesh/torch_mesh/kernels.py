@@ -158,7 +158,12 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     parameters = [out.parameter(True)] + [p.parameter(False) for p in parts] + [b.parameter(False)] + \
         ([bias.parameter(False)] if bias else [])
     bias_term = f' + {beta}f * float({bias.load(["n"] if len(bias.shape) == 1 else ["m", "n"])})' if bias else ''
-    if M % 8 == 0 and all(_tensor_operand(v) for v in parts + [b]):
+    # B read as the transpose of its own storage where its K axis is the fast one (linear's W: [K, N] with strides (1, K)):
+    # matmul2d's transpose_right, its tensor W itself ([N, K] row-major, height N and width K: MPPTensorOpsMatMul2dImpl.h),
+    # where a strided tensor came out wrong (_tensor_operand)
+    transposed = (not b.coherent and b.dtype in TENSOR_TYPES and b.shape[0] != 1 and b.stride[0] == 1 and b.shape[1] != 1
+                  and 0 < b.stride[1] < TENSOR_STRIDE_BOUND)
+    if M % 8 == 0 and all(_tensor_operand(v) for v in parts) and (transposed or _tensor_operand(b)):
         rows = next(r for r in (32, 16, 8) if r <= TENSOR_ROWS_MOST and M % r == 0)
         K = sum(p.shape[1] for p in parts)
         blocks = -(-N // TENSOR_COLUMNS) * (M // rows)
@@ -172,13 +177,18 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
         # check is the dynamic slice's); otherwise every block is checked against the operands' extents
         full = M % rows == 0 and N % TENSOR_COLUMNS == 0
         left_slice = f'slice<dynamic_extent, {rows}>(0, row)' if full else 'slice(0, row)'
-        right_slice = f'slice<{TENSOR_COLUMNS}, dynamic_extent>(col, 0)' if full else 'slice(col, 0)'
+        if transposed:
+            right_slice = f'slice<dynamic_extent, {TENSOR_COLUMNS}>(0, col)' if full else 'slice(0, col)'
+            right_of = lambda k_extent, offset='0': _tensor(b, f"a{b.index}", N, k_extent, offset, row_axis=1, column_axis=0)
+        else:
+            right_slice = f'slice<{TENSOR_COLUMNS}, dynamic_extent>(col, 0)' if full else 'slice(col, 0)'
+            right_of = lambda k_extent, offset='0': _tensor(b, f"a{b.index}", k_extent, N, offset)
         runs, first = [], 0
         for k, p in enumerate(parts):
             lo, hi = f'max(k0, {first})', f'min(k1, {first + p.shape[1]})'
             runs.append(f'    if ({lo} < {hi}) {{\n        const int lo = {lo}, hi = {hi};\n'
                         f'        auto left = {_tensor(p, f"a{p.index}", M, "hi - lo", f"(lo - {first}) * {p.stride[1]}")}.{left_slice};\n'
-                        f'        auto right = {_tensor(b, f"a{b.index}", "hi - lo", N, f"lo * {b.stride[0]}")}.{right_slice};\n'
+                        f'        auto right = {right_of("hi - lo", f"lo * {b.stride[0]}")}.{right_slice};\n'
                         f'        op.run(left, right, total);\n    }}')
             first += p.shape[1]
         p0 = parts[0]
@@ -202,10 +212,10 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     const int col = int(at.x / {32 * split}u) * {TENSOR_COLUMNS}, row = int(at.y) * {rows};
     const int k0 = int(s) * {span}, k1 = min(k0 + {span}, {K});
     constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor({rows}, {TENSOR_COLUMNS}, static_cast<int>(dynamic_extent),
-        false, false, false, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+        false, {'true' if transposed else 'false'}, false, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
     mpp::tensor_ops::matmul2d<descriptor, execution_simdgroup> op;
     using Left = decltype({_tensor(p0, f"a{p0.index}", M, p0.shape[1])}.{left_slice});
-    using Right = decltype({_tensor(b, f"a{b.index}", K, N)}.{right_slice});
+    using Right = decltype({right_of(K)}.{right_slice});
     auto total = op.get_destination_cooperative_tensor<Left, Right, float>();
     #pragma unroll
     for (uint i = 0; i < total.get_capacity(); i++) total[i] = 0.0f;
