@@ -7,6 +7,10 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 ## Start here
 
+- [SCOPE.md](SCOPE.md): what the library has to do, in the operator's statements of 2026-11-03 and Claude's answers
+  to them, verbatim. The library balances collective work across devices and transactions along edges, and describes
+  memory on every machine by pages for AOT compilation. It captures, transduces and fuses programs so that no
+  interpreter or lock sits on the DMA path. It composes calls and never defines what a call computes.
 - [design/rubric-actionable.md](design/rubric-actionable.md): the short form of the rubrics. It gives the review
   procedure, what crosses each interface between mesh, collective and data code, and one line for each dimension of
   rubrics M, C and D, with that dimension's line in design/rubrics.md.
