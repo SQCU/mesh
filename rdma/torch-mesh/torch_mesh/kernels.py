@@ -38,9 +38,17 @@ class View:
         return f'{qualifier}{const} {MSL[self.dtype]} *a{self.index} [[buffer({self.index})]]'
 
     def at(self, coordinates):
-        """the element index of this view at `coordinates` (one expression an axis, broadcast axes left out)"""
-        terms = [f'{self.offset}l'] + [f'({c}) * {s}l' for c, s, n in zip(coordinates, self.stride, self.shape)
-                                        if s and n != 1]
+        """the element index of this view at `coordinates` (one expression an axis, broadcast axes left out): in 32 bits
+        where the view's last element's index fits (its offset and every axis's last coordinate by its stride), as
+        _digits' coordinates: the 64-bit products of an address cost the M4 Pro's one-dispatch LSTM tick about 2 us
+        over its two-dispatch form (lstm-2026-11-03 narrow-on, mesh f22c0e90)"""
+        last = self.offset + sum((n - 1) * s for s, n in zip(self.stride, self.shape) if s and n != 1)
+        if 0 <= self.offset and all(s >= 0 for s in self.stride) and last < 1 << 32:
+            terms = [f'{self.offset}u'] + [f'uint({c}) * {s}u' for c, s, n in zip(coordinates, self.stride, self.shape)
+                                            if s and n != 1]
+        else:
+            terms = [f'{self.offset}l'] + [f'({c}) * {s}l' for c, s, n in zip(coordinates, self.stride, self.shape)
+                                            if s and n != 1]
         return ' + '.join(terms)
 
     def load(self, coordinates):
