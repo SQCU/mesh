@@ -253,6 +253,10 @@ struct MetalReplay *MetalReplayDescribed(id<MTLDevice>, const struct MetalComman
    pipeline was not made by MetalPipelineMake, or the kernel uses no buffer there), and its label */
 NSUInteger MetalPipelineDeclaredBytes(id<MTLComputePipelineState>, NSUInteger index);
 NSString *MetalPipelineName(id<MTLComputePipelineState>);
+// design/page-maps-2026-11-02.md, integration step 5: the run's solve's edges between the next flush's nodes, by their
+// place in its expanded order (a replay range one node a command). Where given, they are the flush's only order:
+// no reach decides one.
+void MetalScheduleEdges(struct MetalSchedule *, const uint32_t (*edges)[2], size_t count);
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *, const void *, size_t bytes, uint32_t index);
 void MetalScheduleCompute(struct MetalSchedule *, id<MTLComputePipelineState>,
     const struct MetalCommandBinding *, size_t count, MTLSize groups, MTLSize threads);

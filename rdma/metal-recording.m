@@ -1292,6 +1292,9 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
 
 struct MetalSchedule {
     struct MetalSchedule *next, *tail, *root;
+    // the run's solve's edges between this flush's nodes, by their place in the expanded order (MetalScheduleEdges):
+    // where given, the only order; the nodes' reaches decide none (design/page-maps-2026-11-02.md, step 5)
+    NSMutableData *edges;
     struct MetalSchedule *submit, *firstSubmission, *lastSubmission;
     id<MTLDevice> device;
     enum MetalForm form;
@@ -1444,6 +1447,12 @@ void MetalScheduleCommunicator(struct MetalSchedule *s,struct ncclComm *comm) {
 
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *s) { return MetalScheduleTail(s)->residency; }
 
+// metal-recording.h MetalScheduleEdges
+void MetalScheduleEdges(struct MetalSchedule *s,const uint32_t (*edges)[2],size_t count) {
+    struct MetalSchedule *root=s->root?s->root:s;
+    if(!root->edges)root->edges=[NSMutableData new];
+    [root->edges appendBytes:edges length:count*sizeof *edges];
+}
 struct MetalCommandBinding MetalScheduleData(struct MetalSchedule *s,const void *data,size_t bytes,uint32_t index) {
     s=MetalScheduleTail(s);
     NSUInteger size=(bytes+MESH_COMMAND_DATA_ALIGNMENT-1)/MESH_COMMAND_DATA_ALIGNMENT*MESH_COMMAND_DATA_ALIGNMENT;
@@ -1774,6 +1783,18 @@ static NSUInteger MetalWorkDependencies(struct MetalSchedule *root,NSArray *work
     for(NSUInteger i=0;i<work.count;i++) {
         MetalWork *w=work[i];w->ordinal=first+i;[root->history addObject:w];
     }
+    if(root->edges) {
+        // the solve's edges are the order: no frontier, no reach decides one
+        const uint32_t (*edge)[2]=root->edges.bytes;
+        for(NSUInteger k=0;k<root->edges.length/sizeof *edge;k++) {
+            if(edge[k][0]>=edge[k][1]||edge[k][1]>=work.count)
+                [NSException raise:NSInvalidArgumentException format:@"a solve edge outside this flush's order"];
+            [((MetalWork *)work[edge[k][1]])->dependencies addIndex:first+edge[k][0]];
+        }
+        for(MetalWork *w in work){[w->accesses release];w->accesses=nil;[w->readVersions release];w->readVersions=nil;}
+        [root->edges release];root->edges=nil;
+        goto ordered;
+    }
     for(NSUInteger i=0;i<work.count;i++) {
         MetalWork *w=work[i];
         for(NSMutableDictionary *domain in w->external?@[]:w->readVersions) {
@@ -1830,6 +1851,7 @@ static NSUInteger MetalWorkDependencies(struct MetalSchedule *root,NSArray *work
     }
     if(MetalViewPending(next)||MetalViewPending(observed))
         [NSException raise:NSInvalidArgumentException format:@"next-version page read has no declared producer or input"];
+ordered:;
     NSMutableData *counts=[NSMutableData dataWithLength:work.count*sizeof(NSUInteger)];NSUInteger *left=counts.mutableBytes;
     NSMutableIndexSet *ready=[NSMutableIndexSet indexSet];
     for(NSUInteger i=0;i<work.count;i++) {
