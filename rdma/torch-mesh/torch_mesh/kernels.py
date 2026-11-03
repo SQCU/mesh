@@ -123,7 +123,7 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     return _source(name, parameters, body), (N * 32, M, 1), (32, 1, 1)
 
 
-def summed(name, out, source, axes):
+def summed(name, out, source, axes, scale=1.0):
     """out[c] = the sum of source over `axes` at the other coordinates c (source's axes not in `axes` are out's, in
     order); one thread an output element"""
     kept = [d for d in range(len(source.shape)) if d not in axes]
@@ -138,7 +138,7 @@ def summed(name, out, source, axes):
         coordinates[d] = f'r{d}'
         loops.append(f'for (ulong r{d} = 0; r{d} < {source.shape[d]}ul; r{d}++)')
     body = (f'    const ulong i = at.x;\n    if (i >= {count}ul) return;\n    float total = 0.0f;\n'
-            f'    {" ".join(loops)} total += float({source.load(coordinates)});\n    {out.store(c, "total")}')
+            f'    {" ".join(loops)} total += float({source.load(coordinates)});\n    {out.store(c, f"total * {scale}f" if scale != 1.0 else "total")}')
     parameters = [out.parameter(True), source.parameter(False)]
     return _source(name, parameters, body), (count, 1, 1), (min(256, max(1, count)), 1, 1)
 

@@ -30,7 +30,14 @@ UNARY = {aten.sigmoid.default: '(1.0f / (1.0f + exp(-({0}))))', aten.tanh.defaul
          aten._to_copy.default: '({0})', aten.clone.default: '({0})'}
 BINARY = {aten.mul.Tensor: '({0}) * ({1})', aten.div.Tensor: '({0}) / ({1})', aten.add.Tensor: '({0}) + {2} * ({1})',
           aten.sub.Tensor: '({0}) - {2} * ({1})', aten.add_.Tensor: '({0}) + {2} * ({1})',
-          aten.mul_.Tensor: '({0}) * ({1})'}
+          aten.mul_.Tensor: '({0}) * ({1})', aten.mul.Scalar: '({0}) * ({1})', aten.div.Scalar: '({0}) / ({1})',
+          # autograd's: d sigmoid = g s (1 - s), d tanh = g (1 - t^2), from the forward's output
+          aten.sigmoid_backward.default: '({0}) * ({1}) * (1.0f - ({1}))',
+          aten.tanh_backward.default: '({0}) * (1.0f - ({1}) * ({1}))',
+          # x^2 written x x (a negative base has no pow), any other exponent pow
+          aten.pow.Tensor_Scalar: 'pow_({0}, {1})'}
+# a value of one constant: autograd's seeds and zero states, inlined where a consumer takes them
+CONSTANT = {aten.zeros.default: 0.0, aten.zeros_like.default: 0.0, aten.ones_like.default: 1.0, aten.ones.default: 1.0}
 INPLACE = {aten.copy_.default, aten.add_.Tensor, aten.mul_.Tensor, aten.index_copy_.default}
 _EVENTS = itertools.count(1)
 READ, WRITE = 1, 2
@@ -150,7 +157,7 @@ class Template:
         from mesh_graph import absorbed
         values, expression = {}, {}
         placeholders = iter(self.args)
-        pointwise = set(UNARY) | set(BINARY) | {aten.copy_.default, aten.clamp.default}
+        pointwise = set(UNARY) | set(BINARY) | set(CONSTANT) | {aten.copy_.default, aten.clamp.default}
         same = lambda n, u: n.meta.get('val') is not None and u.meta.get('val') is not None and \
             tuple(n.meta['val'].shape) == tuple(u.meta['val'].shape)
         # a pointwise node its one pointwise consumer of its shape takes in (mesh_graph.absorbed)
@@ -202,7 +209,7 @@ class Template:
                 self._joined(node, values)
             elif node.target in (aten.index_select.default, aten.index_copy_.default):
                 self._indexed(node, values)
-            elif node.target in (aten.sum.dim_IntList,):
+            elif node.target in (aten.sum.dim_IntList, aten.mean.default, aten.sum.default):
                 self._summed(node, values)
             elif str(node.target).startswith('torch_mesh.allgatherv_out'):
                 self._gathered(node, values)
@@ -305,7 +312,12 @@ class Template:
             inplace = target in INPLACE
             out = values[args[0]] if inplace else self._new(node)
             shape = out.shape
-            if target in UNARY:
+            if target in CONSTANT:
+                tree = ('const', CONSTANT[target])
+            elif target is aten.pow.Tensor_Scalar:
+                base = operand(args[0], shape)
+                tree = ('({0}) * ({0})', base) if float(args[1]) == 2.0 else ('pow({0}, {1})', base, ('const', float(args[1])))
+            elif target in UNARY:
                 tree = (UNARY[target], operand(args[0], shape))
             elif target is aten.clamp.default:
                 low = args[1] if len(args) > 1 and args[1] is not None else node.kwargs.get('min')
@@ -343,7 +355,7 @@ class Template:
         if node.target is not aten._to_copy.default or set(node.kwargs) - {'dtype'} or node.kwargs.get('dtype') is not torch.float32:
             return False
         source = node.args[0].meta.get('val') if isinstance(node.args[0], torch.fx.Node) else None
-        pointwise = set(UNARY) | set(BINARY) | {aten.copy_.default, aten.clamp.default}
+        pointwise = set(UNARY) | set(BINARY) | set(CONSTANT) | {aten.copy_.default, aten.clamp.default}
         return source is not None and source.dtype in (torch.float16, torch.bfloat16) and \
             all(u.target in VIEWS or u.target is operator.getitem or u.target in pointwise for u in node.users)
 
@@ -427,10 +439,16 @@ class Template:
                 name, c.writes[0].view(0), c.reads[0].view(1), c.reads[1].view(2), axis % len(c.writes[0].shape), True))[0]
 
     def _summed(self, node, values):
-        source, axes = values[node.args[0]], [a % len(values[node.args[0]].shape) for a in node.args[1]]
+        source = values[node.args[0]]
+        if node.target in (aten.mean.default, aten.sum.default):
+            # every axis, a mean's sum scaled by its count
+            axes = list(range(len(source.shape)))
+            scale = 1.0 / max(1, math.prod(source.shape)) if node.target is aten.mean.default else 1.0
+        else:
+            axes, scale = [a % len(source.shape) for a in node.args[1]], 1.0
         out = self._new(node)
         values[node] = self._command([out], [source], lambda name, c: kernels.summed(
-            name, c.writes[0].view(0), c.reads[0].view(1), axes))[0]
+            name, c.writes[0].view(0), c.reads[0].view(1), axes, scale))[0]
 
     def _gathered(self, node, values):
         """allgatherv_out(mine, out, axis, sizes, group): a call a frame of out's gathered axis (the axes before it),
