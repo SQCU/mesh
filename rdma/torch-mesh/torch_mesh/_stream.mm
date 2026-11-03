@@ -239,6 +239,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.attr("RUN_FREE") = pybind11::int_(MESH_RUN_FREE);
   module.attr("RUN_BEFORE") = pybind11::int_((int)MESH_RUN_BEFORE);
   module.attr("RUN_AFTER") = pybind11::int_((int)MESH_RUN_AFTER);
+  module.attr("RUN_COHERENT") = pybind11::int_((int)MESH_RUN_COHERENT);
   module.def("run_solve", [](uint64_t page_bytes, uint32_t events,
                              const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t>> &accesses,
                              const std::vector<std::pair<uint32_t, uint32_t>> &links,

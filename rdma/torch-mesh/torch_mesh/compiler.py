@@ -764,8 +764,12 @@ class Template:
             first += pages
         own = sum(max(1, -(-root.nbytes // page)) for root in items if root.tensor is None)
         bins.append((first, max(1, own)))
+        # a system-coherent item (a SEND's source, a landing) shares no page with an ordinary one (RUN_COHERENT,
+        # mesh-page-map.h): an M4 Pro writes an ordinary store's dirty line back at the running buffer's end, over a
+        # landing into it (metal-microbench docs/facts.md, visible.m "writeback")
         rows = [(max(1, -(-root.nbytes // page)), pins.get(id(root), _stream.RUN_FREE),
-                 (_stream.RUN_BEFORE | _stream.RUN_AFTER) if root.tensor is not None else 0, 1) for root in items]
+                 ((_stream.RUN_BEFORE | _stream.RUN_AFTER) if root.tensor is not None else 0) |
+                 (_stream.RUN_COHERENT if root.coherent else 0), 1) for root in items]
         solved = _stream.run_solve(page, len(events), accesses, links, rows, bins)
         self.events, self.items, self.page, self.accesses = events, items, page, accesses
         self.edges = sorted({(f, t) for f, t, *_ in solved['edges'] if f != t})
@@ -1185,6 +1189,13 @@ class Program:
             own = contract(through(t.edges, has_node), lambda e: ids[e])
             edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
             previous_sinks = [x for x in sinks(kept, own) if named[x][1][0] not in ('sent', 'landed')] or previous_sinks
+            # a part ends where the run passes to another compiled function: each places its items over the same arena
+            # alone, so one's ordinary item can share bytes with the next one's landing (the LSTM's starting tick's
+            # product and its first chunk's second landing, hazard-2), and on an M4 Pro the ordinary store's dirty line
+            # is written back over the landing in a running buffer (visible.m "writeback"); the part's end writes it
+            # back first. Within one function and between its instances no page holds both (RUN_COHERENT)
+            if chunk + 1 < len(instances) and instances[chunk + 1][0] is not t and labels:
+                run.cut()
         emit_carry(carry)  # the last chunk's
         from mesh_graph import contract
         edges = contract(edges, lambda e: alias.get(e, e))

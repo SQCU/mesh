@@ -302,7 +302,8 @@ int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t 
   for (size_t k = items; !result && k > 0; k--) by_item[k] = by_item[k - 1];
   if (!result) by_item[0] = 0;
   /* before(a, b): every access of a happens before every access of b (mesh_graph_precedence over the accesses' ends
-     and begins); nothing is before an item live from before the run, and nothing after one live past it */
+     and begins); nothing is before an item live from before the run, and nothing after one live past it, and nothing
+     orders a system-coherent item and an ordinary one (MESH_RUN_COHERENT: they never share a position) */
   for (size_t x = 0; !result && x < accesses; x++) {
     ends[x] = access[of_item[x]].end;
     begins[x] = access[of_item[x]].begin;
@@ -311,7 +312,8 @@ int mesh_run_solve(const struct mesh_page_space *space, uint32_t events, size_t 
     result = mesh_graph_precedence(events, first, run_edge_head, head, items, by_item, ends, by_item, begins, before);
   for (size_t a = 0; !result && a < items; a++)
     for (size_t b = 0; b < items; b++)
-      if ((item[a].lives & MESH_RUN_AFTER) || (item[b].lives & MESH_RUN_BEFORE))
+      if ((item[a].lives & MESH_RUN_AFTER) || (item[b].lives & MESH_RUN_BEFORE) ||
+          ((item[a].lives ^ item[b].lives) & MESH_RUN_COHERENT))
         before[(a * items + b) / 8] &= (unsigned char)~(1u << ((a * items + b) % 8));
   /* place: pins, contiguous items, then the rest page by page; an item with no access, pin or life holds no page */
   for (size_t k = 0; !result && k < items; k++) {

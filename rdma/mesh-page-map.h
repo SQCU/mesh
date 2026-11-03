@@ -118,7 +118,12 @@ size_t mesh_page_compose(const struct mesh_view *view, const struct mesh_layout 
    their completions, landings, the bridge leaving a table), its accesses to items, the transport's own edges and the
    bins of positions the process owns (one a lease the run touches, the arena last), and decides each item's place and
    the run's order. It knows no address; the lowering reindexes a place through its bin's lease. */
-enum { MESH_RUN_BEFORE = 1, MESH_RUN_AFTER = 2 }; /* an item live from before the run starts, or past its end */
+/* an item live from before the run starts, or past its end; MESH_RUN_COHERENT an item every access of which is
+   system-coherent or the NIC's (a SEND's source, a landing): it shares no position with an item accessed ordinarily,
+   since an M4 Pro's GPU keeps an ordinary store's line dirty across a running buffer's barriers and writes it back at the
+   buffer's end, over a landing into the same bytes (metal-microbench docs/facts.md, visible.m "writeback": 2048 of 2048
+   words), however the edges order the two */
+enum { MESH_RUN_BEFORE = 1, MESH_RUN_AFTER = 2, MESH_RUN_COHERENT = 4 };
 #define MESH_RUN_FREE UINT64_MAX
 /* an item: a value at an invocation, a state's version, a collective's own value, or a coexisting buffer (pinned, with
    `lives`): its pages; its first position where it is pinned (else MESH_RUN_FREE); `contiguous` where a function typed
@@ -143,7 +148,8 @@ struct mesh_run_history;
    - edges: mesh_graph_dependences over the accesses, each access's begin -> end where they differ, and the links;
    - order: the least-numbered ready event first (mesh_graph_order), so the declared order where the edges leave it;
    - runs: two items share a position only where every access of one happens before every access of the other over
-     the edges (an item live before the run has nothing before it; one live past it has nothing after); pinned items
+     the edges (an item live before the run has nothing before it; one live past it has nothing after) and both or
+     neither are MESH_RUN_COHERENT; pinned items
      at their pins, contiguous items one range each, the others page by page (mesh_graph_place).
    No edge is added for reuse. 0; EINVAL for an access outside its item or its events, unordered bins, a pin in no bin,
    or a cycle in the edges; EBUSY where two pins meet; ENOMEM where the run's live set exceeds its bins. */
