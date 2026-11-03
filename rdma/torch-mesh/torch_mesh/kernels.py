@@ -26,9 +26,11 @@ def prelude():
 class View:
     """an operand of a kernel: its argument index, element type, shape, strides and element offset (torch's), and
     whether its bytes are a SEND's source (stored coherently) or a landing's (loaded coherently)"""
-    def __init__(self, index, dtype, shape, stride, offset, coherent=False):
+    def __init__(self, index, dtype, shape, stride, offset, coherent=False, tg=None):
         self.index, self.dtype, self.shape, self.stride, self.offset = index, dtype, tuple(shape), tuple(stride), offset
-        self.coherent = coherent
+        # tg: the name of a threadgroup array holding the view's root in place of a buffer (fused: a product's output
+        # its one consumer reads in the same kernel)
+        self.coherent, self.tg = coherent, tg
 
     def parameter(self, writes):
         qualifier = 'volatile coherent(system) device' if self.coherent else 'device'
@@ -42,10 +44,14 @@ class View:
         return ' + '.join(terms)
 
     def load(self, coordinates):
+        if self.tg:
+            return f'{self.tg}[{self.at(coordinates)}]'
         place = f'a{self.index} + ({self.at(coordinates)})'
         return f'mesh_payload({place})' if self.coherent else f'a{self.index}[{self.at(coordinates)}]'
 
     def store(self, coordinates, value):
+        if self.tg:
+            return f'{self.tg}[{self.at(coordinates)}] = {MSL[self.dtype]}({value});'
         place = f'a{self.index} + ({self.at(coordinates)})'
         if self.coherent:
             return f'mesh_payload_store({place}, {MSL[self.dtype]}({value}));'
@@ -242,6 +248,66 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     total = simd_sum(total);
     if (lane == 0ul) {{ {out.store(["m", "n"], f"{alpha}f * total{bias_term}")} }}'''
     return _source(name, parameters, body), (N * 32, M, 1), (32, 1, 1)
+
+
+FUSED_THREADS = 1024  # a fused kernel's one threadgroup
+
+
+def fused(name, products, out, operands, expression, shared, tg, tg_dtype, tg_elements):
+    """products whose outputs one pointwise consumer alone reads, and that consumer, in one kernel of one threadgroup
+    (compiler.py _fuse): each product's outputs (a View of the threadgroup array `tg` in its root's layout) computed one
+    simdgroup an output, its lanes over k (product's simdgroup form), a threadgroup barrier, then the pointwise (out,
+    operands, expression and shared as pointwise's, its loads of the products' root from `tg`), one thread an element
+    in stride. products: (out, parts, b, bias, alpha, beta) each. A tick's products and cell were three dependent
+    dispatches, each 2-4 us at a light load's clock on every member (metal-microbench docs/facts.md, chain.m); fused,
+    one."""
+    views = {}
+    for v in [out] + [view for view, _, _ in shared]:
+        views[v.index] = v.parameter(True)
+    for v in operands:
+        if not v.tg:
+            views.setdefault(v.index, v.parameter(False))
+    for _, parts, b, bias, _, _ in products:
+        for v in parts + [b] + ([bias] if bias else []):
+            views.setdefault(v.index, v.parameter(False))
+    groups = FUSED_THREADS // 32
+    code = []
+    for o, parts, b, bias, alpha, beta in products:
+        M, N = o.shape
+        bias_term = f' + {beta}f * float({bias.load(["n"] if len(bias.shape) == 1 else ["m", "n"])})' if bias else ''
+        loops, first = [], 0
+        for part in parts:
+            K = part.shape[1]
+            loops.append(f'        for (ulong k = lane; k < {K}ul; k += 32ul) total += float({part.load(["m", "k"])}) * '
+                         f'float({b.load([f"(k + {first}ul)", "n"])});')
+            first += K
+        code += [f'    for (ulong o = group; o < {M * N}ul; o += {groups}ul) {{',
+                 f'        const ulong m = o / {N}ul, n = o % {N}ul;',
+                 '        float total = 0.0f;',
+                 *loops,
+                 '        total = simd_sum(total);',
+                 f'        if (lane == 0ul) {{ {o.store(["m", "n"], f"{alpha}f * total{bias_term}")} }}',
+                 '    }']
+    count = 1
+    for extent in out.shape:
+        count *= extent
+    c = _digits(out.shape)
+    loads = [f'        const float x{k} = float({view.load(c)});' for k, view in enumerate(operands)]
+    pre = []
+    for view, text, named in shared:
+        pre += [f'        const float {named} = float({MSL[view.dtype]}({text}));', f'        {view.store(c, named)}']
+    body = [f'    threadgroup {MSL[tg_dtype]} {tg}[{tg_elements}];',
+            '    const ulong thread = tid, group = thread / 32ul, lane = thread % 32ul;',
+            *code,
+            '    threadgroup_barrier(mem_flags::mem_threadgroup);',
+            f'    for (ulong i = thread; i < {count}ul; i += {FUSED_THREADS}ul) {{',
+            *loads, *pre,
+            f'        {out.store(c, expression)}',
+            '    }']
+    parameters = ', '.join(views[k] for k in sorted(views))
+    source = (f'{prelude()}\nusing namespace metal;\nkernel void {name}({parameters}, '
+              f'uint tid [[thread_index_in_threadgroup]]) {{\n' + '\n'.join(body) + '\n}\n')
+    return source, (FUSED_THREADS, 1, 1), (FUSED_THREADS, 1, 1)
 
 
 def summed(name, out, source, axes, scale=1.0):

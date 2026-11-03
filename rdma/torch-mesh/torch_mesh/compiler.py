@@ -60,6 +60,8 @@ import os
 # (metal-microbench docs/facts.md). What must stay: no part end that only made a store visible.
 CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
+# a fused kernel's bounds (Template._fuse): its products' outputs at most this many, their root in threadgroup memory
+FUSED_OUTPUTS, FUSED_BYTES = 4096, 16384
 
 
 class Root:
@@ -179,6 +181,7 @@ class Template:
         graph = make_fx(lambda *a: fn(*a), tracing_mode='fake', _allow_non_fake_inputs=True)(*args)
         self.roots, self.commands, self.collectives, self.order, self.current, self.node = {}, [], [], [], {}, None
         self._lower(graph)
+        self._fuse()
         self._declare()
         self._solve()
 
@@ -415,9 +418,11 @@ class Template:
         text = render(tree)
         texts = [x for _, x in shared]
         W = 1 + len(shared)
-        return self._command([out] + [v for v, _ in shared], list(loads), lambda name, c, x=text, texts=texts: kernels.pointwise(
+        written = self._command([out] + [v for v, _ in shared], list(loads), lambda name, c, x=text, texts=texts: kernels.pointwise(
             name, c.writes[0].view(0), [v.view(W + k) for k, v in enumerate(c.reads)], x,
             shared=[(c.writes[1 + k].view(1 + k), texts[k], f's{k}') for k in range(len(texts))]))[0]
+        self.commands[-1].pointwise = (text, texts)  # _fuse's operands
+        return written
 
     def _widening(self, node):
         if node.target is not aten._to_copy.default or set(node.kwargs) - {'dtype'} or node.kwargs.get('dtype') is not torch.float32:
@@ -462,11 +467,13 @@ class Template:
             self._command([out], reads, lambda name, c: kernels.product(
                 name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
                 c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))
+            self.commands[-1].product = (P, float(alpha), float(beta), len(reads) > P + 1)  # _fuse's operands
             values[node] = out
             return
         values[node] = self._command([out], reads, lambda name, c: kernels.product(
             name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
             c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))[0]
+        self.commands[-1].product = (P, float(alpha), float(beta), len(reads) > P + 1)
 
     def _linear_backward(self, node, values):
         """autograd's linear_backward(input, grad, weight, mask) as products and a sum: the input's gradient grad W, the
@@ -622,6 +629,63 @@ class Template:
                 root.base.coherent = True
         self.collectives.append(collective)
         values[node] = None
+
+    # ---- fuse ----
+    def _fuse(self):
+        """a run of products whose outputs, together exactly one small root of the arena, one pointwise command after
+        them alone reads, merged with it into one kernel of one threadgroup (kernels.fused): the products' outputs in
+        threadgroup memory, then the pointwise. The LSTM's tick lowered its layers' products and its cell to three
+        dependent dispatches, 2-4 us each at a light load's clock on every member (metal-microbench docs/facts.md,
+        chain.m); fused, one, and its stack of gates holds no page. A product over more outputs than FUSED_OUTPUTS (the
+        FFN's) keeps its own kernel: one threadgroup of the simdgroup form is far under matmul2d's rate there."""
+        commands = self.commands
+        values_of = lambda c: [c.out, c.mine] if isinstance(c, Collective) else list(c.writes) + list(c.reads)
+        out, k = [], 0
+        while k < len(commands):
+            j = k
+            while j < len(commands) and getattr(commands[j], 'product', None) is not None:
+                j += 1
+            consumer = commands[j] if k < j < len(commands) else None
+            if consumer is not None and getattr(consumer, 'pointwise', None) is not None:
+                run = commands[k:j]
+                R = run[0].writes[0].root
+                outputs = sum(math.prod(p.writes[0].shape) for p in run)
+                others = [c for c in commands if c is not consumer and all(c is not p for p in run)]
+                if (all(p.writes[0].root is R for p in run) and R.tensor is None and R.base is None and not R.coherent
+                        and R.nbytes <= FUSED_BYTES and outputs <= FUSED_OUTPUTS
+                        and outputs * run[0].writes[0].dtype.itemsize == R.nbytes
+                        and not any(v.root is R for p in run for v in p.reads)
+                        and any(v.root is R for v in consumer.reads) and not any(v.root is R for v in consumer.writes)
+                        and not any(v.root is R for c in others for v in values_of(c))):
+                    out.append(self._fused(run, consumer, R))
+                    k = j + 1
+                    continue
+            out.append(commands[k])
+            k += 1
+        self.commands = out
+
+    def _fused(self, run, consumer, R):
+        """the command of kernels.fused over `run`'s products and their `consumer`"""
+        products = []
+        for p in run:
+            P, alpha, beta, biased = p.product
+            products.append((p.writes[0], list(p.reads[:P]), p.reads[P], p.reads[P + 1] if biased else None, alpha, beta))
+        reads = [v for p in run for v in p.reads] + [v for v in consumer.reads if v.root is not R]
+        command = Command(list(consumer.writes), reads, None)
+        text, texts = consumer.pointwise
+        dtype, elements = run[0].writes[0].dtype, R.nbytes // run[0].writes[0].dtype.itemsize
+
+        def make(name, c, products=products, operands=list(consumer.reads), text=text, texts=texts):
+            index = {id(v): len(c.writes) + k for k, v in enumerate(c.reads)}
+            device = lambda v: v.view(index[id(v)])
+            local = lambda v: kernels.View(0, v.dtype, v.shape, v.stride, v.offset, tg='gates')
+            return kernels.fused(
+                name, [(local(o), [device(x) for x in parts], device(b), device(bias) if bias is not None else None,
+                        alpha, beta) for o, parts, b, bias, alpha, beta in products],
+                c.writes[0].view(0), [local(v) if v.root is R else device(v) for v in operands], text,
+                [(c.writes[1 + k].view(1 + k), texts[k], f's{k}') for k in range(len(texts))], 'gates', dtype, elements)
+        command.make = make
+        return command
 
     # ---- declare ----
     def _declare(self):
