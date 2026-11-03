@@ -1511,34 +1511,3 @@ int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const 
   free(p.placed); free(p.taken); free(order);
   return result;
 }
-
-/* mesh-graph.h mesh_graph_tree_order */
-uint32_t mesh_graph_tree_order(uint32_t vertices, uint32_t root, const uint32_t *parent, uint32_t *depth, uint32_t *order){
-  for(uint32_t v=0;v<vertices;v++){
-    uint32_t d=0,x=v;
-    while(x!=root && x<vertices && parent[x]!=UINT32_MAX && d<=vertices){x=parent[x];d++;}
-    depth[v]=x==root?d:UINT32_MAX;
-  }
-  uint32_t count=0;
-  for(uint32_t d=0;d<vertices;d++)for(uint32_t v=0;v<vertices;v++)if(depth[v]==d)order[count++]=v;
-  return count;
-}
-/* mesh-graph.h mesh_graph_share_pick */
-uint32_t mesh_graph_share_pick(uint32_t trees, const uint32_t *root, const double *share, uint32_t r, double at){
-  double sum=0;uint32_t last=UINT32_MAX;
-  for(uint32_t k=0;k<trees;k++)if(root[k]==r){last=k;sum+=share[k];if(at<sum)return k;}
-  return last;
-}
-/* mesh-graph.h mesh_graph_tree_edges */
-uint32_t mesh_graph_tree_edges(uint32_t vertices, uint32_t root, const uint32_t *parent, int leaves_first,
-                               void (*visit)(void *consumer, uint32_t child, uint32_t parent), void *consumer){
-  uint32_t *depth=malloc(((size_t)vertices+1)*sizeof *depth),*order=malloc(((size_t)vertices+1)*sizeof *order),visited=0;
-  if(!depth || !order){free(depth);free(order);return 0;}
-  const uint32_t placed=mesh_graph_tree_order(vertices,root,parent,depth,order);
-  for(uint32_t k=1;k<placed;k++){
-    const uint32_t v=order[leaves_first?placed-k:k];
-    visit(consumer,v,parent[v]);visited++;
-  }
-  free(depth);free(order);
-  return visited;
-}
