@@ -51,13 +51,14 @@ READ, WRITE = 1, 2
 # 163-188 at 4 KB (allreduce-2026-11-03 sweep-21).
 import os
 # whether a part ends after each run of links and releases (settle). A word is a kernel's coherent store, seen 5-7 us
-# into a running buffer on every member (kernels.store), so no part end is needed to make it visible; but the one-part
-# LSTM is wrong at one tick on the Mini (0.235 in its block, every run alike; lstm-2026-11-03 store-1 to store-7) where
-# the cut form is right (1.2e-4), and on the Mini a running buffer's ordinary loads of bytes another process rewrote
-# read stale (visible.m "stale"). So the ends stay until that defect is named; the run's configuration
-# (MESH_RUN_CUTS=0) runs one part for that reading, first one end (metal-microbench docs/facts.md). What must stay: no
-# one-part default while it is wrong anywhere.
-CUTS = {'0': 'none', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', 'all'), 'all')
+# into a running buffer on every member (kernels.store), and an item the NIC touches shares no page with one stored
+# ordinarily (RUN_COHERENT; the M4 Pro writes an ordinary store's dirty line back over a later landing), so a run is one
+# part but where it passes between compiled functions. The one-part wrong tick (lstm-2026-11-03 store-1 to store-7) was
+# that write-back; with it kept apart the LSTM, its trainable form, the FFN and the all-reduce are right in one part, at
+# 39-42 us a tick against 63-69, 310-317 us a layer against 668-683, 110-131 us against 263-312 (coherent-1, the
+# services' onepart-1). The run's configuration (MESH_RUN_CUTS=all, or first) restores the ends for a comparison
+# (metal-microbench docs/facts.md). What must stay: no part end that only made a store visible.
+CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
 
 
