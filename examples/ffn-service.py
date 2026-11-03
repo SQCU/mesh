@@ -40,8 +40,16 @@ def main(config=None):
     a1 = torch_mesh.empty(B, blocks[rank], dtype=torch.half)
     a2 = torch_mesh.empty(B, blocks[rank], dtype=torch.half)
 
+    only = config.get('only')  # one stage a layer ('first': x W1, 'relu', 'second': a2 W2), its GPU time alone
+
     def ffn(t):
-        if staged:
+        if only == 'first':
+            a1.copy_(x @ w1)
+        elif only == 'relu':
+            a2.copy_(torch.relu(a1))
+        elif only == 'second':
+            y.copy_(a2 @ w2)
+        elif staged:
             # each stage into a caller tensor of its own, so rank 0 checks each against torch
             a1.copy_(x @ w1)
             a2.copy_(torch.relu(a1))
@@ -74,7 +82,7 @@ def main(config=None):
         emit({**measure(started, ended, flops, layers), 'workload': 'ffn_column_separable', 'rank': rank, 'size': size,
               'report': dict(tokens=B, dim=D, hidden=F, block=blocks[rank], layers=layers, repeat=repeat,
                              gflops=round(flops / (ended - started) / 1e9, 2), us_per_layer=round((ended - started) / layers * 1e6, 1))})
-    if rank == 0:
+    if rank == 0 and not only:
         torch.mps.synchronize()
         expected = torch.relu(x_cpu.half().float() @ w1_cpu.half().float()) @ w2_cpu.half().float() if summed else \
             torch.relu(x_cpu.half().float() @ w1_cpu[:, :blocks[0]].half().float()) @ w2_cpu[:blocks[0]].half().float()
