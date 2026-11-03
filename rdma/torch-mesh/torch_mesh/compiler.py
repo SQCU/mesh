@@ -746,8 +746,15 @@ class Program:
         values = empty((max(1, len(stores)),), dtype=torch.int64)
         values.copy_(torch.tensor(stores or [0], dtype=torch.int64).to(values.device))
         # pass 2: the run's nodes, the caller's work so far (torch's stream, the store values among it) its input
+        # the events in the order their nodes are appended, and each id's name: a refused finish names its backward edges
+        emitted, named = [], {}
+
+        def ev(i):
+            emitted.append(i)
+            run.event(i)
         start = next(_EVENTS)
-        run.event(start)
+        named[start] = ('start',)
+        ev(start)
         run.inputs()
         edges, previous_sinks = [], [start]
         watched = self.watched[id(run)] = []
@@ -765,6 +772,8 @@ class Program:
         cut = [False]  # a part end owed after links and releases, across chunks
         for chunk, (t, lowered) in enumerate(instances):
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
+            for e, i in ids.items():
+                named[i] = (chunk, t.events[e])
             has_node = set()
             # a step's send, sent and landed events are its channel's node's: one id a (occurrence, kind, channel)
             # group, its node appended at the group's last event in the order. A forward's send is in no group: the
@@ -823,7 +832,7 @@ class Program:
             def emit_observation(key):
                 kind, c, channel, round_ = key
                 settle()
-                run.event(ids[group[key][0]])
+                ev(ids[group[key][0]])
                 command = t.commands[c]
                 steps = [command.steps[t.events[m][2]] for m in group[key]]
                 for _, _, word, value, slot, _ in nodes_of(c, kind, channel, round_):
@@ -853,13 +862,13 @@ class Program:
                     source, grid, group_size = kernels.pointwise('mesh_command', out, reads, 'x0 + x1')
                     tensor, base = self._binding(s['root'])
                     landing, landing_base = self._binding(s['landing'])
-                    run.event(ids[e])
+                    ev(ids[e])
                     run.dispatch(_pipeline(source, 'mesh_command'), [(0, tensor, base), (1, tensor, base),
                                                                     (2, landing, landing_base)], grid, group_size, True)
                 elif kind == 'command':
                     flush(e)
                     settle()
-                    run.event(ids[e])
+                    ev(ids[e])
                     operands = []
                     for index, value in enumerate([*command.writes[:1], *command.reads]):
                         tensor, base = self._binding(value.root)
@@ -869,7 +878,7 @@ class Program:
                     links = [n for n in lowered[c] if n[0] == lib.ncclMeshNodeLink]
                     if links:
                         flush(e)
-                        run.event(ids[e])
+                        ev(ids[e])
                         for _, _, word, _, slot, _ in links:
                             stored(slot, word)
                         cut[0] = True
@@ -878,7 +887,7 @@ class Program:
                     if key[0] == 'send':
                         for m in group[key]:
                             flush(m)
-                        run.event(ids[e])
+                        ev(ids[e])
                         for _, _, word, value, slot, _ in nodes_of(c, 'send', key[2], key[3]):
                             stored(slot, word)
                         cut[0] = True
@@ -893,7 +902,18 @@ class Program:
             edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
             previous_sinks = sinks(kept, own) or previous_sinks
         run.edges(edges)
-        run.finish()
+        try:
+            run.finish()
+        except RuntimeError as refused:
+            if 'backward' not in str(refused):
+                raise
+            first, last = {}, {}
+            for k, i in enumerate(emitted):
+                first.setdefault(i, k)
+                last[i] = k
+            backward = [(a, b) for a, b in edges if a in last and b in first and first[b] < last[a]]
+            raise RuntimeError(f'{refused}: {len(backward)} edges backward in the emitted order, the first '
+                               f'{[(named.get(a), last[a], named.get(b), first[b]) for a, b in backward[:4]]}') from refused
         return run
 
     def forward(self):
