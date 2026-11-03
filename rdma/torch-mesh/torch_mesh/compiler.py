@@ -50,10 +50,12 @@ READ, WRITE = 1, 2
 # (MESH_ALLREDUCE_GATHER_BELOW, bytes) sets it for a sweep. The planner's all-reduce measured 357-416 us at 256 KB and
 # 163-188 at 4 KB (allreduce-2026-11-03 sweep-21).
 import os
-# whether a part ends after each run of links and releases (settle); the run's configuration (MESH_RUN_CUTS=0) runs it
-# as one part, its order alone keeping a copy behind the waits it follows (an M5 Ultra's late part starts are at part
-# boundaries: metal-microbench docs/facts.md, gaps.m)
-CUTS = {'0': 'none', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', 'all'), 'all')
+# whether a part ends after each run of links and releases (settle). Changed by the one-part session from 'all': a part
+# end made a link's or release's copy visible (about 25 us after the part's end on an M5 Ultra, its late part starts at
+# the boundaries: metal-microbench docs/facts.md, gaps.m); a word is now a kernel's coherent store, seen 5-7 us into a
+# running buffer on every member (kernels.store), so a run is one part. The run's configuration (MESH_RUN_CUTS=all, or
+# first) restores the ends for a comparison. What must stay: no part end that only made a store visible.
+CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
 
 
@@ -817,7 +819,7 @@ class Program:
         # each run's watched words in their order (run.landings()'s): (kind 'landed' or 'sent', chunk, channel, the
         # ranks whose segments its steps carry), so a timeline names what each landing was
         self.watched = {}
-        self.copies = {}  # a run's copies: each one's event, its word's address and its value slot's (the stall's reading)
+        self.stores = {}  # a run's word stores: each one's event, its word's address and its value slot's (a stall's reading)
         self.labels = {}  # a traced run's nodes in the order appended: each one's kind and its event's name (trace)
         # the run's defect word, its observations' (kernels.observe): 0, or 1 a give-up, 2 a lost word
         self.defect = empty((2,), dtype=torch.int64)
@@ -933,26 +935,28 @@ class Program:
             batch.clear()
         watched = self.watched[id(run)] = []
 
-        # a link's or release's word written by a copy from its value slot. Changed by the FFN demonstration session
-        # from a kernel's store (mesh_publish): a kernel's store reaches the bridge only at its part's end, about 25 us
-        # after it on an M5 Ultra, in every round; a copy's write reaches it about 6 us after it runs, with a kernel's
-        # system-coherent stores before it (behind its barrier) complete (metal-microbench docs/facts.md, visible.m
-        # "copied" and "ordered"). On an M5 Ultra a copy runs only once every earlier dispatch of its encoder has ended
-        # (visible.m "behind": never while an observation before it spins), so the part still ends after each run of
-        # links and releases (settle), and a copy waits for its own part's earlier nodes alone, the same nodes whose
-        # end the kernel's store waited for to be seen (with no part ends, the LSTM and the all-reduce stalled on every
-        # rank, ffn-2026-11-03 notes). A copy writes where mesh_publish took a maximum, so each word's stores are
-        # ordered: its next follows its last (an edge). What must stay: a word's store is one the CPU sees in a
-        # running part, after the data it releases, its stores in order, and no copy behind another part's waits.
+        # a link's or release's word written by a one-thread kernel's coherent store from its value slot (kernels.store).
+        # Changed by the one-part session from a copy, which the FFN demonstration session had chosen over mesh_publish's
+        # atomic on visible.m "copied" (a copy seen about 6 us into a running part): that way's observation polled a
+        # word in the copied word's 64-byte sector, and those reads are what drew the copy out. With no dispatch reading
+        # its sector, a copy in a running buffer is never seen within 1 s on the Mini, nor on an M5 Ultra without a
+        # barrier after it, and on an M5 Ultra it runs only after every earlier dispatch of its encoder (visible.m
+        # "behind"), so a one-part run stalled (onepart-1 to 11: the Mini's links and releases unseen for 1.39 s, its
+        # bridge's words unmoved at 1 ms). The kernel's store is seen 5.5-7 us into the buffer on both chips, its
+        # coherent payload complete behind it, and it waits only for its own producers (metal-microbench
+        # docs/facts.md, visible.m "shaped"). Each word's stores are ordered: its next follows its last (an edge). What
+        # must stay: a word's store is one another process sees in a running buffer, after the data it releases, its
+        # stores in order.
         last_store = {}
+        storing = _pipeline(kernels.store(), kernels.STORE)
 
         def stored(slot, word, event):
             if word in last_store and last_store[word] != event:
                 edges.append((last_store[word], event))
             last_store[word] = event
-            run.copy(values, 8 * slot, word, 0, 8)
-            labels.append(('copy', named.get(current[0])))
-            self.copies.setdefault(id(run), []).append((named.get(current[0]), word, int(_stream.address(values)) + 8 * slot))
+            run.dispatch(storing, [(0, word, 0), (1, values, 8 * slot)], (1, 1, 1), (1, 1, 1), True)
+            labels.append(('store', named.get(current[0])))
+            self.stores.setdefault(id(run), []).append((named.get(current[0]), word, int(_stream.address(values)) + 8 * slot))
             node_events.append(current[0])
             if tracing:
                 run.mark()
@@ -1025,9 +1029,8 @@ class Program:
             held = []
 
             def settle():
-                # a part ends after its links and releases, once, before the next node of another kind: a copy runs
-                # only once its encoder's earlier dispatches have ended (an M5 Ultra; stored), so the observations
-                # after it go in the next part, committed ahead, which begins at once
+                # with MESH_RUN_CUTS=all (or first) a part ends after its links and releases, once, before the next
+                # node of another kind: the form whose ends made a copy's word visible (CUTS), kept for a comparison
                 if cut[0]:
                     if CUTS == 'all' or (CUTS == 'first' and not cuts_made[0]):
                         run.cut()
@@ -1175,13 +1178,13 @@ class Program:
         from mesh_graph import contract
         edges = contract(edges, lambda e: alias.get(e, e))
         if os.environ.get('MESH_RUN_ORDER_CHECK'):
-            # each copy after an observation it does not follow, as if the run were one part (MESH_RUN_CUTS=0's hold)
+            # each word's store after an observation it does not follow, as if the run were one part
             from mesh_graph import unfollowed
             kinds = {}
             for (kind, *_), e in zip(labels, node_events):
                 kinds.setdefault(e, set()).add(kind)
             order = list(dict.fromkeys(node_events))
-            bad = unfollowed(order, {e for e, k in kinds.items() if 'observe' in k}, {e for e, k in kinds.items() if 'copy' in k}, edges)
+            bad = unfollowed(order, {e for e, k in kinds.items() if 'observe' in k}, {e for e, k in kinds.items() if 'store' in k}, edges)
             sends = [(w, c) for w, c in bad if (named.get(c) or (None, ('',)))[1][0] == 'send']
             # a command behind a barrier waits for every earlier dispatch of its part too: the commands after an
             # observation they do not follow (a release after such a command is held by it)

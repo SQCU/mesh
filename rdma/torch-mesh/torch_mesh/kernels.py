@@ -5,7 +5,7 @@ Metal compiler folds each index (a power-of-two extent's digit is a shift and a 
 landing's loads are system-coherent (rdma/mesh.metal); every other access is an ordinary one. One kernel a command:
 a pointwise map (a fused expression over its operands), a matrix product with its bias (product's two forms), an
 indexed read or write through a device index, a sum over axes, and the run's observation of a word (a landing's or a
-SEND's completion). A link's or release's word is written by a copy, not a kernel (compiler.py stored).
+SEND's completion), and a link's or release's word store (compiler.py stored).
 """
 import functools
 import pathlib
@@ -268,6 +268,26 @@ OBSERVE = 'mesh_observe'
 # an observation's bound: at most this many fenced reads (well under a second on the members), and none once the run's
 # defect word is set, so a word that never comes ends the run and names itself, never a GPU held
 OBSERVE_POLLS = int(__import__("os").environ.get("MESH_OBSERVE_POLLS", 1 << 22))  # the run's configuration may set it
+
+
+STORE = 'mesh_store'
+
+
+@functools.cache
+def store():
+    """a link's or release's word: argument 0 the word, argument 1 its value (in the run's value slots), stored after a
+    system-scope fence as a plain volatile coherent(system) store. Changed by the one-part session from a copy (and,
+    before it, from mesh_publish's atomic maximum): with no dispatch reading the word's 64-byte sector, a running
+    buffer's copy is never seen by another process within 1 s on the Mini, nor on an M5 Ultra without a barrier after
+    it; mesh_publish's atomic never on the Mini, 4-169 ms on an M5 Ultra; this store 5.5-6.2 us from the buffer's start
+    on the Mini and 4.6-7.0 on an M5 Ultra, its coherent payload (a SEND's source, stored coherently) complete behind
+    it (metal-microbench docs/facts.md, visible.m "shaped"). A word's stores are ordered by the compiler's edges
+    (compiler.py stored), not by a maximum. What must stay: a plain coherent(system) store after the fence, never an
+    atomic and never a copy, for any word another process reads while the run's buffer runs."""
+    return (f'{prelude()}\nusing namespace metal;\nkernel void {STORE}(volatile coherent(system) device ulong *word '
+            f'[[buffer(0)]], device const ulong *value [[buffer(1)]], uint at [[thread_position_in_grid]]) {{\n'
+            f'    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
+            f'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));\n    *word = value[0];\n}}\n')
 
 
 @functools.cache
