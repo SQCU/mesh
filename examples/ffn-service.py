@@ -78,11 +78,11 @@ def main(config=None):
                                   tflops=round(2 * B * D * blocks[rank] / us / 1e6, 2))), flush=True)
     if config.get('sweep'):
         # each product's GPU time alone (16 back to back, the last repeat's part) under each block geometry the sweep
-        # names (kernels' TENSOR_ROWS_MOST, TENSOR_SPLIT_MOST, TENSOR_SIMDGROUPS), compiled afresh for each
+        # names (kernels' TENSOR_ROWS_MOST, TENSOR_SPLIT_MOST, TENSOR_SIMDGROUPS, TENSOR_SPLIT_LEAST_K), compiled afresh for each
         from torch_mesh import kernels
         for geometry in config['sweep']:
-            kernels.TENSOR_ROWS_MOST, kernels.TENSOR_SPLIT_MOST, kernels.TENSOR_SIMDGROUPS = (
-                geometry['rows'], geometry['split'], geometry.get('simdgroups', 1 << 20))
+            kernels.TENSOR_ROWS_MOST, kernels.TENSOR_SPLIT_MOST, kernels.TENSOR_SIMDGROUPS, kernels.TENSOR_SPLIT_LEAST_K = (
+                geometry['rows'], geometry['split'], geometry.get('simdgroups', 1 << 20), geometry.get('least_k', 32))
             for label, stage in (('first', lambda t: (a1.copy_(x @ w1), t.add_(1))),
                                  ('second', lambda t: (y.copy_(a2 @ w2), t.add_(1)))):
                 swept = Program([(stage, (t,))] * 16)
