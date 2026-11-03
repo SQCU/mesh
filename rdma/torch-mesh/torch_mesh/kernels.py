@@ -362,7 +362,11 @@ def summed(name, out, source, axes, scale=1.0):
 OBSERVE = 'mesh_observe'
 # an observation's bound: at most this many fenced reads (well under a second on the members), and none once the run's
 # defect word is set, so a word that never comes ends the run and names itself, never a GPU held
-OBSERVE_POLLS = int(__import__("os").environ.get("MESH_OBSERVE_POLLS", 1 << 22))  # the run's configuration may set it
+# an observation's polls before it gives up and names itself (a fence and a coherent load each, a few to tens of ns):
+# a stall named before the run's 8 s watchdog, not a slow program failed. At 2^22 (about 20-40 ms) an LSTM of width 4096
+# (ticks of 20-28 ms behind its 8-row products) gave up on landings 3 short of their counts in its third round
+# (metal-microbench balance-2026-11-03 sweep-3); the run's configuration may set it
+OBSERVE_POLLS = int(__import__("os").environ.get("MESH_OBSERVE_POLLS", 1 << 28))
 
 
 STORE = 'mesh_store'
