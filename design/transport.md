@@ -4,11 +4,6 @@ This is the description of how data moves between nodes, who may touch what, how
 answers, in terms of the objects the code holds, the operator's questions of 2026-10-19. Where it and older text in
 this repository disagree, this text is the description and the older text is history.
 
-The 2026-10-24 exact-byte revision below is wire version **135**, region layout **154**. It passed local build,
-sanitized/mock ownership tests, and the [live validation below](#exact-byte-validation-on-2026-10-24). The cluster
-deployment was temporary; the preceding bridge was restored after testing. These results do not describe a permanent
-deployment or establish that all workloads attain their bandwidth bounds.
-
 Incident records it cites: [RDMA-KERNEL-RECOVERY.md](RDMA-KERNEL-RECOVERY.md) (September 5, October 16-18). Apple's
 transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt).
 
@@ -20,10 +15,9 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   hardware fact is the bank: `tbt_post_recv` keeps only the low 32 bits of an SGE address with the extent's key, so an
   extent crossing a 4 GiB boundary aliased receives 4 GiB low (September 5). Every address a request names is inside
   it.
-- **The page table.** The region's rows (one row is one block, 16 KiB on the pair) and, per row, an owner word and the
-  arena page it maps (`mesh_buffer`, `mesh_page_entry`), claimed by compare-and-swap on bitmaps. A client's memory is
-  rows whose owner word is its own. This allocation granularity is not a minimum transfer size. "Lease" in the code
-  means only this: rows owned. It has no term, renewal or expiry.
+- **The page table.** The region's rows (one row is one block) and, per row, an owner word and the arena page it maps
+  (`mesh_buffer`, `mesh_page_entry`), claimed by compare-and-swap on bitmaps. A client's memory is rows whose owner
+  word is its own. "Lease" in the code means only this: rows owned. It has no term, renewal or expiry.
 - **A link.** The two ports at the ends of one cable and the queue pairs the bridges make on them at each pairing:
   the unreliable-connected queue pairs of its plan, ten where both ends' devices hold ten (macOS 26's) and fewer where
   either holds fewer (the M5 Ultra's macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule:
@@ -36,21 +30,14 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   next arriving SEND fills the oldest posted receive. Its completion is an entry in the receive completion queue.
 - **A SEND.** An `ibv_send_wr` with one SGE naming a range of the region. TN3205: only SEND and RECV exist on this
   transport (no RDMA WRITE or READ), a SEND and the receive it fills must cover the same number of 4 KiB frames, and a
-  SEND is held by the hardware's credit until the peer has a receive posted. The compiled plan makes the SGE lengths
-  equal exactly. `ceil(length / 4096)` is the credit charge, not padding read from or written to application memory.
-- **A resolved byte span.** `mesh_dma_span {uint64_t offset, bytes, through}` is 24 bytes of local metadata; offset
-  is relative to the region base. It names the actual registered interval, can start inside an allocation page, and
-  never crosses a 1 GiB MR boundary. The compiled mask may set bytes to zero. The local completion position
-  `through` includes any following masked units on that lane. No copy, header or descriptor travels with the payload. Physical wire framing
-  overhead is separate and is not inferred by treating a credit frame as 4096 transmitted payload bytes.
-- **A readiness word.** A 64-bit contiguous count of compiled span units, with one writer and one or more readers:
+  SEND is held by the hardware's credit until the peer has a receive posted. `ceil(length / 4096)` is the credit charge.
+- **A readiness word.** A 64-bit contiguous count of units, with one writer and one or more readers:
   `ready` counts produced units, `sent` completed SEND units, and `landed` completed receive units. Both hardware
   lanes contribute to the same contiguous prefix. These counts are neither byte counts nor allocation-page counts.
-  All-ones (~0) in a completion prefix means loss, not completed work. Invalid descriptors fail validation; the
-  byte-extent revision does not substitute an all-ones payload (section 10).
+  All-ones (~0) in a completion prefix means loss, not completed work.
 
-The compiler binds storage and dependencies; the bridge realizes exact spans, requests, completion prefixes and
-queue capacity. It need not know tensor dimensions or the arithmetic performed on the bytes.
+The compiler binds storage and dependencies; the bridge realizes requests, completion prefixes and queue capacity. It
+need not know tensor dimensions or the arithmetic performed on the bytes.
 
 ## 2. Who owns what
 
@@ -65,8 +52,8 @@ bridge stopped by SIGHUP (its heartbeat's restart, a deploy) or ended by a crash
 bridge adopts the region, the same memory, where its layout is that bridge's:
 - clients' slots, rows and leases stand, and the GPU buffers over them stay valid;
 - the port children register the same pages again, so nothing is wired twice and nothing is reloaded;
-- the bridge's own pages (each port's link pages, its streams' lists and physical-interval pin rings, the map, and
-  the reserved all-ones block retained from older layouts) are recorded in the region and taken again;
+- the bridge's own pages (each port's link pages, the map, and the reserved all-ones block retained from older
+  layouts) are recorded in the region and taken again;
 - every stream is set not live and held by none, its landed words ~0, so a communicator of the old pairing fails and is
   made again, and the next pairing opens each stream new;
 - a retirement a dead process left half done is finished.
@@ -162,43 +149,11 @@ queue-pair numbers, packet sequence numbers and GIDs the hardware assigns at eac
 endpoint exchange): HELLO and LINK on the control socket, once a pairing. RECORD carries each node's links and memory
 (the map), which is data, not a dialogue.
 
-Before execution, both ends have equal payload lengths and unit order. `ncclMeshCommPlan` consumes
-Call bindings and typed views through the [shared tensor lowerer](../rdma/mesh-write-compiler.h), resolving local
-page selections and exchanging shape metadata through the existing bootstrap. `ncclMeshCommEncode` records the
-next declared group; numerical execution exchanges neither that metadata nor acknowledgments. Affine rows stay in a fixed-size report. Peers may use different row pitches, row shapes or
-indexed selections for the same message. The [common cut builder](../rdma/nccl-mesh.c) includes actual layout
-discontinuities, each binding occurrence's registration boundaries, publication tiles and the packet limit.
-Typed repeats retain the [modular repeat compiler](../rdma/mesh-span-plan.h). Only final DMA descriptors are
-materialized. Full pages and masked pages use this same compiler and executor.
+Before execution, both ends have equal payload lengths and unit order.
 
 Data executes as SEND into an AOT-bound, preposted receive. There is no payload header, receive-address request,
 receipt all-gather or remote ACK. A lost link remains a driver/control-socket event. Prepared bindings carry a
 configuration-time agreement; this is not a claim that creating a plan involves no metadata exchange.
-
-### Exact-byte validation on 2026-10-24
-
-The three-rank [byte-write test](../rdma/tests/byte-writes.py) passed all five cases: 3 bytes; seven 257-byte rows;
-5,003 three-byte rows; 4 MiB + 13 bytes; and 1 GiB + 19 bytes crossing registration boundaries. It verified exact
-payload accounting and preserved leading, trailing and inter-row neighbor guards. The larger transfers carried
-payload over all six discovered cables. Separately, [fused-physical](../rdma/tests/fused-physical.py) passed 14 cases
-and 94 calls per rank in each of the two-node and three-node runs.
-
-The complete numerical function `seed -> remote uint8 affine transform -> local xor` used five trials of 128 calls
-per mode. Median amortized function latency was **31.290 µs with exact spans**, versus **35.569 µs with padded
-transfers**. Each transfer's payload was 3 bytes versus 16,384 bytes. These are whole-function GPU observations,
-including computation and communication; they are not measurements of isolated NIC latency, nor does the payload
-ratio imply the same latency ratio. Preparation, compilation, allocation and diagnostics were outside timing.
-
-The subsystem improvement is established by preserved results with fewer payload bytes and removal of the remote
-packing/unpacking passes. It does not require a visible speedup in every complete function. Lower interconnect
-overhead frees resources that dependent computations can use; the observed latency effect depends on how much
-that overhead contributes to the workload. Whole-function measurements characterize that effect and check for
-regressions. In the separate large-DNN replay every observed span was already 16 KiB, so it exercised the revised
-transport and accounting without exercising the short-span padding savings.
-
-The [validation logs](/Users/mdot/metal-microbench/output_data/review-20261024/byte-extents) record this temporary
-wire-135/layout-154 deployment and its restoration. The historical measurements elsewhere in this document remain
-evidence for their respective revisions.
 
 ## 4. SEND and RECV do not fail
 
@@ -213,7 +168,7 @@ In correct code:
 What does happen: nothing arrives (the other side supplied nothing, or the cable is gone), and the driver's device
 events (link off, the peer interface's termination). The M5's bridge log from 2026-10-16 00:08Z to 2026-10-19 holds
 no failed completion at all. It holds 176 link losses: 100 the bridge concluded itself over receives a stopped
-communicator had left posted (section 12), the rest its own conclusions at restarts, peers' stops and interfaces going
+communicator had left posted, the rest its own conclusions at restarts, peers' stops and interfaces going
 down, and connects failing with EIO from its own stale addressing after the Mini's power loss (2026-10-19).
 
 ## 5. Every loop of ours can stop; only a kernel call cannot
@@ -232,21 +187,14 @@ seconds without something happening/concluding."
 
 Since 2026-10-22 no wait of the bridge or the collective on a peer's data is bounded by a clock, and the bridge decides
 nothing by one (section 14: "we don't introduce race conditions or use timing anywhere"). The deadline bounds the
-bridge's own lifecycle (a driver call's job, a quiet window, a child's end) and the bootstrap's phases. A group's
-presentation waits for its bridge to take its entries (`taken`), and a host-path group's wait for its own GPU work, and
-a destroy's, end at the command buffer's completion status, which the platform's watchdog ends with an error where the
-buffer overruns (a buffer not yet committed fails a group at once, as a value, and a destroy does not await it:
-nothing runs it while its committer waits). A group's waits re-read the revoke and its holding between looks (rubric
-M3, 10-18), and no transaction fails because time passed (2026-10-22). None of these waits holds the library's groups'
-lock: each releases it for the wait and takes it again after, as a condition variable's wait releases its mutex, so
-other communicators' groups and revokes go on (rubric M4). A GPU wait keeps its poll bound; a link
-carries no keepalive.
-
-An expiry stops the process's GPU work before the program ends (rdma/nccl-mesh.c mesh_library_expired): it takes every
-communicator's failure claim and stop, so each GPU wait and the track kernel end within 2^10 loads, and awaits the
-library's committed GPU programs within MESH_PLATFORM_NS. A watch looks every MESH_PLATFORM_NS / 20 for a communicator's command
-buffer committed and not ended while none of the library's programs has ended for twice MESH_PLATFORM_NS, and ends the
-program so, naming the wait.
+bridge's own lifecycle (a driver call's job, a quiet window, a child's end) and the bootstrap's phases. A host-path
+group's wait for its own GPU work, and a destroy's, end at the command buffer's completion status, which the platform's
+watchdog ends with an error where the buffer overruns (a buffer not yet committed fails a group at once, as a value, and
+a destroy does not await it: nothing runs it while its committer waits). A group's waits re-read the revoke and its
+holding between looks (rubric M3, 10-18), and no transaction fails because time passed (2026-10-22). None of these waits
+holds the library's groups' lock: each releases it for the wait and takes it again after, as a condition variable's wait
+releases its mutex, so other communicators' groups and revokes go on (rubric M4). A GPU wait keeps its poll bound; a
+link carries no keepalive.
 
 The only thing that cannot be stopped is a thread inside a kernel call that waits on something that never happens. A
 process in that state (STAT `U`) ignores every signal, SIGKILL included. Observed:
@@ -273,16 +221,7 @@ with a device's termination (section 9).
 
 ## 6. Who looped forever
 
-| date | what spun or blocked | whose |
-|---|---|---|
-| 2026-09-05 | test processes in the release of their verbs objects (state U) | the provider's release, entered by our processes' exits during the fault |
-| 2026-09-05, 10-18 | `deallocPD` waiting on a termination that waits on its gate | the provider's deadlock, entered by our teardown call |
-| 2026-10-02 | a GPU kernel spinning with no bound on a word only another command queue wrote; the M5 crashed | ours |
-| 2026-10-17 | `pair_flush` spinning for `ib_drain_qp` markers the provider accepts and never completes | ours: waiting on something never promised |
-| to 2026-10-19 | unbounded host and GPU waits on landed words, waits on peers in call setup | ours |
-
-The data path of Apple's provider (`post_send`, `post_recv`, `poll_cq`) always returned. Every infinite wait on record
-was ours, and the one kernel hang was entered through a call of ours.
+The data path of Apple's provider (`post_send`, `post_recv`, `poll_cq`) always returned.
 
 Open: the Mini's two kernel data aborts at fault address 0x98, seconds after its bridge stopped, October 16 and 17
 (each stop then destroyed queue pairs while posts could be in flight; trigger not established).
@@ -302,8 +241,8 @@ nothing starts it. Since the bridge makes no call that waits on a termination (s
    power goes first, its kernel state goes with it, and a machine that is off cannot hang.
 2. **The node staying up** (the M5). It reads FAREWELL, or the link-off event, or the peer interface's termination.
    It stops serving that link and makes no verbs call on it. The termination finishes because nothing of the bridge
-   holds the provider's gate. Calls with positions on that link observe failure metadata; the byte-span path does
-   not fabricate replacement payloads (section 10). Other ports continue independently.
+   holds the provider's gate. Calls with positions on that link observe failure metadata. Other ports continue
+   independently.
 
 ## 8. A crushed cable
 
@@ -342,11 +281,6 @@ objects. A job an operator disables (`launchctl disable`) stays off: the install
 
 ## 10. Invalid descriptors and historical duds
 
-Earlier page-only versions could replace an invalid row with a whole page of all-ones, sent from the bridge's
-preinitialized block. That history does not describe the byte-span path. `mesh_stream_present` validates the span
-table, dependency word, arena bounds and exact registration-contained extents before publication. A bad span seen
-by the bridge fails the link; it is not converted into filler or a padded write to unrelated storage.
-
 Previously posted receives retain their actual destination intervals until completion or the posting child's
 queue pairs cease to exist. Failure and an all-ones completion prefix never prove those accesses completed.
 
@@ -357,44 +291,21 @@ transport level errors. you need to transmit 1000 frames which are *normal* and 
 for every 1 *error* wrt the bridge application. sending an all-1 dud buffer is not a transport error, but a client
 error".
 
-- **A frame**, for the accounting below, is a hardware credit unit charged to a posted SEND. A short span consumes
-  one credit unit without transferring 4 KiB of application data. Physical framing bytes require separate measurement.
+- **A frame**, for the accounting below, is a hardware credit unit charged to a posted SEND. Physical framing bytes
+  require separate measurement.
 - **A normal frame** is a credit unit of a payload that arrives intact in the receive the schedule gave it.
 - **A transport error** is a frame that does not: lost, cut short, landed in another position's receive, held by the
   bridge past its deadline, or cancelled because a link was lost or concluded. Every frame in flight on a link when it
   is lost counts, and so does every frame scheduled on it until the calls on it end.
-- **Not transport errors:** the client's historical dud substitutions, and positions of calls that ended before
-  they were sent. The byte-span path introduces no dud substitutions.
+- **Not transport errors:** positions of calls that ended before they were sent.
 - **The requirement:** at least 1,000 normal frames per transport error, counted per bridge.
 
 What it rules out: any link loss the bridge causes itself. One link loss in a decode call at the pair's rate (on the
 order of ten thousand frames a second) costs every frame scheduled until the call ends; a re-pair of about 8 s
-costs tens of thousands, which then requires tens of millions of clean frames to stay at three nines. Before this
-document the bridge concluded a link at every rank renewal and at every failed call (section 12), which no workload
-can meet. After it, only physical events (a cable pulled or crushed, a node losing power) lose links.
+costs tens of thousands, which then requires tens of millions of clean frames to stay at three nines.
 
 Keep posted and landed credit-frame counts, actual payload bytes, and transport-error counts distinct in each
-node's record. Historical dud counts belong to the versions that emitted them; they are not useful payload or an
-exact-byte failure recovery mechanism.
-
-## 12. The code before this document
-
-What HEAD did against the sections above, by section:
-
-- 2: every client mapped the whole region read-write; client rows held `struct mesh_send` (a prepared `ibv_send_wr`
-  and the queue-pair pointer), which the bridge posted as it found it; clients named the addresses of the words the
-  bridge writes (`mesh_delivery`); clients claimed queue pairs by compare-and-swap on `hdr->lanes`.
-- 3: a per-communicator "session" (opened at the first crossing group, its rings in the communicator's rows, a digest
-  agreement at its first position), the rank's "meets" before and after preparation, filler stamps and their checks.
-- 4, 5: receives were posted ahead into a communicator's own rows and restarted for each communicator, so every
-  communicator's end left receives posted ("dirty"); the bridge's only way to clear them was to conclude the whole
-  link and pair it again (`lanes_release`, `link_turn`), ending every other communicator on the cable and the rank's
-  call-delivery group with them, about 8 s each time. Communicators were kept from call to call to avoid that, and
-  a failed member's end still did it (2026-10-19: one call's failed program build cost the next two calls).
-- 9: the bridge stopped itself when its binary changed.
-- 10: no duds; a member that supplied nothing made its peers wait to the bound of their GPU waits.
-- 2 and 11, in metal-microbench: per-rank byte ceilings computed by the planner (`programs.py plans`, the engine's
-  `withinPlan`) refused allocations the region could hold.
+node's record.
 
 ## 13. Reviewing transport code
 
@@ -416,7 +327,6 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | How a holding ends | the link concluded ≺ every unit it declared or supplied sent, the unsupplied ones as duds, and one more (132) ≺ at once at its give: nothing more of it posted, the stream free (133) ≺ at once at its give or its holder's retirement, each unit told before it is posted and posted only while the holding is its holder's: with nothing outstanding the stream free, else the stream not live for its pairing (134) | M4, M10 |
 | Where the next holding starts | the bridge's answer in the client's slot (127) ≺ each lane's counts sampled as a holding begins, exchanged as `start` words and MAXed, spares and duds between (129-132) ≺ where the last one ended at each end, the stream's pages posted told as facts, the filler presented by the collective (133) ≺ where the last one ended, equal at both ends of a live stream by construction, the facts kept as a statistic (134) | M2, C7 |
 | A holding that ends with units outstanding | its receives' owner's every row held until they land (`touching`), the next communicator's filler and its wait taking them up (133) ≺ the queue pairs moved to Error and every request flushed (the operator's permission of 10-22, not used) ≺ the stream not live for its pairing, a link with no live stream lost by the port child's exit, the window's rows held until each unit completes or the child exits (134) | M3, M4 |
-| Which rows a reclaim keeps | every row of a holder a stream still names (`mesh_touched`, 133: D(P) taken as everything P held) ≺ W(t), the rows the units posted and not completed name, the plan's window in flight, each until its unit completes or its port's child exits (134; design/extents-and-liveness.md, d) | M4 |
 | A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life, a lost link down until a person relaunched it (129) ≺ none in a process: made and connected once in a port child's life, released by its exit, the link paired again by the port's next child (130) | M3, M4, M6 |
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on the guard word while it serves nothing | M8 |
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
@@ -425,66 +335,28 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 clients and data processing code, which present buffers for transmission and accept whatever packet or frame size the
 bridge chooses to use. the bridge chooses, and it chooses based upoin the actual driver and api the rdma firmware
 supplies. only the bridge is allowed to know these configuration details." And: "zero copy methods must always be used
-over access by copy because memory bandwidth and flops are too scarce on this hardware api." Versions 127 to 131 had
-clients copy into the bridge's rings and count positions against them (a lag credit), so clients knew frames and units;
-the fix of version 125's real defect (clients holding work requests and queue pairs) had moved the data itself into the
-bridge. A client naming its own pages holds no DMA state, and needs no ring.
+over access by copy because memory bandwidth and flops are too scarce on this hardware api." A client naming its own
+pages holds no DMA state, and needs no ring.
 
-**The stream (wire 135, layout 162).**
+**The stream (wire 136, layout 163).**
 - Each physical cable carries up to `MESH_LINK_STREAMS` streams, according to its negotiated queue-pair budget.
-  Logical unit p goes on lane p mod `MESH_STREAM_LANES`. Both ends retain that order and the same mask.
+  Logical unit p goes on lane p mod `MESH_STREAM_LANES`. Both ends retain that order.
 - Each stream has a `wire` identity derived from its pairing. Local holding generations distinguish later users
   of the same pairing and its reset completion words.
-- A holding presents SEND and landing lists of `mesh_entry {spans, units, word, base, step, spans_word, spans_base}`.
-  `spans` names a region array of `mesh_dma_span {offset, bytes, through}`. Entries are 56 bytes; spans are
-  24 bytes. All are local page metadata. The compiler fixes each offset and the equal packet cuts at both ends.
-  Source-local numerical mask work may change each length from its original value to zero.
-- Before reading descriptor k, either endpoint observes `spans_word >= spans_base+k+1`. Static tables bind an
-  explicitly completed word. Computed tables bind their actual producer's prefix. Zero-filled storage does not
-  announce that a mask has been computed. A table dependency does not join all packets of a message.
-- A zero-length unit advances the logical sequence without a SEND, receive, frame credit, payload read, or
-  overwrite dependency. An active SEND additionally requires its payload word (0 selects stream `ready`) to reach
-  `base+k*step+1`. Packet prefixes use step 1; a scalar threshold for a whole tile uses step 0.
-  This represents both dependencies directly, without subtracting a packet count from a scalar value.
-  Active SENDs and landings consume their compiled `after` lists. Fresh disjoint landing pages have
-  no overwrite predecessor. These are local page dependencies; no peer supplies a receipt or permission.
-- Each active SGE names its exact registered interval. It does not round payload to an allocation page or credit
-  frame. Parallel paths and relay buffers use the same representation.
-- Request IDs name their retained span directly. A completion reads its byte count to retire frame credits and
-  its `through` position to advance logical progress. There is no second completion-descriptor search or ring.
-  Preparation initializes `through` to that unit's next lane position. When later masked units are encountered,
-  the bridge extends the latest outstanding span's position; with no request outstanding, those units complete
-  directly. This accounts for changing masks without constructing a new order or delaying a skipped gap behind
-  the next active transfer. The minimum completed position across lanes is the stream's `sent` or `landed` prefix.
 - `ceil(actual_length / MESH_FRAME)` bounds frames; `MESH_LANE_UNITS` independently bounds outstanding requests.
-  Physical posted/completed counts exclude masked units. They remain the counts used to retain outstanding
-  hardware work after a holding ends. Logical progress is not a count of hardware requests.
-- `taken` records occurrence tables the bridge has passed. It does not release their span arrays. Descriptor
-  storage remains live through future posts, completion reads, and the bridge's end of the holding. An unfinished
-  holding retains storage until all physical requests complete or its posting child is reaped, as described in
-  [reclamation-2026-10-30.md](reclamation-2026-10-30.md). No per-entry hazard pointer or interval-pin ring remains.
+  Physical posted/completed counts remain the counts used to retain outstanding hardware work after a holding ends.
+- `taken` records occurrence tables the bridge has passed. Descriptor storage remains live through future posts,
+  completion reads, and the bridge's end of the holding. An unfinished holding retains storage until all physical
+  requests complete or its posting child is reaped, as described in
+  [reclamation-2026-10-30.md](reclamation-2026-10-30.md).
 
-The logical-prefix argument is local to each lane. Its `through` is the first
-position on that lane that has not completed. Posting an active unit leaves
-that position unchanged. Skipping a masked unit either advances it directly
-(no active request pending), or extends the last pending request's recorded
-completion position. Only that last request can be extended, so an earlier
-completion cannot jump over a later active request. Queue-pair completions are
-ordered; reading each completed descriptor therefore advances the prefix
-through exactly its active unit and the masked units following it. Taking the
-minimum lane position gives the stream's contiguous prefix, including when
-all units are masked. Mask producers write only descriptor lengths; the
-bridge alone owns these completion positions during execution.
-
-The bridge's link-byte observations sum actual receive completion `byte_len`
-values (`mesh_link_landed`). Logical `sent`/`landed` prefixes are dependency
-positions, not wire-byte measurements; advancing through a masked unit does
-not add bytes to that observation. Whole-function latency and useful work rate
-remain the application measurements.
+The bridge's link-byte observations sum actual receive completion `byte_len` values (`mesh_link_landed`). Logical
+`sent`/`landed` prefixes are dependency positions, not wire-byte measurements. Whole-function latency and useful work
+rate remain the application measurements.
 
 The bridge's HELLO still requires equal allocation-block sizes because generic collective front ends retain a
-common packet grid. Exact byte DMA itself imposes no such equality. Remove this remaining compatibility check
-only after every front end prepares matching cuts for unequal block sizes.
+common packet grid. Remove this remaining compatibility check only after every front end prepares matching cuts for
+unequal block sizes.
 
 **Holding it** (version 133; the operator, 2026-10-22, on the holding's start of 129-132: "something is sampled
 diachronically four times then we do a funny little guess ... this entire code path needs to be remove and rewritten
@@ -507,14 +379,9 @@ statistic, not a data dependent control flow for a collective verb or a bridge t
   stream's units sent so far and its landing walk at the stream's units posted so far, in one pass: no unit of an
   earlier holding is outstanding then (a holding's end, below).
 - The facts. The bridge tells each of a stream's two lanes' units over its pairing, each way, posted and completed
-  (`posts`), and the physical interval each unit names (`rows`, the historical field name), for release of backing storage (mesh-dataflow.c mesh_pinned); no
-  communicator reads them. On a live stream both ends' are equal by construction: a holding that ends with nothing
-  outstanding at both ends left every SEND completed into a posted receive (TN3205) and every receive landed from a
-  SEND, and one that ends otherwise takes its stream out of the pairing. The pages posted that communicators once
-  exchanged at their init and kept as a statistic read by nothing (version 134's `differ`) are deleted. The filler of
-  version 133 (dud SENDs and receives into the spare page presented first, entries of
-  `MESH_NO_ROW`, and the init's wait for an earlier holding's receives to land) is deleted; the operator, 2026-10-22,
-  on waiting for a future communicator's filler: "dispose of".
+  (`posts`); no communicator reads them. On a live stream both ends' are equal by construction: a holding that ends with
+  nothing outstanding at both ends left every SEND completed into a posted receive (TN3205) and every receive landed
+  from a SEND, and one that ends otherwise takes its stream out of the pairing.
 - One communicator holds a particular physical stream at a time. It can bind streams on every available cable
   between a node pair, with a matching free `wire` at both ends of each cable. Sharing a peer does not collapse
   those bindings to one cable. A binding is refused (EBUSY) when its physical link has no stream free at both ends.
@@ -534,7 +401,7 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The progress thread ends the
   holding at once at the give, or at its client's retirement: nothing more of it is posted, and its entries taken and
   not posted are dropped. The progress thread reads the owner word each pass (stream_turn) and posts nothing of
-  a holding once it is given; no unit is told or pinned before it is posted (design/reclamation-2026-10-30.md: the
+  a holding once it is given; no unit is told before it is posted (design/reclamation-2026-10-30.md: the
   holding's end is its grace period, 2548cbce). A reclaimer acquires the owner word stream_free releases, and so
   happens-after every read of the holding's tables and words. Nothing in the bridge
   closes a holding with its peer: no message, no totals, no clock.
@@ -553,14 +420,10 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   `MESH_LANE_UNITS`. An end is decided at each end alone, so a stream can be live at one end and not at the other; an
   init takes only a stream free at both ends, so such a stream serves no communicator, and a link whose every stream
   is so is not lost by this rule while each end keeps one live (open, for the operator: the peer is told nothing).
-- Backing storage. A posted request pins every allocation intersecting its actual interval, including spans
-  crossing row boundaries or resolved from aliases/scatter tables. A returned lease with any such overlap stays
-  closed until the requests complete or their posting child's queue pairs cease to exist. Link loss alone is not
-  completion. The stream records that child's pid and start, so reused process IDs do not supply retirement proof.
-  Future unposted reads are also live uses: native `ncclMemFree` is a logical asynchronous free and retains all
-  registered future physical readers before presentation. Its allocation pool separately needs completed GPU uses
-  and destination-consumer proofs before overwrite. For a dead payload, giving every relevant holding permits
-  outstanding requests to retain it through bridge pins; this is not an application overwrite proof.
+- Backing storage. A returned lease stays closed until the requests complete or their posting child's queue pairs cease
+  to exist. Link loss alone is not completion. The stream records that child's pid and start, so reused process IDs do
+  not supply retirement proof. Future unposted reads are also live uses: native `ncclMemFree` is a logical asynchronous
+  free and retains all registered future physical readers before presentation.
 - Descriptor tables have local CPU readers in addition to their SEND/LAND direction obligations.
   `client|GIVEN` prevents a future hardware post but does not itself prove the progress thread stopped reading the
   table. Until the bridge transitions that owner to 0 or GIVEN-alone, descriptor storage remains retained. This
@@ -574,23 +437,21 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   mesh" 3; rubric M3).
 - The cost: a link's controller that has been quiet is slow on its next frame (6.2 us against 1.9 on the Mac mini,
   metal-microbench docs/measurement.md, 2026-10-17). Without the keepalive that is paid at a holding's first SEND and
-  after every quiet stretch inside a holding (a layer's 40-50 us between crossings); on a plan with lane 0 the
-  keepalive had kept the controller warm inside a holding too.
+  after every quiet stretch inside a holding (a layer's 40-50 us between crossings).
 
 **A process a port** (version 130, its streams new at every pairing from 131; the operator's choice of 10-20).
 - The bridge is a parent and a child a port. The parent, its heartbeat's child, holds the region, the map and records, the
   clients' slots, device discovery, hellos and the control sockets. A port's child is `mesh-flow` spawned again by the
-  parent, told the version of the contract between them (`--child VERSION DEVICE ...`, mesh-bridge.h MESH_CHILD_VERSION,
-  declared and changed only where the contract changes, never by comparing builds: one source builds different programs on
-  different machines), in a
-  process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the region,
+  parent, told the version of the contract between them (`--child VERSION DEVICE ...`, etc/bridge/layout.h
+  MESH_CHILD_VERSION, declared and changed only where the contract changes, never by comparing builds: one source
+  builds different programs on different machines), in a process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the region,
   makes and connects the link's queue pairs (its plan's, from the queue pairs both ends' devices hold, each end's told
   in its HELLO: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)) and runs the port's progress thread (one: its SENDs and receives in one pass). The parent asks it to open,
   make, connect, halt and end; it answers each, naming the pairing it was asked for, and tells failed lanes, absorbed
   faults, guards not held and terminations it heard. Queue pairs exist only in a child, and a child is the bridge
   ("the bridge and only the bridge may ever have access to that exact data structure", 10-20).
-- A link's queue pairs are made once and connected once in a child's life. None is moved to another state,
-  destroyed or forgotten; the kernel releases them at the child's exit. A link takes every queue pair its device holds
+- A link's queue pairs are made once and connected once in a child's life. None is destroyed or forgotten; the
+  kernel releases them at the child's exit. A link takes every queue pair its device holds
   for it (ten of a macOS 26 device's ten; two of the M5 Ultra's macOS 27 device's two by max_qp − 1), so a returning peer's lanes
   cannot exist beside the old ones, and the old child's exit is their one release (RESET panicked the M5 on 10-19;
   destroy is ruled out by its history, M3).
@@ -598,38 +459,35 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   of the link live, the link going off, a termination, an absorbed fault, a protocol error, the child's own end): its
   streams cancelled (landed
   words ~0), its lanes served no more (the child halted, before the control socket closes), the port closed. Once the
-  port's quiet window and any termination's have ended and no call of the port's own is stuck (B9, B9b, B12), the
+  port's quiet window and any termination's have ended and no call of the port's own is stuck, the
   parent asks the child to end, reaps it and spawns the next, which opens the port and pairs with the peer whenever it answers. Nobody acts.
   Other ports' children and links, the clients and their leases are untouched.
-- A child that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
-  passed, at the events that open any port (its child's end is one). Nothing the bridge does next depends on how often
-  a child ended: the spawn backoff of 1f9be1d5 and 128d0e84 (the k-th unbidden end within 60 s of a spawn holding the
-  next 60·2^(k−2) s) is deleted (4dc9e98a; the operator, 2026-10-23 01:03Z: "this is not a real feature. delete it and
-  anything like it"). A child whose parent is gone halts its
-  lanes and exits MESH_PLATFORM_NS later, its own windows held; a child's end (asked, its parent's loss, or SIGTERM,
-  SIGINT or SIGHUP) flushes the lanes that hold work (moved to the error state, their completions taken, at most
-  MESH_PLATFORM_NS) before its exit, so the kernel's release finds nothing posted; a port's child is spawned only
-  while no other child of its device lives (the region's holder table, each entry its pid, device and start, a child in
-  its exit included), so a device's queue pairs are one child's at a time and no make meets the device's ceiling. At
-  the bridge's stop every child is halted before the farewell, asked to end after the exit's hold, awaited for as long
-  as its own bounds (2 MESH_PLATFORM_NS and MESH_PAUSE_NS), then ended (SIGKILL) and awaited MESH_PLATFORM_NS more: the
-  bridge ends after its children, one the kernel still holds named in the holder table. A message to a child, or a child's
-  to its parent, goes whole within MESH_PLATFORM_NS of its send, and a peer that takes none by then ends the sending
-  process at once, the wait named (the operator, 2026-10-23, of the blocking send: "forbidden. no wait may ever run
-  longer than a deadline operand presented at the time the wait was constructed; the presumed default is 5 seconds").
-- Streams across children. A port's streams' lists, rings and words are the parent's, leased once. Each stream names
-  the child that posts on it (`child`, `child_start`), and its units count only while that process lives: a child's
-  exit, whether this launch reaps it or it is an earlier launch's, releases every row its units named, by no port
-  index and with no wait for a next pairing (the parent looks at the closed leases again as it reaps its own). A new
-  child opens every stream new as its link connects: owner word 0, its counts 0 (`ready`, `sent`, `landed`, its
-  lists', `posts`), itself its poster, and live. A holding of the lost pairing
-  ended with it: its holder's give (a compare-and-swap from its own client) then matches nothing, and its communicator
-  reads its holding gone (mesh-call.h `mesh_stream_held`: live, its owner word its client's, its identity the one it
-  took) and starts no group on it (libnccl-mesh `comm_failure`, `ncclCommGetAsyncError`). No holder keeps a stream from
-  the link's next pairing by letting go or by never letting go (design/rubrics.md M4, 10-20). Nothing of the lost
-  pairing is sent on the new one: that pairing's groups ended at their next look at a landed word ~0, the connect comes
-  `MESH_PLATFORM_NS` and a child's exit after the loss, and the two ends of a communicator take only an identity free
-  at both (`wire`, a digest of this pairing's queue pair numbers and addresses).
+- A child that ends unbidden loses its link the same way and is spawned again once the port's quiet window has passed,
+  at the events that open any port (its child's end is one). Nothing the bridge does next depends on how often a child
+  ended. A child whose parent is gone halts its lanes and exits MESH_PLATFORM_NS later, its own windows held; a child's
+  end (asked, its parent's loss, or SIGTERM, SIGINT or SIGHUP) flushes the lanes that hold work (moved to the error
+  state, their completions taken, at most MESH_PLATFORM_NS) before its exit, so the kernel's release finds nothing
+  posted; a port's child is spawned only while no other child of its device lives (the region's holder table, each entry
+  its pid, device and start, a child in its exit included), so a device's queue pairs are one child's at a time and no
+  make meets the device's ceiling. At the bridge's stop every child is halted before the farewell, asked to end after
+  the exit's hold, awaited for as long as its own bounds (2 MESH_PLATFORM_NS and MESH_PAUSE_NS), then ended (SIGKILL)
+  and awaited MESH_PLATFORM_NS more: the bridge ends after its children, one the kernel still holds named in the holder
+  table. A message to a child, or a child's to its parent, goes whole within MESH_PLATFORM_NS of its send, and a peer
+  that takes none by then ends the sending process at once, the wait named (the operator, 2026-10-23, of the blocking
+  send: "forbidden. no wait may ever run longer than a deadline operand presented at the time the wait was constructed;
+  the presumed default is 5 seconds").
+- Streams across children. Each stream names the child that posts on it (`child`, `child_start`), and its units count
+  only while that process lives: a child's exit, whether this launch reaps it or it is an earlier launch's, releases
+  every row its units named, by no port index and with no wait for a next pairing (the parent looks at the closed leases
+  again as it reaps its own). A new child opens every stream new as its link connects: owner word 0, its counts 0
+  (`ready`, `sent`, `landed`, its lists', `posts`), itself its poster, and live. A holding of the lost pairing ended
+  with it: its holder's give (a compare-and-swap from its own client) then matches nothing, and its communicator reads
+  its holding gone (mesh-call.h `mesh_stream_held`: live, its owner word its client's, its identity the one it took) and
+  starts no group on it (libnccl-mesh `ncclCommGetAsyncError`). No holder keeps a stream from the link's next pairing by
+  letting go or by never letting go (design/rubrics.md M4, 10-20). Nothing of the lost pairing is sent on the new one:
+  that pairing's groups ended at their next look at a landed word ~0, the connect comes `MESH_PLATFORM_NS` and a child's
+  exit after the loss, and the two ends of a communicator take only an identity free at both (`wire`, a digest of this
+  pairing's queue pair numbers and addresses).
 - A LINK names the address its lanes were made on (a make reads the port's address again, as a peer's restart can move
   its GID table); the connect and each stream's identity take the peer's address from its LINK.
 - Plug to link, at the hardware's pace. A port is opened when its interface's link comes on, when its RDMA peer
