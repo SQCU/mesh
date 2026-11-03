@@ -100,6 +100,9 @@ size_t MetalRunWaiting(struct MetalRun *, uint64_t (*landing)[3], size_t capacit
 /* each part's times in mesh_statistics_now's clock (0 where not yet): committed, its GPU start and its GPU end, up to
    `capacity`; the count of parts */
 size_t MetalRunParts(struct MetalRun *, double (*times)[3], size_t capacity);
+/* each landing's threshold and the time its presence was seen (mesh_statistics_now's clock; 0 not yet), in the order
+   they were appended, up to `capacity`; the count */
+size_t MetalRunLandings(struct MetalRun *, double (*landing)[2], size_t capacity);
 
 #endif
 #ifdef __cplusplus

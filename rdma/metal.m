@@ -83,6 +83,7 @@ struct RunLanding {
     uint64_t threshold;
     id<MTLSharedEvent> event;
     _Atomic int state, references;
+    double present; // when the watcher saw it (mesh_statistics_now)
     struct RunLanding *next;
 };
 static _Atomic(struct RunLanding *) landingStack;
@@ -107,6 +108,7 @@ static void *RunLandingWatch(void *unused) {
             int state=atomic_load_explicit(&landing->state,memory_order_acquire);
             if(state==LandingWaiting&&(landed==UINT64_MAX||landed>=landing->threshold)) {
                 state=landed==UINT64_MAX?LandingLost:LandingPresent;
+                landing->present=mesh_statistics_now();
                 atomic_store_explicit(&landing->state,state,memory_order_release);
                 landing->event.signaledValue=1;
             }
@@ -507,6 +509,15 @@ int MetalRunEnd(struct MetalRun *run,double *ended,NSError **error) {
 }
 
 void MetalRunFree(struct MetalRun *run) { if(run)RunRelease(run); }
+size_t MetalRunLandings(struct MetalRun *run,double (*out)[2],size_t capacity) {
+    struct RunLanding *const *landing=run->landings.bytes;
+    const size_t count=run->landings.length/sizeof *landing;
+    for(size_t k=0;k<count&&k<capacity;k++) {
+        out[k][0]=(double)landing[k]->threshold;
+        out[k][1]=atomic_load_explicit(&landing[k]->state,memory_order_acquire)==LandingWaiting?0:landing[k]->present;
+    }
+    return count;
+}
 size_t MetalRunParts(struct MetalRun *run,double (*times)[3],size_t capacity) {
     for(uint32_t p=0;p<run->parts&&p<capacity;p++)
         times[p][0]=run->part[p].committed,times[p][1]=run->part[p].started,times[p][2]=run->part[p].ended;

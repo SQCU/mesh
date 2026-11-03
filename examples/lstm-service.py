@@ -91,6 +91,12 @@ def main(config=None):
                     for c, s, e in times])), flush=True)
                 raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
             time.sleep(0)
+        if repeat == repeats - 1:
+            # the last repeat's timeline on this rank's clock: each part's GPU start and end, each landing's presence
+            run = program.done[-1]
+            at = lambda x: round((x - started) * 1e6, 1) if x else None
+            print(json.dumps(dict(phase='timeline', parts=[[at(s), at(e)] for _, s, e in run.parts()],
+                                  landings=[at(p) for _, p in run.landings()])), flush=True)
         summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows, repeat=repeat, input_width=KIN,
                        width=H, steps=steps, ticks=steps + L - 1, latency_ticks=L)
         emit({**measure(started, ended, steps * rows * H * torch.half.itemsize, steps), 'workload': 'lstm_sequence',

@@ -312,6 +312,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("enqueue", &Run::enqueue, pybind11::call_guard<Drained>())
     .def("end", &Run::end, pybind11::call_guard<Drained>())
     .def("waiting", &Run::waiting, pybind11::call_guard<Drained>())
+    .def("landings", [](Run &r) {
+      std::vector<std::array<double, 2>> out(MetalRunLandings(r.run.get(), nullptr, 0));
+      MetalRunLandings(r.run.get(), reinterpret_cast<double (*)[2]>(out.data()), out.size());
+      return out;
+    }, pybind11::call_guard<Drained>())
     .def("parts", [](Run &r) {
       std::vector<std::array<double, 3>> times(MetalRunParts(r.run.get(), nullptr, 0));
       MetalRunParts(r.run.get(), reinterpret_cast<double (*)[3]>(times.data()), times.size());
