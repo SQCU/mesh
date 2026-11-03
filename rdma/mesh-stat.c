@@ -103,6 +103,43 @@ static int streams_watch(uint64_t period_us,double seconds){
   static uint64_t seen[MESH_STREAMS][6];
   const uint64_t end=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(uint64_t)(seconds*1e9);
   const struct timespec pause={(time_t)(period_us/1000000),(long)(period_us%1000000*1000)};
+  if(!period_us){
+    /* period 0: a spin that keeps each moved word (its pass's time, the stream, the word, its value) in memory and
+       prints the lines below once it ends: printing every held stream at each move took longer than an M5 Ultra's
+       words take to move, so its moves came merged (metal-microbench tools/mesh/tick_words.py, words-1). The clock is
+       CLOCK_UPTIME_RAW's, its nanoseconds a pass apart */
+    struct move { uint64_t ns; uint32_t t,w; uint64_t v; };
+    const size_t cap=(size_t)1<<21;
+    struct move *moves=malloc(cap*sizeof *moves);
+    if(!moves){printf("{\"up\":false,\"errno\":%d}\n",ENOMEM);munmap(m,size);return 1;}
+    size_t n=0;
+    while(n+MESH_STREAMS*6<cap){
+      const uint64_t ns=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=end)break;
+      for(uint32_t t=0;t<MESH_STREAMS;t++){
+        const struct mesh_stream *x=mesh_stream_at(m,t);
+        const uint64_t words[6]={atomic_load(&x->owner),atomic_load(&x->ready),atomic_load(&x->sent),atomic_load(&x->landed),
+                                 atomic_load(&x->taken[0]),atomic_load(&x->taken[1])};
+        for(uint32_t w=0;w<6;w++)if(words[w]!=seen[t][w]){moves[n++]=(struct move){ns,t,w,words[w]};seen[t][w]=words[w];}
+      }
+    }
+    static uint64_t state[MESH_STREAMS][6];
+    for(size_t i=0;i<n;){
+      const uint64_t ns=moves[i].ns;
+      for(;i<n && moves[i].ns==ns;i++)state[moves[i].t][moves[i].w]=moves[i].v;
+      printf("{\"ns\":%llu,\"streams\":[",(unsigned long long)ns);
+      int first=1;
+      for(uint32_t t=0;t<MESH_STREAMS;t++)if(state[t][0]){
+        printf("%s[%u,%u,%llu,%llu,%llu,%llu,%llu,%llu]",first?"":",",t,atomic_load(&mesh_stream_at(m,t)->peer),
+               (unsigned long long)state[t][0],(unsigned long long)state[t][1],(unsigned long long)state[t][2],
+               (unsigned long long)state[t][3],(unsigned long long)state[t][4],(unsigned long long)state[t][5]);
+        first=0;
+      }
+      printf("]}\n");
+    }
+    free(moves);munmap(m,size);
+    return 0;
+  }
   while(clock_gettime_nsec_np(CLOCK_MONOTONIC)<end){
     int moved=0;
     uint64_t now[MESH_STREAMS][6];
@@ -125,8 +162,7 @@ static int streams_watch(uint64_t period_us,double seconds){
       printf("]}\n");
       fflush(stdout);
     }
-    /* period 0: a spin, each move timed to within a pass (a few us), for a tick's releases and landings */
-    if(period_us)nanosleep(&pause,NULL);
+    nanosleep(&pause,NULL);
   }
   munmap(m,size);
   return 0;
