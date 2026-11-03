@@ -317,26 +317,50 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0, accumulate=False):
         source = ('#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n'
                   + _source(name, parameters, body))
         return source, (-(-N // TENSOR_COLUMNS) * 32 * split, M // rows, 1), (32 * split, 1, 1)
-    # a threadgroup a row and STAGED_COLUMNS columns: its threads load the row's A (every part, a landing's
-    # system-coherently) into threadgroup memory once, then a simdgroup a column over it. A simdgroup an output loading
-    # its own row coherently cost the LSTM's product 7.3 us a dispatch against 2.3 with ordinary loads on an M5 Ultra
-    # (13.0 against 7.2 on the Mini; metal-microbench tools/mesh/chain.m dot_coherent, dot_plain)
+    # a threadgroup STAGED_COLUMNS columns of every row: its threads stage every row's A (every part, a landing's
+    # system-coherently) a chunk of k at a time in threadgroup memory, then a simdgroup a column over the chunk, its
+    # lanes over k, each lane's weight load used for every row. A simdgroup an output loading its own row coherently
+    # cost the LSTM's product 7.3 us a dispatch against 2.3 with ordinary loads on an M5 Ultra (13.0 against 7.2 on
+    # the Mini; metal-microbench tools/mesh/chain.m dot_coherent, dot_plain).
+    # Changed from a threadgroup a row over a whole staged row (97eee528), which read every column's weights once a
+    # row and staged k floats (8,192 at an LSTM of width 4096, whose tick took 28 ms against about 0.2 ms of weight
+    # reads, metal-microbench docs/facts.md, balance-2026-11-03 sweep-4). What must stay: A's coherent loads staged
+    # once, the weights read once
     S = min(STAGED_COLUMNS, N)
-    staged, first = [], 0
-    for p in parts:
-        K = p.shape[1]
-        staged.append(f'    for (ulong k = me; k < {K}ul; k += {32 * S}ul) row[{first}ul + k] = float({p.load(["m", "k"])});')
-        first += K
-    body = f'''    const ulong m = at.y, me = at.x % {32 * S}ul, n = at.x / {32 * S}ul * {S}ul + me / 32ul, lane = me % 32ul;
-    threadgroup float row[{first}];
-{chr(10).join(staged)}
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (n >= {N}ul) return;
-    float total = 0.0f;
-    for (ulong k = lane; k < {first}ul; k += 32ul) total += row[k] * float({b.load(["k", "n"])});
-    total = simd_sum(total);
-    if (lane == 0ul) {{ {out.store(["m", "n"], f"{alpha}f * total{bias_term}")} }}'''
-    return _source(name, parameters, body), (-(-N // S) * 32 * S, M, 1), (32 * S, 1, 1)
+    K = sum(p.shape[1] for p in parts)
+    KB = min(K, max(32, (4096 // M) // 32 * 32))  # a chunk: M x KB floats, 16 KiB of threadgroup memory at most
+    loads, first = [], 0
+    for q, p in enumerate(parts):
+        Kp = p.shape[1]
+        test = f'k < {first + Kp}ul' if q + 1 < len(parts) else 'true'
+        loads.append(f'{"if" if q == 0 else "else if"} ({test}) {{ const ulong kp = k - {first}ul; v = float({p.load(["m", "kp"])}); }}')
+        first += Kp
+    body = f'''    const ulong me = at.x % {32 * S}ul, n = at.x / {32 * S}ul * {S}ul + me / 32ul, lane = me % 32ul;
+    threadgroup float rows[{M * KB}];
+    float total[{M}];
+    for (uint m = 0; m < {M}u; m++) total[m] = 0.0f;
+    for (ulong kc = 0; kc < {K}ul; kc += {KB}ul) {{
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (ulong e = me; e < {M * KB}ul; e += {32 * S}ul) {{
+            const ulong m = e / {KB}ul, k = kc + e % {KB}ul;
+            float v = 0.0f;
+            if (k < {K}ul) {{ {' '.join(loads)} }}
+            rows[e] = v;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (n < {N}ul)
+            for (ulong kk = lane; kk < {KB}ul && kc + kk < {K}ul; kk += 32ul) {{
+                const ulong k = kc + kk;
+                const float w = float({b.load(["k", "n"])});
+                for (uint m = 0; m < {M}u; m++) total[m] += rows[m * {KB}u + kk] * w;
+            }}
+    }}
+    for (uint mm = 0; mm < {M}u; mm++) {{
+        const float t = simd_sum(total[mm]);
+        const ulong m = mm;
+        if (lane == 0ul && n < {N}ul) {{ {out.store(["m", "n"], f"{alpha}f * t{bias_term}")} }}
+    }}'''
+    return _source(name, parameters, body), (-(-N // S) * 32 * S, 1, 1), (32 * S, 1, 1)
 
 
 def summed(name, out, source, axes, scale=1.0):
