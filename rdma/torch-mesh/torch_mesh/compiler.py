@@ -7,10 +7,10 @@ lower    a view is a view of its operand's root; a pointwise op, a matrix produc
          a declared group of calls (nccl.h ncclMeshCommDeclare), one a contiguous frame of its gathered axis.
 solve    each command's reads and writes and each collective step's SEND, completion, post and landing are the run's
          events and accesses (mesh-page-map.h mesh_run_solve); a caller's storage is a pinned bin, the arena the last.
-run      a command a dispatch, a link and a release a word's store, a landing and a SEND's completion a presence, and the
-         solve's edges between them (rdma/metal.h); an event with no node (a relay's SEND, the bridge's) passes its edges
-         through. A repeated chunk is captured, lowered and solved once and instanced in the run, its collective
-         occurrences each lowered anew (their channels' absolute positions move).
+run      a command a dispatch, a run of links and releases one dispatch of word stores, a landing and a SEND's
+         completion a presence, and the solve's edges between them (rdma/metal.h); an event with no node (a relay's
+         SEND, the bridge's) passes its edges through. A repeated chunk is captured, lowered and solved once and
+         instanced in the run, its collective occurrences each lowered anew (their channels' absolute positions move).
 """
 import itertools
 import json
@@ -841,9 +841,9 @@ class Program:
         # with the run's configuration's MESH_RUN_TRACE, a GPU timestamp after every node (MetalRunTrace) and each node's
         # label, the order they are appended in (Program.trace)
         tracing = bool(os.environ.get('MESH_RUN_TRACE'))
-        # MESH_RUN_TRACE=light stamps after each release's store and each first command after a tick's observations
-        # alone: a stamp waits for the work before it, so one after every node serialized a tick (the LSTM's 27 us to
-        # about 70, store-4); two a tick name when its compute began and when it released
+        # MESH_RUN_TRACE=light stamps after each node of word stores holding a release and each first command after a
+        # tick's observations alone: a stamp waits for the work before it, so one after every node serialized a tick (the
+        # LSTM's 27 us to about 70, store-4); two a tick name when its compute began and when it released
         light = os.environ.get('MESH_RUN_TRACE') == 'light'
         if tracing:
             run.trace()
@@ -851,8 +851,9 @@ class Program:
         node_events = []  # each node's event, the order appended (the order check's)
         current = [None]
         # pass 1: each chunk's occurrences lowered onto their bytes (their channels' positions move each time), and
-        # each word store's value (a link's table offset, a release's count) given its slot
-        instances, stores = [], []
+        # each observation's count given its slot; a link's table offset and a release's count take theirs in pass 2,
+        # in the emitted order, so a run of word stores reads its values from one binding (stored)
+        instances, stores, store_slots = [], [], 0
         for fn, _ in self.chunks:
             t = self.templates[id(fn)]
             lowered = {}
@@ -874,11 +875,12 @@ class Program:
                 made = []
                 for n in nodes[0:count[0]]:
                     slot = None
-                    # every node's value a slot: a link's table offset, a release's count, an observation's count
-                    slot = len(stores)
-                    stores.append(n.value)
                     if n.kind in (lib.ncclMeshNodeLanding, lib.ncclMeshNodeSent):
-                        stores.append(slot)  # an observation's own slot beside its count: a defect names it
+                        # an observation's count, its own slot beside it: a defect names it
+                        slot = len(stores)
+                        stores += [n.value, slot]
+                    else:
+                        store_slots += 1
                     made.append((n.kind, n.transfer, int(ffi.cast('uintptr_t', n.word)), n.value, slot, n.round))
                 lowered[c] = made
                 if os.environ.get('MESH_RUN_ORDER_CHECK') and len(instances) < 2:
@@ -896,13 +898,73 @@ class Program:
                                                  for k, st in enumerate(command.steps)])), flush=True)
                 run.communicator(int(ffi.cast('uintptr_t', command.comm)))
             instances.append((t, lowered))
-        values = empty((max(1, len(stores)),), dtype=torch.int64)
-        values.copy_(torch.tensor(stores or [0], dtype=torch.int64).to(values.device))
-        # pass 2: the run's nodes, the caller's work so far (torch's stream, the store values among it) its input
+        # the observations' slots, then the word stores' in the emitted order: written after pass 2 on torch's stream,
+        # which forward's run.inputs_now takes as the run's input again
+        values = empty((max(1, len(stores) + store_slots),), dtype=torch.int64)
+        # pass 2: the run's nodes, the caller's work so far (torch's stream) its input
         # the events in the order their nodes are appended, and each id's name: a refused finish names its backward edges
         emitted, named = [], {}
 
+        # a link's or release's word written by a one-thread kernel's coherent store from its value slot (kernels.store).
+        # Changed by the one-part session from a copy, which the FFN demonstration session had chosen over mesh_publish's
+        # atomic on visible.m "copied" (a copy seen about 6 us into a running part): that way's observation polled a
+        # word in the copied word's 64-byte sector, and those reads are what drew the copy out. With no dispatch reading
+        # its sector, a copy in a running buffer is never seen within 1 s on the Mini, nor on an M5 Ultra without a
+        # barrier after it, and on an M5 Ultra it runs only after every earlier dispatch of its encoder (visible.m
+        # "behind"), so a one-part run stalled (onepart-1 to 11: the Mini's links and releases unseen for 1.39 s, its
+        # bridge's words unmoved at 1 ms). The kernel's store is seen 5.5-7 us into the buffer on both chips, its
+        # coherent payload complete behind it, and it waits only for its own producers (metal-microbench
+        # docs/facts.md, visible.m "shaped"). Each word's stores are ordered: its next follows its last (an edge). What
+        # must stay: a word's store is one another process sees in a running buffer, after the data it releases, its
+        # stores in order.
+        #
+        # Changed from a dispatch a word to a dispatch a run of word stores: a run of them with no node between (an
+        # all-reduce rank's 19-27 releases, an LSTM tick's 2-3) went one dependent dispatch after another, 2.6-4 us
+        # apart on an M5 Ultra and 7-8 us on the Mini (metal-microbench docs/facts.md, "The planner's all-reduce stalls
+        # about 1 ms"). Now each run is one node, its words in the emitted order behind one fence (kernels.store): it
+        # ends at the next node of another kind (ev), before a store with a producer in it (a word's own last store
+        # among them, so a word is stored once a node), and at kernels.STORE_WORDS (the argument table), never inside
+        # one event's words but where they alone pass it. Its values lie consecutive (their slots given here, in the
+        # emitted order). The node is its first event's; every other event in it takes that one's node (alias,
+        # applied to the run's edges), so their producers precede it and their consumers follow it. What must stay:
+        # each store's producers before its node, its consumers after, a word's stores in order, and a store's
+        # label, its entry in self.stores, its edges, and the light trace's mark (a node holding a release) per word.
+        last_store = {}
+        pending = []  # the run of word stores not yet dispatched: (event, word, slot, release) each
+
+        def issue():
+            if not pending:
+                return
+            run.event(pending[0][0])
+            bindings = [(0, values, 8 * pending[0][2])] + [(k + 1, word, 0) for k, (_, word, _, _) in enumerate(pending)]
+            run.dispatch(_pipeline(kernels.store(len(pending)), kernels.STORE), bindings, (1, 1, 1), (1, 1, 1), True)
+            labels.append(('store', *[named.get(event) for event, *_ in pending]))
+            node_events.append(pending[0][0])
+            if tracing and (not light or any(release for *_, release in pending)):
+                run.mark()
+            pending.clear()
+
+        def stored(event, words, release=False):
+            # one event's words, [(word, value)] each
+            emitted.append(event)
+            for word, _ in words:
+                if word in last_store and last_store[word] != event:
+                    order([(last_store[word], event)])
+                last_store[word] = event
+            if len(pending) + len(words) > kernels.STORE_WORDS or into.get(event, set()) & {e for e, *_ in pending}:
+                issue()
+            if pending:
+                alias[event] = pending[0][0]
+            for word, value in words:
+                if len(pending) == kernels.STORE_WORDS:
+                    issue()
+                address = int(_stream.address(values)) + 8 * len(stores)
+                self.stores.setdefault(id(run), []).append((named.get(event), word, address))
+                pending.append((event, word, len(stores), release))
+                stores.append(value)
+
         def ev(i):
+            issue()  # a run of word stores ends at the next node of another kind
             emitted.append(i)
             current[0] = i
             run.event(i)
@@ -913,6 +975,12 @@ class Program:
         labels.append(('input',))
         node_events.append(current[0])
         edges, previous_sinks = [], [start]
+        into = {}  # each event's producers among the edges so far (a run of word stores ends before a store of one)
+
+        def order(pairs):
+            edges.extend(pairs)
+            for a, b in pairs:
+                into.setdefault(b, set()).add(a)
         # every earlier chunk's accesses (each its node, whether it writes, its bytes in the region) and the last chunk's
         # observations no node of it followed, which go out in the next chunk (below)
         history, carry = [], []
@@ -932,32 +1000,6 @@ class Program:
                     f(k)
             batch.clear()
         watched = self.watched[id(run)] = []
-
-        # a link's or release's word written by a one-thread kernel's coherent store from its value slot (kernels.store).
-        # Changed by the one-part session from a copy, which the FFN demonstration session had chosen over mesh_publish's
-        # atomic on visible.m "copied" (a copy seen about 6 us into a running part): that way's observation polled a
-        # word in the copied word's 64-byte sector, and those reads are what drew the copy out. With no dispatch reading
-        # its sector, a copy in a running buffer is never seen within 1 s on the Mini, nor on an M5 Ultra without a
-        # barrier after it, and on an M5 Ultra it runs only after every earlier dispatch of its encoder (visible.m
-        # "behind"), so a one-part run stalled (onepart-1 to 11: the Mini's links and releases unseen for 1.39 s, its
-        # bridge's words unmoved at 1 ms). The kernel's store is seen 5.5-7 us into the buffer on both chips, its
-        # coherent payload complete behind it, and it waits only for its own producers (metal-microbench
-        # docs/facts.md, visible.m "shaped"). Each word's stores are ordered: its next follows its last (an edge). What
-        # must stay: a word's store is one another process sees in a running buffer, after the data it releases, its
-        # stores in order.
-        last_store = {}
-        storing = _pipeline(kernels.store(), kernels.STORE)
-
-        def stored(slot, word, event, release=False):
-            if word in last_store and last_store[word] != event:
-                edges.append((last_store[word], event))
-            last_store[word] = event
-            run.dispatch(storing, [(0, word, 0), (1, values, 8 * slot)], (1, 1, 1), (1, 1, 1), True)
-            labels.append(('store', named.get(current[0])))
-            self.stores.setdefault(id(run), []).append((named.get(current[0]), word, int(_stream.address(values)) + 8 * slot))
-            node_events.append(current[0])
-            if tracing and (release or not light):
-                run.mark()
 
         # a landing and a SEND's completion observed on the GPU (kernels.observe), a node like any other, so a chunk
         # has no outside input and the GPU is already in the part when its data lands (docs/facts.md: a CPU-signalled
@@ -1041,6 +1083,7 @@ class Program:
                 # node of another kind: the form whose ends made a copy's word visible (CUTS), kept for a comparison
                 if cut[0]:
                     if CUTS == 'all' or (CUTS == 'first' and not cuts_made[0]):
+                        issue()
                         run.cut()
                         cuts_made[0] += 1
                     cut[0] = False
@@ -1067,9 +1110,7 @@ class Program:
             posts, posted = [], [False]
 
             def emit_post(e, links):
-                ev(ids[e])
-                for _, _, word, _, slot, _ in links:
-                    stored(slot, word, ids[e])
+                stored(ids[e], [(word, value) for _, _, word, value, _, _ in links])
                 cut[0] = True
 
             def flush(target):
@@ -1102,7 +1143,15 @@ class Program:
                                   for (begin, end, w, lo, hi), (_, _, _, item, _, _) in zip(spans, t.accesses)]
             from mesh_graph import carried
             crossing = carried(history, [(b, w, lo, hi) for begin, _, w, lo, hi in spans for b in at_or_after(begin)])
-            edges += crossing
+            order(crossing)
+            # the solve's edges between nodes, through events with none; the instance after the one before, from its
+            # sinks but its observations (their order is the bytes', carried above). Here, before the chunk's nodes,
+            # so a run of word stores knows each store's producers (stored); they were added after them, to the same
+            # effect on the run's edges
+            kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))
+            own = contract(passed(), lambda e: ids[e])
+            order(own + [(p, s) for p in previous_sinks for s in sources(kept, own)])
+            previous_sinks = [x for x in sinks(kept, own) if named[x][1][0] not in ('sent', 'landed')] or previous_sinks
             # the last chunk's unfollowed observations go out before the first node of this one that follows one of
             # them, or the first that is not a post (its links first: no copy of them behind the observations' waits)
             crossing_set = set(crossing)
@@ -1173,9 +1222,8 @@ class Program:
                     if key[0] == 'send':
                         for m in group[key]:
                             flush(m)
-                        ev(ids[e])
-                        for _, _, word, value, slot, _ in nodes_of(c, 'send', key[2], key[3]):
-                            stored(slot, word, ids[e], release=True)
+                        releases = nodes_of(c, 'send', key[2], key[3])
+                        stored(ids[e], [(word, value) for _, _, word, value, _, _ in releases], release=True)
                         cut[0] = True
                         if posts:
                             emit_post(*posts.pop(0))
@@ -1193,20 +1241,17 @@ class Program:
             from mesh_graph import superseded
             newer = [(a, w, lo, hi) for _, end, w, lo, hi in spans for a in at_or_before(end)]
             history = superseded(history, newer) + newer
-            # the solve's edges between nodes, through events with none; the instance after the one before, from its
-            # sinks but its observations (their order is the bytes', carried above)
-            kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))
-            own = contract(passed(), lambda e: ids[e])
-            edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
-            previous_sinks = [x for x in sinks(kept, own) if named[x][1][0] not in ('sent', 'landed')] or previous_sinks
             # a part ends where the run passes to another compiled function: each places its items over the same arena
             # alone, so one's ordinary item can share bytes with the next one's landing (the LSTM's starting tick's
             # product and its first chunk's second landing, hazard-2), and on an M4 Pro the ordinary store's dirty line
             # is written back over the landing in a running buffer (visible.m "writeback"); the part's end writes it
             # back first. Within one function and between its instances no page holds both (RUN_COHERENT)
             if chunk + 1 < len(instances) and instances[chunk + 1][0] is not t and labels:
+                issue()
                 run.cut()
         emit_carry(carry)  # the last chunk's
+        issue()
+        values[:max(1, len(stores))].copy_(torch.tensor(stores or [0], dtype=torch.int64).to(values.device))
         from mesh_graph import contract
         edges = contract(edges, lambda e: alias.get(e, e))
         if os.environ.get('MESH_RUN_ORDER_CHECK'):
