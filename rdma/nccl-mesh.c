@@ -2335,13 +2335,22 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
   const uint64_t page = comm->page;
   /* each step's units, its entry's base on its channel's prefix (sends: ready; landings: landed), its list's place */
   uint64_t *base = calloc(d->steps + 1, sizeof *base), *units = calloc(d->steps + 1, sizeof *units);
+  size_t *unit_first = calloc(d->steps + 2, sizeof *unit_first);
   int64_t *gate = calloc(d->steps + 1, sizeof *gate); /* the COPY a forwarding SEND follows, else -1 */
-  if (!base || !units || !gate) { free(base); free(units); free(gate); return fail(ncclSystemError, "a lowering's memory"); }
+  if (!base || !units || !gate || !unit_first) {
+    free(base); free(units); free(gate); free(unit_first);
+    return fail(ncclSystemError, "a lowering's memory");
+  }
   ncclResult_t result = ncclSuccess;
   for (size_t s = 0; s < d->steps; s++) {
+    units[s] = (mesh_step_bytes(d->step + s) + page - 1) / page;
+    unit_first[s + 1] = unit_first[s] + units[s];
+  }
+  uint64_t *unit_at = calloc(unit_first[d->steps] + 1, sizeof *unit_at);
+  if (!unit_at) result = fail(ncclSystemError, "a lowering's unit offsets' memory");
+  for (size_t s = 0; !result && s < d->steps; s++) {
     const struct mesh_step *step = d->step + s;
     const uint64_t bytes = mesh_step_bytes(step);
-    units[s] = (bytes + page - 1) / page;
     gate[s] = -1;
     /* a unit is a page of the piece from its start, the same cut at both ends (TN3205: a SEND and its receive cover
        the same frames); a span may start inside a page (design/transport.md section 1), and each unit's bytes lie
@@ -2350,6 +2359,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
       const char *first = (const char *)address[s] + u * page;
       const uint64_t length = bytes - u * page < page ? bytes - u * page : page;
       const uint64_t a = region_offset(first), b = region_offset(first + length - 1);
+      unit_at[unit_first[s] + u] = a;
       if (a == UINT64_MAX || b == UINT64_MAX)
         result = fail(ncclInvalidUsage, "step %zu's bytes lie in no region lease of this process", s);
       else if (b != a + length - 1 || a / MESH_DMA_EXTENT != b / MESH_DMA_EXTENT)
@@ -2411,8 +2421,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
           const uint64_t piece = mesh_step_bytes(step);
           for (uint64_t u = 0; u < units[s]; u++) {
             const uint64_t first = u * page, length = piece - first < page ? piece - first : page;
-            span[u] = (struct mesh_dma_span){region_offset((const char *)address[s] + first), length,
-                                             *position + u + MESH_STREAM_LANES};
+            span[u] = (struct mesh_dma_span){unit_at[unit_first[s] + u], length, *position + u + MESH_STREAM_LANES};
           }
           entry[i].entry = (struct mesh_entry){.spans = region_offset(span), .units = units[s], .step = 1,
                                                .spans_word = complete_at, .spans_base = 0, .base = *position};
@@ -2449,7 +2458,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
     }
   }
   #undef NODE
-  free(base); free(units); free(gate); free(placed); free(listed);
+  free(base); free(units); free(gate); free(placed); free(listed); free(unit_at); free(unit_first);
   *count = written;
   return result;
 }

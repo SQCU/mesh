@@ -171,6 +171,7 @@ struct MetalRun {
     MTLSharedEventListener *listener;
     dispatch_queue_t commits;
     _Atomic long pending;
+    _Atomic long references; // the caller's, each committed part's and each submitted host task's: the last frees
     _Atomic(uintptr_t) failure; // a retained NSError
     double observed;
 };
@@ -189,8 +190,10 @@ static void RunFail(struct MetalRun *run,NSString *message) {
     if(!atomic_compare_exchange_strong(&run->failure,&none,(uintptr_t)error))[error release];
 }
 
+static void RunRelease(struct MetalRun *run);
 struct MetalRun *MetalRunCreate(id<MTL4CommandQueue> queue) {
     struct MetalRun *run=calloc(1,sizeof *run);
+    atomic_init(&run->references,1);
     run->queue=[queue retain];run->device=[queue.device retain];
     MTLResidencySetDescriptor *descriptor=[[MTLResidencySetDescriptor new] autorelease];
     NSError *error=nil;
@@ -265,13 +268,16 @@ static void RunHostCompleted(void *context,const char *error) {
     host->ended=mesh_statistics_now();
     if(error)RunFail(host->run,[NSString stringWithUTF8String:error]);
     RunLeave(host->leaves);
-    atomic_fetch_sub_explicit(&host->run->pending,1,memory_order_release);
+    struct MetalRun *run=host->run;
+    atomic_fetch_sub_explicit(&run->pending,1,memory_order_release);
+    RunRelease(run);
 }
 static void RunCommit(struct MetalRun *run,uint32_t p) {
     struct RunPart *part=&run->part[p];
     const struct RunWait *wait=part->inputs.bytes;
     for(size_t k=0;k<part->inputs.length/sizeof *wait;k++)[run->queue waitForEvent:wait[k].event value:wait[k].value];
     id<MTL4CommandBuffer> buffer=part->buffer;
+    atomic_fetch_add_explicit(&run->references,1,memory_order_relaxed); // its feedback's
     [run->queue commit:&buffer count:1 options:part->options];
     if(part->done)[run->queue signalEvent:part->done value:1];
     RunLeave(part->leaves);
@@ -376,6 +382,7 @@ const char *MetalRunFinish(struct MetalRun *run) {
                 owner->part[at].ended=RunStatisticsTime(feedback.GPUEndTime);
                 if(feedback.error)RunFail(owner,feedback.error.localizedDescription);
                 atomic_fetch_sub_explicit(&owner->pending,1,memory_order_release);
+                RunRelease(owner);
             }];
         }
         if(barrier[v])[encoder barrierAfterEncoderStages:stages beforeEncoderStages:stages visibilityOptions:MTL4VisibilityOptionDevice];
@@ -438,6 +445,7 @@ void MetalRunEnqueue(struct MetalRun *run) {
     }
     for(size_t v=0;v<run->nodeCount;v++)if(nodes[v].kind==RunHost) {
         const MeshHostTask task=run->host[v].task;
+        atomic_fetch_add_explicit(&run->references,1,memory_order_relaxed); // its completion's
         dispatch_group_notify(run->host[v].join,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),^{task.submit(task.context);});
     }
     for(uint32_t p=0;p<run->parts;p++)if(run->part[p].join) {
@@ -491,8 +499,10 @@ int MetalRunEnd(struct MetalRun *run,double *ended,NSError **error) {
     return 1;
 }
 
-void MetalRunFree(struct MetalRun *run) {
-    if(!run)return;
+void MetalRunFree(struct MetalRun *run) { if(run)RunRelease(run); }
+// the run's memory, once the caller and every part and host task it committed have let it go
+static void RunRelease(struct MetalRun *run) {
+    if(atomic_fetch_sub_explicit(&run->references,1,memory_order_acq_rel)!=1)return;
     for(uint32_t p=0;p<run->parts;p++) {
         struct RunPart *part=&run->part[p];
         [part->allocator release];[part->buffer release];[part->options release];[part->fence release];[part->done release];
