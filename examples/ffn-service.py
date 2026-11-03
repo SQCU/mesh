@@ -107,6 +107,19 @@ def main(config=None):
         print(json.dumps(dict(phase='torch_reads', rank=rank, **{
             f'{name}_{label}': float((read(v) - host(v)).abs().max())
             for label, v in (('y', y), ('w2', w2), ('a1', a1)) for name, read in reads.items()})), flush=True)
+        # a cast's output (a fresh MPS lease) read by the CPU from its bytes and by torch's copy, and the leases' spans
+        for label, v in (('y', y), ('w2', w2)):
+            A = v.float()
+            torch.mps.synchronize()
+            hA, hv = host(A), host(v)
+            C = A.cpu()
+            held = dict(A=A, C=C, x=x, w1=w1, w2=w2, a1=a1, a2=a2, y=y)
+            spans = {k: (torch_mesh.address(u), torch_mesh.address(u) + u.untyped_storage().nbytes()) for k, u in held.items()}
+            overlaps = [(i, j) for i in spans for j in spans if i < j and spans[i][0] < spans[j][1] and spans[j][0] < spans[i][1]]
+            print(json.dumps(dict(phase='cast_probe', rank=rank, what=label, cast_error=float((hA - hv).abs().max()),
+                                  copy_error=float((C - hA).abs().max()), read_error=float((C - hv).abs().max()),
+                                  overlaps=overlaps, A=[hex(a) for a in spans['A']], C=[hex(a) for a in spans['C']],
+                                  outside=[k for k, (a, _) in spans.items() if a == 0])), flush=True)
     if staged and not summed:
         # the second product alone, its operand written before the run: its kernel apart from the order it follows
         alone = torch_mesh.empty(B, D, dtype=torch.half)
