@@ -631,12 +631,16 @@ def trees_bound(nodes, capacity, depth=None):
 
 
 def release_gaps(releases, arrivals):
-    """one rank's ticks' critical path: tick j's gap from its last arrival (the latest of each stream's arrival
-    arrivals[s][j]) to the next release releases[j + 1], for each tick whose arrivals are all known and precede that
-    release (mesh_statistics.StreamWords.chains: a rank's compute in a run, from its stream words)"""
-    out = []
-    for j in range(len(releases) - 1):
-        last = [a[j] for a in arrivals]
-        if last and None not in last and releases[j + 1] > max(last):
-            out.append(releases[j + 1] - max(last))
+    """one rank's ticks' critical path: each release's gap from the last arrival of the latest tick whose arrivals all
+    precede it (a tick's last arrival the latest of each stream's arrivals[s][j]), so a release is paired with the
+    data it followed whichever counts first (the Mini's first landing came a tick before its first release, which
+    paired by index read every gap a period long, 55-79 us: metal-microbench balance-2026-11-03 words-3)"""
+    lasts = sorted(max(a[j] for a in arrivals) for j in range(min(map(len, arrivals), default=0))
+                   if arrivals and all(a[j] is not None for a in arrivals))
+    out, k = [], 0
+    for r in releases[1:]:
+        while k < len(lasts) and lasts[k] < r:
+            k += 1
+        if k:
+            out.append(r - lasts[k - 1])
     return out
