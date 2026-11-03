@@ -155,10 +155,6 @@ struct MetalSchedule *MetalScheduleCreateOn(id<MTL4CommandQueue> queue, enum Met
 // commands consuming or replacing those pages inherit its event dependency.
 // No command, observer or whole-function gate is added for the declaration.
 void MetalScheduleInput(struct MetalSchedule *, const struct MetalReach *, size_t count, id<MTLEvent>, uint64_t value);
-// Preparation scope: reads of these source versions retain their supplied
-// Next qualifier across alias views. A local write ends that source version
-// for its covered range. The callback appends ordinary commands to this function.
-void MetalScheduleReadVersions(struct MetalSchedule *, const struct MetalReach *, size_t count, void (^declare)(void));
 // Preparation records the function's collective result sources. Observers read
 // their existing failure state; this adds no command or transfer-time check.
 void MetalScheduleCommunicator(struct MetalSchedule *, struct ncclComm *);
