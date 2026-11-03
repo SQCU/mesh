@@ -1,46 +1,14 @@
-// The GPU side of the words mesh-metal.m prepares (design/transport.md, M07, M10, M12, M30), and of the wire's
-// one small float format (FP8, nccl.h ncclFloat8e4m3 and ncclFloat8e5m2), defined once: a kernel that waits on a count,
-// reads landed bytes, publishes a count or decodes FP8 includes this file and calls these from its own source, and no
-// source splices them into another kernel's text (metal-microbench docs/acceptance-20261014.md A40, A54).
-// libnccl-mesh's kernels include it, and so does every kernel that hands words to another party (the host, a Neural
-// Engine partner's thread) or reads FP8 (metal-microbench dsv41.swift). It is read from the library
-// (the user's checkout, ~/mesh/rdma/mesh.metal).
+// The kernel prelude (torch_mesh/kernels.py prepends it to every kernel it writes): a SEND source's stores and a
+// landing's loads system-coherent, a release of `ready` after a system fence (design/transport.md section 1; the
+// partial-tensor contract's I2, a producer publishes when its writes are visible), and the wire's FP8 codec. No
+// kernel waits: a consumer of landed bytes runs once they are present (metal.h MetalRunLanded).
 #ifndef MESH_METAL
 #define MESH_METAL
 #pragma METAL internals : enable
 #include <metal_stdlib>
-
-// The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load), each after a
-// system-scope fence: without it a running kernel sees a store of the NIC's or the host's late, on the M4 Pro about
-// 3.2 ms in nearly every wait and on the M5 Max 2.3 ms at the 99th percentile, while the fence costs at most 0.13 us a
-// wait (metal-microbench tools/poll_probe.m, both nodes, 2026-10-21: one kernel spinning across rounds, unfenced 3198 us
-// median on the Mini and 0.50 us with a 2308 us p99 on the M5, fenced 0.58 us on both; a poll 0.23-0.26 us either way).
-// Each wait makes at most nccl.h NCCL_MESH_POLLS loads, about 1.1 s at that period on both nodes: the bound exists
-// because a GPU spin with no end halts the node (the Mini's watchdog reset, 2026-10-21), and the caller tells a word
-// short of `target` (the bound reached) from a landing. A reader orders its later loads after the observation with a
-// system-scope fence of its own, after the barrier that gives the observation to its threads (nccl-mesh-metal.m
-// mesh_step_await). With `stop` (not null), the wait also ends once the word at `stop` is not 0, read every 2^10 loads:
-// a dispatch's failure claim (nccl-mesh-kernels.h mesh_step_claim), so that once one wait of a dispatch has failed, every
-// other wait of it ends within 2^10 loads instead of at its own bound (the Mini's watchdog reset, 2026-10-21: a dispatch's
-// whole spin is what must stay bounded, and a wide dispatch runs its threadgroups' waits in waves).
-// Preparation fixes only the load budget. This local counter starts at the
-// first executed observation; no wall-clock timestamp ages while compiling.
-template <typename W>
-__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls,
-                                                                  device metal::atomic_uint *stop) {
-    W seen;
-    uint k = 0u;
-    do {
-        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-        seen = *word;
-    } while (seen < target && ++k < polls && ((k % MESH_STOP_POLL_PERIOD) != 0u || !stop || metal::atomic_load_explicit(stop, metal::memory_order_relaxed) == 0u));
-    return seen;
-}
-
-template <typename W>
-__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
-    return mesh_wait_bounded(word, target, polls, nullptr);
-}
+#ifndef MESH_SYSTEM_THREAD_SCOPE
+#define MESH_SYSTEM_THREAD_SCOPE 3 /* etc/compute/metal.def */
+#endif
 
 // A landed value (bytes the NIC wrote into a landing buffer), loaded through volatile coherent(system) in the widest words
 // that divide it.
@@ -115,56 +83,6 @@ __attribute__((always_inline)) static inline void mesh_publish(volatile coherent
     metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
     volatile coherent(system) device metal::atomic_ulong *word = (volatile coherent(system) device metal::atomic_ulong *)cell;
     mesh_atomic_max(&word->__s, value, 0);
-}
-
-// The count and its activity mask can be produced independently of the
-// numerical contributors. One system-scope RMW orders their announcements;
-// it does not order unrelated cuts or hold a lock across numerical work.
-#define MESH_COUNT_RMW(name, primitive) \
-template<class A> __attribute__((always_inline)) static inline auto name(A word,uint value,int) \
- -> decltype(primitive(word,value,0,0,__METAL_MEMORY_FLAGS_NONE__)) { \
- return primitive(word,value,int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE,__METAL_MEMORY_FLAGS_NONE__); } \
-template<class A> __attribute__((always_inline)) static inline uint name(A word,uint value,long) { \
- return primitive(word,value,int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE); }
-MESH_COUNT_RMW(mesh_count_add,__metal_atomic_fetch_add_explicit)
-MESH_COUNT_RMW(mesh_count_or,__metal_atomic_fetch_or_explicit)
-#undef MESH_COUNT_RMW
-template<class A> static inline auto mesh_count_load(A word,int)
- -> decltype(__metal_atomic_load_explicit(word,0,0,__METAL_MEMORY_FLAGS_NONE__)) {
-    return __metal_atomic_load_explicit(word,int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE,__METAL_MEMORY_FLAGS_NONE__);
-}
-template<class A> static inline uint mesh_count_load(A word,long) {
-    return __metal_atomic_load_explicit(word,int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE);
-}
-template<class A> static inline auto mesh_count_exchange(A word,thread uint *expected,uint value,int)
- -> decltype(__metal_atomic_compare_exchange_weak_explicit(word,expected,value,0,0,0,__METAL_MEMORY_FLAGS_NONE__)) {
-    return __metal_atomic_compare_exchange_weak_explicit(word,expected,value,int(metal::memory_order_relaxed),
-        int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE,__METAL_MEMORY_FLAGS_NONE__);
-}
-template<class A> static inline bool mesh_count_exchange(A word,thread uint *expected,uint value,long) {
-    return __metal_atomic_compare_exchange_weak_explicit(word,expected,value,int(metal::memory_order_relaxed),
-        int(metal::memory_order_relaxed),MESH_SYSTEM_THREAD_SCOPE);
-}
-static inline uint mesh_graph_count_load(device metal::atomic_uint *value) {
-    return mesh_count_load(&((volatile coherent(system) device metal::atomic_uint *)value)->__s,0);
-}
-static inline bool mesh_graph_count_exchange(device metal::atomic_uint *value,thread uint *expected,uint desired) {
-    return mesh_count_exchange(&((volatile coherent(system) device metal::atomic_uint *)value)->__s,expected,desired,0);
-}
-static inline void mesh_graph_coverage(volatile coherent(system) device metal::atomic_uint *state,
-    volatile coherent(system) device metal::atomic_uint *arrivals,volatile coherent(system) device const uint *expected,
-    uint announce,uint contribution,bool known) {
-    metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,
-                             static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-    const uint count=contribution?mesh_count_add(&arrivals->__s,contribution,0)+contribution:0u;
-    if(known) {
-        if(count==*expected)mesh_count_or(&state->__s,2u,0);
-        return;
-    }
-    const uint ready=mesh_count_or(&state->__s,announce,0)|announce;
-    metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,
-                             static_cast<metal::thread_scope>(MESH_SYSTEM_THREAD_SCOPE));
-    if((ready&5u)==5u&&mesh_count_or(&arrivals->__s,0u,0)==*expected)mesh_count_or(&state->__s,2u,0);
 }
 
 // FP8 E4M3 (fn: no infinity, S.1111.111 NaN) and, with e5, E5M2 (IEEE-like) [OCP 8-bit floating point, 2023]: a byte's

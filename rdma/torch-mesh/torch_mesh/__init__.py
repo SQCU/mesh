@@ -1,177 +1,16 @@
-"""torch.distributed's "mesh" backend over ../libnccl-mesh.dylib (torch_mesh/backend.py).  Importing torch_mesh
-registers it, and so does the torch.backends entry point when torch is imported where this package is installed, so
-a program only names it: init_process_group(backend="mesh").  A run that brings its commit's torch_mesh by path
-has no installed entry point, so the import is what registers it there.
-
-declarations.Function compiles a complete PyTorch graph into the common native
-command records, with buffers and dispatches bound before execution.
+"""torch.distributed's "mesh" backend over ../libnccl-mesh.dylib (torch_mesh/backend.py) and its compiler
+(torch_mesh/compiler.py). Importing torch_mesh registers the backend, and so does the torch.backends entry point, so a
+program only names it: init_process_group(backend="mesh").
 
 empty() makes a region tensor, whose bytes are a lease of this node's bridge's region, which a collective reads and
-writes where it lies.  Every MPS tensor is one: torch's MPS allocator is the region's (allocator.mm, installed as
-_stream loads).  records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the
-region (0: outside it); check_memory() warns where this process's MPS tensors outside it come to 1 GiB or more.
-
-merge_partials() declares a softmax-summary reduction through reduction.partials,
-an ordinary supplied Reduction function. Each member's attention over its own
-keys is merged by the rows' logsumexp into the attention over all of them.
-Partition's ring attention uses the same function for reduce-scatter.
-
-plan() declares a program's collectives on a group once, in their order (libnccl-mesh's ncclMeshCommPlan), each
-compiled then, so none is planned where it is issued.
-
-declarations.Function traces a complete numerical function with fake tensors and compiles it before execution.
-Its run attribute is the prepared callable; declaration and preparation do not execute the numerical payload."""
+writes where it lies; every MPS tensor is one (allocator.mm). address(t) is where a tensor's bytes lie in the region
+(0: outside it); check_memory() warns where this process's MPS tensors outside it come to 1 GiB or more. A stepper
+declares its collectives (partition.allgatherv_out) and runs as a compiled program (compiler.Program); no collective
+runs eagerly."""
 
 
 def _autoload():
     from . import backend  # noqa: F401
-
-
-def compiler(gm, example_inputs, *, configuration=None, destinations=None):
-    from .declarations import Function
-    function = Function(gm, *example_inputs, configuration=configuration)
-    function.declare_graph(gm, None, destinations=destinations)
-    return function.execution
-
-
-def prepare_source(gm, example_inputs):
-    """Prepare the common numerical source before logical IR or page binding.
-
-    Ownership and ordinary compilation consume these same functionalization,
-    tensor equations and numerical rewrites. The returned operands retain their
-    page identities; no numerical function is invoked.
-    """
-    from pathlib import Path
-    import torch
-    from . import _stream, backend, partition
-    from .streamed import node
-    from .compilation import operands as compiler_operands
-    aten = torch.ops.aten
-
-    def replace(module, before, after):
-        """Carry result identities through an equivalent numerical rewrite."""
-        after.meta = before.meta.copy()
-        before.replace_all_uses_with(after)
-        module.meta['mesh_source_results'] = tree_map(
-            lambda value: after if value is before else value, module.meta.get('mesh_source_results', {}))
-
-    def remove_unobserved(module, value):
-        # A fused intermediate has no separately emitted result. Its source
-        # origins remain on the fused operation; it cannot name the final value.
-        module.meta['mesh_source_results'] = {source: result for source, result in
-            module.meta.get('mesh_source_results', {}).items()
-            if not any(leaf is value for leaf in tree_flatten(result)[0])}
-
-    def rows(x, w):
-        """Row-shaped products share the same reader and layout declarations."""
-        x, w = x.meta.get('val'), w.meta.get('val')
-        return (x is not None and w is not None and x.dtype == w.dtype and x.dim() == w.dim() == 2)
-
-    def joined(x):
-        """The two row segments joined along their last dimension, with no other use."""
-        if x.target is not aten.cat.default or len(x.users) != 1 or len(x.args[0]) != 2 or (x.args[1:] or (0,))[0] not in (1, -1):
-            return None
-        parts = [p.meta.get('val') for p in x.args[0]]
-        if any(p is None or p.dim() != 2 for p in parts) or parts[0].dtype != parts[1].dtype:
-            return None
-        return x.args[0]
-
-    def grouped(module):
-        """Consecutive products of torch_mesh::linear, within the manifest binding capacity, none reading another's output nor any of their outputs
-        used before the last of them, as one torch_mesh::linears: one dispatch."""
-        import operator
-        graph = module.graph
-        order = {n: i for i, n in enumerate(graph.nodes)}
-        products = [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear.default]
-        from mesh_graph import independent
-        above = {}
-        i = 0
-        while i < len(products):
-            group = [products[i]]
-            for m in products[i + 1:compiler_operands()['BUFFER_BINDINGS'] // 3 + i]:
-                if not independent(lambda n: n.all_input_nodes, lambda n: n.users, order, group, m, above):
-                    break
-                group.append(m)
-            if len(group) > 1:
-                args = [list(m.args) + [None, 0, None][len(m.args) - 2:] for m in group]
-                with graph.inserting_before(group[-1]):
-                    made = graph.call_function(torch.ops.torch_mesh.linears.default, tuple([a[k] for a in args] for k in range(5)))
-                    made.meta['val'] = [m.meta['val'] for m in group]
-                    for j, m in enumerate(group):
-                        part = graph.call_function(operator.getitem, (made, j))
-                        replace(module, m, part)
-                    made.meta['mesh_source_nodes'] = tuple(dict.fromkeys(
-                        origin for item in group for origin in item.meta.get('mesh_source_nodes', (item,))))
-                for m in group:
-                    graph.erase_node(m)
-            i += len(group)
-
-    def rewrite(module):
-        graph = module.graph
-        for node in list(graph.nodes):
-            mm = node.target is aten.mm.default and rows(*node.args)
-            addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])
-                     and node.args[0].meta['val'].dim() == 1)
-            if mm or addmm:
-                x, w = node.args[-2:]
-                parts = joined(x)
-                with graph.inserting_before(node):
-                    weight = graph.call_function(aten.permute.default, (w, [1, 0]))
-                    weight.meta['val'] = w.meta['val'].permute(1, 0)
-                    made = graph.call_function(torch.ops.torch_mesh.linear.default,
-                                               (parts[0] if parts else x, weight, node.args[0] if addmm else None, 0) +
-                                               ((parts[1],) if parts else ()))
-                replace(module, node, made)
-                graph.erase_node(node)
-                if parts:
-                    remove_unobserved(module, x)
-                    graph.erase_node(x)
-                users = list(made.users)
-                if len(users) == 1 and users[0].target is aten.tanh.default:
-                    made.args = made.args[:3] + (1,) + made.args[4:]
-                    origins = tuple(dict.fromkeys((*made.meta.get('mesh_source_nodes', ()),
-                                                   *users[0].meta.get('mesh_source_nodes', (users[0],)))))
-                    remove_unobserved(module, made)
-                    replace(module, users[0], made)
-                    made.meta['mesh_source_nodes'] = origins
-                    graph.erase_node(users[0])
-        grouped(module)
-
-    from torch._guards import detect_fake_mode
-    from torch._subclasses.fake_tensor import FakeTensorMode
-    from torch._inductor.decomposition import select_decomp_table
-    from .algebra import decompositions
-    from torch.utils._pytree import tree_map, tree_flatten
-    # Functionalization receives every tensor as an operand, including
-    # weights and prebound outputs. It can then lower out= operations
-    # while retaining their writes to those exact destinations.
-    from .compilation import functionalize_source, lift_state
-    # every attribute bound where it lies: a region tensor by its producer (any MPS tensor: torch's MPS allocator is
-    # the region's; torch_mesh.empty), never imported into the region by a copy
-    lifted, operands = lift_state(gm, example_inputs)
-    described = [node.meta['val'] for node in gm.graph.nodes if 'val' in node.meta]
-    mode = detect_fake_mode(described) or FakeTensorMode(allow_non_fake_inputs=True)
-    from .operand import TensorView
-    def described_input(value, declared):
-        if isinstance(value, TensorView):
-            return declared
-        return mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
-    inputs = [tree_map(described_input, value, node.meta['val'])
-              for node, value in zip((n for n in lifted.graph.nodes if n.op == 'placeholder'), operands, strict=True)]
-    with mode:
-        lowered = functionalize_source(lifted, inputs, select_decomp_table() | decompositions)
-    # The section's interface is its operands' leaves, as returned below and as native lowering runs it: an operand
-    # can be a list (a host declaration's results, whose getitem lies in this section), and make_fx then gives the
-    # trace a pytree codegen whose output unflattening fails in GraphLowering.run (lstm-service's [x, h] product after
-    # its concatenation's host declaration, 2026-11-01). The placeholders and the output are already flat.
-    lowered.graph._codegen = torch.fx.graph.CodeGen()
-    output = next(node for node in lowered.graph.nodes if node.op == 'output')
-    if not isinstance(output.args[0], (tuple, list)):
-        output.args = ((output.args[0],),)
-        lowered.recompile()
-    rewrite(lowered)
-    lowered.recompile()
-    return lowered, tree_flatten(inputs)[0], tree_flatten(operands)[0]
 
 
 def empty(*size, dtype=None, device='mps'):
@@ -192,12 +31,6 @@ def empty(*size, dtype=None, device='mps'):
         with fake:
             return torch.empty(sizes, dtype=dtype or torch.get_default_dtype(), device=kind)
     return _stream.region_empty(sizes, torch.empty(0, dtype=dtype or torch.get_default_dtype()), kind == 'mps')
-
-
-def records():
-    """The region tensors empty() made that are live now: each {address, bytes} of its lease."""
-    from . import _stream
-    return [{'address': a, 'bytes': b} for a, b in _stream.records()]
 
 
 def address(tensor):
@@ -221,33 +54,5 @@ def check_memory():
     return outside
 
 
-def plan(group, calls, *, order=None, production_seconds=None, routing=None):
-    """The collectives a program issues on `group` (None: the default group) declared once, in their order: `calls`
-    the groups, each a list of torch_mesh.backend.Call (one torch collective, or one coalesced batch, a group) or (that
-    list, repeat) issued repeat times in a row, the order repeated from the group's next collective on (backend
-    ProcessGroupMesh.plan; partition's ops give their own, partition.calls).  Every rank declares its own calls, the same
-    groups in the same order, at the same point.  Returns each group's (send entries, landing entries) on this rank."""
-    import torch.distributed as dist
 
-    from . import backend
-    group = group or dist.distributed_c10d._get_default_group()
-    return backend._mesh(group.group_name, 'plan').plan(calls, order=order, production_seconds=production_seconds, routing=routing)
-
-
-def merge_partials(out, lse, group=None, root=-1):
-    """Every member's attention over its own keys merged into the attention over all of them (split-KV attention's
-    merge, compiled from reduction.partials through its ordinary source graph):
-    `out` (rows x dim, any leading shape) and `lse` (each row's logsumexp, -inf where it saw
-    no key), the same rows on every member.  Returns (the attention in out's dtype, each row's logsumexp), on every member
-    (`root` -1) or at `root`."""
-    import torch
-    import torch.distributed as dist
-
-    from . import backend
-    group = group or dist.distributed_c10d._get_default_group()
-    attended, lse = backend.attention(backend.merge_partials(backend.partial(out, lse), root, group.group_name, []))
-    return attended.to(out.dtype), lse
-
-
-# the backend registered by the import itself, not by install metadata (an entry point a by-path run does not have)
-_autoload()
+from . import backend  # noqa: E402,F401  (registers the backend)

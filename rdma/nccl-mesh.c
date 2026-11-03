@@ -2260,6 +2260,7 @@ ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *call
   struct definition *d = calloc(1, sizeof *d);
   if (!d || !(d->call = malloc((count + 1) * sizeof *d->call))) { free(d); return fail(ncclSystemError, "a declaration's memory"); }
   memcpy(d->call, calls, count * sizeof *calls);
+  for (size_t k = 0; k < count; k++) d->call[k].segments = NULL; /* read at declaration alone */
   d->calls = count;
   for (size_t k = 0; !result && k < count; k++) {
     const ncclMeshCollective *call = calls + k;
@@ -2282,8 +2283,10 @@ ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *call
       if (!step || !owner) result = fail(ncclSystemError, "a call's steps' memory");
       else {
         const struct mesh_operand operand = {call->type, (uint32_t)SIZE[call->type], call->elements};
-        const uint32_t made = mesh_program_steps_cut(&program, (uint32_t)comm->rank, operand, NULL, comm->page,
-                                                     d->step + d->steps);
+        const uint32_t made = mesh_program_steps_cut(&program, (uint32_t)comm->rank, operand, call->segments,
+                                                     comm->page, d->step + d->steps);
+        if (!made && call->elements && call->segments)
+          result = fail(ncclInvalidArgument, "call %zu: its segments do not sum to its elements", k);
         for (uint32_t s = 0; s < made; s++) {
           d->step_call[d->steps + s] = (uint32_t)k;
           if (d->step[d->steps + s].peer != (uint32_t)comm->rank && channel_of(comm, d->step[d->steps + s].peer) < 0)
@@ -2423,7 +2426,10 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
           }
           *position += units[s];
           if (land) NODE(ncclMeshNodeLanding, (uint32_t)s, h, (void *)ch->view.landed, *position);
-          else if (gate[s] < 0) NODE(ncclMeshNodeRelease, (uint32_t)s, h, (void *)ch->view.ready, *position);
+          else {
+            if (gate[s] < 0) NODE(ncclMeshNodeRelease, (uint32_t)s, h, (void *)ch->view.ready, *position);
+            NODE(ncclMeshNodeSent, (uint32_t)s, h, (void *)ch->view.sent, *position);
+          }
         }
       }
       if (!table->count[0] && !table->count[1]) continue;

@@ -285,18 +285,20 @@ typedef struct {
 } ncclMeshStream;
 
 /* design/zorvek.md: the collective's lowering. A call of a declared group: its collective (mesh-plan.h MESH_ALLREDUCE,
-   MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER), element type (ncclDataType_t), reduction op, root
-   and elements. */
-typedef struct { uint32_t what, type, op, root; uint64_t elements; } ncclMeshCollective;
+   MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER), element type (ncclDataType_t), reduction op, root,
+   elements, and each rank's elements of an all-gather or a reduce-scatter (a size a rank, summing to `elements`;
+   NULL: the program's own cut) */
+typedef struct { uint32_t what, type, op, root; uint64_t elements; const uint64_t *segments; } ncclMeshCollective;
 /* a step of a declared group at this rank (mesh-plan.h struct mesh_step): its call, its channel (the communicator's
    channel toward its peer), op (MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY), round, buffer (0 the call's
    operand and result, 1 and more its scratch) and its bytes [first, first + bytes) in that buffer: the run's transport
    accesses, placed by the solve */
 typedef struct { uint32_t call, channel, op, round, buffer; uint64_t first, bytes; } ncclMeshTransfer;
 /* a node an occurrence gives the run: a link (`word` the chain's link word, `value` the table's region offset), a
-   release (`word` the channel's ready, stored `value` once the step's bytes are written) or a landing (present once
-   the channel's landed `word` reaches `value`); `transfer` its step (UINT32_MAX for a link) */
-enum { ncclMeshNodeLink, ncclMeshNodeRelease, ncclMeshNodeLanding };
+   release (`word` the channel's ready, stored `value` once the step's bytes are written), a landing (present once the
+   channel's landed `word` reaches `value`) or a SEND's completion (present once the channel's sent `word` reaches
+   `value`: its source bytes may be written again); `transfer` its step (UINT32_MAX for a link) */
+enum { ncclMeshNodeLink, ncclMeshNodeRelease, ncclMeshNodeLanding, ncclMeshNodeSent };
 typedef struct { uint32_t kind, transfer, channel; void *word; uint64_t value; } ncclMeshNode;
 /* Opaque handle to communicator */
 typedef struct ncclComm* ncclComm_t;

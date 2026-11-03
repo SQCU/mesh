@@ -9,10 +9,8 @@ import torch.distributed as dist
 import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
-from torch_mesh.declarations import Function, execution_sequence
-from torch_mesh.configuration import placement, bind, record
-from torch_mesh import compute
-from mesh_statistics import now, next_configuration
+from torch_mesh.compiler import Program
+from mesh_statistics import now, measure, emit
 
 import chain
 
@@ -48,74 +46,40 @@ def folded(config, full):
 def main(config=None):
     if config is None:
         config = json.load(sys.stdin if sys.argv[1] == '-' else open(sys.argv[1]))
-    capabilities = compute.metal(config['capabilities'])
-    steps, rows = config['steps'], config['rows']
+    steps, rows, width = config['steps'], config['rows'], config['width']
+    k = config['parameters']['steps_per_replay']['value']
     # every rank draws the same inputs from the configuration's seed: no broadcast of E into E (design/page-maps-
-    # 2026-11-02.md, Construction 7); rank 0's folds are the ones distributed
+    # 2026-11-02.md, Construction 7)
     inputs, full = chain.inputs(config, steps, rows)
     folds = folded(config, full)
     del full
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
-    rank, size, width = dist.get_rank(), dist.get_world_size(), config['width']
+    rank, size = dist.get_rank(), dist.get_world_size()
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=width)
-    workload = {'function': 'chain_sequence', 'width': width, 'steps': steps, 'rows': rows}
-    configuration = placement(mesh, 'tp', workload, config.get('placement'), parameters=config['parameters'],
-        observations=config.get('observations', []), proposal=config.get('proposal', 0),
-        family=config.get('family', workload), forms=config.get('forms', ()))
-    chosen = configuration['assignment']['operands']
-    k = chosen['steps_per_replay']
     a, b = chain.weights(mesh, folds, width)
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
     E.copy_(torch.from_numpy(inputs[:]))
     del inputs
-    group = mesh.get_group('tp')
-    # the chain's step through the frontend the LSTM uses: one declaration for each distinct chunk length, replayed for
-    # every chunk of that length, the step counter t on the GPU selecting its steps (examples/lstm-service.py)
     tick = chain.Tick(mesh, a, b, rows, width)
     t = torch.zeros(1, dtype=torch.int64, device='mps')
-    full, rest = divmod(steps, k)
-    chunks = [k] * full + [rest] * bool(rest)
-    from mesh_relation import Algebra
-    algebra = Algebra()
-    unit = Function(tick.stepper(E, O, 1), t, algebra=algebra,
-                    source_scope={'program': 'chain_sequence', 'phase': 'step'}).capture()
-    functions = {}
-    for count in dict.fromkeys(chunks):
-        function = unit.repeated(count)
-        function.declare(group)
-        functions[count] = function
-    ordered = [functions[count] for count in chunks]
-    groups = []
-    for function in ordered:
-        own = function.groups.get(group.group_name, [])
-        if len(own) == 1 and groups and isinstance(groups[-1], tuple) and groups[-1][0] is own[0]:
-            groups[-1] = (own[0], groups[-1][1] + 1)
-        elif len(own) == 1:
-            groups.append((own[0], 1))
-        else:
-            groups.extend(own)
+    # a chunk of k steps compiled once and instanced for every chunk of that length, the step counter t on the GPU
+    # selecting its steps (torch_mesh/compiler.py)
+    whole, rest = divmod(steps, k)
+    stepper = {n: tick.stepper(E, O, n) for n in {k, rest} if n}
+    program = Program([(stepper[k], (t,))] * whole + ([(stepper[rest], (t,))] if rest else []))
     torch_mesh.check_memory()
-    program = execution_sequence(ordered, O, algebra=algebra)
-    def prepare():
-        program.realize(1)
-        return {'layouts': [choice for function in ordered for choice in function.layout_choices],
-                'choices': [choice for function in ordered for choice in function.choices]}
-    bind(configuration, groups, prepare)
+    program.prepare(1)
     started = now()
     program.forward()
-    completion = program.completion()
-    summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
-                   steps_per_replay=k)
-    record(configuration, completion, started, O.numel() * O.element_size(), summary)
-    while not configuration['observations'].close():
+    while (ended := program.completion()) is None:
         time.sleep(0)
+    summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps, steps_per_replay=k)
+    emit({**measure(started, ended, O.numel() * O.element_size(), steps), 'workload': 'chain_sequence',
+          'rank': rank, 'size': size, 'report': summary})
     dist.destroy_process_group()
-    state = next_configuration(configuration['observations'].declaration,
-        [*configuration['group'].configuration_observations, *configuration['observations'].poll()],
-        family=configuration['family']['source'])
-    return {'output': O, 'configuration': state}
+    return {'output': O, 'configuration': config.get('placement')}
 
 
 if __name__ == '__main__':
