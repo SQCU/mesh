@@ -165,10 +165,9 @@ struct ncclComm {
   struct ncclComm *next_live;
   char *cpu_compiler,*cpu_resources;
   _Atomic int runs;
-  /* the collective lowering's (design/zorvek.md): the declared groups, and the trees they are routed along */
+  /* the collective lowering's (design/zorvek.md): the declared groups (routed along `trees`, which own their arrays:
+     routes_free) */
   struct definition *declared;
-  uint32_t *tree_root, *tree_parent;
-  double *tree_weight;
 };
 
 /* the groups' one lock: a group's planning, scheduling and encoding, a completion, a communicator's failure kept and its
@@ -269,7 +268,6 @@ static void comm_free(struct ncclComm *comm) {
   for (struct definition *d = comm->declared, *next; d; d = next) {
     next = d->next; free(d->call); free(d->step); free(d->step_call); free(d);
   }
-  free(comm->tree_root); free(comm->tree_parent); free(comm->tree_weight);
   for (uint32_t h = 0; h < comm->count; h++) MetalRelease(comm->channels[h].buffer);
   ncclMemFree((void *)comm->words);
   comm_leave(comm);
@@ -2232,14 +2230,16 @@ ncclResult_t ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId *uniqueId) {
 static ncclResult_t comm_trees(ncclComm_t comm) {
   if (comm->trees.count) return ncclSuccess;
   const uint32_t nodes = comm->map.nodes, most = nodes * MESH_TREES_MOST;
-  comm->tree_root = calloc(most, sizeof *comm->tree_root);
-  comm->tree_parent = calloc((size_t)most * nodes, sizeof *comm->tree_parent);
-  comm->tree_weight = calloc(most, sizeof *comm->tree_weight);
-  if (!comm->tree_root || !comm->tree_parent || !comm->tree_weight) return fail(ncclSystemError, "the trees' memory");
-  const uint32_t count = mesh_trees_pack(&comm->map, NULL, MESH_TREE_EPS, MESH_TREES_MOST, comm->tree_root,
-                                         comm->tree_parent, comm->tree_weight);
-  if (!count) return fail(ncclInvalidUsage, "the communicator's map does not join its ranks (mesh-plan.h mesh_trees_pack)");
-  comm->trees = (struct mesh_trees){nodes, count, comm->tree_root, comm->tree_parent, comm->tree_weight};
+  uint32_t *root = calloc(most, sizeof *root), *parent = calloc((size_t)most * nodes, sizeof *parent);
+  double *weight = calloc(most, sizeof *weight);
+  const uint32_t count = root && parent && weight ?
+      mesh_trees_pack(&comm->map, NULL, MESH_TREE_EPS, MESH_TREES_MOST, root, parent, weight) : 0;
+  if (!count) {
+    free(root); free(parent); free(weight);
+    return fail(root && parent && weight ? ncclInvalidUsage : ncclSystemError,
+                "the communicator's trees (mesh-plan.h mesh_trees_pack: its map joins its ranks)");
+  }
+  comm->trees = (struct mesh_trees){nodes, count, root, parent, weight};
   return ncclSuccess;
 }
 
