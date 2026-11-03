@@ -786,6 +786,7 @@ class Program:
                     stores.append(n.value)
                     if n.kind in (lib.ncclMeshNodeLanding, lib.ncclMeshNodeSent):
                         stores.append(slot)  # an observation's own slot beside its count: a defect names it
+                        stores.append(0)  # its flag: its polling thread's end, which its other threads end with
                     made.append((n.kind, n.transfer, int(ffi.cast('uintptr_t', n.word)), n.value, slot, n.round))
                 lowered[c] = made
                 run.communicator(int(ffi.cast('uintptr_t', command.comm)))
@@ -831,7 +832,8 @@ class Program:
         observing = _pipeline(kernels.observe(), kernels.OBSERVE)
 
         def observed(slot, word):
-            run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
+            run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)],
+                         (kernels.OBSERVE_THREADGROUPS * 32, 1, 1), (32, 1, 1), True)
         cut = [False]  # a part end owed after links and releases, across chunks
         waited = [False]  # observations emitted since the last command: the next command begins a part's compute
         for chunk, (t, lowered) in enumerate(instances):

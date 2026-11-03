@@ -249,24 +249,44 @@ OBSERVE = 'mesh_observe'
 # an observation's bound: at most this many fenced reads (well under a second on the members), and none once the run's
 # defect word is set, so a word that never comes ends the run and names itself, never a GPU held
 OBSERVE_POLLS = 1 << 22
+# the threadgroups an observation keeps busy beside its polling thread, and the arithmetic steps between their looks at
+# its flag: an M5 Ultra whose parts are narrow loses its GPU's performance state between them, its next part starting
+# 0.1-1.7 ms late now and then (the LSTM's tail); wide work in the part keeps it (metal-microbench docs/facts.md, gaps.m:
+# 640 threadgroups beside a narrow buffer clean in most rounds, 2560 in all but one of 16; a keepalive on another queue
+# time-slices with the run instead). The user's word: a keepalive the hardware needs for its rate is to be built.
+OBSERVE_THREADGROUPS = 640
+OBSERVE_SPIN = 256
 
 
 @functools.cache
 def observe():
     """a landing's or a SEND completion's presence on the GPU: argument 0 the channel's `landed` or `sent` word, argument
-    1 the count it must reach (in the run's value slots), argument 2 the run's defect word and the word read at a
-    give-up beside it. Read through volatile coherent(system) loads, each after a system-scope fence (mesh 1f794b8f^
-    mesh_wait_bounded's form: a part already running sees a CPU's store in 1-4 us, metal-microbench docs/facts.md,
-    where a CPU-signalled start costs an M5 Ultra 100-180 us); present where the word reaches the count, lost where it
-    reads ~0 (a lost port's words, as the bridge stores them). A give-up at OBSERVE_POLLS, or a lost word, sets the
-    defect word to the observation's slot x 4 + 1 (a give-up) or + 2 (a lost word) if none is set, and an observation
-    of a run with a defect set ends at once"""
+    1 the observation's value slots (the count it must reach, its own slot, its flag), argument 2 the run's defect word
+    and the word read at a give-up beside it. Thread 0 polls: volatile coherent(system) loads, each after a system-scope
+    fence (mesh 1f794b8f^ mesh_wait_bounded's form: a part already running sees a CPU's store in 1-4 us, metal-microbench
+    docs/facts.md, where a CPU-signalled start costs an M5 Ultra 100-180 us); present where the word reaches the count,
+    lost where it reads ~0 (a lost port's words, as the bridge stores them). A give-up at OBSERVE_POLLS, or a lost word,
+    sets the defect word to the observation's slot x 4 + 1 (a give-up) or + 2 (a lost word) if none is set, and an
+    observation of a run with a defect set ends at once. Thread 0 sets the flag as it ends; every other thread (the
+    dispatch's OBSERVE_THREADGROUPS) runs arithmetic, looking at the flag every OBSERVE_SPIN steps, and ends with it:
+    the GPU loaded while it waits (OBSERVE_THREADGROUPS)"""
     return (f'{prelude()}\nusing namespace metal;\nkernel void {OBSERVE}(volatile coherent(system) device const ulong *word '
-            f'[[buffer(0)]], device const ulong *value [[buffer(1)]], volatile coherent(system) device ulong *defect '
+            f'[[buffer(0)]], device ulong *value [[buffer(1)]], volatile coherent(system) device ulong *defect '
             f'[[buffer(2)]], uint at [[thread_position_in_grid]]) {{\n'
-            f'    if (defect[0]) return;\n'
-            f'    const ulong want = value[0], slot = value[1];\n    ulong seen;\n    uint n = 0u;\n'
-            f'    do {{\n        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
-            f'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));\n        seen = *word;\n'
-            f'    }} while (seen < want && ++n < {OBSERVE_POLLS}u && ((n & 4095u) || !defect[0]));\n'
-            f'    if (seen < want || seen == ~0ul) {{ if (!defect[0]) {{ defect[1] = seen; defect[0] = slot * 4ul + (seen == ~0ul ? 2ul : 1ul); }} }}\n}}\n')
+            f'    device atomic_uint *done = (device atomic_uint *)(value + 2);\n'
+            f'    if (at) {{\n'
+            f'        uint a = at;\n'
+            f'        for (uint n = 0u; n < (1u << 30); n++) {{\n'
+            f'            for (uint i = 0u; i < {OBSERVE_SPIN}u; i++) a = a * 1664525u + 1013904223u;\n'
+            f'            if (atomic_load_explicit(done, memory_order_relaxed) || a == 7u) break;\n'
+            f'        }}\n'
+            f'        return;\n'
+            f'    }}\n'
+            f'    if (!defect[0]) {{\n'
+            f'        const ulong want = value[0], slot = value[1];\n        ulong seen;\n        uint n = 0u;\n'
+            f'        do {{\n            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
+            f'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));\n            seen = *word;\n'
+            f'        }} while (seen < want && ++n < {OBSERVE_POLLS}u && ((n & 4095u) || !defect[0]));\n'
+            f'        if (seen < want || seen == ~0ul) {{ if (!defect[0]) {{ defect[1] = seen; defect[0] = slot * 4ul + (seen == ~0ul ? 2ul : 1ul); }} }}\n'
+            f'    }}\n'
+            f'    atomic_store_explicit(done, 1u, memory_order_relaxed);\n}}\n')
