@@ -83,6 +83,10 @@ def main(config=None):
             if now() - started > 8.0:
                 parts, landings = program.done[-1].waiting()
                 print(json.dumps(dict(phase='timeout', parts_pending=parts, landings_waiting=len(landings), landings=[dict(word=hex(w), value=v, threshold=t) for w, v, t in landings[:16]])), flush=True)
+                times = program.done[-1].parts()
+                print(json.dumps(dict(phase='parts', started=started, parts=[[round((c - started) * 1e3, 3) if c else None,
+                    round((s - started) * 1e3, 3) if s else None, round((e - started) * 1e3, 3) if e else None]
+                    for c, s, e in times])), flush=True)
                 raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
             time.sleep(0)
         summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows, repeat=repeat, input_width=KIN,

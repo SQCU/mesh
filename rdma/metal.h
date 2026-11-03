@@ -97,6 +97,9 @@ void MetalRunFree(struct MetalRun *);
 /* what a run still waits on, for a failure's report: each landing not yet present (its word, the word's value now and
    its threshold), written up to `capacity`; the count of such landings. *parts the parts not yet complete. */
 size_t MetalRunWaiting(struct MetalRun *, uint64_t (*landing)[3], size_t capacity, long *parts);
+/* each part's times in mesh_statistics_now's clock (0 where not yet): committed, its GPU start and its GPU end, up to
+   `capacity`; the count of parts */
+size_t MetalRunParts(struct MetalRun *, double (*times)[3], size_t capacity);
 
 #endif
 #ifdef __cplusplus
