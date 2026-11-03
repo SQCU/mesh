@@ -355,4 +355,14 @@ int mesh_graph_place(size_t n, const uint64_t *size, const uint64_t *key, const 
 #ifdef __cplusplus
 }
 #endif
+/* A rooted tree's nodes by depth (root `root`, parents parent[..], the root its own, a node off it UINT32_MAX):
+   depth[v] its edges from the root (UINT32_MAX off the tree) and order[..] the tree's nodes root-outward, by depth then
+   index; their count. Reversed, the order is leaves-first (core/collective.h: an all-reduce's partials up a tree, a
+   page's relays down it). */
+uint32_t mesh_graph_tree_order(uint32_t vertices, uint32_t root, const uint32_t *parent, uint32_t *depth, uint32_t *order);
+/* The tree of root r a share-weighted pick gives the place `at` in [0, 1) (trees k with root[k] == r, each its share
+   share[k], in index order, the first whose cumulative share passes `at`): its index, or UINT32_MAX where r roots none
+   (core/collective.h: a root's pages spread over its trees by share). */
+uint32_t mesh_graph_share_pick(uint32_t trees, const uint32_t *root, const double *share, uint32_t r, double at);
+
 #endif

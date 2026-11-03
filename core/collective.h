@@ -112,14 +112,6 @@ static uint64_t collective_move(struct collective_plan_state *s, uint32_t u, uin
   return index;
 }
 
-/* the trees of root r, each with its share; a page index p goes to the tree whose cumulative share holds p's place */
-static uint32_t collective_tree(const struct collective_plan_state *s, uint32_t r, uint64_t p, uint64_t pages) {
-  double at = (pages ? (double)(p % pages) + 0.5 : 0) / (pages ? (double)pages : 1), sum = 0;
-  uint32_t last = UINT32_MAX;
-  for (uint32_t k = 0; k < s->trees; k++) if (s->root[k] == r) { last = k; sum += s->share[k]; if (at <= sum) return k; }
-  return last;
-}
-
 int collective_plan(const struct collective_fabric *f, const struct collective_call *calls, uint32_t count,
                     uint32_t occurrences, struct collective_work **work_out) {
   struct collective_plan_state s = { .f = f, .n = f->nodes };
@@ -155,10 +147,11 @@ int collective_plan(const struct collective_fabric *f, const struct collective_c
     for (uint32_t r = 0; r < n; r++) {
       const uint64_t lo = (uint64_t)r * share, hi = lo + share < pages ? lo + share : pages;
       for (uint64_t p = lo; p < hi; p++) {
-        const uint32_t *par = s.parent + (size_t)collective_tree(&s, r, p - lo, hi - lo) * n;
+        const uint32_t tree = mesh_graph_share_pick(s.trees, s.root, s.share, r, ((double)(p - lo) + 0.5) / (double)(hi - lo));
+        const uint32_t *par = s.parent + (size_t)tree * n;
         const uint32_t bytes = (uint32_t)(p + 1 < pages || call->bytes % BRIDGE_PAGE == 0 ? BRIDGE_PAGE : call->bytes % BRIDGE_PAGE);
-        uint32_t depth[64];
-        for (uint32_t v = 0; v < n; v++) { depth[v] = 0; for (uint32_t u = v; u != r && par[u] != UINT32_MAX && depth[v] <= n; u = par[u]) depth[v]++; }
+        uint32_t depth[64], order[64];
+        const uint32_t placed = mesh_graph_tree_order(n, r, par, depth, order);
         /* the publication after which page p is ready at each node: produced, or its last fold's */
         uint64_t ready[64];
         for (uint32_t v = 0; v < n; v++) ready[v] = produced;
@@ -166,8 +159,8 @@ int collective_plan(const struct collective_fabric *f, const struct collective_c
           /* up, leaves first: v's partial (its page base + p, ready after its own last fold) to its parent u, landing in
              u's scratch copy for v (base + pages x (1 + v's place among u's children) + p), then u folds it in */
           uint32_t children[64] = {0};
-          for (int d = (int)n; d >= 1; d--) for (uint32_t v = 0; v < n; v++) {
-            if (depth[v] != (uint32_t)d || par[v] == UINT32_MAX || v == r) continue;
+          for (uint32_t k = placed; k-- > 1;) {
+            const uint32_t v = order[k];
             const uint32_t u = par[v];
             const bridge_page scratch = base + (bridge_page)(pages * (1 + children[u]++) + p);
             const uint32_t send_link = v == f->rank ? s.local[collective_cable(f, v, u, p)] : 0;
@@ -186,9 +179,8 @@ int collective_plan(const struct collective_fabric *f, const struct collective_c
         /* down (an all-gather, and an all-reduce's second half): page p from r along its tree, the root's send once it
            is ready there, each relay forwarding it once it has landed there */
         uint64_t landed_at[64] = {0}; uint32_t in_link[64] = {0};
-        for (uint32_t d = 1; d <= n; d++) for (uint32_t v = 0; v < n; v++) {
-          const uint32_t u = par[v];
-          if (u == UINT32_MAX || v == r || depth[v] != d) continue;
+        for (uint32_t k = 1; k < placed; k++) {
+          const uint32_t v = order[k], u = par[v];
           uint32_t after_link = 0, after_landed = 0; uint64_t position = 0;
           if (u == f->rank && u == r) { after_link = s.local[collective_cable(f, u, v, p)]; position = ready[u]; }
           else if (u == f->rank) { after_link = in_link[u]; after_landed = 1; position = landed_at[u]; }
