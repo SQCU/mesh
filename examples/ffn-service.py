@@ -80,6 +80,26 @@ def main(config=None):
                                   y_from_a2_error=float((y.float().cpu() - a2.float().cpu() @ w2_cpu[:blocks[0]].half().float()).abs().max()),
                                   w2_error=float((w2.float().cpu() - w2_cpu[:blocks[0]].half().float()).abs().max()),
                                   y_max=float(y.float().abs().max()), y_zero=float((y == 0).float().mean()))), flush=True)
+    if staged:
+        # every rank's own operands and stages read by the CPU from the region's bytes (no GPU op between the run and
+        # the reading), against torch on the CPU: the run's writes apart from torch's MPS reads of them
+        import ctypes
+
+        def host(tensor):
+            n = tensor.numel() * tensor.element_size()
+            return torch.frombuffer(bytearray((ctypes.c_char * n).from_address(torch_mesh.address(tensor))),
+                                    dtype=tensor.dtype).reshape(tensor.shape).float()
+        torch.mps.synchronize()
+        hx, hw1, hw2, ha1, ha2, hy = (host(v) for v in (x, w1, w2, a1, a2, y))
+        mine = slice(first, first + blocks[rank])
+        print(json.dumps(dict(phase='host_stages', rank=rank,
+                              x_error=float((hx - x_cpu.half().float()).abs().max()),
+                              w1_error=float((hw1 - w1_cpu[:, mine].half().float()).abs().max()),
+                              w2_error=float((hw2 - w2_cpu[mine].half().float()).abs().max()),
+                              a1_error=float((ha1 - hx @ hw1).abs().max()), a1_max=float(ha1.abs().max()),
+                              a2_error=float((ha2 - torch.relu(ha1)).abs().max()),
+                              y_error=float((hy - ha2 @ hw2).abs().max()) if not summed else None,
+                              y_max=float(hy.abs().max()), y_zero=float((hy == 0).float().mean()))), flush=True)
     if staged and not summed:
         # the second product alone, its operand written before the run: its kernel apart from the order it follows
         alone = torch_mesh.empty(B, D, dtype=torch.half)
