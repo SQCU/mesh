@@ -394,7 +394,7 @@ The [graph history](aot-graphs-and-pytorch.md) explains the connections and prio
 | [mesh-coreml.m](../rdma/mesh-coreml.m), `mesh_coreml_predict`; `engines.Ane` | CoreML model execution over shared tensor storage | Retain the engine capability. Model preparation must be outside the call; the current wrapper is not certified as allocation-free native execution. |
 | Native `PageManager`, prefix trie; [dsv41.swift](../../../metal-microbench/dsv41.swift) model composition | Paged model state, shared prefixes, another model's native phases | Capability identified. Session management is not certified as a fixed numerical schedule; it is not a replacement transport. |
 | [rollout.py](../rdma/rollout.py), [store.py](../rdma/store.py), `configuration.bind`/`record` | Asynchronous whole-call observations and in-memory feedback | Correct separation of observations from numerical execution. Observation history currently has process lifetime; late records do not drive a new per-op controller. |
-| [mesh_hourly.py](../rdma/mesh_hourly.py), microbench's [hourly entry](../../../metal-microbench/tools/mesh/hourly/hourly.py) | Run committed library workloads and record time/useful rate | Entry imports the driver. Do not add numerical code, a second measurement implementation or a different runtime here. |
+| [mesh_hourly.py](../rdma/mesh_hourly.py) | Run committed library workloads and record time/useful rate | Entry imports the driver. Do not add numerical code, a second measurement implementation or a different runtime here. |
 
 ## Removal boundaries
 

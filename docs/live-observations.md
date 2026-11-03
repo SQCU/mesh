@@ -5,11 +5,15 @@ stdout through `mesh_statistics.emit`, one JSON line, as the call completes, whe
 finished. Output that is not a record is the program's own diagnostics. A late peer's observation still enters the
 feedback collector, and an unfinished later call does not hide an earlier completed call's record.
 
-The hourly (`rdma/mesh_hourly.py`, every node's `io.mesh.hourly` job) runs each program of metal-microbench's
-`tools/mesh/hourly/workloads.json` as anyone runs it. Its record is the program's own output, in the job's log on each
-node, `/usr/local/mesh/log/user/io.mesh.hourly.log` (newsyslog rotates it past 4 MB, two kept): a line naming the
-program, the nodes and the commits of the node's two checkouts before each run (the hourly runs the git state the node
-holds and moves no checkout), the program's records and diagnostics, and a line with its exit status after.
+The hourly (`rdma/mesh_hourly.py`, every member's `io.mesh.hourly` job) runs each program of metal-microbench's
+`tools/mesh/hourly/workloads.json` as anyone runs it, on the git state the node holds (it moves no checkout). Its report
+is `~/.cache/mesh/hourly.jsonl` on each member: one JSON line per workload per run (`run` its start, `node`, `number`,
+`commits` of both checkouts, `workload`, `program`, `configuration`, `nodes` in rank order, `rank`, `exit`, `ended`,
+`started`, `seconds`, `measured`: the program's `mesh_statistics.emit` records, and `error`: its error output's tail on
+a failure), and one line a run (`stage`: `run`) with its `prepare`, `paired`, `nodes` and `absent` members. The
+programs' whole output is in the job's log, `/usr/local/mesh/log/user/io.mesh.hourly.log` (newsyslog rotates it past
+4 MB, two kept), and each workload's last run in `~/.cache/mesh/hourly/<workload>.out` and `.err`. metal-microbench's
+`tools/mesh/hourly/ledger.py` gathers every member's report and tabulates it by commit.
 
 A program emits its own records, each call timed to its GPU end (`rdma/mesh_statistics.py` `Observations`); no
 placement reads them back before a run (placement is an operand). Live connectivity
