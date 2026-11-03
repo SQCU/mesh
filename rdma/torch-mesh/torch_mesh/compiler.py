@@ -834,7 +834,9 @@ class Program:
         self.observations = {}  # an observation's value slot -> (kind, chunk, channel, origins, count): a defect's name
 
     def _binding(self, root):
-        return (_whole(root.tensor), 0) if root.tensor is not None else (self.arena, root.at)
+        # a root no access touches (a rank's share of none: a balancer's partition giving it no units) holds no page
+        # (the solve places only items accessed): it binds at the arena's start, where its kernels read nothing
+        return (_whole(root.tensor), 0) if root.tensor is not None else (self.arena, getattr(root, 'at', 0))
 
     def _address(self, root, at):
         tensor, base = self._binding(root)
