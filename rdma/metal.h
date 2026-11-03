@@ -80,6 +80,9 @@ void MetalRunInputValue(struct MetalRun *, uint64_t value);
 void MetalRunLanded(struct MetalRun *, const void *word, uint64_t threshold);
 /* the solve's edges (from event, to event); each event must name an appended node, and each edge run forward */
 void MetalRunEdges(struct MetalRun *, const uint64_t (*edges)[2], size_t count);
+/* the node appended last ends its part (mesh-graph.h mesh_graph_realize `ends`): its stores reach the host at the part's
+   end, where a store in a running part reaches it late (metal-microbench docs/facts.md, visible.m) */
+void MetalRunCut(struct MetalRun *);
 /* a returned page with no local reader: the run is complete once the `bytes`-wide word at `offset` reaches
    `threshold` */
 void MetalRunResult(struct MetalRun *, id<MTLBuffer>, NSUInteger offset, uint32_t bytes, uint64_t threshold);

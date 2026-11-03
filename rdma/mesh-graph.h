@@ -306,9 +306,11 @@ int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*hea
    0, EINVAL where an edge runs backward in the order, ENOMEM. */
 struct mesh_graph_crossing { uint32_t waiter, kind, producer; };
 /* fence[v]: GPU node v has a GPU consumer in another part, so it publishes a fence that consumer waits on. */
+/* ends[v] (NULL: none): GPU node v ends its part, the next GPU node beginning another (a store the host must see at
+   once: a GPU store in a running command buffer reaches the CPU late, metal-microbench docs/facts.md, visible.m). */
 int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const uint32_t (*edge)[2], uint32_t *part,
                        uint32_t *parts, unsigned char *barrier, unsigned char *fence, struct mesh_graph_crossing *waits,
-                       size_t capacity, size_t *count, unsigned char *deferred);
+                       size_t capacity, size_t *count, unsigned char *deferred, const unsigned char *ends);
 /* Greedy by size (mesh-graph.c's section ported from TensorFlow Lite's GreedyBySizeAssignment, Apache-2.0):
    `count` items (indices into size and offset) on one line of units from 0, the `placed` pinned items already at their
    offsets. The largest first (ties in the given order), each in the smallest gap left of an item it is not apart from

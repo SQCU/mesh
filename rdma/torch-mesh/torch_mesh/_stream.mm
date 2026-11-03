@@ -307,6 +307,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("inputs", &Run::inputs, pybind11::call_guard<Drained>())
     .def("inputs_now", &Run::inputs_now, pybind11::call_guard<Drained>())
     .def("edges", &Run::edges, pybind11::call_guard<Drained>())
+    .def("cut", [](Run &r) { MetalRunCut(r.run.get()); }, pybind11::call_guard<Drained>())
     .def("communicator", &Run::communicator)
     .def("finish", &Run::finish, pybind11::call_guard<Drained>())
     .def("enqueue", &Run::enqueue, pybind11::call_guard<Drained>())

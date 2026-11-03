@@ -571,6 +571,10 @@ class Program:
         # each run's watched words in their order (run.landings()'s): (kind 'landed' or 'sent', chunk, channel, the
         # ranks whose segments its steps carry), so a timeline names what each landing was
         self.watched = {}
+        # the run's defect word, its observations' (kernels.observe): 0, or 1 a give-up, 2 a lost word
+        self.defect = empty((2,), dtype=torch.int64)
+        self.defect.zero_()
+        self.observations = {}  # an observation's value slot -> (kind, chunk, channel, origins, count): a defect's name
 
     def _binding(self, root):
         return (_whole(root.tensor), 0) if root.tensor is not None else (self.arena, root.at)
@@ -616,9 +620,11 @@ class Program:
                 made = []
                 for n in nodes[0:count[0]]:
                     slot = None
-                    if n.kind in (lib.ncclMeshNodeLink, lib.ncclMeshNodeRelease):
-                        slot = len(stores)
-                        stores.append(n.value)
+                    # every node's value a slot: a link's table offset, a release's count, an observation's count
+                    slot = len(stores)
+                    stores.append(n.value)
+                    if n.kind in (lib.ncclMeshNodeLanding, lib.ncclMeshNodeSent):
+                        stores.append(slot)  # an observation's own slot beside its count: a defect names it
                     made.append((n.kind, n.transfer, int(ffi.cast('uintptr_t', n.word)), n.value, slot))
                 lowered[c] = made
                 run.communicator(int(ffi.cast('uintptr_t', command.comm)))
@@ -634,6 +640,14 @@ class Program:
 
         def stored(slot, word):
             run.dispatch(store, [(0, word, 0), (1, values, 8 * slot)], (1, 1, 1), (1, 1, 1), True)
+
+        # a landing and a SEND's completion observed on the GPU (kernels.observe), a node like any other, so a chunk
+        # has no outside input and the GPU is already in the part when its data lands (docs/facts.md: a CPU-signalled
+        # part start costs an M5 Ultra 100-180 us, a running observation 1-4 us)
+        observing = _pipeline(kernels.observe(), kernels.OBSERVE)
+
+        def observed(slot, word):
+            run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
         for chunk, (t, lowered) in enumerate(instances):
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
             has_node = set()
@@ -657,41 +671,81 @@ class Program:
                 for e in members:
                     ids[e] = ids[members[0]]
                 last[members[-1]] = key
+            from mesh_graph import contract, held_before, sinks, sources, through
+
+            def nodes_of(c, kind, channel):
+                wanted = {'send': lib.ncclMeshNodeRelease, 'sent': lib.ncclMeshNodeSent,
+                          'landed': lib.ncclMeshNodeLanding}[kind]
+                return [n for n in lowered[c] if n[0] == wanted and n[1] == channel]
+            # the events with nodes, then their edges through the events with none
+            for e in t.order:
+                kind, c, *rest = t.events[e]
+                if kind == 'command' or (kind == 'post' and any(n[0] == lib.ncclMeshNodeLink for n in lowered[c])):
+                    has_node.add(e)
+                elif e in last and nodes_of(c, *last[e][::2]):
+                    has_node.update(group[last[e]])
+            after = {}
+            for a, b in through(t.edges, has_node):
+                after.setdefault(a, set()).add(b)
+            # an observation is emitted just before the first node that follows it, not where its event falls in the
+            # order: the GPU runs a part's nodes in order, so an observation the order put early (a landing follows
+            # only its post) would hold the work after it, the release its peers' SENDs wait on among it (run-26: every
+            # rank's one part pending at 8 s). Held observations go out before their first follower, each after those
+            # it follows; the chunk's last go at its end.
+            held = []
+
+            def emit_observation(key):
+                kind, c, channel = key
+                run.event(ids[group[key][0]])
+                command = t.commands[c]
+                steps = [command.steps[t.events[m][2]] for m in group[key]]
+                for _, _, word, value, slot in nodes_of(c, kind, channel):
+                    observed(slot, word)
+                    self.observations.setdefault(id(run), {})[slot] = (kind, chunk, channel, sorted({command.origin(s) for s in steps}),
+                                                                      value, word)
+                watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
+
+            def flush(target):
+                for k in held_before(held, lambda k: group[k], after, target):
+                    held.remove(k)
+                    emit_observation(k)
             for e in t.order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
                 if kind == 'command':
+                    flush(e)
                     run.event(ids[e])
                     operands = []
                     for index, value in enumerate([*command.writes[:1], *command.reads]):
                         tensor, base = self._binding(value.root)
                         operands.append((index, tensor, base))
                     run.dispatch(command.pipeline, operands, command.grid, command.group, True)
-                    has_node.add(e)
                 elif kind == 'post':
                     links = [n for n in lowered[c] if n[0] == lib.ncclMeshNodeLink]
                     if links:
+                        flush(e)
                         run.event(ids[e])
                         for _, _, word, _, slot in links:
                             stored(slot, word)
-                        has_node.add(e)
-                elif e in last:
-                    kind, c, channel = last[e]
-                    wanted = {'send': lib.ncclMeshNodeRelease, 'sent': lib.ncclMeshNodeSent,
-                              'landed': lib.ncclMeshNodeLanding}[kind]
-                    mine = [n for n in lowered[c] if n[0] == wanted and n[1] == channel]
-                    if mine:
+                        # the part ends at its links and at its releases: a store in a running part reaches the bridge
+                        # late (docs/facts.md, visible.m: tens of ms on an M5 Ultra, seconds beside spinning
+                        # observations on the Mini, run-38); the next part, committed ahead, begins at once
+                        run.cut()
+                elif e in last and nodes_of(c, *last[e][::2]):
+                    key = last[e]
+                    if key[0] == 'send':
+                        for m in group[key]:
+                            flush(m)
                         run.event(ids[e])
-                        for _, _, word, value, slot in mine:
-                            if kind == 'send':
-                                stored(slot, word)
-                            else:
-                                run.landed(word, value)
-                                steps = [command.steps[t.events[m][2]] for m in group[kind, c, channel]]
-                                watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
-                        has_node.update(group[kind, c, channel])
+                        for _, _, word, value, slot in nodes_of(c, 'send', key[2]):
+                            stored(slot, word)
+                        run.cut()
+                    else:
+                        held.append(key)
+            for k in list(held):
+                held.remove(k)
+                emit_observation(k)
             # the solve's edges between nodes, through events with none; the instance after the one before
-            from mesh_graph import contract, sinks, sources, through
             kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))
             own = contract(through(t.edges, has_node), lambda e: ids[e])
             edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
@@ -708,5 +762,17 @@ class Program:
         return run
 
     def completion(self):
-        """the latest run's end (mesh_statistics_now's clock) once it has completed, else None"""
-        return self.done[-1].end() if self.done else None
+        """the latest run's end (mesh_statistics_now's clock) once it has completed, else None; a run whose observation
+        gave up or read a lost word raises"""
+        end = self.done[-1].end() if self.done else None
+        if end is not None:
+            import ctypes
+            defect = ctypes.c_int64.from_address(_stream.address(self.defect)).value
+            if defect:
+                slot, code = divmod(defect, 4)
+                kind, chunk, channel, origins, count, word = self.observations[id(self.done[-1])][slot]
+                raise RuntimeError(f'a run\'s observation {"gave up after kernels.OBSERVE_POLLS reads" if code == 1 else "read a lost word (its port lost)"}: '
+                                   f'{kind} on channel {channel} (segments of {origins}), chunk {chunk}, its count {count}, '
+                                   f'the word the GPU read {ctypes.c_uint64.from_address(_stream.address(self.defect) + 8).value}, '
+                                   f'the CPU reads {ctypes.c_uint64.from_address(word).value}')
+        return end

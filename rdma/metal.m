@@ -63,7 +63,7 @@ struct RunNode {
     __unsafe_unretained id<MTLComputePipelineState> pipeline;
     size_t first, count;
     MTLSize groups, threads;
-    BOOL threadGrid;
+    BOOL threadGrid, ends; // ends: the node ends its part (MetalRunCut)
     __unsafe_unretained id<MTLBuffer> source, destination;
     NSUInteger from, to, bytes;
     __unsafe_unretained MetalHostOperation operation;
@@ -252,6 +252,9 @@ void MetalRunLanded(struct MetalRun *run,const void *word,uint64_t threshold) {
     [run->landings appendBytes:&landing length:sizeof landing];
     RunAppend(run,(struct RunNode){.kind=RunInput,.signal=landing->event,.value=1}); // no input of MetalRunInputValue's
 }
+void MetalRunCut(struct MetalRun *run) {
+    if(run->nodes.length)((struct RunNode *)run->nodes.mutableBytes)[run->nodes.length/sizeof(struct RunNode)-1].ends=YES;
+}
 void MetalRunEdges(struct MetalRun *run,const uint64_t (*edges)[2],size_t count) {
     [run->edges appendBytes:edges length:count*sizeof *edges];
 }
@@ -332,15 +335,16 @@ const char *MetalRunFinish(struct MetalRun *run) {
     unsigned char *host=calloc(n+1,1),*barrier=calloc(n+1,1),*fence=calloc(n+1,1);
     for(uint32_t v=0;v<n;v++)host[v]=nodes[v].kind==RunHost?1:nodes[v].kind==RunInput?2:0;
     uint32_t *part=malloc((n+1)*sizeof *part);
-    unsigned char *deferred=calloc(n+1,1);
+    unsigned char *deferred=calloc(n+1,1),*ends=calloc(n+1,1);
+    for(uint32_t v=0;v<n;v++)ends[v]=nodes[v].ends;
     size_t capacity=m+1,count=0;
     struct mesh_graph_crossing *wait=malloc(capacity*sizeof *wait);
     int status=mesh_graph_realize(n,host,m,(const uint32_t (*)[2])edge,part,&run->parts,barrier,fence,wait,capacity,&count,
-                                  deferred);
+                                  deferred,ends);
     if(!status&&count>capacity) {
         capacity=count;wait=realloc(wait,capacity*sizeof *wait);
         status=mesh_graph_realize(n,host,m,(const uint32_t (*)[2])edge,part,&run->parts,barrier,fence,wait,capacity,&count,
-                                  deferred);
+                                  deferred,ends);
     }
     free(edge);
     const char *defect=status==EINVAL?"a solve edge runs backward in the nodes' order (the producer's defect)":
@@ -419,7 +423,7 @@ const char *MetalRunFinish(struct MetalRun *run) {
         pending++;
     }
     atomic_store_explicit(&run->pending,pending,memory_order_relaxed);
-    free(host);free(barrier);free(fence);free(part);free(deferred);
+    free(host);free(barrier);free(fence);free(part);free(deferred);free(ends);
     run->wait=wait;run->waits=count;
     return defect;
 }

@@ -1139,7 +1139,7 @@ static int realize_wait_order(const void *left, const void *right) {
 }
 int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const uint32_t (*edge)[2], uint32_t *part,
                        uint32_t *parts, unsigned char *barrier, unsigned char *fence, struct mesh_graph_crossing *waits,
-                       size_t capacity, size_t *count, unsigned char *deferred) {
+                       size_t capacity, size_t *count, unsigned char *deferred, const unsigned char *ends) {
   for (size_t k = 0; k < m; k++) if (edge[k][0] >= edge[k][1] || edge[k][1] >= n) return EINVAL;
   uint32_t (*sorted)[2] = malloc((m + 1) * sizeof *sorted);
   struct mesh_graph_crossing *found = malloc((m + 1) * sizeof *found);
@@ -1149,12 +1149,13 @@ int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const ui
   qsort(sorted, m, sizeof *sorted, realize_by_target);
   /* parts: walk the order; a GPU node with a host predecessor the current part has not waited on starts a new part */
   uint32_t current = UINT32_MAX;
-  int open = 0;
+  int open = 0, cut = 0;
   size_t k = 0;
   for (uint32_t v = 0; v < n; v++) {
     barrier[v] = 0; fence[v] = 0;
     if (host[v]) { part[v] = UINT32_MAX; while (k < m && sorted[k][1] == v) k++; continue; }
-    int fresh = !open;
+    int fresh = !open || cut;
+    cut = ends && ends[v];
     for (size_t j = k; j < m && sorted[j][1] == v; j++)
       if (host[sorted[j][0]] && open && waited[sorted[j][0]] != current + 1) fresh = 1;
     if (fresh) { current = current == UINT32_MAX ? 0 : current + 1; open = 1; }
