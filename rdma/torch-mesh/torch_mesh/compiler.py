@@ -570,11 +570,25 @@ class Template:
                     for k, s in enumerate(command.steps):
                         if s['kind'] == 'send' and (r is None or s['round'] == r):
                             s['event'] = event('send', c, k)
+                    if r is not None:
+                        # an all-reduce's SENDs complete within their round's span: a later round lands over bytes an
+                        # earlier one sent (a partial sent up, the sum gathered back), its receive posted once those
+                        # SENDs have completed (the lowering's after lists)
+                        for k, s in enumerate(command.steps):
+                            if s['kind'] == 'send' and s['round'] == r:
+                                s['completion'] = event('sent', c, k)
+                                access(s['event'], s['completion'], READ, s['root'], s['at'], s['at'] + s['bytes'])
+                                links.append((s['event'], s['completion']))
                     for k, s in enumerate(command.steps):
                         if s['kind'] == 'copy' and (r is None or s['round'] == r):
                             s['event'] = event('landed', c, k)
-                            access(post, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
+                            s['after'] = [j for j, x in enumerate(command.steps) if r is not None and x['kind'] == 'send' and
+                                          x['round'] < r and x['root'] is s['root'] and x['at'] < s['at'] + s['bytes'] and
+                                          s['at'] < x['at'] + x['bytes']]
+                            begin = max([command.steps[j]['completion'] for j in s['after']], default=post)
+                            access(begin, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
                             links.append((post, s['event']))
+                            links.extend((command.steps[j]['completion'], s['event']) for j in s['after'])
                         elif s['kind'] == 'reduce' and (r is None or s['round'] == r):
                             # its landing into its own root, then its fold: the step's bytes plus the landing
                             s['event'] = event('landed', c, k)
@@ -585,7 +599,7 @@ class Template:
                             access(s['fold'], s['fold'], READ, s['root'], s['at'], s['at'] + s['bytes'])
                             access(s['fold'], s['fold'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
                 for k, s in enumerate(command.steps):
-                    if s['kind'] == 'send':
+                    if s['kind'] == 'send' and 'completion' not in s:
                         s['completion'] = event('sent', c, k)
                         access(s['event'], s['completion'], READ, s['root'], s['at'], s['at'] + s['bytes'])
                         links.append((s['event'], s['completion']))
@@ -708,7 +722,14 @@ class Program:
                 forwards = ffi.new('uint32_t[][2]', max(1, len(pairs)))
                 for p, (send, copy) in enumerate(pairs):
                     forwards[p][0], forwards[p][1] = send, copy
-                mesh.check(lib.ncclMeshCommLowerOccurrence(command.comm, command.definition, addresses, ffi.NULL, 0,
+                # each landing's after list: the SENDs whose completion its receive's posting waits for (an all-reduce's
+                # gathered sums over the partials sent up)
+                afters = [(j, k) for k, s in enumerate(command.steps) for j in s.get('after', ())]
+                after = ffi.new('uint32_t[][2]', max(1, len(afters)))
+                for a, (j, k) in enumerate(afters):
+                    after[a][0], after[a][1] = j, k
+                mesh.check(lib.ncclMeshCommLowerOccurrence(command.comm, command.definition, addresses,
+                                                           after if afters else ffi.NULL, len(afters),
                                                            forwards, len(pairs), nodes, room, count))
                 made = []
                 for n in nodes[0:count[0]]:
