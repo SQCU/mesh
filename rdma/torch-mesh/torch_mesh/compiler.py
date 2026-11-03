@@ -1023,8 +1023,10 @@ class Program:
             # a chunk's posts (each occurrence's links) are held like its observations: every occurrence's post comes
             # first in the order, and their copies one after another (about 1.7 us each on an M5 Ultra) held the
             # chunk's first tick about 50 us at every boundary (metal-microbench docs/facts.md, the GPU trace). A post
-            # goes out before its first follower, or after a run of releases one at a time, an occurrence ahead.
-            posts = []
+            # goes out before its first follower, or after a run of releases one at a time, an occurrence ahead; the
+            # chunk's first at once (held, a one-occurrence chunk's receives were posted after its own release: the
+            # FFN 313 -> 360 us a layer).
+            posts, posted = [], [False]
 
             def emit_post(e, links):
                 ev(ids[e])
@@ -1108,7 +1110,11 @@ class Program:
                     links = [n for n in lowered[c] if n[0] == lib.ncclMeshNodeLink]
                     if links:
                         flush(e)
-                        posts.append((e, links))
+                        if posted[0]:
+                            posts.append((e, links))
+                        else:  # the chunk's first goes out at once: its receives are the first wanted
+                            posted[0] = True
+                            emit_post(e, links)
                 elif e in last and nodes_of(c, last[e][0], last[e][2], last[e][3]):
                     key = last[e]
                     if key[0] == 'send':
