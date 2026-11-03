@@ -745,15 +745,12 @@ static NSData *MetalCommandReaches(const struct MetalRecordedDispatch *command,c
 // The queue retains the last producer/reader of each declared page range.
 // These are dependency operands, not a union requiring a whole-queue barrier.
 // Snapshots retain fences/events only; they never keep numerical pages alive.
-// A queue's runs follow one another: the next run's first part waits on the previous run's final events (its last
-// part's and its host nodes'), the run-level order the solve's pages assume (design/page-maps-2026-11-02.md, step 5)
-@interface MetalQueueAccess : NSObject {
-@public NSMutableData *finals; // struct MetalScheduleWait
-}
+// A run's pinned state (a caller's lease it reads first and writes last) is the previous run's once that run has
+// completed: the caller sequences runs (Execution's forward after the previous completion), so a run holds nothing
+// for the run before it (design/page-maps-2026-11-02.md: hold only dependent work, at its data's granularity)
+@interface MetalQueueAccess : NSObject
 @end
 @implementation MetalQueueAccess
-- (instancetype)init { self=[super init];finals=[NSMutableData new];return self; }
-- (void)dealloc { [finals release];[super dealloc]; }
 @end
 static char queueAccessKey,encoderScheduleKey;
 
@@ -2083,14 +2080,12 @@ static void MetalScheduleFinishPart(struct MetalSchedule *s) {
 // Lower the persistent dependency graph to one flat commit order. A host wait
 // follows every GPU part needed to produce that host's inputs. Among ready
 // parts, work whose host results are already covered is committed first.
-// The parts commit in the order realize made them; each waits on its host producers' events, and the first on the
-// queue's previous run's finals
-static void MetalScheduleOrder(struct MetalSchedule *root,NSData *previous) {
+// The parts commit in the order realize made them; each waits on its host producers' events
+static void MetalScheduleOrder(struct MetalSchedule *root) {
     root->firstSubmission=root->lastSubmission=NULL;
     for(struct MetalSchedule *s=root;s;s=s->next) {
         [s->waits setLength:0];
         if(!s->commands)continue;
-        if(!root->firstSubmission)[s->waits appendData:previous];
         [s->hostDependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
             (void)stop;MetalWork *producer=root->history[p];
             const struct MetalScheduleWait wait={producer->event,producer->eventValue};
@@ -2107,22 +2102,10 @@ int MetalScheduleFinish(struct MetalSchedule *root,void (^completed)(NSError *))
     // publish exact queue relations in one preparation transaction; no lock or
     // frontier discovery enters submission or numerical execution.
     @synchronized(root->queueAccesses) {
-        MetalQueueAccess *queue=root->queueAccesses;
-        NSData *previous=[[queue->finals copy] autorelease];
         MetalScheduleFlush(root);
         [root->completed release];root->completed=[completed copy];
         MetalScheduleFinishPart(MetalScheduleTail(root));
-        MetalScheduleOrder(root,previous);
-        // this run's finals, for the queue's next run: its last part's event and each host node's
-        [queue->finals setLength:0];
-        if(root->lastSubmission) {
-            const struct MetalScheduleWait last={MetalSchedulePublication(root->lastSubmission),1};
-            [queue->finals appendBytes:&last length:sizeof last];
-        }
-        for(MetalWork *host in root->hosts) {
-            const struct MetalScheduleWait wait={host->event,host->eventValue};
-            [queue->finals appendBytes:&wait length:sizeof wait];
-        }
+        MetalScheduleOrder(root);
         for(NSValue *value in root->communicators) {
             const ncclResult_t error=ncclMeshCommRealized(value.pointerValue);
             if(error)return error;
