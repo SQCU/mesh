@@ -3924,6 +3924,8 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct where base, area; void *tables;
                /* Prepared region pages and the invocation that owns them. */
                void *zeeb; size_t bytes; uint64_t instance, used, occurrence;
+               /* its definition names spaces (struct compiled's deferred): its landings' pages are the run's solve's */
+               int deferred;
                uint32_t polls, copies; int remote, recorded, inputs_bound;
                size_t recorded_commands;
                void *input_requirements;
@@ -4941,7 +4943,11 @@ static struct metal_result zinth(struct metal_program *program,struct ncclComm *
     const struct linking *link=u->linking+h;
     const struct schedule *schedule=u->plans+h;
     if(!schedule->outs&&!schedule->ins)continue;
-    for(size_t k=0;k<schedule->ins;k++) {
+    /* design/page-maps-2026-11-02.md, integration step 6: a landing whose pages the run's solve placed has no access
+       before its post (nothing reaches a post, so no item gives a landing its pages), so the link names no write of
+       them and is posted where the program reaches it, never after the tick before's readers. A definition over
+       buffers keeps the declared writes, which order its link after earlier users of reused pages */
+    for(size_t k=0;!u->deferred&&k<schedule->ins;k++) {
       const struct message *m=schedule->in+k;
       const ncclMeshAccess use={{m->data.buffer,m->data.offset},m->bytes,ncclMeshAccessWritten};
       metal_accesses(program,&use,1);
@@ -6827,6 +6833,7 @@ static ncclResult_t zoblimp(struct ncclComm *comm, struct compiled *x, uint64_t 
   if (grow(&x->laid, &x->laid_room, x->laid_count, sizeof *x->laid)) { issue_free(comm, u); return fail(ncclSystemError, "out of memory"); }
   x->laid[x->laid_count++] = u;
   u->instance = instance;
+  u->deferred = x->deferred;
   memcpy(u->calls, x->calls, x->n * sizeof *u->calls);
   ncclResult_t result = ncclSuccess;
   for (size_t i = 0; i < x->n && !result; i++) {
