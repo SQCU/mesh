@@ -53,7 +53,22 @@ import os
 # whether a part ends after each run of links and releases (settle); the run's configuration (MESH_RUN_CUTS=0) runs it
 # as one part, its order alone keeping a copy behind the waits it follows (an M5 Ultra's late part starts are at part
 # boundaries: metal-microbench docs/facts.md, gaps.m)
-CUTS = {'0': 'none', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', 'all'), 'all')
+# By chip, at compile time: an M5's GPU makes its copies into the region seen by its bridge within microseconds of
+# running (its ready at once in a run of one part), so a run is one part there and its part starts, each a chance of a
+# late start, go (metal-microbench docs/facts.md, gaps.m: an M5 Ultra's fence-waiting buffers start 0.1-1.7 ms late now
+# and then). The Mini's (M4 Pro) copies into its region were seen only as their buffer ended (lstm-2026-11-03
+# onepart-11: its release copies ran 65 us into the part, its bridge saw nothing for 1.77 s, then everything), so it
+# keeps a part end after each run of links and releases. MESH_RUN_CUTS (all, first, 0) sets it whatever the chip.
+def _chip():
+    import subprocess
+    try:
+        return subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True,
+                              timeout=2).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ''
+_CUTS_SET = os.environ.get('MESH_RUN_CUTS')
+CUTS = ({'0': 'none', 'first': 'first'}.get(_CUTS_SET, 'all') if _CUTS_SET is not None
+        else 'none' if _chip().startswith('Apple M5') else 'all')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
 
 
