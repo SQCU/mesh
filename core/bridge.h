@@ -45,7 +45,9 @@ struct bridge_region {
   uint64_t magic, pages, links;
   _Atomic uint64_t loaded;               /* the client's count of tables handed over (bridge_load) */
   _Atomic uint64_t taken;                /* the bridge's count of tables it has posted */
-  uint64_t count;                        /* the steps in the table */
+  uint64_t count;                        /* the steps in the table: one run of the program's calls */
+  uint64_t period;                       /* the client's supplied count a run: the table is replayed run after run, a
+                                            run's positions offset by its run's count of supplied and of landed */
   struct bridge_words words[BRIDGE_LINKS];
   struct bridge_step table[BRIDGE_STEPS];
 };
@@ -57,10 +59,12 @@ void *bridge_address(bridge_page page);
 /* A link's words. */
 struct bridge_words *bridge_words(uint32_t link);
 
-/* Hand the bridge a client's page lists once, before the call: every receive is posted ahead, into this node's own
-   pages, in list order a link; each send is posted when the word it names reaches its position, in list order a
-   link. The bridge sends no header, receipt or acknowledgement. 0, or an errno. */
-int bridge_load(const struct bridge_step *steps, uint32_t count);
+/* Hand the bridge a client's page lists once, before its first run: one run's steps, and `period`, the supplied count
+   a run. Every receive is posted ahead, into this node's own pages, in list order a link; each send is posted when the
+   word it names reaches its position, in list order a link. The lists replay for every later run with the same
+   positions, offset by the run (run r: r x period for supplied, r x the link's receives a run for landed), so nothing
+   is reset or reloaded between runs. The bridge sends no header, receipt or acknowledgement. 0, or an errno. */
+int bridge_load(const struct bridge_step *steps, uint32_t count, uint64_t period);
 
 /* The bridge process. Its configuration, one line each: "region <name> <GiB>", then for each link "link <device>
    <gid index> <peer host> <tcp port> <listen 0|1>". It makes the region (1 GiB extents, 1 GiB aligned, so none crosses
@@ -79,6 +83,7 @@ int bridge_serve(const char *configuration);
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static struct bridge_region *bridge_region_;
@@ -90,28 +95,34 @@ static size_t bridge_header_bytes(void) { return (sizeof(struct bridge_region) +
 int bridge_attach(const char *name) {
   const int fd = shm_open(name, O_RDWR, 0);
   if (fd < 0) return errno;
-  struct bridge_region head;
-  if (pread(fd, &head, sizeof head, 0) != (ssize_t)sizeof head || head.magic != BRIDGE_MAGIC) { close(fd); return EINVAL; }
-  const size_t bytes = bridge_header_bytes() + head.pages * BRIDGE_PAGE;
-  void *m = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  /* the region's size from the object itself (a macOS shared memory object has no read or write: ESPIPE) */
+  struct stat st;
+  if (fstat(fd, &st) || (size_t)st.st_size < bridge_header_bytes()) { close(fd); return EINVAL; }
+  void *m = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
   if (m == MAP_FAILED) return errno;
+  if (((struct bridge_region *)m)->magic != BRIDGE_MAGIC) { munmap(m, (size_t)st.st_size); return EINVAL; }
   bridge_region_ = m; bridge_pages_ = (char *)m + bridge_header_bytes();
   return 0;
 }
 void *bridge_address(bridge_page page) { return bridge_pages_ + (size_t)page * BRIDGE_PAGE; }
 struct bridge_words *bridge_words(uint32_t link) { return &bridge_region_->words[link]; }
 
-int bridge_load(const struct bridge_step *steps, uint32_t count) {
+int bridge_load(const struct bridge_step *steps, uint32_t count, uint64_t period) {
   if (count > BRIDGE_STEPS) return E2BIG;
   memcpy(bridge_region_->table, steps, count * sizeof *steps);
-  bridge_region_->count = count;
+  bridge_region_->count = count; bridge_region_->period = period;
   for (uint32_t l = 0; l < bridge_region_->links; l++) {
     atomic_store(&bridge_region_->words[l].supplied, 0);
     atomic_store(&bridge_region_->words[l].sent, 0);
     atomic_store(&bridge_region_->words[l].landed, 0);
   }
-  atomic_fetch_add_explicit(&bridge_region_->loaded, 1, memory_order_release);
+  /* returns once the bridge has taken the lists and posted their first receives: a SEND that finds no posted receive
+     is dropped (an unreliable-connected queue pair, data-model.md section 3), so no peer may send before this node's
+     receives are posted; the program's ranks start their first run only once every rank's load has returned (the
+     communicator's join, once a program, as ncclCommInitRank's) */
+  const uint64_t loaded = atomic_fetch_add_explicit(&bridge_region_->loaded, 1, memory_order_release) + 1;
+  while (atomic_load_explicit(&bridge_region_->taken, memory_order_acquire) != loaded) {}
   return 0;
 }
 
@@ -120,10 +131,11 @@ struct bridge_link {
   struct ibv_context *context; struct ibv_pd *pd; struct ibv_cq *cq; struct ibv_qp *qp;
   struct ibv_mr *mr[100]; uint32_t mrs; int gid_index;
   uint32_t depth;                        /* the queue pair's receive and send depth (max_qp_wr): the hardware's limit */
-  uint64_t posted_receives, posted_sends;/* this table's, in list order */
-  uint64_t next_receive, next_send;      /* the table index past the last one posted (a cursor a link) */
+  uint32_t receives_at, receives, sends_at, sends;  /* the link's two page lists in bridge_order_ (a run's) */
+  uint64_t posted_receives, posted_sends;/* since the table's load, over every run, in list order */
 };
 static struct bridge_link bridge_link_[BRIDGE_LINKS];
+static uint32_t bridge_order_[BRIDGE_STEPS];   /* the table's steps grouped by link, each link's receives then sends */
 static uint32_t bridge_links_open_;
 
 /* "A process that exits while it holds queue pairs can hang in the driver until the node resets" (data-model.md
@@ -145,7 +157,11 @@ static int bridge_exchange(const char *host, const char *port, int listen_end, c
   int s = socket(ai->ai_family, SOCK_STREAM, 0), c = -1, one = 1;
   setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
   if (listen_end) { if (!bind(s, ai->ai_addr, ai->ai_addrlen) && !listen(s, 1)) c = accept(s, NULL, NULL); }
-  else { while (connect(s, ai->ai_addr, ai->ai_addrlen)) sleep(1); c = s; }
+  else {
+    /* until the peer's bridge listens: a socket a try (a refused connect leaves a BSD socket unusable), 10 ms apart */
+    while (connect(s, ai->ai_addr, ai->ai_addrlen)) { close(s); usleep(10000); s = socket(ai->ai_family, SOCK_STREAM, 0); }
+    c = s;
+  }
   freeaddrinfo(ai);
   if (c < 0) { close(s); return ECONNREFUSED; }
   const int ok = write(c, mine, n) == (ssize_t)n && read(c, theirs, n) == (ssize_t)n;
@@ -231,45 +247,55 @@ int bridge_serve(const char *configuration) {
   if (!bridge_region_) return EINVAL;
   bridge_region_->links = links;
   fprintf(stderr, "bridge: region %s, %llu pages, %u links\n", name, (unsigned long long)bridge_region_->pages, links);
-  uint64_t taken = 0;
+  uint64_t taken = 0; int announce = 0;
   for (;;) {
     /* a new table: its receives posted ahead and its sends from the start, link by link */
     if (atomic_load_explicit(&bridge_region_->loaded, memory_order_acquire) != taken) {
       taken = atomic_load(&bridge_region_->loaded);
+      /* each link's two page lists, in table order (a counting pass a link: once a load, never on a run's path) */
+      const struct bridge_step *t = bridge_region_->table;
+      uint32_t at = 0;
       for (uint32_t l = 0; l < links; l++) {
-        bridge_link_[l].posted_receives = bridge_link_[l].posted_sends = 0;
-        bridge_link_[l].next_receive = bridge_link_[l].next_send = 0;
+        struct bridge_link *L = &bridge_link_[l];
+        L->receives_at = at;
+        for (uint32_t k = 0; k < bridge_region_->count; k++) if (t[k].link == l && t[k].receive) bridge_order_[at++] = k;
+        L->receives = at - L->receives_at; L->sends_at = at;
+        for (uint32_t k = 0; k < bridge_region_->count; k++) if (t[k].link == l && !t[k].receive) bridge_order_[at++] = k;
+        L->sends = at - L->sends_at;
+        L->posted_receives = L->posted_sends = 0;
       }
-      atomic_store(&bridge_region_->taken, taken);
+      announce = 1;
     }
     const struct bridge_step *t = bridge_region_->table;
-    const uint64_t count = bridge_region_->count;
+    const uint64_t period = bridge_region_->period;
     for (uint32_t l = 0; l < links; l++) {
       struct bridge_link *L = &bridge_link_[l];
       struct bridge_words *w = &bridge_region_->words[l];
-      /* every receive of the link, in list order, as far as the queue pair holds (its depth: the hardware's limit) */
+      /* the link's receives, in list order, run after run, as far as the queue pair holds (its depth: the hardware's
+         limit) */
       const uint64_t landed = atomic_load_explicit(&w->landed, memory_order_relaxed);
-      for (uint64_t k = L->next_receive; k < count && L->posted_receives - landed < L->depth; k++) {
-        if (t[k].link != l || !t[k].receive) continue;
+      while (L->receives && L->posted_receives - landed < L->depth) {
+        const uint32_t k = bridge_order_[L->receives_at + L->posted_receives % L->receives];
         const size_t at = (size_t)t[k].page * BRIDGE_PAGE + t[k].offset;
         struct ibv_sge sge = { .addr = (uintptr_t)(region + at), .length = t[k].bytes, .lkey = bridge_lkey(L, at) };
         struct ibv_recv_wr wr = { .wr_id = k, .sg_list = &sge, .num_sge = 1 }, *bad;
         if (ibv_post_recv(L->qp, &wr, &bad)) break;
-        L->posted_receives++; L->next_receive = k + 1;
+        L->posted_receives++;
       }
-      /* each send of the link, in list order, once the word it names (its producer's supplied, or the landed of the
-         link a relayed page came in on) reaches its position */
+      /* the link's sends, in list order, run after run, each once the word it names (its producer's supplied, or the
+         landed of the link a relayed page came in on) reaches its position in that run */
       const uint64_t sent = atomic_load_explicit(&w->sent, memory_order_relaxed);
-      for (uint64_t k = L->next_send; k < count && L->posted_sends - sent < L->depth; k++) {
-        if (t[k].link != l || t[k].receive) continue;
+      while (L->sends && L->posted_sends - sent < L->depth) {
+        const uint64_t run = L->posted_sends / L->sends;
+        const uint32_t k = bridge_order_[L->sends_at + L->posted_sends % L->sends];
         const struct bridge_words *a = &bridge_region_->words[t[k].after_link];
         const uint64_t reached = atomic_load_explicit(t[k].after_landed ? &a->landed : &a->supplied, memory_order_acquire);
-        if (t[k].position > reached) break;
+        if (t[k].position + run * (t[k].after_landed ? bridge_link_[t[k].after_link].receives : period) > reached) break;
         const size_t at = (size_t)t[k].page * BRIDGE_PAGE + t[k].offset;
         struct ibv_sge sge = { .addr = (uintptr_t)(region + at), .length = t[k].bytes, .lkey = bridge_lkey(L, at) };
         struct ibv_send_wr wr = { .wr_id = k, .sg_list = &sge, .num_sge = 1, .opcode = IBV_WR_SEND, .send_flags = IBV_SEND_SIGNALED }, *bad;
         if (ibv_post_send(L->qp, &wr, &bad)) break;
-        L->posted_sends++; L->next_send = k + 1;
+        L->posted_sends++;
       }
       /* completions: a receive's lands, a send's has been read */
       struct ibv_wc wc[64];
@@ -279,6 +305,8 @@ int bridge_serve(const char *configuration) {
         atomic_fetch_add_explicit(wc[i].opcode & IBV_WC_RECV ? &w->landed : &w->sent, 1, memory_order_release);
       }
     }
+    /* a new table's first receives are posted on every link: its load returns (bridge_load) */
+    if (announce) { atomic_store_explicit(&bridge_region_->taken, taken, memory_order_release); announce = 0; }
   }
 }
 

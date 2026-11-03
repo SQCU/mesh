@@ -17,31 +17,57 @@ void *collective_alloc(size_t bytes);    /* ncclMemAlloc */
 void collective_free(void *memory);      /* ncclMemFree */
 
 /* A declared call (the NCCL API's collectives, declared, never eager). An all-gather's `receive` holds every rank's
-   segment in rank order, this rank's own included; an all-reduce sums `receive` over the ranks in place. */
+   segment in rank order, this rank's own included; an all-reduce combines `receive` over the ranks in place. The
+   library defines no arithmetic: an all-reduce's combine is the program's own kernel, as MPI_Op_create's user function
+   is the program's (MPI 4.0 section 6.9.5), `kernel(device T *into [[buffer(0)]], device const T *from [[buffer(1)]],
+   uint i [[thread_position_in_grid]])`, each thread combining `combine_unit` bytes of one page into its own. */
 enum { COLLECTIVE_ALLGATHER, COLLECTIVE_ALLREDUCE };
-struct collective_call { uint32_t what; void *receive; uint64_t bytes; };
+struct collective_call { uint32_t what; void *receive; uint64_t bytes; const char *combine; uint32_t combine_unit; };
 
 /* The routing function's inputs (data-model.md section 5): the nodes, the cables that join them and their rates, in one
    order every node holds; this node's bridge links are the cables that end at it, in that order. */
 struct collective_link { uint32_t a, b; double bytes_a_second; };
 struct collective_fabric { uint32_t nodes, rank; const struct collective_link *links; uint32_t count; };
 
-/* What the program does around the bridge's moves, a call occurrence at a time. A publication is one system fence then
-   the node's publication count, incremented, stored in every link's supplied word: the program publishes once after
-   producing the call's pages, then once after each fold. A fold adds a landed partial page into its own once that
-   link's landed reaches `after`. The call is complete here when every link's landed reaches its `await` count. An
-   all-reduce's receive buffer holds its bytes then (nodes - 1) scratch copies, where children's partials land. */
+/* What the program does around the bridge's moves, a call at a time, in one run of its function; every later run
+   replays the same work, its counts offset by the run (bridge_load). A publication is one system fence then the node's
+   publication count stored in every link's supplied word: the program publishes once after producing the call's
+   pages, then once after each combine. A combine is the call's combine kernel over (into, from), once that link's
+   landed reaches `after`. The call is complete here when every link's landed reaches its `await` count; the last
+   call's `await` is each link's receives a run. An all-reduce's receive buffer holds its bytes then (nodes - 1)
+   scratch copies, where children's partials land. */
 struct collective_fold { bridge_page into, from; uint32_t bytes, after_link; uint64_t after; };
 struct collective_work {
   struct collective_fold *folds; uint32_t fold_count;
-  uint64_t await[BRIDGE_LINKS];          /* a link's landed count at the occurrence's end (0: none) */
+  uint64_t await[BRIDGE_LINKS];          /* a link's landed count at the call's end, within the run (0: none) */
 };
 
-/* Compile the whole function for `occurrences` runs of its calls into this node's page lists (loaded into its bridge)
-   and its work, one collective_work a call occurrence (calls x occurrences, call-major within an occurrence). The same
-   function of the same inputs at every node, so both ends of every cable make the same lists. 0, or an errno. */
+/* Compile one run of the whole function's calls into this node's page lists (loaded into its bridge) and its work,
+   one collective_work a call; `published`, the run's publication count. The same function of the same inputs at
+   every node, so both ends of every cable make the same lists. 0, or an errno. */
 int collective_plan(const struct collective_fabric *fabric, const struct collective_call *calls, uint32_t count,
-                    uint32_t occurrences, struct collective_work **work);
+                    struct collective_work **work, uint64_t *published);
+
+/* The device-function header (the rubric's interface between collective and program): the program's GPU stream
+   publishes and awaits through these, with no host on the path. `run` is the program's count of runs finished, kept
+   in its own memory and advanced by collective_next_run at each run's end; a count within a run is offset by the run:
+   supplied by run x the run's publications, a link's landed by run x the link's receives a run. */
+#define COLLECTIVE_DEVICE_FUNCTIONS \
+  "#pragma METAL internals : enable\n#include <metal_stdlib>\nusing namespace metal;\n" \
+  "/* a link's words, three ulongs (supplied, sent, landed: struct bridge_words), through system-coherent loads and\n" \
+  "   stores ordered by a system-scope fence (thread_scope 3; coherent(system) under the internals pragma), the form\n" \
+  "   metal-microbench tools/mesh/wake.m's observer and tick.m's release use */\n" \
+  "kernel void collective_publish(volatile coherent(system) device ulong *w [[buffer(0)]],\n" \
+  "                               constant ulong4 &a [[buffer(1)]], device const ulong *run [[buffer(2)]]) {\n" \
+  "  const ulong value = run[0] * a.y + a.x;   /* a: count, run's publications, links */\n" \
+  "  atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));\n" \
+  "  for (uint l = 0; l < a.z; l++) w[3 * l] = value; }\n" \
+  "kernel void collective_await(volatile coherent(system) device ulong *w [[buffer(0)]],\n" \
+  "                             constant ulong4 &a [[buffer(1)]], device const ulong *run [[buffer(2)]]) {\n" \
+  "  const ulong value = run[0] * a.z + a.y;   /* a: link, count, link's receives a run */\n" \
+  "  while (w[3 * a.x + 2] < value) {}\n" \
+  "  atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); }\n" \
+  "kernel void collective_next_run(device ulong *run [[buffer(2)]]) { run[0] += 1; }\n"
 #endif
 
 #ifdef COLLECTIVE_IMPLEMENTATION
@@ -149,7 +175,7 @@ static void collective_down(void *consumer, uint32_t v, uint32_t u) {
 }
 
 int collective_plan(const struct collective_fabric *f, const struct collective_call *calls, uint32_t count,
-                    uint32_t occurrences, struct collective_work **work_out) {
+                    struct collective_work **work_out, uint64_t *published_out) {
   struct collective_plan_state s = { .f = f, .n = f->nodes };
   const uint32_t n = f->nodes;
   /* the graph module's trees over the node graph, a pair's cables one hop of their summed rate */
@@ -172,10 +198,10 @@ int collective_plan(const struct collective_fabric *f, const struct collective_c
   /* this node's links: the cables that end here, in fabric order */
   s.local = malloc(f->count * sizeof *s.local); s.receives = calloc(f->count, sizeof *s.receives);
   for (uint32_t c = 0, l = 0; c < f->count; c++) s.local[c] = (f->links[c].a == f->rank || f->links[c].b == f->rank) ? l++ : UINT32_MAX;
-  struct collective_work *work = calloc((size_t)count * occurrences, sizeof *work);
-  uint64_t published = 0;                /* the node's publication count, as the program will store it */
-  for (uint32_t o = 0; o < occurrences; o++) for (uint32_t i = 0; i < count; i++) {
-    struct collective_work *w = &work[(size_t)o * count + i];
+  struct collective_work *work = calloc(count, sizeof *work);
+  uint64_t published = 0;                /* the node's publication count in the run, as the program will store it */
+  for (uint32_t i = 0; i < count; i++) {
+    struct collective_work *w = &work[i];
     const struct collective_call *call = &calls[i];
     const bridge_page base = collective_page_of(call->receive);
     const uint64_t pages = (call->bytes + BRIDGE_PAGE - 1) / BRIDGE_PAGE, share = (pages + n - 1) / n;
@@ -196,9 +222,9 @@ int collective_plan(const struct collective_fabric *f, const struct collective_c
     for (uint32_t c = 0; c < f->count; c++) if (s.local[c] != UINT32_MAX) w->await[s.local[c]] = s.receives[c];
   }
   free(s.root); free(s.parent); free(s.share); free(s.local); free(s.receives);
-  const int e = bridge_load(s.steps, (uint32_t)s.step_count);
+  const int e = bridge_load(s.steps, (uint32_t)s.step_count, published);
   free(s.steps);
-  *work_out = work;
+  *work_out = work; *published_out = published;
   return e;
 }
 #endif
