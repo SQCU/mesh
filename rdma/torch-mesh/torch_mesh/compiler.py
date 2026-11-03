@@ -213,7 +213,7 @@ class Template:
         self._command([into], [source], lambda name, c: kernels.pointwise(
             name, c.writes[0].view(0), [c.reads[0].view(1)], 'x0'))
 
-    def _command(self, writes, reads, make, collective=None):
+    def _command(self, writes, reads, make, collective=None, covered=None):
         """a command's reads and writes on their storages' versions: a read takes the current version (completed
         first); a write after another node's read of its storage starts a version of its own"""
         node = self.node
@@ -228,7 +228,7 @@ class Template:
                     current = Root(base.nbytes, base=base, prev=current)
                     current.coherent = base.coherent
                     self.current[id(base)] = current
-                current.covered.extend(value.runs())
+                current.covered.extend(value.runs() if covered is None else covered)
                 value = value.on(current)
             bound_writes.append(value)
         bound_reads = []
@@ -378,7 +378,16 @@ class Template:
         frames = [out.offset + sum(c * s for c, s in zip(at, out.stride[:axis]))
                   for at in itertools.product(*(range(n) for n in out.shape[:axis]))]
         collective = Collective(out, frames, [s * inner for s in sizes], out.dtype, group)
-        self._command([out], [mine], None, collective)
+        # an in-place gather writes its peers' segments alone: its own is its SEND's source, read
+        own, landed = mine.runs(), []
+        for a, b in out.runs():
+            for c, d in own:
+                if c > a and c < b:
+                    landed.append((a, c))
+                a = max(a, d) if c < b and d > a else a
+            if a < b:
+                landed.append((a, b))
+        self._command([out], [mine], None, collective, covered=landed)
         for root in (collective.out.root, collective.mine.root):
             root.coherent = True
             if root.base is not None:
