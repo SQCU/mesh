@@ -850,6 +850,24 @@ class Program:
         # every earlier chunk's accesses (each its node, whether it writes, its bytes in the region) and the last chunk's
         # observations no node of it followed, which go out in the next chunk (below)
         history, carry = [], []
+        # a chunk's unfollowed observations of one word (a channel's `sent` or `landed`, a count that only rises) want
+        # its largest count alone: the others' events take its node (alias, applied to the run's edges), so a 16-tick
+        # chunk's 48 SEND completions end it as 3 observations (metal-microbench docs/facts.md, the GPU trace)
+        alias = {}
+
+        def emit_carry(batch):
+            best = {}
+            for _, _, i, words in batch:
+                if len(words) == 1:
+                    word, value = words[0]
+                    if word not in best or value > best[word][1]:
+                        best[word] = (i, value)
+            for f, k, i, words in batch:
+                if len(words) == 1 and best[words[0][0]][0] != i:
+                    alias[i] = best[words[0][0]][0]
+                    continue
+                f(k)
+            batch.clear()
         watched = self.watched[id(run)] = []
 
         # a link's or release's word written by a copy from its value slot. Changed by the FFN demonstration session
@@ -988,10 +1006,8 @@ class Program:
             crossing_set = set(crossing)
 
             def release_carry(e):
-                if carry and (t.events[e][0] != 'post' or any((i, ids[e]) in crossing_set for _, _, i in carry)):
-                    for f, k, _ in carry:
-                        f(k)
-                    carry.clear()
+                if carry and (t.events[e][0] != 'post' or any((i, ids[e]) in crossing_set for _, _, i, _ in carry)):
+                    emit_carry(carry)
             for e in t.order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
@@ -1049,10 +1065,9 @@ class Program:
                         cut[0] = True
                     else:
                         held.append(key)
-            for f, k, _ in carry:  # a chunk of posts alone
-                f(k)
-            carry.clear()
-            carry = [(emit_observation, k, ids[group[k][0]]) for k in held]
+            emit_carry(carry)  # a chunk of posts alone
+            carry = [(emit_observation, k, ids[group[k][0]], [(n[2], n[3]) for n in nodes_of(k[1], k[0], k[2], k[3])])
+                     for k in held]
             held.clear()
             history += [(a, w, lo, hi) for _, end, w, lo, hi in spans for a in at_or_before(end)]
             # the solve's edges between nodes, through events with none; the instance after the one before, from its
@@ -1061,8 +1076,8 @@ class Program:
             own = contract(through(t.edges, has_node), lambda e: ids[e])
             edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
             previous_sinks = [x for x in sinks(kept, own) if named[x][1][0] not in ('sent', 'landed')] or previous_sinks
-        for f, k, _ in carry:  # the last chunk's
-            f(k)
+        emit_carry(carry)  # the last chunk's
+        edges = sorted({(alias.get(a, a), alias.get(b, b)) for a, b in edges if alias.get(a, a) != alias.get(b, b)})
         run.edges(edges)
         try:
             run.finish()
