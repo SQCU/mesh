@@ -213,6 +213,14 @@ uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from
    vertices x vertices, added to. */
 void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
                            const double *weight, double *load);
+/* Whether any of n intervals [first[k], end[k]) of a round later than `after` meets [lo, hi): a transfer's receiver sending
+   some of it on, read from the receiver's SENDs (libnccl-mesh's spread over a pair's parallel cables). */
+int mesh_graph_later_overlap(size_t n, const uint32_t *round, const uint64_t *first, const uint64_t *end, uint32_t after,
+                             uint64_t lo, uint64_t hi);
+/* [first, first + length) cut into `parts` runs of whole quanta from first, the first ones one quantum more for the
+   remainder, the last ending at the interval's end, an empty run dropped: start[i], count[i] each run's; their number. */
+uint32_t mesh_graph_quanta_cut(uint64_t first, uint64_t length, uint64_t quantum, uint32_t parts, uint64_t *start,
+                               uint64_t *count);
 /* A tree's depth (its root root, parents parent[..], a vertex off it UINT32_MAX): the most edges from the root to a
    vertex on it, mesh_graph_depth's over each vertex's parent; UINT32_MAX where its parents hold a cycle */
 uint32_t mesh_graph_tree_depth(uint32_t vertices, uint32_t root, const uint32_t *parent);
