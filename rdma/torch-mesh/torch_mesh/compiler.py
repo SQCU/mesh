@@ -403,9 +403,9 @@ class Template:
         for command in self.commands:
             if isinstance(command, Collective):
                 continue
-            source, grid, group = command.make('kernel')
+            source, grid, group = command.make('mesh_command')
             command.grid, command.group = grid, group
-            command.pipeline = _pipeline(source, 'kernel')
+            command.pipeline = _pipeline(source, 'mesh_command')
 
 
 _PIPELINES = {}
