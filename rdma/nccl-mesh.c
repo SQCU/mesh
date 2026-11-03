@@ -2383,6 +2383,9 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
   for (uint32_t h = 0; !result && h < comm->count; h++) for (int land = 0; land < 2; land++) {
     struct channel *ch = comm->channels + h;
     struct mesh_place *list = placed + (2 * (size_t)h + land) * (d->steps + 1);
+    /* a step goes on one channel toward its peer, the first (channel_of): a parallel cable's channel carries none of
+       this occurrence (each would otherwise list, and post, every step of the peer's) */
+    if (channel_of(comm, (uint32_t)ch->peer) != (int)h) continue;
     mesh_lay(d->step, (uint32_t)d->steps, (uint32_t)ch->peer, !land, 0, list, listed + 2 * h + land);
     uint64_t position = land ? ch->lands : ch->sends;
     for (uint32_t i = 0; i < listed[2 * h + land]; i++) { base[list[i].step] = position; position += units[list[i].step]; }
