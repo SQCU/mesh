@@ -479,14 +479,27 @@ static int mesh_compile_sets(const struct mesh_trees *trees,uint32_t what,uint32
   /* coalesced: a message joins the one before it between the same two nodes in the same round where their parts adjoin
      and each end's buffer and step are the same */
   qsort(message,messages,sizeof *message,mesh_message_order);
+  /* and, for a COPY, where both parts reached the sending node by one message (the same sender, the same round), so a
+     relay never sends as one step parts two parents sent it: a forward is gated on one COPY's landing, and a SEND over
+     two COPYs could be gated on neither (libnccl-mesh refused it: "forward does not name a SEND within a COPY's pages",
+     a 32 MB all-gather cut over a root's trees, metal-microbench output_data/bandwidth-2026-11-02 run-1). came[v x
+     parts + p] is the message that brought part p to node v, its sender plus one and its round; 0 where v owns it. */
+  uint64_t *came=calloc((size_t)n*(parts+1)+1,sizeof *came);
+  if(!came){status=ENOMEM;goto done;}
+  for(uint32_t i=0;i<messages;i++)
+    if(message[i].op==MESH_STEP_COPY && message[i].part<parts)
+      came[(size_t)message[i].to*parts+message[i].part]=((uint64_t)(message[i].from+1)<<32)|message[i].round;
   uint32_t kept=0;
   for(uint32_t i=0;i<messages;i++){
     struct mesh_message *last=kept?message+kept-1:NULL;
     const struct mesh_message *m=message+i;
+    const int alike=m->op!=MESH_STEP_COPY || (last && last->part<parts && m->part<parts &&
+                    came[(size_t)m->from*parts+last->part]==came[(size_t)m->from*parts+m->part]);
     if(last && last->from==m->from && last->to==m->to && last->round==m->round && last->part+last->parts==m->part &&
-       last->out==m->out && last->in==m->in && last->op==m->op)last->parts+=m->parts;
+       last->out==m->out && last->in==m->in && last->op==m->op && alike)last->parts+=m->parts;
     else message[kept++]=*m;
   }
+  free(came);
   /* each rank's moves: its SENDs and its receives, in order */
   uint32_t moves=0;
   for(uint32_t i=0;i<kept;i++){
