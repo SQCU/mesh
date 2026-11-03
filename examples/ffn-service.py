@@ -100,6 +100,13 @@ def main(config=None):
                               a2_error=float((ha2 - torch.relu(ha1)).abs().max()),
                               y_error=float((hy - ha2 @ hw2).abs().max()) if not summed else None,
                               y_max=float(hy.abs().max()), y_zero=float((hy == 0).float().mean()))), flush=True)
+        # torch's own reads of the same bytes, each against the CPU's (host): which of torch's paths reads them wrong
+        reads = {'cpu': lambda v: v.cpu().float(), 'float_cpu': lambda v: v.float().cpu(),
+                 'clone_cpu': lambda v: v.clone().cpu().float(), 'float_cpu_again': lambda v: v.float().cpu(),
+                 'synchronized_float_cpu': lambda v: (torch.mps.synchronize(), v.float().cpu())[1]}
+        print(json.dumps(dict(phase='torch_reads', rank=rank, **{
+            f'{name}_{label}': float((read(v) - host(v)).abs().max())
+            for label, v in (('y', y), ('w2', w2), ('a1', a1)) for name, read in reads.items()})), flush=True)
     if staged and not summed:
         # the second product alone, its operand written before the run: its kernel apart from the order it follows
         alone = torch_mesh.empty(B, D, dtype=torch.half)
