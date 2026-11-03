@@ -1777,23 +1777,43 @@ static void MetalScheduleExpandHost(struct MetalSchedule *root,MetalWork *work,N
 
 static BOOL MetalWorkHost(MetalWork *work) { return work->hostProducer; }
 
+// The flush's nodes ordered by the run's solve's edges (MetalScheduleEdges), already in a linear extension of them: each
+// node's dependencies are its edges in, and one pass in node order carries every node's host and GPU predecessors to
+// its consumers. No reach decides an order here (design/page-maps-2026-11-02.md, integration step 5).
+static NSUInteger MetalWorkOrdered(struct MetalSchedule *root,NSArray *work) {
+    const NSUInteger first=root->history.count;
+    for(NSUInteger i=0;i<work.count;i++) {
+        MetalWork *w=work[i];w->ordinal=first+i;[root->history addObject:w];
+        [w->accesses release];w->accesses=nil;[w->readVersions release];w->readVersions=nil;
+    }
+    const uint32_t (*edge)[2]=root->edges.bytes;
+    for(NSUInteger k=0;k<root->edges.length/sizeof *edge;k++) {
+        if(edge[k][0]>=edge[k][1]||edge[k][1]>=work.count)
+            [NSException raise:NSInvalidArgumentException format:@"a solve edge outside this flush's order"];
+        [((MetalWork *)work[edge[k][1]])->dependencies addIndex:first+edge[k][0]];
+        [((MetalWork *)work[edge[k][0]])->successors addIndex:edge[k][1]];
+    }
+    [root->edges release];root->edges=nil;
+    for(MetalWork *w in work)
+        [w->dependencies enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
+            (void)stop;MetalWork *producer=root->history[p];
+            [w->hostDependencies addIndexes:producer->hostDependencies];
+            if(MetalWorkHost(producer)) {
+                [w->hostDependencies addIndex:p];
+                [w->gpuDependencies addIndexes:producer->gpuDependencies];
+            } else {
+                [w->gpuDependencies addIndex:p];
+                if(w->operation)producer->hostConsumer=YES;
+            }
+        }];
+    return first;
+}
+
 static NSUInteger MetalWorkDependencies(struct MetalSchedule *root,NSArray *work) {
     const NSUInteger first=root->history.count;
     NSMutableDictionary *next=[NSMutableDictionary dictionary],*observed=[NSMutableDictionary dictionary];
     for(NSUInteger i=0;i<work.count;i++) {
         MetalWork *w=work[i];w->ordinal=first+i;[root->history addObject:w];
-    }
-    if(root->edges) {
-        // the solve's edges are the order: no frontier, no reach decides one
-        const uint32_t (*edge)[2]=root->edges.bytes;
-        for(NSUInteger k=0;k<root->edges.length/sizeof *edge;k++) {
-            if(edge[k][0]>=edge[k][1]||edge[k][1]>=work.count)
-                [NSException raise:NSInvalidArgumentException format:@"a solve edge outside this flush's order"];
-            [((MetalWork *)work[edge[k][1]])->dependencies addIndex:first+edge[k][0]];
-        }
-        for(MetalWork *w in work){[w->accesses release];w->accesses=nil;[w->readVersions release];w->readVersions=nil;}
-        [root->edges release];root->edges=nil;
-        goto ordered;
     }
     for(NSUInteger i=0;i<work.count;i++) {
         MetalWork *w=work[i];
@@ -1851,7 +1871,6 @@ static NSUInteger MetalWorkDependencies(struct MetalSchedule *root,NSArray *work
     }
     if(MetalViewPending(next)||MetalViewPending(observed))
         [NSException raise:NSInvalidArgumentException format:@"next-version page read has no declared producer or input"];
-ordered:;
     NSMutableData *counts=[NSMutableData dataWithLength:work.count*sizeof(NSUInteger)];NSUInteger *left=counts.mutableBytes;
     NSMutableIndexSet *ready=[NSMutableIndexSet indexSet];
     for(NSUInteger i=0;i<work.count;i++) {
@@ -2071,7 +2090,7 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
     for(MetalWork *work in nodes)MetalScheduleExpandHost(root,work,expanded);
     [root->work removeAllObjects];nodes=expanded;
     BOOL hosts=NO;for(MetalWork *work in nodes)hosts|=work->operation!=nil;
-    const NSUInteger first=MetalWorkDependencies(root,nodes);
+    const NSUInteger first=root->edges?MetalWorkOrdered(root,nodes):MetalWorkDependencies(root,nodes);
     [MetalScheduleFrontierNodes(root) enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
         (void)stop;((MetalWork *)root->history[p])->exported=YES;
     }];
