@@ -1135,9 +1135,11 @@ class Program:
                         tensor, base = self._binding(value.root)
                         operands.append((index, tensor, base))
                     run.dispatch(command.pipeline, operands, command.grid, command.group, True)
-                    # a traced command names its writes' and reads' shapes, so a trace tells its commands apart
+                    # a traced command names its writes' and reads' shapes and whether each is system-coherent, so a
+                    # trace tells its commands apart and names an ordinary load of a landing's bytes
                     labels.append(('command', named.get(current[0]), [list(v.shape) for v in command.writes],
-                                   [list(v.shape) for v in command.reads]) if tracing else ('command', named.get(current[0])))
+                                   [list(v.shape) for v in command.reads], [int(v.root.coherent) for v in command.writes],
+                                   [int(v.root.coherent) for v in command.reads]) if tracing else ('command', named.get(current[0])))
                     node_events.append(current[0])
                     if waited[0]:
                         run.stamp()  # this part's compute begins here, its waits done (MetalRunSpans)
