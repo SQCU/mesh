@@ -68,9 +68,11 @@ def main(config=None):
     # selecting its steps (torch_mesh/compiler.py)
     whole, rest = divmod(steps, k)
     stepper = {n: tick.stepper(E, O, n) for n in {k, rest} if n}
+    begun = now()
     program = Program([(stepper[k], (t,))] * whole + ([(stepper[rest], (t,))] if rest else []))
     torch_mesh.check_memory()
     program.prepare(1)
+    print(json.dumps(dict(phase='prepared', seconds=round(now() - begun, 3))), flush=True)
     started = now()
     program.forward()
     while (ended := program.completion()) is None:

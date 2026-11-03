@@ -297,7 +297,8 @@ typedef struct { uint32_t call, channel, op, round, buffer; uint64_t first, byte
 /* a node an occurrence gives the run: a link (`word` the chain's link word, `value` the table's region offset), a
    release (`word` the channel's ready, stored `value` once the step's bytes are written), a landing (present once the
    channel's landed `word` reaches `value`) or a SEND's completion (present once the channel's sent `word` reaches
-   `value`: its source bytes may be written again); `transfer` its step (UINT32_MAX for a link) */
+   `value`: its source bytes may be written again); one of each a channel an occurrence, `transfer` its channel
+   (UINT32_MAX for a link) */
 enum { ncclMeshNodeLink, ncclMeshNodeRelease, ncclMeshNodeLanding, ncclMeshNodeSent };
 typedef struct { uint32_t kind, transfer, channel; void *word; uint64_t value; } ncclMeshNode;
 /* Opaque handle to communicator */

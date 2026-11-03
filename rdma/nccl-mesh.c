@@ -2411,6 +2411,7 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
       struct channel *ch = comm->channels + h;
       struct mesh_zwoggle *table = (struct mesh_zwoggle *)at; at += sizeof *table;
       for (int land = 0; land < 2; land++) {
+        uint64_t own_end = 0;
         const struct mesh_place *list = placed + (2 * (size_t)h + land) * (d->steps + 1);
         const uint32_t n_listed = listed[2 * h + land];
         struct mesh_zwoggle_entry *entry = (struct mesh_zwoggle_entry *)at; at += n_listed * sizeof *entry;
@@ -2447,12 +2448,13 @@ ncclResult_t ncclMeshCommLowerOccurrence(ncclComm_t comm, uint64_t definition, v
             entry[i].after = n ? region_offset(list) : 0;
           }
           *position += units[s];
-          if (land) NODE(ncclMeshNodeLanding, (uint32_t)s, h, (void *)ch->view.landed, *position);
-          else {
-            if (gate[s] < 0) NODE(ncclMeshNodeRelease, (uint32_t)s, h, (void *)ch->view.ready, *position);
-            NODE(ncclMeshNodeSent, (uint32_t)s, h, (void *)ch->view.sent, *position);
-          }
+          if (!land && gate[s] < 0) own_end = *position;
         }
+        /* the channel's nodes, one each (a consumer reads the occurrence's landings whole; `ready` is one prefix):
+           its landing at its landings' end, its SENDs' completion at their end, its release at its own units' end */
+        if (land && n_listed) NODE(ncclMeshNodeLanding, h, h, (void *)ch->view.landed, *position);
+        if (!land && n_listed) NODE(ncclMeshNodeSent, h, h, (void *)ch->view.sent, *position);
+        if (!land && own_end) NODE(ncclMeshNodeRelease, h, h, (void *)ch->view.ready, own_end);
       }
       if (!table->count[0] && !table->count[1]) continue;
       /* zinth: this table stored where the channel's chain left off, the stream's root or the last table's next */

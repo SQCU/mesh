@@ -406,8 +406,8 @@ class Template:
             steps = ffi.new('ncclMeshTransfer[]', max(1, count[0]))
             mesh.check(lib.ncclMeshCommSteps(c.comm, c.definition, steps, count[0], count))
             width = c.dtype.itemsize
-            c.steps = [dict(call=s.call, op=s.op, round=s.round, buffer=s.buffer, first=s.first, bytes=s.bytes)
-                       for s in steps[0:count[0]]]
+            c.steps = [dict(call=s.call, channel=s.channel, op=s.op, round=s.round, buffer=s.buffer, first=s.first,
+                            bytes=s.bytes) for s in steps[0:count[0]]]
             # a step's bytes: buffer 0 its frame's in out's root; a scratch buffer a run root of its own per call
             c.scratch = {}
             for s in c.steps:
@@ -602,6 +602,18 @@ class Program:
         for t, lowered in instances:
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
             has_node = set()
+            # a step's send, sent and landed events are its channel's node's: one id a (occurrence, kind, channel)
+            # group, its node appended at the group's last event in the order
+            group = {}
+            for e in t.order:
+                kind, c, *rest = t.events[e]
+                if kind in ('send', 'sent', 'landed'):
+                    group.setdefault((kind, c, t.commands[c].steps[rest[0]]['channel']), []).append(e)
+            last = {}
+            for key, members in group.items():
+                for e in members:
+                    ids[e] = ids[members[0]]
+                last[members[-1]] = key
             for e in t.order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
@@ -620,10 +632,11 @@ class Program:
                         for _, _, word, _, slot in links:
                             stored(slot, word)
                         has_node.add(e)
-                else:
+                elif e in last:
+                    kind, c, channel = last[e]
                     wanted = {'send': lib.ncclMeshNodeRelease, 'sent': lib.ncclMeshNodeSent,
                               'landed': lib.ncclMeshNodeLanding}[kind]
-                    mine = [n for n in lowered[c] if n[0] == wanted and n[1] == rest[0]]
+                    mine = [n for n in lowered[c] if n[0] == wanted and n[1] == channel]
                     if mine:
                         run.event(ids[e])
                         for _, _, word, value, slot in mine:
@@ -631,11 +644,11 @@ class Program:
                                 stored(slot, word)
                             else:
                                 run.landed(word, value)
-                        has_node.add(e)
+                        has_node.update(group[kind, c, channel])
             # the solve's edges between nodes, through events with none; the instance after the one before
             from mesh_graph import sinks, sources, through
             kept = [e for e in t.order if e in has_node]
-            own = through(t.edges, set(kept))
+            own = [(a, b) for a, b in through(t.edges, set(kept)) if ids[a] != ids[b]]
             edges += [(ids[a], ids[b]) for a, b in own] + [(p, ids[s]) for p in previous_sinks for s in sources(kept, own)]
             previous_sinks = [ids[e] for e in sinks(kept, own)] or previous_sinks
         run.edges(edges)

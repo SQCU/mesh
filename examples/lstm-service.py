@@ -65,11 +65,13 @@ def main(config=None):
     starting = [lambda _, s=s: tick.starting(s, X[s]) for s in range(L - 1)]
     whole, rest = divmod(steps, k)
     stepper = {n: tick.stepper(X, O, n) for n in {k, rest} if n}
+    begun = now()
     program = Program([(fn, (t,)) for fn in starting] + [(stepper[k], (t,))] * whole +
                       ([(stepper[rest], (t,))] if rest else []))
     torch_mesh.check_memory()
     repeats = config.get('repeats', 1)
     program.prepare(repeats)
+    print(json.dumps(dict(phase='prepared', seconds=round(now() - begun, 3))), flush=True)
     blocks = partition.split(mesh, 'tp', H)
     # the prepared run `repeats` times, each from the same state (the step counter and every layer's h and c set again
     # on the device once the run before has completed); each is one record
