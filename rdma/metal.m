@@ -20,9 +20,16 @@ id<MTLDevice> MetalDevice(void) {
     return device;
 }
 
+// A region span's buffer, hazard-tracked. Changed from untracked (since 2026-09, no reason recorded) by the FFN
+// demonstration session: every MPS tensor of a mesh process is a lease's buffer (torch_mesh allocator.mm), and torch's
+// stream is classic Metal, whose encoders are ordered against one another only over tracked resources, as torch's own
+// allocator's are (its pools' HAZARD usage). Untracked, torch's cast and the copy after it raced in one command buffer:
+// v.float().cpu() read y and w2 wrong on every rank while the CPU read their bytes right (metal-microbench
+// docs/facts.md, ffn-2026-11-03 runs 11-13). A Metal 4 queue tracks nothing whatever the mode, so a run's encoding
+// is unchanged. What must stay: tracked, while torch's stream runs over leases.
 id<MTLBuffer> MetalWrap(void *address,size_t bytes) {
     return [MetalDevice() newBufferWithBytesNoCopy:address length:bytes
-        options:MTLResourceStorageModeShared|MTLResourceHazardTrackingModeUntracked deallocator:nil];
+        options:MTLResourceStorageModeShared|MTLResourceHazardTrackingModeTracked deallocator:nil];
 }
 
 void MetalRelease(id object) { [object release]; }
