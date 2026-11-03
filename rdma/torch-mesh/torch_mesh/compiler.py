@@ -701,7 +701,8 @@ class Program:
                 steps = [command.steps[t.events[m][2]] for m in group[key]]
                 for _, _, word, value, slot in nodes_of(c, kind, channel):
                     observed(slot, word)
-                    self.observations[slot] = (kind, chunk, channel, sorted({command.origin(s) for s in steps}), value)
+                    self.observations.setdefault(id(run), {})[slot] = (kind, chunk, channel, sorted({command.origin(s) for s in steps}),
+                                                                      value, word)
                 watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
 
             def flush(target):
@@ -764,8 +765,9 @@ class Program:
             defect = ctypes.c_int64.from_address(_stream.address(self.defect)).value
             if defect:
                 slot, code = divmod(defect, 4)
-                kind, chunk, channel, origins, count = self.observations.get(slot, ('?', '?', '?', '?', '?'))
+                kind, chunk, channel, origins, count, word = self.observations[id(self.done[-1])][slot]
                 raise RuntimeError(f'a run\'s observation {"gave up after kernels.OBSERVE_POLLS reads" if code == 1 else "read a lost word (its port lost)"}: '
                                    f'{kind} on channel {channel} (segments of {origins}), chunk {chunk}, its count {count}, '
-                                   f'the word at {ctypes.c_uint64.from_address(_stream.address(self.defect) + 8).value}')
+                                   f'the word the GPU read {ctypes.c_uint64.from_address(_stream.address(self.defect) + 8).value}, '
+                                   f'the CPU reads {ctypes.c_uint64.from_address(word).value}')
         return end
