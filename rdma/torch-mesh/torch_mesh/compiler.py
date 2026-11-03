@@ -165,6 +165,10 @@ class Template:
     def _lower(self, graph):
         from mesh_graph import absorbed
         values, expression = {}, {}
+        # a copy_ whose one user is pointwise, held so that user's kernel computes and stores it (_emit's shared): the
+        # LSTM's c, which its h reads back, written in h's kernel rather than by one before it (a dependent dispatch
+        # less a tick: metal-microbench docs/facts.md, the GPU trace)
+        self.held = {}
         placeholders = iter(self.args)
         pointwise = set(UNARY) | set(BINARY) | set(CONSTANT) | {aten.copy_.default, aten.clamp.default}
         same = lambda n, u: n.meta.get('val') is not None and u.meta.get('val') is not None and \
@@ -228,9 +232,12 @@ class Template:
                 self._reduced(node, values)
             else:
                 raise NotImplementedError(f'no lowering of {node.target} (torch_mesh/compiler.py)')
-        # an expression no consumer took is its command
+        # an expression no consumer took is its command, and a held copy_ no consumer took its own
         for node, (tree, out) in expression.items():
             self._emit(tree, out)
+        for node, (tree, out) in list(self.held.items()):
+            self._emit(tree, out)
+        self.held.clear()
         # each renamed storage's last version copied back to the caller's own bytes, so a chunk ends where it began
         self.node = None
         for base in list(self.roots.values()):
@@ -307,6 +314,11 @@ class Template:
     def _pointwise(self, node, values, expression, users):
         """a pointwise node as an expression tree; one an equal-shaped, unaliased, single consumer takes is inlined"""
         def operand(arg, shape):
+            if isinstance(arg, torch.fx.Node) and arg in self.held:
+                tree, held = self.held.pop(arg)
+                if held.shape == tuple(shape):
+                    return ('shared', tree, held)
+                values[arg] = self._emit(tree, held)
             if isinstance(arg, torch.fx.Node):
                 if arg in expression and arg in users and expression[arg][1].shape == tuple(shape):
                     tree, _ = expression.pop(arg)
@@ -337,16 +349,26 @@ class Template:
             else:
                 alpha = node.kwargs.get('alpha', 1)
                 tree = (BINARY[target], operand(args[0], shape), operand(args[1], shape), ('const', float(alpha)))
-        if target in INPLACE or target is aten.copy_.default:
+        pointwise = set(UNARY) | set(BINARY)
+        if target is aten.copy_.default and len(node.users) == 1 and next(iter(node.users)).target in pointwise:
+            self.held[node] = (tree, out)
+            values[node] = out
+        elif target in INPLACE or target is aten.copy_.default:
             values[node] = self._emit(tree, out)
         else:
             values[node] = out
             expression[node] = (tree, out)
 
     def _emit(self, tree, out):
-        loads = []
+        loads, shared = [], []
 
         def render(t):
+            if t[0] == 'shared':
+                for k, (view, _) in enumerate(shared):
+                    if view is t[2]:
+                        return f's{k}'
+                shared.append((t[2], render(t[1])))
+                return f's{len(shared) - 1}'
             if t[0] == 'load':
                 loads.append(t[1])
                 return f'x{len(loads) - 1}'
@@ -359,8 +381,11 @@ class Template:
                 return f'clamp({inner}, {low}, {high})'
             return t[0].format(*(render(a) for a in t[1:]))
         text = render(tree)
-        return self._command([out], list(loads), lambda name, c, x=text: kernels.pointwise(
-            name, c.writes[0].view(0), [v.view(k + 1) for k, v in enumerate(c.reads)], x))[0]
+        texts = [x for _, x in shared]
+        W = 1 + len(shared)
+        return self._command([out] + [v for v, _ in shared], list(loads), lambda name, c, x=text, texts=texts: kernels.pointwise(
+            name, c.writes[0].view(0), [v.view(W + k) for k, v in enumerate(c.reads)], x,
+            shared=[(c.writes[1 + k].view(1 + k), texts[k], f's{k}') for k in range(len(texts))]))[0]
 
     def _widening(self, node):
         if node.target is not aten._to_copy.default or set(node.kwargs) - {'dtype'} or node.kwargs.get('dtype') is not torch.float32:
@@ -1047,7 +1072,7 @@ class Program:
                     settle()
                     ev(ids[e])
                     operands = []
-                    for index, value in enumerate([*command.writes[:1], *command.reads]):
+                    for index, value in enumerate([*command.writes, *command.reads]):
                         tensor, base = self._binding(value.root)
                         operands.append((index, tensor, base))
                     run.dispatch(command.pipeline, operands, command.grid, command.group, True)

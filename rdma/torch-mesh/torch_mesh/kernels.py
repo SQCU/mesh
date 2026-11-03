@@ -65,17 +65,23 @@ def _source(name, parameters, body):
     return f'{prelude()}\nusing namespace metal;\nkernel void {name}({", ".join(parameters)}, uint3 at [[thread_position_in_grid]]) {{\n{body}\n}}\n'
 
 
-def pointwise(name, out, operands, expression, extra=()):
+def pointwise(name, out, operands, expression, extra=(), shared=()):
     """out[c] = expression over the operands loaded at c (each a View broadcast over out's shape: `x{k}` names operand
-    k's value as float); `extra` the parameters of an indexed operand (index views). One thread an element."""
+    k's value as float); `extra` the parameters of an indexed operand (index views). `shared`: (view, expression, name)
+    each, a value computed once (as float, rounded through its view's type as its store is), stored to its view at c and
+    named in the expressions after it: a write the next kernel would read back (compiler.py _emit). One thread an
+    element."""
     count = 1
     for extent in out.shape:
         count *= extent
     c = _digits(out.shape)
     loads = '\n'.join(f'    const float x{k} = float({view.load(c)});' for k, view in enumerate(operands))
-    body = (f'    const ulong i = at.x;\n    if (i >= {count}ul) return;\n{loads}\n'
+    pre = ''.join(f'\n    const float {named} = float({MSL[view.dtype]}({text}));\n    {view.store(c, named)}'
+                  for view, text, named in shared)
+    body = (f'    const ulong i = at.x;\n    if (i >= {count}ul) return;\n{loads}{pre}\n'
             f'    {out.store(c, expression)}')
-    parameters = [out.parameter(True)] + [view.parameter(False) for view in operands] + list(extra)
+    parameters = [out.parameter(True)] + [view.parameter(True) for view, _, _ in shared] + \
+        [view.parameter(False) for view in operands] + list(extra)
     return _source(name, parameters, body), (count, 1, 1), (min(256, max(1, count)), 1, 1)
 
 
