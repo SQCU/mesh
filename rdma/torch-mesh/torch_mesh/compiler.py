@@ -572,9 +572,8 @@ class Program:
         # ranks whose segments its steps carry), so a timeline names what each landing was
         self.watched = {}
         # the run's defect word, its observations' (kernels.observe): 0, or 1 a give-up, 2 a lost word
-        self.defect = empty((2,), dtype=torch.int64)
+        self.defect = empty((1,), dtype=torch.int64)
         self.defect.zero_()
-        self.observations = {}  # an observation's value slot -> (kind, chunk, channel, origins, count): a defect's name
 
     def _binding(self, root):
         return (_whole(root.tensor), 0) if root.tensor is not None else (self.arena, root.at)
@@ -623,8 +622,6 @@ class Program:
                     # every node's value a slot: a link's table offset, a release's count, an observation's count
                     slot = len(stores)
                     stores.append(n.value)
-                    if n.kind in (lib.ncclMeshNodeLanding, lib.ncclMeshNodeSent):
-                        stores.append(slot)  # an observation's own slot beside its count: a defect names it
                     made.append((n.kind, n.transfer, int(ffi.cast('uintptr_t', n.word)), n.value, slot))
                 lowered[c] = made
                 run.communicator(int(ffi.cast('uintptr_t', command.comm)))
@@ -671,7 +668,7 @@ class Program:
                 for e in members:
                     ids[e] = ids[members[0]]
                 last[members[-1]] = key
-            from mesh_graph import contract, held_before, sinks, sources, through
+            from mesh_graph import contract, sinks, sources, through
 
             def nodes_of(c, kind, channel):
                 wanted = {'send': lib.ncclMeshNodeRelease, 'sent': lib.ncclMeshNodeSent,
@@ -698,14 +695,21 @@ class Program:
                 kind, c, channel = key
                 run.event(ids[group[key][0]])
                 command = t.commands[c]
-                steps = [command.steps[t.events[m][2]] for m in group[key]]
                 for _, _, word, value, slot in nodes_of(c, kind, channel):
                     observed(slot, word)
-                    self.observations[slot] = (kind, chunk, channel, sorted({command.origin(s) for s in steps}), value)
+                steps = [command.steps[t.events[m][2]] for m in group[key]]
                 watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
 
             def flush(target):
-                for k in held_before(held, lambda k: group[k], after, target):
+                needed = [k for k in held if any(target in after.get(m, ()) for m in group[k])]
+                grew = True
+                while grew:
+                    grew = False
+                    for k in held:
+                        if k not in needed and any(any(x in after.get(m, ()) for x in group[n]) for n in needed for m in group[k]):
+                            needed.append(k)
+                            grew = True
+                for k in [k for k in held if k in needed]:
                     held.remove(k)
                     emit_observation(k)
             for e in t.order:
@@ -763,9 +767,5 @@ class Program:
             import ctypes
             defect = ctypes.c_int64.from_address(_stream.address(self.defect)).value
             if defect:
-                slot, code = divmod(defect, 4)
-                kind, chunk, channel, origins, count = self.observations.get(slot, ('?', '?', '?', '?', '?'))
-                raise RuntimeError(f'a run\'s observation {"gave up after kernels.OBSERVE_POLLS reads" if code == 1 else "read a lost word (its port lost)"}: '
-                                   f'{kind} on channel {channel} (segments of {origins}), chunk {chunk}, its count {count}, '
-                                   f'the word at {ctypes.c_uint64.from_address(_stream.address(self.defect) + 8).value}')
+                raise RuntimeError(f'a run\'s observation {"gave up after kernels.OBSERVE_POLLS reads" if defect == 1 else "read a lost word (its port lost)"}')
         return end
