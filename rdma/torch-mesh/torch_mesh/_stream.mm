@@ -1,17 +1,19 @@
-// torch_mesh's binding (rdma/metal.h): region tensors, the stream's Metal 4 queue, compiled pipelines, the run, the run's
-// solve, and the communicator a process group names. Everything the GPU does is a node of a run.
+// torch_mesh's binding (rdma/metal.h): region tensors, each torch stream's Metal 4 queue beside it, compiled pipelines
+// (metal.h 1), recorded runs (metal.h 2, over mesh_graph_realize's outputs) and their commits (metal.h 3), the run's
+// solve, and the communicator a process group names. The caller drives: it commits a run once, runs its host steps in
+// node order, each once the event values its rows name are reached, and reads the event values and words it owns
+// (value); nothing here calls back into it.
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <c10/core/CPUAllocator.h>
 #include <ATen/mps/MPSDevice.h>
-#include <ATen/mps/MPSEvent.h>
 #include <ATen/mps/MPSStream.h>
 #include <ATen/native/mps/OperationUtils.h>
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
-#include <memory>
+#include <cerrno>
+#include <cstdlib>
 #include <mutex>
-#include <optional>
 #include <unordered_map>
 #include <vector>
 #include "metal.h"
@@ -21,41 +23,42 @@
 
 void install_region_allocator();
 
-// Framework stream dependencies and compatibility-call storage. The shared
-// native schedule owns prepared execution; this state names MPS data events.
+// every shared event of this binding, retained for the process, by its handle: a stream's `progress` (its writer
+// torch's own command buffer, inputs) and its `done` (its writer the stream's queue, Run::commit). No host stores one:
+// the metal ticket's revision (2026-11-03) deleted `event` and `signal`, by which a caller's loop raised a landing's or
+// a host step's event for a part held on it (a CPU-mediated start, 93-178 us on an M5 Ultra: metal-microbench
+// docs/facts.md, wake.m); a consumer reads its own guard (metal.h MetalNode). What must stay: GPU writers only.
+static std::vector<id<MTLSharedEvent>> *events_ = new std::vector<id<MTLSharedEvent>>;
+
+static int64_t event_of(id<MTLDevice> device) {
+  events_->push_back([device newSharedEvent]);
+  return (int64_t)events_->size() - 1;
+}
+
+// A torch stream's Metal 4 queue and its events: `progress` rises as torch's work commits (inputs), `done` as a run's
+// parts complete (Run::commit; `ended`, the value it reaches once every run committed so far has completed).
+// `resident`, on the queue for all its command buffers, holds every lease an argument of a run addresses (metal.h 2).
+// The metal ticket (2026-11-03) replaced torch's MPSEvent notify block, which raised `progress` from a listener, with
+// a signal encoded on torch's own command buffer: no callback, and the signals rise in torch's queue order.
 struct MeshStream {
   at::mps::MPSStream *const mps;
-  id<MTLSharedEvent> const progress;
-  id<MTL4CommandQueue> const prepared;
-  // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
-  uint64_t committed = 0;
-
-  explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]),
-      prepared([stream->device() newMTL4CommandQueue]) {
-    if (!progress || !prepared) {
-      [progress release]; [prepared release];
-      TORCH_CHECK(false,"preparing Metal context: shared event or command queue unavailable");
-    }
-  }
-
-  // On torch's queue: its work so far committed (and waited for, where `wait`), torch's own event after it (MPSEvent)
-  // notifying `progress` of the next count for consumers of its declared external input pages.  Notifications
-  // may come in any order; `progress` only rises.
-  std::mutex rising;
-  void signalled(bool wait) {
-    const uint64_t value = ++committed;
-    id<MTLSharedEvent> event = progress;
-    std::mutex *order = &rising;
-    std::shared_ptr<at::mps::MPSEvent> ended = at::mps::getMPSEventPool()->acquireEvent(false, mps);
-    ended->record(false);
-    ended->notify(false, ^(id<MTLSharedEvent>, uint64_t) {
-      std::lock_guard<std::mutex> guard(*order);
-      if (event.signaledValue < value) event.signaledValue = value;
-      (void)ended;
-    });
-    mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
-  }
+  id<MTL4CommandQueue> const queue;
+  id<MTLResidencySet> const resident;
+  const int64_t progress, done;
+  uint64_t committed = 0, ended = 0;
 };
+
+static MeshStream *made_stream(at::mps::MPSStream *mps) {
+  id<MTLDevice> device = mps->device();
+  NSError *failure = nil;
+  id<MTLResidencySet> resident = [device newResidencySetWithDescriptor:[[MTLResidencySetDescriptor new] autorelease]
+                                                                 error:&failure];
+  id<MTL4CommandQueue> queue = [device newMTL4CommandQueue];
+  TORCH_CHECK(resident && queue, "preparing Metal context: ",
+              failure ? failure.localizedDescription.UTF8String : "command queue unavailable");
+  [queue addResidencySet:resident];
+  return new MeshStream{mps, queue, resident, event_of(device), event_of(device)};
+}
 
 static std::mutex *streams_lock_ = new std::mutex;
 static auto *streams_ = new std::unordered_map<at::mps::MPSStream *, MeshStream *>;
@@ -66,11 +69,21 @@ static MeshStream &stream_of(at::mps::MPSStream *mps) {
   if (last.first == mps) return *last.second;
   std::lock_guard<std::mutex> guard(*streams_lock_);
   auto found = streams_->find(mps);
-  if (found == streams_->end()) found = streams_->emplace(mps, new MeshStream(mps)).first;
+  if (found == streams_->end()) found = streams_->emplace(mps, made_stream(mps)).first;
   last = {mps, found->second};
   return *found->second;
 }
 
+// torch's work so far on the current stream, committed with `progress` signalled after it: an outside producer, its
+// event's handle and the value its consumers' parts wait for (Run::commit's value)
+static std::pair<int64_t, uint64_t> inputs() {
+  MeshStream &stream = stream_of(at::mps::getCurrentMPSStream());
+  const uint64_t value = ++stream.committed;
+  stream.mps->endKernelCoalescing();
+  [stream.mps->commandBuffer() encodeSignalEvent:(*events_)[stream.progress] value:value];
+  stream.mps->synchronize(at::mps::SyncType::COMMIT);
+  return {stream.progress, value};
+}
 
 static void checked(int64_t result) {
   TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
@@ -118,103 +131,129 @@ static uint64_t address(const at::Tensor &t) {
   return (uint64_t)(uintptr_t)at;
 }
 
-// metal.h 2: each compiled pipeline, retained for the process, by its handle
+// metal.h 1: each compiled pipeline, retained for the process, by its handle
 static std::vector<id<MTLComputePipelineState>> *pipelines_ = new std::vector<id<MTLComputePipelineState>>;
 
 // `function` of `source`, specialized by `constants` ((index, MTLDataType, bytes) each); its handle
 static int64_t pipeline(const std::string &source, const std::string &function,
                         const std::vector<std::tuple<uint32_t, uint32_t, pybind11::bytes>> &constants) {
-  NSMutableArray *values = [NSMutableArray array];
+  std::vector<std::string> raw;
+  std::vector<MetalConstant> constant;
   for (const auto &[index, type, bytes] : constants) {
-    const std::string raw = bytes;
-    [values addObject:@[@(index), @(type), [NSData dataWithBytes:raw.data() length:raw.size()]]];
+    raw.push_back(bytes);
+    constant.push_back({index, type, nullptr});
   }
-  NSError *error = nil;
-  id<MTLComputePipelineState> made = MetalPipeline([NSString stringWithUTF8String:source.c_str()],
-                                                   [NSString stringWithUTF8String:function.c_str()], values, &error);
-  TORCH_CHECK(made, "compiling ", function, ": ", error ? error.localizedDescription.UTF8String : "no pipeline");
+  for (size_t k = 0; k < raw.size(); k++) constant[k].value = raw[k].data();
+  char *error = nullptr;
+  id<MTLComputePipelineState> made = MetalCompile(source.c_str(), function.c_str(), constant.data(), constant.size(), &error);
+  const std::string statement = error ? error : "";
+  free(error);
+  TORCH_CHECK(made, "compiling ", function, ": ", statement);
   pipelines_->push_back(made);
   return (int64_t)pipelines_->size() - 1;
 }
 
-// A run binding: a region tensor (its storage's buffer, from its first element and `offset` more bytes) or a word's
-// address (the lease or stream page holding it: nccl.h ncclMeshMemBuffer)
-static MetalRunBinding bound(const pybind11::handle &operand, uint32_t index, uint64_t offset,
-                             std::vector<at::Tensor> &held) {
+// A dispatch argument: a region tensor (its storage's buffer, from its first element and `offset` more bytes) or a
+// word's address (the lease or stream page holding it: nccl.h ncclMeshMemBuffer), as a GPU address, its buffer made
+// resident on the stream's queue
+static MetalArgument bound(const pybind11::handle &operand, uint32_t index, uint64_t offset, std::vector<at::Tensor> &held,
+                           id<MTLResidencySet> resident) {
+  id<MTLBuffer> buffer = nil;
+  uint64_t at = offset;
   if (THPVariable_Check(operand.ptr())) { // torch's caster is no registered pybind type: isinstance<at::Tensor> is false
     const at::Tensor t = THPVariable_Unpack(operand.ptr());
-    TORCH_CHECK(t.is_mps(), "a run binding is an MPS region tensor");
+    TORCH_CHECK(t.is_mps(), "a run argument is an MPS region tensor");
     held.push_back(t);
-    return {at::native::mps::getMTLBufferStorage(t), (NSUInteger)(t.storage_offset() * t.element_size() + offset), index};
+    buffer = at::native::mps::getMTLBufferStorage(t);
+    at += t.storage_offset() * t.element_size();
+  } else {
+    void *theirs = nullptr;
+    size_t within = 0;
+    checked(ncclMeshMemBuffer((void *)(uintptr_t)operand.cast<uint64_t>(), &theirs, &within));
+    buffer = (__bridge id<MTLBuffer>)theirs;
+    at += within;
   }
-  void *buffer = nullptr;
-  size_t at = 0;
-  checked(ncclMeshMemBuffer((void *)(uintptr_t)operand.cast<uint64_t>(), &buffer, &at));
-  return {(__bridge id<MTLBuffer>)buffer, (NSUInteger)(at + offset), index};
+  [resident addAllocation:buffer];
+  return {buffer.gpuAddress + at, index, 0};
 }
 
-// metal.h 3: a run on torch's stream's Metal 4 queue
+// metal.h 2 and 3: a run recorded on the current stream's queue, committed once. Its nodes in the solve's order, each
+// (pipeline handle or -1, [(argument index, region tensor or word address, byte offset)], groups, threads, event
+// handle or -1: a dispatch, its guard's count and threshold words among its arguments; an outside producer, its event
+// the stream's `progress` or `done`; or with neither a host step the caller runs); the edges (from, to) between them;
+// the nodes ending their parts (mesh_graph_realize `ends`). An edge a guard realizes (a landing's, a SEND
+// completion's or a host step's to its GPU consumer) is no edge of the run (metal.h MetalNode). It keeps, of
+// realize's waits rows, those a host step waits on (waiter, kind, producer): kind 1 on a part, kind 5 on an outside
+// producer; a host step after a host step is in node order, the caller's.
+// Changed by the metal ticket's revision (2026-11-03) from exposing realize's part, deferred and waits rows for the
+// caller to work out its commit ranges, deferrals and host waits from (readiness logic outside the solve). What must
+// stay: the caller walks values, never rows.
+using RunNode = std::tuple<int64_t, std::vector<std::tuple<uint32_t, pybind11::object, uint64_t>>,
+                           std::array<uint32_t, 3>, std::array<uint32_t, 3>, int64_t>;
 struct Run {
-  std::shared_ptr<MetalRun> run;
+  MeshStream *const stream;
+  id run = nil;
   std::vector<at::Tensor> held;
-  Run() : run(MetalRunCreate(stream_of(at::mps::getCurrentMPSStream()).prepared), MetalRunFree) {}
-  void event(uint64_t event) { MetalRunEvent(run.get(), event); }
-  // operands: (argument index, tensor or address, byte offset) each
-  void dispatch(int64_t handle, const std::vector<std::tuple<uint32_t, pybind11::object, uint64_t>> &operands,
-                std::array<NSUInteger, 3> grid, std::array<NSUInteger, 3> group, bool threads) {
-    TORCH_CHECK(handle >= 0 && (size_t)handle < pipelines_->size(), "no such pipeline");
-    std::vector<MetalRunBinding> bindings;
-    for (const auto &[index, operand, offset] : operands) bindings.push_back(bound(operand, index, offset, held));
-    MetalRunDispatch(run.get(), (*pipelines_)[handle], bindings.data(), bindings.size(),
-                     MTLSizeMake(grid[0], grid[1], grid[2]), MTLSizeMake(group[0], group[1], group[2]), threads);
+  uint32_t parts = 0;
+  std::vector<int64_t> event;
+  std::vector<std::tuple<uint32_t, uint32_t, uint32_t>> hosts;
+
+  Run(const std::vector<RunNode> &nodes, const std::vector<std::pair<uint32_t, uint32_t>> &edges,
+      const std::vector<uint32_t> &ends) : stream(&stream_of(at::mps::getCurrentMPSStream())) {
+    const uint32_t n = (uint32_t)nodes.size();
+    std::vector<MetalNode> node(n);
+    std::vector<std::vector<MetalArgument>> arguments(n);
+    std::vector<unsigned char> host(n), end(n), barrier(n), fence(n);
+    event.resize(n);
+    for (uint32_t v = 0; v < n; v++) {
+      const auto &[handle, operands, groups, threads, produced] = nodes[v];
+      for (const auto &[index, operand, offset] : operands)
+        arguments[v].push_back(bound(operand, index, offset, held, stream->resident));
+      node[v] = {handle >= 0 ? (*pipelines_)[handle] : nil, arguments[v].data(), (uint32_t)arguments[v].size(),
+                 {groups[0], groups[1], groups[2]}, {threads[0], threads[1], threads[2]},
+                 produced >= 0 ? (*events_)[produced] : nil};
+      host[v] = handle >= 0 ? 0 : produced >= 0 ? 2 : 1;
+      event[v] = produced;
+    }
+    for (uint32_t v : ends) end[v] = 1;
+    [stream->resident commit];
+    std::vector<uint32_t> edge;
+    for (const auto &[from, to] : edges) { edge.push_back(from); edge.push_back(to); }
+    std::vector<mesh_graph_crossing> crossing(edges.size() + 1);
+    size_t count = 0;
+    std::vector<uint32_t> part(n);
+    std::vector<unsigned char> deferred(n); // realize's, unread (metal.h 2)
+    const int status = mesh_graph_realize(n, host.data(), edges.size(), reinterpret_cast<const uint32_t (*)[2]>(edge.data()),
+                                          part.data(), &parts, barrier.data(), fence.data(), crossing.data(),
+                                          crossing.size(), &count, deferred.data(), end.data());
+    TORCH_CHECK(!status, "realizing the run: ", status == EINVAL ? "an edge runs backward in the order" : "out of memory");
+    char *error = nullptr;
+    run = MetalRecord(stream->queue, n, node.data(), part.data(), parts, barrier.data(), fence.data(), crossing.data(),
+                      count, &error);
+    const std::string statement = error ? error : "";
+    free(error);
+    TORCH_CHECK(run, "recording the run: ", statement);
+    for (size_t j = 0; j < count; j++)
+      if (crossing[j].kind == 1 || (crossing[j].kind == 5 && host[crossing[j].producer] == 2))
+        hosts.emplace_back(crossing[j].waiter, crossing[j].kind, crossing[j].producer);
   }
-  // a copy of `bytes` from `source` to `destination`, each a region tensor or a word's address (a binding's operand),
-  // `from` and `to` bytes past it
-  void copy(const pybind11::object &source, uint64_t from, const pybind11::object &destination, uint64_t to, uint64_t bytes) {
-    const MetalRunBinding read = bound(source, 0, from, held), written = bound(destination, 0, to, held);
-    MetalRunCopy(run.get(), read.buffer, read.offset, written.buffer, written.offset, bytes);
-  }
-  void landed(uint64_t word, uint64_t threshold) { MetalRunLanded(run.get(), (const void *)(uintptr_t)word, threshold); }
-  // torch's work so far, an outside producer of this event's pages
-  void inputs() {
-    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-    MeshStream *source = &stream_of(stream);
-    at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
-    MetalRunInput(run.get(), source->progress, source->committed);
-  }
-  // torch's work so far, again: the input's value set to its progress now (a repeat's reset after preparation)
-  void inputs_now() {
-    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-    MeshStream *source = &stream_of(stream);
-    at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
-    MetalRunInputValue(run.get(), source->committed);
-  }
-  void edges(const std::vector<std::pair<uint64_t, uint64_t>> &pairs) {
-    std::vector<uint64_t> flat;
-    for (const auto &[a, b] : pairs) { flat.push_back(a); flat.push_back(b); }
-    MetalRunEdges(run.get(), reinterpret_cast<const uint64_t (*)[2]>(flat.data()), pairs.size());
-  }
-  void communicator(int64_t comm) { MetalRunCommunicator(run.get(), (struct ncclComm *)(uintptr_t)comm); }
-  void finish() {
-    const char *defect = MetalRunFinish(run.get());
-    TORCH_CHECK(!defect, "preparing the run: ", defect ? defect : "");
-  }
-  void enqueue() { MetalRunEnqueue(run.get()); }
-  // what the run still waits on: (pending parts and host tasks, [(word, value now, threshold)] of each landing not present)
-  std::pair<long, std::vector<std::array<uint64_t, 3>>> waiting() {
-    long parts = 0;
-    const size_t count = MetalRunWaiting(run.get(), nullptr, 0, &parts);
-    std::vector<std::array<uint64_t, 3>> landings(count);
-    MetalRunWaiting(run.get(), reinterpret_cast<uint64_t (*)[3]>(landings.data()), count, &parts);
-    return {parts, landings};
-  }
-  // nonblocking: None while pending, else the latest end (mesh_statistics_now's clock); raises a failure
-  std::optional<double> end() {
-    double ended = 0;
-    NSError *error = nil;
-    const int status = MetalRunEnd(run.get(), &ended, &error);
-    TORCH_CHECK(status >= 0, "the run failed: ", error ? error.localizedDescription.UTF8String : "");
-    return status ? std::optional<double>(ended) : std::nullopt;
+  Run(const Run &) = delete;
+  ~Run() { MetalRelease(run); }
+
+  // metal.h 3: every part committed once, each after its queue waits for outside producer v's event to reach value[v]
+  // (indexed by node). Returns the value the stream's done reaches once the run has completed (the caller keeps the run
+  // until then; a later occurrence waits on done at it, an outside producer of its own run), and for each node the
+  // (event handle, value) pairs a host step waits for before the caller runs it: done's signal after a part it reads,
+  // an outside producer's value.
+  std::pair<uint64_t, std::vector<std::vector<std::pair<int64_t, uint64_t>>>> commit(const std::vector<uint64_t> &value) {
+    const uint64_t base = stream->ended;
+    stream->ended = base + parts;
+    MetalCommit(run, value.data(), (*events_)[stream->done], base);
+    std::vector<std::vector<std::pair<int64_t, uint64_t>>> waits(event.size());
+    for (const auto &[waiter, kind, producer] : hosts)
+      waits[waiter].emplace_back(kind == 5 ? event[producer] : stream->done,
+                                 kind == 5 ? value[producer] : base + producer + 1);
+    return {stream->ended, waits};
   }
 };
 
@@ -287,11 +326,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     TORCH_CHECK(!ncclMeshRegionPageBytes(&page_bytes), "region_page_bytes: ", ncclGetLastError(nullptr));
     return page_bytes;
   });
-  module.def("region_page_bytes", []() {
-    uint64_t page_bytes = 0;
-    TORCH_CHECK(!ncclMeshRegionPageBytes(&page_bytes), "region_page_bytes: ", ncclGetLastError(nullptr));
-    return page_bytes;
-  });
   module.def("region_empty", &region_empty, pybind11::call_guard<Drained>());
   module.def("address", &address, pybind11::call_guard<Drained>());
   module.def("attach", &attach, pybind11::call_guard<Drained>());
@@ -299,42 +333,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline, pybind11::arg("source"), pybind11::arg("function"),
              pybind11::arg("constants") = std::vector<std::tuple<uint32_t, uint32_t, pybind11::bytes>>{},
              pybind11::call_guard<Drained>());
+  // shared events by handle: its value now; the current stream's torch inputs and done
+  module.def("value", [](int64_t handle) { return (*events_)[handle].signaledValue; });
+  module.def("inputs", &inputs, pybind11::call_guard<Drained>());
+  module.def("done", []() { return stream_of(at::mps::getCurrentMPSStream()).done; }, pybind11::call_guard<Drained>());
   pybind11::class_<Run>(module, "Run")
-    .def(pybind11::init<>(), pybind11::call_guard<Drained>())
-    .def("event", &Run::event)
-    .def("dispatch", &Run::dispatch, pybind11::call_guard<Drained>())
-    .def("copy", &Run::copy, pybind11::call_guard<Drained>())
-    .def("landed", &Run::landed, pybind11::call_guard<Drained>())
-    .def("inputs", &Run::inputs, pybind11::call_guard<Drained>())
-    .def("inputs_now", &Run::inputs_now, pybind11::call_guard<Drained>())
-    .def("edges", &Run::edges, pybind11::call_guard<Drained>())
-    .def("cut", [](Run &r) { MetalRunCut(r.run.get()); }, pybind11::call_guard<Drained>())
-    .def("stamp", [](Run &r) { MetalRunStamp(r.run.get()); }, pybind11::call_guard<Drained>())
-    .def("trace", [](Run &r) { MetalRunTrace(r.run.get()); }, pybind11::call_guard<Drained>())
-    .def("mark", [](Run &r) { MetalRunMark(r.run.get()); }, pybind11::call_guard<Drained>())
-    .def("times", [](Run &r) {
-      std::vector<double> out(MetalRunTimes(r.run.get(), nullptr, 0));
-      MetalRunTimes(r.run.get(), out.data(), out.size());
-      return out;
-    }, pybind11::call_guard<Drained>())
-    .def("spans", [](Run &r) {
-      std::vector<double> out(MetalRunSpans(r.run.get(), nullptr, 0));
-      MetalRunSpans(r.run.get(), out.data(), out.size());
-      return out;
-    }, pybind11::call_guard<Drained>())
-    .def("communicator", &Run::communicator)
-    .def("finish", &Run::finish, pybind11::call_guard<Drained>())
-    .def("enqueue", &Run::enqueue, pybind11::call_guard<Drained>())
-    .def("end", &Run::end, pybind11::call_guard<Drained>())
-    .def("waiting", &Run::waiting, pybind11::call_guard<Drained>())
-    .def("landings", [](Run &r) {
-      std::vector<std::array<double, 2>> out(MetalRunLandings(r.run.get(), nullptr, 0));
-      MetalRunLandings(r.run.get(), reinterpret_cast<double (*)[2]>(out.data()), out.size());
-      return out;
-    }, pybind11::call_guard<Drained>())
-    .def("parts", [](Run &r) {
-      std::vector<std::array<double, 3>> times(MetalRunParts(r.run.get(), nullptr, 0));
-      MetalRunParts(r.run.get(), reinterpret_cast<double (*)[3]>(times.data()), times.size());
-      return times;
-    }, pybind11::call_guard<Drained>());
+    .def(pybind11::init<const std::vector<RunNode> &, const std::vector<std::pair<uint32_t, uint32_t>> &,
+                        const std::vector<uint32_t> &>(),
+         pybind11::arg("nodes"), pybind11::arg("edges"), pybind11::arg("ends") = std::vector<uint32_t>{},
+         pybind11::call_guard<Drained>())
+    .def("commit", &Run::commit, pybind11::arg("value"), pybind11::call_guard<Drained>());
 }
