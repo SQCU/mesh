@@ -157,13 +157,18 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
         while (split * 2 <= TENSOR_SPLIT_MOST and blocks * split < TENSOR_SIMDGROUPS
                and K // (split * 2) >= TENSOR_SPLIT_LEAST_K and (split * 2 - 1) * block * 4 <= THREADGROUP_BYTES):
             split *= 2
-        span = -(-K // split)
+        span = -(-K // (split * 32)) * 32
+        # a product whose blocks all lie inside it reads them unchecked (static slice extents: MPPTensorOpsMatMul2d.h, the edge
+        # check is the dynamic slice's); otherwise every block is checked against the operands' extents
+        full = M % rows == 0 and N % TENSOR_COLUMNS == 0
+        left_slice = f'slice<dynamic_extent, {rows}>(0, row)' if full else 'slice(0, row)'
+        right_slice = f'slice<{TENSOR_COLUMNS}, dynamic_extent>(col, 0)' if full else 'slice(col, 0)'
         runs, first = [], 0
         for k, p in enumerate(parts):
             lo, hi = f'max(k0, {first})', f'min(k1, {first + p.shape[1]})'
             runs.append(f'    if ({lo} < {hi}) {{\n        const int lo = {lo}, hi = {hi};\n'
-                        f'        auto left = {_tensor(p, f"a{p.index}", M, "hi - lo", f"(lo - {first}) * {p.stride[1]}")}.slice(0, row);\n'
-                        f'        auto right = {_tensor(b, f"a{b.index}", "hi - lo", N, f"lo * {b.stride[0]}")}.slice(col, 0);\n'
+                        f'        auto left = {_tensor(p, f"a{p.index}", M, "hi - lo", f"(lo - {first}) * {p.stride[1]}")}.{left_slice};\n'
+                        f'        auto right = {_tensor(b, f"a{b.index}", "hi - lo", N, f"lo * {b.stride[0]}")}.{right_slice};\n'
                         f'        op.run(left, right, total);\n    }}')
             first += p.shape[1]
         p0 = parts[0]
@@ -189,8 +194,8 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor({rows}, {TENSOR_COLUMNS}, static_cast<int>(dynamic_extent),
         false, false, false, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
     mpp::tensor_ops::matmul2d<descriptor, execution_simdgroup> op;
-    using Left = decltype({_tensor(p0, f"a{p0.index}", M, p0.shape[1])}.slice(0, 0));
-    using Right = decltype({_tensor(b, f"a{b.index}", K, N)}.slice(0, 0));
+    using Left = decltype({_tensor(p0, f"a{p0.index}", M, p0.shape[1])}.{left_slice});
+    using Right = decltype({_tensor(b, f"a{b.index}", K, N)}.{right_slice});
     auto total = op.get_destination_cooperative_tensor<Left, Right, float>();
     #pragma unroll
     for (uint i = 0; i < total.get_capacity(); i++) total[i] = 0.0f;

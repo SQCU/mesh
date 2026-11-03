@@ -22,7 +22,10 @@ def main(config=None):
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
-    partition.attach(mesh, tp=F)
+    # the hidden units split in tiles of 32 (a product's block width, kernels.TENSOR_COLUMNS), so every rank's W1
+    # columns and W2 rows are whole blocks with aligned rows; `units` each rank's share of the tiles (a balancer's
+    # partition, the same list on every rank), even by default
+    partition.attach(mesh, tp=config.get('units', F // 32))
     group, blocks = mesh.get_group('tp').group_name, partition.split(mesh, 'tp', F)
     first = sum(blocks[:rank])
     g = torch.Generator().manual_seed(seed)
