@@ -424,13 +424,28 @@ def backward(edges, order):
     return [(a, b) for a, b in edges if a in last and b in first and first[b] < last[a]]
 
 
-def carried(history, accesses):
+def carried(history, accesses, quantum=16384):
     """type: history [(end, writes, lo, hi)], accesses [(begin, writes, lo, hi)] -> the edges (end, begin) from each
     earlier access to each later one over overlapping bytes [lo, hi) where either writes: a run's chunks ordered by the
     bytes they share, where every sink of one chunk before every source of the next held a chunk's receives until its
-    last SEND had completed (torch_mesh/compiler.py; metal-microbench docs/facts.md, the LSTM's chunk boundaries)"""
-    return sorted({(end, begin) for end, w0, lo0, hi0 in history for begin, w1, lo1, hi1 in accesses
-                   if (w0 or w1) and lo0 < hi1 and lo1 < hi0 and end != begin})
+    last SEND had completed (torch_mesh/compiler.py; metal-microbench docs/facts.md, the LSTM's chunk boundaries). The
+    earlier accesses found through buckets of `quantum` bytes (each in every bucket it touches), not every pair: every
+    pair was 1.95 of a 256-step LSTM's 3.6 s preparation, its history every chunk before (lstm-2026-11-03 profile-2)"""
+    buckets = {}
+    for k, (_, _, lo, hi) in enumerate(history):
+        for q in range(lo // quantum, (hi - 1) // quantum + 1):
+            buckets.setdefault(q, []).append(k)
+    out = set()
+    for begin, w1, lo1, hi1 in accesses:
+        seen = set()
+        for q in range(lo1 // quantum, (hi1 - 1) // quantum + 1):
+            for k in buckets.get(q, ()):
+                if k not in seen:
+                    seen.add(k)
+                    end, w0, lo0, hi0 = history[k]
+                    if (w0 or w1) and lo0 < hi1 and lo1 < hi0 and end != begin:
+                        out.add((end, begin))
+    return sorted(out)
 
 
 def largest(items):
