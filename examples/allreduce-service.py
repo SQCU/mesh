@@ -35,12 +35,12 @@ def main(config=None):
             x.mul_(1.0)
         torch.ops.torch_mesh.allreduce_(x, group)
         t.add_(1)
-    program = Program([(reduce, (t,))])
+    chunks = config.get('chunks', 1)  # all-reduces a run, one after another (each one's time apart from the run's start)
+    program = Program([(reduce, (t,))] * chunks)
     repeats = config.get('repeats', 3)
     begun = now()
     program.prepare(repeats)
     print(json.dumps(dict(phase='prepared', seconds=round(now() - begun, 3))), flush=True)
-    total = size * (size + 1) // 2
     for repeat in range(repeats):
         x.fill_(rank + 1)
         started = now()
@@ -50,10 +50,17 @@ def main(config=None):
                 raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
             time.sleep(0)
         torch.mps.synchronize()
+        if repeat == repeats - 1:
+            run = program.done[-1]
+            at = lambda v: round((v - started) * 1e6, 1) if v else None
+            print(json.dumps(dict(phase='timeline', rank=rank, parts=[[at(c), at(s), at(e)] for c, s, e in run.parts()],
+                                  spans=[round(v, 2) for v in run.spans()])), flush=True)
+        total = size * (size + 1) // 2 * size ** (chunks - 1)  # each sum after the first sums size equal copies
         wrong = int((x.float() != total).sum().item())
         moved = 2 * x.numel() * x.element_size() * (size - 1) // size  # a reduce-scatter's and an all-gather's bytes
-        emit({**measure(started, ended, moved, 1), 'workload': 'allreduce', 'rank': rank, 'size': size,
-              'report': dict(units=units, width=width, repeat=repeat, elements_wrong=wrong, expected=total)})
+        emit({**measure(started, ended, moved * chunks, chunks), 'workload': 'allreduce', 'rank': rank, 'size': size,
+              'report': dict(units=units, width=width, repeat=repeat, chunks=chunks, elements_wrong=wrong, expected=total,
+                             us_per_layer=round((ended - started) / chunks * 1e6, 1))})
     dist.destroy_process_group()
 
 
