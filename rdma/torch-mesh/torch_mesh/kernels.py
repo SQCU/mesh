@@ -143,7 +143,19 @@ def _tensor(view, pointer, rows, columns, offset='0', row_axis=0, column_axis=1)
 STAGED_COLUMNS = 4  # the simdgroup form's columns a threadgroup, over one staged row of A
 
 
-def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
+ACCUMULATE_THREADGROUPS = 176  # an accumulating product's threadgroups at least, k split over them (gemm.m's best: 4 ways)
+ACCUMULATE_LEAST_K = 256        # the least k a split takes
+
+
+def accumulates(M, parts, b):
+    """whether a product of these operands (Views) takes the accumulating form (product's `accumulate`): 64-row tiles of
+    tensor operands"""
+    transposed = (not b.coherent and b.dtype in TENSOR_TYPES and b.shape[0] != 1 and b.stride[0] == 1 and b.shape[1] != 1
+                  and 0 < b.stride[1] < TENSOR_STRIDE_BOUND)
+    return M % 64 == 0 and all(_tensor_operand(v) for v in parts) and (transposed or _tensor_operand(b))
+
+
+def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0, accumulate=False):
     """out[m, n] = beta bias[n] + alpha sum_k a[m, k] b[k, n], each a View of rank 2 (bias of rank 1 or broadcast); `a` a
     View or a list of Views, the parts of a concatenation along k (a cat the product reads in place, compiler.py), part p
     over b's rows from the sum of the parts before it.
@@ -167,6 +179,59 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     # where a strided tensor came out wrong (_tensor_operand)
     transposed = (not b.coherent and b.dtype in TENSOR_TYPES and b.shape[0] != 1 and b.stride[0] == 1 and b.shape[1] != 1
                   and 0 < b.stride[1] < TENSOR_STRIDE_BOUND)
+    if accumulate:
+        # a threadgroup of 4 simdgroups a 64 x 32 tile (matmul2d at threadgroup scope, execution_simdgroups<4>), k split
+        # over threadgroups (grid z), each split's partial added to out (float, zeroed before: compiler.py _product)
+        # atomically. The FFN's products on an M5 Ultra: 11.1 and 10.6 us (521 and 542 GB/s of weights) against 28.7
+        # and 20.7 for the whole k a tile, and 39-48 for kernels.product's 16-row form with k split in its threadgroup
+        # (metal-microbench tools/mesh/gemm.m tg64x32k4)
+        rows, K = 64, sum(p.shape[1] for p in parts)
+        tiles = -(-N // TENSOR_COLUMNS) * (M // rows)
+        split = 1
+        while split < 8 and tiles * split < ACCUMULATE_THREADGROUPS and K // (split * 2) >= ACCUMULATE_LEAST_K:
+            split *= 2
+        span = -(-K // split)
+        full = N % TENSOR_COLUMNS == 0
+        left_slice = f'slice<dynamic_extent, {rows}>(0, row)'
+        if transposed:
+            right_slice = f'slice<dynamic_extent, {TENSOR_COLUMNS}>(0, col)' if full else 'slice(0, col)'
+            right_of = lambda k_extent, offset='0': _tensor(b, f"a{b.index}", N, k_extent, offset, row_axis=1, column_axis=0)
+        else:
+            right_slice = f'slice<{TENSOR_COLUMNS}, dynamic_extent>(col, 0)' if full else 'slice(col, 0)'
+            right_of = lambda k_extent, offset='0': _tensor(b, f"a{b.index}", k_extent, N, offset)
+        runs, first = [], 0
+        for p in parts:
+            lo, hi = f'max(k0, {first})', f'min(k1, {first + p.shape[1]})'
+            runs.append(f'    if ({lo} < {hi}) {{\n        const int lo = {lo}, hi = {hi};\n'
+                        f'        auto left = {_tensor(p, f"a{p.index}", M, "hi - lo", f"(lo - {first}) * {p.stride[1]}")}.{left_slice};\n'
+                        f'        auto right = {right_of("hi - lo", f"lo * {b.stride[0]}")}.{right_slice};\n'
+                        f'        op.run(left, right, total);\n    }}')
+            first += p.shape[1]
+        p0 = parts[0]
+        bias_add = f' + (s == 0u ? {beta}f * float({bias.load(["n"] if len(bias.shape) == 1 else ["m", "n"])}) : 0.0f)' if bias else ''
+        body = f'''    const uint s = at.z;
+    const int col = int(at.x / 128u) * {TENSOR_COLUMNS}, row = int(at.y) * {rows};
+    const int k0 = int(s) * {span}, k1 = min(k0 + {span}, {K});
+    constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor({rows}, {TENSOR_COLUMNS}, static_cast<int>(dynamic_extent),
+        false, {'true' if transposed else 'false'}, false, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    mpp::tensor_ops::matmul2d<descriptor, execution_simdgroups<4>> op;
+    using Left = decltype({_tensor(p0, f"a{p0.index}", M, p0.shape[1])}.{left_slice});
+    using Right = decltype({right_of(K)}.{right_slice});
+    auto total = op.get_destination_cooperative_tensor<Left, Right, float>();
+    #pragma unroll
+    for (uint i = 0; i < total.get_capacity(); i++) total[i] = 0.0f;
+{chr(10).join(runs)}
+    #pragma unroll
+    for (uint i = 0; i < total.get_capacity(); i++) if (total.is_valid_element(i)) {{
+        const auto e = total.get_multidimensional_index(i);
+        const ulong m = ulong(row + e[1]), n = ulong(col + e[0]);
+        if (m < {M}ul && n < {N}ul)
+            atomic_fetch_add_explicit((device atomic_float *)(a{out.index} + {out.at(["m", "n"])}), {alpha}f * total[i]{bias_add},
+                                      memory_order_relaxed);
+    }}'''
+        source = ('#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n'
+                  + _source(name, parameters, body))
+        return source, (-(-N // TENSOR_COLUMNS) * 128, M // rows, split), (128, 1, 1)
     if M % 8 == 0 and all(_tensor_operand(v) for v in parts) and (transposed or _tensor_operand(b)):
         rows = next(r for r in (32, 16, 8) if r <= TENSOR_ROWS_MOST and M % r == 0)
         K = sum(p.shape[1] for p in parts)

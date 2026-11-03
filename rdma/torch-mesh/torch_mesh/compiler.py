@@ -464,6 +464,16 @@ class Template:
                 c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))
             values[node] = out
             return
+        if out.root.tensor is None and kernels.accumulates(out.shape[0], [x.view(0) for x in parts], b.view(0)):
+            # a product of 64-row tiles accumulates in float (kernels.product's accumulate: k split over threadgroups,
+            # each partial added atomically), into a root zeroed first; its readers load the float. The FFN's products
+            # 11.1 and 10.6 us a Studio against 39-48 (metal-microbench tools/mesh/gemm.m)
+            acc = Value(Root(math.prod(out.shape) * 4), torch.float32, tuple(out.shape), (out.shape[1], 1), 0)
+            self._command([acc], [], lambda name, c: kernels.pointwise(name, c.writes[0].view(0), [], '0.0f'))
+            values[node] = self._command([acc], reads, lambda name, c: kernels.product(
+                name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
+                c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta), accumulate=True))[0]
+            return
         values[node] = self._command([out], reads, lambda name, c: kernels.product(
             name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
             c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta)))[0]
