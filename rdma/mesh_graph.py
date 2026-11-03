@@ -422,3 +422,12 @@ def backward(edges, order):
         first.setdefault(node, k)
         last[node] = k
     return [(a, b) for a, b in edges if a in last and b in first and first[b] < last[a]]
+
+
+def carried(history, accesses):
+    """type: history [(end, writes, lo, hi)], accesses [(begin, writes, lo, hi)] -> the edges (end, begin) from each
+    earlier access to each later one over overlapping bytes [lo, hi) where either writes: a run's chunks ordered by the
+    bytes they share, where every sink of one chunk before every source of the next held a chunk's receives until its
+    last SEND had completed (torch_mesh/compiler.py; metal-microbench docs/facts.md, the LSTM's chunk boundaries)"""
+    return sorted({(end, begin) for end, w0, lo0, hi0 in history for begin, w1, lo1, hi1 in accesses
+                   if (w0 or w1) and lo0 < hi1 and lo1 < hi0 and end != begin})

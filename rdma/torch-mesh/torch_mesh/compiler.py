@@ -678,7 +678,7 @@ class Template:
         rows = [(max(1, -(-root.nbytes // page)), pins.get(id(root), _stream.RUN_FREE),
                  (_stream.RUN_BEFORE | _stream.RUN_AFTER) if root.tensor is not None else 0, 1) for root in items]
         solved = _stream.run_solve(page, len(events), accesses, links, rows, bins)
-        self.events, self.items, self.page = events, items, page
+        self.events, self.items, self.page, self.accesses = events, items, page, accesses
         self.edges = sorted({(f, t) for f, t, *_ in solved['edges'] if f != t})
         # each occurrence's forwards: a SEND reading bytes a COPY of the same occurrence landed (its RAW edge)
         from mesh_graph import joined
@@ -804,6 +804,9 @@ class Program:
         ev(start)
         run.inputs()
         edges, previous_sinks = [], [start]
+        # every earlier chunk's accesses (each its node, whether it writes, its bytes in the region) and the last chunk's
+        # observations no node of it followed, which go out in the next chunk (below)
+        history, carry = [], []
         watched = self.watched[id(run)] = []
 
         # a link's or release's word written by a copy from its value slot. Changed by the FFN demonstration session
@@ -866,7 +869,7 @@ class Program:
                 last[members[0] if key[0] == 'landed' else members[-1]] = key
             from mesh_graph import contract, held_before, sinks, sources, through
 
-            def nodes_of(c, kind, channel, round_):
+            def nodes_of(c, kind, channel, round_, lowered=lowered):
                 wanted = {'send': lib.ncclMeshNodeRelease, 'sent': lib.ncclMeshNodeSent,
                           'landed': lib.ncclMeshNodeLanding}[kind]
                 return [n for n in lowered[c] if n[0] == wanted and n[1] == channel and n[5] == round_]
@@ -895,7 +898,7 @@ class Program:
                     run.cut()
                     cut[0] = False
 
-            def emit_observation(key):
+            def emit_observation(key, t=t, group=group, ids=ids, chunk=chunk, nodes_of=nodes_of):
                 kind, c, channel, round_ = key
                 settle()
                 ev(ids[group[key][0]])
@@ -912,9 +915,38 @@ class Program:
                 for k in held_before(held, lambda k: group[k], after, target):
                     held.remove(k)
                     emit_observation(k)
+            # each access of this chunk after the earlier chunks' accesses of the same bytes where either writes
+            # (mesh_graph.carried), from the node each is emitted at. Changed by the FFN demonstration session: every
+            # sink of a chunk went before every source of the next, so a chunk's receives (its post's link copies) were
+            # held behind its last SENDs' completions, and with a copy behind every earlier dispatch of its part every
+            # rank waited about 100 us at each chunk boundary (metal-microbench docs/facts.md, the LSTM's tail). What
+            # must stay: every byte a later chunk touches ordered after an earlier chunk's conflicting access.
+            def at_or_after(e, has_node=has_node, t=t, ids=ids):
+                return [ids[e]] if e in has_node else sorted({ids[b] for a, b in through(t.edges, has_node | {e}) if a == e})
+
+            def at_or_before(e, has_node=has_node, t=t, ids=ids):
+                return [ids[e]] if e in has_node else sorted({ids[a] for a, b in through(t.edges, has_node | {e}) if b == e})
+            spans = []
+            for begin, end, mode, item, first_byte, length in t.accesses:
+                tensor, base = self._binding(t.items[item])
+                lo = _stream.address(tensor) + base + first_byte
+                spans.append((begin, end, mode == WRITE, lo, lo + length))
+            from mesh_graph import carried
+            crossing = carried(history, [(b, w, lo, hi) for begin, _, w, lo, hi in spans for b in at_or_after(begin)])
+            edges += crossing
+            # the last chunk's unfollowed observations go out before the first node of this one that follows one of
+            # them, or the first that is not a post (its links first: no copy of them behind the observations' waits)
+            crossing_set = set(crossing)
+
+            def release_carry(e):
+                if carry and (t.events[e][0] != 'post' or any((i, ids[e]) in crossing_set for _, _, i in carry)):
+                    for f, k, _ in carry:
+                        f(k)
+                    carry.clear()
             for e in t.order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
+                release_carry(e)
                 if kind == 'fold':
                     # a REDUCE's fold: its bytes plus its landing, coherent both (the landing the NIC wrote, the
                     # bytes a later SEND reads)
@@ -964,14 +996,20 @@ class Program:
                         cut[0] = True
                     else:
                         held.append(key)
-            for k in list(held):
-                held.remove(k)
-                emit_observation(k)
-            # the solve's edges between nodes, through events with none; the instance after the one before
+            for f, k, _ in carry:  # a chunk of posts alone
+                f(k)
+            carry.clear()
+            carry = [(emit_observation, k, ids[group[k][0]]) for k in held]
+            held.clear()
+            history += [(a, w, lo, hi) for _, end, w, lo, hi in spans for a in at_or_before(end)]
+            # the solve's edges between nodes, through events with none; the instance after the one before, from its
+            # sinks but its observations (their order is the bytes', carried above)
             kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))
             own = contract(through(t.edges, has_node), lambda e: ids[e])
             edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
-            previous_sinks = sinks(kept, own) or previous_sinks
+            previous_sinks = [x for x in sinks(kept, own) if named[x][1][0] not in ('sent', 'landed')] or previous_sinks
+        for f, k, _ in carry:  # the last chunk's
+            f(k)
         run.edges(edges)
         try:
             run.finish()
