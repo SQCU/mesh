@@ -98,16 +98,77 @@ def indexed(name, out, source, index, axis, writes_through_index):
     return _source(name, parameters, body), (count, 1, 1), (min(256, max(1, count)), 1, 1)
 
 
+# the tensor operations' element types (MetalPerformancePrimitives MPPTensorOpsMatMul2d.h: every pair of these
+# with a float destination), and their strides' bound (docs/facts.md: matmul2d reads wrong rows past the first where a
+# tensor's stride is 2^16 elements or more, M5 Max 2026-10-07)
+TENSOR_TYPES = {torch.float16: 'half', torch.float32: 'float', torch.bfloat16: 'bfloat'}
+TENSOR_STRIDE_BOUND = 1 << 16
+# a simdgroup's output block (docs/kernels.md: a simdgroup accumulates a 32 x 32 block, the dense kernel 0.82 of MPS
+# on the M5 Max): 32 columns, and 32, 16 or 8 rows, whichever the product's rows fill
+TENSOR_COLUMNS = 32
+
+
+def _tensor_operand(view):
+    """whether a product reads `view` through a tensor: an ordinary (not system-coherent) load of a tensor element
+    type, every stride non-negative and under the bound"""
+    return (not view.coherent and view.dtype in TENSOR_TYPES
+            and all(0 <= s < TENSOR_STRIDE_BOUND for s, n in zip(view.stride, view.shape) if n != 1))
+
+
+def _tensor(view, pointer, rows, columns, row_axis=0, column_axis=1, offset=0):
+    """a tensor over `view`'s elements from element `offset` on: `columns` its x extent (stride along column_axis),
+    `rows` its y (MPP's order: the fastest index first)"""
+    stride = lambda axis: view.stride[axis] if view.shape[axis] != 1 else 0
+    return (f'tensor(const_cast<device {TENSOR_TYPES[view.dtype]} *>({pointer}) + {view.offset + offset}l, '
+            f'dextents<int, 2>({columns}, {rows}), array<int, 2>{{{stride(column_axis)}, {stride(row_axis)}}})')
+
+
 def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     """out[m, n] = beta bias[n] + alpha sum_k a[m, k] b[k, n], each a View of rank 2 (bias of rank 1 or broadcast); `a` a
     View or a list of Views, the parts of a concatenation along k (a cat the product reads in place, compiler.py), part p
-    over b's rows from the sum of the parts before it; one simdgroup an output, its lanes over k, summed with simd_sum
-    (tools/mesh/lstm_metal.m's shape)"""
+    over b's rows from the sum of the parts before it.
+
+    Two forms, chosen by the operands at compile time. Where every operand is a tensor's (_tensor_operand) and the rows
+    are a multiple of 8 (Metal 4 tensor operations need it on the M4 Pro: docs/kernels.md), the M5's neural
+    accelerators: MetalPerformancePrimitives matmul2d, a simdgroup's 32 x 32 (or 16, or 8 rows) block over all of k
+    with float accumulation, the epilogue (alpha, bias, the store) in its registers; the form mesh 1f794b8f^
+    matrix.metal had, which that commit replaced with the other. Otherwise (a landing's system-coherent loads, which a
+    tensor does not express; fewer than 8 rows): one simdgroup an output, its lanes over k, summed with simd_sum
+    (tools/mesh/lstm_metal.m's shape)."""
     M, N = out.shape
     parts = a if isinstance(a, list) else [a]
     parameters = [out.parameter(True)] + [p.parameter(False) for p in parts] + [b.parameter(False)] + \
         ([bias.parameter(False)] if bias else [])
     bias_term = f' + {beta}f * float({bias.load(["n"] if len(bias.shape) == 1 else ["m", "n"])})' if bias else ''
+    if M % 8 == 0 and all(_tensor_operand(v) for v in parts + [b]):
+        rows = 32 if M % 32 == 0 else 16 if M % 16 == 0 else 8
+        K = sum(p.shape[1] for p in parts)
+        runs, first = [], 0
+        for k, p in enumerate(parts):
+            runs.append(f'    {{\n        auto left = {_tensor(p, f"a{p.index}", M, p.shape[1])}.slice(0, row);\n'
+                        f'        auto right = {_tensor(b, f"a{b.index}", p.shape[1], N, offset=first * b.stride[0])}.slice(col, 0);\n'
+                        f'        op.run(left, right, total);\n    }}')
+            first += p.shape[1]
+        p0 = parts[0]
+        body = f'''    const int col = int(at.x / 32u) * {TENSOR_COLUMNS}, row = int(at.y) * {rows};
+    constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor({rows}, {TENSOR_COLUMNS}, static_cast<int>(dynamic_extent),
+        false, false, false, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    mpp::tensor_ops::matmul2d<descriptor, execution_simdgroup> op;
+    using Left = decltype({_tensor(p0, f"a{p0.index}", M, p0.shape[1])}.slice(0, 0));
+    using Right = decltype({_tensor(b, f"a{b.index}", K, N)}.slice(0, 0));
+    auto total = op.get_destination_cooperative_tensor<Left, Right, float>();
+    #pragma unroll
+    for (uint i = 0; i < total.get_capacity(); i++) total[i] = 0.0f;
+{chr(10).join(runs)}
+    #pragma unroll
+    for (uint i = 0; i < total.get_capacity(); i++) if (total.is_valid_element(i)) {{
+        const auto e = total.get_multidimensional_index(i);
+        const ulong m = ulong(row + e[1]), n = ulong(col + e[0]);
+        if (m < {M}ul && n < {N}ul) {{ {out.store(["m", "n"], f"{alpha}f * total[i]{bias_term}")} }}
+    }}'''
+        source = ('#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n'
+                  + _source(name, parameters, body))
+        return source, (-(-N // TENSOR_COLUMNS) * 32, M // rows, 1), (32, 1, 1)
     loops, first = [], 0
     for p in parts:
         K = p.shape[1]
