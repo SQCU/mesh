@@ -7,10 +7,11 @@ lower    a view is a view of its operand's root; a pointwise op, a matrix produc
          a declared group of calls (nccl.h ncclMeshCommDeclare), one a contiguous frame of its gathered axis.
 solve    each command's reads and writes and each collective step's SEND, completion, post and landing are the run's
          events and accesses (mesh-page-map.h mesh_run_solve); a caller's storage is a pinned bin, the arena the last.
-run      a command a dispatch, a run of links and releases one dispatch of word stores, a landing and a SEND's
-         completion a presence, and the solve's edges between them (rdma/metal.h); an event with no node (a relay's
-         SEND, the bridge's) passes its edges through. A repeated chunk is captured, lowered and solved once and
-         instanced in the run, its collective occurrences each lowered anew (their channels' absolute positions move).
+run      a command a dispatch, a run of links and releases one dispatch of word stores, a run of REDUCE folds one
+         dispatch, a landing and a SEND's completion a presence, and the solve's edges between them (rdma/metal.h); an
+         event with no node (a relay's SEND, the bridge's) passes its edges through. A repeated chunk is captured,
+         lowered and solved once and instanced in the run, its collective occurrences each lowered anew (their
+         channels' absolute positions move).
 """
 import itertools
 import json
@@ -984,8 +985,34 @@ class Program:
         # label, its entry in self.stores, its edges, and the light trace's mark (a node holding a release) per word.
         last_store = {}
         pending = []  # the run of word stores not yet dispatched: (event, word, slot, release) each
+        # the run of REDUCE folds not yet dispatched: (event, step, element type) each, and the buffers it binds
+        # ((storage, element type) each: folded)
+        folding, fold_buffers = [], set()
+
+        def buffer(root, dtype):
+            # a fold's buffer: its root's storage (a caller's tensor's, or the arena every run root lies in) and the
+            # element type it is read as, bound once a run of folds from the storage's first byte
+            return (id(root.tensor) if root.tensor is not None else None, dtype)
 
         def issue():
+            # the pending run, of word stores or of folds (at most one is pending: each kind issues the other's first)
+            if folding:
+                run.event(folding[0][0])
+                bound = {}  # buffer -> (argument index, tensor, element type), in index order
+
+                def place(root, dtype, at):
+                    tensor, base = self._binding(root)
+                    index = bound.setdefault(buffer(root, dtype), (len(bound), tensor, dtype))[0]
+                    return index, (base + at) // dtype.itemsize
+                folds = tuple((dtype, s['bytes'] // dtype.itemsize, tuple(place(r, dtype, s['at']) for r in s['writes']),
+                               place(s['root'], dtype, s['at']), place(s['landing'], dtype, 0)) for _, s, dtype in folding)
+                source, grid, group_size = kernels.fold(tuple(dtype for *_, dtype in bound.values()), folds)
+                run.dispatch(_pipeline(source, kernels.FOLD), [(index, tensor, 0) for index, tensor, _ in bound.values()],
+                             grid, group_size, True)
+                labels.append(('fold', *[named.get(event) for event, *_ in folding]))
+                node_events.append(folding[0][0])
+                folding.clear()
+                fold_buffers.clear()
             if not pending:
                 return
             run.event(pending[0][0])
@@ -997,8 +1024,39 @@ class Program:
                 run.mark()
             pending.clear()
 
+        # a REDUCE's fold (its landing added into the step's bytes, the sum stored to each root of its `writes`: _halves'
+        # x, the partial a later fold or SEND reads, and y, a final) joins the run of folds pending, as a word store
+        # joins a run of them (stored).
+        # Changed from a dispatch a fold (kernels.pointwise's 'x0 + x1', behind its observation): a rank's 41-45 folds
+        # of the planner's all-reduce went one dependent dispatch after another, 2.6-4 us apart on an M5 Ultra and 7-8 us
+        # on the Mini, and its reduce-scatter half took about 1 ms for about 90 us of bytes (metal-microbench
+        # docs/facts.md, "The all-reduce's all-gather lands in pages of its own"). Now each maximal run of folds the
+        # emitted order puts together is one node (kernels.fold, a range of threadgroups a fold): it ends at the next
+        # node of another kind (ev, stored), before a fold with a producer in it, and where its buffers would pass the
+        # argument table's (kernels.ARGUMENT_BUFFERS). A fold over bytes an earlier fold of the run writes, or writing
+        # bytes one of them reads, follows it by the solve's edges (mesh_graph_dependences: an edge from each byte's
+        # latest writer, and from its readers since to a write), so it is such a producer and the run ends before it.
+        # The node is its first event's; every other fold in it takes that one's node (alias, applied to the run's
+        # edges). Its folds' observations went before its first (flush, a stretch's), so the run starts after them. What
+        # must stay: a fold after its landing's observation and its other producers (each before its run's node), and
+        # folds over the same bytes in their order, never in one run; a fold's label per event.
+        def folded(event, s, dtype):
+            if pending:
+                issue()  # a run of word stores ends at a fold
+            emitted.append(event)
+            current[0] = event
+            buffers = {buffer(root, dtype) for root in (*s['writes'], s['root'], s['landing'])}
+            if len(fold_buffers | buffers) > kernels.ARGUMENT_BUFFERS or into.get(event, set()) & {f for f, *_ in folding}:
+                issue()
+            if folding:
+                alias[event] = folding[0][0]
+            folding.append((event, s, dtype))
+            fold_buffers.update(buffers)
+
         def stored(event, words, release=False):
             # one event's words, [(word, value)] each
+            if folding:
+                issue()  # a run of folds ends at a word store
             emitted.append(event)
             for word, _ in words:
                 if word in last_store and last_store[word] != event:
@@ -1017,7 +1075,7 @@ class Program:
                 stores.append(value)
 
         def ev(i):
-            issue()  # a run of word stores ends at the next node of another kind
+            issue()  # a run of word stores, or of folds, ends at the next node of another kind
             emitted.append(i)
             current[0] = i
             run.event(i)
@@ -1166,12 +1224,13 @@ class Program:
                 stored(ids[e], [(word, value) for _, _, word, value, _, _ in links])
                 cut[0] = True
 
-            def flush(target):
-                for p in held_before([pe for pe, _ in posts], lambda x: [x], after, target):
+            def flush(targets):
+                # the held posts and observations any of `targets` follows, before the first of them
+                for p in held_before([pe for pe, _ in posts], lambda x: [x], after, targets):
                     links = next(l for pe, l in posts if pe == p)
                     posts[:] = [(pe, l) for pe, l in posts if pe != p]
                     emit_post(p, links)
-                for k in held_before(held, lambda k: group[k], after, target):
+                for k in held_before(held, lambda k: group[k], after, targets):
                     held.remove(k)
                     emit_observation(k)
             # each access of this chunk after the earlier chunks' accesses of the same bytes where either writes
@@ -1199,8 +1258,8 @@ class Program:
             order(crossing)
             # the solve's edges between nodes, through events with none; the instance after the one before, from its
             # sinks but its observations (their order is the bytes', carried above). Here, before the chunk's nodes,
-            # so a run of word stores knows each store's producers (stored); they were added after them, to the same
-            # effect on the run's edges
+            # so a run of word stores or of folds knows each member's producers (stored, folded); they were added after
+            # them, to the same effect on the run's edges
             kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))
             own = contract(passed(), lambda e: ids[e])
             order(own + [(p, s) for p in previous_sinks for s in sources(kept, own)])
@@ -1217,34 +1276,27 @@ class Program:
             from mesh_graph import waits_late
             emitted_order = waits_late(t.order, t.edges, {e for e in t.order if t.events[e][0] in ('landed', 'sent')},
                                        {e for e in t.order if t.events[e][0] == 'send'})
+            # each stretch of folds consecutive in the emitted order, by its first. waits_late puts a round's landings
+            # (its segment's waits) before its folds (which follow them), but each observation is held until the first
+            # node that follows it (flush), so a stretch went observation, fold, observation, fold: no two folds
+            # adjacent, a dispatch each. Now a stretch's first fold flushes every fold's of the stretch, so its folds
+            # meet in one run (folded). What must stay: an observation before every fold that follows it.
+            stretches = {}
+            for of_folds, stretch in itertools.groupby(emitted_order, lambda e: t.events[e][0] == 'fold'):
+                stretch = list(stretch)
+                if of_folds:
+                    stretches[stretch[0]] = stretch
             for e in emitted_order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
                 release_carry(e)
                 if kind == 'fold':
-                    # a REDUCE's fold: its bytes plus its landing, coherent all (the landing the NIC wrote, the
-                    # bytes a later SEND reads), the sum stored to each root of its `writes` (views 0 .. W - 1, the
-                    # second a shared value: _halves' x and y), its reads views W and W + 1
-                    flush(e)
+                    # a REDUCE's fold into the run of folds (folded), after its stretch's held observations
+                    flush(stretches.get(e, [e]))
                     settle()
-                    s = command.steps[rest[0]]
-                    width = command.dtype.itemsize
-                    n, at = s['bytes'] // width, s['at'] // width
-                    W = len(s['writes'])
-                    outs = [kernels.View(i, command.dtype, (n,), (1,), at, coherent=True) for i in range(W)]
-                    reads = [kernels.View(W, command.dtype, (n,), (1,), at, coherent=True),
-                             kernels.View(W + 1, command.dtype, (n,), (1,), 0, coherent=True)]
-                    shared = [(outs[1], 'x0 + x1', 's0')] if W > 1 else []
-                    source, grid, group_size = kernels.pointwise('mesh_command', outs[0], reads,
-                                                                 's0' if shared else 'x0 + x1', shared=shared)
-                    bindings = [(i, *self._binding(root)) for i, root in enumerate(s['writes'])]
-                    bindings += [(W, *self._binding(s['root'])), (W + 1, *self._binding(s['landing']))]
-                    ev(ids[e])
-                    run.dispatch(_pipeline(source, 'mesh_command'), bindings, grid, group_size, True)
-                    labels.append(('fold', named.get(current[0])))
-                    node_events.append(current[0])
+                    folded(ids[e], command.steps[rest[0]], command.dtype)
                 elif kind == 'command':
-                    flush(e)
+                    flush([e])
                     settle()
                     ev(ids[e])
                     operands = []
@@ -1266,7 +1318,7 @@ class Program:
                 elif kind == 'post':
                     links = [n for n in lowered[c] if n[0] == lib.ncclMeshNodeLink]
                     if links:
-                        flush(e)
+                        flush([e])
                         if posted[0]:
                             posts.append((e, links))
                         else:  # the chunk's first goes out at once: its receives are the first wanted
@@ -1276,7 +1328,7 @@ class Program:
                     key = last[e]
                     if key[0] == 'send':
                         for m in group[key]:
-                            flush(m)
+                            flush([m])
                         releases = nodes_of(c, 'send', key[2], key[3])
                         stored(ids[e], [(word, value) for _, _, word, value, _, _ in releases], release=True)
                         cut[0] = True

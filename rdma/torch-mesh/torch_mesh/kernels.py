@@ -5,7 +5,8 @@ Metal compiler folds each index (a power-of-two extent's digit is a shift and a 
 landing's loads are system-coherent (rdma/mesh.metal); every other access is an ordinary one. One kernel a command:
 a pointwise map (a fused expression over its operands), a matrix product with its bias (product's two forms), an
 indexed read or write through a device index, a sum over axes, and the run's observation of a word (a landing's or a
-SEND's completion), and a run of link and release word stores (compiler.py stored).
+SEND's completion), a run of link and release word stores (compiler.py stored), and a run of REDUCE folds, each a
+landing added into its bytes (compiler.py folded).
 """
 import functools
 import pathlib
@@ -394,9 +395,10 @@ OBSERVE_POLLS = int(__import__("os").environ.get("MESH_OBSERVE_POLLS", 1 << 28))
 
 
 STORE = 'mesh_store'
-# a store's words at most: the run's argument table holds 31 buffers (rdma/metal.m, maxBufferBindCount), one of them
-# the words' values
-STORE_WORDS = 30
+# the run's argument table's buffers (rdma/metal.m, maxBufferBindCount): a dispatch binds at most this many
+ARGUMENT_BUFFERS = 31
+# a store's words at most: the argument table's buffers, one of them the words' values
+STORE_WORDS = ARGUMENT_BUFFERS - 1
 
 
 @functools.cache
@@ -419,6 +421,38 @@ def store(words):
             f'{parameters}, uint at [[thread_position_in_grid]]) {{\n'
             f'    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '
             f'static_cast<thread_scope>(MESH_SYSTEM_THREAD_SCOPE));\n{body}}}\n')
+
+
+FOLD = 'mesh_fold'
+FOLD_GROUP = 256  # a fold's threads: whole threadgroups of this many, so no threadgroup spans two folds
+
+
+@functools.cache
+def fold(types, folds):
+    """a run of REDUCE folds (compiler.py folded), one dispatch: `types` each bound buffer's element type (argument k,
+    bound from its storage's first byte), `folds` (element type, elements, writes, bytes, landing) each, a place a
+    (buffer, element offset) pair and `writes` one or two places (_halves' x and y). Fold f's threads are a contiguous
+    range of whole FOLD_GROUP-thread threadgroups after fold f - 1's; its thread j adds landing[j] into bytes[j] (in float,
+    rounded once to the element type) and stores the sum to each place of `writes`, every load and store system-coherent
+    (the landing the NIC wrote, the bytes a later SEND reads). Every offset is a literal constant of the text.
+    Changed from a kernel a fold (compiler.py's pointwise 'x0 + x1', a dispatch each): a rank's 41-45 folds of the
+    planner's all-reduce went one dependent dispatch after another behind their observations, 2.6-4 us apart on an M5
+    Ultra and 7-8 us on the Mini, and its reduce-scatter half took about 1 ms for about 90 us of bytes (metal-microbench
+    docs/facts.md, "The all-reduce's all-gather lands in pages of its own"). What must stay: each fold's sum rounded once
+    and stored to each of its writes, its loads and stores system-coherent; folds over the same bytes in one dispatch
+    never (the compiler ends a run there)."""
+    parameters = [View(b, t, (1,), (1,), 0, coherent=True).parameter(True) for b, t in enumerate(types)]
+    branches, start = [], 0
+    for dtype, n, writes, bytes_, landing in folds:
+        end = start + -(-n // FOLD_GROUP) * FOLD_GROUP
+        place = lambda at, dtype=dtype, n=n: View(at[0], dtype, (n,), (1,), at[1], coherent=True)
+        stores = ''.join(f'\n            {place(w).store(["j"], "s")}' for w in writes)
+        branches.append(f'    if (i < {end}u) {{\n        const uint j = i - {start}u;\n        if (j < {n}u) {{\n'
+                        f'            const {MSL[dtype]} s = {MSL[dtype]}(float({place(bytes_).load(["j"])}) + '
+                        f'float({place(landing).load(["j"])}));{stores}\n        }}\n        return;\n    }}')
+        start = end
+    body = '    const uint i = at.x;\n' + '\n'.join(branches)
+    return _source(FOLD, parameters, body), (start, 1, 1), (FOLD_GROUP, 1, 1)
 
 
 @functools.cache

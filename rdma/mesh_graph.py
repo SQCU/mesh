@@ -397,14 +397,19 @@ def serialized(at, node, place):
            [(node, other) for other, where in at.items() if where > place]
 
 
-def held_before(held, members, after, target):
-    """type: held items in order, members(item) -> its nodes, after (node -> the nodes that follow it), a target node ->
-    the held items that must come before `target`: those a member of which `target` follows, and those a member of which
-    one of theirs follows, transitively, in `held`'s order (torch_mesh/compiler.py: an observation goes just before the
-    first node that follows it, each after the held ones it follows)"""
+def held_before(held, members, after, targets):
+    """type: held items in order, members(item) -> its nodes, after (node -> the nodes that follow it), target nodes ->
+    the held items that must come before the first of `targets`: those a member of which a target follows, and those a
+    member of which one of theirs follows, transitively, in `held`'s order (torch_mesh/compiler.py: an observation goes
+    just before the first node that follows it, each after the held ones it follows; a stretch of folds, consecutive in
+    the emitted order, takes every one's observations before its first, so the folds meet in one dispatch).
+    Changed from one target: a round's folds each took their own observations just before them (observation, fold,
+    observation, fold), so no two folds were adjacent and each was a dispatch of its own (metal-microbench
+    docs/facts.md, "The all-reduce's all-gather lands in pages of its own": 41-45 a rank). What must stay: every held
+    item a target follows, and every held item one of those follows, comes before the targets, in `held`'s order."""
     def reaches(item, nodes):
         return any(x in after.get(m, ()) for m in members(item) for x in nodes)
-    needed = [k for k in held if reaches(k, [target])]
+    needed = [k for k in held if reaches(k, targets)]
     grew = True
     while grew:
         grew = False
