@@ -856,6 +856,10 @@ class Program:
         # with the run's configuration's MESH_RUN_TRACE, a GPU timestamp after every node (MetalRunTrace) and each node's
         # label, the order they are appended in (Program.trace)
         tracing = bool(os.environ.get('MESH_RUN_TRACE'))
+        # MESH_RUN_TRACE=light stamps after each release's store and each first command after a tick's observations
+        # alone: a stamp waits for the work before it, so one after every node serialized a tick (the LSTM's 27 us to
+        # about 70, store-4); two a tick name when its compute began and when it released
+        light = os.environ.get('MESH_RUN_TRACE') == 'light'
         if tracing:
             run.trace()
         labels = self.labels[id(run)] = []
@@ -959,7 +963,7 @@ class Program:
         last_store = {}
         storing = _pipeline(kernels.store(), kernels.STORE)
 
-        def stored(slot, word, event):
+        def stored(slot, word, event, release=False):
             if word in last_store and last_store[word] != event:
                 edges.append((last_store[word], event))
             last_store[word] = event
@@ -967,7 +971,7 @@ class Program:
             labels.append(('store', named.get(current[0])))
             self.stores.setdefault(id(run), []).append((named.get(current[0]), word, int(_stream.address(values)) + 8 * slot))
             node_events.append(current[0])
-            if tracing:
+            if tracing and (release or not light):
                 run.mark()
 
         # a landing and a SEND's completion observed on the GPU (kernels.observe), a node like any other, so a chunk
@@ -979,7 +983,7 @@ class Program:
             run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
             labels.append(('observe', named.get(current[0])))
             node_events.append(current[0])
-            if tracing:
+            if tracing and not light:
                 run.mark()
         cut = [False]  # a part end owed after links and releases, across chunks
         cuts_made = [0]
@@ -1171,7 +1175,7 @@ class Program:
                             flush(m)
                         ev(ids[e])
                         for _, _, word, value, slot, _ in nodes_of(c, 'send', key[2], key[3]):
-                            stored(slot, word, ids[e])
+                            stored(slot, word, ids[e], release=True)
                         cut[0] = True
                         if posts:
                             emit_post(*posts.pop(0))
