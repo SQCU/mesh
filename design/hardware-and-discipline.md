@@ -9,7 +9,7 @@ hardware to surprising mediocrity rather than something qualitatively different 
 
 Compared with CUDA sm90 and sm100:
 - **One cache level fewer.** The GPU's caches sit in front of a system-level cache shared with the CPU and the
-  Thunderbolt RDMA engine, then DRAM. It is much less cache-congested than an HBM GPU.
+  Thunderbolt RDMA engine, then DRAM.
 - **Very low FLOPs and bandwidth relative to its memory, which is large.** Strong out-of-order CPUs, which can compile
   and plan at the node.
 - **One memory.** CPU, GPU and the RDMA engine address the same DRAM. There is no device memory, no BAR, and no PCIe
@@ -21,13 +21,11 @@ Measured on these machines:
   once (metal-microbench docs/measurement.md, 2026-09-29).
 - Data exchanged between threadgroups within one dispatch needs `coherent(device)`. Plain memory held on the M5's one
   die and failed on the M5 Ultra's two (mesh ebdef267).
-- A dispatch boundary costs about 1–2 µs, and starting a command buffer about 13–19 µs. The GPU watchdog ends a command
-  buffer after about 5 s.
-- An M5 Ultra device holds 2 usable queue pairs a link.
+- "A dispatch in an open command buffer costs 0.9-1.4 µs. A new command buffer costs 13.7-18.7 µs" (data-model.md:40).
+  The GPU watchdog ends a command buffer after about 5 s.
 
-With a dispatch boundary at 1–2 µs and a command buffer's start at 13–19 µs, a step whose compute is short is mostly
-fixed overhead. The operator, 2026-10-20 (design/rubrics.md M8): "if there is 10ns of reducible overhead anywhere in our
-code we reduce it to 0ns."
+A step whose compute is short is mostly fixed overhead. The operator, 2026-10-20 (design/rubrics.md M8): "if there is
+10ns of reducible overhead anywhere in our code we reduce it to 0ns."
 
 ## 2. DMA is fundamental
 "dma is fundamental and requires exceptional programming practices to make useful collectives from weak silicon."
@@ -68,8 +66,8 @@ with another vendor's NIC: device memory sits behind PCIe, registering arbitrary
 flushes.
 
 **Here.**
-- The memory model is a page table of rows, stamps and use counts (design/pages-and-functions.md), with extents
-  declared when a program is called and plans compiled from them.
+- The memory model is a page table of rows (design/pages-and-functions.md), with extents declared when a program is
+  called and plans compiled from them.
 - A not-in-place reduction's extra pages are rows chosen in the plan and landed into in place. There is no staging pool
   and no ring with copies.
 - On the collective's page facts, the operator, 2026-10-22: "data processing code may never discover these abstracted
