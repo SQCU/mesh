@@ -179,7 +179,7 @@ double program_run(void) {
 /* The demonstration: `demo <fabric file> <rank> allgather|allreduce <bytes> <repeats>`. The fabric file: "nodes <n>",
    then one line a cable, "cable <a> <b> <bytes a second>", in the one order every node holds. The program fills this
    rank's part of a buffer (one kernel), then makes the call; it reports the microseconds a repeat and the bytes this
-   rank received a second, against its cables' rate. */
+   rank received a second. */
 #include <stdio.h>
 static const char *demo_kernels =
   "kernel void demo_fill(device half *x [[buffer(0)]], uint i [[thread_position_in_grid]]) { x[i] = half(1); }\n";
@@ -215,11 +215,9 @@ int main(int argc, char **argv) {
   struct collective_fabric fabric = { .nodes = nodes, .rank = rank, .links = cables, .count = count };
   if ((e = program_prepare(&prog, &fabric, repeats))) { fprintf(stderr, "demo: prepare: %s\n", strerror(e)); return 1; }
   const double us = program_run();
-  double in_rate = 0;
-  for (uint32_t c = 0; c < count; c++) if (cables[c].a == rank || cables[c].b == rank) in_rate += cables[c].bytes_a_second;
   const double received = (double)(what == COLLECTIVE_ALLREDUCE ? 2.0 * bytes * (nodes - 1) / nodes : (double)bytes * (nodes - 1) / nodes);
-  printf("{\"rank\":%u,\"call\":\"%s\",\"bytes\":%llu,\"repeats\":%u,\"us_a_repeat\":%.1f,\"received_GBps\":%.2f,\"cables_in_GBps\":%.1f}\n",
-         rank, argv[3], (unsigned long long)bytes, repeats, us, received / us / 1e3, in_rate / 1e9);
+  printf("{\"rank\":%u,\"call\":\"%s\",\"bytes\":%llu,\"repeats\":%u,\"us_a_repeat\":%.1f,\"received_GBps\":%.2f}\n",
+         rank, argv[3], (unsigned long long)bytes, repeats, us, received / us / 1e3);
   return 0;
 }
 #endif
