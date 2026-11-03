@@ -70,6 +70,9 @@ void MetalRunCopy(struct MetalRun *, id<MTLBuffer> source, NSUInteger from, id<M
 void MetalRunHost(struct MetalRun *, MetalHostOperation);
 /* an outside producer: its event reaching `value` publishes this event's pages */
 void MetalRunInput(struct MetalRun *, id<MTLSharedEvent>, uint64_t value);
+/* the value the last outside producer MetalRunInput appended (a landing is none) must reach, set again before the run
+   is enqueued */
+void MetalRunInputValue(struct MetalRun *, uint64_t value);
 /* landed bytes as an outside producer (design/transport.md section 1: the bridge's `landed`, a single-writer prefix of
    span units): present once the 64-bit word at `word` reaches `threshold`; all-ones is the link's loss, which fails the
    run. Its consumers' parts wait on its presence in the command processor; no kernel waits. The run is complete only

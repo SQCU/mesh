@@ -399,14 +399,13 @@ class Template:
             if root.tensor is None:
                 (place, _), = runs
                 root.at = (place - arena_first) * page
-        # each command's kernel, compiled once
-        self.pipelines = {}
-        for c, command in enumerate(self.commands):
+        # each command's kernel, named by nothing but its text, so a tick's kernels compile once for every tick
+        for command in self.commands:
             if isinstance(command, Collective):
                 continue
-            source, grid, group = command.make(f'command{c}')
+            source, grid, group = command.make('kernel')
             command.grid, command.group = grid, group
-            command.pipeline = _pipeline(source, f'command{c}')
+            command.pipeline = _pipeline(source, 'kernel')
 
 
 _PIPELINES = {}
@@ -546,6 +545,7 @@ class Program:
 
     def forward(self):
         run = self.runs.pop(0)
+        run.inputs_now()  # the caller's work so far on torch's stream (a repeat's reset among it) precedes the run
         run.enqueue()
         self.done.append(run)
         return run

@@ -162,6 +162,7 @@ struct MetalRun {
     NSMutableArray *held;
     NSMutableData *nodes, *bindings, *edges, *results, *comms, *landings; // landings: struct RunLanding *
     uint64_t event;
+    size_t input; // the last outside producer MetalRunInput appended
     uint32_t parts;
     struct RunPart *part;
     struct RunHostState *host; // by node
@@ -236,14 +237,18 @@ void MetalRunHost(struct MetalRun *run,MetalHostOperation operation) {
 }
 void MetalRunInput(struct MetalRun *run,id<MTLSharedEvent> event,uint64_t value) {
     [run->held addObject:event];
+    run->input=run->nodes.length/sizeof(struct RunNode);
     RunAppend(run,(struct RunNode){.kind=RunInput,.signal=event,.value=value});
+}
+void MetalRunInputValue(struct MetalRun *run,uint64_t value) {
+    ((struct RunNode *)run->nodes.mutableBytes)[run->input].value=value;
 }
 void MetalRunLanded(struct MetalRun *run,const void *word,uint64_t threshold) {
     struct RunLanding *landing=calloc(1,sizeof *landing);
     landing->word=word;landing->threshold=threshold;landing->event=[run->device newSharedEvent];
     atomic_init(&landing->state,LandingWaiting);atomic_init(&landing->references,1); // the run's
     [run->landings appendBytes:&landing length:sizeof landing];
-    MetalRunInput(run,landing->event,1);
+    RunAppend(run,(struct RunNode){.kind=RunInput,.signal=landing->event,.value=1}); // no input of MetalRunInputValue's
 }
 void MetalRunEdges(struct MetalRun *run,const uint64_t (*edges)[2],size_t count) {
     [run->edges appendBytes:edges length:count*sizeof *edges];

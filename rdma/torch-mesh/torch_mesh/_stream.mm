@@ -182,6 +182,13 @@ struct Run {
     at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
     MetalRunInput(run.get(), source->progress, source->committed);
   }
+  // torch's work so far, again: the input's value set to its progress now (a repeat's reset after preparation)
+  void inputs_now() {
+    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+    MeshStream *source = &stream_of(stream);
+    at::mps::dispatch_sync_with_rethrow(stream->queue(), ^{ source->signalled(false); });
+    MetalRunInputValue(run.get(), source->committed);
+  }
   void edges(const std::vector<std::pair<uint64_t, uint64_t>> &pairs) {
     std::vector<uint64_t> flat;
     for (const auto &[a, b] : pairs) { flat.push_back(a); flat.push_back(b); }
@@ -290,6 +297,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     .def("copy", &Run::copy, pybind11::call_guard<Drained>())
     .def("landed", &Run::landed, pybind11::call_guard<Drained>())
     .def("inputs", &Run::inputs, pybind11::call_guard<Drained>())
+    .def("inputs_now", &Run::inputs_now, pybind11::call_guard<Drained>())
     .def("edges", &Run::edges, pybind11::call_guard<Drained>())
     .def("communicator", &Run::communicator)
     .def("finish", &Run::finish, pybind11::call_guard<Drained>())
