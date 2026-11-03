@@ -35,9 +35,12 @@ def main(config=None):
     w2 = torch_mesh.empty(blocks[rank], D, dtype=torch.half).copy_(w2_cpu[first:first + blocks[rank]].half().to('mps'))
     t = torch.empty(1, dtype=torch.int64, device='mps').fill_(0)
 
+    summed = not config.get('partial_only', False)
+
     def ffn(t):
         y.copy_(torch.relu(x @ w1) @ w2)
-        torch.ops.torch_mesh.allreduce_(y, group)
+        if summed:
+            torch.ops.torch_mesh.allreduce_(y, group)
         t.add_(1)
     program = Program([(ffn, (t,))] * layers)
     repeats = config.get('repeats', 3)
@@ -57,7 +60,8 @@ def main(config=None):
                              gflops=round(flops / (ended - started) / 1e9, 2), us_per_layer=round((ended - started) / layers * 1e6, 1))})
     if rank == 0:
         torch.mps.synchronize()
-        expected = torch.relu(x_cpu.half().float() @ w1_cpu.half().float()) @ w2_cpu.half().float()
+        expected = torch.relu(x_cpu.half().float() @ w1_cpu.half().float()) @ w2_cpu.half().float() if summed else \
+            torch.relu(x_cpu.half().float() @ w1_cpu[:, :blocks[0]].half().float()) @ w2_cpu[:blocks[0]].half().float()
         print(json.dumps(dict(phase='checked', max_abs_error=float((y.float().cpu() - expected).abs().max()),
                               output_max_abs=float(expected.abs().max()))), flush=True)
     dist.destroy_process_group()
