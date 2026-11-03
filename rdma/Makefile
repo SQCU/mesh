@@ -61,7 +61,7 @@ $(IMAGES:%=.build/%): .build/metal-environment
 .build/mesh-cpu-source.o: mesh-cpu-source.m mesh-cpu-source.h mesh-cpu-kernels.h mesh-host.h Makefile .build/metal-environment
 	mkdir -p .build
 	cc -fobjc-arc -fblocks -O2 $(WARN) -c mesh-cpu-source.m -o $@
-.build/libnccl-mesh.dylib: .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c mesh-statistics.h metal.m metal.h mesh-page-sites.h mesh-host.h mesh-span-plan.h mesh-landing.h mesh-fold.h mesh-lease-retire.h mesh-publication.h nccl.h mesh-graph.h mesh-write-compiler.h \
+.build/libnccl-mesh.dylib: .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c mesh-statistics.h metal.m metal.h mesh-page-sites.h mesh-host.h mesh-span-plan.h mesh-landing.h mesh-lease-retire.h mesh-publication.h nccl.h mesh-graph.h mesh-write-compiler.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h mesh-fabric.h .build/libmesh.dylib Makefile $(METAL_CONFIGURATION)
 	cc -fblocks -O2 $(WARN) $(METAL_DEFINES) -dynamiclib -I .build \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
