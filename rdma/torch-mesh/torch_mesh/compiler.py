@@ -646,11 +646,11 @@ class Program:
                                 run.landed(word, value)
                         has_node.update(group[kind, c, channel])
             # the solve's edges between nodes, through events with none; the instance after the one before
-            from mesh_graph import sinks, sources, through
-            kept = [e for e in t.order if e in has_node]
-            own = [(a, b) for a, b in through(t.edges, set(kept)) if ids[a] != ids[b]]
-            edges += [(ids[a], ids[b]) for a, b in own] + [(p, ids[s]) for p in previous_sinks for s in sources(kept, own)]
-            previous_sinks = [ids[e] for e in sinks(kept, own)] or previous_sinks
+            from mesh_graph import contract, sinks, sources, through
+            kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))
+            own = contract(through(t.edges, has_node), lambda e: ids[e])
+            edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
+            previous_sinks = sinks(kept, own) or previous_sinks
         run.edges(edges)
         run.finish()
         return run

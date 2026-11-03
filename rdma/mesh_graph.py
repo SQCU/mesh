@@ -377,6 +377,12 @@ def joined(edges, label, earlier, later):
     return out
 
 
+def contract(edges, label):
+    """type: edges (a, b), label(node) -> the edges between labels, each pair once, none from a label to itself (a run's
+    events merged into their channel's node: torch_mesh/compiler.py)"""
+    return sorted({(label(a), label(b)) for a, b in edges if label(a) != label(b)})
+
+
 def absorbed(nodes, users, joins):
     """type: nodes, users(n) -> n's consumers, joins(n, u) -> whether u can take n in -> the nodes their one consumer
     absorbs (a pointwise chain fused: torch_mesh/compiler.py)"""
