@@ -36,9 +36,18 @@ def main(config=None):
     t = torch.empty(1, dtype=torch.int64, device='mps').fill_(0)
 
     summed = not config.get('partial_only', False)
+    staged = config.get('stages', False)
+    a1 = torch_mesh.empty(B, blocks[rank], dtype=torch.half)
+    a2 = torch_mesh.empty(B, blocks[rank], dtype=torch.half)
 
     def ffn(t):
-        y.copy_(torch.relu(x @ w1) @ w2)
+        if staged:
+            # each stage into a caller tensor of its own, so rank 0 checks each against torch
+            a1.copy_(x @ w1)
+            a2.copy_(torch.relu(a1))
+            y.copy_(a2 @ w2)
+        else:
+            y.copy_(torch.relu(x @ w1) @ w2)
         if summed:
             torch.ops.torch_mesh.allreduce_(y, group)
         t.add_(1)
@@ -64,6 +73,11 @@ def main(config=None):
             torch.relu(x_cpu.half().float() @ w1_cpu[:, :blocks[0]].half().float()) @ w2_cpu[:blocks[0]].half().float()
         print(json.dumps(dict(phase='checked', max_abs_error=float((y.float().cpu() - expected).abs().max()),
                               output_max_abs=float(expected.abs().max()))), flush=True)
+        if staged:
+            e1 = x_cpu.half().float() @ w1_cpu[:, :blocks[0]].half().float()
+            print(json.dumps(dict(phase='stages', x_w1_error=float((a1.float().cpu() - e1).abs().max()), x_w1_max=float(e1.abs().max()),
+                                  relu_error=float((a2.float().cpu() - torch.relu(a1.float().cpu())).abs().max()),
+                                  y_from_a2_error=float((y.float().cpu() - a2.float().cpu() @ w2_cpu[:blocks[0]].half().float()).abs().max()))), flush=True)
     dist.destroy_process_group()
 
 
