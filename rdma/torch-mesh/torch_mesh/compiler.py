@@ -684,7 +684,7 @@ class Template:
                         alpha, beta) for o, parts, b, bias, alpha, beta in products],
                 c.writes[0].view(0), [local(v) if v.root is R else device(v) for v in operands], text,
                 [(c.writes[1 + k].view(1 + k), texts[k], f's{k}') for k in range(len(texts))], 'gates', dtype, elements)
-        command.make = make
+        command.make = lambda name, c=command: make(name, c)
         return command
 
     # ---- declare ----
