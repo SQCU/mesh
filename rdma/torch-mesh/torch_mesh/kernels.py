@@ -166,9 +166,21 @@ ACCUMULATE_THREADGROUPS = 176  # an accumulating product's threadgroups at least
 ACCUMULATE_LEAST_K = 256        # the least k a split takes
 
 
+ROWS_LEAST = 1 << 20  # a product of fewer than 64 rows takes the rows form (product) from k x n this many
+ROWS_COLUMNS = 32     # the rows form's columns a threadgroup, 8 a simdgroup
+ROWS_CHUNK = 256      # its k a chunk of A staged in threadgroup memory
+
+
+def _rows_form(M, parts, b):
+    """whether a product takes the rows form: fewer than 64 rows over a k x n of ROWS_LEAST or more"""
+    return M < 64 and sum(v.shape[1] for v in parts) * b.shape[1] >= ROWS_LEAST
+
+
 def accumulates(M, parts, b):
     """whether a product of these operands (Views) takes the accumulating form (product's `accumulate`): 64-row tiles of
-    tensor operands"""
+    tensor operands, or the rows form (_rows_form)"""
+    if _rows_form(M, parts, b):
+        return True
     transposed = (not b.coherent and b.dtype in TENSOR_TYPES and b.shape[0] != 1 and b.stride[0] == 1 and b.shape[1] != 1
                   and 0 < b.stride[1] < TENSOR_STRIDE_BOUND)
     return M % 64 == 0 and all(_tensor_operand(v) for v in parts) and (transposed or _tensor_operand(b))
@@ -198,6 +210,64 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0, accumulate=False):
     # where a strided tensor came out wrong (_tensor_operand)
     transposed = (not b.coherent and b.dtype in TENSOR_TYPES and b.shape[0] != 1 and b.stride[0] == 1 and b.shape[1] != 1
                   and 0 < b.stride[1] < TENSOR_STRIDE_BOUND)
+    if accumulate and _rows_form(M, parts, b):
+        # the rows form: a threadgroup ROWS_COLUMNS columns of every row (8 a simdgroup), k split over threadgroups,
+        # A's rows staged ROWS_CHUNK of k at a time in threadgroup memory (each part's own loads, a landing's
+        # coherently), each simdgroup's lanes over k reading each column's weights once, each split's partial added
+        # atomically. The staged form (a threadgroup a row) read the weights once a row and staged a whole row, 8,192
+        # floats at k 8192: an LSTM of width 4096 ticked in 28.2 ms against about 0.2 ms of weight reads
+        # (metal-microbench docs/facts.md, balance-2026-11-03 sweep-2)
+        K = sum(p.shape[1] for p in parts)
+        C, KB, per = ROWS_COLUMNS, ROWS_CHUNK, ROWS_COLUMNS // 4
+        groups = -(-N // C)
+        split = 1
+        while split < 16 and groups * split < 2 * ACCUMULATE_THREADGROUPS and K // (split * 2) >= 4 * KB:
+            split *= 2
+        span = -(-K // split)
+        loads, first = [], 0
+        for q, part in enumerate(parts):
+            Kp = part.shape[1]
+            test = f'k < {first + Kp}u' if q + 1 < len(parts) else 'true'
+            loads.append(f'{"if" if q == 0 else "else if"} ({test}) {{ const uint kp = k - {first}u; '
+                         f'v = float({part.load(["m", "kp"])}); }}')
+            first += Kp
+        bias_add = (f' + (s == 0u ? {beta}f * float({bias.load(["n"] if len(bias.shape) == 1 else ["m", "n"])}) : 0.0f)'
+                    if bias else '')
+        body = f'''    const uint s = at.z, group = at.x / 128u, me = at.x % 128u, sg = me / 32u, lane = me % 32u;
+    const uint k0 = s * {span}u, k1 = min(k0 + {span}u, {K}u);
+    threadgroup float A[{M * KB}];
+    float total[{M}][{per}];
+    for (uint m = 0; m < {M}u; m++) for (uint c = 0; c < {per}u; c++) total[m][c] = 0.0f;
+    for (uint kc = k0; kc < k1; kc += {KB}u) {{
+        const uint kn = min({KB}u, k1 - kc);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint e = me; e < {M * KB}u; e += 128u) {{
+            const uint m = e / {KB}u, kk = e % {KB}u, k = kc + kk;
+            float v = 0.0f;
+            if (kk < kn) {{ {' '.join(loads)} }}
+            A[e] = v;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint c = 0; c < {per}u; c++) {{
+            const uint n = group * {C}u + sg * {per}u + c;
+            if (n >= {N}u) break;
+            for (uint kk = lane; kk < kn; kk += 32u) {{
+                const uint k = kc + kk;
+                const float w = float({b.load(["k", "n"])});
+                for (uint m = 0; m < {M}u; m++) total[m][c] += A[m * {KB}u + kk] * w;
+            }}
+        }}
+    }}
+    for (uint c = 0; c < {per}u; c++) {{
+        const uint n = group * {C}u + sg * {per}u + c;
+        for (uint m = 0; m < {M}u; m++) {{
+            const float t = simd_sum(total[m][c]);
+            if (lane == 0u && n < {N}u)
+                atomic_fetch_add_explicit((device atomic_float *)(a{out.index} + {out.at(["m", "n"])}), {alpha}f * t{bias_add},
+                                          memory_order_relaxed);
+        }}
+    }}'''
+        return _source(name, parameters, body), (groups * 128, 1, split), (128, 1, 1)
     if accumulate:
         # a threadgroup of 4 simdgroups a 64 x 32 tile (matmul2d at threadgroup scope, execution_simdgroups<4>), k split
         # over threadgroups (grid z), each split's partial added to out (float, zeroed before: compiler.py _product)
