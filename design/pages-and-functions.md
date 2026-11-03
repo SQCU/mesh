@@ -3,9 +3,6 @@
 On the actual Thunderbolt substrate, payload intervals use SEND/RECV, as documented
 by Apple TN3205; software publication of a received page does not require
 hardware remote-write support.
-Statements below about instant execution and topology-independent utilization
-express the desired absence of added control dependencies, not a zero-latency
-theorem or a measured performance guarantee.
 
 Topology is discovered for each realized configuration. The 2026-10-24 morning
 microprofile recorded Studio–Studio/first-Studio–Mini/second-Studio–Mini cable
@@ -32,8 +29,8 @@ Its logical page/range vocabulary is independent of the physical transfer quantu
 One page table holds every page the runtime will use. Each function output
 is a range of rows in that table. A row holds three things: which page, its
 stamp, and its use count. The use count is the use-checker. This is the logical
-operand/ownership model, not the bridge ABI: compiled span descriptors, local
-ownership metadata and physical completion prefixes realize its dependencies.
+operand/ownership model, not the bridge ABI: local ownership metadata and
+physical completion prefixes realize its dependencies.
 
 Every function has a known number of output pages. Every function input is
 the output pages of some function, on this node or on a peer. All of this is
@@ -70,9 +67,7 @@ meshfunction(x)`, with literal values corresponding to error codes and
 where/when they happened in a callgraph reported in the meta channel, not the
 output channel, for calling consumers to interpret and handle..."
 
-Metadata occupies page-table pages configured before launch: a return channel
-beside `out`, not a private allocation, completion token or readiness gate. A
-terminal device completion publishes the configured output pages whatever the
+A terminal device completion publishes the configured output pages whatever the
 metadata holds. Their stamp says the pages are available, not that their
 contents are correct: the calling context may reject them by `meta`. Without a
 terminal completion the output is unavailable, and metadata published alone
@@ -98,7 +93,7 @@ carries no numerical value and does not say that outstanding work completed.
    The compiled GPU stream may already contain that function with a bounded
    availability dependency. This is not a host scheduler waiting for a peer,
    and not a separate permission message. The current kernels encode GPU
-   prefix observations; "the GPU never waits" was not a description of them.
+   prefix observations.
    A ready page should not wait for an unrelated operand's last page.
 
 ### Freeing
@@ -107,12 +102,10 @@ carries no numerical value and does not say that outstanding work completed.
    DMA read. The compiler records those distinct uses. The bridge's final
    DMA-read completion (`sent`) releases a source: a landing into it is posted
    only once its channel's `sent` passes that SEND's end (mesh.h struct
-   mesh_zwoggle_entry `after`), local ownership bookkeeping, not a
-   remote-consumption ACK. No proof that a downstream arrival implies the read
-   ended stands in for it (the witness proofs, deleted: they re-derived the
-   transport's completion from the program). The destination's consumers have
-   their own lifetime. No receipt message is introduced. Release does not zero
-   the page: each next producer must define the values it exposes.
+   mesh_zwoggle_entry `word`, `threshold`), local ownership bookkeeping, not a
+   remote-consumption ACK. The destination's consumers have their own
+   lifetime. No receipt message is introduced. Release does not zero the
+   page: each next producer must define the values it exposes.
 7. A page is written again only after release. Two NFEs can be in flight
    because rows for NFE k+1 point at other pages until the rows for NFE k are
    released. Reuse must be ordered before the next **first write**, not merely
@@ -274,56 +267,15 @@ or many; latency and utilization must be measured for the actual graph.
 
 A source range is reusable once its last outgoing DMA read completed, the
 bridge's `sent` prefix past that SEND's end: the landing that writes it again
-lists that requirement (mesh.h struct mesh_zwoggle_entry `after`) and the
-bridge posts none of it before. A partial SEND completion does not cover
-unposted source pages. `rdma/lifetimes.py`, an executable proof of reuse from
-natural events (`prove_recurrent_gather` for a two-slot recurrence among them),
-is deleted with the C library's witness proofs (design/zorvek.md item 2).
-
-The byte-extent revision resolves a logical page or affine row into exact byte
-intervals. A local 16-byte `mesh_dma_span {offset, bytes}` names one payload;
-`mesh_entry {spans, units, word, base}` names an immutable array of those spans.
-The descriptor bytes are not payload headers. Allocation pages, 1 GiB registered
-extents, 4 KiB hardware credit frames, and actual SGE payload lengths are distinct.
-Short or unaligned spans transfer only their declared bytes. Exact intervals
-leave adjacent destination values untouched, without padded transport copies.
-
-The current API places exact source and destination geometry on
-`ncclMeshCallWrite` in `ncclMeshCommPlan`. Local buffer slots, pure typed views,
-frames and progress operands are declared together. Rows and indexed selections
-use the same cut compiler; no numerical buffer is packed merely to describe a
-view. `ncclMeshCommEncode` records the next declared group without a separate
-WRITE handle or placement exchange.
-
-The measurements below describe the earlier byte-extent revision, before this
-public API consolidation; they do not validate the new declaration interface.
-
-This source revision is wire 135/layout 154. Its existing contiguous/affine
-[live validation](transport.md#exact-byte-validation-on-2026-10-24)
-passed three-rank writes from 3 bytes through 1 GiB + 19 bytes, including ragged
-rows, exact byte accounting and preserved neighbors; larger transfers used all
-six cables. Two-node and three-node fused runs each passed 14 cases and 94 calls
-per rank. A complete three-byte numerical function took median 31.290 µs with
-exact writes versus 35.569 µs with padded transfers across five trials of 128
-calls per mode. These are whole-function observations, not isolated NIC timing.
-The bridge deployment was temporary and the preceding bridge was restored.
+lists that requirement (mesh.h struct mesh_zwoggle_entry `word`, `threshold`)
+and the bridge posts none of it before. A partial SEND completion does not cover
+unposted source pages.
 
 Each source extent remains immutable until every declared physical reader
-finishes, including reads not posted yet. Pins record physical byte intervals,
-so crossing an allocation row or using an alias cannot hide a backing reader.
+finishes, including reads not posted yet.
 A destination's consumer and any forwarding read have separate lifetimes.
 Serial receiver execution alone does not order an already preposted remote
 write; one-way reuse still needs a natural causal proof or distinct storage.
-The earlier masked frame train obeyed the same proof, but its padding is not a
-requirement of the byte-span interface.
-
-The immutable span table is itself a closure operand. SEND and LAND prefixes
-retire its two directions independently, and taking its list entry does not
-finish the bridge's later CPU reads of the table. A local stream give prevents
-new posts; the bridge's subsequent owner transition proves its CPU reader ended.
-Keep descriptor storage until completion or that local quiescence proof. None
-of these ownership proofs introduces a network ACK. Affine address geometry and
-disjoint final stores remain separate obligations from ownership reachability.
 
 ## What this is called elsewhere
 
@@ -337,5 +289,4 @@ metadata, and the calling context reads them.
 The firing principle is tagged-token dataflow; operand slots and presence
 bits have hardware prior art in Monsoon. In-data flags, dependency-driven
 execution and pipelined reductions also have published implementations.
-None of them is the exact caller described here. The reduce description and
-the historical incident record are in [distributed-reduce.md](distributed-reduce.md).
+None of them is the exact caller described here.
