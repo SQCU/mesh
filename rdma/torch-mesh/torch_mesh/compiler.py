@@ -926,7 +926,8 @@ class Program:
         # every earlier chunk's accesses (each its node, whether it writes, its bytes in the region) and the last chunk's
         # observations no node of it followed, which go out in the next chunk (below)
         history, carry = [], []
-        checked_spans = []  # MESH_RUN_ORDER_CHECK: every instance's accesses, (befores, afters, writes, lo, hi, names)
+        # MESH_RUN_ORDER_CHECK: every instance's accesses, (befores, afters, writes, lo, hi, names, coherent, function)
+        checked_spans = []
         # a chunk's unfollowed observations of one word (a channel's `sent` or `landed`, a count that only rises) want
         # its largest count alone: the others' events take its node (alias, applied to the run's edges), so a 16-tick
         # chunk's 48 SEND completions end it as 3 observations (metal-microbench docs/facts.md, the GPU trace)
@@ -1097,7 +1098,7 @@ class Program:
                 spans.append((begin, end, mode == WRITE, lo, lo + length))
             if os.environ.get('MESH_RUN_ORDER_CHECK'):
                 checked_spans += [(at_or_before(begin), at_or_after(end), w, lo, hi, (named[ids[begin]], named[ids[end]]),
-                                   t.items[item].coherent)
+                                   t.items[item].coherent, id(t))
                                   for (begin, end, w, lo, hi), (_, _, _, item, _, _) in zip(spans, t.accesses)]
             from mesh_graph import carried
             crossing = carried(history, [(b, w, lo, hi) for begin, _, w, lo, hi in spans for b in at_or_after(begin)])
@@ -1216,14 +1217,15 @@ class Program:
             # the edges are its only order
             from mesh_graph import unordered
             aliased = lambda es: [alias.get(x, x) for x in es]
-            hazards = unordered(order, edges, [(aliased(b), aliased(a), w, lo, hi) for b, a, w, lo, hi, _, _ in checked_spans])
-            base = min((lo for _, _, _, lo, _, _, _ in checked_spans), default=0)
+            hazards = unordered(order, edges, [(aliased(b), aliased(a), w, lo, hi) for b, a, w, lo, hi, *_ in checked_spans])
+            base = min((x[3] for x in checked_spans), default=0)
             # an ordinary write over bytes a system-coherent access (a SEND's source, a landing) also touches: on an M4
             # Pro the ordinary store's line stays dirty across the running buffer's barriers and is written back over
-            # the landing at the buffer's end (visible.m "writeback"), whatever the edges order
+            # the landing at the buffer's end (visible.m "writeback"), whatever the edges order. Two compiled
+            # functions' accesses are apart by the part end between them, so the pairs counted are one function's
             ordinary = [k for k, x in enumerate(checked_spans) if x[2] and not x[6]]
             shared = [(o, k) for o in ordinary for k, x in enumerate(checked_spans)
-                      if x[6] and x[3] < checked_spans[o][4] and checked_spans[o][3] < x[4]]
+                      if x[6] and x[7] == checked_spans[o][7] and x[3] < checked_spans[o][4] and checked_spans[o][3] < x[4]]
             print(json.dumps(dict(phase='writebacks', count=len(shared), first=[
                 [[checked_spans[k][5], 'write' if checked_spans[k][2] else 'read', int(checked_spans[k][6]), checked_spans[k][3] - base,
                   checked_spans[k][4] - checked_spans[k][3]] for k in pair] for pair in shared[:12]])), flush=True)
