@@ -331,3 +331,15 @@ def retained(items, removable, writes, reads, protected=()):
             readers[value] -= 1
     return [item for item, keep in zip(items, kept) if keep]
 
+
+def sources(nodes, edges):
+    """type: nodes, edges (earlier, later) -> the nodes no edge enters, in the nodes' order"""
+    entered = {later for _, later in edges}
+    return [node for node in nodes if node not in entered]
+
+
+def serialized(at, node, place):
+    """type: at, node -> its place in one order; a node to place at `place` -> the edges putting it after every node
+    before that place and before every node after it"""
+    return [(other, node) for other, where in at.items() if where < place] + \
+           [(node, other) for other, where in at.items() if where > place]

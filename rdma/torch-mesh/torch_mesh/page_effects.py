@@ -734,16 +734,15 @@ class Plan:
             node = _node(key)
             if node is not None:
                 order_of[event_of(node)] = min(order_of.get(event_of(node), key[0]), key[0])
+        from mesh_graph import serialized, sources
         write_event = {}
         for index, step in enumerate(self.declarations):
             if step.get('transfer') == 'write':
-                made = write_event[2 * index] = new_event()
-                edges.update((e, made) for e, at in order_of.items() if at < 2 * index)
-                edges.update((made, e) for e, at in order_of.items() if at > 2 * index)
+                write_event[2 * index] = new_event()
+                edges.update(serialized(order_of, write_event[2 * index], 2 * index))
         # the run's external inputs precede every node with nothing before it
         if getattr(self, 'input_event', None) is not None:
-            targets = {b for _, b in edges}
-            edges.update((self.input_event, e) for e in (*order_of, *write_event.values()) if e not in targets)
+            edges.update((self.input_event, e) for e in sources([*order_of, *write_event.values()], edges))
         # each occurrence's spaces bound to its runs, then the occurrence lowered, in declaration order: the C
         # cursor's (lowering.bind_spaces; design/page-maps-2026-11-02.md, "The collective lowering in two phases")
         from .lowering import bind_spaces
