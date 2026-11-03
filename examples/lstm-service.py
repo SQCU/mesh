@@ -141,6 +141,13 @@ def main(config=None):
                               steps_past_1e3=[int(s) for s in np.nonzero(per_step > 1e-3)[0][:32]],
                               worst_blocks=[float(error[w][:, a:b].max()) for a, b in zip(cuts, cuts[1:])],
                               worst_against={str(d): v for d, v in beside.items()})), flush=True)
+        # each early step's error in each rank's block, and for each wrong block the step offset (-4 to 4) whose
+        # expected value it is nearest, with that distance: a block a few steps early or late names its hazard
+        nearest = lambda s, a, b: min(((float(np.abs(got[s][:, a:b] - expected[s + d][:, a:b]).max()), d)
+                                       for d in range(-4, 5) if 0 <= s + d < len(expected)))
+        print(json.dumps(dict(phase='blocks', steps=[[s, [round(float(error[s][:, a:b].max()), 5) for a, b in zip(cuts, cuts[1:])],
+                                                      [(lambda e, d: [d, round(e, 5)])(*nearest(s, a, b)) if error[s][:, a:b].max() > 1e-3 else None
+                                                       for a, b in zip(cuts, cuts[1:])]] for s in range(min(18, len(error)))])), flush=True)
     dist.destroy_process_group()
     return {'output': O, 'configuration': config.get('placement')}
 
