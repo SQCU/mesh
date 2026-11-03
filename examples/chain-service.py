@@ -74,6 +74,8 @@ def main(config=None):
     started = now()
     program.forward()
     while (ended := program.completion()) is None:
+        if now() - started > 8.0:
+            raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
         time.sleep(0)
     summary = dict(blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps, steps_per_replay=k)
     emit({**measure(started, ended, O.numel() * O.element_size(), steps), 'workload': 'chain_sequence',

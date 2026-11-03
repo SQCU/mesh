@@ -1,7 +1,7 @@
 # design/transport.md: the node's images, built in .build by `all`, which installs nothing; `install` renames
 # each that changed into rdma/, in this order: the libraries first, the bridge's binary last, then libnccl-mesh with its
 # kernels (install-nccl, below)
-IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh-statistics.dylib mesh-stat mesh-heartbeat mesh-flow
+IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-statistics.dylib mesh-stat mesh-heartbeat mesh-flow
 .DEFAULT_GOAL := all
 METAL_CONFIGURATION ?= ../etc/compute/metal.mk
 include $(METAL_CONFIGURATION)
@@ -67,10 +67,6 @@ $(IMAGES:%=.build/%): .build/metal-environment
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c metal.m -L.build -lmesh \
 	  -framework Metal -framework Foundation -framework Accelerate
-.build/libmesh-coreml.dylib: mesh-coreml.m mesh-coreml.h mesh-cpu-source.h mesh-host.h mesh-cpu-kernels.h mesh-ane-entry.h mesh-ane-entry.inc mesh-tensor-layout.h .build/libnccl-mesh.dylib Makefile
-	mkdir -p .build
-	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
-	  -Wl,-rpath,@loader_path -L.build -lnccl-mesh -framework CoreML -framework Foundation -framework Accelerate -framework IOSurface
 .build/libmesh-statistics.dylib: mesh-statistics.c mesh-statistics.h Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-statistics.dylib -o $@ mesh-statistics.c

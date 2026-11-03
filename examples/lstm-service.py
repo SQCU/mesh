@@ -80,6 +80,8 @@ def main(config=None):
         started = now()
         program.forward()
         while (ended := program.completion()) is None:
+            if now() - started > 8.0:
+                raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
             time.sleep(0)
         summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows, repeat=repeat, input_width=KIN,
                        width=H, steps=steps, ticks=steps + L - 1, latency_ticks=L)
