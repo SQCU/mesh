@@ -2226,6 +2226,13 @@ ncclResult_t ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId *uniqueId) {
    SEND of bytes an earlier COPY landed is gated on that landing (zirrupel, the bridge's forward), with no release. */
 #define MESH_TREE_EPS 0.1 /* Garg and Konemann's eps for the trees (mesh-plan.h mesh_trees_pack): a choice to measure */
 #define MESH_TREES_MOST 4 /* each root's heaviest trees kept */
+/* The communicator's trees are each root's shortest-path ones (mesh-graph.h mesh_graph_pack `shallow`). A segment under
+   a page goes whole onto its root's heaviest tree, and a hop costs a relay about 110-140 us from its landing to its
+   SEND's completion (metal-microbench docs/facts.md, run-22), so a tick's gather costs its deepest tree's hops: the
+   unrestricted packing's heaviest trees were 3 and 4 deep on the five members' 13 cables, where every root reaches
+   every rank in 2. On those cables the shallow packing also carries more: the all-gather's bandwidth-bound rate into a
+   rank 26.7 GB/s against 25.2 (the Mini's three cables bound it at 30), computed from both packings' trees, shares and
+   the cables' rates. */
 
 static ncclResult_t comm_trees(ncclComm_t comm) {
   if (comm->trees.count) return ncclSuccess;
@@ -2233,7 +2240,7 @@ static ncclResult_t comm_trees(ncclComm_t comm) {
   uint32_t *root = calloc(most, sizeof *root), *parent = calloc((size_t)most * nodes, sizeof *parent);
   double *weight = calloc(most, sizeof *weight);
   const uint32_t count = root && parent && weight ?
-      mesh_trees_pack(&comm->map, NULL, MESH_TREE_EPS, MESH_TREES_MOST, root, parent, weight) : 0;
+      mesh_trees_pack(&comm->map, NULL, MESH_TREE_EPS, MESH_TREES_MOST, 1, root, parent, weight) : 0;
   if (!count) {
     free(root); free(parent); free(weight);
     return fail(root && parent && weight ? ncclInvalidUsage : ncclSystemError,

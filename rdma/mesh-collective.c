@@ -784,8 +784,8 @@ uint32_t mesh_flow_trees(uint32_t nodes,const uint32_t *demand,const struct mesh
    trees and weights. */
 static int mesh_root_member(const void *context,uint32_t r){ return mesh_member(context,r); }
 
-uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
-                         double *log_weight){
+uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,double eps,uint32_t most,int shallow,uint32_t *root,
+                         uint32_t *parent,double *log_weight){
   const uint32_t n=map->nodes,N=mesh_all(map);
   uint32_t rooted=0;
   for(uint32_t r=0;r<n;r++)rooted+=mesh_member(roots,r);
@@ -827,7 +827,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,d
     double inverse=known?8e9/(double)aggregate[k]:1.0/parallel[k];
     capacity[k]=1/inverse;
   }
-  written=mesh_graph_pack(n,m,from,to,through,crossing,P,capacity,mesh_root_member,roots,eps,most,root,parent,log_weight);
+  written=mesh_graph_pack(n,m,from,to,through,crossing,P,capacity,mesh_root_member,roots,eps,most,shallow,root,parent,log_weight);
 done:
   free(from);free(to);free(through);free(crossing);free(hop);free(capacity);free(parallel);free(aggregate);
   return written;

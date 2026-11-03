@@ -153,8 +153,8 @@ uint32_t mesh_solve(const struct mesh_link_map *,double eps,const struct mesh_de
                     uint32_t *demand,uint32_t *parent,double *share);
 uint32_t mesh_flow_trees(uint32_t nodes,const uint32_t *demand,const struct mesh_demand *,const uint32_t *parent,const double *share,
                          uint32_t count,uint32_t first,uint32_t last,uint32_t *root,uint32_t *tree,double *log_weight);
-uint32_t mesh_trees_pack(const struct mesh_link_map *,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
-                         double *log_weight);
+uint32_t mesh_trees_pack(const struct mesh_link_map *,const uint64_t *roots,double eps,uint32_t most,int shallow,uint32_t *root,
+                         uint32_t *parent,double *log_weight);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };

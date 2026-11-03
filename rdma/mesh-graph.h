@@ -200,11 +200,14 @@ uint32_t mesh_graph_flow(uint32_t vertices, uint32_t edges, const uint32_t *from
    crossing[through[e + 1] - 1], hop k of capacity[k]. Every root r for which rooted(context, r) holds is given a demand
    of one, packed along least-weight arborescences (mesh_graph_arborescence) until the hops' lengths reach one. Each
    root's `most` heaviest distinct trees are kept, root by root: root[k], parents parent[k * vertices ..] and log
-   weight log_weight[k], the log of its share of its root's kept flow. Their count; 0 where no arborescence spans. */
+   weight log_weight[k], the log of its share of its root's kept flow. Their count; 0 where no arborescence spans.
+   `shallow`: each root's arborescences are its shortest-path ones alone, every edge from a vertex d edges from the root
+   to one d + 1 from it (the edges of its breadth-first layering), so each tree is as shallow as a tree from that root
+   can be: where a hop costs a fixed time far past its bytes' (a small collective), a tree's time is its depth's hops. */
 uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const uint32_t *through,
                          const uint32_t *crossing, uint32_t hops, const double *capacity,
                          int (*rooted)(const void *context, uint32_t r), const void *context, double eps, uint32_t most,
-                         uint32_t *root, uint32_t *parent, double *log_weight);
+                         int shallow, uint32_t *root, uint32_t *parent, double *log_weight);
 /* The items left once every one take(consumer, item) accepts is taken, the passes repeating while one is taken (taking
    one can free another: a composed page view's return unpins its owner leases, nccl-mesh.c leases_reap); a taken item
    leaves the array by swap-removal. The count left. */

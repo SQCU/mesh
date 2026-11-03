@@ -742,8 +742,14 @@ static int pack_same(const void *context,uint32_t t){
 uint32_t mesh_graph_pack(uint32_t n, uint32_t m, const uint32_t *from, const uint32_t *to, const uint32_t *through,
                          const uint32_t *crossing, uint32_t P, const double *capacity,
                          int (*rooted)(const void *context, uint32_t r), const void *context, double eps, uint32_t most,
-                         uint32_t *root, uint32_t *parent, double *log_weight){
+                         int shallow, uint32_t *root, uint32_t *parent, double *log_weight){
   uint32_t *uses=calloc((size_t)P+1,sizeof *uses);
+  /* shallow: root r's edges, those from layer d of its breadth-first layering to layer d + 1 (kept[r * m ..], their
+     count kept_count[r]), the arborescence searched over them alone (sub_*) and its choice mapped back */
+  uint32_t *kept=shallow?malloc(((size_t)n*m+1)*sizeof *kept):NULL,*kept_count=shallow?calloc((size_t)n+1,sizeof *kept_count):NULL;
+  uint32_t *layer=shallow?malloc(((size_t)n+1)*sizeof *layer):NULL;
+  uint32_t *sub_from=shallow?malloc(((size_t)m+1)*sizeof *sub_from):NULL,*sub_to=shallow?malloc(((size_t)m+1)*sizeof *sub_to):NULL;
+  double *sub_weight=shallow?malloc(((size_t)m+1)*sizeof *sub_weight):NULL;
   double *length=malloc(((size_t)P+1)*sizeof *length),*weight=malloc(((size_t)m+1)*sizeof *weight);
   int32_t *chosen=malloc(((size_t)n+1)*sizeof *chosen);
   struct mesh_packed *packed=NULL;
@@ -751,13 +757,29 @@ uint32_t mesh_graph_pack(uint32_t n, uint32_t m, const uint32_t *from, const uin
   size_t trees=0,room=0;
   uint32_t written=0;
   if(!uses || !length || !weight || !chosen || !head)goto done;
+  if(shallow && (!kept || !kept_count || !layer || !sub_from || !sub_to || !sub_weight))goto done;
+  for(uint32_t r=0;shallow && r<n;r++){
+    for(uint32_t v=0;v<n;v++)layer[v]=UINT32_MAX;
+    layer[r]=0;
+    for(uint32_t d=0,grew=1;grew;d++){
+      grew=0;
+      for(uint32_t e=0;e<m;e++)if(layer[from[e]]==d && layer[to[e]]==UINT32_MAX){layer[to[e]]=d+1;grew=1;}
+    }
+    for(uint32_t e=0;e<m;e++)if(layer[from[e]]!=UINT32_MAX && layer[to[e]]==layer[from[e]]+1)kept[(size_t)r*m+kept_count[r]++]=e;
+  }
   for(uint32_t r=0;r<n;r++)head[r]=UINT32_MAX;
   const double delta=mesh_graph_exp(-mesh_graph_log(P/(1-eps))/eps);
   double D=0;
   for(uint32_t k=0;k<P;k++){length[k]=delta/capacity[k];D+=length[k]*capacity[k];}
   while(D<1)for(uint32_t r=0;r<n && D<1;r++)for(double demand=rooted(context,r);demand>0 && D<1;){
     for(uint32_t e=0;e<m;e++){weight[e]=0;for(uint32_t i=through[e];i<through[e+1];i++)weight[e]+=length[crossing[i]];}
-    if(mesh_graph_arborescence(n,r,m,from,to,weight,chosen))goto done;
+    if(shallow){
+      const uint32_t *own=kept+(size_t)r*m;
+      for(uint32_t k=0;k<kept_count[r];k++){sub_from[k]=from[own[k]];sub_to[k]=to[own[k]];sub_weight[k]=weight[own[k]];}
+      if(mesh_graph_arborescence(n,r,kept_count[r],sub_from,sub_to,sub_weight,chosen))goto done;
+      for(uint32_t v=0;v<n;v++)if(v!=r)chosen[v]=(int32_t)own[chosen[v]];
+    }
+    else if(mesh_graph_arborescence(n,r,m,from,to,weight,chosen))goto done;
     /* the tree's flow: its demand, at most each directed hop's capacity over the tree's edges crossing it */
     for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++)uses[crossing[i]]++;
     double f=demand;
@@ -808,6 +830,7 @@ uint32_t mesh_graph_pack(uint32_t n, uint32_t m, const uint32_t *from, const uin
 done:
   for(size_t t=0;t<trees;t++)free(packed[t].parent);
   free(packed);free(uses);free(length);free(weight);free(chosen);free(head);free(next);
+  free(kept);free(kept_count);free(layer);free(sub_from);free(sub_to);free(sub_weight);
   return written;
 }
 
