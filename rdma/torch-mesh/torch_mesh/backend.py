@@ -134,27 +134,47 @@ def group_transfers(group, ahead, calls):
     """design/page-maps-2026-11-02.md, integration step 4: the declared group that the occurrence `ahead` lowerings past
     the next one lowers (nccl.h ncclMeshCommDefinitionAhead), read at declaration with no address.
 
-    type: (a ProcessGroupMesh, ahead, its group's call count) -> (definition, records, buffers): records, nccl.h
+    type: (a ProcessGroupMesh, ahead, its group's call count) -> (definition, records, buffers, area): records, nccl.h
     ncclMeshTransferRecord's fields as dicts (op 0 SEND, 1 REDUCE, 2 COPY; buffer 0 the operand with the result made
-    in place); buffers, each call's dict(bytes, initialized, send_origin, result_origin) (ncclMeshCommBuffers)."""
+    in place; a REDUCE's `area` its offset in the landing area); buffers, each call's dict(bytes, owned,
+    initialized, send_origin, result_origin) (ncclMeshCommBuffers); area, the landing area's bytes."""
     which = ffi.new('uint32_t *')
     check(LIB.ncclMeshCommDefinitionAhead(group.comm, ahead, which))
-    count = ffi.new('size_t *')
-    check(LIB.ncclMeshCommTransfers(group.comm, which[0], ffi.NULL, 0, count))
+    count, area = ffi.new('size_t *'), ffi.new('uint64_t *')
+    check(LIB.ncclMeshCommTransfers(group.comm, which[0], ffi.NULL, 0, count, area))
     made = ffi.new('ncclMeshTransferRecord[]', max(1, count[0]))
-    check(LIB.ncclMeshCommTransfers(group.comm, which[0], made, count[0], count))
-    names = ('call', 'channel', 'op', 'round', 'peer', 'buffer', 'offset', 'bytes')
+    check(LIB.ncclMeshCommTransfers(group.comm, which[0], made, count[0], count, area))
+    names = ('call', 'channel', 'op', 'round', 'peer', 'buffer', 'offset', 'bytes', 'area')
     records = [{name: int(getattr(record, name)) for name in names} for record in made[0:count[0]]]
     buffers = []
     for call in range(calls):
         n, initialized = ffi.new('uint32_t *'), ffi.new('uint32_t *')
         send, result = ffi.new('uint64_t *'), ffi.new('uint64_t *')
-        check(LIB.ncclMeshCommBuffers(group.comm, which[0], call, ffi.NULL, 0, n, initialized, send, result))
-        sizes = ffi.new('uint64_t[]', max(1, n[0]))
-        check(LIB.ncclMeshCommBuffers(group.comm, which[0], call, sizes, n[0], n, initialized, send, result))
-        buffers.append(dict(bytes=tuple(int(b) for b in sizes[0:n[0]]), initialized=int(initialized[0]),
-                            send_origin=int(send[0]), result_origin=int(result[0])))
-    return int(which[0]), records, buffers
+        check(LIB.ncclMeshCommBuffers(group.comm, which[0], call, ffi.NULL, ffi.NULL, 0, n, initialized, send, result))
+        sizes, owned = ffi.new('uint64_t[]', max(1, n[0])), ffi.new('unsigned char[]', max(1, n[0]))
+        check(LIB.ncclMeshCommBuffers(group.comm, which[0], call, sizes, owned, n[0], n, initialized, send, result))
+        buffers.append(dict(bytes=tuple(int(b) for b in sizes[0:n[0]]), owned=tuple(bool(o) for o in owned[0:n[0]]),
+                            initialized=int(initialized[0]), send_origin=int(send[0]), result_origin=int(result[0])))
+    return int(which[0]), records, buffers, int(area[0])
+
+
+def own_values(group, definition, buffers, area, page_bytes):
+    """design/page-maps-2026-11-02.md, integration step 4: a declared group's own buffers and landing area as values,
+    each over a space of its own, named to the library once (ncclMeshCommOwnSpace, ncclMeshCommAreaSpace) and placed by
+    the run's solve per occurrence like any value. type: -> ({(call, buffer): TensorValue}, the area's TensorValue or
+    None)."""
+    from .operand import TensorValue
+    own = {}
+    for call, made in enumerate(buffers):
+        for b, (size, owned) in enumerate(zip(made['bytes'], made['owned'])):
+            if owned and size:
+                value = own[call, b] = TensorValue.virtual(size, page_bytes)
+                check(LIB.ncclMeshCommOwnSpace(group.comm, definition, call, b, space_handle(value.space)))
+    landing = None
+    if area:
+        landing = TensorValue.virtual(area, page_bytes)
+        check(LIB.ncclMeshCommAreaSpace(group.comm, definition, space_handle(landing.space)))
+    return own, landing
 
 
 def _operand(value):

@@ -2362,6 +2362,9 @@ struct call {
   struct write_binding *write_binding;
   struct routing *routing; /* borrowed from the compiled group */
   uint32_t routing_scope; /* explicit preparation choice scope */
+  /* each own buffer's space (ncclMeshCommOwnSpace), a deferred definition's: the run's solve's pages, bound per
+     occurrence; the definition's array, which its issues' copies of the call borrow */
+  struct ncclMeshSpace **own_space;
 };
 
 static ncclResult_t write_binding_prepare(struct call *c, const ncclMeshCall *d, uint64_t invocations);
@@ -3962,7 +3965,8 @@ struct compiled { struct call *calls; size_t n; uint64_t repeat, identity; struc
                   struct issue **laid; size_t laid_count, laid_room; struct routing *routing;
                   /* design/page-maps-2026-11-02.md, integration step 1: a call names a space, so nothing is laid at
                      declaration; each occurrence lays its own issue once its spaces are bound (zorvek) */
-                  int deferred; };
+                  int deferred;
+                  struct ncclMeshSpace *area_space; /* its landing area's space (ncclMeshCommAreaSpace) */ };
 /* a definition dropped: its laid issues freed, their pages back to the region */
 static void calls_free(struct call *list, size_t n);
 static void issue_free(struct ncclComm *comm, struct issue *u);
@@ -4157,13 +4161,18 @@ void metal_piece_give(void *piece) {
    calls' buffers that are the communicator's (generation_buffer, read on x's own calls: an issued call keeps its roles
    alone, never its declaration's recipients; a write's none), each laid from *base where given (st->buffer), then its
    landing area (*area, where given), a page for each combine's landing of `plans`; its bytes */
+/* whether call c's buffer b is the collective's own, not an operand's (slot_laid's rule, read by ncclMeshCommBuffers) */
+static int own_buffer(const struct ncclComm *comm, const struct call *c, uint32_t b) {
+  const struct steps *st = c->bound;
+  return st && !c->target && generation_buffer(c, (uint32_t)comm->rank, b) && !(!b && st->partial);
+}
 static size_t slot_laid(const struct ncclComm *comm, const struct compiled *x, const struct call *list, size_t n,
                         const struct schedule *plans, const struct where *base, struct where *area) {
   size_t used = 0;
   for (size_t i = 0; i < n; i++)
     for (uint32_t b = 0, z = (uint32_t)SIZE[list[i].type]; list[i].bound && b < list[i].bound->buffers; b++) {
       struct steps *st = list[i].bound;
-      if (list[i].target || !generation_buffer(x->calls + i, (uint32_t)comm->rank, b) || (!b && st->partial)) continue;
+      if (!own_buffer(comm, x->calls + i, b)) continue;
       if (base) st->buffer[b] = shifted(*base, used);
       used += page_up(b < st->initialized ? elements(list + i) * z : st->extent[b], comm->page);
     }
@@ -4177,6 +4186,20 @@ static size_t slot_laid(const struct ncclComm *comm, const struct compiled *x, c
    construction cuts their actual registration boundaries before execution. */
 static ncclResult_t zappo(struct ncclComm *comm, struct compiled *x, struct issue *u, struct call *list, size_t n,
                           struct where *area) {
+  if (x->deferred) {
+    /* design/page-maps-2026-11-02.md, integration step 4: its own buffers and its landing area lie in spaces the run's
+       solve placed and the lowering bound to this occurrence's pages; nothing is allocated here */
+    u->base = (struct where){0}; u->bytes = 0;
+    for (size_t i = 0; i < n; i++)
+      for (uint32_t b = 0; list[i].bound && b < list[i].bound->buffers; b++) {
+        if (!own_buffer(comm, x->calls + i, b)) continue;
+        if (!list[i].own_space || !list[i].own_space[b])
+          return fail(ncclInvalidUsage, "a call's own buffer %u has no space (ncclMeshCommOwnSpace)", b);
+        list[i].bound->buffer[b] = (struct where){NULL, 0, list[i].own_space[b]};
+      }
+    *area = (struct where){NULL, 0, x->area_space};
+    return ncclSuccess;
+  }
   const size_t zirn = page_up(slot_laid(comm, x, list, n, u->plans, NULL, NULL), comm->page);
   if (!zirn) { u->base = (struct where){0}; u->bytes = 0; *area = u->base; return ncclSuccess; }
   ncclResult_t result = mem_alloc(&u->zeeb, zirn, MESH_BACKING_LINEAR);
@@ -5031,6 +5054,7 @@ static void calls_free(struct call *list, size_t n) {
     write_binding_drop(list[i].write_binding);
     free(list[i].segments); free(list[i].matrix); free(list[i].contributors); free(list[i].recipients); free(list[i].production);
     free(list[i].coverage);
+    free(list[i].own_space);
   }
   free(list);
 }
@@ -5944,6 +5968,33 @@ ncclResult_t ncclMeshCommLower(ncclComm_t comm,uint64_t invocation,uint32_t poll
   return result;
 }
 
+/* nccl.h ncclMeshCommOwnSpace */
+ncclResult_t ncclMeshCommOwnSpace(ncclComm_t comm, uint32_t group, uint32_t call, uint32_t buffer,
+                                  struct ncclMeshSpace *space) {
+  if (!comm || !space) return fail(ncclInvalidArgument, "name a call's own buffer's space");
+  pthread_mutex_lock(&group_lock);
+  struct plan *made = comm->plan;
+  struct compiled *x = made && group < made->view.groups ? made->group + group : NULL;
+  struct call *c = x && call < x->n ? x->calls + call : NULL;
+  ncclResult_t result = c && c->bound && buffer < c->bound->buffers && own_buffer(comm, c, buffer) ? ncclSuccess
+                        : fail(ncclInvalidUsage, "a space for buffer %u, which is not the call's own", buffer);
+  if (!result && !c->own_space && !(c->own_space = calloc(c->bound->buffers, sizeof *c->own_space)))
+    result = fail(ncclSystemError, "allocating a call's own spaces");
+  if (!result) c->own_space[buffer] = space;
+  pthread_mutex_unlock(&group_lock);
+  return result;
+}
+/* nccl.h ncclMeshCommAreaSpace */
+ncclResult_t ncclMeshCommAreaSpace(ncclComm_t comm, uint32_t group, struct ncclMeshSpace *space) {
+  if (!comm || !space) return fail(ncclInvalidArgument, "name a group's landing area's space");
+  pthread_mutex_lock(&group_lock);
+  struct plan *made = comm->plan;
+  struct compiled *x = made && group < made->view.groups ? made->group + group : NULL;
+  ncclResult_t result = x ? ncclSuccess : fail(ncclInvalidUsage, "a landing area's space needs its plan");
+  if (x) x->area_space = space;
+  pthread_mutex_unlock(&group_lock);
+  return result;
+}
 /* nccl.h ncclMeshCommDefinitionAhead */
 ncclResult_t ncclMeshCommDefinitionAhead(ncclComm_t comm, uint64_t ahead, uint32_t *group) {
   if (!comm || !group) return fail(ncclInvalidArgument, "read an occurrence's definition into a group");
@@ -5956,30 +6007,36 @@ ncclResult_t ncclMeshCommDefinitionAhead(ncclComm_t comm, uint64_t ahead, uint32
 }
 /* nccl.h ncclMeshCommTransfers: compile_group's schedules (x->plans), read as declared */
 ncclResult_t ncclMeshCommTransfers(ncclComm_t comm, uint32_t group, ncclMeshTransferRecord *records, size_t capacity,
-                                   size_t *count) {
-  if (!comm || !count) return fail(ncclInvalidArgument, "read a group's transfers into a count");
+                                   size_t *count, uint64_t *area_bytes) {
+  if (!comm || !count || !area_bytes) return fail(ncclInvalidArgument, "read a group's transfers into a count and area");
   pthread_mutex_lock(&group_lock);
   const struct plan *made = comm->plan;
   ncclResult_t result = made && group < made->view.groups ? ncclSuccess
                         : fail(ncclInvalidUsage, "a declared group's transfers need its plan (ncclMeshCommPlan)");
   size_t n = 0;
+  uint64_t area = 0;
   const struct compiled *x = result ? NULL : made->group + group;
+  /* place_data's order: each channel's SENDs, then its landings, a REDUCE's piece next in the area */
   for (uint32_t h = 0; x && x->plans && h < comm->count; h++)
     for (int send = 1; send >= 0; send--)
       for (size_t k = 0; k < (send ? x->plans[h].outs : x->plans[h].ins); k++, n++) {
         const struct message *m = (send ? x->plans[h].out : x->plans[h].in) + k;
         const struct mesh_step *step = m->c->bound ? m->c->bound->steps + m->step : NULL;
+        const int reduce = !send && step && step->op == MESH_STEP_REDUCE;
         if (n < capacity && step)
           records[n] = (ncclMeshTransferRecord){(uint32_t)(m->c - x->calls), h, step->op, step->round, step->peer,
-                                                step->buffer, m->offset, m->bytes};
+                                                step->buffer, m->offset, m->bytes, reduce ? area : UINT64_MAX};
+        if (reduce) area += page_up(m->bytes, comm->page);
       }
   *count = n;
+  *area_bytes = area;
   pthread_mutex_unlock(&group_lock);
   return result;
 }
 /* nccl.h ncclMeshCommBuffers: slot_laid's extents, the operand's own first */
-ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, uint32_t capacity,
-                                 uint32_t *count, uint32_t *initialized, uint64_t *send_origin, uint64_t *result_origin) {
+ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, unsigned char *owned,
+                                 uint32_t capacity, uint32_t *count, uint32_t *initialized, uint64_t *send_origin,
+                                 uint64_t *result_origin) {
   if (!comm || !count || !initialized || !send_origin || !result_origin)
     return fail(ncclInvalidArgument, "read a call's buffers into a count and origins");
   pthread_mutex_lock(&group_lock);
@@ -5990,8 +6047,10 @@ ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call,
   ncclResult_t result = st ? ncclSuccess : fail(ncclInvalidUsage, "a declared call's buffers need its compiled steps");
   *count = st ? st->buffers : 0;
   *initialized = st ? st->initialized : 0;
-  for (uint32_t b = 0; st && b < st->buffers && b < capacity; b++)
+  for (uint32_t b = 0; st && b < st->buffers && b < capacity; b++) {
     bytes[b] = b < st->initialized ? elements(c) * SIZE[c->type] : st->extent[b];
+    owned[b] = (unsigned char)own_buffer(comm, c, b);
+  }
   /* plan_direct's: an all-gather's send operand is its own segment of the result; a reduce-scatter's result is its
      segment of the whole (result_of) */
   size_t length = 0;

@@ -68,45 +68,79 @@ def _value_bytes(value, first, count):
 
 
 def _transfer_accesses(t, transfer, post_key):
-    """type: a transfer occurrence (order, invocation, records, buffers, views) -> its accesses (semantic key, begin key,
-    end key, mode, root, invocation, first byte, bytes) and links (from key, to key) on its operands' values, with the
-    routed buffer 0 read as versions (design/page-maps-2026-11-02.md, step 4): a SEND of buffer-0 bytes no earlier
-    step of the call wrote reads the send operand, else the result; a COPY writes the result over [post, landed]; a
-    REDUCE combines into the result once landed. The collective's own buffers are its own until it declares them."""
+    """type: a transfer occurrence (order, invocation, records, buffers, views, own, area) -> its accesses (semantic key,
+    begin key, end key, mode, root, invocation, first byte, bytes) and links (from key, to key), with the routed
+    buffers read as versions and items (design/page-maps-2026-11-02.md, step 4):
+    - an own buffer (scratch, relays, a non-recipient's or a reduce-scatter's operand) is its own value; one below
+      `initialized` is the operand's copy made at the call's start;
+    - a non-own buffer 0 is the operands: a SEND of bytes no earlier round wrote reads the send operand, else the result;
+    - a SEND reads over [SEND, completion]; a COPY writes over [post, landed]; a REDUCE lands in the landing area over
+      [post, landed] and its sum, once landed, reads that piece and combines it into its buffer."""
     P, invocation = transfer['order'], transfer['invocation']
+    own, area = transfer.get('own', {}), transfer.get('area')
     accesses, links = [], []
+
+    def access(key, begin, end, mode, value, first, count):
+        placed = _value_bytes(value, first, count)
+        if placed is not None:
+            accesses.append((key, begin, end, mode, placed[0], invocation, placed[1], placed[2]))
+
+    for (call, b), value in sorted(own.items()):
+        made = transfer['buffers'][call]
+        if b < made['initialized']:
+            copy = (P, 0, t, -(1 + call * 64 + b))
+            source = transfer['views'][call][0]
+            if source is not None:
+                access(copy, copy, copy, 1, source, 0, made['bytes'][b])
+            access(copy, copy, copy, 2, value, 0, made['bytes'][b])
     written = {}
     for r in transfer['records']:
-        if r['buffer'] == 0 and r['op'] != _SEND:
-            written.setdefault(r['call'], []).append((r['round'], r['offset'], r['offset'] + r['bytes']))
-    for k, r in enumerate(transfer['records']):
-        if r['buffer'] != 0 or not r['bytes']:
-            continue
+        if r['op'] != _SEND:
+            written.setdefault((r['call'], r['buffer']), []).append((r['round'], r['offset'], r['offset'] + r['bytes']))
+
+    def buffer_parts(r, lo, hi, reading):
+        """the (value, first byte within it, bytes) of [lo, hi) of record r's buffer: an own buffer's value, or buffer 0
+        as the operands' versions"""
+        if (r['call'], r['buffer']) in own:
+            return [(own[r['call'], r['buffer']], lo, hi - lo)]
+        if r['buffer'] != 0:
+            return []
         source, destination = transfer['views'][r['call']]
         origins = transfer['buffers'][r['call']]
+        if not reading:
+            return [(destination, lo - origins['result_origin'], hi - lo)]
+        earlier = [(a, b) for round_, a, b in written.get((r['call'], 0), ()) if round_ < r['round']]
+        cuts = sorted({lo, hi} | {x for a, b in earlier for x in (a, b) if lo < x < hi})
+        parts = []
+        for a, b in zip(cuts, cuts[1:]):
+            done = any(w0 <= a and b <= w1 for w0, w1 in earlier)
+            value, origin = ((destination, origins['result_origin']) if done or source is None
+                             else (source, origins['send_origin']))
+            parts.append((value, a - origin, b - a))
+        return parts
+
+    for k, r in enumerate(transfer['records']):
+        if not r['bytes']:
+            continue
         lo, hi = r['offset'], r['offset'] + r['bytes']
         if r['op'] == _SEND:
             begin, end = (P, 1, t, k), (P, 3, t, k)
             links.append((begin, end))
-            # the parts of [lo, hi) an earlier round of this call wrote are the result's; the rest the send operand's
-            cuts = sorted({lo, hi} | {x for round_, a, b in written.get(r['call'], ()) if round_ < r['round']
-                                      for x in (a, b) if lo < x < hi})
-            for a, b in zip(cuts, cuts[1:]):
-                done = any(round_ < r['round'] and w0 <= a and b <= w1 for round_, w0, w1 in written.get(r['call'], ()))
-                value, origin = ((destination, origins['result_origin']) if done or source is None
-                                 else (source, origins['send_origin']))
-                placed = _value_bytes(value, a - origin, b - a)
-                if placed is not None:
-                    accesses.append(((P, 1, t, k), begin, end, 1, placed[0], invocation, placed[1], placed[2]))
-        else:
-            post, landed = post_key(invocation, t, k), (P, 2, t, k)
-            links.append((post, landed))
-            placed = _value_bytes(destination, lo - origins['result_origin'], hi - lo)
-            if placed is not None:
-                if r['op'] == _COPY:
-                    accesses.append(((P, 2, t, k), post, landed, 2, placed[0], invocation, placed[1], placed[2]))
-                else:
-                    accesses.append(((P, 2, t, k), landed, landed, 3, placed[0], invocation, placed[1], placed[2]))
+            for value, first, count in buffer_parts(r, lo, hi, True):
+                access((P, 1, t, k), begin, end, 1, value, first, count)
+            continue
+        post, landed = post_key(invocation, t, k), (P, 2, t, k)
+        links.append((post, landed))
+        if r['op'] == _COPY:
+            for value, first, count in buffer_parts(r, lo, hi, False):
+                access((P, 2, t, k), post, landed, 2, value, first, count)
+            continue
+        # a REDUCE: its piece lands in the area, then its sum combines it into the buffer
+        if area is not None and r['area'] != (1 << 64) - 1:
+            access((P, 2, t, k), post, landed, 2, area, r['area'], r['bytes'])
+            access((P, 4, t, k), landed, landed, 1, area, r['area'], r['bytes'])
+        for value, first, count in buffer_parts(r, lo, hi, False):
+            access((P, 4, t, k), landed, landed, 3, value, first, count)
     return accesses, links
 
 
@@ -602,9 +636,17 @@ class Plan:
             ahead[handle] = behind + 1
             if step['transfer'] != 'collective':
                 continue
-            _, records, buffers = group_transfers(step['group'], behind, len(step['calls']))
+            definition, records, buffers, area = group_transfers(step['group'], behind, len(step['calls']))
+            # each definition's own buffers and landing area, values made and named to the library once
+            from .backend import own_values
+            if not hasattr(self, 'own'):
+                self.own = {}
+            if (handle, definition) not in self.own:
+                self.own[handle, definition] = own_values(step['group'], definition, buffers, area,
+                                                          _stream.region_page_bytes())
+            own, landing = self.own[handle, definition]
             transfers.append(dict(order=2 * index, invocation=step.get('run_invocation', 0), records=records,
-                                  buffers=buffers, views=step['views']))
+                                  buffers=buffers, views=step['views'], own=own, area=landing, step=index))
         # values carry no binding phase, so the plan has one variant, and its cuts are the collective's declared ones,
         # read without lowering (design/page-maps-2026-11-02.md, integration steps 1 and 2)
         phase = ()
@@ -641,6 +683,8 @@ class Plan:
         for transfer in transfers:
             for pair in transfer['views']:
                 spaces.update((value.space.serial, value.space) for value in pair if isinstance(value, TensorValue))
+            for value in (*transfer['own'].values(), *((transfer['area'],) if transfer['area'] is not None else ())):
+                spaces[value.space.serial] = value.space
         self.assignments.append(assign_pages(descriptions, invocation_of, spaces, transfers))
         programs = source_copy(retained)
         # the final lowering: every value operand a storage view at its occurrence (lowering.lower_programs)
@@ -658,6 +702,8 @@ class Plan:
                 bound = _stream.view_write_operands(step['bindings'], step['group'].handle, 0)
             else:
                 values = [value for pair in step['views'] for value in pair if value is not None]
+                mine = next(transfer for transfer in transfers if transfer['step'] == index)
+                values += [*mine['own'].values(), *((mine['area'],) if mine['area'] is not None else ())]
                 held = bind_spaces(values, step.get('run_invocation', 0), self.assignments[-1], arena)
                 operands = [operand for operand in step['operands'] if not isinstance(operand, TensorValue)] + held
                 bound = _stream.Occurrence(step['group'].handle, operands)

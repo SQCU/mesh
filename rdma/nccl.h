@@ -979,19 +979,30 @@ ncclResult_t ncclMeshSpaceDestroy(ncclMeshSpace_t space);
    [offset, offset + bytes) of that buffer it moves. A SEND reads them from its issue to its completion; a COPY writes
    them from its receive's post until it lands; a REDUCE lands them in pages of its own, then its sum combines them
    into the buffer. Writes `count` records up to `capacity`.
-   ncclMeshCommBuffers: call `call`'s buffers' bytes (buffer 0 the operand's), `initialized` the number that are the
+   ncclMeshCommBuffers: call `call`'s buffers' bytes (buffer 0 the operand's), `owned` those that are the collective's
+   own rather than an operand's (slot_laid's rule: scratch, relays, a non-recipient's or a reduce-scatter's operand),
+   `initialized` the number that are the
    operand's copies made at the call's start (relay buffers follow them), up to `capacity`; and where in buffer 0 the
    send operand's first byte sits (an all-gather's own segment) and the receive operand's (a reduce-scatter's), so a
    record's buffer-0 bytes name the operands' own. */
-typedef struct { uint32_t call, channel, op, round, peer, buffer; uint64_t offset, bytes; } ncclMeshTransferRecord;
+/* A REDUCE lands in the group's landing area at `area` (UINT64_MAX for every other record), its pieces in record
+   order, each rounded up to the communicator's page; ncclMeshCommTransfers' *area_bytes is the area's extent (0: none).
+   ncclMeshCommOwnSpace and ncclMeshCommAreaSpace: the space a call's own buffer (one ncclMeshCommBuffers reports
+   `owned`) and the group's landing area lie in. A definition naming spaces then allocates neither: each occurrence's
+   are the run's solve's, bound before it lowers (design/page-maps-2026-11-02.md, integration step 4). */
+typedef struct { uint32_t call, channel, op, round, peer, buffer; uint64_t offset, bytes, area; } ncclMeshTransferRecord;
 /* ncclMeshCommDefinitionAhead: the declared group (an index of the plan's groups) that the occurrence `ahead` lowerings
    past the next one will lower, by the plan's own order (definition_at), so the run's solve reads each occurrence's
    transfers before any is lowered. */
 ncclResult_t ncclMeshCommDefinitionAhead(ncclComm_t comm, uint64_t ahead, uint32_t *group);
 ncclResult_t ncclMeshCommTransfers(ncclComm_t comm, uint32_t group, ncclMeshTransferRecord *records, size_t capacity,
-                                   size_t *count);
-ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, uint32_t capacity,
-                                 uint32_t *count, uint32_t *initialized, uint64_t *send_origin, uint64_t *result_origin);
+                                   size_t *count, uint64_t *area_bytes);
+ncclResult_t ncclMeshCommOwnSpace(ncclComm_t comm, uint32_t group, uint32_t call, uint32_t buffer,
+                                  struct ncclMeshSpace *space);
+ncclResult_t ncclMeshCommAreaSpace(ncclComm_t comm, uint32_t group, struct ncclMeshSpace *space);
+ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, unsigned char *owned,
+                                 uint32_t capacity, uint32_t *count, uint32_t *initialized, uint64_t *send_origin,
+                                 uint64_t *result_origin);
 ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
     int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
     uint64_t* occurrence);
