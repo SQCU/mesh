@@ -844,6 +844,77 @@ void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *ro
     }
 }
 
+/* mesh-graph.h mesh_graph_tree_depth */
+uint32_t mesh_graph_tree_depth(uint32_t vertices, uint32_t root, const uint32_t *parent){
+  size_t *first=calloc((size_t)vertices+1,sizeof *first);
+  uint32_t *head=malloc(((size_t)vertices+1)*sizeof *head),*depth=malloc(((size_t)vertices+1)*sizeof *depth),most=UINT32_MAX;
+  unsigned char *marked=malloc((size_t)vertices+1);
+  if(first && head && depth && marked){
+    for(uint32_t v=0;v<vertices;v++){
+      first[v+1]=first[v];marked[v]=parent[v]!=UINT32_MAX;
+      if(v!=root && parent[v]!=UINT32_MAX)head[first[v+1]++]=parent[v];
+    }
+    if(!mesh_graph_depth(vertices,first,head,marked,depth)){
+      most=0;
+      for(uint32_t v=0;v<vertices;v++)if(marked[v] && depth[v]>most)most=depth[v];
+    }
+  }
+  free(first);free(head);free(depth);free(marked);
+  return most;
+}
+/* mesh-graph.h mesh_graph_trees_rate */
+double mesh_graph_trees_rate(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
+                             const double *weight, const double *capacity){
+  double *load=calloc((size_t)vertices*vertices+1,sizeof *load),rate=INFINITY;
+  if(!load)return 0;
+  mesh_graph_tree_loads(vertices,trees,root,parent,weight,load);
+  for(size_t e=0;e<(size_t)vertices*vertices;e++)if(load[e]>0){
+    if(!(capacity[e]>0)){rate=0;break;}
+    if(capacity[e]/load[e]<rate)rate=capacity[e]/load[e];
+  }
+  free(load);
+  return isfinite(rate)?rate:0;
+}
+/* mesh-graph.h mesh_graph_fill: the least time T at which the parts' units by T, floor((T - latency) rate) each,
+   reach `units` (a bisection on T), then the units past `units` taken back from the parts whose last finishes
+   latest */
+double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count){
+  for(uint32_t p=0;p<parts;p++)count[p]=0;
+  if(!units || !parts)return 0;
+  double lo=INFINITY,hi=0;
+  for(uint32_t p=0;p<parts;p++)if(rate[p]>0){
+    if(latency[p]<lo)lo=latency[p];
+    const double alone=latency[p]+(double)units/rate[p];
+    if(!(hi>0) || alone<hi)hi=alone;
+  }
+  if(!isfinite(lo))return INFINITY;
+#define MESH_FILL_BY(T) ({ uint64_t n_=0; for(uint32_t p_=0;p_<parts;p_++) if(rate[p_]>0 && (T)>latency[p_]) \
+    n_+=(uint64_t)floor(((T)-latency[p_])*rate[p_]); n_; })
+  for(int i=0;i<200 && hi-lo>0;i++){
+    const double mid=lo+(hi-lo)/2;
+    if(mid<=lo || mid>=hi)break;
+    if(MESH_FILL_BY(mid)>=units)hi=mid;else lo=mid;
+  }
+#undef MESH_FILL_BY
+  uint64_t total=0;
+  for(uint32_t p=0;p<parts;p++)
+    if(rate[p]>0 && hi>latency[p]){count[p]=(uint64_t)floor((hi-latency[p])*rate[p]);total+=count[p];}
+  /* rounding at the bisection's end: the units short given where each would finish soonest */
+  while(total<units){
+    uint32_t best=UINT32_MAX;double soon=INFINITY;
+    for(uint32_t p=0;p<parts;p++)if(rate[p]>0 && latency[p]+(double)(count[p]+1)/rate[p]<soon){soon=latency[p]+(double)(count[p]+1)/rate[p];best=p;}
+    count[best]++;total++;
+  }
+  while(total>units){
+    uint32_t worst=UINT32_MAX;double late=-INFINITY;
+    for(uint32_t p=0;p<parts;p++)if(count[p] && latency[p]+(double)count[p]/rate[p]>late){late=latency[p]+(double)count[p]/rate[p];worst=p;}
+    count[worst]--;total--;
+  }
+  double end=0;
+  for(uint32_t p=0;p<parts;p++)if(count[p] && latency[p]+(double)count[p]/rate[p]>end)end=latency[p]+(double)count[p]/rate[p];
+  return end;
+}
+
 /* mesh-graph.h mesh_graph_settle */
 size_t mesh_graph_settle(void **items, size_t count, int (*take)(void *consumer, void *item), void *consumer) {
   for (int taken = 1; taken && count;) {

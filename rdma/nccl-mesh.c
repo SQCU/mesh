@@ -198,18 +198,19 @@ static void program_free(struct mesh_program *program) {
 }
 
 static void trees_free(struct mesh_trees *trees) {
-  free((void *)trees->root); free((void *)trees->parent); free((void *)trees->log_weight);
+  free((void *)trees->root); free((void *)trees->parent); free((void *)trees->log_weight); free((void *)trees->latency);
   *trees = (struct mesh_trees){0};
 }
 
 /* trees' own copy into `made` (its arrays allocated even for none); 0, or ENOMEM */
 static int trees_copy(struct mesh_trees *made, const struct mesh_trees *from) {
   uint32_t *root = calloc(from->count + 1, sizeof *root), *parent = calloc((size_t)from->count * from->nodes + 1, sizeof *parent);
-  double *weight = calloc(from->count + 1, sizeof *weight);
-  *made = (struct mesh_trees){from->nodes, from->count, root, parent, weight};
-  if (!root || !parent || !weight) return ENOMEM;
+  double *weight = calloc(from->count + 1, sizeof *weight), *latency = from->latency ? calloc(from->count + 1, sizeof *latency) : NULL;
+  *made = (struct mesh_trees){from->nodes, from->count, root, parent, weight, latency, from->rate};
+  if (!root || !parent || !weight || (from->latency && !latency)) return ENOMEM;
   if (from->count) {
     memcpy(root, from->root, from->count * sizeof *root); memcpy(weight, from->log_weight, from->count * sizeof *weight);
+    if (latency) memcpy(latency, from->latency, from->count * sizeof *latency);
     memcpy(parent, from->parent, (size_t)from->count * from->nodes * sizeof *parent);
   }
   return 0;
@@ -2226,27 +2227,47 @@ ncclResult_t ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId *uniqueId) {
    SEND of bytes an earlier COPY landed is gated on that landing (zirrupel, the bridge's forward), with no release. */
 #define MESH_TREE_EPS 0.1 /* Garg and Konemann's eps for the trees (mesh-plan.h mesh_trees_pack): a choice to measure */
 #define MESH_TREES_MOST 4 /* each root's heaviest trees kept */
-/* The communicator's trees are each root's shortest-path ones (mesh-graph.h mesh_graph_pack `shallow`). A segment under
-   a page goes whole onto its root's heaviest tree, and a hop costs a relay about 110-140 us from its landing to its
-   SEND's completion (metal-microbench docs/facts.md, run-22), so a tick's gather costs its deepest tree's hops: the
-   unrestricted packing's heaviest trees were 3 and 4 deep on the five members' 13 cables, where every root reaches
-   every rank in 2. On those cables the shallow packing also carries more: the all-gather's bandwidth-bound rate into a
-   rank 26.7 GB/s against 25.2 (the Mini's three cables bound it at 30), computed from both packings' trees, shares and
-   the cables' rates. */
-
+#define MESH_HOP_NS 8200.0 /* a hop's price: a release to its landing one-way, 8.2 us (metal-microbench docs/measurement.md u4) */
+/* The communicator's trees: both of the map's packings, the unrestricted one and each root's shortest-path one
+   (mesh-graph.h mesh_graph_pack `shallow`), each root's shares halved (the two flows' mean, a flow the links carry),
+   every tree priced at its depth's hops (mesh_graph_tree_depth x MESH_HOP_NS) and the trees' joint rate from the
+   cables' bandwidths (mesh_graph_trees_rate). A call's segment is then cut over its root's trees by earliest finish
+   (mesh-plan.h struct mesh_trees): a unit takes the tree it lands soonest by, many spread over every route.
+   Changed from f6d9ad29, the shortest-path trees alone, which left routes unused (m5ult2 -> Mini at 0.67 of the
+   busiest direction while m5ult1 -> Mini and m5ult3 -> Mini were full) and so a long transfer slower: what must stay
+   is a small segment's unit on a shortest tree (run-23: 575 -> 231-255 us a tick, a sub-page segment on a 3-4 deep
+   tree before), which the earliest-finish cut keeps. */
 static ncclResult_t comm_trees(ncclComm_t comm) {
   if (comm->trees.count) return ncclSuccess;
-  const uint32_t nodes = comm->map.nodes, most = nodes * MESH_TREES_MOST;
-  uint32_t *root = calloc(most, sizeof *root), *parent = calloc((size_t)most * nodes, sizeof *parent);
-  double *weight = calloc(most, sizeof *weight);
-  const uint32_t count = root && parent && weight ?
-      mesh_trees_pack(&comm->map, NULL, MESH_TREE_EPS, MESH_TREES_MOST, 1, root, parent, weight) : 0;
+  const uint32_t nodes = comm->map.nodes, most = nodes * MESH_TREES_MOST, all = 2 * most;
+  uint32_t *root = calloc(all + 1, sizeof *root), *parent = calloc((size_t)all * nodes + 1, sizeof *parent), count = 0;
+  double *weight = calloc(all + 1, sizeof *weight), *latency = calloc(all + 1, sizeof *latency);
+  double *share = calloc(all + 1, sizeof *share), *capacity = calloc((size_t)nodes * nodes + 1, sizeof *capacity);
+  if (root && parent && weight && latency && share && capacity)
+    for (int shallow = 0; shallow < 2; shallow++) {
+      const uint32_t made = mesh_trees_pack(&comm->map, NULL, MESH_TREE_EPS, MESH_TREES_MOST, shallow, root + count,
+                                            parent + (size_t)count * nodes, weight + count);
+      if (!made) { count = 0; break; }
+      count += made;
+    }
   if (!count) {
-    free(root); free(parent); free(weight);
-    return fail(root && parent && weight ? ncclInvalidUsage : ncclSystemError,
-                "the communicator's trees (mesh-plan.h mesh_trees_pack: its map joins its ranks)");
+    free(root); free(parent); free(weight); free(latency); free(share); free(capacity);
+    return fail(ncclInvalidUsage, "the communicator's trees (mesh-plan.h mesh_trees_pack: its map joins its ranks)");
   }
-  comm->trees = (struct mesh_trees){nodes, count, root, parent, weight};
+  for (uint32_t t = 0; t < count; t++) {
+    weight[t] += mesh_graph_log(0.5);
+    share[t] = mesh_graph_exp(weight[t]);
+    latency[t] = mesh_graph_tree_depth(nodes, root[t], parent + (size_t)t * nodes) * MESH_HOP_NS;
+  }
+  for (uint32_t l = 0; l < comm->map.links; l++) {
+    const uint32_t a = comm->map.link[l][0], b = comm->map.link[l][1];
+    if (a >= nodes || b >= nodes || a == b) continue;
+    const double bytes_a_ns = (double)comm->map.bandwidth[l] / 8e9;
+    capacity[(size_t)a * nodes + b] += bytes_a_ns; capacity[(size_t)b * nodes + a] += bytes_a_ns;
+  }
+  const double rate = mesh_graph_trees_rate(nodes, count, root, parent, share, capacity);
+  free(share); free(capacity);
+  comm->trees = (struct mesh_trees){nodes, count, root, parent, weight, latency, rate};
   return ncclSuccess;
 }
 
@@ -2275,11 +2296,11 @@ ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *call
     uint32_t parts = 0, moves = 0;
     mesh_compile_room(&comm->trees, &parts, &moves);
     uint32_t *segment = calloc(parts + 1, sizeof *segment), *first = calloc((size_t)comm->map.nodes + 1, sizeof *first);
-    double *weight = calloc(parts + 1, sizeof *weight);
+    double *weight = calloc(parts + 1, sizeof *weight), *latency = calloc(parts + 1, sizeof *latency);
     struct mesh_move *move = calloc(moves + 1, sizeof *move);
     struct mesh_program program;
-    if (!segment || !first || !weight || !move) result = fail(ncclSystemError, "a call's program memory");
-    else if (mesh_compile(&comm->trees, call->what, call->root, 0, NULL, &program, segment, weight, first, move))
+    if (!segment || !first || !weight || !latency || !move) result = fail(ncclSystemError, "a call's program memory");
+    else if (mesh_compile(&comm->trees, call->what, call->root, 0, NULL, &program, segment, weight, first, move, latency))
       result = fail(ncclInvalidArgument, "call %zu: no program for its collective (mesh-plan.h mesh_compile)", k);
     else {
       const size_t room = (size_t)(first[comm->rank + 1] - first[comm->rank]) * program.parts;
@@ -2303,7 +2324,7 @@ ncclResult_t ncclMeshCommDeclare(ncclComm_t comm, const ncclMeshCollective *call
         d->steps += made;
       }
     }
-    free(segment); free(first); free(weight); free(move);
+    free(segment); free(first); free(weight); free(latency); free(move);
   }
   if (result) { free(d->call); free(d->step); free(d->step_call); free(d); return result; }
   d->id = ++comm->definitions;

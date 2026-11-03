@@ -213,6 +213,20 @@ uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from
    vertices x vertices, added to. */
 void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
                            const double *weight, double *load);
+/* A tree's depth (its root root, parents parent[..], a vertex off it UINT32_MAX): the most edges from the root to a
+   vertex on it, mesh_graph_depth's over each vertex's parent; UINT32_MAX where its parents hold a cycle */
+uint32_t mesh_graph_tree_depth(uint32_t vertices, uint32_t root, const uint32_t *parent);
+/* The rate every root gets at once where each root's flow is cut over its trees by their weights (weights a root's
+   summing to one): the least, over directed edges u -> v, of capacity[u * vertices + v] over the trees' load there
+   (mesh_graph_tree_loads), in capacity's units; 0 where an edge a tree crosses has no capacity. */
+double mesh_graph_trees_rate(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
+                             const double *weight, const double *capacity);
+/* `units` equal units over `parts` parallel routes by earliest finish: part p takes its first unit latency[p] after
+   the start and then one each 1 / rate[p] (rate in units a time); unit k goes where it would finish soonest, so a
+   unit takes the quickest route and many spread over every route with rate, a slower route taking fewer of the first
+   (makespan of equal jobs on uniform machines with release times, which earliest finish solves exactly). count[p]
+   its units; their completion time. A part of no rate takes none. */
+double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count);
 /* The items left once every one take(consumer, item) accepts is taken, the passes repeating while one is taken (taking
    one can free another: a composed page view's return unpins its owner leases, nccl-mesh.c leases_reap); a taken item
    leaves the array by swap-removal. The count left. */

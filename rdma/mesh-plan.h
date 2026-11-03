@@ -122,8 +122,12 @@ int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
    tree order, each the floor of its share and the first ones one element more for the remainder.  A reduction toward
    r runs up r's trees, a broadcast from r down them, a message to r along the path from its sender in r's heaviest
    tree (the lowest-numbered of equals).  The trees are an operand, made ahead of time (mesh_trees_pack, or the
-   caller's own) and changed only by making them again; they span a map that joins its nodes (mesh_link_map_joined). */
-struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const double *log_weight; };
+   caller's own) and changed only by making them again; they span a map that joins its nodes (mesh_link_map_joined).
+   latency[t] (NULL: none) is tree t's time from its root's release to its deepest leaf's first landing (its hops at a
+   hop's cost), and `rate` the bytes a time every root's segment crosses its trees at together (mesh-graph.h
+   mesh_graph_trees_rate); where both are given, a segment's units are cut over its root's trees by earliest finish
+   (mesh-graph.h mesh_graph_fill: a unit goes where it lands soonest), else by the shares as above. */
+struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const double *log_weight; const double *latency; double rate; };
 /* 0 where the trees fit the map: each spans every node over the map's links and reaches its root, and every node
    roots at least one (a collective reduces toward and broadcasts from every node); else EINVAL. */
 int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *);
@@ -289,10 +293,11 @@ void mesh_routed_free(struct mesh_routed_program *);
 enum { MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER };
 struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
 struct mesh_program { uint32_t what,root,nodes,parts,scratch,segments; const uint32_t *segment; const double *log_weight;
-                      const uint32_t *first; const struct mesh_move *move; };
+                      const uint32_t *first; const struct mesh_move *move; const double *latency; double rate; };
 
 /* Exact per-part allocation used by mesh_program_steps_cut; q is in elements. */
-int mesh_program_ranges(const struct mesh_program *,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *first,uint64_t *count);
+int mesh_program_ranges(const struct mesh_program *,uint64_t elements,const uint64_t *sizes,uint64_t q,uint32_t element_bytes,
+                        uint64_t *first,uint64_t *count);
 
 /* The room mesh_compile needs: parts and moves. */
 void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves);
@@ -336,7 +341,8 @@ int mesh_program_check_members(const struct mesh_program *,struct mesh_operand,c
    sends it on; down a tree it is sent a piece only where a contributor lies below it, and sends it on.  0, or
    EINVAL. */
 int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move);
+                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move,
+                 double *latency);
 /* A rank's steps of a program for an operand, a step a move's parts in one segment (none where its elements are
    none: no step spans two segments), at most (first[rank + 1] - first[rank]) x parts, over an operand cut into segments of the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts, one
    a segment in segment order: a reduce-scatter's and an all-gather's segment s is node s's, node s's of its

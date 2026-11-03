@@ -371,7 +371,8 @@ void mesh_compile_room(const struct mesh_trees *trees,uint32_t *parts,uint32_t *
 
 static int mesh_compile_sets(const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,
                  const uint64_t *contributors,const uint64_t *recipients,int global_segments,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move){
+                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move,
+                 double *latency){
   const uint32_t n=trees->nodes,T=trees->count;
   if(!n || what>MESH_ALLGATHER || ((what==MESH_REDUCE || what==MESH_BROADCAST) && root>=n))return EINVAL;
   uint32_t room_parts,room;
@@ -392,7 +393,7 @@ static int mesh_compile_sets(const struct mesh_trees *trees,uint32_t what,uint32
   if(global_segments && ((!outputs && what!=MESH_REDUCE) || (!inputs && what==MESH_ALLGATHER))){
     memset(first,0,((size_t)n+1)*sizeof *first);
     *program=(struct mesh_program){what,root,n,0,0,
-      what==MESH_ALLGATHER || what==MESH_REDUCE_SCATTER?n:0,segment,log_weight,first,move};
+      what==MESH_ALLGATHER || what==MESH_REDUCE_SCATTER?n:0,segment,log_weight,first,move,NULL,0};
     status=0;goto done;
   }
   if(global_segments && ((!inputs && what!=MESH_BROADCAST) ||
@@ -449,7 +450,9 @@ static int mesh_compile_sets(const struct mesh_trees *trees,uint32_t what,uint32
         if(trees->root[t]==(rooted?root:g)){
           part_of[t]=parts;
           segment[parts]=rooted?0:global_segments && (what==MESH_ALLGATHER || what==MESH_REDUCE_SCATTER)?g:index;
-          log_weight[parts]=trees->log_weight[t];parts++;
+          log_weight[parts]=trees->log_weight[t];
+          if(latency)latency[parts]=trees->latency?trees->latency[t]:0;
+          parts++;
         }
       if(global_segments && parts==before)goto done;
       index++;
@@ -498,7 +501,8 @@ static int mesh_compile_sets(const struct mesh_trees *trees,uint32_t what,uint32
   }
   for(uint32_t k=0;k<moves;k++)move[k]=ordered[k].move;
   *program=(struct mesh_program){what,root,n,parts,scratch,
-    global_segments && (what==MESH_ALLGATHER || what==MESH_REDUCE_SCATTER)?n:0,segment,log_weight,first,move};
+    global_segments && (what==MESH_ALLGATHER || what==MESH_REDUCE_SCATTER)?n:0,segment,log_weight,first,move,
+    latency && trees->latency && trees->rate>0?latency:NULL,latency && trees->latency?trees->rate:0};
   status=0;
 done:
   free(shape);free(message);free(ordered);free(part_of);free(buffer);
@@ -508,12 +512,13 @@ done:
 int mesh_compile_members(const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,
                  const uint64_t *contributors,const uint64_t *recipients,
                  struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move){
-  return mesh_compile_sets(trees,what,root,whole,contributors,recipients,1,program,segment,log_weight,first,move);
+  return mesh_compile_sets(trees,what,root,whole,contributors,recipients,1,program,segment,log_weight,first,move,NULL);
 }
 
 int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move){
-  return mesh_compile_sets(trees,what,root,whole,contributors,contributors,0,program,segment,log_weight,first,move);
+                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move,
+                 double *latency){
+  return mesh_compile_sets(trees,what,root,whole,contributors,contributors,0,program,segment,log_weight,first,move,latency);
 }
 
 /* Explicit global rank extent for member-aware V forms, otherwise the legacy
@@ -550,8 +555,8 @@ static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,ui
    flows into them), each a whole number of quanta of `q` elements from the segment's start but the segment's last,
    the remainder's quanta one each to the first parts of weight above 0 (a part of weight 0, a tree of share 0, takes
    none); 0 where the cut is none */
-int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *lo,
-                               uint64_t *count){
+int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,
+                        uint32_t element_bytes,uint64_t *lo,uint64_t *count){
   const uint32_t segments=mesh_program_segments(program);
   uint64_t next=0;
   for(uint32_t g=0;g<segments;g++){
@@ -562,6 +567,28 @@ int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,con
     /* A skipped global rank is a zero-length segment, never permission to
        silently discard a caller's nonzero count. */
     if(program->segments && length && !(total>0)){return 0;}
+    if(program->latency && program->rate>0 && element_bytes && length){
+      /* by earliest finish (mesh-graph.h mesh_graph_fill): part p's units a time its share of the root's rate over a
+         unit's bytes, its first after its tree's latency; the parts' ranges in part order */
+      double *latency=malloc((program->parts+1)*sizeof *latency),*rate=malloc((program->parts+1)*sizeof *rate);
+      uint64_t *units_of=malloc((program->parts+1)*sizeof *units_of);
+      uint32_t *index=malloc((program->parts+1)*sizeof *index),m=0;
+      if(!latency || !rate || !units_of || !index){free(latency);free(rate);free(units_of);free(index);return 0;}
+      for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g){
+        latency[m]=program->latency[p];
+        rate[m]=program->rate*mesh_graph_exp(program->log_weight[p]-most)/total/((double)q*element_bytes);
+        index[m++]=p;
+      }
+      mesh_graph_fill(m,latency,rate,units,units_of);
+      uint64_t at=base;
+      for(uint32_t k=0;k<m;k++){
+        uint64_t share=units_of[k]*q;
+        if(at+share>base+length)share=base+length-at;
+        lo[index[k]]=at;count[index[k]]=share;at+=share;
+      }
+      free(latency);free(rate);free(units_of);free(index);
+      continue;
+    }
     uint64_t floors=0;
     for(uint32_t p=0;p<program->parts;p++)
       if(program->segment[p]==g)floors+=(uint64_t)floor((double)units*mesh_graph_exp(program->log_weight[p]-most)/total);
@@ -584,7 +611,8 @@ uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank
   if(rank>=program->nodes || !program->parts)return 0;
   uint64_t *lo=malloc(program->parts*sizeof *lo),*count=malloc(program->parts*sizeof *count);
   uint32_t k=0;
-  if(lo && count && mesh_program_ranges(program,operand.elements,segments,mesh_page_quantum(page,operand.element_bytes),lo,count)){
+  if(lo && count && mesh_program_ranges(program,operand.elements,segments,mesh_page_quantum(page,operand.element_bytes),
+                                       operand.element_bytes,lo,count)){
     /* a move's parts in one segment are one step: no step spans two segments, so a rank's own segment of a
        reduce-scatter or an all-gather is a buffer of its own (libnccl-mesh partial_split) */
     for(uint32_t i=program->first[rank];i<program->first[rank+1];i++){
@@ -679,7 +707,7 @@ int mesh_program_check_members(const struct mesh_program *program,struct mesh_op
   int result=bounds && ranges?0:ENOMEM;
   if(!result && !mesh_cut(segments,operand.elements,cut,quantum,bounds,bounds+segments))result=EINVAL;
   if(!result && program->parts &&
-     !mesh_program_ranges(program,operand.elements,cut,quantum,ranges,ranges+program->parts))result=EINVAL;
+     !mesh_program_ranges(program,operand.elements,cut,quantum,operand.element_bytes,ranges,ranges+program->parts))result=EINVAL;
   for(uint32_t r=0;!result && r<program->nodes;r++){
     struct mesh_defined *defined=calloc(buffers,sizeof *defined);
     if(!defined){result=ENOMEM;break;}
