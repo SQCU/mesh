@@ -60,8 +60,11 @@ import os
 # (metal-microbench docs/facts.md). What must stay: no part end that only made a store visible.
 CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
-# a fused kernel's bounds (Template._fuse): its products' outputs at most this many, their root in threadgroup memory
-FUSED_OUTPUTS, FUSED_BYTES = 4096, 28672
+# a fused kernel's bounds (Template._fuse): its products' outputs at most this many, their root in threadgroup memory.
+# 0: no fusion. One threadgroup computing the LSTM's tick's products and cell was right but 80-101 us a tick against
+# 25.5 unfused (lstm-2026-11-03 fused-3, fused-4): one core at a light load's clock against the products' 800
+# simdgroups over every core. What must stay: a fused form only where it is measured faster than the parts.
+FUSED_OUTPUTS, FUSED_BYTES = 0, 28672
 
 
 class Root:
