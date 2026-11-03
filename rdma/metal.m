@@ -464,7 +464,7 @@ const char *MetalRunFinish(struct MetalRun *run) {
             else [encoder dispatchThreadgroups:node->groups threadsPerThreadgroup:node->threads];
         }
         if(traced&&run->stamps)
-            [encoder writeTimestampWithGranularity:MTL4TimestampGranularityPrecise intoHeap:run->stamps atIndex:2*(NSUInteger)run->parts+v];
+            [encoder writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed intoHeap:run->stamps atIndex:2*(NSUInteger)run->parts+v];
         if(lastFenced[open]==v)[encoder updateFence:run->part[open].fence afterEncoderStages:stages];
     }
     free(lastFenced);free(begun);
