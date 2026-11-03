@@ -834,6 +834,16 @@ done:
   return written;
 }
 
+/* mesh-graph.h mesh_graph_tree_loads */
+void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
+                           const double *weight, double *load){
+  for(uint32_t k=0;k<trees;k++)
+    for(uint32_t v=0;v<vertices;v++){
+      const uint32_t u=parent[(size_t)k*vertices+v];
+      if(v!=root[k] && u!=UINT32_MAX)load[(size_t)u*vertices+v]+=weight[k];
+    }
+}
+
 /* mesh-graph.h mesh_graph_settle */
 size_t mesh_graph_settle(void **items, size_t count, int (*take)(void *consumer, void *item), void *consumer) {
   for (int taken = 1; taken && count;) {
