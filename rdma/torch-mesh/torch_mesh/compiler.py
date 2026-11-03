@@ -809,7 +809,7 @@ class Program:
         history, carry = [], []
         watched = self.watched[id(run)] = []
 
-        # a link's or release's word written by a copy from its value slot. Changed by the FFN demonstration session
+        # a release's word written by a copy from its value slot (a link's is a store: published). Changed by the FFN session
         # from a kernel's store (mesh_publish): a kernel's store reaches the bridge only at its part's end, about 25 us
         # after it on an M5 Ultra, in every round; a copy's write reaches it about 6 us after it runs, with a kernel's
         # system-coherent stores before it (behind its barrier) complete (metal-microbench docs/facts.md, visible.m
@@ -821,6 +821,13 @@ class Program:
         # ordered: its next follows its last (an edge). What must stay: a word's store is one the CPU sees in a
         # running part, after the data it releases, its stores in order, and no copy behind another part's waits.
         last_store = {}
+        # a link's word by a kernel's store (kernels.store): a chunk's links are a long run (every occurrence's post
+        # first), as copies one after another about 0.8 us each on an M5 Ultra; as stores they run together and are seen
+        # at the part's end the cut after them makes (metal-microbench docs/facts.md, the LSTM's chunk boundaries)
+        store = _pipeline(kernels.store(), kernels.STORE)
+
+        def published(slot, word):
+            run.dispatch(store, [(0, word, 0), (1, values, 8 * slot)], (1, 1, 1), (1, 1, 1), True)
 
         def stored(slot, word, event):
             if word in last_store and last_store[word] != event:
@@ -983,7 +990,7 @@ class Program:
                         flush(e)
                         ev(ids[e])
                         for _, _, word, _, slot, _ in links:
-                            stored(slot, word, ids[e])
+                            published(slot, word)
                         cut[0] = True
                 elif e in last and nodes_of(c, last[e][0], last[e][2], last[e][3]):
                     key = last[e]
