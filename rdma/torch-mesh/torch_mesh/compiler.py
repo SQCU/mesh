@@ -178,8 +178,18 @@ class Template:
             elif node.target is operator.getitem:
                 values[node] = values[node.args[0]][node.args[1]]
             elif node.target in VIEWS:
+                # a view keeps its base's element type (a torch view never changes it; a widening alias's base is the
+                # narrower value it reads, below)
                 base, val = values[node.args[0]], node.meta['val']
-                values[node] = [_meta(base.root, v) for v in val] if isinstance(val, (list, tuple)) else _meta(base.root, val)
+                as_base = lambda v: Value(base.root, base.dtype, tuple(v.shape), v.stride(), v.storage_offset())
+                values[node] = [as_base(v) for v in val] if isinstance(val, (list, tuple)) else as_base(val)
+            elif self._widening(node):
+                # a conversion to float that every reader loads (a view or a pointwise op): the value it converts,
+                # read in place, each load already float (kernels.View.load), so the same numbers without the copy
+                arg = node.args[0]
+                if arg in expression:
+                    self._emit(*expression.pop(arg))
+                values[node] = values[arg]
             elif node.target in pointwise:
                 self._pointwise(node, values, expression, users)
             elif node.target in (aten.addmm.default, aten.mm.default, aten.linear.default):
@@ -322,6 +332,14 @@ class Template:
         text = render(tree)
         return self._command([out], list(loads), lambda name, c, x=text: kernels.pointwise(
             name, c.writes[0].view(0), [v.view(k + 1) for k, v in enumerate(c.reads)], x))[0]
+
+    def _widening(self, node):
+        if node.target is not aten._to_copy.default or set(node.kwargs) - {'dtype'} or node.kwargs.get('dtype') is not torch.float32:
+            return False
+        source = node.args[0].meta.get('val') if isinstance(node.args[0], torch.fx.Node) else None
+        pointwise = set(UNARY) | set(BINARY) | {aten.copy_.default, aten.clamp.default}
+        return source is not None and source.dtype in (torch.float16, torch.bfloat16) and \
+            all(u.target in VIEWS or u.target is operator.getitem or u.target in pointwise for u in node.users)
 
     def _product(self, node, values):
         if node in self.stacked:
