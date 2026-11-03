@@ -27,9 +27,10 @@ struct collective_call {
 struct collective_link { uint32_t a, b; double bytes_a_second; };
 struct collective_fabric { uint32_t nodes, rank; const struct collective_link *links; uint32_t count; };
 
-/* Compile the whole function: every call routed over the links, its pages placed, its page writes ordered, each
-   node's page lists made; the same function of the same inputs at every node, so both ends of every link make the same
-   lists. 0, or an errno. */
+/* Compile the whole function into each node's page lists and hand them to its bridge (bridge_load). The routing over
+   the links, the pages' placement and the page writes' order are the graph module's (rdma/mesh-graph.h, design/
+   rubrics.md:422, C9: graph algorithms in one module), composed here with this rank's calls; the same functions of the
+   same inputs at every node, so both ends of every link make the same lists. 0, or an errno. */
 int collective_plan(const struct collective_fabric *fabric, const struct collective_call *calls, uint32_t count);
 
 /* The device-function header's two operations, in the program's own GPU work: a producer's publication (one system
