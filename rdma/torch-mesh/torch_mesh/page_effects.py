@@ -165,6 +165,27 @@ def _declared_cuts(transfers):
     return cuts
 
 
+import itertools
+_EVENTS = itertools.count(1)
+
+
+def new_event():
+    """a solve event's id for the recorder (design/page-maps-2026-11-02.md, the solve-recorder contract): unique in the
+    process, so unique in every schedule"""
+    return next(_EVENTS)
+
+
+def _node(key):
+    """a solve event's recorder node: a command its own; a collective occurrence's link, copies, SENDs and sums its
+    crossing, one node; a landing's completion and a SEND's are the bridge's, realized by guards and release words,
+    and no node"""
+    if len(key) == 3 and key[1] == 0:
+        return ('command', key[2])
+    if len(key) == 4 and key[1] in (-1, 0, 1, 4):
+        return ('occurrence', key[2])
+    return None
+
+
 def assign_pages(descriptions, invocation_of, spaces, transfers=()):
     """The run's page assignment by the run's solve (mesh-page-map.h mesh_run_solve; design/page-maps-2026-11-02.md,
     "The run's solve, each choice and its ground").
@@ -244,7 +265,7 @@ def assign_pages(descriptions, invocation_of, spaces, transfers=()):
     bins.append((first, max(1, sum(pages)), 'arena'))
     solved = _stream.run_solve(page_bytes, len(keys), accesses, [(event[a], event[b]) for a, b in links],
                                list(zip(pages, pin, lives, contiguous)), [(at, held) for at, held, _ in bins])
-    return dict(edges=[(keys[f], keys[t], kind) for f, t, kind, *_ in solved['edges']], bins=bins,
+    return dict(edges=[(keys[f], keys[t], kind) for f, t, kind, *_ in solved['edges']], events=keys, bins=bins,
                 places={key: tuple(solved['runs'][item]) for key, item in index.items()}, items=items,
                 arena=solved['arena'])
 
@@ -692,6 +713,37 @@ class Plan:
         page_bytes = next(iter(spaces.values())).page_bytes if spaces else 1
         programs, arena = lower_programs(programs, self.assignments[-1], invocation_of, page_bytes, 'mps')
         self.arenas = getattr(self, 'arenas', []) + [arena]
+        # the solve-recorder contract (design/page-maps-2026-11-02.md): each recorder node's event, and the solve's
+        # edges between them, the recorder's only order
+        assignment, ids = self.assignments[-1], {}
+        event_of = lambda node: ids[node] if node in ids else ids.setdefault(node, new_event())
+        c = 0
+        for program in programs:
+            for command in program['commands']:
+                command['event'] = event_of(('command', c))
+                c += 1
+        occurrence_event = {transfer['order']: event_of(('occurrence', t)) for t, transfer in enumerate(transfers)}
+        edges = set()
+        for a, b, _ in assignment['edges']:
+            na, nb = _node(a), _node(b)
+            if na is not None and nb is not None and na != nb:
+                edges.add((event_of(na), event_of(nb)))
+        # a WRITE step, outside the solve, follows everything before it and precedes everything after it
+        order_of = {}
+        for key in assignment['events']:
+            node = _node(key)
+            if node is not None:
+                order_of[event_of(node)] = min(order_of.get(event_of(node), key[0]), key[0])
+        write_event = {}
+        for index, step in enumerate(self.declarations):
+            if step.get('transfer') == 'write':
+                made = write_event[2 * index] = new_event()
+                edges.update((e, made) for e, at in order_of.items() if at < 2 * index)
+                edges.update((made, e) for e, at in order_of.items() if at > 2 * index)
+        # the run's external inputs precede every node with nothing before it
+        if getattr(self, 'input_event', None) is not None:
+            targets = {b for _, b in edges}
+            edges.update((self.input_event, e) for e in (*order_of, *write_event.values()) if e not in targets)
         # each occurrence's spaces bound to its runs, then the occurrence lowered, in declaration order: the C
         # cursor's (lowering.bind_spaces; design/page-maps-2026-11-02.md, "The collective lowering in two phases")
         from .lowering import bind_spaces
@@ -714,8 +766,11 @@ class Plan:
         for program in programs:
             with bind(program['configuration'], algebra=self.algebra):
                 prepared.append((program['order'], Program.prepare(program), None))
-        for _, command, selected in sorted(prepared, key=lambda item: item[0]):
+        for order, command, selected in sorted(prepared, key=lambda item: item[0]):
+            if order in occurrence_event or order in write_event:
+                schedule.event((occurrence_event | write_event)[order])
             if selected is None:
                 command.append(schedule)
             else:
                 command.append(schedule, selected)
+        schedule.edges(sorted(edges))

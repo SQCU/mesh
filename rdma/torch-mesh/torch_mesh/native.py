@@ -262,16 +262,25 @@ class Program:
 
     @classmethod
     def prepare(cls, declaration):
-        recorded, hosts, owners = [], [], []
+        """Each command's records and hosts, each carrying the run's solve's event of its command (`event`, set by
+        Plan.append: design/page-maps-2026-11-02.md, the solve-recorder contract)."""
+        recorded, hosts, owners, record_events, host_events = [], [], [], [], []
         for command in declared_commands(declaration['commands']):
+            event = command.get('event') if isinstance(command, dict) else None
             if isinstance(command, dict) and command['kind'] in ('cpu', 'ane'):
                 from . import cpu, host as provider
                 host = (cpu if command['kind'] == 'cpu' else provider).prepare(command)
                 owners.append(host)
                 hosts.append((len(recorded), host.entry, host.reaches))
+                host_events.append(event)
             else:
-                recorded.extend(command_records((command,), with_reaches=True))
-        return cls(_stream.Commands([record for record, _ in recorded], [reach for _, reach in recorded], hosts),
+                made = command_records((command,), with_reaches=True)
+                recorded.extend(made)
+                record_events.extend([event] * len(made))
+        if None in record_events or None in host_events:
+            raise ValueError('a command with no solve event (design/page-maps-2026-11-02.md)')
+        return cls(_stream.Commands([record for record, _ in recorded], [reach for _, reach in recorded], hosts,
+                                    record_events, host_events),
                    declaration['output'], (*declaration['pages'], *owners))
 
 

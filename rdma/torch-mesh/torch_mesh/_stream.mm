@@ -661,8 +661,13 @@ struct Commands {
   std::vector<MetalReplay *> replays;
   std::vector<std::unique_ptr<PreparedHost>> hosts;
   std::vector<at::Tensor> operands;
+  // the run's solve's event of each record and each host (design/page-maps-2026-11-02.md, the solve-recorder contract),
+  // and each replay's records [first, end)
+  std::vector<uint64_t> recordEvents, hostEvents;
+  std::vector<std::pair<size_t,size_t>> spans;
   explicit Commands(const std::vector<CommandRecord> &records,const std::optional<CommandReaches> &declared=std::nullopt,
-      const std::vector<CommandHost> &hostRecords={}) {
+      const std::vector<CommandHost> &hostRecords={},const std::vector<uint64_t> &record_events={},
+      const std::vector<uint64_t> &host_events={}):recordEvents(record_events),hostEvents(host_events) {
     TORCH_CHECK(!declared||declared->size()==records.size(),"each command has one declared access list");
     if(records.empty()&&hostRecords.empty())return;
     auto device=at::mps::MPSDevice::getInstance()->device();
@@ -725,7 +730,7 @@ struct Commands {
       TORCH_CHECK(first<=end&&end<=descriptions.size(),"host positions must follow declared command order");
       auto *made=first==end?nullptr:MetalReplayCommands(device,descriptions.data()+first,end-first,MetalFormEncoded);
       TORCH_CHECK(first==end||made,"native command preparation failed");
-      replays.push_back(made);first=end;
+      replays.push_back(made);spans.push_back({first,end});first=end;
     };
     for(const auto &[at,entry,reaches]:hostRecords) {
       replay(at);hosts.push_back(std::make_unique<PreparedHost>(entry,reaches));
@@ -736,10 +741,16 @@ struct Commands {
   void append(MetalSchedule *schedule) {
     for(size_t i=0;i<replays.size();i++) {
       if(replays[i]) {
+        if(!recordEvents.empty())
+          MetalScheduleCommandEvents(schedule,recordEvents.data()+spans[i].first,spans[i].second-spans[i].first);
         NSError *error=MetalScheduleAppend(schedule,replays[i],NSMakeRange(0,1),@[],nil,nil);
+        MetalScheduleCommandEvents(schedule,nullptr,0);
         TORCH_CHECK(!error,error?error.localizedDescription.UTF8String:"");
       }
-      if(i<hosts.size())hosts[i]->append(schedule);
+      if(i<hosts.size()) {
+        if(i<hostEvents.size())MetalScheduleEvent(schedule,hostEvents[i]);
+        hosts[i]->append(schedule);
+      }
     }
   }
 };
@@ -1603,8 +1614,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
 #undef MESH_METAL_VALUE
   module.attr("compilation") = compilation;
   module.def("linear_groups", &linear_groups, pybind11::call_guard<Drained>());
-  pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &,const std::optional<CommandReaches> &,const std::vector<CommandHost> &>(),
-    pybind11::arg("records"),pybind11::arg("reaches")=pybind11::none(),pybind11::arg("hosts")=std::vector<CommandHost>{});
+  pybind11::class_<Commands>(module,"Commands").def(pybind11::init<const std::vector<CommandRecord> &,const std::optional<CommandReaches> &,const std::vector<CommandHost> &,const std::vector<uint64_t> &,const std::vector<uint64_t> &>(),
+    pybind11::arg("records"),pybind11::arg("reaches")=pybind11::none(),pybind11::arg("hosts")=std::vector<CommandHost>{},
+    pybind11::arg("record_events")=std::vector<uint64_t>{},pybind11::arg("host_events")=std::vector<uint64_t>{});
   module.def("device_facts", &device_facts, pybind11::call_guard<Drained>());
   module.def("pipeline_facts", &pipeline_facts, pybind11::call_guard<Drained>());
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
@@ -1617,6 +1629,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("records", &region_allocations, pybind11::call_guard<Drained>());   // the region tensors' leases live now: each its address and bytes
   module.def("metal_prelude", &metal_prelude, pybind11::call_guard<Drained>());
   pybind11::class_<ScheduleBinding>(module,"Schedule")
+    // design/page-maps-2026-11-02.md, the solve-recorder contract: the event the next appended nodes realize, and the
+    // solve's edges between events, the flush's only order
+    .def("event",[](ScheduleBinding &s,uint64_t event){MetalScheduleEvent(s.schedule.get(),event);})
+    .def("edges",[](ScheduleBinding &s,const std::vector<std::pair<uint64_t,uint64_t>> &edges){
+      std::vector<uint64_t> flat;for(const auto &[a,b]:edges){flat.push_back(a);flat.push_back(b);}
+      MetalScheduleEdges(s.schedule.get(),reinterpret_cast<const uint64_t (*)[2]>(flat.data()),edges.size());
+    })
     .def(pybind11::init<>(), pybind11::call_guard<Drained>())
     .def("append",[](ScheduleBinding &s,Commands &commands){commands.append(s.schedule.get());
         s.operands.insert(s.operands.end(),commands.operands.begin(),commands.operands.end());}, pybind11::call_guard<Drained>())

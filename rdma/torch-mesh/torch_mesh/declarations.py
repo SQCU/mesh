@@ -1002,7 +1002,12 @@ class Execution:
                         declarations.append(dict(step, configuration=self.configuration, run_invocation=invocation))
                 self.inputs = tuple(inputs)
                 self.page_plan = Plan(declarations)
+            # the run's external inputs, one recorder node with its own solve event (design/page-maps-2026-11-02.md)
+            self.page_plan.input_event = None
             if not self._initialized:
+                from .page_effects import new_event
+                self.page_plan.input_event = new_event()
+                schedule.event(self.page_plan.input_event)
                 schedule.inputs(self.inputs)
             self.page_plan.append(schedule)
         self._initialized = True
