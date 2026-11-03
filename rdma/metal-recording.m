@@ -1792,8 +1792,6 @@ static NSUInteger MetalWorkOrdered(struct MetalSchedule *root,NSArray *work) {
     }
     const uint32_t (*edge)[2]=root->edges.bytes;
     for(NSUInteger k=0;k<root->edges.length/sizeof *edge;k++) {
-        if(edge[k][0]>=edge[k][1]||edge[k][1]>=work.count)
-            [NSException raise:NSInvalidArgumentException format:@"a solve edge outside this flush's order"];
         MetalWork *producer=work[edge[k][0]],*consumer=work[edge[k][1]];
         [consumer->dependencies addIndex:first+edge[k][0]];[producer->successors addIndex:edge[k][1]];
         if(MetalWorkHost(producer))[consumer->hostDependencies addIndex:first+edge[k][0]];
@@ -2087,6 +2085,18 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
     [root->work removeAllObjects];nodes=expanded;
     BOOL hosts=NO;for(MetalWork *work in nodes)hosts|=work->operation!=nil;
     NSData *solved=root->edges?[[root->edges copy] autorelease]:nil;
+    // mesh_graph_realize's decisions, made (and the edges checked against this flush's order) before any is read
+    NSMutableData *hostData=nil,*barrierData=nil,*fenceData=nil,*partData=nil;
+    if(solved) {
+        const uint32_t n=(uint32_t)nodes.count;const uint32_t (*edge)[2]=solved.bytes;const size_t m=solved.length/sizeof *edge;
+        hostData=[NSMutableData dataWithLength:n+1];barrierData=[NSMutableData dataWithLength:n+1];
+        fenceData=[NSMutableData dataWithLength:n+1];partData=[NSMutableData dataWithLength:(n+1)*sizeof(uint32_t)];
+        unsigned char *host=hostData.mutableBytes;uint32_t parts=0;size_t crossings=0;
+        for(uint32_t i=0;i<n;i++)host[i]=((MetalWork *)nodes[i])->operation!=nil||((MetalWork *)nodes[i])->external;
+        if(mesh_graph_realize(n,host,m,edge,partData.mutableBytes,&parts,barrierData.mutableBytes,fenceData.mutableBytes,
+                              NULL,0,&crossings))
+            [NSException raise:NSInvalidArgumentException format:@"the solve's edges do not follow this flush's order"];
+    }
     const NSUInteger first=solved?MetalWorkOrdered(root,nodes):MetalWorkDependencies(root,nodes);
     if(root->edges){[root->edges release];root->edges=nil;}
     [MetalScheduleFrontierNodes(root) enumerateIndexesUsingBlock:^(NSUInteger p,BOOL *stop){
@@ -2104,21 +2114,14 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
     if(solved) {
         // mesh_graph_realize's decisions, encoded: the nodes in their order, a part each command buffer, a barrier
         // before each flagged node, a fence on each GPU producer whose consumer is in another part
-        const uint32_t n=(uint32_t)nodes.count;const uint32_t (*edge)[2]=solved.bytes;const size_t m=solved.length/sizeof *edge;
-        NSMutableData *hostData=[NSMutableData dataWithLength:n+1],*barrierData=[NSMutableData dataWithLength:n+1],
-            *partData=[NSMutableData dataWithLength:(n+1)*sizeof(uint32_t)];
-        unsigned char *host=hostData.mutableBytes,*barrier=barrierData.mutableBytes;uint32_t *part=partData.mutableBytes,parts=0;
-        for(uint32_t i=0;i<n;i++)host[i]=((MetalWork *)nodes[i])->operation!=nil||((MetalWork *)nodes[i])->external;
-        size_t crossings=0;
-        if(mesh_graph_realize(n,host,m,edge,part,&parts,barrier,NULL,0,&crossings))
-            [NSException raise:NSInvalidArgumentException format:@"the solve's edges do not follow this flush's order"];
-        for(size_t k=0;k<m;k++)if(!host[edge[k][0]]&&!host[edge[k][1]]&&part[edge[k][0]]!=part[edge[k][1]])
-            ((MetalWork *)nodes[edge[k][0]])->needsFence=YES;
+        const uint32_t n=(uint32_t)nodes.count;
+        const unsigned char *host=hostData.bytes,*barrier=barrierData.bytes,*fence=fenceData.bytes;
+        const uint32_t *part=partData.bytes;
         NSMutableArray *sequence=[NSMutableArray array];
         for(uint32_t i=0;i<n;i++) {
             MetalWork *work=nodes[i];
             if(host[i]){[sequence addObject:work];continue;}
-            work->scope=part[i]+1;work->realizedPart=part[i];
+            work->scope=part[i]+1;work->realizedPart=part[i];work->needsFence=fence[i]!=0;
             if(barrier[i]){work->barrierAfter=MTLStageDispatch|MTLStageBlit;work->barrierBefore=work->stages;}
             [sequence addObject:@[work]];
         }

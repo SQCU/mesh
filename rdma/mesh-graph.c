@@ -1034,8 +1034,8 @@ static int realize_wait_order(const void *left, const void *right) {
   return (a->producer > b->producer) - (a->producer < b->producer);
 }
 int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const uint32_t (*edge)[2], uint32_t *part,
-                       uint32_t *parts, unsigned char *barrier, struct mesh_graph_crossing *waits, size_t capacity,
-                       size_t *count) {
+                       uint32_t *parts, unsigned char *barrier, unsigned char *fence, struct mesh_graph_crossing *waits,
+                       size_t capacity, size_t *count) {
   for (size_t k = 0; k < m; k++) if (edge[k][0] >= edge[k][1] || edge[k][1] >= n) return EINVAL;
   uint32_t (*sorted)[2] = malloc((m + 1) * sizeof *sorted);
   struct mesh_graph_crossing *found = malloc((m + 1) * sizeof *found);
@@ -1048,7 +1048,7 @@ int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const ui
   int open = 0;
   size_t k = 0;
   for (uint32_t v = 0; v < n; v++) {
-    barrier[v] = 0;
+    barrier[v] = 0; fence[v] = 0;
     if (host[v]) { part[v] = UINT32_MAX; while (k < m && sorted[k][1] == v) k++; continue; }
     int fresh = !open;
     for (size_t j = k; j < m && sorted[j][1] == v; j++)
@@ -1073,6 +1073,7 @@ int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const ui
   for (size_t j = 0; j < m; j++) {
     const uint32_t u = sorted[j][0], v = sorted[j][1];
     if (!host[v] && !host[u] && part[u] == part[v]) continue;
+    if (!host[u] && !host[v]) fence[u] = 1;
     const uint32_t kind = (host[v] ? 1u : 0u) | (host[u] ? 4u : 0u);
     found[w++] = (struct mesh_graph_crossing){host[v] ? v : part[v], kind, host[u] ? u : part[u]};
   }
