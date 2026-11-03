@@ -565,15 +565,22 @@ static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,ui
 
 /* Each part's elements of an operand cut by mesh_cut: [lo[p], lo[p] + count[p]), a segment's parts by the program's
    weights (its trees': the caller's, a configured form's shares, or equal; libnccl-mesh never compiles the packing's
-   flows into them), each a whole number of quanta of `q` elements from the segment's start but the segment's last,
-   the remainder's quanta one each to the first parts of weight above 0 (a part of weight 0, a tree of share 0, takes
-   none); 0 where the cut is none */
+   flows into them), each a whole number of the operand's pages (quanta of `q` elements from the operand's start, a
+   root's start a page: a segment's first and last page may be partial), the remainder's pages one each to the first
+   parts of weight above 0 (a part of weight 0, a tree of share 0, takes none); 0 where the cut is none.
+   Changed from quanta from the segment's start, which put a part's edges inside pages wherever a segment starts in
+   one (an LSTM of width 4096: a rank's 26 KiB of h 26,240 bytes into it), so a forward's piece lay off its COPY's
+   units and a run's landing never came (metal-microbench docs/facts.md, balance-2026-11-03 sweep-1). What must stay:
+   the same cut at both ends, every edge a page's */
 int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,
                         uint32_t element_bytes,uint64_t *lo,uint64_t *count){
   const uint32_t segments=mesh_program_segments(program);
   uint64_t next=0;
   for(uint32_t g=0;g<segments;g++){
-    const uint64_t base=next,length=mesh_cut_next(segments,elements,sizes,q,g,&next),units=(length+q-1)/q;
+    const uint64_t base=next,length=mesh_cut_next(segments,elements,sizes,q,g,&next),page0=base/q,
+                   units=length?(base+length-1)/q-page0+1:0;
+    /* the end of the segment's k-th page (k from 1), the segment's end at most */
+    #define MESH_UNITS_END(k) ((page0+(k))*q<base+length?(page0+(k))*q:base+length)
     double most=-INFINITY,total=0;
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g && program->log_weight[p]>most)most=program->log_weight[p];
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g)total+=mesh_graph_exp(program->log_weight[p]-most);
@@ -593,11 +600,11 @@ int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,con
         index[m++]=p;
       }
       mesh_graph_fill(m,latency,rate,units,units_of);
-      uint64_t at=base;
+      uint64_t at=base,taken=0;
       for(uint32_t k=0;k<m;k++){
-        uint64_t share=units_of[k]*q;
-        if(at+share>base+length)share=base+length-at;
-        lo[index[k]]=at;count[index[k]]=share;at+=share;
+        taken+=units_of[k];
+        const uint64_t end=units_of[k]?MESH_UNITS_END(taken):at;
+        lo[index[k]]=at;count[index[k]]=end-at;at=end;
       }
       free(latency);free(rate);free(units_of);free(index);
       continue;
@@ -605,16 +612,18 @@ int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,con
     uint64_t floors=0;
     for(uint32_t p=0;p<program->parts;p++)
       if(program->segment[p]==g)floors+=(uint64_t)floor((double)units*mesh_graph_exp(program->log_weight[p]-most)/total);
-    uint64_t remainder=floors<units?units-floors:0,at=base;
+    uint64_t remainder=floors<units?units-floors:0,at=base,taken=0;
     for(uint32_t p=0;p<program->parts;p++){
       if(program->segment[p]!=g)continue;
       const double weight=mesh_graph_exp(program->log_weight[p]-most);
       uint64_t share=(uint64_t)floor((double)units*weight/total);
-      if(remainder && weight>0 && at+share*q<base+length){share++;remainder--;}
-      share*=q;
-      if(at+share>base+length)share=base+length-at;
-      lo[p]=at;count[p]=share;at+=share;
+      if(remainder && weight>0 && taken+share<units){share++;remainder--;}
+      if(taken+share>units)share=units-taken;
+      taken+=share;
+      const uint64_t end=share?MESH_UNITS_END(taken):at;
+      lo[p]=at;count[p]=end-at;at=end;
     }
+    #undef MESH_UNITS_END
   }
   return next==elements;
 }
