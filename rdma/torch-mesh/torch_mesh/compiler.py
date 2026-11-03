@@ -883,6 +883,13 @@ class Program:
                         stores.append(slot)  # an observation's own slot beside its count: a defect names it
                     made.append((n.kind, n.transfer, int(ffi.cast('uintptr_t', n.word)), n.value, slot, n.round))
                 lowered[c] = made
+                if os.environ.get('MESH_RUN_ORDER_CHECK') and len(instances) < 2:
+                    # the first two chunks' observation counts and release values a channel, and their forwards (the
+                    # one-part stall's reading: a landing's count against its peers' releases)
+                    kinds = {lib.ncclMeshNodeLanding: 'landed', lib.ncclMeshNodeSent: 'sent', lib.ncclMeshNodeRelease: 'ready'}
+                    print(json.dumps(dict(phase='lowered', chunk=len(instances), command=c,
+                                          nodes=sorted([kinds[k], ch, v, r] for k, ch, _, v, _, r in made if k in kinds),
+                                          forwards=len(pairs))), flush=True)
                 run.communicator(int(ffi.cast('uintptr_t', command.comm)))
             instances.append((t, lowered))
         values = empty((max(1, len(stores)),), dtype=torch.int64)
