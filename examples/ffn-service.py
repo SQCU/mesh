@@ -64,6 +64,13 @@ def main(config=None):
             if now() - started > 8.0:
                 raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
             time.sleep(0)
+        if repeat == repeats - 1:
+            # the last repeat's parts on this rank's clock (each one's commit, GPU start and end) and their compute
+            # spans by GPU timestamps
+            run = program.done[-1]
+            at = lambda x: round((x - started) * 1e6, 1) if x else None
+            print(json.dumps(dict(phase='timeline', rank=rank, parts=[[at(c), at(s), at(e)] for c, s, e in run.parts()],
+                                  spans=[round(x, 2) for x in run.spans()])), flush=True)
         emit({**measure(started, ended, flops, layers), 'workload': 'ffn_column_separable', 'rank': rank, 'size': size,
               'report': dict(tokens=B, dim=D, hidden=F, block=blocks[rank], layers=layers, repeat=repeat,
                              gflops=round(flops / (ended - started) / 1e9, 2), us_per_layer=round((ended - started) / layers * 1e6, 1))})
