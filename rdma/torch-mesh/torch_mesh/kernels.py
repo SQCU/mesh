@@ -140,6 +140,9 @@ def _tensor(view, pointer, rows, columns, offset='0', row_axis=0, column_axis=1)
             f'dextents<int, 2>({columns}, {rows}), array<int, 2>{{{stride(column_axis)}, {stride(row_axis)}}})')
 
 
+STAGED_COLUMNS = 4  # the simdgroup form's columns a threadgroup, over one staged row of A
+
+
 def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     """out[m, n] = beta bias[n] + alpha sum_k a[m, k] b[k, n], each a View of rank 2 (bias of rank 1 or broadcast); `a` a
     View or a list of Views, the parts of a concatenation along k (a cat the product reads in place, compiler.py), part p
@@ -152,7 +155,8 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
     are fewer than TENSOR_SIMDGROUPS, k is split among a threadgroup's simdgroups, each over its range (across the parts
     it meets), their partials summed through threadgroup memory into the first, whose registers hold the epilogue
     (alpha, bias, the store). Otherwise (a landing's system-coherent loads, which a tensor does not express; fewer
-    than 8 rows): one simdgroup an output, its lanes over k, summed with simd_sum (tools/mesh/lstm_metal.m's shape)."""
+    than 8 rows): a threadgroup a row's STAGED_COLUMNS columns over the row of A staged in threadgroup memory, a
+    simdgroup a column, its lanes over k, summed with simd_sum (tools/mesh/lstm_metal.m's shape)."""
     M, N = out.shape
     parts = a if isinstance(a, list) else [a]
     parameters = [out.parameter(True)] + [p.parameter(False) for p in parts] + [b.parameter(False)] + \
@@ -229,19 +233,26 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
         source = ('#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n'
                   + _source(name, parameters, body))
         return source, (-(-N // TENSOR_COLUMNS) * 32 * split, M // rows, 1), (32 * split, 1, 1)
-    loops, first = [], 0
+    # a threadgroup a row and STAGED_COLUMNS columns: its threads load the row's A (every part, a landing's
+    # system-coherently) into threadgroup memory once, then a simdgroup a column over it. A simdgroup an output loading
+    # its own row coherently cost the LSTM's product 7.3 us a dispatch against 2.3 with ordinary loads on an M5 Ultra
+    # (13.0 against 7.2 on the Mini; metal-microbench tools/mesh/chain.m dot_coherent, dot_plain)
+    S = min(STAGED_COLUMNS, N)
+    staged, first = [], 0
     for p in parts:
         K = p.shape[1]
-        loops.append(f'    for (ulong k = lane; k < {K}ul; k += 32ul) total += float({p.load(["m", "k"])}) * '
-                     f'float({b.load([f"(k + {first}ul)", "n"])});')
+        staged.append(f'    for (ulong k = me; k < {K}ul; k += {32 * S}ul) row[{first}ul + k] = float({p.load(["m", "k"])});')
         first += K
-    body = f'''    const ulong n = at.x / 32ul, m = at.y, lane = at.x % 32ul;
-    if (n >= {N}ul || m >= {M}ul) return;
+    body = f'''    const ulong m = at.y, me = at.x % {32 * S}ul, n = at.x / {32 * S}ul * {S}ul + me / 32ul, lane = me % 32ul;
+    threadgroup float row[{first}];
+{chr(10).join(staged)}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (n >= {N}ul) return;
     float total = 0.0f;
-{chr(10).join(loops)}
+    for (ulong k = lane; k < {first}ul; k += 32ul) total += row[k] * float({b.load(["k", "n"])});
     total = simd_sum(total);
     if (lane == 0ul) {{ {out.store(["m", "n"], f"{alpha}f * total{bias_term}")} }}'''
-    return _source(name, parameters, body), (N * 32, M, 1), (32, 1, 1)
+    return _source(name, parameters, body), (-(-N // S) * 32 * S, M, 1), (32 * S, 1, 1)
 
 
 def summed(name, out, source, axes, scale=1.0):
