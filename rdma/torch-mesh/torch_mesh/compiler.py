@@ -668,41 +668,82 @@ class Program:
                 for e in members:
                     ids[e] = ids[members[0]]
                 last[members[-1]] = key
+            from mesh_graph import contract, sinks, sources, through
+
+            def nodes_of(c, kind, channel):
+                wanted = {'send': lib.ncclMeshNodeRelease, 'sent': lib.ncclMeshNodeSent,
+                          'landed': lib.ncclMeshNodeLanding}[kind]
+                return [n for n in lowered[c] if n[0] == wanted and n[1] == channel]
+            # the events with nodes, then their edges through the events with none
+            for e in t.order:
+                kind, c, *rest = t.events[e]
+                if kind == 'command' or (kind == 'post' and any(n[0] == lib.ncclMeshNodeLink for n in lowered[c])):
+                    has_node.add(e)
+                elif e in last and nodes_of(c, *last[e][::2]):
+                    has_node.update(group[last[e]])
+            after = {}
+            for a, b in through(t.edges, has_node):
+                after.setdefault(a, set()).add(b)
+            # an observation is emitted just before the first node that follows it, not where its event falls in the
+            # order: the GPU runs a part's nodes in order, so an observation the order put early (a landing follows
+            # only its post) would hold the work after it, the release its peers' SENDs wait on among it (run-26: every
+            # rank's one part pending at 8 s). Held observations go out before their first follower, each after those
+            # it follows; the chunk's last go at its end.
+            held = []
+
+            def emit_observation(key):
+                kind, c, channel = key
+                run.event(ids[group[key][0]])
+                command = t.commands[c]
+                for _, _, word, value, slot in nodes_of(c, kind, channel):
+                    observed(slot, word)
+                steps = [command.steps[t.events[m][2]] for m in group[key]]
+                watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
+
+            def flush(target):
+                needed = [k for k in held if any(target in after.get(m, ()) for m in group[k])]
+                grew = True
+                while grew:
+                    grew = False
+                    for k in held:
+                        if k not in needed and any(any(x in after.get(m, ()) for x in group[n]) for n in needed for m in group[k]):
+                            needed.append(k)
+                            grew = True
+                for k in [k for k in held if k in needed]:
+                    held.remove(k)
+                    emit_observation(k)
             for e in t.order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
                 if kind == 'command':
+                    flush(e)
                     run.event(ids[e])
                     operands = []
                     for index, value in enumerate([*command.writes[:1], *command.reads]):
                         tensor, base = self._binding(value.root)
                         operands.append((index, tensor, base))
                     run.dispatch(command.pipeline, operands, command.grid, command.group, True)
-                    has_node.add(e)
                 elif kind == 'post':
                     links = [n for n in lowered[c] if n[0] == lib.ncclMeshNodeLink]
                     if links:
+                        flush(e)
                         run.event(ids[e])
                         for _, _, word, _, slot in links:
                             stored(slot, word)
-                        has_node.add(e)
-                elif e in last:
-                    kind, c, channel = last[e]
-                    wanted = {'send': lib.ncclMeshNodeRelease, 'sent': lib.ncclMeshNodeSent,
-                              'landed': lib.ncclMeshNodeLanding}[kind]
-                    mine = [n for n in lowered[c] if n[0] == wanted and n[1] == channel]
-                    if mine:
+                elif e in last and nodes_of(c, *last[e][::2]):
+                    key = last[e]
+                    if key[0] == 'send':
+                        for m in group[key]:
+                            flush(m)
                         run.event(ids[e])
-                        for _, _, word, value, slot in mine:
-                            if kind == 'send':
-                                stored(slot, word)
-                            else:
-                                observed(slot, word)
-                                steps = [command.steps[t.events[m][2]] for m in group[kind, c, channel]]
-                                watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
-                        has_node.update(group[kind, c, channel])
+                        for _, _, word, value, slot in nodes_of(c, 'send', key[2]):
+                            stored(slot, word)
+                    else:
+                        held.append(key)
+            for k in list(held):
+                held.remove(k)
+                emit_observation(k)
             # the solve's edges between nodes, through events with none; the instance after the one before
-            from mesh_graph import contract, sinks, sources, through
             kept = list(dict.fromkeys(ids[e] for e in t.order if e in has_node))
             own = contract(through(t.edges, has_node), lambda e: ids[e])
             edges += own + [(p, s) for p in previous_sinks for s in sources(kept, own)]
