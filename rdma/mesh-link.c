@@ -438,14 +438,6 @@ static void port_pass(struct port *port,uint64_t *told){
     stream_turn(port,t);stream_post(port,t,served);stream_send(port,t,served);
   }
   if(served){link_receive(port,served);link_send(port,served);}
-  /* diagnostic (deployed by hash, not main's): every served stream's lanes' requests posted and completed, each pass */
-  for(uint32_t t=0;t<plan_streams(l->plan);t++)if(l->hold[t]==HOLD_SERVE){
-    struct mesh_stream *x=stream_of(port,t);const struct lane_state *s=l->lane+MESH_LANE_FIRST+2*t;
-    for(uint32_t c=0;c<2;c++){
-      atomic_store_explicit(&x->posts[0].posted[c],s[c].sent,memory_order_relaxed);atomic_store_explicit(&x->posts[0].done[c],s[c].done,memory_order_relaxed);
-      atomic_store_explicit(&x->posts[1].posted[c],s[c].posted,memory_order_relaxed);atomic_store_explicit(&x->posts[1].done[c],s[c].got,memory_order_relaxed);
-    }
-  }
   if(epoch!=*told){port_tell(&port->seen,epoch);*told=epoch;}
 }
 /* design/transport.md section 14: a port's progress thread, its SENDs' and its receives': it passes without pause while
