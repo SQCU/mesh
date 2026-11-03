@@ -37,12 +37,10 @@ There are four forms, from lowest to highest. Each pair below is ranked by the r
 The pairs:
 - **1 ≺ 2, by C6 and M4 (a failure's reach, containment) and C4 (asynchrony).** Form 1's guard is a wait on space.
   It can halt a call while every member is healthy (below: "A guard can halt with no party at fault"). Form 2 adds no
-  wait. The code: the credit receipts of d4b8837c, 8b102b68 and e13eab3f, deleted by 22228bb3; the waits on `sent`
-  inside a call, deleted by bdde7903.
+  wait.
 - **2 ≺ 3, by D2 and C5 (when choices are made, when time may decide).** Form 2 chooses at the call: an undeclared
-  group's definition is compiled at its first issue (`signature`, rdma/nccl-mesh.c). Form 3 chooses at the declaration:
-  `ncclMeshCommPlan`, whose slots are taken there (3db5d137); `Plan` and `Execute` in rdma/mesh_mpi.py;
-  `declarations.Function` in torch-mesh.
+  group's definition is compiled at its first issue. Form 3 chooses at the declaration: `ncclMeshCommDeclare`
+  (rdma/nccl.h); `compiler.Program` in torch-mesh.
 - **3 ∼ 4.** Neither ranks higher, because they are one form. The operator, 2026-10-28: "we can't use cuda ops on mps
   because mps isn't cuda but if we could we would be fond of the best cuda ops." The best compiled grouped GEMM on CUDA
   ranks with them.
@@ -66,7 +64,7 @@ made.
 - **A2.** A page is written again only after it is released (pages-and-functions.md, Freeing 6 and 7).
 - **A3.** A call waits only on data ([deliverables.md](deliverables.md) I3, I4 and I18).
 - **A4.** Every wait has a deadline. Past it the program ends (the operator, 2026-10-23, in c6241813; the code is
-  `mesh_expired` in rdma/mesh.h and `mesh_library_expired` in rdma/nccl-mesh.c).
+  `mesh_expired` in rdma/mesh.h).
 
 ## What a sender can know
 
@@ -75,7 +73,7 @@ Release needs proof. A sender can learn that its page was read in only two ways:
 - its own NIC's completion of the DMA read, the `sent` prefix, which is a local event.
 
 There are no others. A process learns of a remote event only through a chain of messages from that event
-([Lamport 1978][lamport]; Chandy and Misra 1986). Freeing 6 names exactly these two proofs. A receipt is a message sent
+([Lamport 1978][lamport]; Chandy and Misra 1986). A receipt is a message sent
 only to make such a chain, and I3 excludes it.
 
 ## Where a guard would come from
@@ -157,31 +155,12 @@ None of them needs an eager call.
 ## What follows
 
 A call is eager when its buffers are named only as it runs. Its pages are then whatever the caller holds at that
-moment, and no compiler sees them across calls. The API calls themselves are not what is eager. A declared group is
-issued through the same NCCL calls, and the communicator's plan maps each issue to its declared group (`group_at`,
-rdma/nccl-mesh.c).
+moment, and no compiler sees them across calls.
 
-- **Collectives are called inside a declaration.** NCCL's calls are the declaration's vocabulary there, the way CUDA
-  graph capture keeps them.
+- **Collectives are called inside a declaration.**
 - **A call names its buffers at its declaration.**
-  - `ncclMeshCall.bindings` carries them to `ncclMeshCommPlan`, which lays and places each generation of the group
-    for them (`prepared`, rdma/nccl-mesh.c).
-  - A prepared function binds its buffers when it is prepared, and encodes its collectives then, once (`realize`,
-    rdma/torch-mesh/torch_mesh/_stream.mm).
-- **Declarations come first, then deletions.**
-  - At 9eaecc94 no caller passes `bindings`. torch-mesh's `plan`, mesh_mpi's `Plan` and rdma/assignment.py declare
-    kinds and counts alone, so the buffers are still named at the issue.
-  - Once callers declare their bindings, the run-time paths that serve a call with no declared binding are removed:
-    - a group's definition compiled when no plan covers its issue (`signature` and `same_call`, rdma/nccl-mesh.c);
-    - an issue laid and placed again for buffers other than its declaration's (`issue_bind` and `issue_same`). Gone
-      (mesh 4ae7ed5f): a group of collectives is laid for every slot of its bindings as it is declared, and its issue
-      takes its invocation's slot. A declared group of WRITEs is still laid at its issue for the plans it names;
-    - the callers that declare nothing: torch's `_c10d_functional` ops issued on an unplanned group (`functional`,
-      _stream.mm), ProcessGroupMesh's methods on one (backend.py), and mesh_mpi's methods without `Plan`
-      (rdma/mesh_mpi.py).
-  - Prepared functions reach `signature` too, while they are being prepared. Their calls are declared first, so the
-    compile serves no call at run time.
-- **The executors stay.** `launch`, `launch_host` and `launch_metal` run declared groups as well.
+  - A prepared function binds its buffers when it is prepared, and encodes its collectives then, once
+    (`Program.prepare`, rdma/torch-mesh/torch_mesh/compiler.py).
 - **A request for a new call** (`ncclSend` and `ncclRecv`, an undeclared AlltoAllV) is met as a declared call.
 - **Page reuse is answered by page assignment.** Receipts, credits, waits on `sent`, spare pools and reuse queries are
   never the answer. The answer is page assignment over the declared function (Freeing 7).
