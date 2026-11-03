@@ -1170,7 +1170,12 @@ class Program:
             order = list(dict.fromkeys(node_events))
             bad = unfollowed(order, {e for e, k in kinds.items() if 'observe' in k}, {e for e, k in kinds.items() if 'copy' in k}, edges)
             sends = [(w, c) for w, c in bad if (named.get(c) or (None, ('',)))[1][0] == 'send']
-            print(json.dumps(dict(phase='order_check', pairs=len(bad), releases=len(sends),
+            # a command behind a barrier waits for every earlier dispatch of its part too: the commands after an
+            # observation they do not follow (a release after such a command is held by it)
+            held_commands = unfollowed(order, {e for e, k in kinds.items() if 'observe' in k},
+                                       {e for e, k in kinds.items() if 'command' in k}, edges)
+            print(json.dumps(dict(phase='order_check', pairs=len(bad), releases=len(sends), commands=len(held_commands),
+                                  first_commands=[[named.get(w), named.get(c)] for w, c in held_commands[:12]],
                                   first=[[named.get(w), named.get(c)] for w, c in bad[:6]],
                                   first_releases=[[named.get(w), named.get(c)] for w, c in sends[:12]],
                                   head=[[k, *(n or ())] for (k, n) in [(lab[0], lab[1] if len(lab) > 1 else None) for lab in labels[:48]]])),
