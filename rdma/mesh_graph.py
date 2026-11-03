@@ -366,18 +366,6 @@ def through(edges, kept):
     return sorted(out)
 
 
-def joined(edges, label, earlier, later):
-    """type: edges (a, b), label(node) -> (kind, group, item), the kinds `earlier` and `later` -> for each edge from an
-    `earlier` node to a `later` node of the same group, (later's item, earlier's item): a COPY's landing to a SEND of
-    its occurrence (torch_mesh/compiler.py's forwards), by occurrence"""
-    out = {}
-    for a, b in edges:
-        x, y = label(a), label(b)
-        if x[0] == earlier and y[0] == later and x[1] == y[1]:
-            out.setdefault(x[1], []).append((y[2], x[2]))
-    return out
-
-
 def contract(edges, label):
     """type: edges (a, b), label(node) -> the edges between labels, each pair once, none from a label to itself (a run's
     events merged into their channel's node: torch_mesh/compiler.py)"""
@@ -608,21 +596,198 @@ def superseded(history, newer):
     return [h for h in history if not covered(h[2], h[3])]
 
 
-def later_cover(spans, others):
-    """type: spans [(key, lo, hi)], others [(key, lo, hi)] -> [(met, covered)] a span each: whether an other of a greater
-    key overlaps its bytes [lo, hi), and whether those others' union covers all of them. An all-reduce's steps by the
-    solve's order (torch_mesh/compiler.py _halves): a SEND a later COPY lands over sends a partial; a fold a later COPY
-    lands over, or a later fold adds into, stores a partial; a fold no later fold covers is some byte's last, a final"""
+def versions(moves):
+    """type: page moves [(source, destination, kind, link, first, pages)] (mesh-plan.h struct mesh_page_move: kind
+    'transfer', 'forward' or 'reduce', link a move's index or None, operand pages [first, first + pages)) -> (send,
+    land, folds): send[k] and land[k], for each page of move k, the version its SEND reads at the source and the one
+    its landing writes at the destination, (version, index) each; folds {(rank, target): {operand page: (index,
+    inputs)}}, each target page's one fold, `index` the target's page it writes and `inputs` the (version, index) pages
+    it adds, the rank's own first.
+    Renaming: a REDUCE lands in pages of its own, ('landing', k), and a sum carried on is a version of its own,
+    ('sum', L) by the pages of L, the move carrying it, so no landing or fold writes a page a SEND reads and each
+    version page has one writer. 'own' (the rank's value before the collective) and 'result' (its result) go by operand
+    page, a tuple's version by its own pages. A TRANSFER or a FORWARD lands in 'result'. Every REDUCE landing on a
+    rank's page into one target (its link's sum, or 'result' where it has none) is added with the rank's own value in
+    one fold (mesh-plan.h MESH_MOVE_REDUCE: one fold over all its inputs, never a fold a landing), so a sum is its last
+    arrival plus one fold, whatever order the landings arrive in. A FORWARD sends what its link landed; a REDUCE the sum
+    where a fold writes that page of it, else the rank's own; a TRANSFER the result where something lands it at the
+    source, else the rank's own. No order is walked: each read names its version and each version page its one writer,
+    so every rank states every rank's alike (page_schedule's operand).
+    Changed from versions walked in a move order (move_order, a Kahn order of dependences derived again from links and
+    page overlap) with a fold a REDUCE landing, each later fold into a target reading and writing it in place: k
+    dispatches and about 3k page streams for k children, a chain fixed by move order, so a child first in that order
+    that landed last held every fold behind it. What must stay: renaming, and one fold a target page."""
+    folds, written = {}, set()
+    for k, (_, destination, kind, link, first, pages) in enumerate(moves):
+        if kind != 'reduce':
+            written.update((destination, 'result', p) for p in range(first, first + pages))
+            continue
+        target, base = (('sum', link), moves[link][4]) if link is not None else ('result', 0)
+        into = folds.setdefault((destination, target), {})
+        for i in range(pages):
+            into.setdefault(first + i, (first + i - base, [('own', first + i)]))[1].append((('landing', k), i))
+            written.add((destination, target, first + i - base))
+    send, land = [], []
+    for k, (source, _, kind, link, first, pages) in enumerate(moves):
+        span = range(first, first + pages)
+        if kind == 'forward':
+            landed = moves[link]
+            send.append([(('landing', link), p - landed[4]) if landed[2] == 'reduce' else ('result', p) for p in span])
+        elif kind == 'reduce':
+            send.append([(('sum', k), i) if (source, ('sum', k), i) in written else ('own', first + i)
+                         for i in range(pages)])
+        else:
+            send.append([('result', p) if (source, 'result', p) in written else ('own', p) for p in span])
+        land.append([(('landing', k), i) for i in range(pages)] if kind == 'reduce' else [('result', p) for p in span])
+    return send, land, folds
+
+
+def page_schedule(moves, flow, cables, hop, fold):
+    """type: page moves (versions'), their versions (versions), the fabric's cables [(node, node, rate)] in its order
+    (mesh-fabric.h struct mesh_cable, rate in pages a second), hop (seconds from a page's wire time's end to its
+    landing's presence), fold (a fold's own seconds, its page streams a second) -> (units, grains): units[k][i] for page
+    i of move k, (cable, unit, start, arrival): the cable that carries it, its place among the units that cable carries
+    toward the move's destination, and the seconds from the collective's start at which its SEND starts and its landing
+    is present; grains [(rank, start, end, [(target, operand page)])] in start order, a grain one fold at a rank (one
+    dispatch) over every target page whose landings had all arrived when the rank's GPU took it.
+    A list schedule at page granularity, computed alike at every rank from the same moves and cables, so a cable's
+    units are in one order at both ends. Its resources are each cable one way and each rank's GPU; its tasks a page's
+    SEND (1 / rate on one of its pair's cables, its landing present `hop` after) and a grain (fold[0] and its pages'
+    streams over fold[1], a page's inputs read and its sum written). No resource idles while a task is ready for it
+    (R. L. Graham, "Bounds on multiprocessing timing anomalies", SIAM J. Appl. Math. 17(2), 1969). A page is ready once
+    the version it reads is: at once for the rank's own, at its landing's arrival for a relay, at its grain's end for a
+    sum. A cable that frees, or is free when a page of its pair becomes ready, takes of the pair's ready pages the first,
+    highest level first (the longest path to the end: T. L. Adam, K. M. Chandy and J. R. Dickson, "A comparison of list
+    schedules for parallel processing systems", CACM 17(12), 1974; ties by move, then page), that would finish soonest
+    on it of all the pair's cables (earliest finish, mesh-graph.h mesh_graph_fill's rule for uniform machines), so each
+    cable carries a share by its rate and no ready page waits behind a move that is not ready: the pages of moves
+    interleave on a cable as they become ready. A rank's GPU, once free, folds every page whose inputs have landed, so a
+    grain's length follows from the fold's cost against the landings' rate, no size chosen: the first a page, each
+    later one what landed while the last folded, and the first summed page leaves while later pages still land. A cable
+    of no rate carries nothing. ValueError where a page never becomes ready (the moves' dependences hold a cycle: the
+    planner's defect, at compile time).
+    Changed from a move order (move_order: Kahn's, least index first) and a spread of a pair's pages over its cables by
+    page k mod n (spread): move-major units, so a move ready late took a cable's earlier units and held ready pages
+    behind it, and a relayed FORWARD paced its whole outbound cable at its inbound rate; unequal parallel cables finishing
+    at n times the slowest one's share; and a REDUCE's fold one event over all its move's pages, so each hop was store
+    and forward over the whole move. What must stay: one schedule alike at every rank, a cable's units in one order."""
+    import heapq
+    import math
+    send, land, folds = flow
+    seconds = [1.0 / rate if rate > 0 else math.inf for _, _, rate in cables]
+    pair = {}
+    for c, (a, b, rate) in enumerate(cables):
+        if rate > 0:
+            pair.setdefault((a, b), []).append(c)
+            pair.setdefault((b, a), []).append(c)
+    # each version page's one writer at its rank (a page's landing, a target page's fold), and what reads it there
+    writer, readers, waiting = {}, {}, {}
+    for k, m in enumerate(moves):
+        for i, version in enumerate(land[k]):
+            writer[m[1], version] = ('unit', k, i)
+    for (rank, target), pages in folds.items():
+        for p, (index, inputs) in pages.items():
+            writer[rank, (target, index)] = ('fold', rank, target, p)
+            waiting['fold', rank, target, p] = len(inputs) - 1
+            for version in inputs[1:]:
+                readers.setdefault(writer[rank, version], []).append(('fold', rank, target, p))
+    for k, m in enumerate(moves):
+        for i, version in enumerate(send[k]):
+            if (m[0], version) in writer:
+                readers.setdefault(writer[m[0], version], []).append(('unit', k, i))
+    level = {}
+
+    def height(node):
+        # the longest path from a task's start to the end, its own time among it
+        if node not in level:
+            if node[0] == 'unit':
+                own = min(seconds[c] for c in pair[moves[node[1]][0], moves[node[1]][1]]) + hop
+            else:
+                own = fold[0] + (len(folds[node[1], node[2]][node[3]][1]) + 1) / fold[1]
+            level[node] = own + max((height(r) for r in readers.get(node, ())), default=0.0)
+        return level[node]
+    units = [[None] * m[5] for m in moves]
+    grains, free, taken, pool, gpu, foldable, queue, sequence = [], {}, {}, {}, {}, {}, [], itertools.count()
+
+    def at(t, kind, x):
+        heapq.heappush(queue, (t, next(sequence), kind, x))
+
+    def take(ends, t):
+        ready = pool.get(ends)
+        for c in pair[ends]:
+            if not ready or free.get((c, ends[1]), 0.0) > t:
+                continue
+            finish = {j: max(t, free.get((j, ends[1]), 0.0)) + seconds[j] for j in pair[ends]}
+            passed, chosen = [], None
+            while ready:
+                page = heapq.heappop(ready)
+                j = min(pair[ends], key=lambda j: (finish[j], j != c, j))
+                if j == c:
+                    chosen = page
+                    break
+                finish[j] += seconds[j]
+                passed.append(page)
+            for page in passed:
+                heapq.heappush(ready, page)
+            if chosen is not None:
+                _, k, i = chosen
+                unit = taken.get((c, ends[1]), 0)
+                taken[c, ends[1]], free[c, ends[1]] = unit + 1, t + seconds[c]
+                units[k][i] = (c, unit, t, t + seconds[c] + hop)
+                at(t + seconds[c], 'free', ends)
+                at(t + seconds[c] + hop, 'landed', ('unit', k, i))
+
+    def take_fold(rank, t):
+        if gpu.get(rank, 0.0) > t or not foldable.get(rank):
+            return
+        grain = foldable.pop(rank)
+        end = t + fold[0] + sum(len(folds[rank, target][p][1]) + 1 for target, p in grain) / fold[1]
+        gpu[rank] = end
+        grains.append((rank, t, end, grain))
+        at(end, 'folded', len(grains) - 1)
+    for k, m in enumerate(moves):
+        for i, version in enumerate(send[k]):
+            if (m[0], version) not in writer:
+                at(0.0, 'ready', ('unit', k, i))
+    while queue:
+        t, _, kind, x = heapq.heappop(queue)
+        if kind == 'ready':
+            ends = moves[x[1]][0], moves[x[1]][1]
+            heapq.heappush(pool.setdefault(ends, []), (-height(x), x[1], x[2]))
+            take(ends, t)
+        elif kind == 'free':
+            take(x, t)
+        elif kind == 'landed':
+            for node in readers.get(x, ()):
+                if node[0] == 'unit':
+                    at(t, 'ready', node)
+                    continue
+                waiting[node] -= 1
+                if not waiting[node]:
+                    foldable.setdefault(node[1], []).append(node[2:])
+                    take_fold(node[1], t)
+        else:
+            rank, _, _, grain = grains[x]
+            for target, p in grain:
+                for node in readers.get(('fold', rank, target, p), ()):
+                    at(t, 'ready', node)
+            take_fold(rank, t)
+    if any(u is None for move in units for u in move):
+        raise ValueError('page moves whose dependences hold a cycle (mesh-plan.h mesh_page_moves)')
+    return units, grains
+
+
+def consecutive(rows):
+    """type: [(same, ascending)] a pair of tuples a row -> [(first, end)]: the maximal runs of rows [first, end) in which
+    each row's `same` is its predecessor's and each place of its `ascending` its predecessor's plus one (a grain's fold
+    pages contiguous in every buffer it binds, a piece of its dispatch each: torch_mesh/compiler.py)"""
     out = []
-    for key, lo, hi in spans:
-        later = sorted((max(lo, a), min(hi, b)) for k, a, b in others if k > key and a < hi and lo < b)
-        reach = lo
-        for a, b in later:
-            if a > reach:
-                break
-            reach = max(reach, b)
-        out.append((bool(later), reach >= hi))
-    return out
+    for k, (same, ascending) in enumerate(rows):
+        if out and rows[k - 1][0] == same and all(b == a + 1 for a, b in zip(rows[k - 1][1], ascending)):
+            out[-1][1] = k + 1
+        else:
+            out.append([k, k + 1])
+    return [tuple(r) for r in out]
 
 
 def arborescences(nodes, root, capacity, depth=None):

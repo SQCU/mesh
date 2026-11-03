@@ -5,8 +5,13 @@ capture  torch's FX tracer (make_fx) over fake tensors, the caller's tensors (st
 lower    a view is a view of its operand's root; a pointwise op, a matrix product, an indexed copy or a sum is a command
          over views (kernels.py), a chain of single-consumer pointwise ops of one shape fused into one; an all-gather is
          a declared group of calls (nccl.h ncclMeshCommDeclare), one a contiguous frame of its gathered axis.
-solve    each command's reads and writes and each collective step's SEND, completion, post and landing are the run's
-         events and accesses (mesh-page-map.h mesh_run_solve); a caller's storage is a pinned bin, the arena the last.
+solve    each command's reads and writes and each collective's page moves (the planner's, mesh-plan.h struct
+         mesh_page_move: a post, landings, SENDs, their completions and REDUCE folds) are the run's events and accesses
+         (mesh-page-map.h mesh_run_solve, the one solver: dependences, happens-before, placement, order), a
+         collective's at its page schedule's seconds (mesh_graph.page_schedule: each page's cable and unit, each rank's
+         grains of folds, alike at every rank); a caller's storage is a pinned bin, the arena the last; its result this
+         rank's channel table in the solve's order, each entry's guard a landed prefix, a release's word or none
+         (mesh-plan.h struct mesh_channel_entry).
 run      a command a dispatch, a run of links and releases one dispatch of word stores, a run of REDUCE folds one
          dispatch, a landing and a SEND's completion a presence, and the solve's edges between them (rdma/metal.h); an
          event with no node (a relay's SEND, the bridge's) passes its edges through. A repeated chunk is captured,
@@ -53,17 +58,24 @@ import os
 # services' onepart-1). The run's configuration (MESH_RUN_CUTS=all, or first) restores the ends for a comparison
 # (metal-microbench docs/facts.md). What must stay: no part end that only made a store visible.
 CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
+# the page schedule's costs (mesh_graph.page_schedule), the members' own numbers: a page's hop past its wire time, a
+# release to its landing one-way (8.2 us: metal-microbench docs/measurement.md u4); a grain's own cost, its landings'
+# observation and its fold's dispatch (dispatches 7-8 us apart on the Mini, the slowest member, 2.6-4 us on an M5 Ultra:
+# docs/facts.md, "The planner's all-reduce stalls about 1 ms"); its pages' streams at the Mini's memory rate (the M4
+# Pro's 273 GB/s). Every rank schedules with the same numbers, so a cable's units are in one order at both ends.
+HOP_SECONDS, FOLD_SECONDS, FOLD_BYTES_A_SECOND = 8.2e-6, 8e-6, 273e9
 
 
 class Root:
     """a storage values lie in: a caller tensor's (pinned at its own storage) or one of the run's (placed in the
-    arena); coherent where a collective step reads or writes it (its kernels' loads and stores system-coherent). A
+    arena); coherent where a collective's move reads or writes it (its kernels' loads and stores system-coherent),
+    paged where only the NIC and the folds touch it (a REDUCE's landing, a carried sum: placed page by page). A
     version of a caller's storage (`base` the caller's root, `prev` the version before) is one of the run's: a write
     after another node's read of the storage starts one, so a landing never waits for the readers of the bytes it
     replaces (design/page-maps-2026-11-02.md: renaming; docs/facts.md: the LSTM's link racing a peer's SEND), and an
     all-reduce's result always starts one (of a run root's storage too: _reduced)."""
     def __init__(self, nbytes, tensor=None, base=None, prev=None):
-        self.nbytes, self.tensor, self.coherent = nbytes, tensor, False
+        self.nbytes, self.tensor, self.coherent, self.paged = nbytes, tensor, False, False
         self.base, self.prev, self.covered, self.readers = base, prev, [], set()
 
 
@@ -127,51 +139,30 @@ class Command:
 
 
 class Collective:
-    """a declared all-gather: its calls' frames (each a contiguous run of the gathered axis in `out`'s root), each a
-    rank's segment sizes; its steps once declared"""
+    """a declared collective: its calls' frames (each a contiguous run of `out`'s root), each rank's segment sizes (an
+    all-gather's); once declared, its page moves over all its calls (every rank's: mesh-plan.h struct mesh_page_move),
+    each read's and write's version and each target page's fold (mesh_graph.versions), and their one page schedule
+    (mesh_graph.page_schedule: each page's cable, unit and times, each rank's grains)"""
     def __init__(self, out, frames, segments, dtype, group, what='allgather', elements=None):
         self.out, self.frames, self.segments, self.dtype, self.group = out, frames, segments, dtype, group
         # what: 'allgather' (segments the ranks' blocks) or 'allreduce' (segments the planner's cut: None)
         self.what, self.elements = what, elements if elements is not None else sum(segments)
 
-    def origin(self, step):
-        """the rank whose segment a step's bytes lie in (the segments packed in rank order, `first` a byte offset)"""
-        if self.segments is None:
-            return None
-        at, end = step['first'] // self.dtype.itemsize, 0
-        for rank, size in enumerate(self.segments):
-            end += size
-            if at < end:
-                return rank
-        return len(self.segments) - 1
-
-
-def _halves(c):
-    """an all-reduce's operand steps over its two roots (_reduced): x (c.mine, what the program wrote, the partials) and
-    y (c.out, the result, a version of its own). The bytes' flow decides each step's: a COPY lands a final in y (_declare
-    put it there); a SEND reads x where a COPY of its bytes lands at its round or later (a partial sent up) and y
-    otherwise (a final sent down: a forward of a COPY's bytes, or this rank's own segment, which no COPY lands); a REDUCE
-    reads x and its fold stores the sum into x where a later fold of the solve's order (round, then step) adds into any
-    of its bytes, and, over this rank's own segment, into y where no later fold adds into some byte of it (that byte's
-    last fold, its final). So y holds every byte of x's run: a COPY's, or its last fold's.
-    Changed from one root for both halves (every step on c.out's root): the all-gather's landings wrote the pages this
-    rank's reduce-scatter SENDs still read (_reduced: the ~1 ms write-after-read hold). What must stay: no landing, and
-    no fold of a final, on bytes of x a SEND reads."""
-    from mesh_graph import later_cover
-    x, y = c.mine.root, c.out.root
-    # each operand step's span by the solve's order: a round's SENDs, then its landings and folds, in step order
-    span = lambda k, s: ((s['round'], s['kind'] != 'send', k), s['at'], s['at'] + s['bytes'])
-    operand = [(k, s) for k, s in enumerate(c.steps) if not s['buffer']]
-    sends = [(k, s) for k, s in operand if s['kind'] == 'send']
-    folds = [(k, s) for k, s in operand if s['kind'] == 'reduce']
-    copies = [span(k, s) for k, s in operand if s['kind'] == 'copy']
-    for (k, s), (partial, _) in zip(sends, later_cover([span(k, s) for k, s in sends], copies)):
-        s['root'] = x if partial else y
-    spans = [span(k, s) for k, s in folds]
-    for (k, s), (replaced, _), (added, covered) in zip(folds, later_cover(spans, copies), later_cover(spans, spans)):
-        s['root'] = x
-        # another rank's segment (a COPY lands its final later): the partial this rank's SEND up reads
-        s['writes'] = [x] if replaced else ([x] if added else []) + ([y] if not covered else [])
+    def place(self, version, index):
+        """page `index` of `version` (mesh_graph.versions) as its root and bytes there [first, end), the page map the
+        solve's accesses take: a landing's or a carried sum's page of its own pages; the result's operand page on its
+        call's frame of `out`, the rank's own on its pages of `mine` (an operand page is a call's page after the calls
+        before it, _declare; an all-gather's ranks' segments in a call each from a page)"""
+        if isinstance(version, tuple):
+            root, first = self.roots[version], index * self.page
+        else:
+            call, p = divmod(index, self.pages)
+            if version == 'result':
+                root, first = self.out.root, self.frames[call] * self.dtype.itemsize + p * self.page
+            else:
+                root = self.mine.root
+                first = self.mine.span()[0] + (call * self.own_pages + p - self.own_first) * self.page
+        return root, first, min(first + self.page, root.nbytes)
 
 
 def _caller(roots, current, tensor):
@@ -621,7 +612,7 @@ class Template:
         """allreduce_(x, group): x summed over every rank in place, one call over x (one contiguous run): the planner's
         all-reduce, its segments the planner's cut (a reduce-scatter's rounds up the trees and an all-gather's down). It
         reads x (this rank's part of the sum: `mine`) and writes its sum, all of x's bytes, into y, a new version of x's
-        storage (`out`): the COPYs land there and this rank's own segment's last folds store there (_declare's _halves).
+        storage (`out`): the TRANSFERs and FORWARDs land there and the final folds store there (mesh_graph.versions).
         Changed from two lowerings chosen by a modeled finish (GATHER_BELOW, about 1.2 MB: below it a gather of every
         rank's x and a sum over the ranks), a second schedule of the same reduction: alone the planner's was the faster
         at 256 KB (83-140 us against 129-167), inside the FFN the two indistinguishable (metal-microbench docs/facts.md,
@@ -639,8 +630,8 @@ class Template:
             raise NotImplementedError('an all-reduce of a view that is not one contiguous run')
         # x as the program left it, first, while its version is current (a held copy_ out and the version completed
         # write the current version: _held_out, _complete); then y, a new version of x's storage, current, so the
-        # collective's write binds there. y's covered bytes are x's run, all of which the steps write (COPYs and this
-        # rank's last folds); the rest of its storage is completed from the version before (_complete)
+        # collective's write binds there. y's covered bytes are x's run, all of which the moves write (landings and
+        # final folds); the rest of its storage is completed from the version before (_complete)
         self._held_out([x])
         self._complete(x.root)
         base = x.root.base if x.root.base is not None else x.root
@@ -668,54 +659,107 @@ class Template:
 
     # ---- declare ----
     def _declare(self):
+        """each collective's group declared in pages (nccl.h ncclMeshCommDeclare, struct ncclMeshCollective: each rank's
+        pages of a call's operand) and its calls' page moves, every rank's (the planner's, mesh-plan.h struct
+        mesh_page_move: ncclMeshCommSteps), one list over its calls (a call's operand pages after the calls before it,
+        its links on its own moves); their versions and folds (mesh_graph.versions) and their one page schedule over
+        the fabric's cables at their rates (mesh_graph.page_schedule: each page's cable, unit and times, each rank's
+        grains), alike at every rank. A REDUCE's landing and a sum carried on are roots of their own, placed page by
+        page.
+        Changed from a move order, a spread and versions walked in that order a call at a time (mesh_graph.move_order,
+        spread; units carried over from the calls before): a second scheduler beside the solve, its units move-major
+        and its cables taken k mod n whatever their rates (design/drift-2026-11-03.md). And from a declaration in
+        elements of an element type at a root (the library's own cut, nccl.h ncclMeshCollective as it was). What must
+        stay: one page schedule, computed alike at every rank, over every call of the occurrence."""
         import mesh
-        from .backend import TYPES
+        from mesh_graph import page_schedule, versions
         ffi, lib = mesh.ffi, mesh.lib
+        page = _stream.region_page_bytes()
+        kinds = {lib.MESH_MOVE_TRANSFER: 'transfer', lib.MESH_MOVE_FORWARD: 'forward', lib.MESH_MOVE_REDUCE: 'reduce'}
         for c in self.collectives:
             c.comm = ffi.cast('ncclComm_t', _stream.communicator_of(c.group))
+            rank, ranks, fabric = ffi.new('int *'), ffi.new('int *'), ffi.new('const struct mesh_fabric **')
+            mesh.check(lib.ncclCommUserRank(c.comm, rank))
+            mesh.check(lib.ncclCommCount(c.comm, ranks))
+            mesh.check(lib.ncclMeshCommFabric(c.comm, fabric))
+            c.rank, c.page = rank[0], page
+            # each rank's pages of a call's operand: an all-gather's segments each from a page; an all-reduce's are
+            # summed alone (nccl.h ncclMeshCollective), so all of them stand at rank 0
+            if c.segments is not None:
+                sizes = [-(-n * c.dtype.itemsize // page) for n in c.segments]
+            else:
+                sizes = [-(-c.elements * c.dtype.itemsize // page)] + [0] * (ranks[0] - 1)
+            c.pages = sum(sizes)
+            c.own_first, c.own_pages = (sum(sizes[:c.rank]), sizes[c.rank]) if c.segments is not None else (0, c.pages)
+            segment = ffi.new('uint64_t[]', sizes)
             calls = ffi.new('ncclMeshCollective[]', len(c.frames))
-            segments = ffi.new('uint64_t[]', c.segments) if c.segments is not None else ffi.NULL
-            what = lib.MESH_ALLREDUCE if c.what == 'allreduce' else lib.MESH_ALLGATHER
             for k in range(len(c.frames)):
-                calls[k].what, calls[k].type, calls[k].op, calls[k].root = what, TYPES[c.dtype], 0, 0
-                calls[k].elements, calls[k].segments = c.elements, segments
+                calls[k].what = lib.MESH_ALLREDUCE if c.what == 'allreduce' else lib.MESH_ALLGATHER
+                calls[k].segment = segment
             definition = ffi.new('uint64_t *')
             mesh.check(lib.ncclMeshCommDeclare(c.comm, calls, len(c.frames), definition))
             c.definition = definition[0]
-            count = ffi.new('size_t *')
-            mesh.check(lib.ncclMeshCommSteps(c.comm, c.definition, ffi.NULL, 0, count))
-            steps = ffi.new('ncclMeshTransfer[]', max(1, count[0]))
-            mesh.check(lib.ncclMeshCommSteps(c.comm, c.definition, steps, count[0], count))
-            width = c.dtype.itemsize
-            c.steps = [dict(call=s.call, channel=s.channel, op=s.op, round=s.round, buffer=s.buffer, first=s.first,
-                            bytes=s.bytes) for s in steps[0:count[0]]]
-            # a step's bytes: buffer 0 its frame's in out's root; a scratch buffer a run root of its own per call
-            c.scratch = {}
-            for s in c.steps:
-                if s['buffer']:
-                    key = (s['call'], s['buffer'])
-                    c.scratch[key] = max(c.scratch.get(key, 0), s['first'] + s['bytes'])
-            c.scratch = {key: Root(n) for key, n in c.scratch.items()}
-            for root in c.scratch.values():
-                root.coherent = True
-            for s in c.steps:
-                if s['buffer']:
-                    s['root'], s['at'] = c.scratch[s['call'], s['buffer']], s['first']
-                else:
-                    s['root'], s['at'] = c.out.root, c.frames[s['call']] * width + s['first']
-                s['kind'] = {lib.MESH_STEP_SEND: 'send', lib.MESH_STEP_COPY: 'copy', lib.MESH_STEP_REDUCE: 'reduce'}[s['op']]
-                if s['kind'] == 'reduce':
-                    # a REDUCE lands in a root of its own and its fold adds it into the step's bytes (the sum), stored
-                    # to each root of `writes`
-                    s['landing'] = Root(s['bytes'])
-                    s['landing'].coherent = True
-                    s['writes'] = [s['root']]
-            if c.what == 'allreduce':
-                _halves(c)
+            moves = []
+            for call in range(len(c.frames)):
+                count = ffi.new('size_t *')
+                mesh.check(lib.ncclMeshCommSteps(c.comm, c.definition, call, ffi.NULL, 0, count))
+                out = ffi.new('struct mesh_page_move[]', max(1, count[0]))
+                mesh.check(lib.ncclMeshCommSteps(c.comm, c.definition, call, out, count[0], count))
+                base = len(moves)
+                moves += [(m.source, m.destination, kinds[m.kind], None if m.link == (1 << 32) - 1 else base + m.link,
+                           call * c.pages + m.first, m.pages) for m in out[0:count[0]]]
+            cable = fabric[0].cable
+            # a cable's rate in pages a second (its bandwidth in bits a second), and its channel here: its place among
+            # the cables that end at this rank (nccl.h ncclMeshCommChannels)
+            cables = [(cable[k].node[0], cable[k].node[1], cable[k].bandwidth / (8 * page)) for k in range(fabric[0].cables)]
+            c.channel = {k: h for h, k in enumerate(k for k, (a, b, _) in enumerate(cables) if c.rank in (a, b))}
+            c.moves, c.flow = moves, versions(moves)
+            c.units, c.grains = page_schedule(moves, c.flow, cables, HOP_SECONDS,
+                                              (FOLD_SECONDS, FOLD_BYTES_A_SECOND / page))
+            # the roots of this rank's versions of its own: a REDUCE's landing, a sum carried on
+            send, land, folds = c.flow
+            used = [v for k, m in enumerate(moves) if m[0] == c.rank for v, _ in send[k]]
+            used += [v for k, m in enumerate(moves) if m[1] == c.rank for v, _ in land[k]]
+            used += [target for rank, target in folds if rank == c.rank]
+            c.roots = {}
+            for version in used:
+                if isinstance(version, tuple) and version not in c.roots:
+                    c.roots[version] = root = Root(moves[version[1]][5] * page)
+                    root.coherent = root.paged = True
 
     # ---- solve ----
     def _solve(self):
-        """the run's events, in the declared order, and their accesses; the solve's edges and places"""
+        """the run's events, in the declared order, and their accesses; the solve's edges, order and places (mesh-page-map.h
+        mesh_run_solve, the one solver); and from them this rank's channel table (mesh-plan.h struct mesh_channel_entry)
+        in that order, an occurrence's table each (`table`, `entries`), each entry's guard the solve's; each transport
+        event's presence (its channel's count and the value it waits for), each release (`release`: a SEND run's word,
+        a root of a page, and the value its store gives it) and each grain's pieces (`folds`: the element type and
+        (target (root, byte), inputs ((root, byte) the rank's own, then each landing), bytes) each, one contiguous run of
+        each buffer).
+        A collective's events: its post first (every receive posted, into pages no access before it touches), the posts
+        in the occurrences' order; then at its place in the program, at its page schedule's seconds
+        (mesh_graph.page_schedule, alike at every rank): a group of landings here a `landed` event (post -> landed),
+        a REDUCE's group the pages of its channel one grain folds, its presence that channel's landed prefix past the
+        group's last unit; a grain a `fold`, every target page's own value and landings added in one pass; a run of a
+        channel's consecutive SEND units of one producer a `send` and its `sent` (SEND -> completion), once its producer
+        is declared and after the channel's run before it; each page's access on the version mesh_graph.versions names.
+        Every edge then runs forward in the declared order, so the solve's order is the declared one and keeps each
+        channel's units in their unit order: a fold as late as its landings, a release as soon as its grain. The guards:
+        a SEND whose page's last write is a landing is posted once that landing's channel's landed prefix holds it (its
+        unit there: the read mapped back through the channel's unit order); one a GPU node wrote, once its run's release
+        (a word store after its writers) gives its word the threshold; one nothing in the run wrote, and every landing,
+        at once. A table is an occurrence's, its counts from its start.
+        Changed from the library's steps (nccl.h ncclMeshTransfer: each step's channel, round, buffer and bytes chosen in
+        the library, 1f794b8f), the forwards read off the solve's edges for the bridge's own gate (mesh_graph.joined,
+        d30cf628) and an all-reduce's halves split by interval algebra over rounds (_halves, eecfb049; later_cover,
+        f7bcd586): order, channel and guard decided a second time outside the one solver (design/drift-2026-11-03.md).
+        Then from a landed event and a fold a move (a channel each), declared in move order, and a release a channel's
+        ready: each hop store and forward over the whole move (its last page landed, its one fold, its release, and only
+        then its first page sent on), and every ready page of a cable behind moves not yet ready. What must stay: the
+        page schedule alike at every rank (a channel's units match at both ends), renaming (no landing or fold on a page
+        a SEND reads), one fold a target page, and every guard read off the solve's edges."""
+        import mesh
+        ffi, lib = mesh.ffi, mesh.lib
         events, accesses, links = [], [], []
 
         def event(kind, *key):
@@ -732,66 +776,114 @@ class Template:
         def access(begin, end, mode, root, first, end_byte):
             if end_byte > first:
                 accesses.append((begin, end, mode, item(root), first, end_byte - first))
-        # every occurrence's post first: its landings go into versions of their own, so nothing before orders them
-        # (docs/facts.md: a link after its tick's readers raced the peers' SENDs, which TN3205's credit then held)
+        page = _stream.region_page_bytes()
+        rows, landed_at, words, self.presence, self.folds = {}, {}, {}, {}, {}
+        posts = []
         for c, command in enumerate(self.commands):
             if isinstance(command, Collective):
                 command.post = event('post', c)
+                rows[command.post] = []
+                links.extend((p, command.post) for p in posts[-1:])
+                posts.append(command.post)
         for c, command in enumerate(self.commands):
-            if isinstance(command, Collective):
-                post = command.post
-                # an all-gather's sends, then its landings; an all-reduce's round by round (a round's sends, then its
-                # landings and folds), so a later round's SEND follows the folds whose sums it carries
-                rounds = sorted({s['round'] for s in command.steps}) if command.what == 'allreduce' else [None]
-                for r in rounds:
-                    for k, s in enumerate(command.steps):
-                        if s['kind'] == 'send' and (r is None or s['round'] == r):
-                            s['event'] = event('send', c, k)
-                    if r is not None:
-                        # an all-reduce's SENDs complete within their round's span, so a later round's write over bytes
-                        # one read follows its completion
-                        for k, s in enumerate(command.steps):
-                            if s['kind'] == 'send' and s['round'] == r:
-                                s['completion'] = event('sent', c, k)
-                                access(s['event'], s['completion'], READ, s['root'], s['at'], s['at'] + s['bytes'])
-                                links.append((s['event'], s['completion']))
-                    for k, s in enumerate(command.steps):
-                        if s['kind'] == 'copy' and (r is None or s['round'] == r):
-                            s['event'] = event('landed', c, k)
-                            # a COPY lands straight into its root from the post: an all-reduce's into y, its result's
-                            # version (_reduced, _halves), whose SENDs down forward it as it lands.
-                            # Changed from an all-reduce COPY landed in a root of its own and placed into the operand by
-                            # a copy after the SENDs that read those bytes (dccd3135, e35c124d): the place was the
-                            # write-after-read hold of about 1 ms (_reduced). The two causes that copy answered are gone
-                            # with y: the program's own write of the operand before its sum is x's, never y's (run-9:
-                            # landed sums overwritten by that write), and no SEND reads y's bytes before they land
-                            # (run-6: a receive held for a SEND's completion deadlocked; every receive is still posted
-                            # at the link). What must stay: a landing into a version no access before the post touches.
-                            access(post, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
-                            links.append((post, s['event']))
-                        elif s['kind'] == 'reduce' and (r is None or s['round'] == r):
-                            # its landing into its own root, then its fold: the step's bytes plus the landing, stored to
-                            # each root of its `writes` (x, the partial a later fold or SEND reads; y, a final: _halves)
-                            s['event'] = event('landed', c, k)
-                            access(post, s['event'], WRITE, s['landing'], 0, s['bytes'])
-                            links.append((post, s['event']))
-                            s['fold'] = event('fold', c, k)
-                            access(s['fold'], s['fold'], READ, s['landing'], 0, s['bytes'])
-                            access(s['fold'], s['fold'], READ, s['root'], s['at'], s['at'] + s['bytes'])
-                            for root in s['writes']:
-                                access(s['fold'], s['fold'], WRITE, root, s['at'], s['at'] + s['bytes'])
-                for k, s in enumerate(command.steps):
-                    if s['kind'] == 'send' and 'completion' not in s:
-                        s['completion'] = event('sent', c, k)
-                        access(s['event'], s['completion'], READ, s['root'], s['at'], s['at'] + s['bytes'])
-                        links.append((s['event'], s['completion']))
+            if not isinstance(command, Collective):
+                e = event('command', c)
+                for value in command.reads:
+                    access(e, e, READ, value.root, *value.span())
+                for value in command.writes:
+                    access(e, e, WRITE, value.root, *value.span())
                 continue
-            e = event('command', c)
-            for value in command.reads:
-                access(e, e, READ, value.root, *value.span())
-            for value in command.writes:
-                access(e, e, WRITE, value.root, *value.span())
-        page = _stream.region_page_bytes()
+            moves, (send, land, folds), units, grains = command.moves, command.flow, command.units, command.grains
+            rank, channel, place = command.rank, command.channel, command.place
+            grain_of = {(target, p): g for g, (r, _, _, pages) in enumerate(grains) if r == rank for target, p in pages}
+            # this rank's landings, a `landed` event a group's on a channel: a REDUCE's pages by the grain that folds
+            # them, any other move's by its move; its presence the channel's landed prefix past the group's last unit
+            groups, landed_by = {}, {}
+            for k, (_, destination, kind, link, first, pages) in enumerate(moves):
+                if destination != rank:
+                    continue
+                target = ('sum', link) if link is not None else 'result'
+                for i in range(pages):
+                    cable, unit, _, arrival = units[k][i]
+                    key = (('grain', grain_of[target, first + i]) if kind == 'reduce' else ('move', k), channel[cable])
+                    groups.setdefault(key, []).append((unit, k, i, arrival))
+                    landed_by[land[k][i]] = key
+            arrived = {key: max(arrival for *_, arrival in held) for key, held in groups.items()}
+            # each version page a fold of this rank writes, by its grain
+            folded = {(target, index): grain_of[target, p] for (r, target), pages in folds.items() if r == rank
+                      for p, (index, _) in pages.items()}
+            # the collective's events at their schedule's seconds: (seconds, kind's place, sequence, kind, what)
+            declared = [(arrived[key], 0, n, 'landed', (key, held)) for n, (key, held) in enumerate(groups.items())]
+            declared += [(start, 1, len(declared) + g, 'fold', (g, pages))
+                         for g, (r, start, _, pages) in enumerate(grains) if r == rank]
+            # this rank's SENDs, a channel's in their unit order: a `send` event a run of consecutive units of one
+            # producer (a grain, a landing, or none of the collective's: the rank's own), at its first unit's start or
+            # once its producer is, and after its channel's run before it, so every edge runs forward in the declared
+            # order and the solve's order keeps a channel's units in their order
+            outbound = {}
+            for k, (source, *_, pages) in enumerate(moves):
+                if source != rank:
+                    continue
+                for i in range(pages):
+                    cable, unit, start, _ = units[k][i]
+                    version = send[k][i]
+                    if version in folded:
+                        producer, ready = ('fold', folded[version]), grains[folded[version]][1]
+                    elif version in landed_by:
+                        producer, ready = ('landing',), arrived[landed_by[version]]
+                    else:
+                        producer, ready = ('own',), 0.0
+                    outbound.setdefault(channel[cable], []).append((unit, max(start, ready), producer, k, i))
+            for h, held in sorted(outbound.items()):
+                held.sort()
+                last = 0.0
+                for producer, run in itertools.groupby(held, key=lambda u: u[2]):
+                    run = list(run)
+                    last = max([last] + [at for _, at, *_ in run])
+                    declared.append((last, 2, len(declared), 'send', (h, producer, run)))
+            for _, _, _, kind, what in sorted(declared, key=lambda d: d[:3]):
+                if kind == 'landed':
+                    (key, h), held = what
+                    e = event('landed', c, key, h)
+                    links.append((command.post, e))
+                    for unit, k, i, _ in held:
+                        root, a, b = place(*land[k][i])
+                        access(command.post, e, WRITE, root, a, b)
+                        rows[command.post].append((lib.MESH_CHANNEL_LANDING, h, item(root), a, unit))
+                        landed_at[item(root), a // page] = (c, h, unit)
+                    self.presence[e] = (h, lib.MESH_WORD_LANDED, max(unit for unit, *_ in held) + 1)
+                elif kind == 'fold':
+                    # a grain: each target page the rank's own and every landing into it added, stored once
+                    g, pages = what
+                    e = event('fold', c, g)
+                    for target, p in pages:
+                        index, inputs = folds[rank, target][p]
+                        for version in inputs:
+                            access(e, e, READ, *place(*version))
+                        access(e, e, WRITE, *place(target, index))
+                    self.folds[e] = (command, pages)
+                else:
+                    h, producer, run = what
+                    e, done = event('send', c, h, run[0][0]), event('sent', c, h, run[0][0])
+                    links.append((e, done))
+                    rows[e] = []
+                    for unit, _, _, k, i in run:
+                        root, a, b = place(*send[k][i])
+                        access(e, done, READ, root, a, b)
+                        rows[e].append((lib.MESH_CHANNEL_SEND, h, item(root), a, unit))
+                    if producer != ('landing',):
+                        # the word a release stores once the run's pages are written (nccl.h MESH_WORD_READY: the first
+                        # word of a page of its own): a grain's one, stored by its first run, every channel's runs of
+                        # it guarding on it; the rank's own pages' a run's. The bridge reads it until the run's SENDs
+                        # are posted
+                        if (producer if producer[0] == 'fold' else e) not in word_of:
+                            word_of[producer if producer[0] == 'fold' else e] = word = Root(page)
+                            word.coherent = word.paged = True
+                            access(e, e, WRITE, word, 0, 8)
+                            stores[id(word)] = e
+                        words[e] = word_of[producer if producer[0] == 'fold' else e]
+                        access(e, done, READ, words[e], 0, 8)
+                    self.presence[done] = (h, lib.MESH_WORD_SENT, run[-1][0] + 1)
         pinned = [root for root in items if root.tensor is not None]
         bins, first = [], 0
         pins = {}
@@ -804,23 +896,64 @@ class Template:
         bins.append((first, max(1, own)))
         # a system-coherent item (a SEND's source, a landing) shares no page with an ordinary one (RUN_COHERENT,
         # mesh-page-map.h): an M4 Pro writes an ordinary store's dirty line back at the running buffer's end, over a
-        # landing into it (metal-microbench docs/facts.md, visible.m "writeback")
-        rows = [(max(1, -(-root.nbytes // page)), pins.get(id(root), _stream.RUN_FREE),
-                 ((_stream.RUN_BEFORE | _stream.RUN_AFTER) if root.tensor is not None else 0) |
-                 (_stream.RUN_COHERENT if root.coherent else 0), 1) for root in items]
-        solved = _stream.run_solve(page, len(events), accesses, links, rows, bins)
+        # landing into it (metal-microbench docs/facts.md, visible.m "writeback"). An item only the NIC and the folds
+        # touch (a REDUCE's landing, a carried sum) is placed page by page; the others one range each.
+        placed = [(max(1, -(-root.nbytes // page)), pins.get(id(root), _stream.RUN_FREE),
+                   ((_stream.RUN_BEFORE | _stream.RUN_AFTER) if root.tensor is not None else 0) |
+                   (_stream.RUN_COHERENT if root.coherent else 0), 0 if root.paged else 1) for root in items]
+        solved = _stream.run_solve(page, len(events), accesses, links, placed, bins)
         self.events, self.items, self.page, self.accesses = events, items, page, accesses
         self.edges = sorted({(f, t) for f, t, *_ in solved['edges'] if f != t})
-        # each occurrence's forwards: a SEND reading bytes a COPY of the same occurrence landed (its RAW edge)
-        from mesh_graph import joined
-        self.forwards = joined(self.edges, lambda e: (events[e] + (None, None))[:3], 'landed', 'send')
         self.order = solved['order']
         arena_first = bins[-1][0]
         self.arena_pages = solved['arena']
         for root, runs in zip(items, solved['runs']):
-            if root.tensor is None:
+            # its pages' positions in the solve's bins, a page each: the page table's indices the effectors translate
+            root.positions = [at + j for at, pages in runs for j in range(pages)]
+            if root.tensor is None and not root.paged:
                 (place, _), = runs
                 root.at = (place - arena_first) * page
+        # a SEND's pages' last writes: the solve's edges into its event over its reads' items and bytes (an edge into a
+        # SEND's event is a read's RAW; its link edges carry no bytes), each its writer's kind and occurrence
+        wrote = {}
+        for f, t, _, it, a, n in solved['edges']:
+            if t in rows and events[t][0] == 'send':
+                wrote.setdefault(t, []).append((events[f][:2], it, a, a + n))
+        # each occurrence's table (nccl.h ncclMeshCommLowerOccurrence): its entries in the solve's order, a channel's in
+        # its unit order (the post's landings sorted so), counted from the table's start. A landing guards only its own
+        # occurrence's SENDs (an earlier occurrence's count is not this table's); a page written outside the table (a
+        # GPU node, another occurrence's landing) goes by its run's release, the run's store of the run's own word
+        tables, self.release = {c: [] for c, command in enumerate(self.commands) if isinstance(command, Collective)}, {}
+        for e in self.order:
+            for op, channel, it, a, unit in sorted(rows.get(e, ()), key=lambda row: (row[1], row[4])):
+                guard, word, threshold, c = channel, lib.MESH_WORD_READY, 0, events[e][1]
+                writers = {w for w, i, lo, hi in wrote.get(e, ()) if i == it and lo < a + page and a < hi}
+                if writers - {('landed', c)}:
+                    guard, threshold = words[e].positions[0], 1
+                    self.release[e] = (words[e], 1)
+                elif writers:
+                    # the last landed page under the read's (a read over two, where a frame lies off a page)
+                    _, guard, landed = [landed_at[it, j] for j in sorted({a // page, (a + page - 1) // page})
+                                        if (it, j) in landed_at][-1]
+                    word, threshold = lib.MESH_WORD_LANDED, landed + 1
+                tables[c].append((op, channel, items[it].positions[a // page], guard, word, threshold))
+        for c, table in tables.items():
+            self.commands[c].entries = len(table)
+            self.commands[c].table = ffi.new('struct mesh_channel_entry[]', table or 1)
+        # each grain's pieces: its target pages, a page each the target's (root, byte), its inputs' (the rank's own,
+        # then every landing) and its bytes, merged where every buffer's next page is placed next to its last
+        # (mesh_graph.consecutive), so a piece is one contiguous run of each
+        from mesh_graph import consecutive
+        for e, (command, pages) in self.folds.items():
+            at = []
+            for target, p in pages:
+                index, inputs = command.flow[2][command.rank, target][p]
+                places = [command.place(target, index)] + [command.place(*version) for version in inputs]
+                at.append(([(root, a) for root, a, _ in places], min(b - a for _, a, b in places)))
+            keyed = [(tuple((id(root), a % page) for root, a in held) + (n,),
+                      tuple(root.positions[a // page] for root, a in held)) for held, n in at]
+            self.folds[e] = (command.dtype, [(at[f][0][0], tuple(at[f][0][1:]), sum(n for _, n in at[f:end]))
+                                             for f, end in consecutive(keyed)])
         # each command's kernel, named by nothing but its text, so a tick's kernels compile once for every tick
         for command in self.commands:
             if isinstance(command, Collective):
