@@ -77,64 +77,7 @@ def main(config=None):
             e1 = x_cpu.half().float() @ w1_cpu[:, :blocks[0]].half().float()
             print(json.dumps(dict(phase='stages', x_w1_error=float((a1.float().cpu() - e1).abs().max()), x_w1_max=float(e1.abs().max()),
                                   relu_error=float((a2.float().cpu() - torch.relu(a1.float().cpu())).abs().max()),
-                                  y_from_a2_error=float((y.float().cpu() - a2.float().cpu() @ w2_cpu[:blocks[0]].half().float()).abs().max()),
-                                  w2_error=float((w2.float().cpu() - w2_cpu[:blocks[0]].half().float()).abs().max()),
-                                  y_max=float(y.float().abs().max()), y_zero=float((y == 0).float().mean()))), flush=True)
-    if staged:
-        # every rank's own operands and stages read by the CPU from the region's bytes (no GPU op between the run and
-        # the reading), against torch on the CPU: the run's writes apart from torch's MPS reads of them
-        import ctypes
-
-        def host(tensor):
-            n = tensor.numel() * tensor.element_size()
-            return torch.frombuffer(bytearray((ctypes.c_char * n).from_address(torch_mesh.address(tensor))),
-                                    dtype=tensor.dtype).reshape(tensor.shape).float()
-        torch.mps.synchronize()
-        hx, hw1, hw2, ha1, ha2, hy = (host(v) for v in (x, w1, w2, a1, a2, y))
-        mine = slice(first, first + blocks[rank])
-        print(json.dumps(dict(phase='host_stages', rank=rank,
-                              x_error=float((hx - x_cpu.half().float()).abs().max()),
-                              w1_error=float((hw1 - w1_cpu[:, mine].half().float()).abs().max()),
-                              w2_error=float((hw2 - w2_cpu[mine].half().float()).abs().max()),
-                              a1_error=float((ha1 - hx @ hw1).abs().max()), a1_max=float(ha1.abs().max()),
-                              a2_error=float((ha2 - torch.relu(ha1)).abs().max()),
-                              y_error=float((hy - ha2 @ hw2).abs().max()) if not summed else None,
-                              y_max=float(hy.abs().max()), y_zero=float((hy == 0).float().mean()))), flush=True)
-        # torch's own reads of the same bytes, each against the CPU's (host): which of torch's paths reads them wrong
-        reads = {'cpu': lambda v: v.cpu().float(), 'float_cpu': lambda v: v.float().cpu(),
-                 'clone_cpu': lambda v: v.clone().cpu().float(), 'float_cpu_again': lambda v: v.float().cpu(),
-                 'synchronized_float_cpu': lambda v: (torch.mps.synchronize(), v.float().cpu())[1]}
-        print(json.dumps(dict(phase='torch_reads', rank=rank, **{
-            f'{name}_{label}': float((read(v) - host(v)).abs().max())
-            for label, v in (('y', y), ('w2', w2), ('a1', a1)) for name, read in reads.items()})), flush=True)
-        # a cast's output (a fresh MPS lease) read by the CPU from its bytes and by torch's copy, and the leases' spans
-        for label, v in (('y', y), ('w2', w2)):
-            A = v.float()
-            torch.mps.synchronize()
-            hA, hv = host(A), host(v)
-            C = A.cpu()
-            held = dict(A=A, C=C, x=x, w1=w1, w2=w2, a1=a1, a2=a2, y=y)
-            spans = {k: (torch_mesh.address(u), torch_mesh.address(u) + u.untyped_storage().nbytes()) for k, u in held.items()}
-            overlaps = [(i, j) for i in spans for j in spans if i < j and spans[i][0] < spans[j][1] and spans[j][0] < spans[i][1]]
-            print(json.dumps(dict(phase='cast_probe', rank=rank, what=label, cast_error=float((hA - hv).abs().max()),
-                                  copy_error=float((C - hA).abs().max()), read_error=float((C - hv).abs().max()),
-                                  overlaps=overlaps, A=[hex(a) for a in spans['A']], C=[hex(a) for a in spans['C']],
-                                  outside=[k for k, (a, _) in spans.items() if a == 0])), flush=True)
-    if staged and not summed:
-        # the second product alone, its operand written before the run: its kernel apart from the order it follows
-        alone = torch_mesh.empty(B, D, dtype=torch.half)
-        program2 = Program([(lambda t: (alone.copy_(a2 @ w2), t.add_(1)), (t,))])
-        program2.prepare(1)
-        started = now()
-        program2.forward()
-        while program2.completion() is None:
-            if now() - started > 8.0:
-                raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
-            time.sleep(0)
-        torch.mps.synchronize()
-        if rank == 0:
-            print(json.dumps(dict(phase='alone', error=float((alone.float().cpu() - a2.float().cpu() @ w2.float().cpu()).abs().max()),
-                                  max=float(alone.float().abs().max()))), flush=True)
+                                  y_from_a2_error=float((y.float().cpu() - a2.float().cpu() @ w2_cpu[:blocks[0]].half().float()).abs().max()))), flush=True)
     dist.destroy_process_group()
 
 
