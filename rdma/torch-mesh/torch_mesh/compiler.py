@@ -638,10 +638,18 @@ class Program:
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
             has_node = set()
             # a step's send, sent and landed events are its channel's node's: one id a (occurrence, kind, channel)
-            # group, its node appended at the group's last event in the order
+            # group, its node appended at the group's last event in the order. A forward's send is in no group: the
+            # bridge posts it once its COPY's unit has landed (ncclMeshCommLowerOccurrence's gate, no release), so it
+            # has no node and its edges pass through (to the channel's sent). In the release's group it gave the
+            # channel's release its landed -> send edge, so a relay released its own segment only once the segment it
+            # relays had landed and its GPU had started for it: a GPU start a relay a tick (run-23: every Studio, each
+            # a relay, two parts a tick; the Mini, none, one).
+            forwarded = {(c, send) for c, pairs in t.forwards.items() for send, _ in pairs}
             group = {}
             for e in t.order:
                 kind, c, *rest = t.events[e]
+                if kind == 'send' and (c, rest[0]) in forwarded:
+                    continue
                 if kind in ('send', 'sent', 'landed'):
                     group.setdefault((kind, c, t.commands[c].steps[rest[0]]['channel']), []).append(e)
             last = {}
