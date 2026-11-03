@@ -167,6 +167,26 @@ static int streams_watch(uint64_t period_us,double seconds){
   munmap(m,size);
   return 0;
 }
+/* mesh-stat live: every stream toward a node, one line {"ns": the clock, "live": [[stream, peer node, live, owner],
+   ...]}, from a mapping of the region to read: whether a communicator could hold it now (a holding ended with units
+   outstanding leaves its stream not live until the link pairs again, mesh-link.c stream_end) */
+static int live_read(void){
+  size_t size=0;
+  struct hdr *m=region_read(&size);
+  if(!m || m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"errno\":%d}\n",m?EINVAL:errno);return 1;}
+  printf("{\"ns\":%llu,\"live\":[",(unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
+  int first=1;
+  for(uint32_t t=0;t<MESH_STREAMS;t++){
+    const struct mesh_stream *x=mesh_stream_at(m,t);
+    const uint32_t peer=atomic_load(&x->peer);
+    if(!peer)continue;
+    printf("%s[%u,%u,%u,%llu]",first?"":",",t,peer,atomic_load(&x->live),(unsigned long long)atomic_load(&x->owner));
+    first=0;
+  }
+  printf("]}\n");
+  munmap(m,size);
+  return 0;
+}
 /* mesh-stat words <offset>...: the 8-byte words at those region offsets (a plan record's `word`s: nccl-mesh.c
    plan_record, rdma/plan_cycles.py), one line {"ns": the clock, "words": [[offset, value], ...]}, read from a
    mapping of the region alone: a stalled program's producer words as they stand */
@@ -196,6 +216,7 @@ int main(int argc,char **argv){
   if(argc==4 && !strcmp(argv[1],"landed"))return landed_watch(strtoull(argv[2],NULL,10),strtod(argv[3],NULL));
   if(argc==4 && !strcmp(argv[1],"streams"))return streams_watch(strtoull(argv[2],NULL,10),strtod(argv[3],NULL));
   if(argc>=3 && !strcmp(argv[1],"words"))return words_read(argc-2,argv+2);
+  if(argc==2 && !strcmp(argv[1],"live"))return live_read();
   struct port_view port[MESH_PORTS];
   uint32_t node=0,layout=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
   uint64_t *bandwidth=NULL;
