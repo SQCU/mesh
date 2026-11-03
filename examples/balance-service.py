@@ -114,8 +114,9 @@ def main(config=None):
     def gather(g):
         torch.ops.torch_mesh.allgatherv_out(mine, every, 0, [1] * size, group)
         g.add_(1)
+    # prepared each round after the round's LSTM: a program's tables chain on each channel in the order prepared, and
+    # the bridge walks them in that order, so runs are prepared in the order they run
     sharing = Program([(gather, (g,))])
-    sharing.prepare(config['rounds'])
     balancer = Balancer(size, config.get('seed', 0))
     explore = torch.Generator().manual_seed(config.get('seed', 0))
     shares = torch.full((size,), 1.0 / size)
@@ -143,6 +144,7 @@ def main(config=None):
         starts = sorted(s for _, s, _ in parts if s)
         period = statistics.median(b - a for a, b in zip(starts, starts[1:])) * 1e6
         mine.copy_(torch.tensor([[statistics.median(spans), statistics.pstdev(spans)]], device='mps'))
+        sharing.prepare(1)
         sharing.forward()
         while sharing.completion() is None:
             time.sleep(0)
