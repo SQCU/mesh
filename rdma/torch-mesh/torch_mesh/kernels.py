@@ -267,7 +267,7 @@ def summed(name, out, source, axes, scale=1.0):
 OBSERVE = 'mesh_observe'
 # an observation's bound: at most this many fenced reads (well under a second on the members), and none once the run's
 # defect word is set, so a word that never comes ends the run and names itself, never a GPU held
-OBSERVE_POLLS = 1 << 22
+OBSERVE_POLLS = int(__import__("os").environ.get("MESH_OBSERVE_POLLS", 1 << 22))  # the run's configuration may set it
 
 
 @functools.cache
