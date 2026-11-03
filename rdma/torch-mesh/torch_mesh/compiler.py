@@ -38,9 +38,13 @@ READ, WRITE = 1, 2
 
 class Root:
     """a storage values lie in: a caller tensor's (pinned at its own storage) or one of the run's (placed in the
-    arena); coherent where a collective step reads or writes it (its kernels' loads and stores system-coherent)"""
-    def __init__(self, nbytes, tensor=None):
+    arena); coherent where a collective step reads or writes it (its kernels' loads and stores system-coherent). A
+    version of a caller's storage (`base` the caller's root, `prev` the version before) is one of the run's: a write
+    after another node's read of the storage starts one, so a landing never waits for the readers of the bytes it
+    replaces (design/page-maps-2026-11-02.md: renaming; docs/facts.md: the LSTM's link racing a peer's SEND)."""
+    def __init__(self, nbytes, tensor=None, base=None, prev=None):
         self.nbytes, self.tensor, self.coherent = nbytes, tensor, False
+        self.base, self.prev, self.covered, self.readers = base, prev, [], set()
 
 
 class Value:
@@ -60,6 +64,30 @@ class Value:
     def view(self, index):
         return kernels.View(index, self.dtype, self.shape, self.stride, self.offset, self.root.coherent)
 
+    def runs(self):
+        """the byte runs [first, end) of its root this value covers exactly, merged"""
+        width, out = self.dtype.itemsize, []
+        dims = [(n, s) for n, s in zip(self.shape, self.stride) if n != 1]
+        if any(n == 0 for n, _ in dims):
+            return []
+        inner = dims[-1] if dims and dims[-1][1] == 1 else None
+        outer = dims[:-1] if inner else dims
+        length = (inner[0] if inner else 1) * width
+        for at in itertools.product(*(range(n) for n, _ in outer)):
+            first = (self.offset + sum(c * s for c, (_, s) in zip(at, outer))) * width
+            out.append((first, first + length))
+        out.sort()
+        merged = []
+        for a, b in out:
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        return merged
+
+    def on(self, root):
+        return Value(root, self.dtype, self.shape, self.stride, self.offset)
+
 
 class Command:
     """a kernel over values: its writes and reads (for the solve) and how its text is made (`make(views)`)"""
@@ -74,10 +102,11 @@ class Collective:
         self.out, self.frames, self.segments, self.dtype, self.group = out, frames, segments, dtype, group
 
 
-def _caller(roots, tensor):
+def _caller(roots, current, tensor):
+    """`tensor`'s value on its storage's current version (the caller's own root before any write renames it)"""
     storage = tensor.untyped_storage()
     root = roots.setdefault(storage.data_ptr(), Root(storage.nbytes(), tensor))
-    return Value(root, tensor.dtype, tensor.shape, tensor.stride(), tensor.storage_offset())
+    return Value(current.get(id(root), root), tensor.dtype, tensor.shape, tensor.stride(), tensor.storage_offset())
 
 
 def _meta(root, val):
@@ -98,7 +127,7 @@ class Template:
         self.args = args
         # traced through a variadic wrapper: make_fx counts a callable's parameters, defaults among them
         graph = make_fx(lambda *a: fn(*a), tracing_mode='fake', _allow_non_fake_inputs=True)(*args)
-        self.roots, self.commands, self.collectives, self.order = {}, [], [], []
+        self.roots, self.commands, self.collectives, self.order, self.current, self.node = {}, [], [], [], {}, None
         self._lower(graph)
         self._declare()
         self._solve()
@@ -121,10 +150,11 @@ class Template:
                 for arg in node.all_input_nodes:
                     if arg in expression:
                         self._emit(*expression.pop(arg))
+            self.node = node
             if node.op == 'placeholder':
-                values[node] = _caller(self.roots, next(placeholders))
+                values[node] = _caller(self.roots, self.current, next(placeholders))
             elif node.op == 'get_attr':
-                values[node] = _caller(self.roots, getattr(graph, node.target))
+                values[node] = _caller(self.roots, self.current, getattr(graph, node.target))
             elif node.op == 'output':
                 pass
             elif node.target is operator.getitem:
@@ -149,6 +179,74 @@ class Template:
         # an expression no consumer took is its command
         for node, (tree, out) in expression.items():
             self._emit(tree, out)
+        # each renamed storage's last version copied back to the caller's own bytes, so a chunk ends where it began
+        self.node = None
+        for base in list(self.roots.values()):
+            last = self.current.get(id(base))
+            if last is not None and last is not base:
+                self._complete(last)
+                whole = Value(last, torch.uint8, (base.nbytes,), (1,), 0)
+                last.readers.add(None)
+                command = Command([whole.on(base)], [whole], None)
+                command.make = lambda name, c=command: kernels.pointwise(
+                    name, c.writes[0].view(0), [c.reads[0].view(1)], 'x0')
+                self.commands.append(command)
+                self.current[id(base)] = base
+
+    def _complete(self, root):
+        """a version's bytes no write covered, copied from the version before (before its first foreign read)"""
+        if root.base is None or root.prev is None or getattr(root, 'whole', False):
+            return
+        root.whole = True
+        at, gaps = 0, []
+        for a, b in sorted(root.covered):
+            if a > at:
+                gaps.append((at, a))
+            at = max(at, b)
+        if at < root.nbytes:
+            gaps.append((at, root.nbytes))
+        for a, b in gaps:
+            part = Value(root.prev, torch.uint8, (b - a,), (1,), a)
+            self._copy(part, part.on(root))
+
+    def _copy(self, source, into):
+        self._command([into], [source], lambda name, c: kernels.pointwise(
+            name, c.writes[0].view(0), [c.reads[0].view(1)], 'x0'))
+
+    def _command(self, writes, reads, make, collective=None):
+        """a command's reads and writes on their storages' versions: a read takes the current version (completed
+        first); a write after another node's read of its storage starts a version of its own"""
+        node = self.node
+        # writes first: a version this command writes is covered by its writes before its own reads complete it
+        bound_writes = []
+        for value in writes:
+            root = value.root
+            if root.base is not None or root.tensor is not None:
+                base = root.base if root.base is not None else root
+                current = self.current.get(id(base), base)
+                if current.readers - {node}:
+                    current = Root(base.nbytes, base=base, prev=current)
+                    current.coherent = base.coherent
+                    self.current[id(base)] = current
+                current.covered.extend(value.runs())
+                value = value.on(current)
+            bound_writes.append(value)
+        bound_reads = []
+        for value in reads:
+            # a read is of the version its value was made on (the current one when its node ran), completed first
+            root = value.root
+            if root.base is not None and node not in root.readers:
+                self._complete(root)
+            root.readers.add(node)
+            bound_reads.append(value)
+        if collective is not None:
+            collective.mine, collective.out = bound_reads[0], bound_writes[0]
+            self.commands.append(collective)
+            return bound_writes
+        command = Command(bound_writes, bound_reads, None)
+        command.make = lambda name, c=command: make(name, c)
+        self.commands.append(command)
+        return bound_writes
 
     def _new(self, node):
         val = node.meta['val']
@@ -182,10 +280,10 @@ class Template:
             else:
                 alpha = node.kwargs.get('alpha', 1)
                 tree = (BINARY[target], operand(args[0], shape), operand(args[1], shape), ('const', float(alpha)))
-        values[node] = out
         if target in INPLACE or target is aten.copy_.default:
-            self._emit(tree, out)
+            values[node] = self._emit(tree, out)
         else:
+            values[node] = out
             expression[node] = (tree, out)
 
     def _emit(self, tree, out):
@@ -204,9 +302,8 @@ class Template:
                 return f'clamp({inner}, {low}, {high})'
             return t[0].format(*(render(a) for a in t[1:]))
         text = render(tree)
-        reads = list(loads)
-        self.commands.append(Command([out], reads, lambda name, o=out, r=reads, x=text: kernels.pointwise(
-            name, o.view(0), [v.view(k + 1) for k, v in enumerate(r)], x)))
+        return self._command([out], list(loads), lambda name, c, x=text: kernels.pointwise(
+            name, c.writes[0].view(0), [v.view(k + 1) for k, v in enumerate(c.reads)], x))[0]
 
     def _product(self, node, values):
         out = self._new(node)
@@ -226,10 +323,9 @@ class Template:
         else:
             a, b = values[node.args[0]], values[node.args[1]]
             beta, alpha, reads = 0, 1, [a, b]
-        values[node] = out
-        self.commands.append(Command([out], reads, lambda name: kernels.product(
-            name, out.view(0), reads[0].view(1), reads[1].view(2), reads[2].view(3) if len(reads) > 2 else None,
-            float(alpha), float(beta))))
+        values[node] = self._command([out], reads, lambda name, c: kernels.product(
+            name, c.writes[0].view(0), c.reads[0].view(1), c.reads[1].view(2), c.reads[2].view(3) if len(c.reads) > 2 else None,
+            float(alpha), float(beta)))[0]
 
     def _joined(self, node, values):
         """cat and stack: each operand copied into its part of a new value"""
@@ -255,20 +351,18 @@ class Template:
         if node.target is aten.index_select.default:
             source, axis, index = values[node.args[0]], node.args[1], values[node.args[2]]
             out = self._new(node)
-            values[node] = out
-            self.commands.append(Command([out], [source, index], lambda name: kernels.indexed(
-                name, out.view(0), source.view(1), index.view(2), axis % len(out.shape), False)))
+            values[node] = self._command([out], [source, index], lambda name, c: kernels.indexed(
+                name, c.writes[0].view(0), c.reads[0].view(1), c.reads[1].view(2), axis % len(c.writes[0].shape), False))[0]
         else:
             out, axis, index, source = values[node.args[0]], node.args[1], values[node.args[2]], values[node.args[3]]
-            values[node] = out
-            self.commands.append(Command([out], [source, index, out], lambda name: kernels.indexed(
-                name, out.view(0), source.view(1), index.view(2), axis % len(out.shape), True)))
+            values[node] = self._command([out], [source, index], lambda name, c: kernels.indexed(
+                name, c.writes[0].view(0), c.reads[0].view(1), c.reads[1].view(2), axis % len(c.writes[0].shape), True))[0]
 
     def _summed(self, node, values):
         source, axes = values[node.args[0]], [a % len(values[node.args[0]].shape) for a in node.args[1]]
         out = self._new(node)
-        values[node] = out
-        self.commands.append(Command([out], [source], lambda name: kernels.summed(name, out.view(0), source.view(1), axes)))
+        values[node] = self._command([out], [source], lambda name, c: kernels.summed(
+            name, c.writes[0].view(0), c.reads[0].view(1), axes))[0]
 
     def _gathered(self, node, values):
         """allgatherv_out(mine, out, axis, sizes, group): a call a frame of out's gathered axis (the axes before it),
@@ -283,9 +377,13 @@ class Template:
             dense *= out.shape[d]
         frames = [out.offset + sum(c * s for c, s in zip(at, out.stride[:axis]))
                   for at in itertools.product(*(range(n) for n in out.shape[:axis]))]
-        out.root.coherent = mine.root.coherent = True
-        self.collectives.append(Collective(out, frames, [s * inner for s in sizes], out.dtype, group))
-        self.commands.append(self.collectives[-1])
+        collective = Collective(out, frames, [s * inner for s in sizes], out.dtype, group)
+        self._command([out], [mine], None, collective)
+        for root in (collective.out.root, collective.mine.root):
+            root.coherent = True
+            if root.base is not None:
+                root.base.coherent = True
+        self.collectives.append(collective)
         values[node] = None
 
     # ---- declare ----
@@ -347,10 +445,14 @@ class Template:
         def access(begin, end, mode, root, first, end_byte):
             if end_byte > first:
                 accesses.append((begin, end, mode, item(root), first, end_byte - first))
+        # every occurrence's post first: its landings go into versions of their own, so nothing before orders them
+        # (docs/facts.md: a link after its tick's readers raced the peers' SENDs, which TN3205's credit then held)
         for c, command in enumerate(self.commands):
             if isinstance(command, Collective):
-                post = event('post', c)
-                command.post = post
+                command.post = event('post', c)
+        for c, command in enumerate(self.commands):
+            if isinstance(command, Collective):
+                post = command.post
                 for k, s in enumerate(command.steps):
                     if s['kind'] == 'send':
                         s['event'] = event('send', c, k)
