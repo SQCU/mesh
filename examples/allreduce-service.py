@@ -27,7 +27,12 @@ def main(config=None):
     x = torch_mesh.empty(units, width, dtype=torch.half)
     t = torch.empty(1, dtype=torch.int64, device='mps').fill_(0)
 
+    rewrite = config.get('rewrite', False)
+
     def reduce(t):
+        if rewrite:
+            # x written in the program before its sum (as an FFN writes its partial and then sums it)
+            x.mul_(1.0)
         torch.ops.torch_mesh.allreduce_(x, group)
         t.add_(1)
     program = Program([(reduce, (t,))])
