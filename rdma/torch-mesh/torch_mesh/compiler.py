@@ -59,7 +59,8 @@ class Root:
     arena); coherent where a collective step reads or writes it (its kernels' loads and stores system-coherent). A
     version of a caller's storage (`base` the caller's root, `prev` the version before) is one of the run's: a write
     after another node's read of the storage starts one, so a landing never waits for the readers of the bytes it
-    replaces (design/page-maps-2026-11-02.md: renaming; docs/facts.md: the LSTM's link racing a peer's SEND)."""
+    replaces (design/page-maps-2026-11-02.md: renaming; docs/facts.md: the LSTM's link racing a peer's SEND), and an
+    all-reduce's result always starts one (of a run root's storage too: _reduced)."""
     def __init__(self, nbytes, tensor=None, base=None, prev=None):
         self.nbytes, self.tensor, self.coherent = nbytes, tensor, False
         self.base, self.prev, self.covered, self.readers = base, prev, [], set()
@@ -142,6 +143,39 @@ class Collective:
             if at < end:
                 return rank
         return len(self.segments) - 1
+
+
+def _halves(c):
+    """an all-reduce's operand steps over its two roots (_reduced): x (c.mine, what the program wrote, the partials) and
+    y (c.out, the result, a version of its own). The bytes' flow decides each step's: a COPY lands a final in y (_declare
+    put it there); a SEND reads x where a COPY of its bytes lands at its round or later (a partial sent up) and y
+    otherwise (a final sent down: a forward of a COPY's bytes, or this rank's own segment, which no COPY lands); a REDUCE
+    reads x and its fold stores the sum into x where a later fold of the solve's order (round, then step) adds into any
+    of its bytes, and, over this rank's own segment, into y where no later fold adds into some byte of it (that byte's
+    last fold, its final). So y holds every byte of x's run: a COPY's, or its last fold's.
+    Changed from one root for both halves (every step on c.out's root): the all-gather's landings wrote the pages this
+    rank's reduce-scatter SENDs still read (_reduced: the ~1 ms write-after-read hold). What must stay: no landing, and
+    no fold of a final, on bytes of x a SEND reads."""
+    x, y = c.mine.root, c.out.root
+    operand = [(k, s) for k, s in enumerate(c.steps) if not s['buffer']]
+    meets = lambda a, b: a['at'] < b['at'] + b['bytes'] and b['at'] < a['at'] + a['bytes']
+    copies = [s for _, s in operand if s['kind'] == 'copy']
+    for k, s in operand:
+        if s['kind'] == 'send':
+            s['root'] = x if any(meets(s, t) and t['round'] >= s['round'] for t in copies) else y
+        elif s['kind'] == 'reduce':
+            s['root'] = x
+            if any(meets(s, t) for t in copies):
+                s['writes'] = [x]  # another rank's segment: the partial this rank's SEND up reads
+                continue
+            later = sorted((max(s['at'], t['at']), min(s['at'] + s['bytes'], t['at'] + t['bytes'])) for j, t in operand
+                           if t['kind'] == 'reduce' and (t['round'], j) > (s['round'], k) and meets(s, t))
+            reach = s['at']
+            for a, b in later:
+                if a > reach:
+                    break
+                reach = max(reach, b)
+            s['writes'] = ([x] if later else []) + ([y] if reach < s['at'] + s['bytes'] else [])
 
 
 def _caller(roots, current, tensor):
@@ -286,19 +320,22 @@ class Template:
         self._command([into], [source], lambda name, c: kernels.pointwise(
             name, c.writes[0].view(0), [c.reads[0].view(1)], 'x0'))
 
-    def _command(self, writes, reads, make, collective=None, covered=None):
-        """a command's reads and writes on their storages' versions: a read takes the current version (completed
-        first); a write after another node's read of its storage starts a version of its own"""
-        # a held copy_ goes out before any command touching the storage it writes or reads: its consumer's kernel would
-        # store it after a reader of its bytes through another view (the training LSTM: wrong by 0.012 without this),
-        # or read operands a write between them changed
+    def _held_out(self, touching):
+        """a held copy_ goes out before any command touching the storage it writes or reads: its consumer's kernel would
+        store it after a reader of its bytes through another view (the training LSTM: wrong by 0.012 without this), or
+        read operands a write between them changed"""
         if self.held:
             storage = lambda v: id(v.root.base if v.root.base is not None else v.root)
-            touched = {storage(v) for v in list(writes) + list(reads)}
+            touched = {storage(v) for v in touching}
             for held_node, (tree, out) in list(self.held.items()):
                 if ({storage(out)} | {storage(v) for v in _tree_loads(tree)}) & touched:
                     del self.held[held_node]
                     self.values[held_node] = self._emit(tree, out)
+
+    def _command(self, writes, reads, make, collective=None, covered=None):
+        """a command's reads and writes on their storages' versions: a read takes the current version (completed
+        first); a write after another node's read of its storage starts a version of its own"""
+        self._held_out(list(writes) + list(reads))
         node = self.node
         # writes first: a version this command writes is covered by its writes before its own reads complete it
         bound_writes = []
@@ -587,23 +624,50 @@ class Template:
     def _reduced(self, node, values):
         """allreduce_(x, group): x summed over every rank in place, one call over x (one contiguous run): the planner's
         all-reduce, its segments the planner's cut (a reduce-scatter's rounds up the trees and an all-gather's down). It
-        reads all of x (this rank's part of the sum) and writes all of it, so its version is completed from x before any
-        of its SENDs or folds (no covered bytes).
+        reads x (this rank's part of the sum: `mine`) and writes its sum, all of x's bytes, into y, a new version of x's
+        storage (`out`): the COPYs land there and this rank's own segment's last folds store there (_declare's _halves).
         Changed from two lowerings chosen by a modeled finish (GATHER_BELOW, about 1.2 MB: below it a gather of every
         rank's x and a sum over the ranks), a second schedule of the same reduction: alone the planner's was the faster
         at 256 KB (83-140 us against 129-167), inside the FFN the two indistinguishable (metal-microbench docs/facts.md,
-        allreduce-2026-11-03). What must stay: one schedule of a reduction, the planner's"""
+        allreduce-2026-11-03). What must stay: one schedule of a reduction, the planner's.
+        Changed from one root for both halves (x read and written in place, a version only where an earlier node had
+        read x): the all-gather's landings went into x's pages, which this rank's reduce-scatter SENDs still read, a
+        write-after-read hold of about 1 ms on every rank with the bytes on time (each channel's landed prefix held about
+        0.9 ms while the Mini's SENDs had completed from 30-34 us: metal-microbench docs/facts.md, reduce-2026-11-03
+        allreduce-words). Now the result is always a version of its own (the renaming of _command: base and prev, and a
+        caller's storage copied back from its last version at the chunk's end, _lower), and every reader of x after the
+        all-reduce reads y. What must stay: the all-gather's landings never on pages a pending SEND reads"""
         x, group = values[node.args[0]], node.args[1]
         runs = x.runs()
         if len(runs) != 1:
             raise NotImplementedError('an all-reduce of a view that is not one contiguous run')
+        # x as the program left it, first, while its version is current (a held copy_ out and the version completed
+        # write the current version: _held_out, _complete); then y, a new version of x's storage, current, so the
+        # collective's write binds there. y's covered bytes are x's run, all of which the steps write (COPYs and this
+        # rank's last folds); the rest of its storage is completed from the version before (_complete)
+        self._held_out([x])
+        self._complete(x.root)
+        base = x.root.base if x.root.base is not None else x.root
+        y = Root(base.nbytes, base=base, prev=self.current.get(id(base), base))
+        y.coherent = True
+        self.current[id(base)] = y
         collective = Collective(x, [x.offset], None, x.dtype, group, what='allreduce', elements=math.prod(x.shape))
-        self._command([x], [x], None, collective, covered=[])
+        self._command([x.on(y)], [x], None, collective)
         for root in (collective.out.root, collective.mine.root):
             root.coherent = True
             if root.base is not None:
                 root.base.coherent = True
         self.collectives.append(collective)
+        # every value on the version the all-reduce read (x and its views, however a later node names them: the op
+        # returns nothing, so make_fx's later uses of x are the nodes before it) is the result's from here
+        old = x.root
+
+        def rebound(v):
+            if isinstance(v, Value) and v.root is old:
+                return v.on(y)
+            return [rebound(u) for u in v] if isinstance(v, list) else v
+        for key in values:
+            values[key] = rebound(values[key])
         values[node] = None
 
     # ---- declare ----
@@ -645,9 +709,13 @@ class Template:
                     s['root'], s['at'] = c.out.root, c.frames[s['call']] * width + s['first']
                 s['kind'] = {lib.MESH_STEP_SEND: 'send', lib.MESH_STEP_COPY: 'copy', lib.MESH_STEP_REDUCE: 'reduce'}[s['op']]
                 if s['kind'] == 'reduce':
-                    # a REDUCE lands in a root of its own and its fold adds it into the step's bytes (the sum)
+                    # a REDUCE lands in a root of its own and its fold adds it into the step's bytes (the sum), stored
+                    # to each root of `writes`
                     s['landing'] = Root(s['bytes'])
                     s['landing'].coherent = True
+                    s['writes'] = [s['root']]
+            if c.what == 'allreduce':
+                _halves(c)
 
     # ---- solve ----
     def _solve(self):
@@ -684,9 +752,8 @@ class Template:
                         if s['kind'] == 'send' and (r is None or s['round'] == r):
                             s['event'] = event('send', c, k)
                     if r is not None:
-                        # an all-reduce's SENDs complete within their round's span: a later round lands over bytes an
-                        # earlier one sent (a partial sent up, the sum gathered back), its receive posted once those
-                        # SENDs have completed (the lowering's after lists)
+                        # an all-reduce's SENDs complete within their round's span, so a later round's write over bytes
+                        # one read follows its completion
                         for k, s in enumerate(command.steps):
                             if s['kind'] == 'send' and s['round'] == r:
                                 s['completion'] = event('sent', c, k)
@@ -695,37 +762,28 @@ class Template:
                     for k, s in enumerate(command.steps):
                         if s['kind'] == 'copy' and (r is None or s['round'] == r):
                             s['event'] = event('landed', c, k)
-                            # every all-reduce COPY lands in a root of its own and is placed by a copy the solve orders: a
-                            # landing straight into the operand is a write from the chunk's post, so it could come before
-                            # the program's own write of the operand and be overwritten by it (allreduce-2026-11-03 run-9:
-                            # x written in the program before its sum, every element wrong on two ranks in a skewed
-                            # repeat), and a sum over bytes an earlier round sent must wait for those SENDs (run-6)
-                            over = r is not None
-                            if over:
-                                # an all-reduce's gathered sum over bytes an earlier round sent (a partial sent up): it
-                                # lands in a root of its own and a copy places it once those SENDs have completed (the
-                                # solve's write after their reads). A receive held for a SEND's completion deadlocked
-                                # against the hold of a SEND until its peer's receive is posted, both ends' first landing
-                                # on a channel a held one (allreduce-2026-11-03 run-6, m5ult4's cables to m5ult3)
-                                s['landing'], s['place'] = Root(s['bytes']), True
-                                s['landing'].coherent = True
-                                access(post, s['event'], WRITE, s['landing'], 0, s['bytes'])
-                                links.append((post, s['event']))
-                                s['fold'] = event('fold', c, k)
-                                access(s['fold'], s['fold'], READ, s['landing'], 0, s['bytes'])
-                                access(s['fold'], s['fold'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
-                            else:
-                                access(post, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
-                                links.append((post, s['event']))
+                            # a COPY lands straight into its root from the post: an all-reduce's into y, its result's
+                            # version (_reduced, _halves), whose SENDs down forward it as it lands.
+                            # Changed from an all-reduce COPY landed in a root of its own and placed into the operand by
+                            # a copy after the SENDs that read those bytes (dccd3135, e35c124d): the place was the
+                            # write-after-read hold of about 1 ms (_reduced). The two causes that copy answered are gone
+                            # with y: the program's own write of the operand before its sum is x's, never y's (run-9:
+                            # landed sums overwritten by that write), and no SEND reads y's bytes before they land
+                            # (run-6: a receive held for a SEND's completion deadlocked; every receive is still posted
+                            # at the link). What must stay: a landing into a version no access before the post touches.
+                            access(post, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
+                            links.append((post, s['event']))
                         elif s['kind'] == 'reduce' and (r is None or s['round'] == r):
-                            # its landing into its own root, then its fold: the step's bytes plus the landing
+                            # its landing into its own root, then its fold: the step's bytes plus the landing, stored to
+                            # each root of its `writes` (x, the partial a later fold or SEND reads; y, a final: _halves)
                             s['event'] = event('landed', c, k)
                             access(post, s['event'], WRITE, s['landing'], 0, s['bytes'])
                             links.append((post, s['event']))
                             s['fold'] = event('fold', c, k)
                             access(s['fold'], s['fold'], READ, s['landing'], 0, s['bytes'])
                             access(s['fold'], s['fold'], READ, s['root'], s['at'], s['at'] + s['bytes'])
-                            access(s['fold'], s['fold'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
+                            for root in s['writes']:
+                                access(s['fold'], s['fold'], WRITE, root, s['at'], s['at'] + s['bytes'])
                 for k, s in enumerate(command.steps):
                     if s['kind'] == 'send' and 'completion' not in s:
                         s['completion'] = event('sent', c, k)
@@ -1169,23 +1227,25 @@ class Program:
                 command = t.commands[c]
                 release_carry(e)
                 if kind == 'fold':
-                    # a REDUCE's fold: its bytes plus its landing, coherent both (the landing the NIC wrote, the
-                    # bytes a later SEND reads)
+                    # a REDUCE's fold: its bytes plus its landing, coherent all (the landing the NIC wrote, the
+                    # bytes a later SEND reads), the sum stored to each root of its `writes` (views 0 .. W - 1, the
+                    # second a shared value: _halves' x and y), its reads views W and W + 1
                     flush(e)
                     settle()
                     s = command.steps[rest[0]]
                     width = command.dtype.itemsize
                     n, at = s['bytes'] // width, s['at'] // width
-                    out = kernels.View(0, command.dtype, (n,), (1,), at, coherent=True)
-                    reads = [kernels.View(1, command.dtype, (n,), (1,), at, coherent=True),
-                             kernels.View(2, command.dtype, (n,), (1,), 0, coherent=True)]
-                    source, grid, group_size = kernels.pointwise('mesh_command', out, reads,
-                                                                 'x1' if s.get('place') else 'x0 + x1')
-                    tensor, base = self._binding(s['root'])
-                    landing, landing_base = self._binding(s['landing'])
+                    W = len(s['writes'])
+                    outs = [kernels.View(i, command.dtype, (n,), (1,), at, coherent=True) for i in range(W)]
+                    reads = [kernels.View(W, command.dtype, (n,), (1,), at, coherent=True),
+                             kernels.View(W + 1, command.dtype, (n,), (1,), 0, coherent=True)]
+                    shared = [(outs[1], 'x0 + x1', 's0')] if W > 1 else []
+                    source, grid, group_size = kernels.pointwise('mesh_command', outs[0], reads,
+                                                                 's0' if shared else 'x0 + x1', shared=shared)
+                    bindings = [(i, *self._binding(root)) for i, root in enumerate(s['writes'])]
+                    bindings += [(W, *self._binding(s['root'])), (W + 1, *self._binding(s['landing']))]
                     ev(ids[e])
-                    run.dispatch(_pipeline(source, 'mesh_command'), [(0, tensor, base), (1, tensor, base),
-                                                                    (2, landing, landing_base)], grid, group_size, True)
+                    run.dispatch(_pipeline(source, 'mesh_command'), bindings, grid, group_size, True)
                     labels.append(('fold', named.get(current[0])))
                     node_events.append(current[0])
                 elif kind == 'command':
