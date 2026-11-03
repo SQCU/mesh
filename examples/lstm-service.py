@@ -81,7 +81,16 @@ def main(config=None):
             tick.reset()
         started = now()
         program.forward()
-        while (ended := program.completion()) is None:
+
+        def completion():
+            try:
+                return program.completion()
+            except RuntimeError:
+                # a run that ended with a defect: its GPU trace first, where traced (MESH_RUN_TRACE)
+                if os.environ.get('MESH_RUN_TRACE'):
+                    print(json.dumps(dict(phase='trace', rank=rank, nodes=program.trace(program.done[-1]))), flush=True)
+                raise
+        while (ended := completion()) is None:
             if now() - started > 8.0:
                 parts, landings = program.done[-1].waiting()
                 print(json.dumps(dict(phase='timeout', parts_pending=parts, landings_waiting=len(landings), landings=[dict(word=hex(w), value=v, threshold=t) for w, v, t in landings[:16]])), flush=True)
