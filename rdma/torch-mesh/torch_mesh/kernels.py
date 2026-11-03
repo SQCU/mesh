@@ -251,9 +251,9 @@ def product(name, out, a, b, bias=None, alpha=1.0, beta=1.0):
 
 def fused(name, products, out, operands, expression, shared):
     """products whose outputs one pointwise consumer alone reads, each output once, and that consumer, in one kernel
-    (compiler.py _fuse): one simdgroup a consumer element, which computes each product output its loads of the
-    products' root name (a View with tg set: the root's layout) as product's simdgroup form does (its lanes over k,
-    simd_sum), then its lane 0 the pointwise (out, operands, expression and shared as pointwise's). products: (out,
+    (compiler.py _fuse): one threadgroup a consumer element, one simdgroup each product output its loads of the
+    products' root name (a View with tg set: the root's layout), as product's simdgroup form does (its lanes over k,
+    simd_sum), then its first thread the pointwise (out, operands, expression and shared as pointwise's). products: (out,
     parts, b, bias, alpha, beta) each, out a View of rows [M, N] at its offset in the root (strides (N, 1)). The LSTM's
     tick lowered its products and cell to three dependent dispatches, 2-4 us each at a light load's clock on every
     member (metal-microbench docs/facts.md, chain.m); fused, one, every core still over the products' outputs. One
@@ -271,13 +271,16 @@ def fused(name, products, out, operands, expression, shared):
     for extent in out.shape:
         count *= extent
     c = _digits(out.shape)
-    body = [f'    const ulong i = at.x / 32ul, lane = at.x % 32ul;', f'    if (i >= {count}ul) return;']
-    for k, view in enumerate(operands):
-        if not view.tg:
-            body.append(f'    const float x{k} = float({view.load(c)});')
-            continue
+    # a consumer element a threadgroup, one simdgroup each product output it reads (its gates at once: four in a row
+    # in one simdgroup were no faster than the parts, fused-6), the outputs met in threadgroup memory, then the
+    # pointwise on the threadgroup's first thread
+    computed = [k for k, view in enumerate(operands) if view.tg]
+    G = max(1, len(computed))
+    body = [f'    const ulong i = at.x / {32 * G}ul, local = at.x % {32 * G}ul, g = local / 32ul, lane = local % 32ul;',
+            f'    threadgroup float outputs[{G}];']
+    for slot, k in enumerate(computed):
         # the product output this load names: its product by the root's offset, its row and column within it
-        body += [f'    float x{k};', '    {', f'        const ulong e = {view.at(c)};', '        float total = 0.0f;']
+        body += [f'    if (g == {slot}ul) {{', f'        const ulong e = {operands[k].at(c)};', '        float total = 0.0f;']
         for p, (o, parts, b, bias, alpha, beta) in enumerate(products):
             M, N = o.shape
             test = f'e < {o.offset + M * N}ul' if p + 1 < len(products) else 'true'
@@ -290,14 +293,17 @@ def fused(name, products, out, operands, expression, shared):
                 body.append(f'            for (ulong k = lane; k < {K}ul; k += 32ul) total += float({part.load(["m", "k"])}) * '
                             f'float({b.load([f"(k + {first}ul)", "n"])});')
                 first += K
-            body += ['            total = simd_sum(total);', f'            x{k} = {alpha}f * total{bias_term};', '        }']
+            body += ['            total = simd_sum(total);',
+                     f'            if (lane == 0ul) outputs[{slot}] = {alpha}f * total{bias_term};', '        }']
         body.append('    }')
-    body.append('    if (lane != 0ul) return;')
+    body += ['    threadgroup_barrier(mem_flags::mem_threadgroup);', '    if (local != 0ul) return;']
+    for k, view in enumerate(operands):
+        body.append(f'    const float x{k} = outputs[{computed.index(k)}];' if view.tg else f'    const float x{k} = float({view.load(c)});')
     for view, text, named in shared:
         body += [f'    const float {named} = float({MSL[view.dtype]}({text}));', f'    {view.store(c, named)}']
     body.append(f'    {out.store(c, expression)}')
     parameters = ', '.join(views[k] for k in sorted(views))
-    return _source(name, [parameters], '\n'.join(body)), (count * 32, 1, 1), (min(256, count * 32), 1, 1)
+    return _source(name, [parameters], '\n'.join(body)), (count * 32 * G, 1, 1), (32 * G, 1, 1)
 
 
 def summed(name, out, source, axes, scale=1.0):
