@@ -886,10 +886,10 @@ class Program:
                 steps = [command.steps[t.events[m][2]] for m in group[key]]
                 for _, _, word, value, slot, _ in nodes_of(c, kind, channel, round_):
                     observed(slot, word)
-                waited[0] = True
                     self.observations.setdefault(id(run), {})[slot] = (kind, chunk, channel, sorted({command.origin(s) for s in steps}),
                                                                       value, word)
                 watched.append((kind, chunk, channel, sorted({command.origin(s) for s in steps})))
+                waited[0] = True
 
             def flush(target):
                 for k in held_before(held, lambda k: group[k], after, target):
