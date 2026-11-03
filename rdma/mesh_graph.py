@@ -444,3 +444,32 @@ def largest(items):
             if word not in best or count > best[word][1]:
                 best[word] = (node, count)
     return {node: best[words[0][0]][0] for node, words in items if len(words) == 1 and best[words[0][0]][0] != node}
+
+
+def unfollowed(order, waits, copies, edges):
+    """type: order [node] (as emitted, one part), waits {node}, copies {node}, edges (a, b) -> [(wait, copy)] each copy
+    after a wait it does not follow: on an M5 Ultra a copy runs only once every earlier dispatch of its encoder has ended
+    (metal-microbench visible.m behind), so in one part each pair holds the copy behind the wait (torch_mesh/compiler.py,
+    a run with no part ends)"""
+    before = {}
+    for a, b in edges:
+        before.setdefault(b, set()).add(a)
+    ancestors = {}
+
+    def of(node):
+        if node not in ancestors:
+            seen, stack = set(), list(before.get(node, ()))
+            while stack:
+                n = stack.pop()
+                if n not in seen:
+                    seen.add(n)
+                    stack.extend(before.get(n, ()))
+            ancestors[node] = seen
+        return ancestors[node]
+    out, seen_waits = [], []
+    for node in order:
+        if node in copies:
+            out += [(w, node) for w in seen_waits if w not in of(node) and w != node]
+        if node in waits:
+            seen_waits.append(node)
+    return out

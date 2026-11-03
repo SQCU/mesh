@@ -13,6 +13,7 @@ run      a command a dispatch, a link and a release a word's store, a landing an
          occurrences each lowered anew (their channels' absolute positions move).
 """
 import itertools
+import json
 import math
 import operator
 
@@ -848,6 +849,7 @@ class Program:
         if tracing:
             run.trace()
         labels = self.labels[id(run)] = []
+        node_events = []  # each node's event, the order appended (the order check's)
         current = [None]
         # pass 1: each chunk's occurrences lowered onto their bytes (their channels' positions move each time), and
         # each word store's value (a link's table offset, a release's count) given its slot
@@ -897,6 +899,7 @@ class Program:
         ev(start)
         run.inputs()
         labels.append(('input',))
+        node_events.append(current[0])
         edges, previous_sinks = [], [start]
         # every earlier chunk's accesses (each its node, whether it writes, its bytes in the region) and the last chunk's
         # observations no node of it followed, which go out in the next chunk (below)
@@ -935,6 +938,7 @@ class Program:
             last_store[word] = event
             run.copy(values, 8 * slot, word, 0, 8)
             labels.append(('copy', named.get(current[0])))
+            node_events.append(current[0])
             if tracing:
                 run.mark()
 
@@ -946,6 +950,7 @@ class Program:
         def observed(slot, word):
             run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
             labels.append(('observe', named.get(current[0])))
+            node_events.append(current[0])
             if tracing:
                 run.mark()
         cut = [False]  # a part end owed after links and releases, across chunks
@@ -1096,6 +1101,7 @@ class Program:
                     run.dispatch(_pipeline(source, 'mesh_command'), [(0, tensor, base), (1, tensor, base),
                                                                     (2, landing, landing_base)], grid, group_size, True)
                     labels.append(('fold', named.get(current[0])))
+                    node_events.append(current[0])
                 elif kind == 'command':
                     flush(e)
                     settle()
@@ -1106,6 +1112,7 @@ class Program:
                         operands.append((index, tensor, base))
                     run.dispatch(command.pipeline, operands, command.grid, command.group, True)
                     labels.append(('command', named.get(current[0])))
+                    node_events.append(current[0])
                     if waited[0]:
                         run.stamp()  # this part's compute begins here, its waits done (MetalRunSpans)
                         waited[0] = False
@@ -1150,6 +1157,16 @@ class Program:
         emit_carry(carry)  # the last chunk's
         from mesh_graph import contract
         edges = contract(edges, lambda e: alias.get(e, e))
+        if os.environ.get('MESH_RUN_ORDER_CHECK'):
+            # each copy after an observation it does not follow, as if the run were one part (MESH_RUN_CUTS=0's hold)
+            from mesh_graph import unfollowed
+            kinds = {}
+            for (kind, *_), e in zip(labels, node_events):
+                kinds.setdefault(e, set()).add(kind)
+            order = list(dict.fromkeys(node_events))
+            bad = unfollowed(order, {e for e, k in kinds.items() if 'observe' in k}, {e for e, k in kinds.items() if 'copy' in k}, edges)
+            print(json.dumps(dict(phase='order_check', pairs=len(bad), first=[[named.get(w), named.get(c)] for w, c in bad[:12]])),
+                  flush=True)
         run.edges(edges)
         try:
             run.finish()
