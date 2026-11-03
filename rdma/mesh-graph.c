@@ -1021,6 +1021,71 @@ int mesh_graph_precedence(uint32_t vertices, const size_t *first, uint32_t (*hea
   return result;
 }
 
+/* mesh-graph.h */
+static int realize_by_target(const void *left, const void *right) {
+  const uint32_t *a = left, *b = right;
+  if (a[1] != b[1]) return a[1] < b[1] ? -1 : 1;
+  return (a[0] > b[0]) - (a[0] < b[0]);
+}
+static int realize_wait_order(const void *left, const void *right) {
+  const struct mesh_graph_crossing *a = left, *b = right;
+  if (a->kind != b->kind) return a->kind < b->kind ? -1 : 1;
+  if (a->waiter != b->waiter) return a->waiter < b->waiter ? -1 : 1;
+  return (a->producer > b->producer) - (a->producer < b->producer);
+}
+int mesh_graph_realize(uint32_t n, const unsigned char *host, size_t m, const uint32_t (*edge)[2], uint32_t *part,
+                       uint32_t *parts, unsigned char *barrier, struct mesh_graph_crossing *waits, size_t capacity,
+                       size_t *count) {
+  for (size_t k = 0; k < m; k++) if (edge[k][0] >= edge[k][1] || edge[k][1] >= n) return EINVAL;
+  uint32_t (*sorted)[2] = malloc((m + 1) * sizeof *sorted);
+  struct mesh_graph_crossing *found = malloc((m + 1) * sizeof *found);
+  uint32_t *waited = calloc((size_t)n + 1, sizeof *waited); /* the part (plus 1) that last waited on host node h */
+  if (!sorted || !found || !waited) { free(sorted); free(found); free(waited); return ENOMEM; }
+  memcpy(sorted, edge, m * sizeof *sorted);
+  qsort(sorted, m, sizeof *sorted, realize_by_target);
+  /* parts: walk the order; a GPU node with a host predecessor the current part has not waited on starts a new part */
+  uint32_t current = UINT32_MAX;
+  int open = 0;
+  size_t k = 0;
+  for (uint32_t v = 0; v < n; v++) {
+    barrier[v] = 0;
+    if (host[v]) { part[v] = UINT32_MAX; while (k < m && sorted[k][1] == v) k++; continue; }
+    int fresh = !open;
+    for (size_t j = k; j < m && sorted[j][1] == v; j++)
+      if (host[sorted[j][0]] && open && waited[sorted[j][0]] != current + 1) fresh = 1;
+    if (fresh) { current = current == UINT32_MAX ? 0 : current + 1; open = 1; }
+    part[v] = current;
+    for (; k < m && sorted[k][1] == v; k++)
+      if (host[sorted[k][0]]) waited[sorted[k][0]] = current + 1;
+  }
+  *parts = open ? current + 1 : 0;
+  /* barriers: the edges within one part, by target; a barrier before the target of the first one no barrier crosses
+     covers every later edge whose span holds that point (interval stabbing by right endpoint) */
+  uint32_t last = UINT32_MAX; /* the latest barrier placed, before node `last` */
+  for (size_t j = 0; j < m; j++) {
+    const uint32_t u = sorted[j][0], v = sorted[j][1];
+    if (host[u] || host[v] || part[u] != part[v]) continue;
+    if (last != UINT32_MAX && last > u && last <= v) continue;
+    barrier[v] = 1; last = v;
+  }
+  /* waits: an edge into a part from another part or a host node, or into a host node */
+  size_t w = 0;
+  for (size_t j = 0; j < m; j++) {
+    const uint32_t u = sorted[j][0], v = sorted[j][1];
+    if (!host[v] && !host[u] && part[u] == part[v]) continue;
+    const uint32_t kind = (host[v] ? 1u : 0u) | (host[u] ? 4u : 0u);
+    found[w++] = (struct mesh_graph_crossing){host[v] ? v : part[v], kind, host[u] ? u : part[u]};
+  }
+  qsort(found, w, sizeof *found, realize_wait_order);
+  size_t kept = 0;
+  for (size_t j = 0; j < w; j++)
+    if (!kept || realize_wait_order(found + kept - 1, found + j)) found[kept++] = found[j];
+  for (size_t j = 0; j < kept && j < capacity; j++) waits[j] = found[j];
+  *count = kept;
+  free(sorted); free(found); free(waited);
+  return 0;
+}
+
 /* ==== Begin: greedy by size, from TensorFlow Lite (Apache-2.0). The notice below covers this section. ==== */
 /* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
 
