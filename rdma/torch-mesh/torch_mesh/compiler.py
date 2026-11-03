@@ -648,6 +648,7 @@ class Program:
 
         def observed(slot, word):
             run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
+        cut = [False]  # a part end owed after links and releases, across chunks
         for chunk, (t, lowered) in enumerate(instances):
             ids = {e: next(_EVENTS) for e in range(len(t.events))}
             has_node = set()
@@ -694,8 +695,18 @@ class Program:
             # it follows; the chunk's last go at its end.
             held = []
 
+            def settle():
+                # a part ends after its links and releases, once, before the next node of another kind: a store in a
+                # running part reaches the bridge late (docs/facts.md, visible.m: tens of ms on an M5 Ultra, seconds
+                # beside spinning observations on the Mini, run-38), a part's end makes it visible (about 27 us after
+                # it on an M5 Ultra, at once on the Mini); the next part, committed ahead, begins at once
+                if cut[0]:
+                    run.cut()
+                    cut[0] = False
+
             def emit_observation(key):
                 kind, c, channel = key
+                settle()
                 run.event(ids[group[key][0]])
                 command = t.commands[c]
                 steps = [command.steps[t.events[m][2]] for m in group[key]]
@@ -714,6 +725,7 @@ class Program:
                 command = t.commands[c]
                 if kind == 'command':
                     flush(e)
+                    settle()
                     run.event(ids[e])
                     operands = []
                     for index, value in enumerate([*command.writes[:1], *command.reads]):
@@ -727,10 +739,7 @@ class Program:
                         run.event(ids[e])
                         for _, _, word, _, slot in links:
                             stored(slot, word)
-                        # the part ends at its links and at its releases: a store in a running part reaches the bridge
-                        # late (docs/facts.md, visible.m: tens of ms on an M5 Ultra, seconds beside spinning
-                        # observations on the Mini, run-38); the next part, committed ahead, begins at once
-                        run.cut()
+                        cut[0] = True
                 elif e in last and nodes_of(c, *last[e][::2]):
                     key = last[e]
                     if key[0] == 'send':
@@ -739,7 +748,7 @@ class Program:
                         run.event(ids[e])
                         for _, _, word, value, slot in nodes_of(c, 'send', key[2]):
                             stored(slot, word)
-                        run.cut()
+                        cut[0] = True
                     else:
                         held.append(key)
             for k in list(held):
