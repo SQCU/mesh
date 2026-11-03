@@ -765,6 +765,7 @@ class Program:
         # each run's watched words in their order (run.landings()'s): (kind 'landed' or 'sent', chunk, channel, the
         # ranks whose segments its steps carry), so a timeline names what each landing was
         self.watched = {}
+        self.labels = {}  # a traced run's nodes in the order appended: each one's kind and its event's name (trace)
         # the run's defect word, its observations' (kernels.observe): 0, or 1 a give-up, 2 a lost word
         self.defect = empty((2,), dtype=torch.int64)
         self.defect.zero_()
@@ -790,6 +791,12 @@ class Program:
         from . import empty
         ffi, lib = mesh.ffi, mesh.lib
         run = _stream.Run()
+        # with the run's configuration's MESH_RUN_TRACE, a GPU timestamp after every node (MetalRunTrace) and each node's
+        # label, the order they are appended in (Program.trace)
+        if os.environ.get('MESH_RUN_TRACE'):
+            run.trace()
+        labels = self.labels[id(run)] = []
+        current = [None]
         # pass 1: each chunk's occurrences lowered onto their bytes (their channels' positions move each time), and
         # each word store's value (a link's table offset, a release's count) given its slot
         instances, stores = [], []
@@ -831,11 +838,13 @@ class Program:
 
         def ev(i):
             emitted.append(i)
+            current[0] = i
             run.event(i)
         start = next(_EVENTS)
         named[start] = ('start',)
         ev(start)
         run.inputs()
+        labels.append(('input',))
         edges, previous_sinks = [], [start]
         # every earlier chunk's accesses (each its node, whether it writes, its bytes in the region) and the last chunk's
         # observations no node of it followed, which go out in the next chunk (below)
@@ -860,6 +869,7 @@ class Program:
                 edges.append((last_store[word], event))
             last_store[word] = event
             run.copy(values, 8 * slot, word, 0, 8)
+            labels.append(('copy', named.get(current[0])))
 
         # a landing and a SEND's completion observed on the GPU (kernels.observe), a node like any other, so a chunk
         # has no outside input and the GPU is already in the part when its data lands (docs/facts.md: a CPU-signalled
@@ -868,6 +878,7 @@ class Program:
 
         def observed(slot, word):
             run.dispatch(observing, [(0, word, 0), (1, values, 8 * slot), (2, self.defect, 0)], (1, 1, 1), (1, 1, 1), True)
+            labels.append(('observe', named.get(current[0])))
         cut = [False]  # a part end owed after links and releases, across chunks
         waited = [False]  # observations emitted since the last command: the next command begins a part's compute
         for chunk, (t, lowered) in enumerate(instances):
@@ -998,6 +1009,7 @@ class Program:
                     ev(ids[e])
                     run.dispatch(_pipeline(source, 'mesh_command'), [(0, tensor, base), (1, tensor, base),
                                                                     (2, landing, landing_base)], grid, group_size, True)
+                    labels.append(('fold', named.get(current[0])))
                 elif kind == 'command':
                     flush(e)
                     settle()
@@ -1007,6 +1019,7 @@ class Program:
                         tensor, base = self._binding(value.root)
                         operands.append((index, tensor, base))
                     run.dispatch(command.pipeline, operands, command.grid, command.group, True)
+                    labels.append(('command', named.get(current[0])))
                     if waited[0]:
                         run.stamp()  # this part's compute begins here, its waits done (MetalRunSpans)
                         waited[0] = False
@@ -1061,6 +1074,11 @@ class Program:
         run.enqueue()
         self.done.append(run)
         return run
+
+    def trace(self, run):
+        """a traced run's nodes after it completes: [microseconds after its earliest GPU stamp (-1: none), kind, its
+        event's name] each, in the order appended (MESH_RUN_TRACE)"""
+        return [[round(us, 2), *label] for us, label in zip(run.times(), self.labels.get(id(run), []))]
 
     def completion(self):
         """the latest run's end (mesh_statistics_now's clock) once it has completed, else None; a run whose observation

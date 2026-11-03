@@ -87,6 +87,10 @@ void MetalRunCut(struct MetalRun *);
    MetalRunSpans gives each part's span from it to the part's end, in microseconds (0 where a part has none) */
 void MetalRunStamp(struct MetalRun *);
 size_t MetalRunSpans(struct MetalRun *, double *us, size_t capacity);
+/* a GPU timestamp after every node (before MetalRunFinish): MetalRunTimes gives each node's, in microseconds from the
+   run's earliest stamp (-1 where a node has none: host and input nodes), in the order appended */
+void MetalRunTrace(struct MetalRun *);
+size_t MetalRunTimes(struct MetalRun *, double *us, size_t capacity);
 /* a returned page with no local reader: the run is complete once the `bytes`-wide word at `offset` reaches
    `threshold` */
 void MetalRunResult(struct MetalRun *, id<MTLBuffer>, NSUInteger offset, uint32_t bytes, uint64_t threshold);

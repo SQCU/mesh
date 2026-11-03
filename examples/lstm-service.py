@@ -102,6 +102,9 @@ def main(config=None):
                                   spans=[round(x, 2) for x in run.spans()],
                                   landings=[[at(p), *w] for (_, p), w in zip(run.landings(), program.watched[id(run)])])),
                   flush=True)
+            if os.environ.get('MESH_RUN_TRACE'):
+                # each node's GPU time after the run's earliest stamp (compiler.Program.trace)
+                print(json.dumps(dict(phase='trace', rank=rank, nodes=program.trace(run))), flush=True)
         summary = dict(blocks=blocks, steps_per_replay=k, layers=L, rows=rows, repeat=repeat, input_width=KIN,
                        width=H, steps=steps, ticks=steps + L - 1, latency_ticks=L)
         emit({**measure(started, ended, steps * rows * H * torch.half.itemsize, steps), 'workload': 'lstm_sequence',

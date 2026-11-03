@@ -175,6 +175,7 @@ struct MetalRun {
     uint32_t parts;
     struct RunPart *part;
     id<MTL4CounterHeap> stamps; // two a part: its compute's start (its first stamped node) and its end
+    BOOL traced; // and, where traced (MetalRunTrace), one a node after it, from 2 x parts on
     struct RunHostState *host; // by node
     size_t nodeCount;
     struct mesh_graph_crossing *wait; // realize's rows, wired into joins at enqueue
@@ -271,6 +272,21 @@ size_t MetalRunSpans(struct MetalRun *run,double *us,size_t capacity) {
     for(uint32_t p=0;p<run->parts&&p<capacity;p++)
         us[p]=e&&e[2*p].timestamp&&e[2*p+1].timestamp>e[2*p].timestamp?(double)(e[2*p+1].timestamp-e[2*p].timestamp)/frequency*1e6:0;
     return run->parts;
+}
+void MetalRunTrace(struct MetalRun *run) { run->traced=YES; }
+size_t MetalRunTimes(struct MetalRun *run,double *us,size_t capacity) {
+    const size_t n=run->nodes.length/sizeof(struct RunNode);
+    if(!run->stamps||!run->traced||run->stamps.count<2*(NSUInteger)run->parts+n)return 0;
+    NSData *entries=[run->stamps resolveCounterRange:NSMakeRange(0,2*(NSUInteger)run->parts+n)];
+    const MTL4TimestampHeapEntry *e=entries.bytes;
+    uint64_t base=UINT64_MAX;
+    for(size_t k=0;e&&k<2*(size_t)run->parts+n;k++)if(e[k].timestamp&&e[k].timestamp<base)base=e[k].timestamp;
+    const double frequency=(double)[run->device queryTimestampFrequency];
+    for(size_t v=0;v<n&&v<capacity;v++) {
+        const uint64_t t=e?e[2*(size_t)run->parts+v].timestamp:0;
+        us[v]=t&&base!=UINT64_MAX?(double)(t-base)/frequency*1e6:-1;
+    }
+    return n;
 }
 void MetalRunCut(struct MetalRun *run) {
     if(run->nodes.length)((struct RunNode *)run->nodes.mutableBytes)[run->nodes.length/sizeof(struct RunNode)-1].ends=YES;
@@ -387,9 +403,10 @@ const char *MetalRunFinish(struct MetalRun *run) {
 
     // a part's compute span: two timestamps a part (metal-microbench docs/facts.md: a count past 4096 with no error slot
     // faulted the driver; two a part with the slot)
-    if(!defect&&run->parts&&2*run->parts<=4096) {
+    const NSUInteger traced=run->traced?(NSUInteger)n:0;
+    if(!defect&&run->parts&&2*run->parts+traced<=4096) {
         MTL4CounterHeapDescriptor *stampsDescriptor=[[MTL4CounterHeapDescriptor new] autorelease];
-        stampsDescriptor.type=MTL4CounterHeapTypeTimestamp;stampsDescriptor.count=2*run->parts;
+        stampsDescriptor.type=MTL4CounterHeapTypeTimestamp;stampsDescriptor.count=2*run->parts+traced;
         NSError *error=nil;
         run->stamps=[run->device newCounterHeapWithDescriptor:stampsDescriptor error:&error];
         if(run->stamps)[run->held addObject:run->stamps];
@@ -446,6 +463,8 @@ const char *MetalRunFinish(struct MetalRun *run) {
             if(node->threadGrid)[encoder dispatchThreads:node->groups threadsPerThreadgroup:node->threads];
             else [encoder dispatchThreadgroups:node->groups threadsPerThreadgroup:node->threads];
         }
+        if(traced&&run->stamps)
+            [encoder writeTimestampWithGranularity:MTL4TimestampGranularityPrecise intoHeap:run->stamps atIndex:2*(NSUInteger)run->parts+v];
         if(lastFenced[open]==v)[encoder updateFence:run->part[open].fence afterEncoderStages:stages];
     }
     free(lastFenced);free(begun);

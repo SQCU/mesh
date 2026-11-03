@@ -3,6 +3,7 @@ own and folded into the operand, then an all-gather): each rank's x filled with 
 rank, so every element is 1 + 2 + ... + size on every rank; each run's time and the bytes a rank moved. The gradient
 sum a trainable program needs (docs/facts.md). A run is bounded at 8 s."""
 import json
+import os
 import sys
 import time
 
@@ -55,6 +56,8 @@ def main(config=None):
             at = lambda v: round((v - started) * 1e6, 1) if v else None
             print(json.dumps(dict(phase='timeline', rank=rank, parts=[[at(c), at(s), at(e)] for c, s, e in run.parts()],
                                   spans=[round(v, 2) for v in run.spans()])), flush=True)
+            if os.environ.get('MESH_RUN_TRACE'):
+                print(json.dumps(dict(phase='trace', rank=rank, nodes=program.trace(run))), flush=True)
         total = size * (size + 1) // 2 * size ** (chunks - 1)  # each sum after the first sums size equal copies
         wrong = int((x.float() != total).sum().item())
         moved = 2 * x.numel() * x.element_size() * (size - 1) // size  # a reduce-scatter's and an all-gather's bytes
