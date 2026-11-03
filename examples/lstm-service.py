@@ -70,7 +70,19 @@ def main(config=None):
                       ([(stepper[rest], (t,))] if rest else []))
     torch_mesh.check_memory()
     repeats = config.get('repeats', 1)
-    program.prepare(repeats)
+    if os.environ.get('MESH_PREPARE_PROFILE'):
+        # the preparation's functions by their own time (cProfile, this thread alone: a sampling thread beside torch's
+        # MPS stream tripped a Metal assertion, lstm-2026-11-03 profile-1)
+        import cProfile, pstats, io
+        profiler = cProfile.Profile()
+        profiler.enable()
+        program.prepare(repeats)
+        profiler.disable()
+        text = io.StringIO()
+        pstats.Stats(profiler, stream=text).sort_stats('tottime').print_stats(14)
+        print(json.dumps(dict(phase='prepare_profile', top=text.getvalue().splitlines()[-22:])), flush=True)
+    else:
+        program.prepare(repeats)
     print(json.dumps(dict(phase='prepared', seconds=round(now() - begun, 3))), flush=True)
     blocks = partition.split(mesh, 'tp', H)
     # the prepared run `repeats` times, each from the same state (the step counter and every layer's h and c set again
