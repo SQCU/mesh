@@ -504,3 +504,17 @@ def unordered(order, edges, accesses):
                 found.append((j, i))
         active.append(i)
     return found
+
+
+def labelling(names, adjacent, labels):
+    """type: names [member], adjacent {member: {label}} (the labels each member's edges reach), labels [label] ->
+    {member: label}: an assignment of distinct labels under which no member reaches its own and each edge is reached
+    from both its ends (a member's streams toward peer nodes, named by node identity: metal-microbench
+    tools/mesh/tick_words.py); {} where none is. A search over the assignments: the members are few"""
+    import itertools
+    for chosen in itertools.permutations(labels, len(names)):
+        label = dict(zip(names, chosen))
+        if all(label[n] not in adjacent[n] for n in names) and \
+                all((label[m] in adjacent[n]) == (label[n] in adjacent[m]) for n in names for m in names if n != m):
+            return label
+    return {}
