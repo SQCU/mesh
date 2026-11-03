@@ -30,7 +30,9 @@ struct bridge_step {
   uint32_t receive;                      /* 1: lands into `page`; 0: sends from `page` */
   bridge_page page;
   uint32_t offset, bytes;                /* the mask within the page */
-  uint64_t position;                     /* a send: posted once its link's supplied word reaches this */
+  uint32_t after_link, after_landed;     /* a send waits on this link's word: landed (1, a relay's forward: "a relay
+                                            passes each part on as it arrives", data-model.md section 5) or supplied */
+  uint64_t position;                     /* a send: posted once that word reaches this */
 };
 
 /* The words a client and the bridge share, one set a link. The client stores `supplied` (how far its producers have
@@ -56,8 +58,8 @@ void *bridge_address(bridge_page page);
 struct bridge_words *bridge_words(uint32_t link);
 
 /* Hand the bridge a client's page lists once, before the call: every receive is posted ahead, into this node's own
-   pages, in list order a link; each send is posted when its link's supplied word reaches its position, in list order
-   a link. The bridge sends no header, receipt or acknowledgement. 0, or an errno. */
+   pages, in list order a link; each send is posted when the word it names reaches its position, in list order a
+   link. The bridge sends no header, receipt or acknowledgement. 0, or an errno. */
 int bridge_load(const struct bridge_step *steps, uint32_t count);
 
 /* The bridge process. Its configuration, one line each: "region <name> <GiB>", then for each link "link <device>
@@ -240,12 +242,14 @@ int bridge_serve(const char *configuration) {
         if (ibv_post_recv(L->qp, &wr, &bad)) break;
         L->posted_receives++; L->next_receive = k + 1;
       }
-      /* each send of the link, in list order, once supplied reaches its position */
-      const uint64_t supplied = atomic_load_explicit(&w->supplied, memory_order_acquire);
+      /* each send of the link, in list order, once the word it names (its producer's supplied, or the landed of the
+         link a relayed page came in on) reaches its position */
       const uint64_t sent = atomic_load_explicit(&w->sent, memory_order_relaxed);
       for (uint64_t k = L->next_send; k < count && L->posted_sends - sent < L->depth; k++) {
         if (t[k].link != l || t[k].receive) continue;
-        if (t[k].position > supplied) break;
+        const struct bridge_words *a = &bridge_region_->words[t[k].after_link];
+        const uint64_t reached = atomic_load_explicit(t[k].after_landed ? &a->landed : &a->supplied, memory_order_acquire);
+        if (t[k].position > reached) break;
         const size_t at = (size_t)t[k].page * BRIDGE_PAGE + t[k].offset;
         struct ibv_sge sge = { .addr = (uintptr_t)(region + at), .length = t[k].bytes, .lkey = bridge_lkey(L, at) };
         struct ibv_send_wr wr = { .wr_id = k, .sg_list = &sge, .num_sge = 1, .opcode = IBV_WR_SEND, .send_flags = IBV_SEND_SIGNALED }, *bad;
