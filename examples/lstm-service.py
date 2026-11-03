@@ -79,6 +79,8 @@ def main(config=None):
         if repeat:
             t.fill_(L - 1)
             tick.reset()
+        if os.environ.get('MESH_SYNC_BEFORE_RUN'):
+            torch.mps.synchronize()  # torch's work so far ended before the run (the one-part stall's input reading)
         started = now()
         program.forward()
 
