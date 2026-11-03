@@ -271,14 +271,23 @@ def fused(name, products, out, operands, expression, shared, tg, tg_dtype, tg_el
         for v in parts + [b] + ([bias] if bias else []):
             views.setdefault(v.index, v.parameter(False))
     groups = FUSED_THREADS // 32
-    code = []
-    for o, parts, b, bias, alpha, beta in products:
+    # each product's A parts staged in threadgroup memory by every thread at once first: a landing's coherent loads
+    # one simdgroup after another in one threadgroup, with nothing to hide their latency, made the LSTM's tick 97-101 us
+    # against 25.5 (lstm-2026-11-03 fused-3)
+    staged, code = [], []
+    for p, (o, parts, b, bias, alpha, beta) in enumerate(products):
+        for q, part in enumerate(parts):
+            M, K = part.shape
+            staged += [f'    threadgroup {MSL[part.dtype]} a_{p}_{q}[{M * K}];',
+                       f'    for (ulong e = me; e < {M * K}ul; e += {FUSED_THREADS}ul) {{ const ulong m = e / {K}ul, k = e % {K}ul; '
+                       f'a_{p}_{q}[e] = {part.load(["m", "k"])}; }}']
+    for p, (o, parts, b, bias, alpha, beta) in enumerate(products):
         M, N = o.shape
         bias_term = f' + {beta}f * float({bias.load(["n"] if len(bias.shape) == 1 else ["m", "n"])})' if bias else ''
         loops, first = [], 0
-        for part in parts:
+        for q, part in enumerate(parts):
             K = part.shape[1]
-            loops.append(f'        for (ulong k = lane; k < {K}ul; k += 32ul) total += float({part.load(["m", "k"])}) * '
+            loops.append(f'        for (ulong k = lane; k < {K}ul; k += 32ul) total += float(a_{p}_{q}[m * {K}ul + k]) * '
                          f'float({b.load([f"(k + {first}ul)", "n"])});')
             first += K
         code += [f'    for (ulong o = sg; o < {M * N}ul; o += {groups}ul) {{',
@@ -298,6 +307,8 @@ def fused(name, products, out, operands, expression, shared, tg, tg_dtype, tg_el
         pre += [f'        const float {named} = float({MSL[view.dtype]}({text}));', f'        {view.store(c, named)}']
     body = [f'    threadgroup {MSL[tg_dtype]} {tg}[{tg_elements}];',
             '    const ulong me = tid, sg = me / 32ul, lane = me % 32ul;',
+            *staged,
+            '    threadgroup_barrier(mem_flags::mem_threadgroup);',
             *code,
             '    threadgroup_barrier(mem_flags::mem_threadgroup);',
             f'    for (ulong i = me; i < {count}ul; i += {FUSED_THREADS}ul) {{',

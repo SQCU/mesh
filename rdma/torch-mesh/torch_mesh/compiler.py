@@ -61,7 +61,7 @@ import os
 CUTS = {'all': 'all', 'first': 'first'}.get(os.environ.get('MESH_RUN_CUTS', '0'), 'none')
 GATHER_BELOW = int(os.environ.get('MESH_ALLREDUCE_GATHER_BELOW', 3 * 40e-6 * 24.4e9 * 5 / (4 * 3)))
 # a fused kernel's bounds (Template._fuse): its products' outputs at most this many, their root in threadgroup memory
-FUSED_OUTPUTS, FUSED_BYTES = 4096, 16384
+FUSED_OUTPUTS, FUSED_BYTES = 4096, 28672
 
 
 class Root:
@@ -650,9 +650,11 @@ class Template:
                 run = commands[k:j]
                 R = run[0].writes[0].root
                 outputs = sum(math.prod(p.writes[0].shape) for p in run)
+                # threadgroup memory: the products' outputs and their A parts, staged (kernels.fused)
+                staged = sum(math.prod(v.shape) * v.dtype.itemsize for p in run for v in p.reads[:p.product[0]])
                 others = [c for c in commands if c is not consumer and all(c is not p for p in run)]
                 if (all(p.writes[0].root is R for p in run) and R.tensor is None and R.base is None and not R.coherent
-                        and R.nbytes <= FUSED_BYTES and outputs <= FUSED_OUTPUTS
+                        and R.nbytes + staged <= FUSED_BYTES and outputs <= FUSED_OUTPUTS
                         and outputs * run[0].writes[0].dtype.itemsize == R.nbytes
                         and not any(v.root is R for p in run for v in p.reads)
                         and any(v.root is R for v in consumer.reads) and not any(v.root is R for v in consumer.writes)
