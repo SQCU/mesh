@@ -2288,7 +2288,8 @@ static int channel_of(ncclComm_t comm, uint32_t peer) {
    one order both ends make), so both ends cut and place alike, and a forward's piece lies within one COPY's piece (a
    forward's range lies within its COPY's, the gate the lowering takes) for any cable counts either side. Every step's
    channel in d->step_channel. Measured need: a pair's parallel cables sat idle under one channel a peer
-   (metal-microbench docs/facts.md, the bandwidth run: one port a peer carried bytes). */
+   (metal-microbench docs/facts.md, the bandwidth run: one port a peer carried bytes). A REDUCE is cut alike: its
+   sender's SEND is. */
 static ncclResult_t spread(ncclComm_t comm, struct definition *d, struct mesh_operand operand, uint32_t made, uint32_t call) {
   const uint64_t cell = mesh_page_quantum(comm->page, operand.element_bytes) * MESH_SPREAD_QUANTA;
   uint64_t most = 1;
@@ -2313,7 +2314,9 @@ static ncclResult_t spread(ncclComm_t comm, struct definition *d, struct mesh_op
     const struct mesh_step x = own[s];
     int lanes[comm->count + 1], n = 0;
     for (uint32_t h = 0; h < comm->count; h++) if ((uint32_t)comm->channels[h].peer == x.peer) lanes[n++] = (int)h;
-    if (x.peer == (uint32_t)comm->rank || !n || (x.op != MESH_STEP_SEND && x.op != MESH_STEP_COPY)) {
+    /* every transfer: a SEND, a COPY and a REDUCE (a receive too: left on one channel it met a sender's pieces on
+       every channel with receives on one, and the others' SENDs were held for good, allreduce-2026-11-03 run-6) */
+    if (x.peer == (uint32_t)comm->rank || !n) {
       d->step[at] = x; d->step_call[at] = call;
       d->step_channel[at] = x.peer == (uint32_t)comm->rank || !n ? 0 : (uint32_t)lanes[0]; at++; continue;
     }
