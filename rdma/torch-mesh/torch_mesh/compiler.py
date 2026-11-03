@@ -470,15 +470,9 @@ class Template:
             # 11.1 and 10.6 us a Studio against 39-48 (metal-microbench tools/mesh/gemm.m)
             acc = Value(Root(math.prod(out.shape) * 4), torch.float32, tuple(out.shape), (out.shape[1], 1), 0)
             self._command([acc], [], lambda name, c: kernels.pointwise(name, c.writes[0].view(0), [], '0.0f'))
-            summed = self._command([acc], reads, lambda name, c: kernels.product(
+            values[node] = self._command([acc], reads, lambda name, c: kernels.product(
                 name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
                 c.reads[P + 1].view(P + 2) if len(c.reads) > P + 1 else None, float(alpha), float(beta), accumulate=True))[0]
-            # a product written into part of a root (the LSTM's layers' gates stacked into one) has the float converted
-            # into its own place there: the float root alone left that place unwritten (an LSTM of width 1024 off by
-            # 0.16 under the rows form, metal-microbench lstm-2026-11-03 rows-1)
-            whole = out.offset == 0 and math.prod(out.shape) * out.dtype.itemsize == out.root.nbytes
-            values[node] = summed if whole else self._command(
-                [out], [summed], lambda name, c: kernels.pointwise(name, c.writes[0].view(0), [c.reads[0].view(1)], 'x0'))[0]
             return
         values[node] = self._command([out], reads, lambda name, c: kernels.product(
             name, c.writes[0].view(0), [c.reads[k].view(1 + k) for k in range(P)], c.reads[P].view(P + 1),
