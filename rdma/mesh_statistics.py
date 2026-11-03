@@ -7,6 +7,7 @@ import json
 import ctypes
 import contextlib
 import copy
+import threading
 from pathlib import Path
 
 
@@ -22,6 +23,69 @@ _lib.mesh_statistics_now.restype = ctypes.c_double
 _lib.mesh_statistics_measure.argtypes = [ctypes.c_double] * 4
 _lib.mesh_statistics_measure.restype = _Value
 now = _lib.mesh_statistics_now
+_lib.mesh_statistics_streams.argtypes = [ctypes.POINTER(ctypes.c_ulonglong), ctypes.c_ulong, ctypes.POINTER(ctypes.c_int)]
+_lib.mesh_statistics_streams.restype = ctypes.c_long
+
+
+class StreamWords:
+    """this host's stream words beside a run, `with StreamWords() as words: <the run>`, then words.chains(): the C
+    spin (mesh-statistics.h mesh_statistics_streams) on a thread of its own, which ctypes runs without the GIL, so the
+    run's own thread is not held; it stops when the block ends. `capacity` moves kept at most (32 bytes each)."""
+
+    def __init__(self, capacity=1 << 18):
+        self.capacity, self.count = capacity, None
+        self.buffer = (ctypes.c_ulonglong * (4 * capacity))()
+        self.stop = ctypes.c_int(0)
+        self.thread = threading.Thread(target=self._spin, daemon=True)
+
+    def _spin(self):
+        self.count = _lib.mesh_statistics_streams(self.buffer, self.capacity, ctypes.byref(self.stop))
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.value = 1
+        self.thread.join(2.0)
+
+    def moves(self):
+        """(ns, stream, word, value) each kept move (word 0 owner, 1 ready, 2 sent, 3 landed)"""
+        if self.count is None or self.count < 0:
+            raise RuntimeError(f'no stream words (mesh_statistics_streams: {self.count})')
+        b = self.buffer
+        return [(b[4 * k], b[4 * k + 1], b[4 * k + 2], b[4 * k + 3]) for k in range(self.count)]
+
+    def chains(self):
+        """each tick's chain on this host, microseconds from its last landing (every held stream's `landed` at that
+        tick's count) to its next release (`ready`'s next rise on the stream releasing least often, a stream carrying
+        a forward as well rising twice a tick): the rank's compute in the run itself, as tools/mesh/tick_words.py
+        reads it from mesh-stat (metal-microbench)"""
+        owner, series = {}, {}
+        for ns, t, w, v in self.moves():
+            if w == 0:
+                owner[t] = v
+            elif v < 1 << 62 and 0 < owner.get(t, 0) < 1 << 63:
+                series.setdefault((t, w), []).append((ns, v))
+        rises = {t: [ns for (a, b) in zip(s, s[1:]) for ns in [b[0]] if b[1] > a[1]]
+                 for (t, w), s in series.items() if w == 1}
+        rises = {t: r for t, r in rises.items() if len(r) > 2}
+        if not rises:
+            return []
+        releases = min(rises.values(), key=len)
+        ticks = len(releases)
+        arrivals = []
+        for (t, w), s in series.items():
+            if w != 3 or s[-1][1] <= s[0][1]:
+                continue
+            base, step = s[0][1], (s[-1][1] - s[0][1]) / ticks
+            arrivals.append([next((ns for ns, v in s if v >= base + round((j + 1) * step)), None) for j in range(ticks)])
+        out = []
+        for j in range(ticks - 1):
+            last = [a[j] for a in arrivals]
+            if last and None not in last and releases[j + 1] > max(last):
+                out.append((releases[j + 1] - max(last)) / 1e3)
+        return out
 
 
 def measure(started, observed, useful_bytes, units=0):

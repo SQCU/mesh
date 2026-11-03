@@ -1,6 +1,6 @@
 """The load balancer the goal names (docs/facts.md; the user, 2026-10-21): a two-layer LSTM, trained online on every
-rank's observed compute (the median and spread over runs of its ticks' compute alone, the round's ticks without their
-gather, GPU timestamps), chooses the partition of
+rank's observed compute (the median and spread of its ticks' chains in the round's run, each tick's last landing to
+its next release, from its host's stream words: mesh_statistics.StreamWords), chooses the partition of
 the LSTM's units over the ranks. Each round attaches a partition (partition.attach with each rank's units), runs the
 LSTM's ticks on it (lstm.Tick through the compiler), gathers every rank's (median, spread) through a compiled
 all-gather, trains the predictor (the round's partition and the round before's observations -> this round's), and
@@ -23,7 +23,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard
 from torch_mesh import partition
 from torch_mesh.compiler import Program
-from mesh_statistics import now
+from mesh_statistics import StreamWords, now
 
 import lstm
 
@@ -134,37 +134,27 @@ def main(config=None):
         tick = lstm.Tick(mesh, [split(w) for w, _ in held], [split(b) for _, b in held], rows, steps)
         t = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1)
         whole, rest = divmod(steps, k)
-        # each rank's compute alone: the round's ticks without their gather, `observed_runs` runs, a run's stepper part's
-        # GPU span over its ticks. In one part (mesh 28d9fe01) a run's parts are no longer a tick's, so their spans
-        # are not its compute; this run has no wait in it
-        alone = Program([(lambda _, s=s: tick.starting(s, X[s], gather=False), (t,)) for s in range(L - 1)] +
-                        [(tick.stepper(X, O, k, gather=False), (t,))] * whole)
-        runs = config.get('observed_runs', 3)
-        alone.prepare(runs)
-        per_tick = []
-        for _ in range(runs):
-            t.fill_(L - 1)
-            began = now()
-            alone.forward()
-            while alone.completion() is None:
-                if now() - began > 8.0:
-                    raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
-                time.sleep(0)
-            _, first, last = alone.done[-1].parts()[-1]
-            per_tick.append((last - first) / (whole * k) * 1e6)
-        del alone
         starting = [lambda _, s=s: tick.starting(s, X[s]) for s in range(L - 1)]
         stepper = {n: tick.stepper(X, O, n) for n in {k, rest} if n}
         program = Program([(fn, (t,)) for fn in starting] + [(stepper[k], (t,))] * whole +
                           ([(stepper[rest], (t,))] if rest else []))
         program.prepare(1)
         t.fill_(L - 1)
-        started = now()
-        program.forward()
-        while (ended := program.completion()) is None:
-            if now() - started > 8.0:
-                raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
-            time.sleep(0)
+        # each rank's compute in the run it balances: each tick's last landing to its next release, read from this
+        # host's stream words beside the run (mesh_statistics.StreamWords), its first quarter left out (the run's
+        # start). Changed from the round's ticks without their gather (50f63cf4): at 64 ticks with no waits those read
+        # 21-37 us a tick against the same chain's 7.3-9.0 in the run, a short program's clock state, and the balancer
+        # drifted after a period its observation did not follow (metal-microbench docs/facts.md, balance-2026-11-03
+        # index32-1). What must stay: a rank's observation its own compute, not its waits on its peers
+        with StreamWords() as words:
+            started = now()
+            program.forward()
+            while (ended := program.completion()) is None:
+                if now() - started > 8.0:
+                    raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
+                time.sleep(0)
+        chains = words.chains()
+        per_tick = chains[len(chains) // 4:] or [0.0]
         run = program.done[-1]
         # the tick period: the full run's last part (its ticks after the first function's) over its ticks
         _, first, last = run.parts()[-1]

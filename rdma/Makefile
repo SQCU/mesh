@@ -67,7 +67,7 @@ $(IMAGES:%=.build/%): .build/metal-environment
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ .build/mesh-cpu-source.o nccl-mesh.c mesh-statistics.c metal.m -L.build -lmesh \
 	  -framework Metal -framework Foundation -framework Accelerate
-.build/libmesh-statistics.dylib: mesh-statistics.c mesh-statistics.h Makefile
+.build/libmesh-statistics.dylib: mesh-statistics.c mesh-statistics.h mesh.h Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-statistics.dylib -o $@ mesh-statistics.c
 # The reporting host needs only this ordinary library dependency, not a bridge.
