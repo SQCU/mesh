@@ -56,6 +56,21 @@ class StreamWords:
         b = self.buffer
         return [(b[4 * k], b[4 * k + 1], b[4 * k + 2], b[4 * k + 3]) for k in range(self.count)]
 
+    def streams(self):
+        """each held stream's moves in the watch: {stream: [ready's rises, sent's, landed's rise over the watch]}"""
+        out, owner, last = {}, {}, {}
+        for ns, t, w, v in self.moves():
+            if w == 0:
+                owner[t] = v
+                continue
+            if not 0 < owner.get(t, 0) < 1 << 63 or v >= 1 << 62:
+                continue
+            row = out.setdefault(t, [0, 0, 0])
+            if (t, w) in last and v > last[t, w]:
+                row[w - 1] += 1 if w < 3 else v - last[t, w]
+            last[t, w] = v
+        return out
+
     def chains(self, ticks=None):
         """each tick's chain on this host, microseconds from its last landing (every held stream's `landed` at that
         tick's count) to its next release (`ready`'s next rise on the stream rising nearest `ticks` times, the run's

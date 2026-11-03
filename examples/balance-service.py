@@ -154,6 +154,8 @@ def main(config=None):
                     raise TimeoutError('the run did not complete within 8 s (a run is bounded: docs/facts.md)')
                 time.sleep(0)
         chains = words.chains(steps)
+        print(json.dumps(dict(phase='words', round=round_, rank=rank, streams=words.streams(), chains=len(chains),
+                              moves=words.count)), flush=True)
         per_tick = chains[len(chains) // 4:] or [0.0]
         run = program.done[-1]
         # the tick period: the full run's last part (its ticks after the first function's) over its ticks
