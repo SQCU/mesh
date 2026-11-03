@@ -1005,6 +1005,15 @@ ncclResult_t ncclMeshCommAreaSpace(ncclComm_t comm, uint32_t group, struct ncclM
 ncclResult_t ncclMeshCommBuffers(ncclComm_t comm, uint32_t group, uint32_t call, uint64_t *bytes, unsigned char *owned,
                                  uint32_t capacity, uint32_t *count, uint32_t *initialized, uint64_t *send_origin,
                                  uint64_t *result_origin);
+/* design/page-maps-2026-11-02.md, integration step 5: each command of a lowered occurrence's source program, in its
+   program order, tagged with the role it realizes, so the run's solve gives it its event: the link posting a
+   channel's receives, a call's publications (its SENDs' release), operand copies (the start copies), sums (its
+   REDUCEs' combines), complement copies, epilogue, and a coverage mask. call and channel are UINT32_MAX where none. */
+enum { ncclMeshSourceLink, ncclMeshSourcePublish, ncclMeshSourceCopy, ncclMeshSourceSum, ncclMeshSourceComplement,
+       ncclMeshSourceEpilogue, ncclMeshSourceMask };
+typedef struct { uint32_t role, call, channel; } ncclMeshSourceTag;
+ncclResult_t ncclMeshCommSourceTags(ncclComm_t comm, uint64_t occurrence, ncclMeshSourceTag *tags, size_t capacity,
+                                    size_t *count);
 ncclResult_t ncclMeshCommLower(ncclComm_t comm, uint64_t invocation, uint32_t polls,
     int (*effect)(void* context,const ncclMeshPageEffect* effect), void* context,
     uint64_t* occurrence);

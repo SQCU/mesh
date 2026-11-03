@@ -3920,6 +3920,9 @@ struct issue { struct schedule *plans; struct steps **steps; struct inflight *gr
                struct metal_program *source;
                size_t *source_link;
                size_t *source_calls;
+               /* each source-program command's role, call and channel (ncclMeshSourceTag), for the run's solve to
+                  give it its event (design/page-maps-2026-11-02.md, integration step 5) */
+               ncclMeshSourceTag *source_tags; size_t source_tag_room;
                uint64_t *source_bindings;
                ncclMeshTransport *transport;
                struct message **transport_messages;
@@ -4864,7 +4867,7 @@ static void issue_free(struct ncclComm *comm, struct issue *u) {
   if (!u) return;
   zplan_free(u->zplan);
   if(u->source){metal_end(u->source);free(u->source);}
-  free(u->source_link);
+  free(u->source_link); free(u->source_tags);
   free(u->source_calls);
   free(u->source_bindings);
   free(u->transport);free(u->transport_messages);
@@ -5558,6 +5561,19 @@ static ncclResult_t source_publications(struct metal_program *program,const stru
   return ncclSuccess;
 }
 static ncclResult_t source_coverage(struct issue *);
+/* tag source commands [from, to) of issue u with their role, call and channel */
+static ncclResult_t source_tag(struct issue *u, size_t from, size_t to, uint32_t role, uint32_t call, uint32_t channel) {
+  if (to > u->source_tag_room) {
+    size_t room = u->source_tag_room ? u->source_tag_room : 64;
+    while (room < to) room *= 2;
+    ncclMeshSourceTag *more = realloc(u->source_tags, room * sizeof *more);
+    if (!more) return fail(ncclSystemError, "tagging source commands");
+    for (size_t k = u->source_tag_room; k < room; k++) more[k] = (ncclMeshSourceTag){ncclMeshSourceMask, UINT32_MAX, UINT32_MAX};
+    u->source_tags = more; u->source_tag_room = room;
+  }
+  for (size_t k = from; k < to; k++) u->source_tags[k] = (ncclMeshSourceTag){role, call, channel};
+  return ncclSuccess;
+}
 static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
   struct inflight *g=u->group;struct ncclComm *comm=g->comm;
   struct call *list=g->list;const size_t n=g->n;
@@ -5604,16 +5620,23 @@ static ncclResult_t source_group(struct issue *u,struct isl_ctx *context) {
   }
   if(u->zeeb)metal_resident(program,u->base.buffer);
   ncclResult_t result=u->remote?gpu(zinth(program,comm,u),"declaring descriptor publication"):ncclSuccess;
+  for(uint32_t h=0;!result&&u->remote&&h<comm->count;h++)
+    if(u->plans[h].outs||u->plans[h].ins)
+      result=source_tag(u,u->source_link[h],u->source_link[h]+1,ncclMeshSourceLink,UINT32_MAX,h);
+  /* each call's commands, tagged by the role they realize */
+#define TAGGED(role,call) do { const size_t from_=metal_command_count(program); if(!result)result=(call); \
+    if(!result)result=source_tag(u,from_,metal_command_count(program),(role),(uint32_t)i,UINT32_MAX); } while(0)
   for(size_t i=0;!result&&i<n;i++) {
     u->source_calls[i]=metal_command_count(program);
     program->frame=0;
-    result=source_publications(program,g,list+i);
-    if(!result)result=operand_copies(program,comm,list+i,1,u->plans,NULL);
-    if(!result&&u->remote)result=zabbadoo(program,comm,u,list+i);
+    TAGGED(ncclMeshSourcePublish,source_publications(program,g,list+i));
+    TAGGED(ncclMeshSourceCopy,operand_copies(program,comm,list+i,1,u->plans,NULL));
+    if(u->remote)TAGGED(ncclMeshSourceSum,zabbadoo(program,comm,u,list+i));
     program->frame=0;
-    if(!result&&u->remote)result=complement_copy(program,list+i);
-    if(!result)result=epilogue(program,list+i,1);
+    if(u->remote)TAGGED(ncclMeshSourceComplement,complement_copy(program,list+i));
+    TAGGED(ncclMeshSourceEpilogue,epilogue(program,list+i,1));
   }
+#undef TAGGED
   u->source_calls[n]=metal_command_count(program);
   if(!result)result=source_coverage(u);
   if(!result)metal_sources(program);
@@ -5900,9 +5923,30 @@ static ncclResult_t source_coverage(struct issue *u) {
     metal_place_sources(u->source,previous,positions,mask_effects,count,relocation);
     for(uint32_t h=0;h<comm->count;h++)if(u->plans[h].outs||u->plans[h].ins)
       u->source_link[h]=relocation[u->source_link[h]];
+    /* the tags move with their commands; the masks' places are tagged as masks of their transfers' calls */
+    const size_t total=metal_command_count(u->source);
+    ncclMeshSourceTag *moved=malloc((total+1)*sizeof *moved);
+    if(!moved)result=fail(ncclSystemError,"relocating source tags");
+    for(size_t k=0;moved&&k<total;k++)moved[k]=(ncclMeshSourceTag){ncclMeshSourceMask,UINT32_MAX,UINT32_MAX};
+    for(size_t k=0;moved&&k<previous&&k<u->source_tag_room;k++)moved[relocation[k]]=u->source_tags[k];
+    if(moved){free(u->source_tags);u->source_tags=moved;u->source_tag_room=total;}
   }
   for(size_t k=0;cut_tables&&k<count;k++)if(!k||cut_tables[k]!=cut_tables[k-1])free(cut_tables[k]);
   free(projections);free(cut_tables);free(relocation);free(positions);free(mask_effects);free(selected);
+  return result;
+}
+/* nccl.h ncclMeshCommSourceTags */
+ncclResult_t ncclMeshCommSourceTags(ncclComm_t comm, uint64_t occurrence, ncclMeshSourceTag *tags, size_t capacity,
+                                    size_t *count) {
+  if (!comm || !count) return fail(ncclInvalidArgument, "read an occurrence's source tags into a count");
+  pthread_mutex_lock(&group_lock);
+  const struct issue *u = occurrence_at(comm, occurrence);
+  ncclResult_t result = u && u->source ? ncclSuccess : fail(ncclInvalidUsage, "an occurrence's source tags need its lowering");
+  const size_t n = result ? 0 : metal_command_count(u->source);
+  for (size_t k = 0; k < n && k < capacity; k++)
+    tags[k] = k < u->source_tag_room ? u->source_tags[k] : (ncclMeshSourceTag){ncclMeshSourceMask, UINT32_MAX, UINT32_MAX};
+  *count = n;
+  pthread_mutex_unlock(&group_lock);
   return result;
 }
 ncclResult_t ncclMeshCommSpecialize(ncclComm_t comm,uint64_t occurrence,void *sources) {
