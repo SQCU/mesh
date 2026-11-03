@@ -887,9 +887,15 @@ class Program:
                     # the first two chunks' observation counts and release values a channel, and their forwards (the
                     # one-part stall's reading: a landing's count against its peers' releases)
                     kinds = {lib.ncclMeshNodeLanding: 'landed', lib.ncclMeshNodeSent: 'sent', lib.ncclMeshNodeRelease: 'ready'}
+                    fwd = {send for send, _ in pairs}
                     print(json.dumps(dict(phase='lowered', chunk=len(instances), command=c,
                                           nodes=sorted([kinds[k], ch, v, r] for k, ch, _, v, _, r in made if k in kinds),
-                                          forwards=len(pairs))), flush=True)
+                                          forwards=len(pairs),
+                                          # each step: kind (send, forward or copy), channel, round, its origin rank,
+                                          # its pages
+                                          steps=[['forward' if k in fwd else st['kind'], st['channel'], st['round'],
+                                                  command.origin(st), -(-st['bytes'] // _stream.region_page_bytes())]
+                                                 for k, st in enumerate(command.steps)])), flush=True)
                 run.communicator(int(ffi.cast('uintptr_t', command.comm)))
             instances.append((t, lowered))
         values = empty((max(1, len(stores)),), dtype=torch.int64)
