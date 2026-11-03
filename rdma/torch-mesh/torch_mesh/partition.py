@@ -9,9 +9,15 @@ _PARTS = {}
 
 
 def attach(mesh, **dims):
-    """each named mesh dimension's units, split evenly over its ranks in rank order (the first units mod n one more)"""
+    """each named mesh dimension's units over its ranks in rank order: a count split evenly (the first units mod n one
+    more), or a list, each rank's own (a balancer's partition, the same list on every rank)"""
     for name, units in dims.items():
         n = mesh.size(mesh.mesh_dim_names.index(name))
+        if isinstance(units, (list, tuple)):
+            if len(units) != n or min(units) < 0 or sum(units) <= 0:
+                raise ValueError(f'mesh: partition {name}: {list(units)} over a mesh dimension of {n} ranks')
+            _PARTS[id(mesh), name] = [int(u) for u in units]
+            continue
         if n <= 0 or units <= 0:
             raise ValueError(f'mesh: partition {name}: {units} units over a mesh dimension of {n} ranks')
         _PARTS[id(mesh), name] = [units // n + (r < units % n) for r in range(n)]
