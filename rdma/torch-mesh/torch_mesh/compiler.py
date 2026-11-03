@@ -156,26 +156,21 @@ def _halves(c):
     Changed from one root for both halves (every step on c.out's root): the all-gather's landings wrote the pages this
     rank's reduce-scatter SENDs still read (_reduced: the ~1 ms write-after-read hold). What must stay: no landing, and
     no fold of a final, on bytes of x a SEND reads."""
+    from mesh_graph import later_cover
     x, y = c.mine.root, c.out.root
+    # each operand step's span by the solve's order: a round's SENDs, then its landings and folds, in step order
+    span = lambda k, s: ((s['round'], s['kind'] != 'send', k), s['at'], s['at'] + s['bytes'])
     operand = [(k, s) for k, s in enumerate(c.steps) if not s['buffer']]
-    meets = lambda a, b: a['at'] < b['at'] + b['bytes'] and b['at'] < a['at'] + a['bytes']
-    copies = [s for _, s in operand if s['kind'] == 'copy']
-    for k, s in operand:
-        if s['kind'] == 'send':
-            s['root'] = x if any(meets(s, t) and t['round'] >= s['round'] for t in copies) else y
-        elif s['kind'] == 'reduce':
-            s['root'] = x
-            if any(meets(s, t) for t in copies):
-                s['writes'] = [x]  # another rank's segment: the partial this rank's SEND up reads
-                continue
-            later = sorted((max(s['at'], t['at']), min(s['at'] + s['bytes'], t['at'] + t['bytes'])) for j, t in operand
-                           if t['kind'] == 'reduce' and (t['round'], j) > (s['round'], k) and meets(s, t))
-            reach = s['at']
-            for a, b in later:
-                if a > reach:
-                    break
-                reach = max(reach, b)
-            s['writes'] = ([x] if later else []) + ([y] if reach < s['at'] + s['bytes'] else [])
+    sends = [(k, s) for k, s in operand if s['kind'] == 'send']
+    folds = [(k, s) for k, s in operand if s['kind'] == 'reduce']
+    copies = [span(k, s) for k, s in operand if s['kind'] == 'copy']
+    for (k, s), (partial, _) in zip(sends, later_cover([span(k, s) for k, s in sends], copies)):
+        s['root'] = x if partial else y
+    spans = [span(k, s) for k, s in folds]
+    for (k, s), (replaced, _), (added, covered) in zip(folds, later_cover(spans, copies), later_cover(spans, spans)):
+        s['root'] = x
+        # another rank's segment (a COPY lands its final later): the partial this rank's SEND up reads
+        s['writes'] = [x] if replaced else ([x] if added else []) + ([y] if not covered else [])
 
 
 def _caller(roots, current, tensor):

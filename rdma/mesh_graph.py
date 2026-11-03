@@ -591,6 +591,23 @@ def superseded(history, newer):
     return [h for h in history if not covered(h[2], h[3])]
 
 
+def later_cover(spans, others):
+    """type: spans [(key, lo, hi)], others [(key, lo, hi)] -> [(met, covered)] a span each: whether an other of a greater
+    key overlaps its bytes [lo, hi), and whether those others' union covers all of them. An all-reduce's steps by the
+    solve's order (torch_mesh/compiler.py _halves): a SEND a later COPY lands over sends a partial; a fold a later COPY
+    lands over, or a later fold adds into, stores a partial; a fold no later fold covers is some byte's last, a final"""
+    out = []
+    for key, lo, hi in spans:
+        later = sorted((max(lo, a), min(hi, b)) for k, a, b in others if k > key and a < hi and lo < b)
+        reach = lo
+        for a, b in later:
+            if a > reach:
+                break
+            reach = max(reach, b)
+        out.append((bool(later), reach >= hi))
+    return out
+
+
 def arborescences(nodes, root, capacity, depth=None):
     """every spanning arborescence of range(nodes) from `root` over the pairs capacity[u][v] > 0 joins (u v's parent),
     as {v: u}, each within `depth` edges of the root where it is given; by enumeration of each node's parent, so for
