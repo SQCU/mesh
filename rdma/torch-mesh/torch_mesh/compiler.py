@@ -796,7 +796,10 @@ class Program:
             for key, members in group.items():
                 for e in members:
                     ids[e] = ids[members[0]]
-                last[members[-1]] = key
+                # a landing group's node from its first member (its members follow the post and earlier rounds'
+                # completions alone, so a fold after its first landing may come before its last); a SEND's group
+                # from its last (each member follows its own release)
+                last[members[0] if key[0] == 'landed' else members[-1]] = key
             from mesh_graph import contract, held_before, sinks, sources, through
 
             def nodes_of(c, kind, channel, round_):
@@ -907,13 +910,10 @@ class Program:
         except RuntimeError as refused:
             if 'backward' not in str(refused):
                 raise
-            first, last = {}, {}
-            for k, i in enumerate(emitted):
-                first.setdefault(i, k)
-                last[i] = k
-            backward = [(a, b) for a, b in edges if a in last and b in first and first[b] < last[a]]
-            raise RuntimeError(f'{refused}: {len(backward)} edges backward in the emitted order, the first '
-                               f'{[(named.get(a), last[a], named.get(b), first[b]) for a, b in backward[:4]]}') from refused
+            from mesh_graph import backward
+            wrong = backward(edges, emitted)
+            raise RuntimeError(f'{refused}: {len(wrong)} edges backward in the emitted order, the first '
+                               f'{[(named.get(a), named.get(b)) for a, b in wrong[:4]]}') from refused
         return run
 
     def forward(self):

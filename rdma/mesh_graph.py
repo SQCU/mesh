@@ -412,3 +412,13 @@ def held_before(held, members, after, target):
                 needed.append(k)
                 grew = True
     return [k for k in held if k in needed]
+
+
+def backward(edges, order):
+    """type: edges (a, b), order (nodes as emitted, a node repeated for each of its parts) -> the edges whose head is first
+    emitted before their tail is last: a run's order its realize refuses (torch_mesh/compiler.py names them)"""
+    first, last = {}, {}
+    for k, node in enumerate(order):
+        first.setdefault(node, k)
+        last[node] = k
+    return [(a, b) for a, b in edges if a in last and b in first and first[b] < last[a]]
