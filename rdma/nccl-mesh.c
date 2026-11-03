@@ -961,6 +961,8 @@ static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, con
 }
 
 
+/* the longest a communicator's start waits for a stream its bridge is still freeing (fabric_acquire) */
+#define HOLD_WAIT_NS UINT64_C(3000000000)
 /* design/whole-function.md#fabric */
 static int fabric_acquire(struct ncclComm *comm) {
   struct attach *a = comm->attach;
@@ -974,7 +976,13 @@ static int fabric_acquire(struct ncclComm *comm) {
     while (slot < MESH_STREAMS && a->holds[slot].users) slot++;
     if (slot == MESH_STREAMS) { status = ENOSPC; break; }
     if (holding_generation == UINT64_MAX) { status = EOVERFLOW; break; }
-    if ((status = mesh_stream_take(&a->context, c->wire, &stream))) break;
+    /* a stream whose last holding its bridge is still ending (its holder gone a moment ago: a run started right after a
+       killed one held nothing, metal-microbench docs/facts.md, 2026-11-03) is taken once the bridge has freed it,
+       within HOLD_WAIT_NS of the first try; well inside the second gather's MESH_PREPARATION_NS */
+    for (const uint64_t until = clock_gettime_nsec_np(CLOCK_MONOTONIC) + HOLD_WAIT_NS;
+         (status = mesh_stream_take(&a->context, c->wire, &stream)) == EBUSY && clock_gettime_nsec_np(CLOCK_MONOTONIC) < until;)
+      nanosleep(&(struct timespec){0, 1000000}, NULL);
+    if (status) break;
     struct hold *h = a->holds + slot;
     *h = (struct hold){.node = comm->members[peer], .stream = stream, .wire = c->wire, .users = 1, .generation = ++holding_generation};
     comm->endpoint[e] = slot; comm->held |= UINT32_C(1) << slot; comm->binding = 1;
