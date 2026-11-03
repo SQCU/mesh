@@ -365,4 +365,10 @@ uint32_t mesh_graph_tree_order(uint32_t vertices, uint32_t root, const uint32_t 
    (core/collective.h: a root's pages spread over its trees by share). */
 uint32_t mesh_graph_share_pick(uint32_t trees, const uint32_t *root, const double *share, uint32_t r, double at);
 
+/* A rooted tree's edges, each (child, its parent) handed to visit(consumer, child, parent): leaves-first (`leaves_first`
+   1: every child before its parent) or root-outward (0: every parent before its children), by depth then index; the
+   edges visited (core/collective.h: an all-reduce's partials up a page's tree, its relays down it). */
+uint32_t mesh_graph_tree_edges(uint32_t vertices, uint32_t root, const uint32_t *parent, int leaves_first,
+                               void (*visit)(void *consumer, uint32_t child, uint32_t parent), void *consumer);
+
 #endif

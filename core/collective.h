@@ -112,6 +112,42 @@ static uint64_t collective_move(struct collective_plan_state *s, uint32_t u, uin
   return index;
 }
 
+/* one page's walk over its tree: the up pass's and down pass's visitors (the graph module walks, these move pages) */
+struct collective_page_walk {
+  struct collective_plan_state *s; struct collective_work *w; const struct collective_fabric *f;
+  uint32_t r, bytes, children[64], in_link[64]; bridge_page base; uint64_t pages, p, ready[64], landed_at[64], *published;
+  int error;
+};
+static void collective_up(void *consumer, uint32_t v, uint32_t u) {
+  /* v's partial (its page base + p, ready after its own last fold) to its parent u, landing in u's scratch copy for v
+     (base + pages x (1 + v's place among u's children) + p), then u folds it in and publishes */
+  struct collective_page_walk *g = consumer;
+  const struct collective_fabric *f = g->f;
+  const bridge_page scratch = g->base + (bridge_page)(g->pages * (1 + g->children[u]++) + g->p);
+  const uint32_t send_link = v == f->rank ? g->s->local[collective_cable(f, v, u, g->p)] : 0;
+  uint32_t cable;
+  const uint64_t index = collective_move(g->s, v, u, g->base + (bridge_page)g->p, scratch, g->bytes, g->p, send_link, 0, g->ready[v], &cable);
+  if (u != f->rank) return;
+  struct collective_fold *grown = realloc(g->w->folds, (g->w->fold_count + 1) * sizeof *grown);
+  if (!grown) { g->error = ENOMEM; return; }
+  g->w->folds = grown;
+  g->w->folds[g->w->fold_count++] = (struct collective_fold){ .into = g->base + (bridge_page)g->p, .from = scratch, .bytes = g->bytes,
+                                                              .after_link = g->s->local[cable], .after = index };
+  g->ready[u] = ++*g->published;         /* this fold's publication */
+}
+static void collective_down(void *consumer, uint32_t v, uint32_t u) {
+  /* page p from the root down: the root's send once the page is ready there, a relay's once it landed there */
+  struct collective_page_walk *g = consumer;
+  const struct collective_fabric *f = g->f;
+  uint32_t after_link = 0, after_landed = 0; uint64_t position = 0;
+  if (u == f->rank && u == g->r) { after_link = g->s->local[collective_cable(f, u, v, g->p)]; position = g->ready[u]; }
+  else if (u == f->rank) { after_link = g->in_link[u]; after_landed = 1; position = g->landed_at[u]; }
+  uint32_t cable;
+  g->landed_at[v] = collective_move(g->s, u, v, g->base + (bridge_page)g->p, g->base + (bridge_page)g->p, g->bytes, g->p,
+                                    after_link, after_landed, position, &cable);
+  g->in_link[v] = g->s->local[cable] == UINT32_MAX ? 0 : g->s->local[cable];
+}
+
 int collective_plan(const struct collective_fabric *f, const struct collective_call *calls, uint32_t count,
                     uint32_t occurrences, struct collective_work **work_out) {
   struct collective_plan_state s = { .f = f, .n = f->nodes };
@@ -149,45 +185,12 @@ int collective_plan(const struct collective_fabric *f, const struct collective_c
       for (uint64_t p = lo; p < hi; p++) {
         const uint32_t tree = mesh_graph_share_pick(s.trees, s.root, s.share, r, ((double)(p - lo) + 0.5) / (double)(hi - lo));
         const uint32_t *par = s.parent + (size_t)tree * n;
-        const uint32_t bytes = (uint32_t)(p + 1 < pages || call->bytes % BRIDGE_PAGE == 0 ? BRIDGE_PAGE : call->bytes % BRIDGE_PAGE);
-        uint32_t depth[64], order[64];
-        const uint32_t placed = mesh_graph_tree_order(n, r, par, depth, order);
-        /* the publication after which page p is ready at each node: produced, or its last fold's */
-        uint64_t ready[64];
-        for (uint32_t v = 0; v < n; v++) ready[v] = produced;
-        if (call->what == COLLECTIVE_ALLREDUCE) {
-          /* up, leaves first: v's partial (its page base + p, ready after its own last fold) to its parent u, landing in
-             u's scratch copy for v (base + pages x (1 + v's place among u's children) + p), then u folds it in */
-          uint32_t children[64] = {0};
-          for (uint32_t k = placed; k-- > 1;) {
-            const uint32_t v = order[k];
-            const uint32_t u = par[v];
-            const bridge_page scratch = base + (bridge_page)(pages * (1 + children[u]++) + p);
-            const uint32_t send_link = v == f->rank ? s.local[collective_cable(f, v, u, p)] : 0;
-            uint32_t cable;
-            const uint64_t index = collective_move(&s, v, u, base + (bridge_page)p, scratch, bytes, p, send_link, 0, ready[v], &cable);
-            if (u == f->rank) {
-              struct collective_fold *g = realloc(w->folds, (w->fold_count + 1) * sizeof *g);
-              if (!g) return ENOMEM;
-              w->folds = g;
-              w->folds[w->fold_count++] = (struct collective_fold){ .into = base + (bridge_page)p, .from = scratch, .bytes = bytes,
-                                                                    .after_link = s.local[cable], .after = index };
-              ready[u] = ++published;    /* this fold's publication */
-            }
-          }
-        }
-        /* down (an all-gather, and an all-reduce's second half): page p from r along its tree, the root's send once it
-           is ready there, each relay forwarding it once it has landed there */
-        uint64_t landed_at[64] = {0}; uint32_t in_link[64] = {0};
-        for (uint32_t k = 1; k < placed; k++) {
-          const uint32_t v = order[k], u = par[v];
-          uint32_t after_link = 0, after_landed = 0; uint64_t position = 0;
-          if (u == f->rank && u == r) { after_link = s.local[collective_cable(f, u, v, p)]; position = ready[u]; }
-          else if (u == f->rank) { after_link = in_link[u]; after_landed = 1; position = landed_at[u]; }
-          uint32_t cable;
-          landed_at[v] = collective_move(&s, u, v, base + (bridge_page)p, base + (bridge_page)p, bytes, p, after_link, after_landed, position, &cable);
-          in_link[v] = s.local[cable] == UINT32_MAX ? 0 : s.local[cable];
-        }
+        struct collective_page_walk g = { .s = &s, .w = w, .f = f, .r = r, .base = base, .pages = pages, .p = p, .published = &published,
+          .bytes = (uint32_t)(p + 1 < pages || call->bytes % BRIDGE_PAGE == 0 ? BRIDGE_PAGE : call->bytes % BRIDGE_PAGE) };
+        for (uint32_t v = 0; v < n; v++) g.ready[v] = produced;
+        if (call->what == COLLECTIVE_ALLREDUCE) mesh_graph_tree_edges(n, r, par, 1, collective_up, &g);
+        mesh_graph_tree_edges(n, r, par, 0, collective_down, &g);
+        if (g.error) return g.error;
       }
     }
     for (uint32_t c = 0; c < f->count; c++) if (s.local[c] != UINT32_MAX) w->await[s.local[c]] = s.receives[c];
