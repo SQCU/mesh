@@ -98,11 +98,15 @@ class Command:
 class Collective:
     """a declared all-gather: its calls' frames (each a contiguous run of the gathered axis in `out`'s root), each a
     rank's segment sizes; its steps once declared"""
-    def __init__(self, out, frames, segments, dtype, group):
+    def __init__(self, out, frames, segments, dtype, group, what='allgather', elements=None):
         self.out, self.frames, self.segments, self.dtype, self.group = out, frames, segments, dtype, group
+        # what: 'allgather' (segments the ranks' blocks) or 'allreduce' (segments the planner's cut: None)
+        self.what, self.elements = what, elements if elements is not None else sum(segments)
 
     def origin(self, step):
         """the rank whose segment a step's bytes lie in (the segments packed in rank order, `first` a byte offset)"""
+        if self.segments is None:
+            return None
         at, end = step['first'] // self.dtype.itemsize, 0
         for rank, size in enumerate(self.segments):
             end += size
@@ -202,6 +206,8 @@ class Template:
                 self._summed(node, values)
             elif str(node.target).startswith('torch_mesh.allgatherv_out'):
                 self._gathered(node, values)
+            elif str(node.target).startswith('torch_mesh.allreduce_'):
+                self._reduced(node, values)
             else:
                 raise NotImplementedError(f'no lowering of {node.target} (torch_mesh/compiler.py)')
         # an expression no consumer took is its command
@@ -470,6 +476,23 @@ class Template:
         self.collectives.append(collective)
         values[node] = None
 
+    def _reduced(self, node, values):
+        """allreduce_(x, group): x summed over every rank in place, one call over x (one contiguous run), its segments
+        the planner's cut; it reads all of x (this rank's part of the sum) and writes all of it, so its version is
+        completed from x before any of its SENDs or folds (no covered bytes)"""
+        x, group = values[node.args[0]], node.args[1]
+        runs = x.runs()
+        if len(runs) != 1:
+            raise NotImplementedError('an all-reduce of a view that is not one contiguous run')
+        collective = Collective(x, [x.offset], None, x.dtype, group, what='allreduce', elements=math.prod(x.shape))
+        self._command([x], [x], None, collective, covered=[])
+        for root in (collective.out.root, collective.mine.root):
+            root.coherent = True
+            if root.base is not None:
+                root.base.coherent = True
+        self.collectives.append(collective)
+        values[node] = None
+
     # ---- declare ----
     def _declare(self):
         import mesh
@@ -478,10 +501,11 @@ class Template:
         for c in self.collectives:
             c.comm = ffi.cast('ncclComm_t', _stream.communicator_of(c.group))
             calls = ffi.new('ncclMeshCollective[]', len(c.frames))
-            segments = ffi.new('uint64_t[]', c.segments)
+            segments = ffi.new('uint64_t[]', c.segments) if c.segments is not None else ffi.NULL
+            what = lib.MESH_ALLREDUCE if c.what == 'allreduce' else lib.MESH_ALLGATHER
             for k in range(len(c.frames)):
-                calls[k].what, calls[k].type, calls[k].op, calls[k].root = lib.MESH_ALLGATHER, TYPES[c.dtype], 0, 0
-                calls[k].elements, calls[k].segments = sum(c.segments), segments
+                calls[k].what, calls[k].type, calls[k].op, calls[k].root = what, TYPES[c.dtype], 0, 0
+                calls[k].elements, calls[k].segments = c.elements, segments
             definition = ffi.new('uint64_t *')
             mesh.check(lib.ncclMeshCommDeclare(c.comm, calls, len(c.frames), definition))
             c.definition = definition[0]
@@ -508,7 +532,9 @@ class Template:
                     s['root'], s['at'] = c.out.root, c.frames[s['call']] * width + s['first']
                 s['kind'] = {lib.MESH_STEP_SEND: 'send', lib.MESH_STEP_COPY: 'copy', lib.MESH_STEP_REDUCE: 'reduce'}[s['op']]
                 if s['kind'] == 'reduce':
-                    raise NotImplementedError('a REDUCE step (an all-reduce or reduce-scatter): its fold is next')
+                    # a REDUCE lands in a root of its own and its fold adds it into the step's bytes (the sum)
+                    s['landing'] = Root(s['bytes'])
+                    s['landing'].coherent = True
 
     # ---- solve ----
     def _solve(self):
@@ -537,14 +563,27 @@ class Template:
         for c, command in enumerate(self.commands):
             if isinstance(command, Collective):
                 post = command.post
-                for k, s in enumerate(command.steps):
-                    if s['kind'] == 'send':
-                        s['event'] = event('send', c, k)
-                for k, s in enumerate(command.steps):
-                    if s['kind'] == 'copy':
-                        s['event'] = event('landed', c, k)
-                        access(post, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
-                        links.append((post, s['event']))
+                # an all-gather's sends, then its landings; an all-reduce's round by round (a round's sends, then its
+                # landings and folds), so a later round's SEND follows the folds whose sums it carries
+                rounds = sorted({s['round'] for s in command.steps}) if command.what == 'allreduce' else [None]
+                for r in rounds:
+                    for k, s in enumerate(command.steps):
+                        if s['kind'] == 'send' and (r is None or s['round'] == r):
+                            s['event'] = event('send', c, k)
+                    for k, s in enumerate(command.steps):
+                        if s['kind'] == 'copy' and (r is None or s['round'] == r):
+                            s['event'] = event('landed', c, k)
+                            access(post, s['event'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
+                            links.append((post, s['event']))
+                        elif s['kind'] == 'reduce' and (r is None or s['round'] == r):
+                            # its landing into its own root, then its fold: the step's bytes plus the landing
+                            s['event'] = event('landed', c, k)
+                            access(post, s['event'], WRITE, s['landing'], 0, s['bytes'])
+                            links.append((post, s['event']))
+                            s['fold'] = event('fold', c, k)
+                            access(s['fold'], s['fold'], READ, s['landing'], 0, s['bytes'])
+                            access(s['fold'], s['fold'], READ, s['root'], s['at'], s['at'] + s['bytes'])
+                            access(s['fold'], s['fold'], WRITE, s['root'], s['at'], s['at'] + s['bytes'])
                 for k, s in enumerate(command.steps):
                     if s['kind'] == 'send':
                         s['completion'] = event('sent', c, k)
@@ -661,7 +700,8 @@ class Program:
                     continue
                 addresses = ffi.new('void *[]', max(1, len(command.steps)))
                 for k, s in enumerate(command.steps):
-                    addresses[k] = ffi.cast('void *', self._address(s['root'], s['at']))
+                    addresses[k] = ffi.cast('void *', self._address(s['landing'], 0) if s['kind'] == 'reduce'
+                                            else self._address(s['root'], s['at']))
                 room = 4 * len(command.steps) + 64
                 nodes, count = ffi.new('ncclMeshNode[]', room), ffi.new('size_t *')
                 pairs = t.forwards.get(c, [])
@@ -734,7 +774,7 @@ class Program:
             # the events with nodes, then their edges through the events with none
             for e in t.order:
                 kind, c, *rest = t.events[e]
-                if kind == 'command' or (kind == 'post' and any(n[0] == lib.ncclMeshNodeLink for n in lowered[c])):
+                if kind in ('command', 'fold') or (kind == 'post' and any(n[0] == lib.ncclMeshNodeLink for n in lowered[c])):
                     has_node.add(e)
                 elif e in last and nodes_of(c, *last[e][::2]):
                     has_node.update(group[last[e]])
@@ -776,7 +816,24 @@ class Program:
             for e in t.order:
                 kind, c, *rest = t.events[e]
                 command = t.commands[c]
-                if kind == 'command':
+                if kind == 'fold':
+                    # a REDUCE's fold: its bytes plus its landing, coherent both (the landing the NIC wrote, the
+                    # bytes a later SEND reads)
+                    flush(e)
+                    settle()
+                    s = command.steps[rest[0]]
+                    width = command.dtype.itemsize
+                    n, at = s['bytes'] // width, s['at'] // width
+                    out = kernels.View(0, command.dtype, (n,), (1,), at, coherent=True)
+                    reads = [kernels.View(1, command.dtype, (n,), (1,), at, coherent=True),
+                             kernels.View(2, command.dtype, (n,), (1,), 0, coherent=True)]
+                    source, grid, group_size = kernels.pointwise('mesh_command', out, reads, 'x0 + x1')
+                    tensor, base = self._binding(s['root'])
+                    landing, landing_base = self._binding(s['landing'])
+                    run.event(ids[e])
+                    run.dispatch(_pipeline(source, 'mesh_command'), [(0, tensor, base), (1, tensor, base),
+                                                                    (2, landing, landing_base)], grid, group_size, True)
+                elif kind == 'command':
                     flush(e)
                     settle()
                     run.event(ids[e])

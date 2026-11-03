@@ -58,3 +58,15 @@ def allgatherv_out(x: torch.Tensor, out: torch.Tensor, dim: int, sizes: list[int
 @allgatherv_out.register_fake
 def _(x, out, dim, sizes, group_name):
     return None
+
+
+@torch.library.custom_op('torch_mesh::allreduce_', mutates_args=('x',))
+def allreduce_(x: torch.Tensor, group_name: str) -> None:
+    """`x` summed over every rank, in place (a reduce-scatter and an all-gather along the communicator's trees):
+    declared in a stepper"""
+    raise RuntimeError('an all-reduce is declared in a stepper and runs compiled (torch_mesh/compiler.py)')
+
+
+@allreduce_.register_fake
+def _(x, group_name):
+    return None
