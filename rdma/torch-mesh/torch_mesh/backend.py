@@ -125,8 +125,13 @@ def space_handle(space):
     handle = _SPACES.get(space.serial)
     if handle is None:
         made = ffi.new('ncclMeshSpace_t *')
-        check(LIB.ncclMeshSpaceCreate(space.serial, space.pages * space.page_bytes, made))
+        check(LIB.ncclMeshSpaceCreate(space.serial, space.pages * space.page_bytes, 0 if space.lease else 1, made))
         handle = _SPACES[space.serial] = made[0]
+        if space.lease:
+            # a lease's constant map: its caller's own storage at every occurrence, bound once
+            from .lowering import _LEASES, _whole
+            address, _, _ = _stream.page_backing(_whole(_LEASES[space.serial]))
+            check(LIB.ncclMeshSpaceBind(handle, ffi.cast('void *', address), 0))
     return handle
 
 
@@ -497,15 +502,15 @@ def prepare_fragments(bindings, group):
         return group.prepare_writes(deliveries, declarations=[call for call, _, _ in bindings])
     from .collective_views import lower
     bindings, declarations, before, after = lower(bindings, group)
-    # each declaration names the tensors its issue passes, so CommPlan lays and places it for them.
-    # design/eager-execution.md#what-follows
-    declarations = [d._replace(bindings=(source, destination)) for d, source, destination in bindings]
-    from .operand import TensorValue, TensorView
-    views, operands = [], []
-    for declaration, source, destination in bindings:
-        views.append(tuple(None if value is None else value if isinstance(value, TensorValue) else TensorView.of(value)
-                           for value in (source, destination)))
-        operands.extend(t for t in (source, destination) if t is not None)
+    # every operand a value (design/page-maps-2026-11-02.md): a caller's tensor is its view in its storage's space, a
+    # lease's constant map; each declaration names its values' spaces, so every definition defers its laying to the
+    # bound occurrence
+    from .operand import TensorValue
+    valued = lambda value: None if value is None else value if isinstance(value, TensorValue) else TensorValue.of_lease(value)
+    views = [(valued(source), valued(destination)) for _, source, destination in bindings]
+    declarations = [d._replace(bindings=view) for (d, _, _), view in zip(bindings, views)]
+    operands = [t for _, source, destination in bindings for t in (source, destination)
+                if t is not None and not isinstance(t, TensorValue)]
     return dict(transfer='collective', views=tuple(views), calls=tuple(declarations),
                 operands=tuple(operands), group=group, before=tuple(before), after=tuple(after)), declarations
 

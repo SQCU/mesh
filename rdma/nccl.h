@@ -968,7 +968,9 @@ ncclResult_t ncclMeshCommCompiler(ncclComm_t comm,const char* compiler,const cha
    type: Create (serial, bytes) -> a space with no pages; Bind (space, lease address, byte offset) -> its pages until
    the next Bind; an address read from an unbound space is a defect, raised. */
 typedef struct ncclMeshSpace *ncclMeshSpace_t;
-ncclResult_t ncclMeshSpaceCreate(uint64_t serial, uint64_t bytes, ncclMeshSpace_t *out);
+/* `placed`: the run's solve places the space's pages per occurrence (a value of the run); 0 for a lease's constant map,
+   a caller's tensor, the same pages at every occurrence */
+ncclResult_t ncclMeshSpaceCreate(uint64_t serial, uint64_t bytes, int placed, ncclMeshSpace_t *out);
 ncclResult_t ncclMeshSpaceBind(ncclMeshSpace_t space, const void *lease, uint64_t first_byte);
 ncclResult_t ncclMeshSpaceDestroy(ncclMeshSpace_t space);
 /* design/page-maps-2026-11-02.md, "The run's solve", integration step 4: a declared group's routed program in value
