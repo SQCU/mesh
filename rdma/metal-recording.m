@@ -1236,6 +1236,7 @@ static NSError *MetalReplayFailure(NSInteger code, NSString *reason) {
     BOOL prepared, external, declaredInput, hostConsumer, exported, hostProducer, needsFence;
     NSUInteger declaredCommand;
     NSUInteger realizedPart; // its command buffer, mesh_graph_realize's
+    uint64_t solveEvent; // the run's solve's event it realizes (MetalScheduleEvent); UINT64_MAX none
     _Atomic unsigned remaining;
     _Atomic int status;
     NSError *error;
@@ -1254,7 +1255,8 @@ struct MetalSchedule {
     struct MetalSchedule *next, *tail, *root;
     // the run's solve's edges between this flush's nodes, by their place in the expanded order (MetalScheduleEdges):
     // where given, the only order; the nodes' reaches decide none (design/page-maps-2026-11-02.md, step 5)
-    NSMutableData *edges;
+    NSMutableData *edges; // uint64_t pairs: (earlier event, later event), the solve's
+    uint64_t solveEvent;  // the event the next appended nodes realize
     BOOL realized; NSUInteger realizedPart; // parts are mesh_graph_realize's, cut where its part changes
     struct MetalSchedule *submit, *firstSubmission, *lastSubmission;
     id<MTLDevice> device;
@@ -1335,7 +1337,7 @@ static struct MetalSchedule *MetalScheduleCreatePart(id<MTL4CommandQueue> queue,
     struct MetalSchedule *s=calloc(1,sizeof *s);
     if(!s)return NULL;
     atomic_init(&s->references,1);
-    atomic_init(&s->pending,1);s->root=s;
+    atomic_init(&s->pending,1);s->root=s;s->solveEvent=UINT64_MAX;
     atomic_init(&s->status,0);
     s->device=[device retain];s->form=form;s->queue=[queue retain];
     s->owners=[[NSHashTable alloc] initWithOptions:NSPointerFunctionsStrongMemory|NSPointerFunctionsObjectPointerPersonality capacity:0];
@@ -1382,8 +1384,12 @@ void MetalScheduleCommunicator(struct MetalSchedule *s,struct ncclComm *comm) {
 
 id<MTLResidencySet> MetalScheduleResources(struct MetalSchedule *s) { return MetalScheduleTail(s)->residency; }
 
+// metal-recording.h MetalScheduleEvent
+void MetalScheduleEvent(struct MetalSchedule *s,uint64_t event) {
+    struct MetalSchedule *root=s->root?s->root:s;root->solveEvent=event;
+}
 // metal-recording.h MetalScheduleEdges
-void MetalScheduleEdges(struct MetalSchedule *s,const uint32_t (*edges)[2],size_t count) {
+void MetalScheduleEdges(struct MetalSchedule *s,const uint64_t (*edges)[2],size_t count) {
     struct MetalSchedule *root=s->root?s->root:s;
     if(!root->edges)root->edges=[NSMutableData new];
     [root->edges appendBytes:edges length:count*sizeof *edges];
@@ -1422,7 +1428,7 @@ static void MetalScheduleComputeNow(struct MetalSchedule *s,id<MTLComputePipelin
 static MetalWork *MetalScheduleWork(struct MetalSchedule *root,NSData *accesses,
     void (^encode)(struct MetalSchedule *),MetalHostOperation operation) {
     MetalWork *work=[MetalWork new];work->accesses=[accesses copy];work->encode=[encode copy];work->operation=[operation copy];
-    work->root=root;work->hostProducer=operation!=nil;
+    work->root=root;work->hostProducer=operation!=nil;work->solveEvent=root->solveEvent;
     work->stages=MTLStageDispatch;work->eventValue=1;
     work->dependencies=[NSMutableIndexSet new];work->successors=[NSMutableIndexSet new];
     work->hostDependencies=[NSMutableIndexSet new];work->gpuDependencies=[NSMutableIndexSet new];
@@ -1605,6 +1611,7 @@ static NSArray *MetalScheduleExpand(struct MetalSchedule *root,NSArray *ranges) 
             NSData *accesses=MetalCommandReaches(records+c,reaches,range->invocation);
             MetalWork *work=MetalScheduleWork(root,accesses,nil,nil);
             memcpy(work->replay,&replay,sizeof replay);work->invocation=range->invocation;work->first=c;work->end=c+1;
+            work->solveEvent=range->solveEvent;
         }
     }
     NSArray *nodes=[[root->work copy] autorelease];[root->work removeAllObjects];return nodes;
@@ -1692,6 +1699,7 @@ static void MetalScheduleExpandHost(struct MetalSchedule *root,MetalWork *work,N
             (void)work; // Retain the compound declaration until this prepared leaf is released.
             return command.prepare(command.declaration,complete,context,task);
         });
+        child->solveEvent=work->solveEvent;
         MetalScheduleExpandHost(root,child,nodes);
     }
 }
@@ -1879,6 +1887,25 @@ static void MetalScheduleFlush(struct MetalSchedule *root) { @autoreleasepool {
     for(MetalWork *work in nodes)MetalScheduleExpandHost(root,work,expanded);
     [root->work removeAllObjects];nodes=expanded;
     BOOL hosts=NO;for(MetalWork *work in nodes)hosts|=work->operation!=nil;
+    // each node realizes one solve event; the solve's edges between events are edges between their nodes
+    NSMutableData *solvedEdges=nil;
+    if(root->edges) {
+        NSMutableDictionary<NSNumber *,NSMutableIndexSet *> *of=[NSMutableDictionary dictionary];
+        for(NSUInteger i=0;i<nodes.count;i++) {
+            const uint64_t event=((MetalWork *)nodes[i])->solveEvent;
+            if(event==UINT64_MAX)[NSException raise:NSInvalidArgumentException format:@"a node with no solve event"];
+            NSMutableIndexSet *set=of[@(event)];if(!set)of[@(event)]=set=[NSMutableIndexSet indexSet];[set addIndex:i];
+        }
+        solvedEdges=[NSMutableData data];
+        const uint64_t (*pair)[2]=root->edges.bytes;
+        for(NSUInteger k=0;k<root->edges.length/sizeof *pair;k++) {
+            NSIndexSet *from=of[@(pair[k][0])],*to=of[@(pair[k][1])];
+            [from enumerateIndexesUsingBlock:^(NSUInteger u,BOOL *s1){(void)s1;
+                [to enumerateIndexesUsingBlock:^(NSUInteger v,BOOL *s2){(void)s2;
+                    const uint32_t e[2]={(uint32_t)u,(uint32_t)v};[solvedEdges appendBytes:e length:sizeof e];}];}];
+        }
+        [root->edges release];root->edges=[solvedEdges mutableCopy];
+    }
     NSData *solved=root->edges?[[root->edges copy] autorelease]:nil;
     // mesh_graph_realize's decisions, made (and the edges checked against this flush's order) before any is read
     NSMutableData *hostData=nil,*barrierData=nil,*fenceData=nil,*partData=nil;
