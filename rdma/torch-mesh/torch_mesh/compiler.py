@@ -1165,8 +1165,10 @@ class Program:
                 kinds.setdefault(e, set()).add(kind)
             order = list(dict.fromkeys(node_events))
             bad = unfollowed(order, {e for e, k in kinds.items() if 'observe' in k}, {e for e, k in kinds.items() if 'copy' in k}, edges)
-            print(json.dumps(dict(phase='order_check', pairs=len(bad), first=[[named.get(w), named.get(c)] for w, c in bad[:12]])),
-                  flush=True)
+            sends = [(w, c) for w, c in bad if (named.get(c) or (None, ('',)))[1][0] == 'send']
+            print(json.dumps(dict(phase='order_check', pairs=len(bad), releases=len(sends),
+                                  first=[[named.get(w), named.get(c)] for w, c in bad[:6]],
+                                  first_releases=[[named.get(w), named.get(c)] for w, c in sends[:12]])), flush=True)
         run.edges(edges)
         try:
             run.finish()
