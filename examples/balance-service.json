@@ -1,1 +1,1 @@
-{"input_width": 128, "width": 128, "layers": 2, "steps": 64, "rows": 8, "seed": 5, "repeats": 3, "parameters": {"steps_per_replay": {"value": 16, "minimum": 1, "maximum": 256, "grain": 1}}, "rounds": 6, "explore_rounds": 2}
+{"input_width": 128, "width": 128, "layers": 2, "steps": 64, "rows": 8, "seed": 5, "repeats": 3, "parameters": {"steps_per_replay": {"value": 16, "minimum": 1, "maximum": 256, "grain": 1}}, "rounds": 7, "explore_rounds": 2, "region": 0.06}

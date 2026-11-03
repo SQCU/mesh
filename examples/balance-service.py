@@ -63,20 +63,26 @@ class Balancer:
             self.optimizer.step()
         return float(loss)
 
-    def propose(self, explore):
-        logits = torch.log(self.history[-1][0]).clone().requires_grad_(True)
-        step = torch.optim.Adam([logits], lr=0.05)
-        for _ in range(100):
-            shares = torch.softmax(logits, 0)
-            out, _ = self.lstm(self._inputs([s for s, _ in self.history] + [shares]))
+    def propose(self, explore, region, least):
+        """the next shares within a trust region of the last: last + a zero-sum step bounded by `region` a rank (tanh),
+        at least `least` each, the step taken by gradient through the predictor of the smooth worst case (median +
+        spread over ranks), plus `explore` (a perturbation inside the region)"""
+        last = self.history[-1][0]
+        u = torch.zeros(self.n, requires_grad=True)
+        step = torch.optim.Adam([u], lr=0.05)
+
+        def shares_of(u, extra=0):
+            delta = region * torch.tanh(u + extra)
+            s = torch.clamp(last + delta - delta.mean(), min=least)
+            return s / s.sum()
+        for _ in range(200):
+            out, _ = self.lstm(self._inputs([s for s, _ in self.history] + [shares_of(u)]))
             predicted = self.head(out[-1, 0, :])
-            mean, spread = predicted[:self.n], predicted[self.n:]
-            worst = torch.logsumexp(20 * (mean + spread), 0) / 20
+            worst = torch.logsumexp(20 * (predicted[:self.n] + predicted[self.n:]), 0) / 20
             step.zero_grad()
             worst.backward()
             step.step()
-        shares = torch.softmax(logits.detach() + explore, 0)
-        return shares
+        return shares_of(u.detach(), explore).detach()
 
 
 def units_of(shares, total):
@@ -154,8 +160,8 @@ def main(config=None):
         print(json.dumps(dict(phase='round', round=round_, units=units, compute_median_us=[round(float(x), 2) for x in observed[:, 0]],
                               compute_spread_us=[round(float(x), 2) for x in observed[:, 1]], tick_period_us=round(period, 1),
                               predictor_loss=round(fit, 6))), flush=True)
-        noise = torch.randn(size, generator=explore) * (0.3 if round_ < config.get('explore_rounds', 2) else 0.0)
-        shares = balancer.propose(noise)
+        noise = torch.randn(size, generator=explore) * (0.5 if round_ < config.get('explore_rounds', 2) else 0.0)
+        shares = balancer.propose(noise, config.get('region', 0.06), 1.0 / H)
         del program, tick, stepper, starting
     dist.destroy_process_group()
 
