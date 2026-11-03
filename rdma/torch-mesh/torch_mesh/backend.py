@@ -16,6 +16,9 @@ TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.n
 
 
 class ProcessGroupMesh(dist.ProcessGroup):
+    supports_coalescing = True
+    supports_splitting = False
+
     def __init__(self, rank, size, store):
         super().__init__(rank, size)
         made, unique = ffi.new('ncclComm_t *'), ffi.new('ncclUniqueId *')
@@ -39,10 +42,18 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def getBackendName(self):
         return 'mesh'
 
+    @property
+    def group_name(self):
+        """the name torch registered this group under (a creator's ProcessGroup is never given its name)"""
+        return dist.distributed_c10d._world.pg_names[self]
+
+    pg_name = group_name
+
     def shutdown(self):
         if self.comm is not None:
             check(LIB.ncclCommDestroy(self.comm))
             self.comm = None
+        super().shutdown()
 
 
 def create(opts, options):
