@@ -40,14 +40,14 @@ other projects, such as a game bot, and old dated records; they are not listed h
   unit of work now: any number of programs at once, each plan named by its group; the delegate's buffers placed; host
   inputs in copies ordered by events; Metal 4 submission with the queue's event waits; each received page named once
   per landing; and a plan that stands only while its map does. Its D.2 model, D.3.1 and D.5 are superseded by
-  design/transfer-schedule-change-request.md.
-- [design/transfer-schedule-change-request.md](design/transfer-schedule-change-request.md): how a plan decides what the
-  bridge sends and in what order, from the scheduling objective down: the task graph (a join for a function that needs
-  its operand whole, an edge per page for one that takes pages in any order), contention-aware list scheduling by
-  bottom level (Sinnen and Sousa; Adam, Chandy and Dickson), the page table with static binding, each link's sequence of
-  typeless page-to-page sends, the bridge's deal over its lines, several programs by deficit round robin with changes at
-  quiescence, and plans cancelled only by a removal from the map. It supersedes D.2's model, D.3.1 and D.5 of the
-  disjoint-pages change request.
+  design/plan-to-bridge-change-request.md.
+- [design/plan-to-bridge-change-request.md](design/plan-to-bridge-change-request.md): what the code must do after the
+  operator's turns of 2026-11-04, requirement by requirement, each quoting the operator and naming its cited method:
+  pages by view from queues of desired transfers (U-Net, VIA); the page table with static binding; the task graph with
+  functions that need an operand whole or take pages in any order; a static schedule with costs (list scheduling, HEFT's
+  upward rank, edge scheduling under contention); compiled metadata (Hoefler, Siebert and Lumsdaine); nothing outside
+  the bridge knowing the transport; plans holding only their allocations, several programs as one composite schedule.
+  It supersedes D.2's model, D.3.1 and D.5 of the disjoint-pages change request.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.

@@ -7,7 +7,7 @@ functions in scope; and the canonical path.
 Appendix C holds the operator's rulings on the first implementation and Claude's consolidated revision (C3); where C3
 differs from the canonical path, Appendix A3 or Appendix B, C3 holds. Appendix D holds the operator's rulings on the
 revision and Claude's proposal (D.3), which is the unit of work; where D.3 differs from C3 or anything earlier, D.3
-holds. D.2's model of a transfer, D.3.1 and D.5 are superseded by design/transfer-schedule-change-request.md, which
+holds. D.2's model of a transfer, D.3.1 and D.5 are superseded by design/plan-to-bridge-change-request.md, which
 holds over them; the rest of Appendix D stands.
 
 ## The turns
@@ -1535,7 +1535,7 @@ throughout.
 
 ### D.5 What the plan gives the bridge
 
-Superseded by design/transfer-schedule-change-request.md (2026-11-04), which replaces it entirely. Kept as the record.
+Superseded by design/plan-to-bridge-change-request.md (2026-11-04), which replaces it entirely. Kept as the record.
 
 This section is the whole of what crosses from a plan to the bridge, and of what comes back. Code and later documents
 cite it rather than restate it. It names nothing of the transport. How the bridge carries what it is given is its own,
