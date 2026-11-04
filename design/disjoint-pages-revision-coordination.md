@@ -718,10 +718,27 @@ work proceeds.)
   (a peer's exchange k + 1 may land while this node's combine still reads its own exchange-k partial) and the event
   model extended (0ab084aa): MESH_FROM_SOURCE_READ / MESH_TO_SOURCE_READ, the template's S(d); routed to 3 (the vertex
   and kinds), 14 (emit them), 4 (map them).
+- 9 (metal_recording.{h,m}, first): ddb40b8c (the interface), 8cbb83a8 (capture, levels, values, place, received,
+  published, state, replay; MetalStandIn, MetalCaptureValue, MetalBinding resolving each binding per repetition and
+  raising on an unplaced program operand, value or state word; the release as a system-scope fence and an atomic add of
+  1 on the supplied word; the direct publication's restoring counter; record:, operand:stride:, the old receive: and
+  publish: forms, MetalPublicationStores, MetalLandedReads, the per-command strides, the pool and its E2B_DEBUG_*
+  diagnostics gone; the remote read cut to a plain load as the hand-off to 10). Its differences: a program operand is
+  told at capture by its label (as e2b_replay labels its operands and MetalPromoteOperand already assumed) or its
+  receive:/publish: registration: kept, recorded; the add is on the low 32 bits of the 64-bit supplied word (MSL has no
+  64-bit fetch_add; exact below 2^32 executions) and the release's fence is seq_cst (MSL has no release order):
+  accepted; the direct publication applies wherever the producer's stores tile the sent operand's buffer, else a
+  one-thread release follows; each sent operand released exactly once a repetition, refused at capture otherwise;
+  every repetition's first command takes a barrier, t = 0 included. The C9 hook's remark on MetalPrepareDataflow's
+  level assignment (code from before this change; moving it needs libmetal_recording to link libmesh): outside C3's
+  scope, open, as the first implementation's coordinator ruled the same remark. 10 launched with its plug-in points.
 
 ### Reviews and where their findings went
 
 ### Open at the end
+
+- metal_recording.m MetalPrepareDataflow's level assignment (a longest-path walk over the dispatches, from before this
+  change) is a graph computation outside the graph module (C9); moving it needs libmetal_recording to link libmesh.
 
 - With no zeroing (C3.7), a delegate kernel that reads bytes no producer wrote under a multiplicative mask (an
   attention's p x V over a KV cache's slots past the position) depends on those bytes being finite; a page last left
