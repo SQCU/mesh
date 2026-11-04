@@ -526,6 +526,23 @@ static int mesh_ports_loaded(struct mesh_ctx *context){
   }
   return 0;
 }
+/* 2026-11-04, sub-assignment 1 (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-
+   coordination.md, R3): after the raise of the plan's `executions` and the wake, a seq_cst fence, then hdr
+   `map_serial` read; where it is not the plan's entries' serial (struct mesh_hop `serial`, the map the plan was made
+   from; read only where hdr `hops` is above 0), ESTALE, the raise standing.  Why: a plan stands only while its map
+   does.  Where the map moves, the bridge moves the serial, fences (seq_cst) and reads the plan's `executions`, then
+   cancels every receive of the plan not landed for the executions below it, each an arrival on its count with no phase
+   written (mesh-flow.c plan_stale); a raise after that read would leave the raised executions uncancelled, and their
+   readers would end at their deadline (ETIMEDOUT), not at once.  The start raises, fences and reads the serial: of the
+   two fences one comes first, and a load after the later one sees the store before the earlier one, so at least one
+   side sees the other.  Either the cancellation covers the raised executions, or the start reads the moved serial and
+   returns ESTALE, and the program runs none of them and plans again on the map as it is.  The raise left standing is
+   safe: `executions` only rises (C3.7, no state word set back while its plan stands), the program reads and releases
+   nothing of an execution it does not run, and the plan's end (the next plan, or the program's retirement) cancels
+   every receive of it not landed.  The pairing is D10's announcement, fence and re-read
+   (design/disjoint-pages-revision-coordination.md; K. Fraser, Practical lock-freedom, 2004), and the rule is the one
+   mesh_ports_loaded applies before its wait (its ESTALE), applied after the raise; nobody waits.  The fence after the
+   wake, so every raise is woken as before.  What must stay: the raise before the fence, the serial's read after it */
 int mesh_transfers_start(struct mesh_ctx *context,uint64_t executions){
   struct hdr *m=context->M;
   const uint64_t at=atomic_load_explicit(&m->state,memory_order_acquire);
@@ -537,7 +554,10 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t executions){
   while(served<executions && !atomic_compare_exchange_strong_explicit(&state->executions,&served,executions,
                                                                       memory_order_release,memory_order_relaxed));
   os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-  return 0;
+  atomic_thread_fence(memory_order_seq_cst);
+  const uint64_t serial=atomic_load_explicit(&m->map_serial,memory_order_relaxed);
+  const uint64_t hops=atomic_load_explicit(&m->hops,memory_order_acquire);
+  return hops && mesh_hops(m)[0].serial!=serial?ESTALE:0;
 }
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed (sub-assignment 7's 2026-11-03 wait, bounded by
