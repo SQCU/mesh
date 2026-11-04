@@ -148,7 +148,7 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    SIGTERM).  A region that cannot be read is left as it is, and this bridge ends.  1
    adopted, 0 made; *out its descriptor; *geometry fitted to the object's size */
 /* Differs from the tag, its interfaces: the layout version is main's MESH_VERSION (main has one version, its layout's,
-   which every client's mesh_attach and mesh_observe compare), where the tag had MESH_LAYOUT; the layout is main's
+   which every client's mesh_attach compares), where the tag had MESH_LAYOUT; the layout is main's
    mesh_layout of the configuration's geometry, and an object holds it where its size is at least main's computed
    length (`geometry->length`, as every client's mesh_attach takes a region: length <= st_size), in place of the tag's
    mesh_layout_within, which main has not: geometry is not fitted to the object, and an object smaller than the
@@ -340,8 +340,8 @@ int main(int argc,char **argv){
      `block_pages` (the tag's 1 where it gives none: mesh_layout divides by it), so the request bound and the region's
      least size are a block's (main's mesh-flow.c checks, block x pg and arena < block), and the rows, the window and
      the page lists' room are the configuration's.  `links` is MESH_PORTS: the link table holds the resident bridge's
-     MESH_PORTS ports (mesh.h struct mesh_link_info), hdr `links` is the count clients read of it (mesh-dataflow.c
-     mesh_observe), and each publication has room for a target a port (`target_stride`) */
+     MESH_PORTS ports (mesh.h struct mesh_link_info), hdr `links` its count (mesh-stat reads it), and each
+     publication has room for a target a port (`target_stride`) */
   if(!shape.block)shape.block=1;
   /* design/transport.md */
   if((uint64_t)shape.block*pg+MESH_FRAME>MESH_REQUEST_BYTES)die("transport chunk exceeds native request capacity");
