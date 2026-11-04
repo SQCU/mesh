@@ -2,7 +2,10 @@
    A function here knows vertices, edges and the operands its consumer passes (weights, visits, a next hop); it knows
    no cable, collective or tensor.  Python's are rdma/mesh_graph.py's. */
 /* Source: pre-return-20261103 rdma/mesh-graph.h, the declarations of the functions mesh-graph.c brings, verbatim;
-   mesh_graph_list_schedule is new (design/page-queue-change-request.md, "The rule both ends compute"). */
+   mesh_graph_list_schedule is new (design/page-queue-change-request.md, "The rule both ends compute");
+   mesh_graph_happens_before and mesh_graph_left_edge are new (design/disjoint-pages-change-request.md, Appendix A,
+   A3, "Interference, by happens-before" and "The assignment"; design/disjoint-pages-coordination.md, "The
+   allocator"). */
 #ifndef MESH_GRAPH_H
 #define MESH_GRAPH_H
 #include <stddef.h>
@@ -128,6 +131,25 @@ double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate
    takes; their completion time, INFINITY where a unit has no link. A link of no rate takes none. */
 double mesh_graph_list_schedule(uint32_t links, const double *rate, uint64_t units, const uint64_t *bytes,
                                 uint32_t *link, uint64_t *carried);
+/* Happens-before over a dependence graph repeated `iterations` times, its edges carrying iteration distances (M. Lam,
+   PLDI 1988; B. R. Rau, MICRO 1994): template vertex v of iteration i is (v, i); template edge k, in the row
+   [first[v], first[v + 1]) of the vertex v it leaves, joins (v, i) to (head(context, k), i + lag(context, k)) for every
+   i, lag >= 0.  For source[s] (s < sources) and target[x] (x < targets), bit L % 64 of
+   reach[(s * targets + x) * words + L / 64] (words = (iterations + 63) / 64) is set where a path of one or more edges
+   joins (source[s], i) to (target[x], i + L) for i + L < iterations (the same for every such i).  0; EDEADLK where the
+   lag-0 edges hold a cycle; ENOMEM. */
+int mesh_graph_happens_before(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                              uint32_t (*lag)(const void *context, size_t k), const void *context, uint32_t iterations,
+                              uint32_t sources, const uint32_t *source, uint32_t targets, const uint32_t *target,
+                              uint64_t *reach);
+/* The left-edge colouring of items that each need a run of colours (T. Hashimoto and J. Stevens, DAC 1971; M. C.
+   Golumbic 1980; with sizes, greedy by size: Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020): the items in the
+   caller's order order[0 .. items), item i given colours [colour[i], colour[i] + size[i]) at the lowest colour where
+   its run overlaps no item placed before it that it interferes with (interferes(context, a, b) != 0, symmetric);
+   *used the most colour[i] + size[i].  0; ENOSPC where a run would pass `capacity`; ENOMEM. */
+int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *order,
+                         int (*interferes)(const void *context, uint32_t a, uint32_t b), const void *context,
+                         uint64_t capacity, uint64_t *colour, uint64_t *used);
 
 #ifdef __cplusplus
 }
