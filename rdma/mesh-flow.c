@@ -184,7 +184,8 @@ static inline _Atomic uint64_t *landed_cancel(uint64_t word,uint64_t stride){
    link_send_progress).  0, or an error value: ESTALE, ETIMEDOUT or ENOMEM reading the map, EHOSTUNREACH where the
    pair has units but no link of rate, EPROTO where the map gives this cable a queue pair its link does not hold,
    EMSGSIZE where a page is more frames than a lane it is assigned can hold; or EAGAIN, no refusal, where the plan was
-   written again while it was read.
+   written again while it was read.  On 0 the port's `prepared` is the plan's generation, stored before the last check
+   (below); on an error it is as it was, 0.
    2026-11-03, sub-assignment 6 (design/disjoint-pages-change-request.md, "Claude's proposal" 1 and 3; Appendix A, A4):
    the ring went from the bridge: plan_shape (hdr `depth`, a slot's hops, execution t's page the slot t mod depth's
    and its word the cell at word + t hop_stride), the receive window (a receive of t posted once its hop's executions
@@ -298,15 +299,8 @@ static int link_prepare(struct port *port){
       receive_last[q]=record;
     }
   }
-  /* the plan read whole (review R1, round 2): the entries and the landed list's stride were read after `hops`
-     (acquire); were the plan written again meanwhile (its `hops` 0 first, then a new generation `plan`, the plan call's
-     release fence after the 0), a read of the new writes is seen here, after an acquire fence, as `hops` or `plan`
-     moved, and what was read is dropped (EAGAIN: link_run tries again on its next pass) before any of it is posted */
-  atomic_thread_fence(memory_order_acquire);
-  if(atomic_load_explicit(&M->hops,memory_order_relaxed)!=hops || atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan){
-    error=EAGAIN;goto failed;
-  }
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (its traces' room taken before the plan is told loaded, below, so the only failure
+     after that store is a plan written again: no refusal follows it) */
   const char *ledger=getenv("MESH_LEDGER");
   f->ledger=ledger && ledger[0] && !(ledger[0]=='0' && !ledger[1]);
   const uint64_t traces[2]={f->send_count,f->receive_count};
@@ -314,6 +308,38 @@ static int link_prepare(struct port *port){
     f->traced[d]=0;f->trace_capacity[d]=f->ledger?traces[d]:0;f->trace[d]=NULL;
     if(!f->trace_capacity[d])continue;
     if(!(f->trace[d]=aligned_alloc(32,(f->trace_capacity[d]+1)*sizeof(struct mesh_trace)))){error=ENOMEM;goto failed;}
+  }
+  /* The plan told loaded, then read whole.  2026-11-03, sub-assignment 6 (reviewer 12's defect 1 on 5d919bd7, on the
+     coordinator's routing): the port's `prepared` (the generation it loads, release) is stored here, before the last
+     check, where link_run stored it after link_prepare returned.  Why: the landed list and the supplied words are fixed
+     areas the next plan reuses (mesh.h, "Writing a plan"), so a port must never begin serving a plan the plan call has
+     already found erased; with the store after the check, the check could read the old `hops` and `plan`, the plan call
+     store `hops` 0 and read `prepared` 0 (mesh_plan_erased), and the port then store `prepared` and serve the old plan
+     while the new one zeroes and rewrites those areas.  Now each side stores, fences seq_cst and reads the other's word
+     (Dekker's pairing: E. W. Dijkstra, Cooperating sequential processes, 1965): this port `prepared` then `hops` and
+     `plan`; the plan call `hops` 0 then `prepared` (its fence at mesh-dataflow.c mesh_plan_erased's start).  At least
+     one sees the other's store: the plan call waits (bounded) for this port's `prepared` to clear (link_close), or this
+     check sees `hops` or `plan` moved and stores `prepared` 0 again before EAGAIN.  The refusal's order stays: no
+     refusal follows this store, and a refusal stores `code` and phase before `prepared` (link_run); and so does a
+     load's: a refusal of this child's undone (`code` 0, phase MESH_PAIRED) before `prepared` is stored, moved here
+     from link_run with it.  The check is the plan read whole too (review R1, round 2): the entries and the landed
+     list's stride were read after `hops` (acquire); were the plan written again meanwhile (its `hops` 0 first, then a
+     new generation `plan`, the plan call's release fence after the 0), a read of the new writes is seen here, after
+     the fence (seq_cst, an acquire fence as well), as `hops` or `plan` moved, and what was read is dropped (EAGAIN:
+     link_run tries again on its next pass) before any of it is posted.  What must stay: `prepared` stored before the
+     fence and the check, and nothing posted before both */
+  struct mesh_port_info *info=&mesh_links(M)[port->index].port;
+  if(f->refused){
+    f->refused=0;
+    atomic_store_explicit(&info->code,0,memory_order_relaxed);
+    atomic_store_explicit(&info->phase,MESH_PAIRED,memory_order_release);
+  }
+  atomic_store_explicit(&info->prepared,plan,memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  if(atomic_load_explicit(&M->hops,memory_order_relaxed)!=hops ||
+     atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan){
+    atomic_store_explicit(&info->prepared,0,memory_order_release);
+    error=EAGAIN;goto failed;
   }
   if(f->ledger)for(uint32_t q=0;q<MESH_LINK_LANES;q++)if(f->lanes>>q&1)
     fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"lane\":%u,\"send_base\":%llu,\"sends\":%llu,\"receive_base\":%llu,\"receives\":%llu,"
@@ -536,9 +562,10 @@ static void link_close(struct port *port,uint32_t served){
 /* The plan's turn on the port's progress thread, each pass while its link serves: the plan served ended where the
    region's was written again (link_close: hdr `hops` 0, or another generation `plan`) or the client it was loaded for
    holds the region no more (hdr `client` another: mesh-dataflow.c mesh_retire); a plan written while a client holds
-   the region and not yet loaded loaded (link_prepare), its generation then stored in the port's `prepared` (release: the client's start
-   waits on it at every port whose cable reaches a node a hop names, so it is stored where the rule gave this cable no
-   page too), or refused, the port's phase MESH_STOPPED, its `code` the refusal's and its `prepared` the refused
+   the region and not yet loaded loaded (link_prepare), its generation stored in the port's `prepared` by link_prepare
+   before its last check (release, then a seq_cst fence: its note of 2026-11-03; the client's start waits on it at
+   every port whose cable reaches a node a hop names, so it is stored where the rule gave this cable no page too), or
+   refused, the port's phase MESH_STOPPED, its `code` the refusal's and its `prepared` the refused
    generation (CONTRACT "A plan loaded", review R1 round 2), until the plan call writes again, or read torn and tried
    again on the next pass; a plan loaded
    served, its receives, then its SENDs (a landed relay page's SEND goes in the same pass), until every SEND of its share
@@ -568,14 +595,9 @@ static int link_run(struct port *port,uint32_t served){
       atomic_store_explicit(&info->prepared,f->plan,memory_order_release);
       return 0;
     }
-    /* a refusal of this child's undone where a later plan loads: its phase stopped and code were the refusal's */
-    if(f->refused){
-      f->refused=0;
-      atomic_store_explicit(&info->code,0,memory_order_relaxed);
-      atomic_store_explicit(&info->phase,MESH_PAIRED,memory_order_release);
-    }
+    /* loaded: a refusal of this child's undone and `prepared` the plan's, both stored by link_prepare before its last
+       check (its note of 2026-11-03, reviewer 12's defect 1) */
     f->state=FLOW_SERVING;
-    atomic_store_explicit(&info->prepared,f->plan,memory_order_release);
   }
   if(f->state!=FLOW_SERVING)return 0;
   if(!link_receive_progress(port,served) || !link_send_progress(port,served))return 0;
