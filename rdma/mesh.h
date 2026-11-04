@@ -220,9 +220,16 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    Cancellation (C3.1: cancellations arrive on the count, as arrivals do on an mbarrier).  Where a plan ends with
    receives not landed, and where the bridge cancels (mesh-flow.c link_close, plan_cancel), each such receive's count
    word is raised (a compare-and-swap loop that never lowers it; release) to its final value, P x the executions t <
-   `executions` with t mod u its copy, then woken (a receive whose `count` is 0 has none to raise).  No phase is
-   written for a cancellation, so a reader finds the receive one phase behind, and the GPU's later pass counts it in
-   `status`.  No other word is a cancellation's.
+   `executions` with t mod u its copy, then woken (a receive whose `count` is 0 has none to raise).  The bridge
+   cancels a standing plan's receives not landed from an adjacent node it loses, and every one of them where this
+   node's `map_serial` moves while the plan stands, its entries' `serial` no longer the map's (mesh-flow.c
+   plan_stale; design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2):
+   a plan stands only while its map does, so every node of a plan whose map changed reads the cancellation within
+   one flooding of the map.  The client's start raises `executions`, fences (seq_cst) and reads `map_serial`, and
+   the bridge moves the serial, fences and reads `executions`, so either that cancellation covers the raised
+   executions or mesh_transfers_start returns ESTALE after its raise and the program runs none of them (R3).  No phase
+   is written for a cancellation, so a reader finds the receive one phase behind, and the GPU's later pass counts it
+   in `status`.  No other word is a cancellation's.
    Both ends: for adjacent nodes a and b, copy c's entries at a naming b with MESH_SEND and those at b naming a with
    MESH_RECEIVE are the same hops in the same order, and u is the collective's, so both ends hold the same copies.
    Both bridges assign the pair's hops in list order (copy 0's, then copy 1's, ...) to the pair's cables and queue
@@ -254,7 +261,8 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    are released.  That is the announced epoch and its re-read of deferred reclamation (D10; C3.4: RCU's call_rcu, P.
    E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004, epoch-based
    reclamation), and nobody waits for the release.  A plan whose entries' `serial` is not `map_serial` when it is
-   loaded is refused: the call fails by error and its caller plans again on the map as it is. */
+   loaded is refused, and one that stands is cancelled where `map_serial` moves (Cancellation, above; D.3.6, R2): the
+   start fails by error, ESTALE, before its raise or after it (R3), and its caller plans again on the map as it is. */
 struct mesh_hop { uint32_t page,node,direction,field; uint64_t word,count; uint32_t pages,padding; uint64_t serial; };
 _Static_assert(sizeof(struct mesh_hop)==48 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,count)==24 &&
   offsetof(struct mesh_hop,pages)==32 && offsetof(struct mesh_hop,serial)==40,"mesh_hop");
