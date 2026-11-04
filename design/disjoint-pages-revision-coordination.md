@@ -674,6 +674,11 @@ work proceeds.)
   re-paired child reloading the plan would serve from execution 0 over arrivals already counted: ruled, the start waits
   for the ports before it raises `executions` (to 5) and a port refuses a plan whose `executions` is above 0 (to 6);
   (3) design/prepared-machine.md#M08 describes the old receive record: open.
+- 8 again: 34df135f (mesh_metal_status returns the behind-cause wherever a field was behind; EPROTO only with none).
+- 5 again: 72cfd3ed (mesh_transfers_start: the ports' bounded wait first, moved unchanged into mesh_ports_loaded, then
+  `executions` raised; nothing raised on an error). The C9 hook's remark that mesh_ports_loaded moves into the graph
+  module: ruled it stays (it picks this node's cables to the nodes the hops name and waits on their ports; no graph
+  algorithm, and mesh-graph knows no cable).
 
 ### Reviews and where their findings went
 
