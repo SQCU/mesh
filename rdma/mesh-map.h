@@ -89,6 +89,8 @@ _Static_assert(sizeof(struct mesh_reach)==24,"mesh_reach");
    virtual") */
 struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_PORTS]; struct mesh_health health; };
+/* the map's room: the records its area of the layout holds (hdr `map_room`, mesh_layout) */
+#define MESH_MAP_ROOM 256u
 /* moved from mesh.h (review R1, C1): the map's records' reader, bridge-side only (the note above); mesh_map_whole, the
    seqlock's, stays in mesh.h */
 /* tag pre-return-20261103 rdma/mesh.h mesh_records, verbatim (the map: mesh.h, above mesh_map_whole) */
@@ -139,7 +141,11 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
   h->hop_off=at; h->hop_capacity=g.hops; at+=(uint64_t)g.hops*sizeof(struct mesh_hop); at=(at+pgsz-1)/pgsz*pgsz;
+  h->word_off=at; h->word_capacity=(uint64_t)g.hops*MESH_WORD_STRIDE; at+=h->word_capacity; at=(at+pgsz-1)/pgsz*pgsz;
+  h->landed_off=at; h->landed_capacity=(uint64_t)g.hops*sizeof(struct mesh_hop); at+=h->landed_capacity; at=(at+pgsz-1)/pgsz*pgsz;
   h->bridge_off=at; at+=sizeof(struct mesh_bridge_pages); at=(at+pgsz-1)/pgsz*pgsz;
+  atomic_store_explicit(&h->map_off,at,memory_order_relaxed); h->map_room=MESH_MAP_ROOM;
+  at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)g.pages*pgsz;
   h->length=at; return at;
