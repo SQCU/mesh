@@ -38,6 +38,9 @@ int mesh_metal_waits_start(struct mesh_metal_transport *,void *event,const struc
                            uint64_t final,struct mesh_metal_waiter **);
 void mesh_metal_waits_stop(struct mesh_metal_waiter *);  /* async-signal-safe: one store and one wake */
 int mesh_metal_waits_end(struct mesh_metal_waiter *);    /* joined and freed: 0, ETIMEDOUT (a deadline), ECANCELED (a stop) */
+/* 2026-11-04, sub-assignment 8, where the contract's mesh_metal_waits_end names three causes: also EINVAL, where the
+   system's wait refuses a count word (os_sync_wait_on_address.h), so the thread ends at once rather than spin to the
+   deadline (mesh-metal.m waits_run) */
 /* the GPU's status after the run (struct mesh_status): 0 where no pass failed; EPROTO where one found a field ahead;
    else `cause` where it is not 0, else ENOLINK (the bridge cancelled); *first the first failed execution */
 int mesh_metal_status(struct mesh_metal_transport *,int cause,uint64_t *first);
