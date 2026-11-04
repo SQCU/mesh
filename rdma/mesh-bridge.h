@@ -432,6 +432,10 @@ int port_threads(struct port *port);
 void streams_open(struct port *port,uint32_t node,uint64_t bandwidth);
 void streams_cancel(const struct port *port);
 void streams_let_go(void);
+/* the plan written cancelled where its map has moved (its entries' serial not hdr `map_serial`): mesh-records.c map_put
+   and map_adopt, after a write that moved the serial, on the bridge parent's one event-loop thread
+   (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2) */
+void plan_stale(void);
 /* tag rdma/mesh-link.c:56-65 port_halt, static there; mesh-events.c (peer_terminated) and mesh-child.c call it */
 void port_halt(struct port *port,_Atomic uint32_t *which);
 
