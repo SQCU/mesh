@@ -316,28 +316,39 @@ static int plan_hop(struct plan *p,const struct plan_demand *d,uint64_t k,uint32
    pages tree by tree, a page's edges by the vertex they enter.  This node's own hops are visited in that order, so for
    a pair a -> b, a's sends to b and b's receives from a are the same hops in the same order (mesh.h "Both ends").
    Counting (write 0): this node's hops a slot, its landed words and the demands it relays; writing: each hop in every
-   slot. */
+   slot.  A tree's edges are the graph module's (mesh-graph.h mesh_graph_tree_loads: edge u -> v of a tree its weight
+   at load[u n + v]); this reads only this node's row (its sends) and column (its receive) of them (C9: no walk over a
+   parent table here: the C9 review of c5bffd0c). */
 static int plan_walk(struct plan *p,int write){
   const uint32_t n=p->n,self=p->self;
+  const double one=1;
+  double load[(size_t)n*n];
   uint64_t hop=0,landed=0;
   for(uint32_t i=0;i<p->demands;i++){
     struct plan_demand *d=p->demand+i;
     uint64_t k=0;
     for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
-      const uint32_t *parent=p->parent+(size_t)p->tree[j]*n;
       const uint64_t end=k+p->run[j];
-      if(parent[self]==UINT32_MAX){k=end;continue;}
+      memset(load,0,sizeof load);
+      mesh_graph_tree_loads(n,1,&d->source,p->parent+(size_t)p->tree[j]*n,&one,load);
+      /* this node's edge in (from its parent), and whether it sends on this tree at all */
+      uint32_t in=MESH_ABSENT,out=0;
+      for(uint32_t u=0;u<n;u++){
+        if(load[(size_t)u*n+self]>0)in=u;
+        if(load[(size_t)self*n+u]>0)out=1;
+      }
+      if(in==MESH_ABSENT && !out){k=end;continue;}
       for(;k<end;k++){
         /* this node's word of page k: the source's release word, else its receive's landed word, which releases the
            sends it forwards (a relay's, or a destination's on the way to another) */
         const uint64_t w=self==d->source?d->release:p->releases+landed++;
         for(uint32_t v=0;v<n;v++){
-          const uint32_t u=parent[v];
-          if(v==d->source || u==UINT32_MAX || (u!=self && v!=self))continue;
+          const int receive=v==self && in!=MESH_ABSENT;
+          if(!receive && !(load[(size_t)self*n+v]>0))continue;
           if(write){
-            const int status=plan_hop(p,d,k,u==self?MESH_SEND:MESH_RECEIVE,u==self?v:u,w,hop);
+            const int status=plan_hop(p,d,k,receive?MESH_RECEIVE:MESH_SEND,receive?in:v,w,hop);
             if(status)return status;
-          }else if(v==self && d->mine==MESH_ABSENT)d->relayed=1;
+          }else if(receive && d->mine==MESH_ABSENT)d->relayed=1;
           hop++;
         }
       }
