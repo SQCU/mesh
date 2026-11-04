@@ -278,7 +278,9 @@ uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_pub
 
 /* The map reader and the client's start (mesh-dataflow.h mesh_nodes_read, mesh-call.h mesh_transfers_start).  The
    map's records, a cable's both ends and its ports stay in this file: the collective is given node pairs and summed
-   capacity (struct mesh_nodes), and the start a status. */
+   capacity (struct mesh_nodes), and the start a status.  No graph algorithm is here (design/rubrics.md C9; the C9
+   review of 7da3c125 asked these into mesh-graph.h): they read the map's record format, cables matched by their
+   ports, into the node-pair weights mesh-graph.h's functions take as operands, and mesh-graph.h knows no cable. */
 
 /* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_records_read, adapted: the map's records as one serial left them,
    the seqlock's reader (mesh.h mesh_map_whole), copied into r (MESH_NODES_MOST of room) with their count and the map's
