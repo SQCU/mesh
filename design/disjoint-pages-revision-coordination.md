@@ -299,6 +299,12 @@ struct mesh_declared { uint32_t source,destination,identity,order,value,padding;
    MESH_TO_PRODUCED for `to`) or its consumption at declared[i]'s destination (bit clear); both events at one node */
 #define MESH_FROM_PRODUCED 1u
 #define MESH_TO_PRODUCED 2u
+/* (added 2026-11-04, the coordinator's ruling on 13's and 14's finding) the event is declared[i]'s consumption at its
+   SOURCE: the source's own read of the range it sends (a holder's combine reading its own partial, a broadcast source
+   or a single owner reading what it publishes); a value's reads then include it.  An end with both its produced and
+   its source-read bit is EINVAL */
+#define MESH_FROM_SOURCE_READ 4u
+#define MESH_TO_SOURCE_READ 8u
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
 int mesh_plan(struct mesh_ctx *,const struct mesh_declared *,uint32_t count,struct mesh_value *,uint32_t values,
               const struct mesh_dependence *,uint32_t dependences);
@@ -328,7 +334,11 @@ uint64_t mesh_host_arrived(struct mesh_ctx *,struct mesh_section,uint64_t execut
 ### The allocator (mesh-collective.c, owner 3; the graph algorithms owner 2's)
 
 - The template: the demands' P, W, L, F, C vertices and the transport's lag-0 edges as now; each mesh_dependence one
-  edge from its `from` event's vertex (P of the demand, or C at the destination) to its `to` event's, of its lag.
+  edge from its `from` event's vertex (P of the demand, C at the destination, or S, the source's own read) to its `to`
+  event's, of its lag. S(d) exists only where a dependence names it, with the edge P(d) -> S(d) (lag 0), and is a read
+  of the source's value. Without it a source's local read of what it sent is in no event, and the allocator would let
+  a later landing reuse those pages while the source still reads them (in e2b, a peer's exchange k + 1 landing in the
+  pages of this node's exchange-k partial while its own combine reads it: 13's and 14's finding, unsound).
 - Least lags D(x -> y): mesh_graph_lags over the template from every routed value's reads and write (at every node) to
   every routed value's write. A lag-0 cycle (D(x -> x) == 0) is EINVAL. Every routed write vertex w must have
   D(w -> w) == 1 (D5), else ENOMEM naming its value.
@@ -532,7 +542,8 @@ For each recorded dispatch that reads a received operand, in each repetition t:
 
 - The manifest: each rank stage of each region (regions[l].ranks[r]) gains `"dataflow"`, the routed operands that
   stage writes and reads, in the order its program computes them: a list of {"write": name} and {"read": name}
-  (owner 14). Embedding stages and stages with no routed operand have none.
+  (owner 14). A {"read": X} in the list of X's own source rank is the source's own read (MESH_*_SOURCE_READ); the
+  ordering's graph walks go through the graph module's Python half (rdma/mesh_graph.py reach and walk, C9). Embedding stages and stages with no routed operand have none.
 - The program, in order: the LiteRT setup and the operands' sizes as now; mesh_attach; the captures (phases 0, 1, 2)
   against stand-in memory (D4), receive: and publish: inside phase 2's; mesh_plan with every value (each operand: a
   routed one MESH_EXECUTION and wire; every other an invariant of its bytes, a host-prepared or prefill operand its
