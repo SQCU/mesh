@@ -821,6 +821,16 @@ work proceeds.)
   9's defect, so the delegate's kernel is kept there and capture refuses a masked reader binding a split's counters
   (routed to 11); one kernel reading one routed operand and writing another is sound by prepare_e2b.py's rule (its
   read is listed after the write, so the two never share pages).
+- 11 again: 7d752a8c (where a native plan splits and the dispatch reads a received operand, the delegate's kernel is
+  kept; MetalMaskReaders raises where a received operand's reader binds a value of state 1, a native split's counters
+  or a direct publication's counter alike).
+
+### Integration
+
+- After every implementer's last commit (mesh 166ddde7, metal-microbench 7d752a8c; neither tree with a tracked file
+  modified): `make -B -C rdma` 0, `make -B -C rdma native-audit` 0, `make .build/e2b_replay` 0 with its two libraries
+  and the program rebuilt; no warning. The bridge is signed ad hoc where the "Mesh Bridge" identity is absent, as
+  before. Review 17 (the four rules across both repos, and every routed finding against the code) launched.
 
 ### Reviews and where their findings went
 
