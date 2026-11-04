@@ -1019,8 +1019,11 @@ differs from C3 or from anything earlier in this document, D.3 holds.
   isn't lost. Posting ahead saves that wait and nothing else.
 - The allocator orders the peer's SEND of execution t + u after this node's reads of t, and those reads come after t's
   landing (C3.3). So a record posted again as soon as its own last posting lands is always in time.
-- That is the verbs rule for every buffer: a request's buffers are reused only once its work completion has been taken
-  (rdma-core, ibv_post_recv(3) and ibv_post_send(3)).
+- The memory a posted receive names is the plan's page itself: its one scatter element is the page's address in the
+  registered region (mesh-flow.c link_prepare, `wire_span` of `hop->page`; mesh-verbs.h:56). Nothing is staged or
+  copied. The hardware may write that page until the receive completes, so the page is named in a new receive only
+  after the last one completes. The verbs interface calls that memory the request's "data buffers" (the SDK's
+  infiniband/verbs.h, at ibv_post_send).
 - The early second posting bought nothing. It put two postings on one page, and it rested on the provider copying each
   request when it is posted, which nothing documents.
 
