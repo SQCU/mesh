@@ -15,10 +15,6 @@
 #ifndef MESH_HEALTH_NS
 #define MESH_HEALTH_NS UINT64_C(10000000000)
 #endif
-/* tag pre-return-20261103 rdma/mesh-dataflow.h mesh_joined, its signature (at the tag defined in mesh-dataflow.c with
-   mesh_paired and mesh_join, its bound there MESH_STREAMS, here MESH_PORTS) */
-/* declared here until mesh-dataflow.h carries it */
-int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
 #include "mesh-graph.h"
 
 /* tag pre-return-20261103 rdma/mesh-records.c busy_tell (3f72cbde), adapted: a client's hold is main's client word */
@@ -268,9 +264,9 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    the tag's loop is its one slot, s = 0: `owners[0]` its last read, its watch's udata 0 (the tag's slot index; the
    event loop's EVFILT_PROC of udata 0 retires hdr `client` where its low 32 bits are the event's ident).  Main's word has
    no MESH_RETIRING bit: a retirement writes its retirer's pid there (mesh-dataflow.c mesh_retire), this bridge's
-   skipped as the tag skips its own, another's watched as a client's.  Main's mesh_retired_release releases every closed
-   row and returns nothing (the tag's returned the rows a request outstanding on a lane kept), so none is left
-   unreleased after it */
+   skipped as the tag skips its own, another's watched as a client's.  mesh_retired_release keeps the rows a port's plan
+   may still name (any port's `prepared` nonzero, mesh-dataflow.c c01fa79d) and returns how many it kept, as the tag's
+   did, so `unreleased` stays set until none is kept */
 void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0;
@@ -283,7 +279,9 @@ void clients_turn(int liveness){
     changed|=owner!=owners[0];owners[0]=owner;
   }
   unreleased|=changed;
-  if(unreleased || liveness){mesh_retired_release(M);unreleased=0;}
+  /* the tag's line again (the coordinator, at integration, once mesh-dataflow.c's mesh_retired_release returns the rows
+     it kept, c01fa79d): a retired client's rows a port's plan may still name are kept, and looked at again next turn */
+  if(unreleased || liveness)unreleased=mesh_retired_release(M)!=0;
   streams_let_go();
   busy_tell();
 }
