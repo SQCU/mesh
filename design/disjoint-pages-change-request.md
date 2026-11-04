@@ -4,8 +4,8 @@ The operator's and Claude's turns of 2026-11-03 on the page readiness word and t
 literature; the state of the code they change (mesh 7e9936d5, metal-microbench f154814d); the data structures and
 functions in scope; and the canonical path.
 
-Appendix C, the operator's rulings on the first implementation, supersedes parts of Appendix A3 and Appendix B;
-C3 is the revision.
+Appendix C holds the operator's rulings on the first implementation and Claude's consolidated revision (C3), which is
+the unit of work; where C3 differs from the canonical path, Appendix A3 or Appendix B, C3 holds.
 
 ## The turns
 
@@ -361,7 +361,7 @@ C3 is the revision.
 
 ## Claude's proposal: the canonical path
 
-This section is Claude's. With it, this document is the unit of work.
+This section is Claude's. Appendix C3 consolidates the review of its first implementation and holds where they differ.
 
 1. **One allocator, at compile time, as Appendix A defines it and the operator ruled (Appendix B).** `mesh_plan`
    unrolls the plan's executions into value instances and assigns their pages once, before the first execution.
@@ -485,15 +485,17 @@ So the allocator is implemented as Appendix A's A3 states it: the plan's executi
 pages reused only where the dependence graph's topology guarantees the lifetimes don't overlap, as CUDA graph memory
 nodes do. No other allocation strategy is in scope.
 
-## Appendix C: the operator's rulings on the first implementation
+## Appendix C: the operator's rulings on the first implementation, and the consolidated revision
 
-The implementation of this request (mesh 54070db1, metal-microbench 472390a8), Claude's report of where it departs, and
-the operator's rulings of 2026-11-03, verbatim; then where this document's own text produced the departures, and the
-revision. C3 supersedes, in A3: "Its inputs"; the interval sentence of "The assignment"; the copy rule of "Repeated
-executions are unrolled, not ringed"; and "Sharing the region between programs". It also supersedes Appendix B's
-restatement of them.
+The implementation of this request (mesh 54070db1, metal-microbench 472390a8) and its review on 2026-11-03: Claude's
+report of where it departs, and the operator's and Claude's turns that followed, verbatim (C1); where this document's
+own text produced the departures (C2); Claude's proposal consolidating the review (C3); and what goes (C4). C3 is the
+unit of work. Where it differs from the canonical path, Appendix A3 or Appendix B, C3 holds.
 
 ### C1. The turns
+
+In order. The turns name the proposal's items C3.1 to C3.7; C3 keeps those numbers, and its text supersedes what the
+turns quote of it.
 
 **Claude** (the implementation report):
 
@@ -607,101 +609,6 @@ restatement of them.
 >
 > The run's length is never the unroll factor.
 
-### C2. Where this document produced the departures
-
-- A3, "Its inputs": "Every value instance the plan moves or computes, across all of the plan's executions t = 0 …
-  executions − 1". Appendix B: "the plan's executions unrolled into value instances". Both unroll by the trip count.
-  The modulo variable expansion A3 cites unrolls by the longest lifetime.
-- A3, "Sharing the region between programs": "Each program claims its section of the region once, when it attaches".
-  No plan exists at attach, so no size is known, and the implementation's claim took everything free.
-- A3, "The assignment": "Ordered along a topological order of the dependence graph, the instances' lifetimes are
-  intervals", and left-edge "is optimal". A landing's write is set by another node's send, so under happens-before the
-  lifetimes are not intervals on one order. The implementation tests happens-before and colours greedily by size,
-  which is right.
-- Report item 5 called fresh pages for every step "correct". The operator's ruling: the code isn't correct when it
-  avoids demonstrating the requirements.
-- Report item 3's mechanisms: see C5. They come from neither this request nor the literature as they are used, and
-  they go (C4).
-
-### C3. Claude's proposal: the revision
-
-1. **Read-after-write by mask, as proposal item 2 states.** The lanes' waits on the step's mask go.
-   - A pass reads the landed list and computes the lanes whose input pages have landed. The others are predicated off.
-   - They run on a later pass, which the command queue starts once the step's landed count is complete. This is counted
-     completion: Portals 4 counting events (R. Brightwell, B. Barrett et al., The Portals 4.0 network programming
-     interface, Sandia SAND2012-10087), and the queue's own event wait (CUDA stream memory operations,
-     cuStreamWaitValue32; Metal's MTLSharedEvent). There is one wait per pass, held by the queue. No lane reads a word
-     in a loop.
-   - The bridge alone writes the landed list and its count, which rises with every landing and every cancellation. The
-     client alone signals the queue's event: when the count is complete, or at the step's deadline. So the wait ends in
-     bounded time, and each word has one writer. Lanes whose pages never landed end as an error the host reports.
-   - This is not waitless. It is one wait per pass, held by the queue; no lane waits.
-2. **The allocator places every value.** Weights, the KV cache, pooled intermediates, exchanges, the GPU's publication
-   records and the landed list are all placed by `mesh_plan`'s allocator, in the pages it computes. Values written
-   before the first execution and read by every execution (weights; the KV cache as one array) are placed once, for the
-   plan's whole life, as Lam places loop invariants outside the kernel. Nothing is laid out when it's created.
-3. **Unrolling by modulo variable expansion** (M. Lam, PLDI 1988; B. R. Rau, MICRO 1994).
-   - For each value, L is the smallest lag at which every read of it in execution t happens before its write in
-     execution t + L. u is the largest L.
-   - The template is unrolled into u copies. The copies are tested for interference at the distances at which their
-     executions meet, and coloured greedily by size, as now. Execution t runs copy t mod u.
-   - `executions` is no longer an input of `mesh_plan`: a plan runs any number of executions.
-   - The landed list is a value with u copies too. Its records carry their execution's number, and the mask compares
-     it, so a record of execution t − u reads as not landed in execution t. This is the step flag of NCCL's LL protocol
-     and the sense reversal of J. M. Mellor-Crummey and M. L. Scott, Algorithms for scalable synchronization on
-     shared-memory multiprocessors, ACM TOCS 9(1), 1991.
-   - A value with no such L fails the plan with `ENOMEM`, naming the value.
-4. **Nothing grabs.** A program holds exactly the pages its plan uses (`mesh_graph_left_edge`'s `used`). It claims them
-   when `mesh_plan` places them and releases them when the plan retires. Nothing is claimed at attach. Any number of
-   programs hold disjoint sections of a node's region at once.
-5. **The normal program demonstrates the reuse.** `e2b_replay` passes its program's data edges to `mesh_plan` in place
-   of `NULL, 0` (e2b_replay.m:578–579). They come from the captured graph's stages: each stage's reads and writes, in
-   the order its command buffer runs them. `tools/prepare_e2b.py` writes them into the manifest where it doesn't
-   already. The run's pages then don't grow with its steps.
-6. **Every race is closed and every wait is bounded,** including:
-   - a cancel from plan_cancel that lands after a re-plan zeroes the landed records (removed by items 2 and 4: no plan
-     rewrites another's records; C5);
-   - a port that keeps a retired client's plan past MESH_PLATFORM_NS (this goes with item 4);
-   - a local countdown wait that ends with zeros and no mark;
-   - a link loss and a GPU bound that both read as `ETIMEDOUT`;
-   - the host's final completion wait in `e2b_replay.m`.
-7. **Nothing is zeroed or reset (C6).** No data page is zeroed: every read of a placed value follows a write of the
-   same bytes, and a mask never reads outside its page. No word is reset; each records state relative to its
-   execution:
-   - a supplied word holds the plan's generation and the execution, packed so it only rises, and a reader compares it;
-   - a cancel word holds the first execution cancelled, compared, never `UINT64_MAX`;
-   - each page has a 2-bit phase in the dense landed list, Gray-coded 00, 01, 11, 10: PTX mbarrier's phase bit,
-     widened to two (C7). A landing flips one bit, one atomic XOR, never a carry into the next page's field. A reader
-     of execution t compares the field with the phase t expects: equal, landed; one behind, not yet; else a write ran
-     ahead of the allocator's order, an error. A list's fields start at 00 when the allocator places it, once per plan
-     as `mbarrier.init` is once per kernel, and the supplied and cancel words start the same way; nothing starts or
-     resets per execution, and no data page is written but by its producer or its landing. Each lane loads
-     `MESH_LANE_BYTES` = 16 bytes of the list, a compile-time constant;
-   - the queue's event and the landed count only rise, and execution t waits for its own target.
-
-### C4. What goes
-
-- metal_recording.m's two lane waits bounded at 2^23 polls (lines 1921–1996), and the host's read of their bound mark.
-- mesh-dataflow.c `mesh_claim`'s claim at attach of everything free, and the wait at attach for a retired client's
-  claim.
-- The layout of weights, KV cache, pooled intermediates and publication records when they're created, in the claim's
-  local run.
-- `executions` as an input of `mesh_plan`, its per-execution items, and e2b_replay.m's refusals where steps differ from
-  executions (24ec8cda, cfada099, and 472390a8's comment).
-- `NULL, 0` at e2b_replay.m:579.
-- `mesh_plan_erased` (mesh-call.h; mesh-dataflow.c), its seq_cst fence pair with the ports' data path (mesh-flow.c),
-  and the supplied words' and landed list's fixed areas of the layout (hdr `word_off`, `landed_off`) that it guards.
-- The wait at attach for the ports to drop a retired client's plan, before `mesh_claim`.
-- The GPU lane's write of `UINT64_MAX` into a step's landed record at its bound, and `mesh_seen`'s failed value.
-- mesh-collective.c's `memset` of every declared instance's pages before `hops` (lines 749–757), and its word-by-word
-  zeroing of the supplied words and landed records (lines 759–763).
-- tools/e2b_replay.m's zeroing of every local operand's whole extent (line 627) and of every pooled intermediate
-  (line 840).
-- metal_recording.m's zeroing of the projection kernels' partial sums (line 1546); the arrival counters after them keep
-  their start, and native_projection.metal's last arrival restores the count, as mbarrier's phase completion reloads it.
-
-### C5. Report item 3
-
 **The operator:**
 
 > do you think item 3 is endorsed by any particular algorithm? is it waitless, zero copy, one-sided-writing, etc?
@@ -740,8 +647,6 @@ restatement of them.
 > chain of dependent steps like decode, some ordering point is unavoidable. Its wording also gave the landed count two
 > writers ("the client raises it at the step's deadline"). Fixed: the bridge alone writes the landed list and its
 > count, and the client alone signals the queue's event, when the count is complete or at the deadline.
-
-### C6. Why a plan zeroes
 
 **The operator:**
 
@@ -814,8 +719,6 @@ restatement of them.
 >     dispatch would run immediately.
 >   - Concurrent compute encoders with explicit memory barriers let independent work fill the gap.
 
-### C7. Data pages need nothing
-
 **The operator:**
 
 > "- Data pages need nothing. " it is this specific requirement which should draw more attention from you. i would
@@ -884,3 +787,155 @@ restatement of them.
 >   (native_projection.metal:232), the way phase completion reloads it.
 >
 > Only mesh-link.c:245 stays: it zeroes the region's header once, when the bridge creates the region.
+
+**The operator:**
+
+> update the appendix and write a proposal consolidating all of this review.
+
+### C2. Where this document produced the departures
+
+- A3, "Its inputs": "Every value instance the plan moves or computes, across all of the plan's executions t = 0 …
+  executions − 1". Appendix B: "the plan's executions unrolled into value instances". Both unroll by the trip count.
+  The modulo variable expansion A3 cites unrolls by the longest lifetime.
+- A3, "Sharing the region between programs": "Each program claims its section of the region once, when it attaches".
+  No plan exists at attach, so no size is known, and the implementation's claim took everything free.
+- A3, "The assignment": "Ordered along a topological order of the dependence graph, the instances' lifetimes are
+  intervals", and left-edge "is optimal". A landing's write is set by another node's send, so under happens-before the
+  lifetimes are not intervals on one order. The implementation tests happens-before and colours greedily by size,
+  which is right.
+- Report item 5 called fresh pages for every step "correct". The operator's ruling: the code isn't correct when it
+  avoids demonstrating the requirements.
+- Report item 3's mechanisms come from neither this request nor the literature as they are used (C1, the operator's
+  question on item 3 and Claude's answer), and they go (C4).
+
+### C3. Claude's proposal: the consolidated revision
+
+This section is Claude's. It consolidates the review in C1 into one proposal. Its items keep the numbers the turns use.
+
+**The model.** Four rules hold everything below together:
+- **A data page holds payload only.** Its producer or its landing writes each byte once per use, its consumers read
+  it, and nothing else touches it: no header, no flag, no zeroing, no tail. A mask picks values within one page
+  (data-model §6), and masked-off lanes are guarded in registers.
+- **State lives apart from the data,** in the landed list's own section. Each state word has one writer, and no state
+  word is reset while its plan stands.
+- **Everything is placed once, at compile time,** by one allocator, and a program holds exactly what its plan uses.
+- **No lane waits.** Read-after-write is a mask and a later pass. The only waits left are one per pass, held by the
+  command queue, and each ends in bounded time.
+
+1. **Read-after-write by mask and a later pass.**
+   - A step's first pass loads its receives' phases from the landed list, `MESH_LANE_BYTES` (a compile-time 16) per
+     lane, and computes the lanes whose pages have landed. The rest are predicated off. A mask is applied by select,
+     never by multiplying by 0 or 1 (0 × NaN is NaN), and a reduction puts its identity into masked-off lanes.
+   - The first pass compacts the work it left (`simd_ballot`, `simd_prefix_exclusive_sum`; G. E. Blelloch, Vector
+     models for data-parallel computing, 1990) and writes the later pass's threadgroup count.
+     `dispatchThreadgroups(indirectBuffer:)` reads that count when the later pass starts, so the later pass is empty
+     when everything has landed.
+   - The later pass is held at the queue by `encodeWaitForEvent:value:` until the node's landed count reaches
+     execution t's target, (t + 1) × the node's receives per execution. This is counted completion: Portals 4
+     counting events (R. Brightwell, B. Barrett et al., The Portals 4.0 network programming interface,
+     SAND2012-10087), which count successes and failures apart; CUDA's `cuStreamWaitValue32`; Metal's
+     `MTLSharedEvent`. The event's value only rises: execution t's later pass waits for t + 1.
+   - Landings and cancellations both arrive on the count, as arrivals do on an mbarrier. A cancelled receive arrives
+     without changing its phase, so the later pass finds it one phase behind. Its lanes end as an error that the later
+     pass writes into the step's status, a word only the GPU writes, which the host reads after the run. No cancel
+     word is needed. A link loss is such a cancellation.
+   - The client alone signals the event: when the count reaches the step's target, or at the step's deadline. Its host
+     thread waits on the count's address with a timeout (`os_sync_wait_on_address`, woken by the bridge's arrivals),
+     so that wait is bounded too.
+   - Both lane waits in `mesh_read_N` go: the remote wait on the step's mask, and the local countdown. A producer on
+     the same queue comes before its consumer by the command buffer's order or a memory barrier. A host producer is
+     ordered by the event.
+   - This is not waitless. There is one wait per pass, held by the queue, and no lane waits. Concurrent compute
+     encoders with memory barriers let independent work run in the gap.
+2. **The allocator places every value.** Weights, the KV cache, pooled intermediates, exchanges, the GPU's publication
+   records, the landed list and the supplied words are all placed by `mesh_plan`'s allocator, in the pages it computes.
+   Values written before the first execution and read by every execution (weights; the KV cache as one array) are
+   placed once, for the plan's whole life, as Lam places loop invariants outside the kernel. Nothing is laid out when
+   it's created, and no program touches a page to fault it in: the region is wired once, with the region
+   (data-model §2).
+3. **Unrolling by modulo variable expansion** (M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
+   scheduling, MICRO 1994).
+   - For each value, L is the smallest lag at which every read of it in execution t happens before its write in
+     execution t + L. The unroll factor u is the largest L. Tensor-parallel decode gives u = 1; recurrent state updated
+     in place, 2; 1F1B pipelines, up to the number of stages. A value with no such L fails the plan with `ENOMEM`,
+     naming the value.
+   - The template is unrolled into u copies, and execution t runs copy t mod u. `executions` is no longer an input of
+     `mesh_plan`: a plan runs any number of executions.
+   - Interference is happens-before over the template's copies, tested at the distances at which their executions
+     meet. A landing's write is set by another node's send, so lifetimes under happens-before are not intervals on one
+     order, and left-edge doesn't apply. The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288,
+     2020), as `mesh_graph_left_edge` does now.
+   - Its cost is compile time only, once per plan: quadratic at worst in one execution's values × u, never in the
+     run's length. At run time there are no allocations and no bookkeeping; every address is a constant in the plan.
+4. **Nothing grabs.**
+   - A program holds exactly the pages its plan uses (`mesh_graph_left_edge`'s `used`). It claims them when
+     `mesh_plan` places them and releases them when the plan retires. Nothing is claimed at attach, and any number of
+     programs hold disjoint sections of a node's region at once.
+   - A new plan's state is in new pages, never the previous plan's, so nothing erases a plan or waits for one to be
+     erased.
+   - The bridge's own turn releases a retired plan's pages once no port holds them. This is deferred reclamation (RCU's
+     `call_rcu`, P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser, Practical lock-freedom,
+     2004), and nobody waits for it.
+5. **The normal program demonstrates the reuse.** `e2b_replay` passes its program's data edges to `mesh_plan` in place
+   of `NULL, 0` (e2b_replay.m:578–579). They come from the captured graph's stages: each stage's reads and writes, in
+   the order its command buffer runs them. `tools/prepare_e2b.py` writes them into the manifest where it doesn't
+   already. The run's pages then don't grow with its steps.
+6. **Every race is closed and every wait is bounded.**
+   - The cancel that lands after a re-plan zeroes the landed records: gone, because no plan writes another's records
+     (items 4 and 7).
+   - A port that keeps a retired client's plan past `MESH_PLATFORM_NS`: gone with the claim at attach (item 4).
+   - The local countdown wait that ends with zeros and no mark: gone with the lane waits (item 1).
+   - A link loss and a GPU bound that both read as `ETIMEDOUT`: the GPU bound is gone (item 1), and a link loss
+     arrives on the count as cancellations.
+   - The host's final completion wait in `e2b_replay.m`: bounded.
+7. **Nothing is zeroed or reset.**
+   - **No data page is written** but by its producer or its landing.
+   - **The landed list's phases** (PTX mbarrier's phase bit, widened to two):
+     - Each receive in the plan's list (a received page of one value's copy) has a 2-bit phase, Gray-coded
+       00 → 01 → 11 → 10. A landing is one atomic XOR of one bit, which never carries into the next receive's
+       field. Its one writer is the bridge's data path that takes the receive.
+     - A reader of execution t compares the field with Gray(⌊t / u⌋ + 1 mod 4): equal, landed; one behind, not yet;
+       anything else, a write ran ahead of the allocator's order, which is an error.
+     - The fields start at 00 when the allocator places the list, once per plan, as `mbarrier.init` runs once per
+       kernel. A field is reused only with its page, so the allocator's order for the page covers it.
+   - **A supplied word** has one writer, its range's producer, which stores t + 1 after its last write in execution t.
+     A send of execution t goes once its word reads at least t + 1. The word starts at 0 when placed, and one word
+     serves every execution.
+   - **The landed count and the queue's event** only rise.
+   - **The only zeroing left** is mesh-link.c's zeroing of the region's header, once, when the bridge creates the
+     region.
+   - **The projection kernels' arrival counters** already have this form: the last arrival restores the count
+     (native_projection.metal:232), as an mbarrier's phase completion reloads it. Their partial sums need no zeroing,
+     since every threadgroup writes its own before any are read.
+8. **What judges it.**
+   - One configuration runs in a runtime, and no call site handles two forms.
+   - The builds are clean: `make -C rdma` and `make -C rdma native-audit` in mesh, and `make .build/e2b_replay` in
+     metal-microbench.
+   - Parity and the reuse are shown by the normal program, when the operator authorizes runs: e2b_replay's results,
+     and pages that don't grow with its steps.
+   - No data page is written but by its producer or its landing. No state word is reset while its plan stands, and
+     each has one writer; counts take arrivals.
+   - No lane waits. Every wait that remains is bounded, and every failure is an error value.
+   - Commits are pushed to main as each piece builds.
+
+### C4. What goes
+
+**mesh**
+- rdma/mesh-collective.c: `executions` as an input of `mesh_plan`, and its per-execution items; the `memset` of every
+  declared instance's pages before `hops` (lines 749–757); the word-by-word zeroing of the supplied words and landed
+  records (lines 759–763).
+- rdma/mesh-call.h and rdma/mesh-dataflow.c: `mesh_plan_erased`, and its seq_cst fence pair with the ports' data path
+  (rdma/mesh-flow.c).
+- rdma/mesh.h: the supplied words' and landed list's fixed areas of the layout (hdr `word_off`, `landed_off`); the
+  landed record's ORed bits and its `UINT64_MAX` cancel word; the constant `MESH_SUPPLIED`.
+- rdma/mesh-dataflow.c: `mesh_claim`'s claim at attach of everything free, and the wait before it for the ports to
+  drop a retired client's plan; the claim's local run, where values were laid out when created
+  (`mesh_section_create` with `wire` 0).
+
+**metal-microbench**
+- metal_recording.m: both lane waits in `mesh_read_N` bounded at 2^23 polls (lines 1921–1996), the remote and the
+  local countdown; `mesh_seen`'s failed value; a lane's `UINT64_MAX` into a step's landed record, and the host's read
+  of it; the zeroing of the projection kernels' partial sums (line 1546).
+- tools/e2b_replay.m: `NULL, 0` at line 579; the refusals where steps differ from executions (24ec8cda, cfada099, and
+  472390a8's comment); the zeroing of every local operand's whole extent (line 627) and of every pooled intermediate
+  (line 840).
