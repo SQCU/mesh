@@ -772,6 +772,24 @@ work proceeds.)
   phase group, status `first` 32 bits). The C9 hook's remark that plan_walk moves into the graph module: ruled it
   stays (its tree steps are mesh_graph_climb and mesh_graph_rows already, after the C9 reviews of c5bffd0c and
   c9ffedcf; what is left emits the hop entries both ends agree on).
+- 10 (metal_recording.m, second): a159c59a (MetalMaskReaders, after every fusion and before the levels, turning each
+  command that loads a received operand into a masked first pass and its compaction; MetalMaskedPass making the first
+  and later forms from one source: 16-byte loads spread over lanes, select-based masks, simd_ballot, one barrier, a
+  system-scope fence; a folded release first, in the first form only; the later form's grid builtins from list[g],
+  threads past a dispatchThreads grid returning, a failure adding to `behind` or `ahead` and raising `first`;
+  MetalCompactionSource by simd_ballot and simd_prefix_exclusive_sum; MetalValueWord; MetalReplayEncode, the later pass
+  after encodeWaitForEvent in its own encoder by dispatchThreadgroupsWithIndirectBuffer, its waits in pass order; the
+  first passes and compactions marked so MetalReplayExecute refuses them), 184683ec (the header: a first call with
+  `waits` NULL returns the passes and the waits a range needs). Its differences, ruled: (1) a 64-byte phase table a
+  received operand (four rows of the expected and the one-behind phase spread over 16 fields, P and ceil(P/64)) in
+  place of the 16-byte table, since P depends on the region's geometry and must arrive by a binding (D4) and the later
+  pass needs the one-behind phase: accepted; (4) an MTLFence between encoders, since Metal orders only resources an
+  encoder binds or names and an indirect command buffer's are neither: accepted, it is C3.1's "a producer on the same
+  queue comes before its consumer by the command buffer's order or a memory barrier". Its others: the rewrite after
+  the fusions, so the command a fusion makes of a reader is the one masked; MetalFuseRows keeps a reader of a received
+  operand apart from a row kernel that releases a sent one (else the release would wait behind the mask); each first
+  pass one more level and two encoders; in a 2D or 3D partial dispatchThreads threadgroup the later form's SIMD builtins
+  are the full threadgroup's (1D exact; no e2b reader is of that kind): open. 11 launched.
 
 ### Reviews and where their findings went
 
@@ -791,6 +809,9 @@ work proceeds.)
   program gets EADDRINUSE, against C3.4's "any number of programs"; a re-plan needs room for both plans' claims): open.
 
 ### Open at the end
+
+- metal_recording.m's later form: in a 2D or 3D dispatchThreads grid's partial threadgroup its SIMD builtins are the
+  full threadgroup's, not the original partial one's (1D exact; no e2b reader is of that kind; owner 10).
 
 - The bridge wakes a destination's count word once a range and execution (C3.1's design: the client's thread waits on
   the count's address, woken by the bridge's arrivals). For e2b's one-page partials that is a system call a landing on
