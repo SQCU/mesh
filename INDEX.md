@@ -28,3 +28,5 @@ other projects, such as a game bot, and old dated records; they are not listed h
   queue per node that only the bridge consumes over every link, queue pairs kept inside the bridge, the --link form
   replaced only once its replacement covers it, the failport's process lifecycle reused verbatim. With the state of the
   code and the functions in scope.
+- [design/page-queue-coordination.md](design/page-queue-coordination.md): the coordinating agent's notes for that
+  change, verbatim: the contract its sub-agents worked to, and the record of each sub-assignment and review finding.
