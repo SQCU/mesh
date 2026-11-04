@@ -187,8 +187,8 @@ int child_main(int argc,char **argv){
   const unsigned long index=argc>=7?strtoul(argv[4],NULL,10):MESH_PORTS;
   if(index>=MESH_PORTS){return 1;}
   faults_install();
-  /* the region by its name, REGION, for the tag's MESH_NAME: main's region is named by configuration, the name the
-     parent's own region has (mesh-children.c child_spawn) */
+  /* the region by its name, REGION, the command line's sixth word: MESH_NAME, the node's one region, which the parent
+     passes there (mesh-children.c child_spawn), as the tag's child opened MESH_NAME itself */
   const int fd=shm_open(argv[6],O_RDWR);
   struct stat shape;
   if(fd<0 || fstat(fd,&shape))die("child: its bridge's region");
