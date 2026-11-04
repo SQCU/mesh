@@ -262,6 +262,14 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    skipped as the tag skips its own, another's watched as a client's.  mesh_retired_release keeps the rows a port's plan
    may still name (any port's `prepared` nonzero, mesh-dataflow.c c01fa79d) and returns how many it kept, as the tag's
    did, so `unreleased` stays set until none is kept */
+/* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.4: "The bridge's own turn releases a
+   retired plan's pages once no port holds them", deferred reclamation; design/disjoint-pages-revision-coordination.md,
+   "The program's claim and its sections" and D10), the note above made exact for the claims per plan: what
+   mesh_retired_release keeps is each closed claim whose generation a port's `prepared` holds (after a seq_cst fence),
+   not every closed claim while any port holds any plan, and the count it returns is of the closed claims kept.  And
+   the order of this turn's last calls is reversed from the tag's (release, then let go): streams_let_go first, then
+   the release, so a cancellation this turn computes from a plan's entries (mesh-flow.c plan_cancel) lands in that
+   plan's pages before this turn's release can let them go.  What must stay: the cancellation before the release */
 void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0;
@@ -274,9 +282,28 @@ void clients_turn(int liveness){
     changed|=owner!=owners[0];owners[0]=owner;
   }
   unreleased|=changed;
+  /* where no client holds the region, this node's receives of the plan written that have not landed are cancelled:
+     each one's count word raised to its final value, no phase written (mesh-flow.c streams_let_go, plan_cancel;
+     design/disjoint-pages-change-request.md, C3.1 and C3.6), before the release below (the note above, 2026-11-04) */
+  streams_let_go();
   /* the tag's line again (the coordinator, at integration, once mesh-dataflow.c's mesh_retired_release returns the rows
      it kept, c01fa79d): a retired client's rows a port's plan may still name are kept, and looked at again next turn */
+  /* 2026-11-04, sub-assignment 7, for mesh-flow.c plan_cancel (design/disjoint-pages-change-request.md, C3.6;
+     design/disjoint-pages-revision-coordination.md, "The bridge": "plan_cancel and the release of retired claims
+     (mesh_retired_release) both run on the bridge parent's one event-loop thread"): they do.  In the bridge,
+     mesh_retired_release is called here and in mesh-link.c region_adopt, and plan_cancel only from streams_cancel and
+     streams_let_go; each of those runs on the thread of mesh-link.c main alone: region_adopt before the event loop, its
+     streams_cancel(NULL) before its release; streams_let_go here, in clients_turn, the loop's turn; streams_cancel from
+     mesh-ports.c port_lost and mesh-children.c child_reaped and child_heard, which only the loop's turn and its events
+     reach (port_lost's callers: the loop's events, child_reaped, control_heard, hello_heard, network_heard and a
+     control socket's connect; its turn's terminations_turn, ports_stalled, link_turn, port_open by child_spawn,
+     health_turn and record_retell by port_say; and network_heard from the stop's hold after the loop), and
+     streams_cancel(NULL) at the stop, after the loop.
+     The parent's other threads call none of them: control_watch only wakes the loop; the finder's queue (mesh-ports.c
+     ports_find) only lists the devices; the terminations' queue (mesh-events.c peer_terminated, peer_arrived) only
+     stores atomics (port_halt) and wakes the loop.  The port children's threads, which land and send, are other
+     processes and call neither.  So a cancellation's stores, computed from a plan's entries read whole, are done before
+     any later call of the release can let that plan's pages go */
   if(unreleased || liveness)unreleased=mesh_retired_release(M)!=0;
-  streams_let_go();
   busy_tell();
 }

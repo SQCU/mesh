@@ -166,6 +166,15 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    now the layout's, and `map_room`), so each is compared, by the rule above; `landed_stride` is the plan's, not the
    layout's, and is not.  What must stay: every field mesh_layout sets compared, so an adopted region's areas lie where
    this bridge's layout puts them (mesh-records.c map_adopt takes the map's area as it lies) */
+/* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.2 and C4: "the supplied words' and landed
+   list's fixed areas of the layout (hdr `word_off`, `landed_off`)" go; design/disjoint-pages-revision-coordination.md,
+   "The region" and "The layout"), reversing the 2026-11-03 note above: from layout 109 mesh_layout sets no supplied
+   words' or landed list's area, and hdr `word_off`, `word_capacity`, `landed_off`, `landed_capacity` and
+   `landed_stride` are `vacant9` .. `vacant13`, never read or written, so none of them is compared.  The plan's state
+   section (hdr `state`, struct mesh_state: its phases, counts and supplied words) is placed by mesh_plan in the arena
+   with the plan's other values, not by the layout, and is not compared either.  What must stay: exactly the fields
+   mesh_layout sets compared (the map's records' `map_off` and `map_room` among them), so an adopted region's areas lie
+   where this bridge's layout puts them */
 /* 2026-11-04, review R2 (L1), reversing this file's first form (d77eec2a), which refused an object smaller than the
    configuration's length: a configuration that grew the region then left the bridge exiting 1 and its heartbeat
    opening it again, forever.  What must stay: the layout fitted to the object, a bridge ending only where none fits */
@@ -174,10 +183,7 @@ static int region_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->wire_pages==b->wire_pages && a->links==b->links &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
          a->link_off==b->link_off && a->target_stride==b->target_stride && a->target_off==b->target_off &&
-         a->hop_off==b->hop_off && a->hop_capacity==b->hop_capacity &&
-         a->word_off==b->word_off && a->word_capacity==b->word_capacity && a->landed_off==b->landed_off &&
-         a->landed_capacity==b->landed_capacity &&
-         a->bridge_off==b->bridge_off &&
+         a->hop_off==b->hop_off && a->hop_capacity==b->hop_capacity && a->bridge_off==b->bridge_off &&
          atomic_load_explicit(&a->map_off,memory_order_relaxed)==atomic_load_explicit(&b->map_off,memory_order_relaxed) &&
          a->map_room==b->map_room && a->data_off==b->data_off && a->length==b->length;
 }
@@ -242,6 +248,13 @@ static int region_open(struct hdr *geometry,struct mesh_geometry layout,int *out
     if(old->magic==MESH_MAGIC && old->bridge_off>=sizeof *old && old->bridge_off+sizeof(struct mesh_bridge_pages)<=size)
       memcpy(region_children,mesh_bridge_pages(old)->child,sizeof region_children);
     region_orphans_end();
+    /* 2026-11-04, sub-assignment 7: this is C3.7's one zeroing left (design/disjoint-pages-change-request.md, C3.7:
+       "The only zeroing left is mesh-link.c's zeroing of the region's header, once, when the bridge creates the
+       region"): the metadata before `data_off` (the header and the layout's areas) zeroed once, as the region is made
+       again in place; a new object (below) is zero as ftruncate makes it.  Nothing from `data_off` on (the arena: data
+       pages and plans' state sections) is zeroed or reset by the bridge: a data page is written only by its landing, a
+       state word only as C3.7 gives it (one writer; counts take arrivals), never reset while its plan stands.  What
+       must stay: this zeroing once a making, and none past `data_off` */
     M=old;memset((void *)M,0,(size_t)geometry->data_off);
   }else{
     if((fd=shm_open(MESH_NAME,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
@@ -274,19 +287,27 @@ static int region_open(struct hdr *geometry,struct mesh_geometry layout,int *out
    readers wait while it is odd), and the map's records this bridge's to write again (map_adopt) */
 /* tag pre-return-20261103 rdma/mesh-link.c:1835-1868 region_adopt, verbatim but main's region (4bb01da0 f440f786 a1c70649 7876150c 11c52f5e 3f72cbde 0905738c 1835bef4 d9e6d3de 5dcb4f69 ed429e7c 76b85f5e f9f2aff0 ad55cbf4 33ca0dab 292d4516 88fa2452 db2748a9 2fb2b270 8fc0d3d7 f06759d4 6f90dc97 923d73fd) */
 /* Differs from the tag, its interfaces: main's region has no streams; in place of the tag's loop storing each one's
-   landed words lost, this node's landed words of the plan written not landed are cancelled (mesh-flow.c
-   streams_cancel(NULL), the stop's own cancellation: UINT64_MAX where a word reads 0), so a wait on a dead bridge's
-   plan reads the loss, as at the tag, rather than its deadline; and no client slots, but one client word (hdr `client`, its process the low 32 bits, its start hdr `client_start`: mesh-holders.h), which
+   landed words lost, this node's receives of the plan written that have not landed are cancelled (mesh-flow.c
+   streams_cancel(NULL), the stop's own cancellation), so a wait on a dead bridge's plan reads the loss, as at the
+   tag, rather than its deadline; and no client slots, but one client word (hdr `client`, its process the low 32 bits, its start hdr `client_start`: mesh-holders.h), which
    is retired where its process does not hold the region (mesh_holds) by main's own retirement (mesh-dataflow.c
    mesh_retire, as mesh_attach retires a vacant word whose process is gone), where the tag finished a slot's
    retirement half done; and main's link table (struct mesh_link_info) has `peer` and `bandwidth` plain (stored
    atomically as the tag's, by __atomic_store_n), `phase` and `code` in `port`, and `port.prepared` (the plan a port's
    data path loaded, which no new child has) cleared beside them */
+/* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.1: "Landings and cancellations both arrive
+   on the count", and C3.6; design/disjoint-pages-revision-coordination.md, "The bridge"), reversing the 2026-11-03
+   form of the note above, in which a cancellation stored UINT64_MAX into each not-landed receive's execution's cancel
+   word in the landed list (mesh.h's landed records, gone at 109 with the cancel word and its other writers): a
+   cancellation now arrives on the receive's count word, raised (never lowered) to its final value, and no phase is
+   written, so a reader of an execution it cancelled finds the receive's field one phase behind with its count complete:
+   cancelled, an error value, not a wait to its deadline.  What must stay: the cancellation before `bridge_pid` is set,
+   and before the release of retired claims below, on this one thread (so its stores land in pages still held) */
 static void region_adopt(void){
   /* 2026-11-04, review R2 (L2), reversing this file's first form (d77eec2a), which left the plan's words as a dead
      bridge left them: a client waiting on one reached its deadline instead of the loss.  No port is found yet
-     (port_count 0), so this is the plan's receives' words alone.  What must stay: the adopted region's landed words
-     not landed read lost before `bridge_pid` is set */
+     (port_count 0), so this is the plan's receives alone.  What must stay: the adopted region's receives not landed
+     read cancelled (their count words at their final values, their phases unwritten) before `bridge_pid` is set */
   streams_cancel(NULL);
   struct mesh_link_info *links=mesh_links(M);
   for(uint32_t p=0;p<MESH_PORTS;p++){
@@ -295,6 +316,10 @@ static void region_adopt(void){
   }
   const uint64_t client=atomic_load(&M->client);
   if(client && !mesh_holds((pid_t)(uint32_t)client,atomic_load(&M->client_start)))mesh_retire(M,client);
+  /* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.4; the contract, "The program's claim and
+     its sections": mesh_retired_release releases each closed claim whose generation no port's `prepared` holds, after
+     a seq_cst fence): every port's `prepared` is 0 above, so every closed claim is released here, after
+     streams_cancel(NULL)'s stores, on the same thread (main, before the event loop: region_open's caller) */
   mesh_retired_release(M);
   if(atomic_load(&M->map)&1)atomic_fetch_add(&M->map,1);
   if(atomic_load(&M->health)&1)atomic_fetch_add(&M->health,1);
@@ -526,6 +551,10 @@ int main(int argc,char **argv){
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
     if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}
   }
+  /* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.1, C3.6): "every program's words ~0" above
+     is the tag's streams'; here the stop's cancellation raises each not-landed receive's count word of the plan written
+     to its final value, no phase written (mesh-flow.c streams_cancel, plan_cancel), on this thread, after which no
+     release of a claim runs in this bridge.  What must stay: the cancellation before `bridge_pid` is 0 */
   streams_cancel(NULL);
   /* design/transport.md section 2: every stop keeps the region for the next bridge to adopt; a release is the
      heartbeat's, which expires the region once this bridge has ended (mesh-heartbeat.c region_expire) */
