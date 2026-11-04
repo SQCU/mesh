@@ -469,19 +469,19 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
    loads the plan never tells this generation, and the start ends at the bound with ETIMEDOUT.
    2026-11-04, sub-assignment 5: the start says how many executions the bridge serves (design/disjoint-pages-revision-
    coordination.md, D2: `executions` is no input of mesh_plan, design/disjoint-pages-change-request.md, Appendix C,
-   C3.3), the plan's struct mesh_state `executions` raised to it, never lowered (its one writer this call; C3.7, no
-   state word reset while its plan stands), and hdr `plan` woken so the ports serve the rise, before the wait as it
-   was.  EINVAL where no plan is written, or where hdr `state` names no struct mesh_state inside the region.  What must
-   stay: the wait bounded by one deadline */
-int mesh_transfers_start(struct mesh_ctx *context,uint64_t executions){
+   C3.3): once the wait (mesh_ports_loaded) has found every named port's data path holding the plan, the plan's struct
+   mesh_state `executions` is raised to it, never lowered (its one writer this call; C3.7, no state word reset while
+   its plan stands), and hdr `plan` woken so the ports serve the rise.  EINVAL where no plan is written, or where hdr
+   `state` names no struct mesh_state inside the region.
+   2026-11-04, sub-assignment 5, the coordinator's ruling on owner 6's finding (mesh-flow.c 04b5e561): the raise after
+   the wait, where this note's first form raised `executions` before it.  Why: a port child that pairs again after a
+   loss loads the same plan and would serve executions from 0 again over phases and counts that already hold
+   arrivals; so every port loads a plan before any of its executions is served, and a port refuses to load a plan
+   whose `executions` is already above 0 (mesh-flow.c), which holds only where the start raises it after every named
+   port has loaded.  A second start on the same plan (its ports loaded and serving) waits as the first did and raises
+   it.  What must stay: the wait bounded by one deadline; the raise only after every named port holds the plan */
+static int mesh_ports_loaded(struct mesh_ctx *context){
   struct hdr *m=context->M;
-  const uint64_t at=atomic_load_explicit(&m->state,memory_order_acquire);
-  if(!at || at>context->len || context->len-at<sizeof(struct mesh_state))return EINVAL;
-  struct mesh_state *state=mesh_plan_state(m);
-  uint64_t served=atomic_load_explicit(&state->executions,memory_order_relaxed);
-  while(served<executions && !atomic_compare_exchange_strong_explicit(&state->executions,&served,executions,
-                                                                      memory_order_release,memory_order_relaxed));
-  os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
   const uint64_t hops=atomic_load_explicit(&m->hops,memory_order_acquire),plan=atomic_load_explicit(&m->plan,memory_order_relaxed);
   if(!hops)return 0;
@@ -517,6 +517,19 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t executions){
       return code?(int)code:ENOTCONN;
     }
   }
+  return 0;
+}
+int mesh_transfers_start(struct mesh_ctx *context,uint64_t executions){
+  struct hdr *m=context->M;
+  const uint64_t at=atomic_load_explicit(&m->state,memory_order_acquire);
+  if(!at || at>context->len || context->len-at<sizeof(struct mesh_state))return EINVAL;
+  const int error=mesh_ports_loaded(context);
+  if(error)return error;
+  struct mesh_state *state=mesh_plan_state(m);
+  uint64_t served=atomic_load_explicit(&state->executions,memory_order_relaxed);
+  while(served<executions && !atomic_compare_exchange_strong_explicit(&state->executions,&served,executions,
+                                                                      memory_order_release,memory_order_relaxed));
+  os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   return 0;
 }
 
