@@ -6,26 +6,16 @@
 #include <errno.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 struct mesh_range { uint32_t first,count; };
-/* The program's section of the region (design/disjoint-pages-change-request.md, Appendix A, A3, "Sharing the region
-   between programs", and A4: "One claim of a program's section at attach remains"), taken once by mesh_attach and held
-   until the client retires; nothing else takes rows or pages from the region:
-   - `rows`: the claim's rows of the page table, [first, first + count), two or more.  Its first two are the claim's
-     heads, which record it for the bridge's release (mesh_retired_release): row `first` holds the client's owner word
-     and the window run (and the claim's rows), row `first` + 1 the local run (mesh-dataflow.c mesh_claim).  The
-     sections' rows follow, from `first` + 2.
-   - `window`: arena pages [first, first + count), block-aligned, inside the registered window: the pages the plan's
-     allocator assigns (mesh-collective.h mesh_plan), and no one else.  An empty run is {0, 0}.
-   - `local`: arena pages [first, first + count), block-aligned, outside the registered window (where the window is the
-     whole arena, the upper half of the claim's run): the pages of the values no plan names (mesh-call.h
-     mesh_section_create, wire 0), laid out in creation order.
-   - `row_cursor`: the claim's first row no section names; `local_cursor`: `local`'s first page no section holds.
-   2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A4 (sub-assignment 7): `send_off` and `send_bytes`,
-   the plan's words section that mesh_plan allocated at its call, are gone: the supplied words and the landed list are
-   areas of the layout (hdr `word_off`, `landed_off`).  The counts `arena`, `wire`, `shared_pages` and the cursors of
-   the call-site allocators (`wire_cursor`, `bulk_cursor`) went with those allocators.  What must stay: the claim
-   taken once, at attach, and every row and page a program names inside it */
-struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; struct mesh_range rows,window,local;
-                  uint32_t row_cursor,local_cursor; int fd; };
+/* The program's context: the region mapped (`M`, `len`, `fd`) and the client word it took (`client`, hdr `client`).  It
+   holds no rows and no pages: a program's rows and pages are its plans' claims (struct mesh_claim, mesh_claim_take),
+   each taken by mesh_plan for exactly what that plan places (design/disjoint-pages-change-request.md, Appendix C, C3.4;
+   design/disjoint-pages-revision-coordination.md, "The program's claim and its sections").
+   2026-11-04, sub-assignment 5: reversing sub-assignment 7's 2026-11-03 form, where the context held the program's one
+   claim, taken at attach (`rows`, `window`, `local`: every free row and the widest free run of pages in the window and
+   outside it) and laid out by cursors (`row_cursor`, `local_cursor`).  Why: C3.4, "Nothing is claimed at attach", and
+   C4 (mesh_claim's claim at attach of everything free; the claim's local run, where values were laid out when
+   created).  What must stay: no call site but mesh_plan's claim takes rows or pages from the region */
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; };
 /* design/prepared-machine.md#M09 */
 /* The two arena ranges.  [0,wire_pages) is the registered window and the only memory an SGE may
    name; [wire_pages,arena) is addressable and never registered.  An undeclared window is the whole
@@ -37,32 +27,52 @@ static inline struct mesh_range mesh_arena_range(const struct hdr *m,int wire){
 }
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
-/* the region attached: the client's compare-and-swap on hdr `client`, its start beside it (hdr `client_start`), the
-   region's version read again after the swap, a retired client's claim released (mesh_retired_release, waited for
-   while a port's `prepared` holds a plan, bounded by MESH_PLATFORM_NS), and the program's one claim (struct mesh_ctx
-   `rows`, `window`, `local`): the widest run of free rows and, of the arena's free pages, the widest block-aligned run
-   in the registered window and the widest outside it, none of them a page or row a retired client's claim still holds;
-   0, EINVAL where the region is not of this layout or expired as the client was taken (it is let go), EADDRINUSE where
-   another live client holds it, ENOMEM where fewer than the claim's two head rows are free (it is let go), else the
-   errno */
+/* the region attached: the client's compare-and-swap on hdr `client` (an earlier client whose process is gone retired,
+   mesh_retire), its start beside it (hdr `client_start`) and the region's version read again after the swap.  It claims
+   nothing (design/disjoint-pages-change-request.md, Appendix C, C3.4): no row, no page, and no wait for a retired
+   client's claim, which the bridge releases on its own turn (mesh_retired_release).  0, EINVAL where the region is not
+   of this layout or expired as the client was taken (it is let go), EADDRINUSE where another live client holds it,
+   else the errno */
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 /* design/algorithm-sources.md#programtensor */
+/* the client retired: every claim it owns closed (struct mesh_buffer `closed` on each head whose `owner` it is), then
+   hdr `client` cleared; nothing is let go here, the bridge releasing each closed claim once no port holds it
+   (mesh_retired_release) */
 void mesh_retire(struct hdr *,uint64_t client);
 
-/* 2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A4 (sub-assignment 7): mesh_rows_alloc and
-   mesh_arena_alloc, the call-site allocators (first fit at the call that needs memory, A2), and mesh_rows_release
-   are gone; a program's rows and pages are its claim's (struct mesh_ctx), and its plan's pages are the plan's
-   allocator's.  What must stay: no call site takes rows or pages from the region */
-/* rows [first, first + pages / block) of the claim bound to arena pages [page, page + pages), block by block, with
-   `index` the instance (an entry's `mapping` high half) */
+/* A plan's claim (design/disjoint-pages-change-request.md, Appendix C, C3.4; design/disjoint-pages-revision-
+   coordination.md, "The program's claim and its sections"): the only place rows and pages are taken, mesh_plan's one
+   call, for exactly the rows and pages that plan places.  Any number of claims coexist, each its own: a retired plan's
+   with the next plan's, until the bridge releases it. */
+struct mesh_claim { struct mesh_range rows,window,local; };
+/* rows: `rows` free page-table rows (MESH_ROW_OWN), one run; window: `window` free arena pages inside the registered
+   window, local: `local` outside it (inside it where the window is the whole arena), each one block-aligned run, first
+   fit; recorded in the rows' first row (its head: the client, `generation`, the three runs) for the bridge's release.
+   Taken whole or not at all: 0, or ENOMEM with nothing taken.  rows >= 1 (the head)
+   The head row is the claim's record alone (mesh-dataflow.c, "The claim's record"): its struct mesh_buffer and struct
+   mesh_page_entry are written by the claim, its close and its release, and no value's rows include it, so a plan's
+   values' rows are [rows.first + 1, rows.first + rows.count) */
+int mesh_claim_take(struct mesh_ctx *,uint64_t generation,uint32_t rows,uint32_t window,uint32_t local,
+                    struct mesh_claim *);
+/* this client's claim of `generation` closed (others 0), or every claim of this client but that one (others 1); hdr
+   `plan` woken, so the bridge's ports look again */
+void mesh_claim_close(struct mesh_ctx *,uint64_t generation,int others);
+
+/* rows [first, first + pages / block) of a claim bound to arena pages [page, page + pages), block by block, with
+   `index` the copy (an entry's `mapping` high half): mesh_plan's binding of the rows and pages it placed; nothing is
+   taken here, only named */
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
-/* design/algorithm-sources.md#programkernel_call */
-uint32_t mesh_publication_prepare(struct hdr *,uint32_t row,struct prepared_publication *);
-/* a retired client's claim released, its head rows' page runs and then its rows, none while a port's requests may
-   name their pages; the claims kept */
+/* 2026-11-04, sub-assignment 5: mesh_publication_prepare is removed (the GPU's publication records went with layout
+   109, mesh.h; its one caller, mesh-metal.m, reads a range's first row's publication itself).  What must stay: a
+   range's release is its supplied word, which its first row's publication names */
+/* the bridge's release of closed claims (deferred reclamation: RCU's call_rcu, P. E. McKenney and J. D. Slingwine,
+   Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004; the contract's D10): a seq_cst fence, then each
+   closed claim whose generation no port's `prepared` holds released, its pages' bits, then its rows' bits, by the
+   winner of the head's owner exchange; the closed claims kept.  The bridge parent's (mesh-records.c clients_turn,
+   mesh-link.c region_adopt); nobody waits for it */
 uint32_t mesh_retired_release(struct hdr *);
 
 /* The map reader (design/page-queue-change-request.md, "What the collective decides, and what the bridge decides"): the
