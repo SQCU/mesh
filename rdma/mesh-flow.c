@@ -2,13 +2,18 @@
    `plan`), serving this node's share of the region's page lists (mesh.h struct mesh_hop) by the rule both ends compute
    (design/page-queue-change-request.md, "Claude's proposal": "The page lists (the queue)", "What the bridge decides",
    "The rule both ends compute", "The functions"; and the operator's "The page queue" and "Interleaving every
-   transfer": every inbound link used, a ready page waiting only behind earlier pages of its own queue pair).
+   transfer": every inbound link used, a ready page waiting only behind earlier pages of its own queue pair), as
+   design/disjoint-pages-change-request.md changes it ("Claude's proposal: the canonical path", 1 to 3): every page of
+   every execution assigned once, before the first, by the plan's one allocator (its Appendix A, A3), so no execution
+   waits on another's, a relay's page a page like any other; and each landing marked in the landed list, its bit in its
+   execution's record (mesh.h), no word or cell a page.
    Its native forms are the d6dceac transport's (MESH_VERSION 104, restored 2026-10-01: the source of the fastest
    recorded E2B decode, metal-microbench docs/measurement.md): SENDs prepared once a plan and chained per queue pair,
-   each posted as its word releases it; receives prepared once a plan, posted ahead in a window and refilled as they
-   land; completions polled through the provider's own functions (mesh-verbs.h struct mesh_verbs `poll`, struct
-   mesh_queue `send`, `receive`); traced variants under MESH_LEDGER.  Their inputs are the page lists, which replaced
-   d6dceac's per-link, per-queue transfer lists and its --link form's link_configure (both since removed).  The
+   each posted as its word releases it; receives prepared once a plan, posted ahead as their queue pair has room and
+   refilled as they land; completions polled through the provider's own functions (mesh-verbs.h struct mesh_verbs
+   `poll`, struct mesh_queue `send`, `receive`); traced variants under MESH_LEDGER.  Their inputs are the page lists,
+   which replaced d6dceac's per-link, per-queue transfer lists and its --link form's link_configure (both since
+   removed).  The
    progress thread, the guard around its device's verbs calls and a port's halts are tag pre-return-20261103
    rdma/mesh-link.c's, verbatim but at interfaces.  No main (the binary's is mesh-link.c's, the child's mesh-child.c's)
    and no verbs teardown: a halt clears `served` and moves `pairing`, and the child's exit is the teardown (mesh-child.c
@@ -18,61 +23,55 @@
 #include "mesh-dataflow.h"
 
 /* design/prepared-machine.md#M29: d6dceac's prepared SEND (its span and request, one cache line's worth of what the
-   post reads), its release now its word of execution t and `position` (mesh.h struct mesh_hop) in place of the
-   client's `ready` continuation (struct mesh_send): the word is the region's, the record the child's */
+   post reads), its release now its entry's word and `mask` (mesh.h struct mesh_hop): released where the word holds
+   every bit of the mask (a range's supplied word MESH_SUPPLIED, or a forwarding SEND's its receive's bit in its
+   execution's landed record), in place of the client's `ready` continuation (struct mesh_send): the word is the
+   region's, the record the child's.  `position` renamed `mask`, and `forwarding` gone with the forwards gate
+   (link_prepare's note of 2026-11-03) */
 struct prepared_send {
   _Alignas(128) _Atomic uint64_t *word;
-  uint64_t position;
+  uint64_t mask;
   struct ibv_sge span;
   struct ibv_send_wr request;
-  /* a forwarding SEND (its word a receive's landed word at this node: a relay's, a forwarding destination's): its
-     completion adds 1 to its page's sent count of its execution, its word's cell at offset 8 (mesh.h) */
-  uint32_t forwarding;
 };
 _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_send)==128 &&
-  offsetof(struct prepared_send,span)==16 && offsetof(struct prepared_send,request)==32 &&
+  offsetof(struct prepared_send,mask)==8 && offsetof(struct prepared_send,span)==16 &&
+  offsetof(struct prepared_send,request)==32 &&
   offsetof(struct prepared_send,request.send_flags)+sizeof(unsigned int)<=128,"M29");
-/* design/prepared-machine.md#M08: d6dceac's prepared receive, verbatim, its landed word `input` and the value its
-   landing stores `argument` (`position`), `next` the next receive on its queue pair; `hop`, `need` and `sent` added:
-   its hop's place in the pair's receives (struct flow_hop), the leading executions of that hop landed before it is
-   posted, and its page's sent count of execution t - depth (its word's cell at offset 8, mesh.h; NULL where t < depth
-   or the page has no forwards), which reads the page's forwards before it is posted */
+/* design/prepared-machine.md#M08: d6dceac's prepared receive, verbatim but what its landing stores: its landed word
+   `input` (the word of its execution's landed record that holds its bit, mesh.h) and its bit `mask` in place of the
+   value `argument`, which its landing ORs in; `next` the next receive on its queue pair; `cancel` added, its
+   execution's cancel word (its landed record's word 0), which link_close stores UINT64_MAX where its bit is not set.
+   `hop`, `need` and `sent` (the receive window's and the forwards gate's) gone (link_prepare's note of 2026-11-03) */
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
   _Alignas(32) struct ibv_recv_wr *next;
   struct ibv_qp *pair;
   _Atomic uint64_t *input;
-  uint64_t argument;
-  uint32_t hop,need;
-  _Atomic uint64_t *sent;
+  uint64_t mask;
+  _Atomic uint64_t *cancel;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,next)==64 &&
   offsetof(struct prepared_receive,pair)==72 && offsetof(struct prepared_receive,input)==80 &&
-  offsetof(struct prepared_receive,argument)==88,"M08 M09");
+  offsetof(struct prepared_receive,mask)==88 && offsetof(struct prepared_receive,cancel)==96,"M08 M09");
 /* design/prepared-machine.md#M27 */
 struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
 _Static_assert(sizeof(struct mesh_trace)==32 && _Alignof(struct mesh_trace)==32,"M27");
-/* a receive hop of the node pair, its execution-0 landed word (a region offset), its position, the leading
-   executions of it this child has read landed (`through`: mesh.h, a receive of execution t is posted once its
-   receives of executions 0 .. t - (depth - 1) have landed), and its page's forwards (the send hops of a slot naming
-   its word: mesh.h, its receive of t posted, from t = depth, once its sent count of t - depth reads them) */
-struct flow_hop { uint64_t word,position,through,forwards; };
 /* A port's plan as its child serves it, the progress thread's alone: none loaded; refused (the view `hops`, `plan` it
    refused, until the plan call writes again); served; done (every SEND of its share completed, every receive landed);
    or ended with work outstanding on the link's queue pairs, which only the child's exit releases (LINK_STREAMS_ENDED),
    so nothing more is loaded in the child's life.  Its records by lane: SENDs [send_at[k], send_end[k]) still to post,
-   receives from receive_next[k] on (a chain), the pair's receive hops (`landing`), the plan's word stride, the
-   completions of its share (`sent`, `landed`) against its counts, and the traces (MESH_LEDGER) */
+   receives from receive_next[k] on (a chain), the completions of its share (`sent`, `landed`) against its counts, and
+   the traces (MESH_LEDGER) */
 enum { FLOW_NONE, FLOW_REFUSED, FLOW_SERVING, FLOW_DONE, FLOW_ENDED };
 struct flow {
   int state,ledger,refused;
   uint32_t lanes;
-  uint64_t hops,plan,client,stride,send_count,receive_count,sent,landed;
+  uint64_t hops,plan,client,send_count,receive_count,sent,landed;
   struct prepared_send *sends,*send_at[MESH_LINK_LANES],*send_end[MESH_LINK_LANES];
   struct prepared_receive *receives,*receive_next[MESH_LINK_LANES];
-  struct flow_hop *landing;
   struct mesh_trace *trace[2];
   size_t traced[2],trace_capacity[2];
 };
@@ -152,16 +151,15 @@ static uint32_t map_index(const struct mesh_record *records,uint64_t count,uint3
   for(uint64_t r=0;r<count;r++){index+=records[r].node<node;held|=records[r].node==node;}
   return held?index:UINT32_MAX;
 }
-/* the plan written as the bridge reads it (mesh.h, "Executions"): its executions (main's invocations, at least one),
-   its ring depth (d6dceac link_configure's: depth == executions where unset or past them, the unrung machine) and its
-   hops a slot */
-static void plan_shape(uint64_t hops,uint32_t *executions,uint32_t *depth,uint64_t *slot){
-  *executions=M->executions?M->executions:1;
-  *depth=atomic_load_explicit(&M->depth,memory_order_relaxed);
-  if(!*depth || *depth>*executions)*depth=*executions;
-  *slot=hops/ *depth;
-}
 static inline _Atomic uint64_t *region_word(uint64_t offset){ return (_Atomic uint64_t *)(void *)((char *)M+offset); }
+/* the cancel word of the execution whose landed record holds the word at region offset `word`: that record's word 0,
+   the record starting at landed_off + ((word - landed_off) / landed_stride) x landed_stride (mesh.h, the landed list:
+   design/disjoint-pages-change-request.md, "Claude's proposal" 2; hdr `landed_off` the layout's, `landed_stride` the
+   plan's, written before `hops`) */
+static inline _Atomic uint64_t *landed_cancel(uint64_t word){
+  const uint64_t base=M->landed_off,stride=M->landed_stride;
+  return region_word(base+(word-base)/stride*stride);
+}
 
 /* The rule both ends compute (design/page-queue-change-request.md; mesh.h struct mesh_hop, "Both ends"), and this
    port's share of the plan built from it.  The plan written (hdr `plan` its generation) is refused (ESTALE) where its
@@ -171,29 +169,39 @@ static inline _Atomic uint64_t *region_word(uint64_t offset){ return (_Atomic ui
    node id's port index, the higher's), cables in key order; its bandwidth the lesser of the two records' and its queue
    pairs the lesser of the two (the pairing's, the same at both ends).  The pair's links are each cable's queue pairs
    0 .. qps - 1 in (key, queue pair) order, each of rate the cable's bandwidth over its queue pairs.  Each direction's
-   hops of the pair (slot 0's entries naming the peer's index, in list order) are units of execution 0 in list order,
-   then execution 1's, ..., every one a page (block x pgsz bytes), assigned by mesh_graph_list_schedule (Graham's list
-   scheduling, mesh-graph.h): this node's SENDs to the peer are the peer's receives from this node, so both ends assign
-   one list alike.  Kept: the units on this port's cable, each on its queue pair (lane q, link_plan), in assignment
-   order, so the k-th SEND on a queue pair fills the k-th receive posted on it.  A SEND of execution t sends slot (t mod
-   depth)'s page of its hop, released by its word of execution t (word + t hop_stride) reaching `position`; a relay is
-   no special case, its SEND naming its receive's landed word.  A receive of execution t lands in slot (t mod depth)'s
-   page, storing `position` into its word of execution t, and where the plan rings (depth < executions) is posted once
-   its hop's executions 0 .. t - window have landed, the window d6dceac link_configure's (depth - 1, at least 1: a slot
-   short of the ring; mesh.h says t - (depth - 1), which for depth 1 asks t's own landing, so main's 1 stands), and,
-   where its page has forwards, from t = depth once its page's sent count of t - depth reads them (below).  No
-   verbs call: the progress thread posts as it serves (link_receive_progress, link_send_progress).  0, or an error
-   value: ESTALE, ETIMEDOUT or ENOMEM reading the map, EHOSTUNREACH where the pair has units but no link of rate,
-   EPROTO where the map gives this cable a queue pair its link does not hold, EMSGSIZE where a page is more frames than
-   a lane it is assigned can hold; or EAGAIN, no refusal, where the plan was written again while it was read */
+   hops of the pair (the list's entries naming the peer's index, in list order: the list is every execution's entries
+   in execution order, execution 0's, then 1's, ..., mesh.h) are its units in that order, every one a page (block x
+   pgsz bytes), assigned by mesh_graph_list_schedule (Graham's list scheduling, mesh-graph.h): this node's SENDs to the
+   peer are the peer's receives from this node, so both ends assign one list alike.  Kept: the units on this port's
+   cable, each on its queue pair (lane q, link_plan), in assignment order, so the k-th SEND on a queue pair fills the
+   k-th receive posted on it.  An entry's `page`, `word` and `mask` are its execution's own.  A SEND sends its page,
+   released where its word holds every bit of its `mask`; a relay is no special case, its SEND naming its receive's
+   word and mask.  A receive lands in its page, ORs its `mask` into its word (its bit in its execution's landed record)
+   and is posted as its lane's queue has room (link_receive_drain); its execution's cancel word is the record's word 0
+   (landed_cancel).  No verbs call: the progress thread posts as it serves (link_receive_progress,
+   link_send_progress).  0, or an error value: ESTALE, ETIMEDOUT or ENOMEM reading the map, EHOSTUNREACH where the
+   pair has units but no link of rate, EPROTO where the map gives this cable a queue pair its link does not hold,
+   EMSGSIZE where a page is more frames than a lane it is assigned can hold; or EAGAIN, no refusal, where the plan was
+   written again while it was read.
+   2026-11-03, sub-assignment 6 (design/disjoint-pages-change-request.md, "Claude's proposal" 1 and 3; Appendix A, A4):
+   the ring went from the bridge: plan_shape (hdr `depth`, a slot's hops, execution t's page the slot t mod depth's
+   and its word the cell at word + t hop_stride), the receive window (a receive of t posted once its hop's executions
+   0 .. t - window had landed: struct flow_hop, landed_through, `need`) and the coordinator's forwards gate of the same
+   day (a relay page's receive of t posted, from t = depth, once the page's forwarding SENDs of t - depth had completed,
+   each completion adding 1 at offset 8 of its landed word's cell: `sent`, `forwarding`), with the per-page cells both
+   read.  Why: they reused `depth` copies of a page under a wait before each execution, which nothing asked for; the
+   plan's one allocator gives each execution's values their own pages, sharing a page only where the plan's dependence
+   graph orders the last read (a consumption, or a relay's forward) before the next write (a landing), so a receive
+   needs no landing or forward of another execution before it is posted.  What must stay: the k-th SEND on a queue pair
+   fills the k-th receive posted on it (both ends' one assignment, in list order); a landing is never overwritten while
+   it is read, by the allocator's order, not a count here; and no request is taken back but by the child's exit
+   (link_close) */
 static int link_prepare(struct port *port){
   struct link *l=&port->link;
   struct flow *f=flows+port->index;
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_relaxed);
-  f->hops=hops;f->plan=plan;f->client=atomic_load_explicit(&M->client,memory_order_acquire);f->stride=M->hop_stride;
-  uint32_t executions,depth;uint64_t n;
-  plan_shape(hops,&executions,&depth,&n);
+  f->hops=hops;f->plan=plan;f->client=atomic_load_explicit(&M->client,memory_order_acquire);
   const struct mesh_hop *list=mesh_hops(M);
   struct mesh_record *records=NULL;uint64_t count=0,serial=0;
   int error=map_read(&records,&count,&serial);
@@ -215,21 +223,15 @@ static int link_prepare(struct port *port){
       rate[links]=(double)cables[c].bandwidth/(double)cables[c].qps;on[links]=c;queue[links]=q;links++;
     }
   }
-  /* each direction's hops of the pair, slot 0's in list order (every slot holds the same hops in the same order) */
-  uint32_t *pick[2]={NULL,NULL};uint64_t picks[2]={0,0},units[2]={0,0};
+  /* each direction's hops of the pair, its units: the list's entries naming the peer, picked once over the whole list,
+     in list order (execution order) */
+  uint32_t *pick[2]={NULL,NULL};uint64_t units[2]={0,0};
   uint64_t *bytes=NULL,*carried=NULL;uint32_t *assigned[2]={NULL,NULL};
   for(int d=0;d<2 && index!=UINT32_MAX;d++){
-    if(!(pick[d]=malloc((n?n:1)*sizeof *pick[d]))){error=ENOMEM;goto failed;}
-    for(uint64_t j=0;j<n;j++)if(list[j].node==index && list[j].direction==(uint32_t)d)pick[d][picks[d]++]=(uint32_t)j;
-    units[d]=picks[d]*executions;
+    if(!(pick[d]=malloc((hops?hops:1)*sizeof *pick[d]))){error=ENOMEM;goto failed;}
+    for(uint64_t j=0;j<hops;j++)
+      if(list[j].node==index && list[j].direction==(uint32_t)d)pick[d][units[d]++]=(uint32_t)j;
   }
-  /* A page this node both receives into and sends from (a relay's, or a destination's that forwards it) is used again
-     every `depth` executions, so its receive of execution t is posted, from t = depth, only once the page's
-     forwarding SENDs of t - depth have completed (mesh.h: its word's cell of t - depth at offset 8, the sent count,
-     reads the page's forwards; the coordinator, 2026-11-03).  Those SENDs are other ports' children's, each adding 1 as
-     it takes one's completion.  Both are the plan's data (struct mesh_hop `forwards`, mesh_plan's): a receive hop's the
-     page's forwards, the send hops of a slot naming its landed word; a send hop's 1 where it forwards (its word a
-     landed word at this node), else 0 */
   const uint64_t most=units[0]>units[1]?units[0]:units[1];
   if(most){
     bytes=malloc(most*sizeof *bytes);carried=malloc((links?links:1)*sizeof *carried);
@@ -262,11 +264,7 @@ static int link_prepare(struct port *port){
   for(uint32_t q=0;q<MESH_LINK_LANES;q++){f->send_count+=lane_units[MESH_SEND][q];f->receive_count+=lane_units[MESH_RECEIVE][q];}
   f->sends=f->send_count?aligned_alloc(128,f->send_count*sizeof *f->sends):NULL;
   f->receives=f->receive_count?aligned_alloc(128,f->receive_count*sizeof *f->receives):NULL;
-  f->landing=picks[MESH_RECEIVE]?calloc(picks[MESH_RECEIVE],sizeof *f->landing):NULL;
-  if((f->send_count && !f->sends) || (f->receive_count && !f->receives) || (picks[MESH_RECEIVE] && !f->landing)){error=ENOMEM;goto failed;}
-  for(uint64_t i=0;i<picks[MESH_RECEIVE];i++)
-    f->landing[i]=(struct flow_hop){.word=list[pick[MESH_RECEIVE][i]].word,.position=list[pick[MESH_RECEIVE][i]].position,
-                                    .forwards=list[pick[MESH_RECEIVE][i]].forwards};
+  if((f->send_count && !f->sends) || (f->receive_count && !f->receives)){error=ENOMEM;goto failed;}
   struct prepared_send *send_fill[MESH_LINK_LANES];
   struct prepared_receive *receive_fill[MESH_LINK_LANES],*receive_last[MESH_LINK_LANES];
   f->lanes=0;
@@ -277,33 +275,30 @@ static int link_prepare(struct port *port){
     r+=lane_units[MESH_RECEIVE][q];
     if(lane_units[MESH_SEND][q] || lane_units[MESH_RECEIVE][q])f->lanes|=UINT32_C(1)<<q;
   }
-  const uint32_t window=depth<executions?(depth>1?depth-1:1):executions;
   for(int d=0;d<2;d++)for(uint64_t k=0;k<units[d];k++){
     const uint32_t q=assigned[d][k];
     if(q==UINT32_MAX)continue;
-    const uint64_t t=k/picks[d],i=k%picks[d],j=pick[d][i];
-    const struct mesh_hop *hop=list+(t%depth)*n+j;
+    const struct mesh_hop *hop=list+pick[d][k];
     const struct ibv_sge span=wire_span(&port->device,(uint64_t)hop->page*M->pgsz,page_bytes());
-    _Atomic uint64_t *word=region_word(list[j].word+t*f->stride);
+    _Atomic uint64_t *word=region_word(hop->word);
     if(d==MESH_SEND){
       struct prepared_send *record=send_fill[q]++;
-      *record=(struct prepared_send){.word=word,.position=list[j].position,.span=span,.forwarding=list[j].forwards!=0};
+      *record=(struct prepared_send){.word=word,.mask=hop->mask,.span=span};
       record->request=(struct ibv_send_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND,
         .send_flags=IBV_SEND_SIGNALED};
     } else {
       struct prepared_receive *record=receive_fill[q]++;
-      *record=(struct prepared_receive){.span=span,.pair=l->provider.queues[q].pair,.input=word,.argument=list[j].position,
-        .hop=(uint32_t)i,.need=depth<executions && t+1>window?(uint32_t)(t+1-window):0,
-        .sent=t>=depth && list[j].forwards?region_word(list[j].word+(t-depth)*f->stride+sizeof(uint64_t)):NULL};
+      *record=(struct prepared_receive){.span=span,.pair=l->provider.queues[q].pair,.input=word,.mask=hop->mask,
+        .cancel=landed_cancel(hop->word)};
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
       if(receive_last[q])receive_last[q]->next=&record->request;
       receive_last[q]=record;
     }
   }
-  /* the plan read whole (review R1, round 2): the entries, executions, depth and stride were read after `hops`
+  /* the plan read whole (review R1, round 2): the entries and the landed list's stride were read after `hops`
      (acquire); were the plan written again meanwhile (its `hops` 0 first, then a new generation `plan`, the plan call's
      release fence after the 0), a read of the new writes is seen here, after an acquire fence, as `hops` or `plan`
-     moved, and what was read is dropped (EAGAIN: link_run tries again on its next pass) */
+     moved, and what was read is dropped (EAGAIN: link_run tries again on its next pass) before any of it is posted */
   atomic_thread_fence(memory_order_acquire);
   if(atomic_load_explicit(&M->hops,memory_order_relaxed)!=hops || atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan){
     error=EAGAIN;goto failed;
@@ -319,10 +314,10 @@ static int link_prepare(struct port *port){
   }
   if(f->ledger)for(uint32_t q=0;q<MESH_LINK_LANES;q++)if(f->lanes>>q&1)
     fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"lane\":%u,\"send_base\":%llu,\"sends\":%llu,\"receive_base\":%llu,\"receives\":%llu,"
-      "\"send_record_bytes\":%zu,\"receive_record_bytes\":%zu,\"executions\":%u,\"depth\":%u,\"window\":%u}\n",port->index,M->node,q,
+      "\"send_record_bytes\":%zu,\"receive_record_bytes\":%zu,\"executions\":%u}\n",port->index,M->node,q,
       (unsigned long long)(uintptr_t)f->send_at[q],(unsigned long long)lane_units[MESH_SEND][q],
       (unsigned long long)(uintptr_t)f->receive_next[q],(unsigned long long)lane_units[MESH_RECEIVE][q],
-      sizeof(struct prepared_send),sizeof(struct prepared_receive),executions,depth,window);
+      sizeof(struct prepared_send),sizeof(struct prepared_receive),M->executions);
   f->sent=f->landed=0;
   for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);}
   free(bytes);free(carried);
@@ -330,21 +325,9 @@ static int link_prepare(struct port *port){
 failed:
   for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);free(f->trace[d]);f->trace[d]=NULL;}
   free(bytes);free(carried);
-  free(f->sends);free(f->receives);free(f->landing);
-  f->sends=NULL;f->receives=NULL;f->landing=NULL;f->send_count=f->receive_count=0;f->lanes=0;
+  free(f->sends);free(f->receives);
+  f->sends=NULL;f->receives=NULL;f->send_count=f->receive_count=0;f->lanes=0;
   return error;
-}
-
-/* whether the receive's hop has landed its leading executions through the receive's `need` (mesh.h: its word of each
-   reaches its position, below UINT64_MAX), read from the region's words, which every cable of the pair lands into */
-static int landed_through(struct flow *f,const struct prepared_receive *record){
-  struct flow_hop *hop=f->landing+record->hop;
-  while(hop->through<record->need){
-    const uint64_t value=atomic_load_explicit(region_word(hop->word+hop->through*f->stride),memory_order_acquire);
-    if(value<hop->position || value==UINT64_MAX)return 0;
-    hop->through++;
-  }
-  return 1;
 }
 
 /* design/prepared-machine.md#M08 */
@@ -352,14 +335,13 @@ static int landed_through(struct flow *f,const struct prepared_receive *record){
 /* design/algorithm-sources.md#programcopy */
 /* d6dceac's receive drain (its unordered form: a completion names its record), now one pass of the port's progress
    thread over the link's receive completions (the queue pairs' shared queue, `completion`), in the tag's batches
-   (rdma/mesh-link.c link_receive): each landing of a lane served stores its record's `position` (release) into its
-   landed word of its execution, after the acquire the poll's DMA asks, and is counted (the lane's `got` and frames,
-   which lanes_flush reads); a failed one, or one of other than a whole page, fails the link (link_failed), never
-   retried.  Then each served lane's
-   receives posted ahead from its chain, in order, while its queue has room (the tag's requests and frames) and, where
-   the plan rings, its hop's leading executions have landed and its page's forwarding SENDs of `depth` executions
-   before have completed (the sent count; a deferral to a later pass, no wait); at most MESH_POST_QUANTUM a pass.  0
-   where the link failed */
+   (rdma/mesh-link.c link_receive): each landing of a lane served ORs its record's `mask` (release) into its landed
+   word, marking its bit in its execution's landed record (mesh.h; design/disjoint-pages-change-request.md, "Claude's
+   proposal" 2), after the acquire the poll's DMA asks, and is counted (the lane's `got` and frames, which lanes_flush
+   reads); a failed one, or one of other than a whole page, fails the link (link_failed), never retried.  Then each
+   served lane's receives posted ahead from its chain, in order, while its queue has room (the tag's requests,
+   MESH_LANE_UNITS, and its frames, frame_capacity), and nothing else: no receive waits on another execution's landings
+   or forwards (link_prepare's note of 2026-11-03); at most MESH_POST_QUANTUM a pass.  0 where the link failed */
 static __attribute__((always_inline)) inline int link_receive_drain(struct port *port,struct flow *f,uint32_t served,int traced){
   struct link *l=&port->link;
   struct ibv_wc done[MESH_COMPLETION_BATCH];
@@ -384,7 +366,7 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
       if(done[i].byte_len!=page){link_failed(port,EMSGSIZE);return 0;}
       const uint64_t polled=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
       struct prepared_receive *record=(void *)(uintptr_t)done[i].wr_id;
-      atomic_store_explicit(record->input,record->argument,memory_order_release);
+      atomic_fetch_or_explicit(record->input,record->mask,memory_order_release);
       struct lane_state *state=l->lane+lane;
       state->got++;state->frames_retired+=each;f->landed++;
       if(traced && f->traced[MESH_RECEIVE]<capacity){
@@ -400,8 +382,6 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
     struct prepared_receive *record=f->receive_next[k];
     for(uint32_t budget=MESH_POST_QUANTUM;record && budget;budget--){
       if(state->posted-state->got>=MESH_LANE_UNITS || state->frames_posted-state->frames_retired+each>state->frame_capacity)break;
-      if(record->need && !landed_through(f,record))break;
-      if(record->sent && atomic_load_explicit(record->sent,memory_order_acquire)<f->landing[record->hop].forwards)break;
       struct ibv_recv_wr *bad;
       const int error=queue->receive(record->pair,&record->request,&bad);
       if(error){lane_lost(port,k,error<0?-error:error);break;}
@@ -429,11 +409,12 @@ static int link_receive_progress(struct port *port,uint32_t served){
 /* d6dceac's send drain (each queue pair's chain from its cursor, a record posted as its release word holds, through the
    provider's own post), now one pass of the port's progress thread: the SEND completions first, on their own queue
    (`sent`, mesh-verbs.h pair_up), in the tag's batches (rdma/mesh-link.c link_send), each of a lane served retiring its
-   frames through the lane's gate and counted (`done`), a forwarding one adding 1 to its page's sent count of its
-   execution (mesh.h), a failed one failing the link; then each served lane's SENDs in
-   order, each once its word of its execution reaches its `position` (acquire; UINT64_MAX releases nothing), while the
-   lane's gate holds its frames and its requests are under MESH_LANE_UNITS, at most MESH_POST_QUANTUM a pass.  A ready
-   page waits only behind earlier pages of its own queue pair.  0 where the link failed */
+   frames through the lane's gate and counted (`done`), a failed one failing the link (no completion counts a page's
+   forwards: link_prepare's note of 2026-11-03); then each served lane's SENDs in order, each once its word holds every
+   bit of its `mask` (acquire: a range's supplied word MESH_SUPPLIED, or a forwarding SEND's receive's bit; a
+   cancellation is a landed record's word 0, which no SEND names, so it releases nothing), while the lane's gate holds
+   its frames and its requests are under MESH_LANE_UNITS, at most MESH_POST_QUANTUM a pass.  A ready page waits only
+   behind earlier pages of its own queue pair.  0 where the link failed */
 static __attribute__((always_inline)) inline int link_send_drain(struct port *port,struct flow *f,uint32_t served,int traced){
   struct link *l=&port->link;
   struct ibv_wc done[MESH_COMPLETION_BATCH];
@@ -449,10 +430,6 @@ static __attribute__((always_inline)) inline int link_send_drain(struct port *po
       if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
       if(done[i].status){link_failed(port,(int64_t)done[i].status);return 0;}
       gate_retire(l->gate+lane,each);l->lane[lane].done++;f->sent++;
-      /* a forwarding SEND's completion told its page's sent count of its execution (mesh.h: its word's cell at
-         offset 8), which the page's next receive, `depth` executions on, reads before it is posted */
-      const struct prepared_send *record=(const void *)(uintptr_t)done[i].wr_id;
-      if(record->forwarding)atomic_fetch_add_explicit(record->word+1,1,memory_order_release);
     }
   }
   for(uint32_t lanes=f->lanes&served;lanes;lanes&=lanes-1){
@@ -463,8 +440,7 @@ static __attribute__((always_inline)) inline int link_send_drain(struct port *po
     int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=queue->send;
     struct prepared_send *record=f->send_at[k],*const end=f->send_end[k];
     for(uint32_t budget=MESH_POST_QUANTUM;record<end && budget;budget--){
-      const uint64_t value=atomic_load_explicit(record->word,memory_order_acquire);
-      if(value<record->position || value==UINT64_MAX)break;
+      if((atomic_load_explicit(record->word,memory_order_acquire)&record->mask)!=record->mask)break;
       if(state->sent-state->done>=MESH_LANE_UNITS || !gate_holds(gate,each))break;
       const uint64_t observed=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
       struct ibv_send_wr *bad;
@@ -496,8 +472,12 @@ static int link_send_progress(struct port *port,uint32_t served){
 /* design/algorithm-sources.md#meshresult */
 /* The end of the plan a port's child serves, on its progress thread: where the plan was written again (hdr `hops` 0,
    the plan call's first store, or another plan's), where the link serves no lane (a halt, a loss), and as the child
-   closes.  Its landed words not landed are cancelled (mesh.h: UINT64_MAX, stored only where a word reads 0, so a
-   landing is never overwritten); its traces told (d6dceac link_close's lines); its records freed; and the port's
+   closes.  Each of its receives whose bit its execution's landed record does not hold cancels that execution:
+   UINT64_MAX stored (release) into the record's cancel word, its word 0 (mesh.h, the landed list; landed_cancel),
+   never cleared while the plan stands; a landing's bit is in another word of the record, so no landing is overwritten
+   (2026-11-03, sub-assignment 6: was UINT64_MAX into each landed word of its own that read 0, the per-page words gone,
+   design/disjoint-pages-change-request.md, "Claude's proposal" 3); its traces told (d6dceac link_close's lines); its
+   records freed; and the port's
    `prepared` 0, no plan loaded.  Where a SEND or receive of the link's queue pairs is outstanding (the lanes' counts),
    nothing more is loaded in the child's life, and where the link still serves, it is lost as the tag loses a link whose
    holdings ended with units outstanding (rdma/mesh-link.c stream_end: `lost` LINK_STREAMS_ENDED, every lane `broken`,
@@ -515,9 +495,11 @@ static void link_close(struct port *port,uint32_t served){
     atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
     return;
   }
+  /* a receive's bit is this thread's alone to set (its landing, link_receive_drain), so its read here is relaxed */
   for(uint64_t r=0;r<f->receive_count;r++){
-    uint64_t idle=0;
-    atomic_compare_exchange_strong_explicit(f->receives[r].input,&idle,UINT64_MAX,memory_order_release,memory_order_relaxed);
+    const struct prepared_receive *record=f->receives+r;
+    if((atomic_load_explicit(record->input,memory_order_relaxed)&record->mask)!=record->mask)
+      atomic_store_explicit(record->cancel,UINT64_MAX,memory_order_release);
   }
   /* design/prepared-machine.md#M27 */
   for(int d=0;d<2;d++){
@@ -531,8 +513,8 @@ static void link_close(struct port *port,uint32_t served){
   uint32_t outstanding=0;
   for(uint32_t k=0;k<MESH_LINK_LANES;k++)
     if(l->plan>>k&1 && (l->lane[k].sent!=l->lane[k].done || l->lane[k].posted!=l->lane[k].got))outstanding|=UINT32_C(1)<<k;
-  free(f->sends);free(f->receives);free(f->landing);
-  f->sends=NULL;f->receives=NULL;f->landing=NULL;f->send_count=f->receive_count=0;f->lanes=0;
+  free(f->sends);free(f->receives);
+  f->sends=NULL;f->receives=NULL;f->send_count=f->receive_count=0;f->lanes=0;
   memset(f->send_at,0,sizeof f->send_at);memset(f->send_end,0,sizeof f->send_end);memset(f->receive_next,0,sizeof f->receive_next);
   f->state=outstanding?FLOW_ENDED:FLOW_NONE;
   /* `prepared` 0 at once where nothing is outstanding; else it stays the plan's until the parent reaps the child
@@ -733,21 +715,21 @@ int guard_raise(struct port *port){
   return 1;
 }
 
-/* this node's landed words of the plan written not landed cancelled (mesh.h: UINT64_MAX, where a word reads 0), every
-   execution's, of its receives from the node of map index `from` (UINT32_MAX: every receive) */
+/* this node's receives of the plan written from the node of map index `from` (UINT32_MAX: every receive) that have not
+   landed cancel their executions: for each such entry of the list (every execution's, in execution order) whose bit
+   its word does not hold, UINT64_MAX stored (release) into its execution's cancel word (landed_cancel; mesh.h, the
+   landed list), never cleared while the plan stands.  2026-11-03, sub-assignment 6
+   (design/disjoint-pages-change-request.md, "Claude's proposal" 3): was UINT64_MAX into each of the hop's
+   per-execution landed words that read 0, each found at word + t hop_stride over hdr `executions`; the per-page words
+   went, and each entry's word is its execution's own */
 static void plan_cancel(uint32_t from){
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   if(!hops)return;
-  uint32_t executions,depth;uint64_t n;
-  plan_shape(hops,&executions,&depth,&n);
-  const uint64_t stride=M->hop_stride;
   const struct mesh_hop *list=mesh_hops(M);
-  for(uint64_t j=0;j<n;j++){
+  for(uint64_t j=0;j<hops;j++){
     if(list[j].direction!=MESH_RECEIVE || (from!=UINT32_MAX && list[j].node!=from))continue;
-    for(uint64_t t=0;t<executions;t++){
-      uint64_t idle=0;
-      atomic_compare_exchange_strong_explicit(region_word(list[j].word+t*stride),&idle,UINT64_MAX,memory_order_release,memory_order_relaxed);
-    }
+    if((atomic_load_explicit(region_word(list[j].word),memory_order_relaxed)&list[j].mask)==list[j].mask)continue;
+    atomic_store_explicit(landed_cancel(list[j].word),UINT64_MAX,memory_order_release);
   }
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:619-654 streams_open (11807bec), reduced to what it is under the page lists:
@@ -764,13 +746,14 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:699-711 streams_cancel (11807bec), reduced to what it is under the page
    lists: the tag's streams of a port live no more and their words ~0; here, as its link is lost or the bridge stops
-   (mesh-ports.c port_lost, mesh-children.c child_reaped, the stop), this node's landed words not landed cancelled for
-   the receives from the port's peer (its index in the map; none where the map holds no record of it), every one where
-   `port` is NULL, and the port's (every port's) plan no longer loaded (`prepared` 0) where no child of it lives: a
-   live child's requests may still name the plan's pages, so its `prepared` is its own to clear (link_close) or its
-   reap's (child_reaped, after `port->child` is 0).  A receive the port's child lands after it stores its position over
-   the cancellation: the page's bytes did land, and the tag's cancel again (child_heard's connect of a lost pairing,
-   child_reaped) cancels it once more.  A cancel again comes after the loss has zeroed `port->peer` (mesh-ports.c
+   (mesh-ports.c port_lost, mesh-children.c child_reaped, the stop), this node's receives not landed from the port's
+   peer (its index in the map; none where the map holds no record of it), every one where `port` is NULL, cancelling
+   their executions (plan_cancel), and the port's (every port's) plan no longer loaded (`prepared` 0) where no child of
+   it lives: a live child's requests may still name the plan's pages, so its `prepared` is its own to clear
+   (link_close) or its reap's (child_reaped, after `port->child` is 0).  A receive the port's child lands after the
+   cancellation sets its bit beside it, and its execution stays cancelled (a cancel word is never cleared while the plan
+   stands); the tag's cancel again (child_heard's connect of a lost pairing, child_reaped) cancels the executions of
+   the receives not landed by then.  A cancel again comes after the loss has zeroed `port->peer` (mesh-ports.c
    port_lost, which cancels first), so each port's peer at its last cancel with one is kept (`cancelled`, the parent's,
    its node, its map index then, or every receive where the map was not read) and a cancel with no peer cancels by it,
    as at the tag (review R2, C1).  The parent never sees its child load a plan, so the peer is kept at that first cancel,
@@ -799,8 +782,9 @@ void streams_cancel(const struct port *port){
 /* tag pre-return-20261103 rdma/mesh-link.c:712-722 streams_let_go (60b00774), reduced to what it is under the page
    lists: the tag let a gone client's streams go; here, on the bridge's turn over its clients (mesh-records.c
    clients_turn), where no client holds the region (hdr `client` 0: its holder retired, mesh-dataflow.c mesh_retire) and
-   a plan stays written, this node's landed words of it not landed are cancelled, so no relay of this node forwards a
-   page of a plan whose client is gone */
+   a plan stays written, this node's receives of it not landed cancel their executions (plan_cancel), so no consumer
+   reads a step of a plan whose client is gone as whole; a relay's forward of a page not landed is never released (its
+   bit unset) */
 void streams_let_go(void){
   if(atomic_load_explicit(&M->client,memory_order_acquire))return;
   plan_cancel(UINT32_MAX);
