@@ -11,8 +11,9 @@
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
 /* 105: the page lists (struct mesh_hop) and the bridge's pages (struct mesh_bridge_pages) in the layout, the map's
-   fields (struct mesh_record) in the header, `executions` in place of its padding (design/page-queue-change-request.md) */
-#define MESH_VERSION 105u
+   fields (struct mesh_record) in the header, `executions` in place of its padding (design/page-queue-change-request.md).
+   106: the tag's header fields `boot`, `health`, `busy`, `idle_since`, `stopping` appended */
+#define MESH_VERSION 106u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -196,6 +197,13 @@ struct hdr {
      mesh_started), with `client`'s low 32 bits its identity as a holder of the region */
   uint64_t bridge_off;
   _Atomic uint64_t client_start;
+  /* tag pre-return-20261103 rdma/mesh.h struct hdr `boot`, `health`, `busy`, `idle_since`, `stopping`, verbatim (their
+     tag types; read by the tag's mesh-records.c and mesh-link.c region_open and main): `boot` the bridge's start on the
+     wall clock (ns, CLOCK_REALTIME), its records' boot; `health` the serial a health-only change of a record moves,
+     never the map's (mesh-records.c health_put); `busy`: the streams held (0 between calls) and since when none has
+     been (`idle_since`, the wall clock in ns; 0 while any is); `stopping` stored 0 as the region opens */
+  uint64_t boot;
+  _Atomic uint64_t health,busy,idle_since,stopping;
 };
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
