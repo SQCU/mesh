@@ -654,6 +654,7 @@ work proceeds.)
   row's device, buffer fields and publication cleared by the plan (mesh_section_create did that before); ties ordered
   by item index; a value at another node named on stderr by its node, identity and source. Routed: 2 to remove
   mesh_graph_happens_before.
+- 2 again: 86b7026f (mesh_graph_happens_before and its helpers removed, nothing outside mesh-graph naming it).
 
 ### Reviews and where their findings went
 
