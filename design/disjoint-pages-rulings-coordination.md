@@ -289,7 +289,53 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
 
 ### Commits and routing
 
-(appended as the work proceeds)
+- Contract: 79ed346a (this file, INDEX.md). 51523f66 (the coordinator, D.4): design/disjoint-pages-revision-coordination.md's
+  open item on the provider's copy of a request and its stale-M08 sentence gone; the cancelled-field item kept.
+- 2 (mesh-collective.{h,c}): 33a1ea03 (the header: `lag` in place of `padding`, the Values text's In and Out), bee8b2af
+  (validation, EINVAL before anything is written: `lag` on a value not MESH_EXECUTION, wire, state, or named by a
+  declared transfer; rows count x P counted before the colouring; plan_place's k items a lag value, each interfering
+  with every item, its own copies included, in plan_interferes; copy c's rows bound to copy c's item; out `count` k,
+  `stride` P; the files' text in D.2's terms). Its notes: mesh.h struct mesh_target's field `stream` (a supplied word's
+  offset) and mesh-dataflow.h:89 ("a pair's cables summed") name transport outside the bridge, in files outside its
+  set (routed below, with the count audit's list).
+- 1 (mesh-flow.c, mesh-records.c, mesh-bridge.h, mesh-dataflow.c's start, mesh-call.h's text of it, prepared-machine.md
+  M08): 1258766d (R1: link_receive_drain posts a record for its round only where `landings >= at.round`, stopping in
+  order at the first that has not; the notes relying on the provider's copy of a request gone), 7968dc45 (M08 rewritten
+  to struct prepared_receive as it is), 2f349ac4 (plan_stale declared), 35ce58a5 (plan_stale; map_put and map_adopt call
+  it where `map_serial` moved, after the closing notify; every caller of both shown on the parent's event-loop thread,
+  in plan_cancel's note, at plan_stale and in clients_turn's note), 1a8b10e8 (R3 in mesh_transfers_start, after the raise
+  and its wake; mesh-call.h's returns line: every error with `executions` not raised but the ESTALE after the raise).
+  mesh-call.h's comment was given to 1 by the coordinator. Its differences, accepted: (1) plan_cancel takes the
+  generation plan_stale judged stale (0 from streams_cancel and streams_let_go: whichever plan is written), so a plan
+  written between plan_stale's check and plan_cancel's first read, whose map stands, is not cancelled (a spurious
+  ENOLINK); (2) plan_stale's seq_cst fence is its first statement, before it reads `hops` (still after the serial's move
+  and before `executions` is read): a plan whose `hops` was stored after its last map read and just before the move is
+  then seen by the bridge or its start sees the move; (3) plan_stale reads the plan whole (`hops`, `plan`, the serial,
+  an acquire fence, both again), as plan_cancel and link_prepare do.
+- 3 (metal_recording.{h,m}, first): 5e6512ba (the header as the contract writes it), bf5265b4 (the MTL4 queue of the
+  real device, taken from the proxy's Metal 3 queue's device; MetalEncoder, each MTL4 compute encoder beginning with R7's
+  barrier; MetalCommitted, a commit with a feedback handler waited for at most METAL_PLATFORM_NS, its error the
+  feedback's, the handler holding what the GPU uses until it runs; MetalSpecializeScalars' copy in MTL4 with its own
+  allocator and residency set; MetalReplayExecute and MetalReplayOptimize in the MTL4 form alone; MetalReplayEncode
+  committing through each compaction, the queue's waitForEvent, then the later form and what follows; the later pass
+  bound through one argument table, made at replay:, which the encoder snapshots at each dispatch
+  (MTL4ComputeCommandEncoder.h:566-567), in place of the fence and setBytes; MetalReplayWaits; the step word
+  (place:step:, a raise at replay: without one); place:operand: copies and ahead, the stride form gone). Its choices,
+  accepted: a binding with write access takes the write copy (t + ahead) mod copies, a read-only one the read copy (the
+  reflection cannot tell a writer that also reads), and place:operand: raises where ahead is a multiple of copies; the
+  later form's kernel text unchanged (only its binding moved); an empty range commits nothing. Its notes for 7 relayed.
+- 5 (tools/native_bench.m, tools/primitive_constants.m): 7f7d9243, c00f2020 (MTL4 queues, allocators reset after the
+  feedback, argument tables by gpuAddress, residency sets, encoder barriers where one dispatch follows another,
+  feedback-timed GPU time, waits bounded at 5 s, `setBytes` replaced by a buffer). Its departures, accepted with their
+  evidence: primitive_constants.m's `encoded`, `resource_barrier` and `scope_barrier` probes removed, having no MTL4
+  counterpart (MTL4CommandBuffer.h:130, no dispatch type; MTL4CommandEncoder.h:57-58, memory barriers are the Metal 3
+  encoders'; its only barriers :70, :91, :113 and fences); R7's queue barrier left out of primitive_constants.m's
+  encoders, whose probes read nothing an earlier command buffer wrote and whose barrier would fall inside the measured
+  time (native_bench.m's encoders take it: a split kernel's next command buffer reads the counters the last restored);
+  a timed-out wait ends either tool with exit status 1, since its allocator cannot be reset before its command buffer
+  completes (MTL4CommandAllocator.h:48-50). Its notes: Makefile:99 and the tool's head comment cite a docs/kernels.md
+  section that does not exist; the probes `packet` and `scoped` spin by design (they measure spins), unchanged.
+- 4 (metal_recording.m, second: R9) launched after 3.
 
 ### Reviews and where their findings went
 
