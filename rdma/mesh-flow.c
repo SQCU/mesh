@@ -56,7 +56,9 @@ _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_sen
 /* design/prepared-machine.md#M08: d6dceac's prepared receive, its request and span verbatim, and what its landing
    writes (design/disjoint-pages-change-request.md, C3.1 and C3.7; design/disjoint-pages-revision-coordination.md, "The
    bridge"): its phase field, bits [field, field + 2) of `word`, and `count`, its range's count word of its copy, which
-   takes the range's `pages` arrivals an execution; `landings` the record's completions since the load, the progress
+   takes the range's `pages` arrivals an execution, NULL where its entry's `count` is 0 (a relay's own receive: its
+   forwards are released by its phase and nobody waits on a count of it, so it adds, wakes and is raised for nothing;
+   2026-11-04, the coordinator's ruling on review 15's finding 1); `landings` the record's completions since the load, the progress
    thread's alone (its j-th is execution copy + j u: link_prepare), and `copy` its copy.  Every field its landing
    reads is in its second 64 bytes, the 128-byte line its request starts.
    2026-11-04, sub-assignment 6: reversing 2026-11-03's `input`, `mask` and `cancel` (its bit of its execution's landed
@@ -262,7 +264,8 @@ static void flow_executions(struct flow *f,uint64_t executions){
    page and writes its phase and its count alone (link_receive_drain).  No verbs call: the progress thread posts as it
    serves (link_receive_progress, link_send_progress).  0, or an error value: ESTALE, ETIMEDOUT or ENOMEM reading the
    map, EINVAL where the plan has no state, its copies do not divide the list, or an entry's `field` or `pages` is none
-   a plan writes (mesh.h struct mesh_hop: a field's low bit even and below 64, a receive's pages at least 1), and
+   a plan writes (mesh.h struct mesh_hop: a field's low bit even and below 64, the pages of a receive with a count at
+   least 1), and
    `hops` and `plan` still read as loaded (else EAGAIN: plan_refused), EALREADY where this port carries units of a
    plan whose run has begun (its `executions` above 0 at the load: the note at the refusal, below),
    EHOSTUNREACH where the pair has units but no link of rate, EPROTO where the map gives this cable a queue pair its
@@ -404,7 +407,8 @@ static int link_prepare(struct port *port){
     if(q==UINT32_MAX)continue;
     const struct mesh_hop *hop=list+pick[d][k];
     /* a field the shifts below cannot hold, or a receive of no pages, is none a plan writes: refused (EINVAL) */
-    if(((d==MESH_RECEIVE || hop->field!=MESH_ABSENT) && (hop->field>62 || hop->field&1)) || (d==MESH_RECEIVE && !hop->pages)){
+    if(((d==MESH_RECEIVE || hop->field!=MESH_ABSENT) && (hop->field>62 || hop->field&1)) ||
+       (d==MESH_RECEIVE && hop->count && !hop->pages)){
       error=plan_refused(hops,plan,EINVAL);goto failed;
     }
     const struct ibv_sge span=wire_span(&port->device,(uint64_t)hop->page*M->pgsz,page_bytes());
@@ -415,7 +419,7 @@ static int link_prepare(struct port *port){
         .send_flags=IBV_SEND_SIGNALED};
     } else {
       struct prepared_receive *record=f->receives+fill[d][q]++;
-      *record=(struct prepared_receive){.span=span,.word=region_word(hop->word),.count=region_word(hop->count),
+      *record=(struct prepared_receive){.span=span,.word=region_word(hop->word),.count=hop->count?region_word(hop->count):NULL,
         .field=hop->field,.pages=hop->pages,.copy=(uint32_t)(pick[d][k]/n)};
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
     }
@@ -503,9 +507,15 @@ failed:
    (design/disjoint-pages-change-request.md, C3.1 and C3.7; design/disjoint-pages-revision-coordination.md, "The
    bridge"; mesh.h struct mesh_hop, a receive): its phase field flipped by one atomic XOR (release) of bit field +
    ((t / u) & 1), t / u being j, so the field reads mesh_phase(t / u + 1); then its range's count of its copy one more
-   (an atomic add, release); and, where the count it made is a multiple of the entry's `pages` (the pages this node
-   receives of the range a copy: an execution's arrivals in), the count word's waiters woken
-   (os_sync_wake_by_address_all, 8 bytes, region-shared, as the client's waiter waits: mesh-metal.m).  It is counted
+   (an atomic add, release); and, where the count it made is (j + 1) x the entry's `pages` (the pages this node
+   receives of the range a copy), the count word's waiters woken (os_sync_wake_by_address_all, 8 bytes, region-shared,
+   as the client's waiter waits: mesh-metal.m).  That add is the one that completes round j: by the allocator's order
+   every landing of a copy's round j comes before any of its round j + 1, so the arrival that brings the count to
+   (j + 1) P is a landing of round j, and an atomic add returns each value once, so exactly one landing wakes for each
+   round (a cancellation's raise wakes for itself: count_raise).  A receive with no count (a relay's own, `count`
+   NULL) flips its phase alone.  2026-11-04, the coordinator's ruling on review 15's finding 1: in place of this note's
+   first 2026-11-04 test, the count a multiple of `pages` (a 64-bit division a landing), a multiply and a compare, and
+   no add for a relay's own receive.  It is counted
    (the lane's `got` and frames, which lanes_flush reads); a failed one, or one of other than a whole page, fails the
    link (link_failed), never retried.  Then each served lane's receives posted ahead, its cursor's (struct cursor: the
    executions in order, execution t's records copy t mod u's), through the executions below the plan's `executions` as
@@ -542,7 +552,7 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
       struct prepared_receive *record=(void *)(uintptr_t)done[i].wr_id;
       const uint64_t round=record->landings++;
       atomic_fetch_xor_explicit(record->word,UINT64_C(1)<<(record->field+(round&1)),memory_order_release);
-      if((atomic_fetch_add_explicit(record->count,1,memory_order_release)+1)%record->pages==0)
+      if(record->count && atomic_fetch_add_explicit(record->count,1,memory_order_release)+1==(round+1)*record->pages)
         os_sync_wake_by_address_all(record->count,sizeof *record->count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
       struct lane_state *state=l->lane+lane;
       state->got++;state->frames_retired+=each;f->landed++;
@@ -668,7 +678,8 @@ static int link_send_progress(struct port *port,uint32_t served){
 /* design/algorithm-sources.md#meshresult */
 /* The end of the plan a port's child serves, on its progress thread: where the plan was written again (hdr `hops` 0,
    the plan call's first store, or another plan's), where the link serves no lane (a halt, a loss), and as the child
-   closes.  Each of its receives not landed for every execution it serves (its `landings` below the executions t <
+   closes.  Each of its receives with a count (none for a relay's own, which nobody waits on) not landed for every
+   execution it serves (its `landings` below the executions t <
    `executions` of its copy, the plan's word read now, so a rise since the last pass is cancelled too) is cancelled, the
    cancellation an arrival (design/disjoint-pages-change-request.md, C3.1: "Landings and cancellations both arrive on
    the count ... A link loss is such a cancellation"; design/disjoint-pages-revision-coordination.md, "The bridge"):
@@ -703,7 +714,7 @@ static void link_close(struct port *port,uint32_t served){
   for(uint64_t r=0;r<f->receive_count;r++){
     const struct prepared_receive *record=f->receives+r;
     const uint64_t serves=copy_executions(executions,f->copies,record->copy);
-    if(record->landings<serves)count_raise(record->count,(uint64_t)record->pages*serves);
+    if(record->count && record->landings<serves)count_raise(record->count,(uint64_t)record->pages*serves);
   }
   /* design/prepared-machine.md#M27 */
   for(int d=0;d<2;d++){
@@ -935,7 +946,8 @@ int guard_raise(struct port *port){
    phase is written.  The parent keeps no record of which receives landed (the children's `landings`), so it raises
    every such count: one already at its final value (every arrival in, or an earlier cancellation) is left as it is,
    and the entries of one range raise its word once.  A plan with no state, or whose copies do not divide its list,
-   which every port refuses (link_prepare, EINVAL), names no count to raise.
+   which every port refuses (link_prepare, EINVAL), names no count to raise; nor does a receive entry whose `count` is
+   0 (a relay's own receive, which nobody waits on: 2026-11-04, the coordinator's ruling on review 15's finding 1).
    2026-11-04, sub-assignment 6: reversing 2026-11-03's cancellation, UINT64_MAX stored into the cancel word of each
    not-landed entry's execution (C4: the cancel word); what must stay: a count only raised, and no phase written.
    The plan read whole, as link_prepare reads it (b3cc9990's re-read; 2026-11-03, sub-assignment 6, on the
@@ -976,6 +988,7 @@ static void plan_cancel(uint32_t from){
       const uint32_t direction=list[j].direction,node=list[j].node;
       if(direction!=MESH_RECEIVE || (from!=UINT32_MAX && node!=from))continue;
       const uint64_t count=list[j].count,pages=list[j].pages;
+      if(!count)continue;
       atomic_thread_fence(memory_order_acquire);
       /* `hops` acquire, as link_prepare's check: a re-plan of the same size is seen as `plan` moved */
       if(atomic_load_explicit(&M->hops,memory_order_acquire)!=hops ||
