@@ -530,13 +530,61 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   (mesh-metal.m: one repetition's waits copied once, each repetition's computed as the waiter walks t; EINVAL beside
   those the coordinator listed where repetitions x passes or the last target would overflow 64 bits); 4 08083277
   (metal_recording.h: struct MetalWait in that layout, MetalReplayWaits of one repetition, MetalEncoder exported,
-  capture: raising after the first replay:); 6 (this file): its names and R5, R6, R11 brought to the code with dated
-  notes, D.5 recorded.
+  capture: raising after the first replay:), 3135184e (metal_recording.m: MetalReplayWaits of one repetition; each
+  delegate value's buffer released once replay:'s copies return, the capture's own analysis sets emptied, so the
+  recorder holds no delegate buffer after replay:; capture: raising after the first replay:, the map being keyed by
+  address; MetalReplayPeriod over the placements a command or later pass binds, the step word's copies only where a
+  later pass binds it; MetalEncoder exported); 7 64cb0db8 (e2b: EPROTO the run's error at once where the loop stopped
+  on the status, the waiter stopped; the index commands' outputs one copy, bound by copy 0 in every capture; MetalEncoder
+  in place of encoder_of, its raise an error value at each of its four uses; one repetition's waits, `passes` the
+  passes a repetition holds, base t x passes, a step encoding another number of passes refused (9); the early-end check
+  from the per-repetition form); 6 (this file): its names and R5, R6, R11 brought to the code with dated notes, D.5
+  recorded.
 
 ### Integration
 
-(appended at the end)
+- Interim, after the implementers' first commits (mesh 854ad65c, metal-microbench 96edc20e): `make -B -C rdma` 0,
+  `make -B -C rdma native-audit` 0, `make .build/e2b_replay` 0, no warning.
+- Final, once no sub-agent ran (mesh cbb0b4e1, metal-microbench 3135184e; neither tree with a file of this unit's
+  modified): `make -B -C rdma` 0, `make -B -C rdma native-audit` 0, `make .build/e2b_replay` 0 with libmetal_recording,
+  libmesh_metal and the program rebuilt; no warning or error. The bridge signed ad hoc as before. Nothing was run:
+  parity, the page reuse, the transport readings and the spliced kernels (compiled by Metal at capture) wait for the
+  operator's authorization of runs (C3.8).
+- At the end the mesh tree held design/disjoint-pages-change-request.md modified by another session (D.5's chains
+  across rounds, and maps), which this unit neither wrote nor committed.
 
 ### Open at the end
 
-(appended at the end)
+- D.3.1 and D.5 (added during this unit, mesh 4cdff8b3): names, chains, placement tables, priorities, any number of
+  plans; D.3.5's u rounds in flight per chain (this unit's R1 is per lane in order, in the bridge's one flow per port).
+- For the operator (review 8's 1): D.3.6 cancels a standing plan wherever the map serial moves, growth as well as loss
+  (a cable pairing late, a node joining), ending a running decode at every node; the receives posted for a round no
+  peer will send end their links at the plan's end, which re-pair and move the map again (bounded, converging). The
+  reviewer's candidate rule: cancel only where the move removes a cable or a node. A node with no count of its own (a
+  pure source or relay) reads 0, not ENOLINK.
+- For the operator (6's finding 2): hello_budget(0) is 0, adapted from the tag (MESH_LINK_LANES there); a one-line
+  revert restores the tag's form.
+- The bridge's fixed counts no device reports, kept as the tag's: MESH_PROVIDER_RESERVED_QPS 1, MESH_FRAME 4096,
+  IBV_MTU_4096 on port 1. The lifecycle files' notes: mesh-children.c:52-56 reasons from macOS 26's count (the tag's
+  text; its code takes the report), mesh-lanes.c:19-22 stale against link_plan.
+- Names of the bridge's private interface outside its own files, in what D.3.1 replaces: mesh.h's text, mesh-map.h's
+  records and joins (struct mesh_reach `qps`, mesh_cables), mesh-dataflow.{h,c} and mesh-call.{h,c} (the ports'
+  `prepared`, the cables' capacity sum, the start's wait over ports; mesh-dataflow.h:89); and the deployment scripts'
+  (mesh_graph.py, mesh_preflight.py, mesh_hourly.py) and peers.py.
+- R9's classification by the reflection's access: a buffer its kernel writes before it reads, bound read-write, is an
+  invariant, copied once at replay: (a dead fill once a plan) and never reused by liveness (review 9's 8, review 10's
+  4). A binding with write access takes an `ahead` operand's write copy, the stride form's rule (review 9's 6).
+- No MTL4 header says whether an indirect command's setBarrier orders the commands of an MTL4 encoder; the MTL4 decode
+  before ecb374e0 ran with it (review 9's 13).
+- The spliced kernels and primitive_constants.m's bounded `scoped` probe are compiled by Metal at run time only (no
+  offline Metal compiler here): read, not compiled.
+- E2B_PROFILE stays skipped where the decode holds a later pass; E2B_OPCUT_AT is gone (tools/mesh/run_pair.py:47 still
+  forwards it).
+- Metal 3 command buffers outside D.4: the Swift engine's, and mesh user/bench/mps.m (MPS's interface, MPSCommandBuffer.h:124,
+  183; built by no Makefile).
+- The C9 hook's remarks on older code: metal_recording.m MetalPrepareDataflow's level walk; prepare_e2b.py's kv_sections
+  and prepare() walks.
+- From the previous contract, unchanged by this unit: a cancelled receive's field, never written, reads as landed every
+  fourth round (the run already failed); the later form's SIMD builtins in a 2D or 3D partial threadgroup; ml_drift's
+  fusions outside FUSED; a delegate kernel reading unwritten bytes under a multiplicative mask; the wake system call a
+  range and execution; e2b's adapter wait bounded between Dawn calls.
