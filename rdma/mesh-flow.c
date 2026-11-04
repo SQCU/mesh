@@ -154,10 +154,12 @@ static uint32_t map_index(const struct mesh_record *records,uint64_t count,uint3
 static inline _Atomic uint64_t *region_word(uint64_t offset){ return (_Atomic uint64_t *)(void *)((char *)M+offset); }
 /* the cancel word of the execution whose landed record holds the word at region offset `word`: that record's word 0,
    the record starting at landed_off + ((word - landed_off) / landed_stride) x landed_stride (mesh.h, the landed list:
-   design/disjoint-pages-change-request.md, "Claude's proposal" 2; hdr `landed_off` the layout's, `landed_stride` the
-   plan's, written before `hops`) */
-static inline _Atomic uint64_t *landed_cancel(uint64_t word){
-  const uint64_t base=M->landed_off,stride=M->landed_stride;
+   design/disjoint-pages-change-request.md, "Claude's proposal" 2).  hdr `landed_off` is the layout's; `stride` is hdr
+   `landed_stride`, the plan's, which its caller reads after `hops` (acquire) and checks with the entry it read (the
+   plan read whole: link_prepare, plan_cancel).  It is never 0 while `hops` is nonzero: the plan call writes it, at
+   least 32 (R = 0 gives 32), before it stores `hops` (mesh.h, "Writing a plan") */
+static inline _Atomic uint64_t *landed_cancel(uint64_t word,uint64_t stride){
+  const uint64_t base=M->landed_off;
   return region_word(base+(word-base)/stride*stride);
 }
 
@@ -202,6 +204,7 @@ static int link_prepare(struct port *port){
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_relaxed);
   f->hops=hops;f->plan=plan;f->client=atomic_load_explicit(&M->client,memory_order_acquire);
+  const uint64_t landed_stride=M->landed_stride;
   const struct mesh_hop *list=mesh_hops(M);
   struct mesh_record *records=NULL;uint64_t count=0,serial=0;
   int error=map_read(&records,&count,&serial);
@@ -289,7 +292,7 @@ static int link_prepare(struct port *port){
     } else {
       struct prepared_receive *record=receive_fill[q]++;
       *record=(struct prepared_receive){.span=span,.pair=l->provider.queues[q].pair,.input=word,.mask=hop->mask,
-        .cancel=landed_cancel(hop->word)};
+        .cancel=landed_cancel(hop->word,landed_stride)};
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
       if(receive_last[q])receive_last[q]->next=&record->request;
       receive_last[q]=record;
@@ -721,15 +724,30 @@ int guard_raise(struct port *port){
    landed list), never cleared while the plan stands.  2026-11-03, sub-assignment 6
    (design/disjoint-pages-change-request.md, "Claude's proposal" 3): was UINT64_MAX into each of the hop's
    per-execution landed words that read 0, each found at word + t hop_stride over hdr `executions`; the per-page words
-   went, and each entry's word is its execution's own */
+   went, and each entry's word is its execution's own.
+   The plan read whole, as link_prepare reads it (b3cc9990's re-read; 2026-11-03, sub-assignment 6, on the
+   coordinator's routing): this runs in the bridge's parent (streams_cancel, streams_let_go), which no port's
+   `prepared` holds, so the plan call's wait on those (mesh_plan_erased) does not order it before a rewrite.  The plan
+   call stores `hops` 0 (release) and a release fence before it rewrites any entry, and moves `plan` (mesh.h, "Writing a
+   plan").  So `hops` and `plan` are read (acquire) once before the walk; each receive entry's fields are read, then an
+   acquire fence, then `hops` and `plan` again, and the walk stops where either moved: an entry read that saw a rewrite
+   is never acted on, and no cancel word is computed from one.  Only then is its bit tested and its execution's cancel
+   word stored.  What must stay: no store from an entry read before its check */
 static void plan_cancel(uint32_t from){
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
+  const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_acquire);
   if(!hops)return;
+  const uint64_t stride=M->landed_stride;
   const struct mesh_hop *list=mesh_hops(M);
   for(uint64_t j=0;j<hops;j++){
-    if(list[j].direction!=MESH_RECEIVE || (from!=UINT32_MAX && list[j].node!=from))continue;
-    if((atomic_load_explicit(region_word(list[j].word),memory_order_relaxed)&list[j].mask)==list[j].mask)continue;
-    atomic_store_explicit(landed_cancel(list[j].word),UINT64_MAX,memory_order_release);
+    const uint32_t direction=list[j].direction,node=list[j].node;
+    if(direction!=MESH_RECEIVE || (from!=UINT32_MAX && node!=from))continue;
+    const uint64_t word=list[j].word,mask=list[j].mask;
+    atomic_thread_fence(memory_order_acquire);
+    if(atomic_load_explicit(&M->hops,memory_order_relaxed)!=hops ||
+       atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan)return;
+    if((atomic_load_explicit(region_word(word),memory_order_relaxed)&mask)==mask)continue;
+    atomic_store_explicit(landed_cancel(word,stride),UINT64_MAX,memory_order_release);
   }
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:619-654 streams_open (11807bec), reduced to what it is under the page lists:
