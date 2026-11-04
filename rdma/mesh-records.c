@@ -92,9 +92,16 @@ void map_adopt(void){
      were held, since every change of the map's nodes moves it (mesh.h `map_serial`): a plan made against the earlier
      bridge's map is refused.  region_adopt (mesh-link.c) has made `map` even before this, as at the tag */
   mesh_notify(&M->map);
-  if(atomic_load(&M->map_nodes))atomic_fetch_add(&M->map_serial,1);
+  const int moved=atomic_load(&M->map_nodes)!=0;
+  if(moved)atomic_fetch_add(&M->map_serial,1);
   atomic_store(&M->map_nodes,0);
   mesh_notify(&M->map);
+  /* not the tag's (2026-11-04, sub-assignment 1: design/disjoint-pages-change-request.md, D.3.6; design/disjoint-
+     pages-rulings-coordination.md, R2): where the serial moved, the plan made from the earlier bridge's map no longer
+     stands, so its receives not landed are cancelled (mesh-flow.c plan_stale), after the write's closing
+     notification, on this thread (region_adopt's, main's before the event loop).  What must stay: the call after the
+     serial's move and its closing notification */
+  if(moved)plan_stale();
 }
 /* tag pre-return-20261103 rdma/mesh-records.c map_put (3f72cbde, abeffc1b), adapted: node-id order and the map serial */
 /* RFC 2328 s14: the map with `record` put in (its node's held record replaced, else added) and every record no paired
@@ -149,6 +156,13 @@ static void map_put(const struct mesh_record *record){
     atomic_store(&M->map_nodes,kept);
     if(moved)atomic_fetch_add(&M->map_serial,1);
     mesh_notify(&M->map);
+    /* not the tag's (2026-11-04, sub-assignment 1: design/disjoint-pages-change-request.md, D.3.6; design/disjoint-
+       pages-rulings-coordination.md, R2): a plan stands only while its map does, so where this write moved the serial
+       the plan made from the map before it has its receives not landed cancelled (mesh-flow.c plan_stale), after the
+       write's closing notification, on this thread (the bridge parent's one event-loop thread: every caller of map_put
+       is, mesh-flow.c plan_cancel's note).  RFC 2328 section 16: routes come from one version of the database.  What
+       must stay: the call after the serial's move and its closing notification */
+    if(moved)plan_stale();
   }
   free(next);free(reached);free(order);
 }
@@ -298,7 +312,13 @@ void clients_turn(int liveness){
      reach (port_lost's callers: the loop's events, child_reaped, control_heard, hello_heard, network_heard and a
      control socket's connect; its turn's terminations_turn, ports_stalled, link_turn, port_open by child_spawn,
      health_turn and record_retell by port_say; and network_heard from the stop's hold after the loop), and
-     streams_cancel(NULL) at the stop, after the loop.
+     streams_cancel(NULL) at the stop, after the loop.  2026-11-04, sub-assignment 1 (design/disjoint-pages-change-
+     request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2): plan_cancel is called also from mesh-flow.c
+     plan_stale, which map_put and map_adopt alone call: map_put from record_changed (mesh-ports.c link_set and
+     link_turn, health_turn here, mesh-link.c main before the loop) and record_heard (mesh-ports.c message_heard, from
+     control_heard, the loop's events), link_set from port_heard, port_lost, port_opened and ports_found, port_lost as
+     above and from port_say and port_flush at the stop; map_adopt from region_adopt, after its release, before the
+     loop.  Each on main's thread.
      The parent's other threads call none of them: control_watch only wakes the loop; the finder's queue (mesh-ports.c
      ports_find) only lists the devices; the terminations' queue (mesh-events.c peer_terminated, peer_arrived) only
      stores atomics (port_halt) and wakes the loop.  The port children's threads, which land and send, are other

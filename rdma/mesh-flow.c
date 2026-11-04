@@ -967,7 +967,10 @@ int guard_raise(struct port *port){
 }
 
 /* this node's receives of the plan written from the node of map index `from` (UINT32_MAX: every receive) cancelled in
-   the bridge parent (streams_cancel, streams_let_go), as link_close cancels its child's: for each such entry of the
+   the bridge parent (streams_cancel, streams_let_go, plan_stale), as link_close cancels its child's, where that plan's
+   generation (hdr `plan`) is `generation` (0: whichever plan is written; 2026-11-04, sub-assignment 1, for plan_stale,
+   which judged one generation stale, so that a plan written between its judgment and this walk, whose map may stand,
+   is not cancelled: design/disjoint-pages-rulings-coordination.md, R2): for each such entry of the
    list (copy c's at [c n, c n + n)), its range's count of copy c raised to its final value, the entry's `pages` x the
    executions t < `executions` (the plan's word, read once) with t mod u == c, never lowered, and woken (count_raise;
    design/disjoint-pages-change-request.md, C3.1; design/disjoint-pages-revision-coordination.md, "The bridge"); no
@@ -992,18 +995,24 @@ int guard_raise(struct port *port){
    hello_heard, port_flush, port_say, port_greet, port_watch, the message handlers, mesh-events.c network_heard and
    terminations_turn, mesh-children.c child_spawn and child_reaped), from mesh-children.c child_heard and child_reaped
    (the loop's events), from mesh-link.c region_adopt (main, before the loop) and from the stop (main, after it);
-   streams_let_go from mesh-records.c clients_turn (the loop's turn, before its release); and the release from
-   clients_turn and region_adopt (after its streams_cancel) alone.  The parent's other threads (control_watch, the
-   finder's queue's block in ports_find, the terminations' queue's peer_terminated and peer_arrived) call none of
-   them.  So a release never runs inside this walk, and a claim is closed only once its plan is no longer the one
+   streams_let_go from mesh-records.c clients_turn (the loop's turn, before its release); plan_stale from mesh-records.c
+   map_put and map_adopt alone (2026-11-04, sub-assignment 1, R2): map_put from record_changed and record_heard;
+   record_changed from mesh-ports.c link_set (port_heard, port_lost, port_opened, ports_found) and link_turn,
+   mesh-records.c health_turn (the loop's turn) and mesh-link.c main (before the loop); record_heard from mesh-ports.c
+   message_heard (port_heard, from control_heard, the loop's events); port_lost from the callers above, and from
+   port_say and port_flush at the stop (main, after the loop); map_adopt from mesh-link.c region_adopt (main, before
+   the loop, after its release); and the release from clients_turn and region_adopt (after its streams_cancel) alone.
+   The parent's other threads (control_watch, the finder's queue's block in ports_find, the terminations' queue's
+   peer_terminated and peer_arrived) call none of them: they wake the loop, list the devices and store atomics
+   (port_halt).  So a release never runs inside this walk, and a claim is closed only once its plan is no longer the one
    written (`hops` 0 or a later plan's, before the close: mesh_plan, mesh_retire): a count word computed from an entry
    the re-check found current is stored while that plan's claim holds its pages, closed or not, and the release that
    frees them runs later on this thread.  What must stay: no store from an entry read before its check; this walk and
    the release on one thread; and no claim closed while its plan is still the one written */
-static void plan_cancel(uint32_t from){
+static void plan_cancel(uint32_t from,uint64_t generation){
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_acquire);
-  if(!hops)return;
+  if(!hops || (generation && plan!=generation))return;
   struct mesh_state *words=mesh_plan_state(M);
   const uint32_t copies=words?words->copies:0;
   if(!copies || hops%copies)return;
@@ -1056,7 +1065,7 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
 static struct cancelled { uint32_t node,index,every; } cancelled[MESH_PORTS];
 void streams_cancel(const struct port *port){
   if(!port){
-    plan_cancel(UINT32_MAX);
+    plan_cancel(UINT32_MAX,0);
     for(uint32_t p=0;p<port_count;p++)
       if(!ports[p].child)atomic_store_explicit(&mesh_links(M)[ports[p].index].port.prepared,0,memory_order_release);
     return;
@@ -1069,8 +1078,8 @@ void streams_cancel(const struct port *port){
     free(records);
   }
   if(last->node){
-    if(last->every)plan_cancel(UINT32_MAX);
-    else if(last->index!=UINT32_MAX)plan_cancel(last->index);
+    if(last->every)plan_cancel(UINT32_MAX,0);
+    else if(last->index!=UINT32_MAX)plan_cancel(last->index,0);
   }
   if(!port->child)atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
 }
@@ -1084,5 +1093,47 @@ void streams_cancel(const struct port *port){
    (2026-11-04, sub-assignment 6: the cancel word gone, C4) */
 void streams_let_go(void){
   if(atomic_load_explicit(&M->client,memory_order_acquire))return;
-  plan_cancel(UINT32_MAX);
+  plan_cancel(UINT32_MAX,0);
+}
+/* A plan stands only while its map does (design/disjoint-pages-change-request.md, D.2 and D.3.6; RFC 2328 section 16:
+   routes come from one version of the database, and a change recomputes them; design/disjoint-pages-rulings-
+   coordination.md, R2), in the bridge parent, after a write of the map that moved hdr `map_serial` (mesh-records.c
+   map_put and map_adopt, after the write's closing notification): a seq_cst fence; then, where a plan stands (`hops`
+   above 0, acquire; `plan` its generation) and its entries' `serial` (the first entry's, read after `hops`: every
+   entry carries the plan's one serial, mesh.h struct mesh_hop) is not `map_serial` as this thread reads it now (the
+   parent is the map's one writer), every receive of it not landed cancelled: plan_cancel of every entry, that
+   generation alone, each an arrival on its count raised to its final value, no phase written.  Every node's bridge
+   hears the map's move within one flooding (mesh-records.c record_heard, map_put; RFC 2328 section 13), so every node
+   of the plan reads its cancellation then, not its deadline, a relay's downstream nodes included, with no case for a
+   relay.  The cancellation of the lost peer's receives at the cable's two ends (streams_cancel) stays.
+   The fence pairs with the client's start (mesh-dataflow.c mesh_transfers_start; the contract's R3): the start raises
+   the plan's `executions`, fences (seq_cst) and reads `map_serial`; this side has moved `map_serial`, fences, then
+   reads `hops` and, in plan_cancel, `executions`.  Of the two fences one comes first, and a load after the later one
+   sees the store before the earlier one, so at least one side sees the other: this cancellation covers the raised
+   executions, or the start reads the moved serial, returns ESTALE and its program runs none of them.  It is D10's
+   announcement, fence and re-read (design/disjoint-pages-revision-coordination.md; K. Fraser, Practical lock-freedom,
+   2004), and nobody waits.  The fence comes before `hops` is read, not only before `executions`, so a plan whose `hops`
+   its client stored after its last map read and before this move is covered alike: its `hops` stored before its
+   start's fence is seen here, or its start sees the move.  The plan read whole, as plan_cancel reads it: `hops` and
+   `plan`, the serial, an acquire fence, then both again; where either moved, the plan read is no longer the one
+   written (its ports end it, link_close cancelling what has not landed) and a plan written after it is seen here or
+   reads the move at its start, by the same pairing.  plan_cancel is given the generation judged here, so a plan
+   written between this check and its walk, whose map may stand, is left as it is.
+   Its thread: map_put and map_adopt run on the bridge parent's one event-loop thread, mesh-link.c main's, alone
+   (plan_cancel's note lists their callers), so no release of a retired claim runs inside the walk, and a count word
+   computed from an entry the walk found current lands in pages its plan's claim still holds.
+   2026-11-04, sub-assignment 1: new (design/disjoint-pages-change-request.md, D.3.6), in place of nothing: before it
+   only the lost cable's two ends cancelled, and a relay's downstream node read ETIMEDOUT at its deadline.  What must
+   stay: the fence after the serial's move and before `executions` is read; plan_cancel's whole-plan re-read; this call
+   on the parent's one thread */
+void plan_stale(void){
+  atomic_thread_fence(memory_order_seq_cst);
+  const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
+  const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_acquire);
+  if(!hops)return;
+  const uint64_t serial=mesh_hops(M)[0].serial;
+  atomic_thread_fence(memory_order_acquire);
+  if(atomic_load_explicit(&M->hops,memory_order_acquire)!=hops ||
+     atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan)return;
+  if(serial!=atomic_load_explicit(&M->map_serial,memory_order_relaxed))plan_cancel(UINT32_MAX,plan);
 }
