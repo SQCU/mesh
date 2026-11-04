@@ -4,8 +4,10 @@ The operator's and Claude's turns of 2026-11-03 on the page readiness word and t
 literature; the state of the code they change (mesh 7e9936d5, metal-microbench f154814d); the data structures and
 functions in scope; and the canonical path.
 
-Appendix C holds the operator's rulings on the first implementation and Claude's consolidated revision (C3), which is
-the unit of work; where C3 differs from the canonical path, Appendix A3 or Appendix B, C3 holds.
+Appendix C holds the operator's rulings on the first implementation and Claude's consolidated revision (C3); where C3
+differs from the canonical path, Appendix A3 or Appendix B, C3 holds. Appendix D holds the operator's rulings on the
+revision and Claude's proposal (D.3), which is the unit of work; where D.3 differs from C3 or anything earlier, D.3
+holds.
 
 ## The turns
 
@@ -939,3 +941,196 @@ This section is Claude's. It consolidates the review in C1 into one proposal. It
 - tools/e2b_replay.m: `NULL, 0` at line 579; the refusals where steps differ from executions (24ec8cda, cfada099, and
   472390a8's comment); the zeroing of every local operand's whole extent (line 627) and of every pooled intermediate
   (line 840).
+
+## Appendix D: the operator's rulings on the revision
+
+The revision's implementation (mesh 14fcfcd7, metal-microbench a062db81; design/disjoint-pages-revision-coordination.md)
+and its review on 2026-11-04: Claude's report and the operator's turn, verbatim (D.1); Claude's answers to the
+operator's two questions (D.2); Claude's proposal (D.3), the unit of work; and what goes (D.4). The departures the
+report numbers 1 to 4 are departures D8, D11, D12 and D7 of design/disjoint-pages-revision-coordination.md. Where D.3
+differs from C3 or from anything earlier in this document, D.3 holds.
+
+### D.1 The turns
+
+**Claude** (the implementation report):
+
+> The revision is implemented and pushed in both repos, and all three builds are clean. Nothing has been run, so parity
+> and the page reuse are untested until you authorize runs.
+>
+> The coordinator used 17 subagents: 14 implementers, each owning its own files, and 3 reviewers. Its contract and the
+> full routing record are in `design/disjoint-pages-revision-coordination.md`, which is listed in INDEX.md. Both repos
+> are level with origin: mesh `14fcfcd7`, metal-microbench `a062db81`.
+>
+> **What's done.** Every C4 entry is gone. I spot-checked that the lane poll loops and the replay's memsets no longer
+> exist. The `memset`s left in `mesh_plan` cover only the plan's state section and publication records, once per plan.
+> No data page is zeroed.
+>
+> **Departures that conflict with your rulings:**
+> 1. **One client at a time.** A second program to attach gets `EADDRINUSE` (mesh-dataflow.c:215). That contradicts
+>    C3.4 ("any number of programs at once") and your rule against grabbing. The coordinator says serving several
+>    clients needs one page list per client, which C3 doesn't name.
+> 2. **LiteRT's weights, and some delegate buffers, stay outside the allocator.** That contradicts C3.2. The
+>    coordinator's reason is that placing them would mean writing their contents, which C3.7 forbids. That misreads
+>    C3.7: loading the weights is the weights' producer writing them, which C3.7 allows.
+> 3. **Per-step host inputs still grow with steps.** That covers positions, masks, parameters and the schedule, and
+>    contradicts C3.5. The coordinator says C3 doesn't say how a host producer is ordered against the GPU. C3.1 does: "A
+>    host producer is ordered by the event."
+> 4. **The Metal 4 submission was dropped for one Metal 3 command buffer.** The reason given is that
+>    `encodeWaitForEvent:value:` exists only on `MTLCommandBuffer`. But `MTL4CommandQueue` has `waitForEvent:value:`
+>    (MTL4CommandQueue.h:274). It waits between commits rather than inside a buffer, so the Metal 4 path could have
+>    stayed with one commit per wait. Whether this costs speed is unmeasured.
+>
+> **Interpretations that look sound to me:**
+> - Landed counts are kept per received range rather than per node, because e2b's dependent exchanges would otherwise
+>   hold every pass until its deadline.
+> - Each run's execution count goes to the transfer start instead of the plan.
+> - The first pass masks whole threadgroups, because the kernels synchronise within one.
+> - The supplied-word add is 32-bit, because Metal Shading Language has no 64-bit add.
+> - A node that has failed an execution stops releasing its sends.
+>
+> **Still open:**
+> - **A system call on every landing.** Each completed range makes one wake call, and for e2b's one-page partials
+>   that's every landing. Its cost is unmeasured.
+> - **Unproven driver behaviour.** The bridge re-posts a receive record while an earlier post of it is outstanding.
+>   That's safe only if the provider copies the request when it's posted, which the disassembly suggests but doesn't
+>   prove.
+> - **Unrun kernels.** The spliced kernels are compiled only at capture, so some exist only as read code.
+> - **Wrong error after a relay's loss.** Nodes downstream of a relay report a timeout instead of a lost link.
+> - **Older graph walks.** The C9 hook flagged walks in metal_recording.m that predate this change.
+> - **Stale doc.** `design/prepared-machine.md#M08` still describes the old receive record.
+>
+> The scratchpad held 167 stray files from subagents, 84 of them copies of source files. I deleted them; the source is
+> in commit history.
+>
+> Items 1–4 are the next unit of work. I can write them up as the next appendix to the change request when you want.
+
+**The operator:**
+
+> "- Unproven driver behaviour. The bridge re-posts a receive record while an earlier post of it is outstanding. That's
+> safe only if the provider copies the request when it's posted, which the disassembly suggests but doesn't prove." is
+> this beahvior required or a fancy of someone who really wanted to have a complicated base case
+> "- Wrong error after a relay's loss. Nodes downstream of a relay report a timeout instead of a lost link."
+> similar issue. otherwise address 1->4. no metal 3 commandbuffers.
+
+### D.2 Claude's answers
+
+**The receive posted again while an earlier posting is outstanding is not required.**
+- The hardware holds a SEND in credit until its receive is posted (data-model §3). A SEND that comes first waits; it
+  isn't lost. Posting ahead saves that wait and nothing else.
+- The allocator orders the peer's SEND of execution t + u after this node's reads of t, and those reads come after t's
+  landing (C3.3). So a record posted again as soon as its own last posting lands is always in time.
+- That is the verbs rule for every buffer: a request's buffers are reused only once its work completion has been taken
+  (rdma-core, ibv_post_recv(3) and ibv_post_send(3)).
+- The early second posting bought nothing. It put two postings on one page, and it rested on the provider copying each
+  request when it is posted, which nothing documents.
+
+**The timeout after a relay's loss is not required either.**
+- It comes from treating a loss as something only the cable's two ends learn. They cancel the receives from the lost
+  peer, and nobody else cancels anything. A cancellation writes no phase, so the relay never releases its forwards, and
+  the node past it waits out its deadline (MESH_PLATFORM_NS) and reads ETIMEDOUT.
+- But every loss already reaches every node. The relay's record loses the cable, the map serial moves, and the record
+  floods to every bridge (RFC 2328 §13; mesh-records.c map_put). A plan is made against one serial, and a port already
+  refuses to load a plan whose serial is stale (mesh-flow.c link_prepare, ESTALE).
+- So one rule at every node gives every node ENOLINK within one flooding, with no relay case: a plan stands only while
+  its map does. It is link-state routing's own rule: routes come from one version of the database, and a change
+  recomputes them (RFC 2328 §16).
+
+### D.3 Claude's proposal
+
+Items 1 to 4 are the report's departures, in its order. Items 5 and 6 are the answers above. C3's four rules hold
+throughout.
+
+1. **Any number of programs at once.** (Departure D8.)
+   - **Why it needs a name.** One queue pair carries one line of receives, filled in the order they were posted, and
+     there is no shared receive queue (data-model §3). A Thunderbolt device has 11 queue pairs, 10 of them usable
+     (RDMA-FIRST.md). So two programs can share a link only on disjoint queue pairs, and the link's two ends must agree
+     on which program holds which. Only a name both ends know can tell them. NCCL names a communicator by the
+     `ncclUniqueId` the application gives every rank (`ncclCommInitRank`); PMIx names a job by its namespace.
+   - **The name.** `mesh_plan` takes the program's group, a 64-bit value that is the same at every rank, picked once by
+     the program's launcher. A plan is named by (group, epoch). The epoch is the client's count of its own `mesh_plan`
+     calls, which is the same at every rank because the call is collective. The launchers (tools/mesh/run_pair.py and
+     tools/mesh/grid.py) pass one group per launch to every rank, as `MESH_GROUP`.
+   - **Attach takes nothing.** There is no client word, no compare-and-swap and no EADDRINUSE. A client is named only
+     in the heads of its claims (its pid and start), and only once it plans.
+   - **Each plan in its own claim.** A plan's entries and its state section are placed by its allocator in its own
+     pages, as the state section is now. The region's header holds no plan: `hops`, `plan`, `state` and `client` go.
+     One word, `plans`, rises and is woken whenever any plan is written or retired. The bridge then finds the standing
+     plans from the claims' heads.
+   - **Lanes.** On each link it crosses, a plan holds the lanes its units use, apart from every other plan's at both
+     ends. The link's lower-numbered node chooses them from the lanes free at both ends, up to the plan's units on that
+     link in one copy, and names them to the other end over the control socket by the plan's name. Each end frees a
+     plan's lanes when its own serving of the plan ends with nothing outstanding, and tells the far end. Where no lane
+     is free, that port refuses the plan with EBUSY, and the client's start returns it. Queue pairs stay the bridge's;
+     no program sees a lane.
+   - **Serving.** A port serves every standing plan that holds lanes on it, each plan's records on its own lanes, with
+     its own cursors and counts.
+   - **Announcements.** A port's load of a plan sets the port's bit in the plan's own state (one atomic OR, a bit per
+     port). The release of a retired claim reads them there. This is the coordination's D10, moved into the plan's
+     state.
+   - **Holders and retirement.** The heartbeat's holders are the clients the live claims name. A gone client's claims
+     are retired on the bridge's turn, as now.
+2. **Every value placed, the delegate's included.** (Departure D11.)
+   - Every buffer the capture binds is a value of the plan: the weights, and every delegate buffer the recorder doesn't
+     rename, as well as those it does. A buffer written before the first execution and read by every one is an
+     invariant (C3.2). That covers the weights, the constants, and any buffer whose first read in an execution comes
+     before its first write. The rest are execution values at their levels.
+   - An invariant's producer writes it into its placed pages once, after the plan and before the first execution. For
+     the weights, that write is the load: one copy from the buffer the delegate loaded, at the bind. C3.7 allows it,
+     because the producer is writing its own value.
+   - After the bind, no command reads a delegate buffer.
+3. **Host inputs in copies, ordered by events.** (Departure D12.)
+   - The per-step host inputs (positions, masks, cache parameters, the schedule's per-step values, the token stream)
+     are execution values with copies, not one instance per step. The program declares the host's lag, and the
+     allocator gives them copies by it, as modulo variable expansion does for any value. With the host writing step
+     t + 1 while the GPU runs step t, the lag is 2.
+   - The host writes step t's inputs into copy t mod k (k being their copies) once the queue has signalled that step
+     t − k is done, then sets its input event to t + 1. Step t's commands that read them are committed after the queue's
+     `waitForEvent:value:` on that event at t + 1. The queue signals each step's end with `signalEvent:value:` after its
+     last commit. The host's wait on that is bounded by MESH_PLATFORM_NS and ends as an error value.
+   - Each event has one writer: the host sets the input event, the queue sets the step event, and the client's waiter
+     sets the landed event. This is C3.1's "A host producer is ordered by the event".
+   - Nothing the run binds grows with its steps.
+4. **Metal 4 submission. No Metal 3 command buffers.** (Departure D7.)
+   - Every command buffer this code makes is an MTL4CommandBuffer from an MTL4CommandAllocator, committed to an
+     MTL4CommandQueue. That covers the decode, the prefill, the preparation and fills, the profiling, the recorder's own
+     copies and tools/native_bench.m.
+   - The queue holds each later pass. The commands before it are committed. Then comes `waitForEvent:value:` on the
+     landed event at p + 1 (MTL4CommandQueue.h:274). Then the later pass and what follows go in the next command
+     buffer. That is one commit per later pass, and the wait is the GPU queue's, not a host thread's.
+   - A completion is the queue's `signalEvent:value:` (MTL4CommandQueue.h:266) and a bounded wait on that event, or an
+     MTL4CommitFeedback.
+   - One Metal 3 interface stays, and it is the delegate's: ml_drift encodes into an MTLCommandBuffer it is given, and
+     commits its own loads during the capture. The recorder's queue for the delegate exists only for the capture.
+     Nothing the run executes passes through it.
+5. **A receive posted once per landing.** A lane posts a record's round j + 1 only once that record's `landings` reads
+   j + 1. That is one compare, in the line the post already reads. A queue pair's receives complete in the order
+   posted, so when a record lands, every record before its next round on the lane has landed too. The lane never waits
+   on anything but the record itself.
+6. **A plan stands only while its map does.** Where a node's map serial moves away from a standing plan's serial, its
+   bridge cancels every receive of that plan that hasn't landed (plan_cancel over every entry: each an arrival on its
+   count, no phase written). Every node of the plan then reads ENOLINK. The cancellation of the lost peer's receives at
+   the cable's two ends stays.
+7. **What judges it.** C3.8, and also:
+   - A second program attaches and plans while the first runs, on its own pages and lanes. The first's end leaves the
+     second running.
+   - This code creates and commits no Metal 3 command buffer but the delegate's capture.
+   - Nothing bound grows with the steps: not the routed values, not the host inputs, not the delegate's buffers.
+
+### D.4 What goes
+
+**mesh**
+- rdma/mesh.h: hdr `client`, `hops`, `plan` and `state` as the one plan's; the layout's fixed page-list area
+  (`hop_capacity`), whose entries move into each plan's claim.
+- rdma/mesh-dataflow.c: the client word's compare-and-swap in `mesh_attach`, and its EADDRINUSE.
+- rdma/mesh-flow.c: a receive record posted while its earlier posting is outstanding, and link_prepare's note that
+  relies on the provider copying a request; the one flow per port.
+- The ports' `prepared` in the link table: the announcements move into the plan's state.
+- design/disjoint-pages-revision-coordination.md, "Open at the end": the item on the provider's copy of a request.
+
+**metal-microbench**
+- Every MTLCommandQueue and MTLCommandBuffer this code creates outside the delegate's capture: tools/e2b_replay.m
+  (`commit_bounded`, and lines 1048, 1069, 1118 and 1277); metal_recording.m (`MetalCompletion` and `MetalCompleted`
+  outside the capture, line 492, and the `id<MTLCommandBuffer>` of `MetalReplayRecorded` and `MetalReplayEncode`);
+  tools/native_bench.m (lines 97 and 466).
+- The per-step instances of the host inputs, and their bindings at t × stride.
+- The delegate's buffers bound as captured, and `MetalNativeSubstitute`'s reads of the weights from them.

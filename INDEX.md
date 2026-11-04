@@ -36,7 +36,10 @@ other projects, such as a game bot, and old dated records; they are not listed h
   the literature, the state of the code and the functions in scope. Appendix C holds the review of the first
   implementation, verbatim, and Claude's consolidated revision (C3), the unit of work: masks and a later pass on counted
   completion, every value placed by the one allocator, unrolling by lifetime, no claim at attach, mbarrier-style phases,
-  and nothing zeroed or reset.
+  and nothing zeroed or reset. Appendix D holds the review of that revision, verbatim, and Claude's proposal (D.3), the
+  unit of work now: any number of programs at once, each plan named by its group and holding its own lanes; the
+  delegate's buffers placed; host inputs in copies ordered by events; Metal 4 submission with the queue's event waits; a
+  receive posted once per landing; and a plan that stands only while its map does.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.
