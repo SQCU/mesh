@@ -192,7 +192,8 @@ static uint32_t depth_head(const void *context, size_t k) { return ((const uint3
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth) {
   size_t *out = calloc((size_t)vertices + 2, sizeof *out), *at = calloc((size_t)vertices + 1, sizeof *at);
   uint32_t *heads = malloc((first[vertices] + 1) * sizeof *heads), *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
-  uint32_t *ordinal = malloc(((size_t)vertices + 1) * sizeof *ordinal), *order = malloc(((size_t)vertices + 1) * sizeof *order);
+  uint32_t *ordinal = malloc(((size_t)vertices + 1) * sizeof *ordinal);
+  uint32_t *order = malloc(((size_t)vertices + 1) * sizeof *order);
   int result = !out || !at || !heads || !indegree || !ordinal || !order ? ENOMEM : 0;
   for (uint32_t v = 0; !result && v < vertices; v++) for (size_t k = first[v]; k < first[v + 1]; k++) out[head[k] + 1]++;
   for (uint32_t v = 0; !result && v < vertices; v++) out[v + 1] += out[v];
@@ -565,4 +566,161 @@ double mesh_graph_list_schedule(uint32_t links, const double *rate, uint64_t uni
   double end=0;
   for(uint32_t l=0;l<links;l++)if(carried[l] && (double)carried[l]/rate[l]>end)end=(double)carried[l]/rate[l];
   return end;
+}
+
+/* New (design/disjoint-pages-change-request.md, Appendix A, A3, "Interference, by happens-before";
+   design/disjoint-pages-coordination.md, "The allocator"): no tag source.
+   mesh_graph_happens_before's words: calloc of a x b of them, NULL where the count passes size_t */
+static uint64_t *happens_before_words(size_t a, size_t b) {
+  size_t n;
+  return __builtin_mul_overflow(a, b, &n) || n >= SIZE_MAX / sizeof(uint64_t) ? NULL : calloc(n + 1, sizeof(uint64_t));
+}
+/* A 64 x 64 bit matrix, row r the word a[r] and column c its bit c, transposed in place (bit c of a[r] to bit r of
+   a[c]): the off-diagonal j x j blocks of every 2j x 2j block exchanged, j = 32, 16, .., 1, each row pair (k, k + j)
+   at once under the mask of every block's low j columns (H. S. Warren, Hacker's Delight, 2nd ed., 2013, section 7-3,
+   "Transposing a Bit Matrix", with bit 0 the first column) */
+static void happens_before_transpose(uint64_t *a) {
+  uint64_t m = UINT64_C(0x00000000ffffffff);
+  for (unsigned j = 32; j; j >>= 1, m ^= m << j)
+    for (unsigned k = 0; k < 64; k++)
+      if (!(k & j)) {
+        const uint64_t t = ((a[k] >> j) ^ a[k + j]) & m;
+        a[k] ^= t << j;
+        a[k + j] ^= t;
+      }
+}
+/* mesh-graph.h mesh_graph_happens_before.  The graph unrolled over its iterations is acyclic where its lag-0 edges
+   are, no lag being negative, and a path from (v, i) to (w, i + L) lies within iterations i .. i + L, so the paths
+   from iteration 0 give reach for every i.  The unrolled vertices are taken in a topological order: iteration by
+   iteration, and within one in mesh_graph_order's places over the lag-0 edges alone (their rows heads0, read by
+   depth_head).  Vertex (v, i) holds the set of sources a path of one or more edges joins to it, a bit a source; when
+   its turn comes the set is whole, and it is OR'd, with the bits of the sources at v themselves at iteration 0, into
+   the set of each vertex its edges reach before `iterations` (reachability as unions of bit vectors over a topological
+   order: P. Purdom, "A transitive closure algorithm", BIT 10 (1970)).  A target's sets of 64 iterations are, for each
+   64 sources, a 64 x 64 bit matrix, transposed into reach's words (happens_before_transpose), each written once.
+   Cost: mesh_graph_order's O(V^2 + E), then O(iterations x (V + E) x ceil(sources / 64)) word operations for the
+   sets and O(targets x iterations x ceil(sources / 64) x 6) for the transpositions, where a walk of the (vertex,
+   distance) states from each source alone is O(sources x (V + E) x iterations).  Memory: the sets of iterations
+   i .. i + most (most the greatest lag below `iterations`), iteration j's at j mod (most + 1), each cleared once its
+   iteration is done, and 64 iterations of the targets' sets. */
+int mesh_graph_happens_before(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                              uint32_t (*lag)(const void *context, size_t k), const void *context, uint32_t iterations,
+                              uint32_t sources, const uint32_t *source, uint32_t targets, const uint32_t *target,
+                              uint64_t *reach) {
+  const size_t edges = first[vertices], width = ((size_t)sources + 63) / 64, words = ((size_t)iterations + 63) / 64;
+  const size_t stride = (size_t)vertices * width; /* one iteration's sets */
+  uint32_t *heads = malloc((edges + 1) * sizeof *heads), *lags = malloc((edges + 1) * sizeof *lags);
+  uint32_t *heads0 = malloc((edges + 1) * sizeof *heads0);
+  uint32_t *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
+  uint32_t *ordinal = malloc(((size_t)vertices + 1) * sizeof *ordinal);
+  uint32_t *order = malloc(((size_t)vertices + 1) * sizeof *order);
+  size_t *first0 = malloc(((size_t)vertices + 1) * sizeof *first0);
+  uint64_t *rows = NULL, *seed = NULL, *staged = NULL, *push = NULL;
+  uint32_t most = 0;
+  int result = !heads || !lags || !heads0 || !indegree || !ordinal || !order || !first0 ? ENOMEM : 0;
+  if (!result) {
+    first0[0] = 0;
+    for (uint32_t v = 0; v < vertices; v++) {
+      first0[v + 1] = first0[v];
+      for (size_t k = first[v]; k < first[v + 1]; k++) {
+        heads[k] = head(context, k);
+        lags[k] = lag(context, k);
+        if (!lags[k]) heads0[first0[v + 1]++] = heads[k];
+        else if (lags[k] < iterations && lags[k] > most) most = lags[k];
+      }
+    }
+    result = mesh_graph_order(vertices, first0, depth_head, heads0, indegree, ordinal);
+  }
+  for (uint32_t v = 0; !result && v < vertices; v++) order[ordinal[v]] = v;
+  if (!result) {
+    rows = happens_before_words((size_t)most + 1, stride);
+    seed = happens_before_words(vertices, width);
+    staged = happens_before_words((size_t)targets * 64, width);
+    push = happens_before_words(1, width);
+    if (!rows || !seed || !staged || !push) result = ENOMEM;
+  }
+  for (uint32_t s = 0; !result && s < sources; s++) seed[(size_t)source[s] * width + s / 64] |= UINT64_C(1) << (s % 64);
+  for (uint32_t i = 0; !result && i < iterations; i++) {
+    uint64_t *now = rows + (size_t)(i % (most + 1)) * stride;
+    for (uint32_t p = 0; p < vertices; p++) {
+      const uint32_t v = order[p];
+      const uint64_t *set = now + (size_t)v * width, *own = seed + (size_t)v * width;
+      uint64_t any = 0;
+      for (size_t w = 0; w < width; w++) any |= (push[w] = set[w] | (i ? 0 : own[w]));
+      if (!any) continue;
+      for (size_t k = first[v]; k < first[v + 1]; k++) {
+        if (lags[k] >= iterations - i) continue;
+        uint64_t *to = rows + (size_t)((i + lags[k]) % (most + 1)) * stride + (size_t)heads[k] * width;
+        for (size_t w = 0; w < width; w++) to[w] |= push[w];
+      }
+    }
+    /* the targets' sets of iteration i, row i % 64 of their matrices; each 64 rows transposed into reach */
+    for (uint32_t x = 0; x < targets; x++)
+      memcpy(staged + ((size_t)x * 64 + i % 64) * width, now + (size_t)target[x] * width, width * sizeof *staged);
+    if (i % 64 == 63 || i + 1 == iterations) {
+      uint64_t block[64];
+      for (uint32_t x = 0; x < targets; x++)
+        for (size_t w = 0; w < width; w++) {
+          for (unsigned r = 0; r < 64; r++) block[r] = staged[((size_t)x * 64 + r) * width + w];
+          happens_before_transpose(block);
+          for (unsigned c = 0; c < 64 && w * 64 + c < sources; c++)
+            reach[((w * 64 + c) * targets + x) * words + i / 64] = block[c];
+        }
+      memset(staged, 0, (size_t)targets * 64 * width * sizeof *staged);
+    }
+    /* iteration i's sets become iteration i + most + 1's, which no earlier iteration's edge reaches */
+    memset(now, 0, stride * sizeof *now);
+  }
+  free(heads); free(lags); free(heads0); free(indegree); free(ordinal); free(order); free(first0);
+  free(rows); free(seed); free(staged); free(push);
+  return result;
+}
+
+/* New (design/disjoint-pages-change-request.md, Appendix A, A3, "The assignment";
+   design/disjoint-pages-coordination.md, "The allocator"): no tag source.
+   mesh_graph_left_edge's placed runs, kept by first colour */
+struct left_edge_run { uint64_t start,end; uint32_t item; };
+/* mesh-graph.h mesh_graph_left_edge.  An item's run starts at colour 0 and walks the placed runs by first colour,
+   moved to the end of each it overlaps and interferes with, until a placed run starts at or past its run's end (as
+   every later one does).  After its turn a walked run does not interfere or ends at or below the start, which only
+   rises, so the run reached overlaps none it interferes with; and a rise to a run's end passes only starts whose run
+   overlaps that one, so the start reached is the lowest.  A start past capacity - size is ENOSPC at once (the lowest
+   lies at or past it).  The run then goes in among the placed after those starting at or below it (a binary search
+   and one move).  This is the offset calculation of Pisarchyk and Lee's greedy by size (the tensors placed so far
+   walked in offset order), at the lowest colour free of interference, where theirs takes the smallest gap that fits.
+   Cost: each item walks the placed runs once, so O(items^2) interference tests and run moves at worst (items all
+   interfering: items^2 / 2 tests, 4.5 x 10^8 for 30,000), and O(items) memory. */
+int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *order,
+                         int (*interferes)(const void *context, uint32_t a, uint32_t b), const void *context,
+                         uint64_t capacity, uint64_t *colour, uint64_t *used) {
+  struct left_edge_run *placed = malloc(((size_t)items + 1) * sizeof *placed);
+  size_t count = 0;
+  uint64_t most = 0;
+  int result = placed ? 0 : ENOMEM;
+  for (uint32_t n = 0; !result && n < items; n++) {
+    const uint32_t i = order[n];
+    const uint64_t need = size[i];
+    uint64_t c = 0;
+    if (need > capacity) { result = ENOSPC; break; }
+    for (size_t p = 0; p < count && placed[p].start < c + need; p++)
+      if (placed[p].end > c && interferes(context, i, placed[p].item)) {
+        c = placed[p].end;
+        if (c > capacity - need) { result = ENOSPC; break; }
+      }
+    if (result) break;
+    colour[i] = c;
+    if (c + need > most) most = c + need;
+    if (!need) continue; /* an empty run overlaps none */
+    size_t lo = 0, hi = count;
+    while (lo < hi) {
+      const size_t mid = lo + (hi - lo) / 2;
+      if (placed[mid].start <= c) lo = mid + 1; else hi = mid;
+    }
+    memmove(placed + lo + 1, placed + lo, (count - lo) * sizeof *placed);
+    placed[lo] = (struct left_edge_run){c, c + need, i};
+    count++;
+  }
+  *used = most;
+  free(placed);
+  return result;
 }
