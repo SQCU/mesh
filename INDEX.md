@@ -52,6 +52,6 @@ other projects, such as a game bot, and old dated records; they are not listed h
   cannot be met as written, with their evidence) and the record of each sub-assignment's commits, each review finding
   and where it went, and what was left open.
 - [design/disjoint-pages-rulings-coordination.md](design/disjoint-pages-rulings-coordination.md): the coordinating
-  agent's contract for that change request's Appendix D, items D.3.2 to D.3.6 (D.3.1 waits on the operator): the file
-  split, the names files share, its decisions with their sources, and the record of the work, its reviews and what is
-  open.
+  agent's contract for that change request's Appendix D, items D.3.2 to D.3.6 (D.3.1, and D.5 added during the work,
+  outside it): the file split, the names files share, its decisions with their sources, and the record of the work,
+  its reviews and what is open.
