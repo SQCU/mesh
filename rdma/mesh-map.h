@@ -121,8 +121,8 @@ uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,str
    arena bitmap lived in a row plane and the order table was rows-strided; both are now their own
    table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else.  `hops`: the page lists' room
    (struct mesh_hop); absent (0), `rows`.  `links`: the link table's ports (MESH_PORTS, mesh-link.c).
-   The areas, in order, each at a page boundary and owning the rest of its last page: the row planes, the arena
-   bitmap, the page table, the buffers, the link table, the publications, the page lists (`hops` entries), the
+   The areas, in order, each at a page boundary and owning the rest of its last page: the row planes (MESH_PLANES,
+   MESH_ROW_OWN alone), the arena bitmap, the page table, the buffers, the link table, the publications, the page lists (`hops` entries), the
    supplied words (`word_capacity`, 8 bytes a hop: a plan's supplied words, one a release an execution, are at most
    its send hops), the landed list (`landed_capacity`, 40 bytes a hop: a plan's landed records, `landed_stride` bytes
    an execution, are at most 32 bytes a hop where an execution has a hop), the bridge's pages (struct

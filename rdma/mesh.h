@@ -30,7 +30,10 @@
 #endif
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
-enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
+/* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, Appendix A, A4): the row planes MESH_ROW_HOT
+   and MESH_FREE went with the call-site allocators and their reclaim, which alone read and wrote them; the layout sizes
+   the one plane left (MESH_PLANES).  What must stay: MESH_ROW_OWN holds the rows of each program's one claim */
+enum { MESH_ROW_OWN, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M02 */
