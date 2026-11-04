@@ -1012,63 +1012,220 @@ differs from C3 or from anything earlier in this document, D.3 holds.
 > "- Wrong error after a relay's loss. Nodes downstream of a relay report a timeout instead of a lost link."
 > similar issue. otherwise address 1->4. no metal 3 commandbuffers.
 
+**Claude** (the answers, and the work dispatched):
+
+> Neither behaviour was required. Both were complicated base cases, and both are now in the work along with items 1–4.
+> I wrote the answers and the plan into the change request as Appendix D (mesh `23842c61`, pushed), and a coordinator
+> agent is implementing it now. Nothing will be run.
+>
+> **The re-posted receive isn't needed.**
+> - The hardware holds a SEND until its receive is posted (data-model §3). A receive posted late just makes the SEND
+>   wait; nothing is lost.
+> - The allocator already orders the peer's send of execution t+u after this node reads execution t, and that read
+>   comes after t's landing. So posting a record again only once its last posting has landed is always in time.
+> - That's the ordinary verbs rule: a receive buffer is reused only after its completion.
+> - Posting early gained nothing. It put two postings on one page and depended on driver behaviour nobody documents.
+> - The fix is one comparison: a lane re-posts a record only after that record has landed.
+>
+> **The timeout after a relay's loss isn't needed either.**
+> - It happens because only the two ends of the lost cable react. The relay never forwards, so the node past it waits
+>   out the full 5 s deadline.
+> - Every node already hears about the loss: the map changes and floods to every bridge, and a port already refuses a
+>   plan made against an old map.
+> - The fix is one rule at every node: a plan stands only while the map it was made from does. When the map changes,
+>   each bridge cancels that plan's outstanding receives. Every node then reports a lost link within one flood instead
+>   of after 5 s, with no special case for relays. Link-state routing uses the same rule.
+>
+> **Items 1–4:**
+> 1. **Any number of programs.** Attaching takes nothing, and each plan lives in its own pages. A Thunderbolt device
+>    has only 10 usable queue pairs, and each one carries a single fixed order of receives, so two programs can share a
+>    cable only on separate queue pairs. Both ends of the cable must then agree which program holds which, and that
+>    needs a name both ends know.
+>    - The name is a 64-bit group the launcher passes to every rank as `MESH_GROUP`, the way NCCL uses `ncclUniqueId`.
+>      This is the one interface addition, and it touches only the launchers, not `mesh_hourly.py`.
+>    - On each cable, the lower-numbered node assigns each plan its queue pairs. When none is free, the plan gets
+>      `EBUSY` when it starts.
+> 2. **Every buffer is placed by the allocator,** including the weights and the delegate's other buffers. The weights
+>    are copied once into their pages when bound, which is the producer writing them.
+> 3. **Per-step host inputs come in a few rotating copies** instead of one per step. The host writes step t after the
+>    queue signals that step t−k is done, and the queue makes step t's readers wait for the host's signal.
+> 4. **Metal 4 throughout.** Each later pass waits on the queue between commits (`MTL4CommandQueue
+>    waitForEvent:value:`). There's one exception I can't remove: the LiteRT delegate (ml_drift) only accepts a Metal 3
+>    command buffer, so recording its commands at capture still uses one. Nothing in the actual run goes through it.
+>
+> I'll report when the coordinator finishes.
+
+**The operator:**
+
+> "- That's the ordinary verbs rule: a receive buffer is reused only after its completion." what is a receive buffer
+> and is it in a page table at all? did someone try to sneak a write-by-copy into the bridge or collective yet again due
+> to their uncontrollable penchant for adding ring buffers and stallwaits to firmware which *definitely* does not need
+> or use such mechanisms as it reads any view and writes any view?
+
+**The operator:**
+
+> no, what is a 'receive buffer' and why are you describing it? what literature does it come from? citations?
+
+**Claude:**
+
+> "Receive buffer" was my word, and it was the wrong word here. It suggests a separate staging object, and there isn't
+> one: the memory a posted receive points at is the plan's page itself. Nobody slipped a copy into the bridge.
+>
+> **Where the word comes from:** the RDMA verbs interface. A receive request names the memory to land in through a
+> scatter list of address, length and key, and the verbs documentation calls that memory the request's "data buffers".
+> The macOS SDK's `infiniband/verbs.h` says this at `ibv_post_send`: "If IBV_SEND_INLINE flag is set, the data buffers
+> can be reused immediately after the call returns." rdma-core's `ibv_post_send(3)` and `ibv_post_recv(3)` man pages
+> use the same term. I was paraphrasing that reuse rule to back up the fix, and imported the word with it.
+>
+> **It is the page, from the page table:**
+> - `link_prepare` builds each receive's single scatter entry as `wire_span(&port->device, hop->page*M->pgsz,
+>   page_bytes())`. `hop->page` is the page the allocator chose.
+> - `wire_span` (mesh-verbs.h:56) returns that page's address in the registered region and the region's key.
+> - The SEND's bytes land straight in that page, and a send goes out straight from its page.
+>
+> **No copy and no data ring.** The only `memcpy`s in mesh-flow.c are at line 172, which reads the map's records, and
+> line 545, which reads a completion's status field. The one count kept on a lane is the send gate. It tracks the
+> driver's 4 KB credit frames (data-model §3) so the bridge doesn't post more than the driver's queue holds. It stores
+> no bytes.
+>
+> **What the fix actually needs:** the hardware may write a page until the receive naming it completes. So the bridge
+> names that page in a new receive only after the last one has landed, which is the one comparison in the fix.
+>
+> I've reworded that sentence in Appendix D to say this and to cite where the word comes from (mesh `0477f378`,
+> pushed). The coordinator is still running.
+
+**The operator:**
+
+> "A Thunderbolt device has only 10 usable queue pairs, " no it doesn't. queue pairs are an abstraction which no
+> ocllective and no data processing code can know about. the only way to use the dma drivers is to submit work to a
+> queue by view, (reference), not by copy or by value. review the literature: there is no mechanism to allow an
+> arbitrary number of literal hardware edges or subnets or multiplexing relationships to all progress concurrently by
+> copying into a wacky buffer that waits fifo on each element in the special wacky buffer to conclude.
+
+**The operator:**
+
+> you should not be writing about or descirbing anything relted to the literal rdma interface when talking about
+> transfers of data, for this reason and others. also there really arne't 10 'queue pairs' per device. your code will
+> crash on first run if you refuse to write code which is compatible iwth the macos27 rdma interface (the failport
+> branch completely exlpained and described and solved all of these problems...). macos26 and macos27 are both
+> required; you may not single-case or misunderstand any part of the collective's drivers or interfaces for any reason
+> as any approach to any problem.
+
+**The operator:**
+
+> "queue pairs are an abstraction which no ocllective and no data processing code can know about."
+> means
+> "even if the user told me that a specific api must remain totally private, i can still *reason* about queue pairs and
+> say that transactions happen by 'streams' across 'queue pair's in my own private understanding of the code, right?
+> definitely. there's no way the number of queue pairs could be different from run to run..." is exactly why you were
+> told that specific apis must be written with complete ignorance of queue pairs, streams, attempst to present
+> transactions as sockets, etc. isntead of scheduled transfers which happen from an opaque driver consuming queues of
+> desired transfers. there was something you didn't understand but didn't need to understand as long as you treated it
+> totally opaquely instead of as a secret invariant you got to know about in private but code didn't mention.
+> continue
+
+**The operator:**
+
+> "What the fix actually needs: the hardware may write a page until the receive naming it completes. So the bridge
+> names that page in a new receive only after the last one has landed, which is the one comparison in the fix." i still
+> think your explanation of a data model here is incomplete or confused. how many pages do you think can be enqueued for
+> transfer at once? are pages-for-transfer a structured ordered set like an array, a graph, a tree? are
+> pages-for-transfer a set which is sampled from? are pages-for-transfer a map structure where there are a set of local
+> destinations (peers to the immediate bridge, whether the page is being 'relayed' or 'reduced' or 'allgatehred' or
+> 'scattered'), a set of pages for each local destination, and all local destinations can be sampled from concurrently,
+> HARDWARESENT, and complementarily HARDWARERECEIVED on a different machine? walgorithms please? literautre?
+
 ### D.2 Claude's answers
 
-**The receive posted again while an earlier posting is outstanding is not required.**
-- The hardware holds a SEND in credit until its receive is posted (data-model §3). A SEND that comes first waits; it
-  isn't lost. Posting ahead saves that wait and nothing else.
-- The allocator orders the peer's SEND of execution t + u after this node's reads of t, and those reads come after t's
-  landing (C3.3). So a record posted again as soon as its own last posting lands is always in time.
-- The memory a posted receive names is the plan's page itself: its one scatter element is the page's address in the
-  registered region (mesh-flow.c link_prepare, `wire_span` of `hop->page`; mesh-verbs.h:56). Nothing is staged or
-  copied. The hardware may write that page until the receive completes, so the page is named in a new receive only
-  after the last one completes. The verbs interface calls that memory the request's "data buffers" (the SDK's
-  infiniband/verbs.h, at ibv_post_send).
-- The early second posting bought nothing. It put two postings on one page, and it rested on the provider copying each
-  request when it is posted, which nothing documents.
+D.2 and D.3 speak of transfers as the data model does: pages, lists of pages, the words that release them, and the
+nodes they pass between. How the bridge carries a list is the bridge's own, and nothing here depends on it (D.1, the
+operator's last turns).
+
+**The data model of a transfer.**
+- At each node, the plan gives every adjacent node (one this node shares a cable with) two page lists: the pages this
+  node sends to it, and the pages it receives from it. A relay's forward, a reduction's partial, a gather's piece and a
+  scatter's piece are all entries of these lists. The bridge never knows which collective made an entry.
+- Each entry is a view: a page by its name in the page table, never a copy of it. A sent page is released by its
+  range's supplied word, and a forward by its receive's phase.
+- A list's order is fixed when the plan is compiled, and it is the same at both ends: the receiver fixes where each
+  page lands and in what order before it comes (data-model §3 and §6). The plan orders each list by when its pages
+  become ready (R. L. Graham, Bounds on multiprocessing timing anomalies, SIAM J. Appl. Math., 1969).
+- Every adjacent node's lists are drained at once and apart from the others. A page bound for one node never waits on
+  a page bound for another. This is the virtual output queue: one queue per destination at each input. A single FIFO
+  per input caps a switch at 2 − √2 ≈ 58.6% of its throughput by head-of-line blocking (M. J. Karol, M. G. Hluchyj and
+  S. P. Morgan, Input versus output queueing on a space-division packet switch, IEEE Trans. Commun., 1987). One queue
+  per destination removes that block (Y. Tamir and G. L. Frazier, High-performance multi-queue buffers for VLSI
+  communication switches, ISCA 1988; N. McKeown, V. Anantharam and J. Walrand, Achieving 100% throughput in an
+  input-queued switch, INFOCOM 1996).
+- A switch computes its matching of inputs to outputs at every slot. Here the lists are compiled, so the matching is
+  computed once, as a Birkhoff–von Neumann schedule is (C.-S. Chang, W.-J. Chen and H.-Y. Huang, Birkhoff-von Neumann
+  input buffered crossbar switches, INFOCOM 2000).
+
+**How many pages are in flight at once.**
+- Every page of every list, for u rounds at once, u being the plan's copies (C3.3). Each page is named once in each
+  round, and no count of the hardware's enters the number.
+- A received page enters its list again once its last landing has landed. The allocator already orders the adjacent
+  node's next send into it after this node's reads of the last one (C3.3).
+
+**The receive named again before it had landed is not required.** That named one page in two transfers at once. It
+gained nothing over the u rounds the copies already give, and it rested on behaviour of the driver that nothing
+documents.
 
 **The timeout after a relay's loss is not required either.**
 - It comes from treating a loss as something only the cable's two ends learn. They cancel the receives from the lost
-  peer, and nobody else cancels anything. A cancellation writes no phase, so the relay never releases its forwards, and
+  node, and nobody else cancels anything. A cancellation writes no phase, so the relay never releases its forwards, and
   the node past it waits out its deadline (MESH_PLATFORM_NS) and reads ETIMEDOUT.
 - But every loss already reaches every node. The relay's record loses the cable, the map serial moves, and the record
-  floods to every bridge (RFC 2328 §13; mesh-records.c map_put). A plan is made against one serial, and a port already
-  refuses to load a plan whose serial is stale (mesh-flow.c link_prepare, ESTALE).
+  floods to every bridge (RFC 2328 §13; mesh-records.c map_put). A plan is made against one serial, and a bridge
+  already refuses to load a plan whose serial is stale (mesh-flow.c link_prepare, ESTALE).
 - So one rule at every node gives every node ENOLINK within one flooding, with no relay case: a plan stands only while
   its map does. It is link-state routing's own rule: routes come from one version of the database, and a change
   recomputes them (RFC 2328 §16).
+
+**Several programs' plans toward one adjacent node: open, for the operator.** One plan's list toward a node has its
+order from that plan's compilation. Several programs' plans don't share a compilation, and the receiver must still know
+the order before the pages come (data-model §3). That leaves two forms:
+- The two bridges compute one order from every standing plan whenever the set changes. A page of one program can then
+  wait behind another program's.
+- The sending bridge tells the receiving bridge which plan's list it drains next, a notice for each batch. No program
+  then waits on another, but a batch's receives are set only once its notice comes. This is the data model's "ask
+  first" (data-model §3), the rendezvous of MPI's large messages (J. Liu, J. Wu and D. K. Panda, High performance
+  RDMA-based MPI implementation over InfiniBand, ICS 2003).
+D.3.1 waits on this ruling.
+
+**Where Claude's text was wrong.**
+- D.3.1 as first written reasoned from a count the bridge's devices report. That count is private to the bridge, and it
+  differs from run to run and between macOS 26 and macOS 27. The text made it a limit programs see (EBUSY with no lane
+  free) and a reason for the plan's name. Both are withdrawn.
+- D.2 as first written explained a page's reuse with the verbs interface's "data buffers". The page is the transfer's
+  view, and nothing else holds it.
 
 ### D.3 Claude's proposal
 
 Items 1 to 4 are the report's departures, in its order. Items 5 and 6 are the answers above. C3's four rules hold
 throughout.
 
-1. **Any number of programs at once.** (Departure D8.)
-   - **Why it needs a name.** One queue pair carries one line of receives, filled in the order they were posted, and
-     there is no shared receive queue (data-model §3). A Thunderbolt device has 11 queue pairs, 10 of them usable
-     (RDMA-FIRST.md). So two programs can share a link only on disjoint queue pairs, and the link's two ends must agree
-     on which program holds which. Only a name both ends know can tell them. NCCL names a communicator by the
-     `ncclUniqueId` the application gives every rank (`ncclCommInitRank`); PMIx names a job by its namespace.
-   - **The name.** `mesh_plan` takes the program's group, a 64-bit value that is the same at every rank, picked once by
-     the program's launcher. A plan is named by (group, epoch). The epoch is the client's count of its own `mesh_plan`
-     calls, which is the same at every rank because the call is collective. The launchers (tools/mesh/run_pair.py and
-     tools/mesh/grid.py) pass one group per launch to every rank, as `MESH_GROUP`.
+1. **Any number of programs at once.** (Departure D8.) Waits on the ruling in D.2 for how several plans toward one
+   adjacent node are ordered. The rest stands:
    - **Attach takes nothing.** There is no client word, no compare-and-swap and no EADDRINUSE. A client is named only
      in the heads of its claims (its pid and start), and only once it plans.
-   - **Each plan in its own claim.** A plan's entries and its state section are placed by its allocator in its own
+   - **Each plan in its own claim.** A plan's lists and its state section are placed by its allocator in its own
      pages, as the state section is now. The region's header holds no plan: `hops`, `plan`, `state` and `client` go.
      One word, `plans`, rises and is woken whenever any plan is written or retired. The bridge then finds the standing
      plans from the claims' heads.
-   - **Lanes.** On each link it crosses, a plan holds the lanes its units use, apart from every other plan's at both
-     ends. The link's lower-numbered node chooses them from the lanes free at both ends, up to the plan's units on that
-     link in one copy, and names them to the other end over the control socket by the plan's name. Each end frees a
-     plan's lanes when its own serving of the plan ends with nothing outstanding, and tells the far end. Where no lane
-     is free, that port refuses the plan with EBUSY, and the client's start returns it. Queue pairs stay the bridge's;
-     no program sees a lane.
-   - **Serving.** A port serves every standing plan that holds lanes on it, each plan's records on its own lanes, with
-     its own cursors and counts.
-   - **Announcements.** A port's load of a plan sets the port's bit in the plan's own state (one atomic OR, a bit per
-     port). The release of a retired claim reads them there. This is the coordination's D10, moved into the plan's
+   - **The plan's name.** A plan is one program's collective. With several programs at once, each node's bridge must
+     know which plan at an adjacent node belongs to the same collective. The program names it: `mesh_plan` takes the
+     program's group, a 64-bit value that is the same at every rank, picked once by its launcher. NCCL names a
+     communicator the same way, by the `ncclUniqueId` the application gives every rank, and PMIx names a job by its
+     namespace. A plan is (group, epoch), the epoch being the client's count of its own `mesh_plan` calls, which is the
+     same at every rank because the call is collective. The launchers (tools/mesh/run_pair.py and tools/mesh/grid.py)
+     pass one group per launch to every rank, as `MESH_GROUP`.
+   - **The bridge drains every standing plan.** Each adjacent node's lists are every standing plan's lists toward it.
+     Nothing a program, a collective or data code sees names, counts or is limited by the transport. The bridge
+     carries the lists by whatever its devices report on each run, on macOS 26 and macOS 27 alike, by the failport's
+     code (tag pre-return-20261103).
+   - **Announcements.** A bridge's load of a plan sets that port's bit in the plan's own state (one atomic OR, a bit
+     per port). The release of a retired claim reads them there. This is the coordination's D10, moved into the plan's
      state.
    - **Holders and retirement.** The heartbeat's holders are the clients the live claims name. A gone client's claims
      are retired on the bridge's turn, as now.
@@ -1105,17 +1262,16 @@ throughout.
    - One Metal 3 interface stays, and it is the delegate's: ml_drift encodes into an MTLCommandBuffer it is given, and
      commits its own loads during the capture. The recorder's queue for the delegate exists only for the capture.
      Nothing the run executes passes through it.
-5. **A receive posted once per landing.** A lane posts a record's round j + 1 only once that record's `landings` reads
-   j + 1. That is one compare, in the line the post already reads. A queue pair's receives complete in the order
-   posted, so when a record lands, every record before its next round on the lane has landed too. The lane never waits
-   on anything but the record itself.
+5. **A received page named once per landing.** Each adjacent node's receive list holds, at any moment, every page of
+   every copy whose last landing has landed: u rounds of the list at once, each page named once. A page enters the
+   list again only when its last landing lands (D.2).
 6. **A plan stands only while its map does.** Where a node's map serial moves away from a standing plan's serial, its
    bridge cancels every receive of that plan that hasn't landed (plan_cancel over every entry: each an arrival on its
    count, no phase written). Every node of the plan then reads ENOLINK. The cancellation of the lost peer's receives at
    the cable's two ends stays.
 7. **What judges it.** C3.8, and also:
-   - A second program attaches and plans while the first runs, on its own pages and lanes. The first's end leaves the
-     second running.
+   - A second program attaches and plans while the first runs, on its own pages. The first's end leaves the second
+     running.
    - This code creates and commits no Metal 3 command buffer but the delegate's capture.
    - Nothing bound grows with the steps: not the routed values, not the host inputs, not the delegate's buffers.
 
