@@ -392,7 +392,30 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
 
 ### Reviews and where their findings went
 
-(appended as the work proceeds)
+- 8 (the mesh side, at 854ad65c; every changed mesh file compiles alone; the lifecycle files and the deployment and
+  launch scripts unchanged since 5c54134c; D.3.1's standing items untouched): no defect. R1 sound (each record at most
+  one posting outstanding; no deadlock, a blocked record waiting only on its own earlier posting, ahead of it in the
+  same order; the k-th SEND still fills the k-th receive; the cancellations still cover records never posted); R2/R3's
+  store-buffering pairing holds as written (the serial's seq_cst add, plan_stale's seq_cst fence, then the plan and its
+  `executions`; the start's release raise, its seq_cst fence, then `map_serial`), the generation check leaves a plan
+  written between the check and the walk alone, and mesh_plan's step 6 rules out a false cancel; every caller of
+  map_put and map_adopt on the parent's event-loop thread; the relay case reads ENOLINK; R4 and the count audit's
+  fixes right. Findings and where they went: 1 (note, for the operator: D.3.6 cancels a standing plan wherever the
+  serial moves, and the serial moves where the map grows (a cable pairing late, a node joining) as well as where it
+  loses, ending a running decode at every node; the receives already posted for the round no peer will now send end
+  their links at the plan's end, which re-pair, moving the map again, bounded and converging): kept as D.3.6 writes it
+  ("Where a node's map serial moves away from a standing plan's serial ... cancels"; D.2: "When the map changes, each
+  bridge cancels"), open for the operator (the reviewer's candidate: cancel only where the move removes a cable or a
+  node), and the text "the raise left standing is safe" qualified, to 1; its side note (a node with no count of its
+  own, a pure source or relay, reads 0, not ENOLINK; every e2b rank receives): open; 2 (mesh.h's region contract did
+  not state D.3.6 or R3's ESTALE) to 1; 3 (the record of the count audit left out the bridge's fixed counts no device
+  reports: MESH_PROVIDER_RESERVED_QPS 1, MESH_FRAME 4096, IBV_MTU_4096 on port 1, each verbatim from the tag and so by
+  the failport's code): recorded here, judged and kept as the tag's; 4 (the previous contract's open item on the
+  relay's timeout and the cancellation's final value, closed by R2 and R3, still undated) dated by the coordinator
+  (a1d034b4); 5 (mesh_graph_list_schedule's parameters still named `links`, `link`) to 2; 6 (M08's assignment clause
+  and the failed-status check; prepared-machine.md:105 and :161 still describe M08's old design) to 1; 7 (plan_cancel's
+  generation 0, "whichever plan is written", a second form) to 1 (every caller names its generation); 8 (hello_budget(0)
+  0 departs from the tag) recorded with 6's commit above.
 
 ### Integration
 
