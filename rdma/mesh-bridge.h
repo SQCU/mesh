@@ -11,14 +11,17 @@
    named here only by pointer, declared forward. */
 #ifndef MESH_BRIDGE_H
 #define MESH_BRIDGE_H
-/* tag etc/bridge/thunderbolt.mk MESH_PROVIDER_RESERVED_QPS (the tag Makefile's -D): the queue pairs of each device the
-   provider holds itself, so a device holds max_qp less this for a link (mesh-verbs.h device_up `max_pairs`; 76be3217's
-   max_qp - 1, the rule of bd85613e design/HETEROGENEOUS-LINKS.md).  Defined before mesh-verbs.h, whose device_up reads it */
+/* tag etc/bridge/thunderbolt.mk MESH_PROVIDER_RESERVED_QPS, 1 (the tag Makefile's -D, as the Makefile's here; under
+   #ifndef so that identical -D stands): the queue pairs of each device the provider holds itself, so a device holds
+   max_qp less this for a link (mesh-verbs.h device_up `max_pairs`; 76be3217, the rule of bd85613e
+   design/HETEROGENEOUS-LINKS.md).  Defined before mesh-verbs.h, whose device_up reads it */
+#ifndef MESH_PROVIDER_RESERVED_QPS
 #define MESH_PROVIDER_RESERVED_QPS 1
+#endif
 #include "mesh-verbs.h"
 /* tag rdma/mesh-bridge.h: its system headers.  Its mesh-call.h, mesh-observe.h and mesh-graph.h are left out: the client
-   context and slots (`bridge`, `owned`), the observe header (mesh_say, below; main's mesh.h holds struct mesh_link_info)
-   and the walks' chains are named by nothing here */
+   context is named by its tag alone (`bridge`) and the client slots' `owned` does not come over, the observe header's
+   mesh_say is below (main's mesh.h holds struct mesh_link_info), and the walks' chains are named by nothing here */
 #include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
@@ -59,10 +62,27 @@
 /* tag etc/bridge/layout.h: the event loop's tag on a port's child's exit (kevent64 udata TAG_CHILD | the port's index,
    mesh-children.c child_spawn) */
 #define TAG_CHILD (UINT64_C(1)<<58)
+/* tag etc/bridge/layout.h: the most nodes the bridge's table of nodes heard holds (struct known, mesh-records.c) */
+#define MESH_KNOWN 256
+/* tag etc/bridge/layout.h: a link's streams at the tag (mesh-observe.h MESH_PORTS = MESH_STREAMS / MESH_LINK_STREAMS) */
+#define MESH_LINK_STREAMS 4u
 /* tag etc/bridge/thunderbolt.h MESH_FRAME: the bytes of a frame, the unit of a queue's capacity (struct frames) */
 #define MESH_FRAME 4096u
 /* tag etc/bridge/layout.h MESH_RECORD_ALIGNMENT: a SEND gate's alignment (struct send_gate) */
 #define MESH_RECORD_ALIGNMENT 64
+/* tag etc/bridge/layout.h: the most requests outstanding on a lane each way (struct lane_state) */
+#define MESH_LANE_UNITS 4096u
+/* tag etc/bridge/layout.h, "Completion service cadence, independent of queue capacity and link use": the most a lane
+   posts in a pass before the pass reaps completions, and the completions one poll takes (lanes_flush, the data path) */
+#define MESH_POST_QUANTUM 64u
+#define MESH_COMPLETION_BATCH 64
+/* tag etc/bridge/layout.h: the bytes of this node's model as its record carries it (`model`, sysctl hw.model) */
+#define MESH_MODEL_BYTES 32
+/* tag etc/bridge/layout.h XMAGIC, its value, renamed: the wire's magic, what marks a datagram or a control stream's
+   header as the mesh's (struct message `magic`), the value version 131 sends, fixed.  Named MESH_WIRE_MAGIC because
+   main's --link form keeps its own XMAGIC (mesh-verbs.h struct qpi) until sub-assignment 16 removes it; what must stay
+   is the value */
+#define MESH_WIRE_MAGIC (0x4d595048u+131u+(1u<<12))
 
 /* tag rdma/mesh-observe.h mesh_say, verbatim */
 /* design/transport.md section 14: a line of the node's bridge log, the launchd job's stderr (bin/mesh-user.sh
@@ -89,7 +109,7 @@ __attribute__((format(printf,2,3))) static inline void mesh_say(const char *who,
   }
   (void)!write(2,line,(size_t)n);
 }
-/* tag rdma/mesh-link.c clock_ns, verbatim but `static inline`, as a header's: the monotonic clock, ns */
+/* tag rdma/mesh-link.c:48 clock_ns, verbatim but `static inline`, as a header's: the monotonic clock, ns */
 static inline uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
 
 /* tag rdma/mesh-bridge.h, the verbs ABI the bridge's requests are laid against; the tag named the values
@@ -171,15 +191,14 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
 
-/* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: the link block
-   (`page`, `pages`: the spare page, which received what no holding's row took, and which nothing at the tag posted on;
-   main's region has no place for it, mesh.h struct mesh_bridge_pages) and each stream's holding (`held`, `hold`,
-   `sending`, `landing`, `wire`: the walks and the streams' identities) */
+/* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: each stream's
+   holding (`held`, `hold`, `sending`, `landing`, `wire`: the walks and the streams' identities) */
 /* design/transport.md section 14: a port's link lanes (MESH_LINK_LANES), its queue pairs made once and connected once
    in its child's life ("A process a port": `lanes` once the child was asked for them, the parent's; a link lost after it
    pairs again with the port's next child), on the two completion queues its device's context holds, each lane's share
-   of them (`share` frames, a request one frame at least: no lane overruns its queues), and each lane's queue pair number
-   (`qpn`, by which a completion names its lane).  Its state (LINK_DOWN; made and told, LINK_MADE; connecting; up), its
+   of them (`share` frames, a request one frame at least: no lane overruns its queues), the link block (`page`, its first
+   arena page, and `pages`, its arena pages: mesh-link.c link_pages), and each lane's queue pair number (`qpn`, by which
+   a completion names its lane).  Its state (LINK_DOWN; made and told, LINK_MADE; connecting; up), its
    job on the port's queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled), the pairing it belongs to
    (`pairing`, moved at its loss and at a halt, mesh-link.c port_halt, so a job of a pairing gone makes no call and is
    dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`); the lanes the progress thread
@@ -199,21 +218,20 @@ struct link {
   int state,job,result,heard,lanes;
   _Atomic int done,lost;
   _Atomic uint32_t served,broken,pairing;
-  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],job_pairing,psn;
+  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],page,pages,job_pairing,psn;
   struct frames share;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t job_at;
 };
 
-/* tag etc/bridge/layout.h MESH_CHILD_VERSION, adapted: 3, the tag's 2 moved by its own rule below, as struct
-   child_message leaves out `page` (the link block, left out of struct link) */
+/* tag etc/bridge/layout.h MESH_CHILD_VERSION, verbatim */
 /* design/transport.md section 14, "A process a port": the version of the contract between the bridge and its children,
    declared: their command line, `mesh-flow --child VERSION DEVICE INDEX ONES` (its first three words the same
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
    child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
    its bytes (the operator, 2026-10-21) */
-#define MESH_CHILD_VERSION 3u
+#define MESH_CHILD_VERSION 2u
 /* tag rdma/mesh-bridge.h LINK_STREAMS_ENDED, verbatim; what a stream's end is under the page lists is mesh-flow.c's
    (streams_open, streams_cancel: the cancellation of this node's words) */
 /* the code a link's loss is booked with where no stream of it is live, each holding on it having ended with units
@@ -221,12 +239,12 @@ struct link {
    hardware (design/rubrics.md M10: a fact named as what it is), told the parent in CHILD_BROKEN's `result` (version
    2 of the children's contract) */
 #define LINK_STREAMS_ENDED ECONNABORTED
-/* tag rdma/mesh-bridge.h, the children's messages and struct child_message, verbatim but `page` left out (CHILD_MAKE
-   named the link block by it) */
+/* tag rdma/mesh-bridge.h, the children's messages and struct child_message, verbatim */
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
-   parent's: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE), connect them to the peer's (CHILD_CONNECT:
-   the peer's lanes, address, node and the link's bandwidth), serve no lane again (CHILD_HALT), end (CHILD_END).  The
+   parent's: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE, naming the link's pages, its spare page
+   among them, which the parent may lease after the child's spawn), connect them to the peer's (CHILD_CONNECT: the peer's
+   lanes, address, node and the link's bandwidth), serve no lane again (CHILD_HALT), end (CHILD_END).  The
    child's, each naming the pairing it was asked for: the device opened or not (CHILD_OPENED: its address and bandwidth,
    and in `lanes` the queue pairs the device holds for a link), the lanes made or not (CHILD_MAKE names the lanes of the
    plan in `lanes`; CHILD_MADE: each lane's queue pair number, the first sequence number and each lane's share),
@@ -240,7 +258,7 @@ enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
 struct child_message {
   uint32_t kind,pairing;
   int32_t result,refused;
-  uint32_t qpn[MESH_LINK_LANES],peer[MESH_LINK_LANES][2],psn,share,broken,node,lanes;
+  uint32_t qpn[MESH_LINK_LANES],peer[MESH_LINK_LANES][2],psn,share,broken,node,page,lanes;
   uint16_t lid,padding;
   uint8_t gid[16];
   uint64_t bandwidth;
@@ -306,8 +324,9 @@ struct known { uint32_t node; uint64_t heard,gone,boot,sequence; };
 
 /* the state the bridge's translation units share, defined in mesh-link.c: from tag rdma/mesh-bridge.h's externs and
    tag rdma/mesh-link.c's definitions (there `stop_reason`, `exit_at`, `faulted`, `terminated` and `self_path` were
-   static, and `stop` mesh-verbs.h's extern), each with the tag's type but `wire` (main's struct mesh_wire for the tag's
-   struct wire_mapping) and `ports` (its bound, mesh.h MESH_PORTS, given at its definition) */
+   static; `stop` is tag rdma/mesh-verbs.h's extern, the stop flag defined once in mesh-link.c), each with the tag's type
+   but `wire` (main's struct mesh_wire for the tag's struct wire_mapping) and `ports` (its bound, mesh.h MESH_PORTS, given
+   at its definition) */
 extern struct hdr *M;
 extern struct mesh_wire wire;
 extern struct port ports[];
@@ -320,6 +339,36 @@ extern _Atomic uint64_t exit_at;
 extern _Atomic uint32_t faulted,terminated;
 extern char self_path[PATH_MAX];
 extern uint32_t ones;
+/* the rest of tag rdma/mesh-bridge.h's externs, defined in mesh-link.c with the tag's types: the arena pages the bridge
+   holds itself (`held_pages`), this node's available memory and model as its record carries them, the bridge's own
+   context (`bridge`, mesh-call.h struct mesh_ctx, named here by its tag alone), the clients' slots' owners and the
+   ones not released (`owners`: its bound, the tag's MESH_CLIENTS, given at its definition; `unreleased`), the record
+   sequence and the nodes heard (`known`) */
+struct mesh_ctx;
+extern uint64_t held_pages,memory,sequence;
+extern char model[MESH_MODEL_BYTES];
+extern struct mesh_ctx bridge;
+extern uint64_t owners[];
+extern int unreleased;
+extern struct known known[MESH_KNOWN];
+/* defined in mesh-ports.c, with the tag's types (tag rdma/mesh-link.c; there `find_wanted`, `finder` and `everyone`
+   were static): a read of the devices out (`finding`) and taken (`found`), one wanted (`find_wanted`), the queue it
+   runs on (`finder`), and the hellos' group, ff02::1 (`everyone`) */
+extern int finding,find_wanted;
+extern _Atomic int found;
+extern dispatch_queue_t finder;
+extern const struct in6_addr everyone;
+
+/* tag rdma/mesh-link.c quiet_until, verbatim but `static inline`, as a header's */
+/* a window's end moved to `until` where it is earlier, by any thread (the event loop's conclusions, a termination's
+   queue, B9b), never earlier */
+static inline void quiet_until(_Atomic uint64_t *at,uint64_t until){
+  uint64_t was=atomic_load(at);
+  while(was<until && !atomic_compare_exchange_weak(at,&was,until)){}
+}
+/* tag rdma/mesh-link.c page_bytes, verbatim; its comment's mention of the occurrence tables left out with them */
+/* The page table's quantum: the bridge's storage geometry and every lane unit's bytes. */
+static inline uint64_t page_bytes(void){ return (uint64_t)M->block*M->pgsz; }
 
 /* the region's types the prototypes below name, by pointer alone (mesh.h) */
 struct mesh_record;
@@ -381,6 +430,11 @@ void record_changed(void);
 void record_retell(void);
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes);
 struct mesh_record *record_held(uint32_t node);
+void sysctl_text(const char *name,char *out,size_t room);
+void health_init(void);
+uint64_t health_due(void);
+void health_turn(void);
+void clients_turn(int liveness);
 
 /* mesh-flow.c */
 int guard_raise(struct port *port);
