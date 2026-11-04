@@ -765,6 +765,13 @@ work proceeds.)
   (passes ? 1 : steps), from the waiter's end or the commit).
 - 5 again: 6f4c84ea (mesh_retire stores `hops` 0 and `state` 0, a release fence, `plan` woken, before closing claims;
   the late-load refusal's qualification stated).
+- After review 15: 3 a718dd45 (a relay's own receive `count` 0, phase groups kept for every range this node receives,
+  count words only for the ranges it consumes, struct mesh_state `ranges` those; `state` 1 EINVAL unless a local
+  invariant; the `copies` fallback gone); 6 a8731d81 (a `count` 0 receive flips its phase only; the wake where the add
+  makes (j + 1) x pages); 1 73bf5584 (the notes: `count` 0, `ranges` the consumed ranges, every received range a
+  phase group, status `first` 32 bits). The C9 hook's remark that plan_walk moves into the graph module: ruled it
+  stays (its tree steps are mesh_graph_climb and mesh_graph_rows already, after the C9 reviews of c5bffd0c and
+  c9ffedcf; what is left emits the hop entries both ends agree on).
 
 ### Reviews and where their findings went
 
