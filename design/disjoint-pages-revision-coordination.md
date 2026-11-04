@@ -741,6 +741,19 @@ work proceeds.)
   parents) once a write and the kernel span as mesh_graph.reach over (operator, fusable steps left) states, its own
   order and bitsets gone; the FUSED assumption stated in the docstring as open). tools/draft/build_draft.py imports
   prepare_e2b, so it now needs the mesh checkout beside it too (the path stalls.py uses).
+- 4 (tools/e2b_replay.m, second): ecb374e0 (one Metal 3 MTLCommandBuffer on the recorder's queue through
+  MetalReplayEncode with an MTLSharedEvent from command.device; the waiter with final = the passes, none where there
+  are none; refused before the commit where the waits overran their room or the last value is not the passes; the run's
+  result from command.error, waits_end and mesh_metal_status, "step N failed" and no token line after a failure; GPU
+  time from the command buffer; E2B_DUMP reads a routed operand's last copy; the profile only with no later pass; the
+  source's own reads mapped to MESH_*_SOURCE_READ; the MTL4 submission, its unbounded wait and stop_memory gone).
+  Its addition: between the commit and waits_end it waits for the event to reach `final`, each rise within
+  MESH_PLATFORM_NS (waitUntilSignaledValue:timeoutMS:), so a stop can still reach the running waiter; on a completion
+  timeout it releases nothing the GPU may use and leaves the client's retirement to the bridge's turn. Its open risks,
+  ruled defects and routed back to 4: a stop delivered on another thread could reach a freed waiter (to a libdispatch
+  signal source on a serial queue, the pointer cleared by dispatch_sync before waits_end); the completion bound of
+  MESH_PLATFORM_NS would fail a long decode with no later pass (to MESH_PLATFORM_NS x (passes ? 1 : steps)). The
+  preparation's, prefill's and profile's waits are on local GPU work with no spin and no remote dependency: left.
 
 ### Reviews and where their findings went
 
