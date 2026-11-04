@@ -335,7 +335,41 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   a timed-out wait ends either tool with exit status 1, since its allocator cannot be reset before its command buffer
   completes (MTL4CommandAllocator.h:48-50). Its notes: Makefile:99 and the tool's head comment cite a docs/kernels.md
   section that does not exist; the probes `packet` and `scoped` spin by design (they measure spins), unchanged.
-- 4 (metal_recording.m, second: R9) launched after 3.
+- 2 again: e8ea7628 (struct mesh_target's field `stream` renamed `word`, the region offset of a source range's supplied
+  word, in mesh.h, mesh-collective.c and mesh-metal.m; no other use in either repo), bdb1ce8f (mesh-graph.{h,c}'s text
+  in the module's own generic terms: machines, units, rates, a cut's capacity).
+- 7 (tools/e2b_replay.m): 9a196d2a (HOST_LAG k = 2; the R10 feedback records, commit_bounded in MTL4, step_wait bounded
+  at MESH_PLATFORM_NS x k, encoder_of with R7's barrier, copy_at, host_loop (R5) shared by the prefill and the decode;
+  every per-step and per-chunk host input, the token (ahead 1), the index commands' outputs and the step word lag-k
+  values, stand-in memory one copy; the residency sets on the MTL4 queue; the preparation's optimization in an MTL4
+  encoder; MetalReplayWaits for the whole run before the waiter; each decode step the index repetition t, then
+  MetalReplayEncode of [t, t + 1), then signalEvent; E2B_PROFILE by an MTL4CounterHeap, still skipped where the decode
+  holds a later pass (that pass would wait past the run's last landed value); `stride`, `instances`, every Metal 3
+  command buffer outside the capture and the landed-event wait loop gone), 727b9c2e (tools/prepare_e2b.py, comments:
+  "transfer" in place of the verbs word). Its differences, accepted: under RECORD_ONLY the preparation is not committed
+  either (nothing committed); the stop's handler also sets a flag the loop reads before each step, and the stop
+  sources exist wherever the loops run, a stop then ending ECANCELED; the prefill and the decode share the input and
+  step events (chunk c at c + 1, step t at chunks + t + 1), the k allocators and the k command buffers; the run's error
+  is its first failure (the loop, the waiter's cause, the feedback, the status); `invocation_gpu_seconds` the span of
+  the decode's commits, `command_buffers` their count; a lag-k operand bound by copy in its own phase and copy 0 in
+  another; without a decode the index commands run once, in step 0 of the same loop. Its notes: the final feedback
+  wait counts passes + 1 commits a MetalReplayEncode call, as the header says; prepare_e2b.py:2384's argparse help
+  says "SENDs" (runtime text); the C9 hook named older graph walks in prepare_e2b.py (kv_sections, prepare()), open.
+- 4 (metal_recording.m, second: R9): bc906578 (MetalDelegateValues, after MetalMaskReaders and before the level walk:
+  each distinct delegate buffer a recorded command or later pass binds one MetalStandIn over its length, its `delegate`
+  the buffer, METAL_INVARIANT where nothing writes it or its first binder reads it, else METAL_EXECUTION at its levels;
+  MetalDelegateCopies, last in replay:, every invariant copied in one MTL4 command buffer (R7's barrier, copyFromBuffer,
+  a residency set of both buffers, MetalCommitted, raising on an error, the deadline or a value past its placed
+  buffer); MetalBinding's "as captured" path gone, an unplaced binding raising; the replay's residency set no longer
+  the capture's owners and resources (later passes' pipelines added explicitly); useResource:usage: raising),
+  96edc20e (a stale comment in MetalMapShape). Its differences, accepted: MetalNativeSubstitute's `extent` reads the
+  buffer's length at capture, equal to the value's bytes (the values are made after the passes that rename and inline
+  by whether a binding is a buffer); the classification before the level walk (command order and access bits alone);
+  useResource: raises (a kernel reading a buffer through an address in another, which the recorder cannot move to
+  placed pages; Dawn calls it only with MetalUseArgumentBuffers, off by default:
+  .build/Dawn/src/dawn/native/metal/PhysicalDeviceMTL.mm:416, UtilsMetal.mm:957-963); one commit for all copies. Its
+  notes: MetalSpecializeScalars' host read of Dawn's uniforms and the zero points runs at capture, before the values;
+  a delegate buffer bound by two captures becomes a value of each, placed and copied once per capture (to review 9).
 - 6 (the count audit): 2a14d744 (mesh-bridge.h: MESH_LINK_LANES's note stated as a compile-time capacity, which
   link_plan meets with the smaller of the two ends' reported budgets, not as one OS's count; hello_budget(0) 0, not
   MESH_LINK_LANES). Its findings: (1) the note reasoned from macOS 26's report as a fact, the code being the tag's (a
