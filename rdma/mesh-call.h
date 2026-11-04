@@ -23,13 +23,12 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    left standing reads no execution as landed that has not: `executions` only rises, the program reads and releases
    nothing of an execution it does not run, and the plan's end (the next plan, or the program's retirement) cancels
    every receive of it not landed.  It does not end without effect: the bridge has already set the raised executions'
-   receives, which end with the plan as any cancelled run's do, the bridge ending and re-pairing the links toward the
-   adjacent nodes they wait on (review 8's finding 1).  A second start on the same plan waits as the first and raises
-   it.  0 (also where no hop is written), EINVAL where no
-   plan is written (hdr `state` 0), the bridge's code where it refused the plan toward an adjacent node (phase
-   MESH_STOPPED), ETIMEDOUT past the bound, ESTALE where the map moved since the plan was made (plan again), or the map
-   reader's error value (mesh-dataflow.h mesh_nodes_read): each with `executions` not raised, but the ESTALE after the
-   raise, with it raised */
+   receives, which end with the plan as any cancelled run's do, by the bridge's own means (review 8's finding 1;
+   review 10's finding 5).  A second start on the same plan waits as the first and raises it.  0 (also where no hop
+   is written), EINVAL where no plan is written (hdr `state` 0), the bridge's code where it refused the plan toward an
+   adjacent node (phase MESH_STOPPED), ETIMEDOUT past the bound, ESTALE where the map moved since the plan was made
+   (plan again), or the map reader's error value (mesh-dataflow.h mesh_nodes_read): each with `executions` not
+   raised, but the ESTALE after the raise, with it raised */
 int mesh_transfers_start(struct mesh_ctx *,uint64_t executions);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data
