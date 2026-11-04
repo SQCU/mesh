@@ -457,6 +457,31 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   MTL4 decode before ecb374e0 ran with them, and primitive_constants.m's `drain` measures them: open; R3's ESTALE ends
   e2b through OK() with status 1, an error value: accepted; the Swift engine's Metal 3 command buffers, outside D.4:
   open.
+  The fixes: 5 bfc993cf (the `scoped` probe's poll bounded at 2^20 a wait, a miss written to a word the host reads and
+  refuses with exit status 1; its kernel text read, not compiled: no offline Metal compiler here); 4 de92170a (the
+  header: `- (id)capture:(void (^)(void))encode;` in place of capture:repetitions:), 5b55c443 (MetalReplayPeriod: L the
+  least common multiple of every placement's copies, 4u of every received operand a first pass reads and the step
+  word's copies; replay: builds L slots of commands, later-pass bindings and segments; the run's command c runs from
+  slot command c mod (L x count), split at segment edges and the wrap; Optimize covers each slot once; Waits and Encode
+  take any t; activeRepetitions and E2B_OPCUT_AT gone, the latter having keyed a recording by its repetitions, which the
+  recorder no longer gets (tools/mesh/run_pair.py:47 still forwards it, harmless, a launcher this unit leaves); the
+  period shown for the publishing and later index sets, the first command's barrier and E2B_PROFILE's repetition 1),
+  0782af7e (one map across captures from a delegate buffer to its value and whether its capture writes it; a later
+  capture binds the earlier's value, lists and copies it not, and raises where either writes it; the order this asks:
+  an earlier capture's place:value: before a later's replay:, and its replay: before the later's run, which e2b's phase
+  loop keeps), 310ea80b (MetalRefuse: every refusal reachable from a call the delegate makes during a capture (a
+  binding index past 31, a recordDispatch exception, an unrecorded command, useResource:) recorded and raised by
+  capture: after the delegate's preparation completes; the same commands refused as before, none newly); 7 ad64591e
+  (before each step the run's failure read: mesh_metal_status, or the landed event at `final` while a wait of a step not
+  yet committed is unmet (`final` is also reached early, legitimately, where every landing comes ahead); after such a
+  stop the waiter is not stopped, so its cause, then the status, is the error (ENOLINK after a cancellation, not
+  ECANCELED); E2B_DUMP of the token its output copy, steps mod k; a lag-k operand bound by its copies in every capture
+  and refused where a capture outside its own phases binds it, and where it is both per-step and per-chunk; every host
+  input's fill checked before anything runs; each step wait bounded at MESH_PLATFORM_NS x (the passes of the steps it
+  covers + 1 each); an @autoreleasepool a step (MTL4CommandAllocator.h:27, the allocator holding the encoded commands'
+  memory, kept until the step ends); capture: without repetitions, every capture released only after every replay:),
+  63adb790 (prepare_e2b.py's --publication-ranges help: "ranges"). The C9 hook's remarks on prepare_e2b.py's older
+  graph walks (kv_sections, prepare(), at the functions 727b9c2e's comments touched): outside this unit, open.
 
 ### Integration
 
