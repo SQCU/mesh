@@ -16,6 +16,16 @@ for br in $(ifconfig -l | tr ' ' '\n' | grep '^bridge'); do
   for m in $mem; do ifconfig "$br" deletem "$m" >/dev/null 2>&1; done
   ifconfig "$br" destroy >/dev/null 2>&1; drift=1
 done
+# The stored automatic Thunderbolt Bridge (SystemConfiguration VirtualNetworkInterfaces/Bridge/bridge0) lists every
+# fabric port, and configd makes bridge0 again from it as ports attach after this has run. On m5ult3 after its reboot
+# of 2026-11-01 bridge0 bridged en3-en6 again, link-local traffic crossed it and ports paired with nodes not on their
+# cables (failport e7883429). Dissolving the running interface alone (above) is undone, so the definition goes too.
+if printf 'get /VirtualNetworkInterfaces/Bridge\nd.show\nquit\n' | scutil --prefs 2>/dev/null | grep -q 'bridge0 :'; then
+  echo "[$(ts)] DRIFT stored bridge0 definition"
+  printf 'get /VirtualNetworkInterfaces/Bridge\nd.remove bridge0\nset /VirtualNetworkInterfaces/Bridge\ncommit\napply\nquit\n' |
+    scutil --prefs >/dev/null 2>&1
+  drift=1
+fi
 for p in $ports; do
   mac=$(ifconfig "$p" 2>/dev/null | awk '/ether/{print $2}')
   [ -n "$mac" ] || continue
