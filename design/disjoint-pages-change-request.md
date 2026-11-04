@@ -7,7 +7,7 @@ functions in scope; and the canonical path.
 Appendix C holds the operator's rulings on the first implementation and Claude's consolidated revision (C3); where C3
 differs from the canonical path, Appendix A3 or Appendix B, C3 holds. Appendix D holds the operator's rulings on the
 revision and Claude's proposal (D.3), which is the unit of work; where D.3 differs from C3 or anything earlier, D.3
-holds.
+holds. D.5 states what a plan gives the bridge, and holds over everything before it.
 
 ## The turns
 
@@ -1135,6 +1135,252 @@ differs from C3 or from anything earlier in this document, D.3 holds.
 > 'scattered'), a set of pages for each local destination, and all local destinations can be sampled from concurrently,
 > HARDWARESENT, and complementarily HARDWARERECEIVED on a different machine? walgorithms please? literautre?
 
+**Claude:**
+
+> You're right on both counts. I reasoned from a queue-pair count that belongs only to the bridge and differs between
+> macOS 26 and 27, and I turned it into a limit programs would see (`EBUSY`). That is withdrawn, and I stopped the
+> coordinator before it wrote anything. My "one comparison" sentence described the bridge's internals rather than the
+> data model. The fix is still right, but here is the model it should have been explained in.
+>
+> **What pages-for-transfer are:** a map.
+> - At each node, every adjacent node (one it shares a cable with) gets two lists: the pages this node sends to it and
+>   the pages it receives from it.
+> - A relay's forward, a reduction's partial, an allgather piece and a scatter piece are all just entries in these
+>   lists. The bridge doesn't know which collective made an entry.
+> - Each entry is a view: a page by its name in the page table, never a copy. One word releases it: the range's
+>   supplied word for a send, the receive's phase for a forward.
+> - Within one adjacent node, the list's order is fixed at compile time and is the same at both ends (data-model §3,
+>   §6). The plan orders it by when pages become ready, using Graham's list scheduling (1969).
+> - Across adjacent nodes, the lists are independent and all drain at once. A page bound for one node never waits on a
+>   page bound for another.
+>
+> **How many are in flight at once:** every page of every list, for u rounds, where u is the plan's number of copies.
+> Each page is named once per round, and no hardware count enters into it. A received page goes back on its list once
+> its last landing has landed. The allocator already guarantees the next send into that page comes after this node has
+> finished reading it.
+>
+> **Literature:**
+> - **Head-of-line blocking:** a single FIFO per input caps a switch at 2−√2 ≈ 58.6% of its throughput (Karol, Hluchyj
+>   & Morgan, IEEE Trans. Commun. 1987).
+> - **Virtual output queues** remove that block with one queue per destination (Tamir & Frazier, ISCA 1988; McKeown,
+>   Anantharam & Walrand, INFOCOM 1996).
+> - **Compiled matching:** our lists are compiled, so the input-to-output matching a switch computes every slot is
+>   computed once, as a Birkhoff–von Neumann schedule is (Chang, Chen & Huang, INFOCOM 2000).
+>
+> **Done:**
+> - Appendix D now holds your turns verbatim, D.2 is rewritten in these terms, and the queue-pair reasoning is
+>   withdrawn (mesh `5c54134c`).
+> - A new coordinator is implementing D.3.2–D.3.6: the delegate's buffers placed, host inputs in copies, Metal 4 only,
+>   each page re-named once per landing, and a plan that stands only while its map does.
+> - It also checks the bridge for any assumed count, so that it takes what the devices report on each run, on macOS 26
+>   and 27 alike.
+> - Nothing is being run. I added the correction to my memory.
+>
+> **Decision needed before D.3.1 (several programs):** when two programs' plans send to the same adjacent node, they
+> weren't compiled together. The receiver still has to know the order before the pages arrive. I see two forms:
+> 1. **One merged order:** both bridges compute one order from every standing plan whenever that set changes. One
+>    program's page can then wait behind another program's.
+> 2. **Sender notice:** the sending bridge tells the receiving bridge which plan's list it is draining next, one
+>    notice per batch. No program waits on another, but each batch's receives are set only after its notice arrives.
+>    This is the data model's "ask first", and MPI's rendezvous for large messages (Liu, Wu & Panda, ICS 2003).
+>
+> Which do you want, or is there a form I'm missing?
+
+**The operator:**
+
+> "- Within one adjacent node, the list's order is fixed at compile time and is the same at both ends (data-model §3,
+> §6). The plan orders it by when pages become ready, using Graham's list scheduling (1969)."
+> actually does this need to be the case? the semantic meanings of whihc pages with which contents are sent in what
+> order is clearly compiled, but the literal pages, literal pointers, literal ranges do not need to be deterministic;
+> only every local exchange needs to be understood as having the same memory address (page) origin and memory address
+> (page) destination...? the idea that anything needs to be ordered here at runtime seems to be conflating the idea
+> that page transfers have dependency orderings (true) and per node placement (true)... but both of these
+> relationships do not imply total orderings or local orderings determined aot. something *is* determined aot, but
+> you'll notice there are a lot of other reuqiremetns the codebase implied in various other places, like compiling
+> functions and higher order functions as constraints, the use of cudagraphs style 'shapes are compiled but indexes
+> inside of shapes might not need to be', and a 2020s mindset towrads sparsity and formal foundations (you'll notice
+> hte use of 'set' over and over again here)... i think that something is still being treated as overdetermined by
+> existing code and underdetermined by *algorithms*, *citation*, and the hardware model, which we repeatedly remind
+> you is very parallel, very simd, very simt, and has superscalar execution cores on every single node which can do
+> various fancy almost-no-latency application of functions of known size w/ operands of known size to determine final
+> materialized register contents in many kinds of algorithms...
+
+**Claude:**
+
+> No, it doesn't need to be the case. I overdetermined it, and I misread my own sources. Data-model §3 says the
+> receiver fixes where each frame lands "before it comes", which is a deadline at run time, not an order fixed at
+> compile time. §6's page list names pages "in the order it uses them", which is the consumer's order of use, not the
+> order on the wire.
+>
+> **What actually has to be compiled:**
+> - **The shapes:** for each round, the set of exchanges with each adjacent node. Each exchange has a size, an origin
+>   value and a destination value.
+> - **The dependencies:** the partial order among exchanges and compute. The allocator already computes this from
+>   happens-before.
+> - **The placement constraints:** which pages may hold which copies of which values.
+>
+> None of these is a total order, and none needs a literal page fixed in advance for each arrival.
+>
+> **What I fixed that needn't be:** a total order per adjacent node, the same at both ends. Its only job is to tell
+> the receiver which arrival is which without putting anything in the page. It costs two things:
+> - A partial order becomes a total one, so a ready page waits behind an unready earlier one even within a single
+>   adjacent node. That's head-of-line blocking again, inside the list.
+> - Several programs sending to one node then need either a merged order or notices. That was the false choice I put
+>   to you.
+>
+> **The real question is how an arrival is identified.** Position is only one way:
+> - **By position.** This is what the code does now.
+> - **By tag.** In tagged-token dataflow each token carries its context, and a matching store pairs it with its
+>   consumer in any order (Arvind & Nikhil, IEEE Trans. Computers 1990; Gurd, Kirkham & Watson, the Manchester
+>   dataflow machine, CACM 1985). Rule 1 keeps the tag out of the page, so it would have to travel beside it.
+> - **By the receiver choosing at run time.** In receiver-driven transport, the receiver grants what comes next
+>   (Montazeri et al., Homa, SIGCOMM 2018; Handley et al., NDP, SIGCOMM 2017).
+>
+> **Where the GPU comes in:** if landing places are decided at run time, consumers read through an index from each
+> logical page to where it landed, with one entry written per landing in the state section.
+> - **The pattern:** this is a block table, with shapes compiled and indices not. PagedAttention uses one for its KV
+>   cache (Kwon et al., SOSP 2023). CUDA graphs similarly fix their topology but let a node's pointers be updated
+>   (`cudaGraphExecKernelNodeSetParams`).
+> - **The cost:** on SIMT hardware it is one more load per page per lane, a gather of known size. The masked first
+>   pass already builds its work list at run time by compaction (Blelloch), so this adds one indirection.
+>
+> **What this does to the D.3.1 question:** both forms I offered assumed a total order per adjacent node. If identity
+> doesn't come from position, several programs' exchanges with one node are just a union of sets drained as they
+> become ready, and neither form is needed.
+>
+> **What I can't settle from here:** whether an arrival can carry its identity beside the page, or whether the
+> receiver's choices can reach the sender in time. That is a fact about the bridge's driver. It has to be answered
+> from the failport's code and the driver itself, and I won't assume either answer.
+>
+> The coordinator's work on D.3.2–D.3.6 doesn't depend on this: placing the delegate's buffers, host inputs in copies,
+> Metal 4 only, re-naming each page once per landing, and a plan that stands only while its map does. I've saved this
+> correction to memory. Should I write it into Appendix D as the data-model revision behind D.3.1 before any code
+> moves?
+
+**The operator:**
+
+> instead of commenting on your code find reference papers, reports, algorithms literature, etc? we need to ground
+> what is being discussed to the tangible and canonical. this means describing bad algorithms in terms of what
+> historical algorithmic positions they ocucpy and what tradeoffs those algorithms have, then describing other
+> canonical algorithms which better fit the situation.
+> " whether an arrival can carry its identity beside the page, or whether the receiver's choices can reach the sender
+> in time. That is a fact about the bridge's driver.' idk think about whether you can compile a schedule which
+> nonblockinguinely transmits metadata about a candidate page map which will be used soon; if your code is compiled
+> aot why can't you push this one-sided before and without blocking any one-sided transactions?
+> "The masked first pass already builds its work list at run time by compaction (Blelloch), so this adds one
+> indirection.' if there is an indirection does it add 1 register read within l1 cache of indirection or does it caus
+> a stack access? A heap access? determine what the qualities of this problem/topic actually are or must be if we
+> choose data structures which are congenial and well posed, instead of assuming whatever we're using right now must
+> be adversarially read to demand the lowest performance possible even where this would depart from literature.
+
+**Claude:**
+
+> Here is the literature first, with the code placed where it falls in it.
+>
+> ## 1. What the current algorithm is, historically
+>
+> Per adjacent node, the plan keeps one sequence in demand order, the same at both ends. The bridge deals that
+> sequence out by bytes. The k-th arrival is identified by its position.
+>
+> - **Fixed-order channels.** This is Kahn's process network (G. Kahn, IFIP 1974), compiled the way synchronous
+>   dataflow compiles one (E. A. Lee & D. G. Messerschmitt, *Synchronous data flow*, Proc. IEEE 1987): static rates
+>   and a static order, with tokens identified by position. MPI keeps the same rule per (source, tag, communicator):
+>   messages don't overtake each other (MPI 4.0 §3.5). It is tags that let unrelated traffic pass.
+> - **What it buys:** no metadata and no matching at run time.
+> - **What it costs:**
+>   - The order is total, so two exchanges that don't depend on each other still wait on one another. That is
+>     head-of-line blocking inside the list (Karol, Hluchyj & Morgan, IEEE Trans. Commun. 1987).
+>   - SDF graphs compose only by being recompiled together, which is exactly where several independent programs got
+>     stuck.
+> - **The dealing step.** Splitting the sequence by bytes is Graham's list scheduling (1969). Graham's analysis covers
+>   independent jobs, and here it ignores precedence. So the code fixes a total order, then splits it without regard
+>   to which exchanges are concurrent.
+>
+> ## 2. Canonical algorithms that fit better
+>
+> **Chains, not lists (Dilworth).**
+> - Any partial order splits into chains, and the fewest chains needed equals its width, the largest set of mutually
+>   concurrent elements (R. P. Dilworth, Annals of Math. 1950). Fulkerson turned this into bipartite matching (Proc.
+>   AMS 1956), which Hopcroft–Karp solves in O(E√V) (SIAM J. Comput. 1973).
+> - Inside a chain, every element is a dependence successor of the one before it, so it can never be ready first.
+>   Ordering a chain therefore costs no head-of-line blocking at all.
+> - So the compiled object per adjacent node should be a chain decomposition of the dependence order, which the
+>   allocator already computes, not one sequence.
+> - Exchanges from independent programs are never related, so they land in separate chains. Several programs become a
+>   union of chains, with no merged order and no notices.
+>
+> **Shapes compiled, indices at run time.**
+> - *Inspector–executor:* compute the communication schedule once and reuse it every iteration (J. Saltz, R.
+>   Mirchandaney & K. Crowley, *Run-time parallelization and scheduling of loops*, IEEE TC 1991; CHAOS/PARTI, Das et
+>   al., JPDC 1994).
+> - *MoE dispatch:* the shape is a fixed capacity, and which token goes in which slot is a run-time index (Lepikhin et
+>   al., GShard, ICLR 2021; Fedus, Zoph & Shazeer, Switch Transformers, JMLR 2022).
+> - *Block tables:* PagedAttention reads a logical-to-physical block map per sequence (Kwon et al., SOSP 2023). It's
+>   the same move as virtual memory (P. J. Denning, Computing Surveys 1970).
+>
+> **Dynamic dataflow with tags, and what it costs.**
+> - In tagged-token dataflow each token carries its own identity, so tokens can arrive in any order (Arvind & Nikhil,
+>   IEEE TC 1990; Gurd, Kirkham & Watson, CACM 1985).
+> - The cost is an associative matching store at run time. If the tag *is* an index into a table of known shape, that
+>   match becomes one direct-mapped load.
+>
+> ## 3. Push the map ahead: yes, and it's software pipelining
+>
+> You're right that I can't hide behind "a fact of the driver" for this one.
+>
+> - **Why it works.** Every landing place for round r is decided by the end of round r−k. So the map for round r can
+>   be its own compiled transfer: a small state page per adjacent node, produced in round r−k and sent one-sided like
+>   any page.
+> - **How it fits the plan.** The edge from map(r) to data(r) is a dependence with lag k. Modulo variable expansion
+>   gives the map k copies (Lam, PLDI 1988; Rau, MICRO 1994). It lands before its round, as data-model §3's "before it
+>   comes" requires, and nothing waits on it unless its producer is k rounds late.
+> - **Where it shows up elsewhere.** This is inspector–executor, run ahead instead of up front. Sparse data exchange
+>   treats the same metadata problem (Hoefler, Siebert & Lumsdaine, PPoPP 2010). D.3.3's host inputs have the same
+>   form.
+> - **What the map can't carry.** It can't carry the order in which pages become ready in round r. With chains it
+>   doesn't need to, because a chain's order is already its readiness order.
+> - **When it's needed at all.** For e2b's static shapes, placement is affine in the copy (base + (t mod u)·stride +
+>   k·page), so no map is needed. A map is only for placement chosen at run time: MoE capacity slots, KV blocks,
+>   variable lengths.
+>
+> ## 4. What an indirection costs, with structures chosen well
+>
+> - **Affine placement (today's case):** none. The recorder binds each repetition's address, so a kernel gets it as an
+>   argument. It stays in registers, with no load, no stack and no heap.
+> - **A run-time index:**
+>   - It is one 32-bit load per threadgroup per page it reads. It is uniform across the SIMD-group, because it depends
+>     only on the threadgroup's position and the bindings.
+>   - It comes from a contiguous table in the plan's state section: placed once by the allocator and bound as a
+>     buffer. That's neither the stack nor the heap.
+>   - Its address is known at entry, so it issues alongside the phase load the first pass already makes. That means no
+>     extra dependent round trip; the data load waits on both, as it already waits on the phase.
+>   - The address math is one integer multiply-add, or a shift for power-of-two pages, on the superscalar ALUs.
+>   - The value occupies one register, held once per SIMD-group. Dougall Johnson's reverse-engineered *Apple G13 GPU
+>     Architecture Reference* documents uniform registers shared by all 32 lanes.
+>   - Contiguous entries for adjacent pages share cache lines, and data-model §1 puts buffer data in the core's one
+>     on-chip cache.
+>   - Net cost: one small load in parallel with an existing one, and nothing spilled.
+>
+> ## 5. What this changes
+>
+> - The code fixes too much in one place: a total order over concurrent exchanges.
+> - It fixes too little in another: nothing from the dependence structure (chains) reaches the bridge.
+> - The literature's form:
+>   - chains per adjacent node from the allocator's happens-before (Dilworth/Fulkerson);
+>   - placement that's affine where shapes are static, and otherwise a map pushed k rounds ahead (MVE);
+>   - consumers reading through a uniform index colocated with the phase load.
+>
+> It also settles the open D.3.1 question without either of the two forms I offered. Should I write it into Appendix D
+> as the data-model revision, with these citations, so it's the basis for D.3.1? The coordinator's current work
+> (D.3.2–D.3.6) doesn't depend on it.
+
+**The operator:**
+
+> "Sparse data exchange treats the same metadata problem (Hoefler, Siebert & Lumsdaine, PPoPP 2010). " cool great lets
+> consign oureslves to explicitly describing what we gotta present to the bridge for the bridge to get to do really
+> effective transfers wtihout being really brittle. then lets cite our papers and write exactly that, then never need
+> to think about this topic ever again
+
 ### D.2 Claude's answers
 
 D.2 and D.3 speak of transfers as the data model does: pages, lists of pages, the words that release them, and the
@@ -1147,9 +1393,9 @@ operator's last turns).
   scatter's piece are all entries of these lists. The bridge never knows which collective made an entry.
 - Each entry is a view: a page by its name in the page table, never a copy of it. A sent page is released by its
   range's supplied word, and a forward by its receive's phase.
-- A list's order is fixed when the plan is compiled, and it is the same at both ends: the receiver fixes where each
-  page lands and in what order before it comes (data-model §3 and §6). The plan orders each list by when its pages
-  become ready (R. L. Graham, Bounds on multiprocessing timing anomalies, SIAM J. Appl. Math., 1969).
+- What is compiled is each adjacent node's set of exchanges, their dependence order and their placement, never one
+  order over them all. The receiver fixes each landing "before it comes" (data-model §3), which is a deadline at run
+  time, and §6's order is the order a step uses its pages. D.5 states what is compiled.
 - Every adjacent node's lists are drained at once and apart from the others. A page bound for one node never waits on
   a page bound for another. This is the virtual output queue: one queue per destination at each input. A single FIFO
   per input caps a switch at 2 − √2 ≈ 58.6% of its throughput by head-of-line blocking (M. J. Karol, M. G. Hluchyj and
@@ -1182,16 +1428,9 @@ documents.
   its map does. It is link-state routing's own rule: routes come from one version of the database, and a change
   recomputes them (RFC 2328 §16).
 
-**Several programs' plans toward one adjacent node: open, for the operator.** One plan's list toward a node has its
-order from that plan's compilation. Several programs' plans don't share a compilation, and the receiver must still know
-the order before the pages come (data-model §3). That leaves two forms:
-- The two bridges compute one order from every standing plan whenever the set changes. A page of one program can then
-  wait behind another program's.
-- The sending bridge tells the receiving bridge which plan's list it drains next, a notice for each batch. No program
-  then waits on another, but a batch's receives are set only once its notice comes. This is the data model's "ask
-  first" (data-model §3), the rendezvous of MPI's large messages (J. Liu, J. Wu and D. K. Panda, High performance
-  RDMA-based MPI implementation over InfiniBand, ICS 2003).
-D.3.1 waits on this ruling.
+**Several programs' plans toward one adjacent node.** Settled by D.5: each program's exchanges are chains of their own,
+never ordered with another program's, so neither a merged order nor a notice per batch is needed. The two forms first
+offered here both assumed one order per adjacent node.
 
 **Where Claude's text was wrong.**
 - D.3.1 as first written reasoned from a count the bridge's devices report. That count is private to the bridge, and it
@@ -1205,8 +1444,7 @@ D.3.1 waits on this ruling.
 Items 1 to 4 are the report's departures, in its order. Items 5 and 6 are the answers above. C3's four rules hold
 throughout.
 
-1. **Any number of programs at once.** (Departure D8.) Waits on the ruling in D.2 for how several plans toward one
-   adjacent node are ordered. The rest stands:
+1. **Any number of programs at once.** (Departure D8.) On D.5:
    - **Attach takes nothing.** There is no client word, no compare-and-swap and no EADDRINUSE. A client is named only
      in the heads of its claims (its pid and start), and only once it plans.
    - **Each plan in its own claim.** A plan's lists and its state section are placed by its allocator in its own
@@ -1220,8 +1458,8 @@ throughout.
      namespace. A plan is (group, epoch), the epoch being the client's count of its own `mesh_plan` calls, which is the
      same at every rank because the call is collective. The launchers (tools/mesh/run_pair.py and tools/mesh/grid.py)
      pass one group per launch to every rank, as `MESH_GROUP`.
-   - **The bridge drains every standing plan.** Each adjacent node's lists are every standing plan's lists toward it.
-     Nothing a program, a collective or data code sees names, counts or is limited by the transport. The bridge
+   - **The bridge drains every standing plan.** Each adjacent node's chains are every standing plan's chains toward it
+     (D.5). Nothing a program, a collective or data code sees names, counts or is limited by the transport. The bridge
      carries the lists by whatever its devices report on each run, on macOS 26 and macOS 27 alike, by the failport's
      code (tag pre-return-20261103).
    - **Announcements.** A bridge's load of a plan sets that port's bit in the plan's own state (one atomic OR, a bit
@@ -1293,3 +1531,94 @@ throughout.
   tools/native_bench.m (lines 97 and 466).
 - The per-step instances of the host inputs, and their bindings at t × stride.
 - The delegate's buffers bound as captured, and `MetalNativeSubstitute`'s reads of the weights from them.
+
+### D.5 What the plan gives the bridge
+
+This section is the whole of what crosses from a plan to the bridge, and of what comes back. Code and later documents
+cite it rather than restate it. It names nothing of the transport. How the bridge carries what it is given is its own,
+on whatever its devices offer on each run, on macOS 26 and macOS 27 alike. Where it differs from anything earlier in
+this document, it holds.
+
+**Where it sits in the literature.**
+- **The metadata problem.** In a dynamic sparse data exchange each process knows what it sends and to whom, but not what
+  it will receive. Run-time protocols learn that by a personalized exchange of counts, a reduce-scatter of counts, or a
+  nonblocking consensus, NBX (T. Hoefler, C. Siebert and A. Lumsdaine, Scalable communication protocols for dynamic
+  sparse data exchange, PPoPP 2010). A compiled plan answers it once: every rank computes every exchange of the template
+  (C3.3), so nothing at run time learns who sends what. What stays at run time, where a program has it, is each round's
+  placement and size, and that travels as a map (item 7).
+- **Independence.** One queue per destination removes head-of-line blocking between destinations (M. J. Karol, M. G.
+  Hluchyj and S. P. Morgan, Input versus output queueing on a space-division packet switch, IEEE Trans. Commun., 1987;
+  Y. Tamir and G. L. Frazier, High-performance multi-queue buffers for VLSI communication switches, ISCA 1988; N.
+  McKeown, V. Anantharam and J. Walrand, Achieving 100% throughput in an input-queued switch, INFOCOM 1996). Streams
+  that share a carrier, each ordered only within itself, remove it between streams (SCTP's streams, RFC 4960; QUIC's,
+  RFC 9000).
+- **Chains.** A partial order splits into the fewest chains, as many as its widest set of mutually unordered elements
+  (R. P. Dilworth, A decomposition theorem for partially ordered sets, Annals of Math., 1950). The split is a bipartite
+  matching (D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered sets, Proc. AMS, 1956),
+  found in O(E √V) (J. E. Hopcroft and R. M. Karp, An n^5/2 algorithm for maximum matchings in bipartite graphs, SIAM J.
+  Comput., 1973). Inside a chain each element follows its predecessor in the dependence order, so keeping a chain's
+  order never delays a ready element.
+- **Priority.** Among ready work, the longest path to the end goes first (T. L. Adam, K. M. Chandy and J. R. Dickson, A
+  comparison of list schedules for parallel processing systems, CACM, 1974; Y.-K. Kwok and I. Ahmad, Static scheduling
+  algorithms for allocating directed task graphs to multiprocessors, ACM Comput. Surv., 1999).
+- **Shapes compiled, indices at run time.** A schedule is computed once and reused (inspector–executor: J. Saltz, R.
+  Mirchandaney and K. Crowley, Run-time parallelization and scheduling of loops, IEEE Trans. Comput., 1991). A capacity
+  is fixed and its slots are run-time indices (D. Lepikhin et al., GShard, ICLR 2021; W. Fedus, B. Zoph and N. Shazeer,
+  Switch Transformers, JMLR, 2022). A kernel reads through a block table (W. Kwon et al., Efficient memory management
+  for large language model serving with PagedAttention, SOSP 2023). A map needed in round r is produced earlier, with
+  its own copies, by modulo variable expansion (M. Lam, PLDI 1988; B. R. Rau, MICRO 1994).
+- **Routing.** Which adjacent node a page goes through, and each path's share, is the plan's: concurrent multicommodity
+  flow (N. Garg and J. Könemann, Faster and simpler algorithms for multicommodity flow and other fractional packing
+  problems, FOCS 1998).
+
+**What the plan gives, for each standing plan at each node.**
+1. **Its name:** (group, epoch) (D.3.1), and the map serial it was made on (D.3.6).
+2. **Its rounds:** u copies; execution t runs copy t mod u; `executions`, which only rises.
+3. **Its release events.** An event releases a block of pages at once: a range's supplied word reaching t + 1 at its
+   source, or, at a relay, a receive's phase reaching its round (C3.7). Every page an event releases is ready at the
+   same moment.
+4. **Its exchanges.** For each adjacent node, each direction and each copy, the set of pages this node sends to that
+   node or receives from it. Each exchange has:
+   - its entry in its range's placement table (item 7), which gives its page by its row in the page table: a view, never
+     a copy;
+   - its bytes, fixed at both ends before it comes (data-model §3);
+   - for a send, its release event; for a receive, its phase field and its range's count (C3.7);
+   - its chain, and its place in that chain (item 5).
+5. **Its chains.** For each adjacent node and direction, the events behind those exchanges, ordered by the allocator's
+   happens-before, split into the fewest chains (Dilworth; Fulkerson). An event's pages keep page order within it. Round
+   t + 1 of a chain follows round t, because each event's next instance follows it (the coordination's D5). Both ends
+   compute the same chains from the same template, so both know each arrival as (plan, chain, place, round). Different
+   plans' events are never ordered, so their chains stay apart.
+6. **Its priorities:** each event's longest path to the end of its round.
+7. **Its placement.** Each exchange's page and bytes are one 8-byte entry of its range's placement table, an entry per
+   page and copy, in the plan's state section. The bridge and the GPU's readers both read placement there, and nowhere
+   else.
+   - Where placement is static, as in e2b, the plan writes the table once, and nothing writes it again.
+   - Where a program decides placement or size at run time, a round's entries are a map. A map is a page of the plan
+     like any other: produced k ≥ 0 rounds ahead (lag k, with its own copies), sent in its chain ahead of the exchanges
+     it describes, and landed in the receiver's table before they come. Its entries are relative to a pool the allocator
+     placed, so the map is the table itself.
+   - An entry of 0 bytes means no exchange that round. It lands when its map lands.
+
+**What the bridge does with it, and gives back.**
+- Each chain progresses by itself. An exchange waits only on its release and on the earlier exchanges of its own chain.
+  Nothing waits across chains, plans or adjacent nodes.
+- Where ready chain heads share what the bridge carries them on, the higher priority goes first.
+- Every landing is set before its exchange comes, in the page its table names. Nothing is staged or copied.
+- What comes back is words only: each receive's phase (2-bit Gray) and each range's count (arrivals; a cancellation
+  raises it to its final value), every wait on them bounded (C3.1, C3.7). A loss, or a moved map serial, cancels
+  (D.3.6).
+- It serves any number of plans and chains, on whatever its devices offer on each run. A plan never sees a transport
+  object, a count of one, or a limit that comes from one.
+
+**What the plan never gives:** a transport object or a count of one; an order between chains; a wait.
+
+**What placement costs on the GPU.** A reader of a page loads the page's table entry: 8 bytes, the same for every lane
+of its SIMD-group, because it depends only on the threadgroup's position and its bindings. The table is contiguous and
+bound once. The load issues beside the phase load the first pass already makes, so it adds no dependent round trip. The
+entry is held in a register once per SIMD-group (Dougall Johnson's reverse-engineered Apple G13 GPU Architecture
+Reference documents registers shared by all 32 lanes). Nothing is on the stack, nothing is allocated at run time, and
+the address is one integer multiply-add.
+
+**What it settles.** Several programs' exchanges toward one adjacent node are separate chains, so neither of the two
+forms D.2 first offered is needed. D.3.1 stands on this section, and D.3.5's u rounds in flight hold per chain.
