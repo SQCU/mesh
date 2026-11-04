@@ -675,6 +675,102 @@ int mesh_graph_happens_before(uint32_t vertices, const size_t *first, uint32_t (
   return result;
 }
 
+/* New (design/disjoint-pages-change-request.md, Appendix C, C3.3; design/disjoint-pages-revision-coordination.md, D5
+   and "The allocator"): no tag source.
+   mesh_graph_lags' heap: the vertices whose distance is set but not yet known least, a binary heap by (distance,
+   vertex), heap[0] the first; place[v] v's index in it, UINT32_MAX where v is not in it.  a comes before b where its
+   distance is less, a tie to the lower vertex. */
+static int lags_before(const uint32_t *distance, uint32_t a, uint32_t b) {
+  return distance[a] < distance[b] || (distance[a] == distance[b] && a < b);
+}
+/* heap[i]'s vertex moved toward the root past each parent it comes before */
+static void lags_up(uint32_t *heap, uint32_t *place, const uint32_t *distance, size_t i) {
+  const uint32_t v = heap[i];
+  while (i && lags_before(distance, v, heap[(i - 1) / 2])) {
+    heap[i] = heap[(i - 1) / 2];
+    place[heap[i]] = (uint32_t)i;
+    i = (i - 1) / 2;
+  }
+  heap[i] = v;
+  place[v] = (uint32_t)i;
+}
+/* heap[i]'s vertex moved away from the root past each child, the first of the two, that comes before it */
+static void lags_down(uint32_t *heap, uint32_t *place, const uint32_t *distance, size_t count, size_t i) {
+  const uint32_t v = heap[i];
+  for (size_t c = 2 * i + 1; c < count; c = 2 * i + 1) {
+    if (c + 1 < count && lags_before(distance, heap[c + 1], heap[c])) c++;
+    if (!lags_before(distance, heap[c], v)) break;
+    heap[i] = heap[c];
+    place[heap[i]] = (uint32_t)i;
+    i = c;
+  }
+  heap[i] = v;
+  place[v] = (uint32_t)i;
+}
+/* a walk to v of total lag `through`: v's distance lowered to it where it is less, v put into the heap or moved up in
+   it; the heap's count.  distance[v] <= UINT32_MAX, so a sum at or past UINT32_MAX lowers nothing: no walk. */
+static size_t lags_relax(uint32_t *heap, uint32_t *place, uint32_t *distance, size_t count, uint32_t v,
+                         uint64_t through) {
+  if (through >= distance[v]) return count;
+  distance[v] = (uint32_t)through;
+  if (place[v] == UINT32_MAX) {
+    heap[count] = v;
+    lags_up(heap, place, distance, count);
+    return count + 1;
+  }
+  lags_up(heap, place, distance, place[v]);
+  return count;
+}
+/* mesh-graph.h mesh_graph_lags.  From each source, Dijkstra's shortest paths (his second problem, the lags the
+   lengths), every vertex's distance first unreached (UINT32_MAX) and the source's own edges relaxed first, from 0,
+   with the source itself not reached: the walks are those from a vertex whose edges are the source's, so each has at
+   least one edge, and the source reached again takes its least cycle.  A vertex leaves the heap least (distance,
+   vertex) first, its distance then the least (no lag is negative), and never returns to it, nothing after it being
+   less; the walk from a source ends once every distinct target has left the heap (Dijkstra's ends once his target is
+   transferred to set A) or once the heap is empty, a target never reached keeping UINT32_MAX.  The least lags are
+   unique, so the order fixes only the steps, and its ties to the lower vertex make those the same at every node too.
+   The file's rules: integer + and < alone (no rounding at all, beneath "IEEE-exact operations alone"), so every node
+   computes the same lags from the same operands; the lags are the consumer's operands (mesh-collective.c's template);
+   one copy of the algorithm over integer lags (mesh_graph_flow's least-length tree, over undirected edges, double
+   lengths and with its parents, is its own).  The edges' heads and lags are read once.  Every allocation precedes the
+   first lag written, so ENOMEM writes none.
+   Cost: O(sources x (E + V) log V): per source, V distances and places set, each edge relaxed at most once at its
+   tail's departure (and the source's own once more, first), each relaxation and each departure one heap move of
+   O(log V); memory O(V + E). */
+int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
+                    uint32_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
+                    const uint32_t *source,uint32_t targets,const uint32_t *target,uint32_t *lags) {
+  const size_t edges = first[vertices];
+  if (edges >= SIZE_MAX / sizeof(uint32_t)) return ENOMEM;
+  uint32_t *heads = malloc((edges + 1) * sizeof *heads), *weights = malloc((edges + 1) * sizeof *weights);
+  uint32_t *distance = malloc(((size_t)vertices + 1) * sizeof *distance);
+  uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap), *place = malloc(((size_t)vertices + 1) * sizeof *place);
+  unsigned char *wanted = calloc((size_t)vertices + 1, 1);
+  const int result = !heads || !weights || !distance || !heap || !place || !wanted ? ENOMEM : 0;
+  uint32_t distinct = 0;
+  for (size_t k = 0; !result && k < edges; k++) { heads[k] = head(context, k); weights[k] = lag(context, k); }
+  for (uint32_t x = 0; !result && x < targets; x++)
+    if (!wanted[target[x]]) { wanted[target[x]] = 1; distinct++; }
+  for (uint32_t s = 0; !result && distinct && s < sources; s++) {
+    for (uint32_t v = 0; v < vertices; v++) { distance[v] = UINT32_MAX; place[v] = UINT32_MAX; }
+    const uint32_t from = source[s];
+    size_t count = 0;
+    for (size_t k = first[from]; k < first[from + 1]; k++)
+      count = lags_relax(heap, place, distance, count, heads[k], weights[k]);
+    for (uint32_t left = distinct; count;) {
+      const uint32_t at = heap[0];
+      place[at] = UINT32_MAX;
+      if (--count) { heap[0] = heap[count]; lags_down(heap, place, distance, count, 0); }
+      if (wanted[at] && !--left) break;
+      for (size_t k = first[at]; k < first[at + 1]; k++)
+        count = lags_relax(heap, place, distance, count, heads[k], (uint64_t)distance[at] + weights[k]);
+    }
+    for (uint32_t x = 0; x < targets; x++) lags[(size_t)s * targets + x] = distance[target[x]];
+  }
+  free(heads); free(weights); free(distance); free(heap); free(place); free(wanted);
+  return result;
+}
+
 /* New (design/disjoint-pages-change-request.md, Appendix A, A3, "The assignment";
    design/disjoint-pages-coordination.md, "The allocator"): no tag source.
    mesh_graph_left_edge's placed runs, kept by first colour */

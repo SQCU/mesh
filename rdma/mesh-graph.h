@@ -5,7 +5,8 @@
    mesh_graph_list_schedule is new (design/page-queue-change-request.md, "The rule both ends compute");
    mesh_graph_happens_before and mesh_graph_left_edge are new (design/disjoint-pages-change-request.md, Appendix A,
    A3, "Interference, by happens-before" and "The assignment"; design/disjoint-pages-coordination.md, "The
-   allocator"). */
+   allocator"); mesh_graph_lags is new (design/disjoint-pages-change-request.md, Appendix C, C3.3;
+   design/disjoint-pages-revision-coordination.md, D5 and "The allocator"). */
 #ifndef MESH_GRAPH_H
 #define MESH_GRAPH_H
 #include <stddef.h>
@@ -142,6 +143,14 @@ int mesh_graph_happens_before(uint32_t vertices, const size_t *first, uint32_t (
                               uint32_t (*lag)(const void *context, size_t k), const void *context, uint32_t iterations,
                               uint32_t sources, const uint32_t *source, uint32_t targets, const uint32_t *target,
                               uint64_t *reach);
+/* The least total lag over walks of one or more edges from source[s] to target[x] (s < sources, x < targets), in the
+   directed graph whose vertex v's edges are [first[v], first[v + 1]), edge k entering head(context, k) and carrying
+   lag(context, k) >= 0 (E. W. Dijkstra, A note on two problems in connexion with graphs, Numerische Mathematik 1,
+   1959): lags[s * targets + x], UINT32_MAX where no walk joins them.  A source that is its own target is given its
+   least cycle.  0; ENOMEM */
+int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
+                    uint32_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
+                    const uint32_t *source,uint32_t targets,const uint32_t *target,uint32_t *lags);
 /* The left-edge colouring of items that each need a run of colours (T. Hashimoto and J. Stevens, DAC 1971; M. C.
    Golumbic 1980; with sizes, greedy by size: Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020): the items in the
    caller's order order[0 .. items), item i given colours [colour[i], colour[i] + size[i]) at the lowest colour where
