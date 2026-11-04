@@ -86,9 +86,11 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   return 0;
 }
 static const char *shm; static _Atomic sig_atomic_t stop;
-/* design/prepared-machine.md#M11 */
-/* design/algorithm-sources.md#programcopy */
-static int down_pair(struct mesh_verbs *provider){
+/* 2026-11-04: down_pair's header is deleted so this bridge fails at compile instead of at run time. It destroyed
+   queue pairs with receives still posted (as a failing run leaves them), the action behind the Mini's kernel data
+   aborts of 10-16/17, inside an unbounded retry (link_close's while(!down_pair(...))). What must replace it: the
+   failport's flush-before-destroy (lanes_flush: only queue pairs with work outstanding to Error, completions drained
+   until 0.5 s quiet or 5 s, then destroy), in the resident bridge that replaces this one. */
   while(provider->qp_count){ struct ibv_qp *q=provider->queues[provider->qp_count-1].pair; if(q && ibv_destroy_qp(q))return 0; provider->queues[--provider->qp_count].pair=NULL; }
   if(provider->completion){
     if(ibv_destroy_cq(provider->completion))return 0;
