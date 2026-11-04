@@ -27,15 +27,30 @@ int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,s
 struct mesh_metal_publication { uint64_t supplied; };
 int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,
                                    struct mesh_metal_publication *);
-/* the client's signalling of the queue's event (C3.1): a wait of `value` is met once the count word at byte offset
-   `count` of the transport's buffer reads at least `target`; the event (an id<MTLSharedEvent>) is set to each value once
-   every wait of that value or less is met, in order.  The thread waits on each count word with
-   os_sync_wait_on_address_with_timeout (OS_SYNC_WAIT_ON_ADDRESS_SHARED), woken by the bridge's arrivals; a value not
-   met within MESH_PLATFORM_NS of the last value set, or a stop, sets the event to `final` at once and ends */
-struct mesh_metal_wait { uint64_t count,target,value; };
+/* one repetition's wait (design/disjoint-pages-rulings-coordination.md, R11 as review 10 amended it): pass `pass` of a
+   repetition's `passes` reads a received range whose count word of copy 0 is at byte offset `count` of the transport's
+   buffer (copy c's at count + 8 c), `pages` P a copy, `copies` u.  Repetition t's wait is {count word count + 8 (t mod
+   copies), target (t / copies + 1) x pages, value t x passes + pass + 1} */
+struct mesh_metal_wait { uint64_t count; uint32_t pages,copies,pass,padding; };
+/* the client's signalling of the queue's event (C3.1): the waits given are one repetition's, `pass` nondecreasing and
+   each below `passes`; the waiter copies them once (one repetition's, never the run's) and walks repetitions t = 0 ..
+   `repetitions` - 1, computing each wait's count word, target and value as it goes.  A wait is met once its count word
+   reads at least its target; the event (an id<MTLSharedEvent>) is set to each value once every wait of that value or
+   less is met, in order, and a value no wait has (a pass that reads nothing) as soon as the values before it are.
+   The thread waits on each count word with os_sync_wait_on_address_with_timeout (OS_SYNC_WAIT_ON_ADDRESS_SHARED),
+   woken by the bridge's arrivals; a value not met within MESH_PLATFORM_NS of the last value set, or a stop, sets the
+   event to the final value, repetitions x passes, at once and ends.  EINVAL where a wait's count word for any copy
+   c < copies lies outside the transport's buffer or is misaligned, `copies` or `pages` is 0, `pass` >= `passes`, the
+   passes are out of order, or `passes` is 0 with waits given.
+   2026-11-04, sub-assignment 2 (review 10's finding 1, the coordinator's ruling): reversing sub-assignment 8's form,
+   every repetition's waits {count, target, value} given at once for the run and copied whole, and `final` an
+   argument.  Why: a run's waits table was steps x passes x reads, though each wait is affine in t: the trip-count
+   unrolling C1 and C3.3 rejected (design/disjoint-pages-change-request.md, D.3.7: nothing bound grows with the steps).
+   What must stay: the event set to each value once every wait of that value or less is met, in order; the bounded
+   wait and the stop setting the final value at once */
 struct mesh_metal_waiter;
 int mesh_metal_waits_start(struct mesh_metal_transport *,void *event,const struct mesh_metal_wait *,size_t waits,
-                           uint64_t final,struct mesh_metal_waiter **);
+                           uint32_t passes,uint64_t repetitions,struct mesh_metal_waiter **);
 void mesh_metal_waits_stop(struct mesh_metal_waiter *);  /* async-signal-safe: one store and one wake */
 int mesh_metal_waits_end(struct mesh_metal_waiter *);    /* joined and freed: 0, ETIMEDOUT (a deadline), ECANCELED (a stop) */
 /* 2026-11-04, sub-assignment 8, where the contract's mesh_metal_waits_end names three causes: also EINVAL, where the
@@ -55,6 +70,7 @@ _Static_assert(sizeof(struct mesh_metal_input)==32 && offsetof(struct mesh_metal
   offsetof(struct mesh_metal_input,count)==16 && offsetof(struct mesh_metal_input,pages)==24 &&
   offsetof(struct mesh_metal_input,copies)==28,"mesh_metal_input: metal_recording.h struct MetalRemote");
 _Static_assert(sizeof(struct mesh_metal_publication)==8,"mesh_metal_publication");
-_Static_assert(sizeof(struct mesh_metal_wait)==24 && offsetof(struct mesh_metal_wait,target)==8 &&
-  offsetof(struct mesh_metal_wait,value)==16,"mesh_metal_wait: metal_recording.h struct MetalWait");
+_Static_assert(sizeof(struct mesh_metal_wait)==24 && offsetof(struct mesh_metal_wait,pages)==8 &&
+  offsetof(struct mesh_metal_wait,copies)==12 && offsetof(struct mesh_metal_wait,pass)==16,
+  "mesh_metal_wait: metal_recording.h struct MetalWait");
 #endif
