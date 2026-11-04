@@ -547,23 +547,23 @@ double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate
 /* New beside mesh_graph_fill (design/page-queue-change-request.md, "The rule both ends compute"): no tag source.
    mesh-graph.h mesh_graph_list_schedule: each unit in list order to the machine it would end soonest on, the machines
    scanned in order so a tie keeps the lower one */
-double mesh_graph_list_schedule(uint32_t links, const double *rate, uint64_t units, const uint64_t *bytes,
-                                uint32_t *link, uint64_t *carried){
-  for(uint32_t l=0;l<links;l++)carried[l]=0;
+double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t units, const uint64_t *bytes,
+                                uint32_t *machine, uint64_t *carried){
+  for(uint32_t l=0;l<machines;l++)carried[l]=0;
   int lost=0;
   for(uint64_t k=0;k<units;k++){
     uint32_t best=UINT32_MAX;double soon=INFINITY;
-    for(uint32_t l=0;l<links;l++){
+    for(uint32_t l=0;l<machines;l++){
       if(!(rate[l]>0))continue;
       const double at=(double)(carried[l]+bytes[k])/rate[l];
       if(best==UINT32_MAX || at<soon){soon=at;best=l;}
     }
-    link[k]=best;
+    machine[k]=best;
     if(best==UINT32_MAX)lost=1;else carried[best]+=bytes[k];
   }
   if(lost)return INFINITY;
   double end=0;
-  for(uint32_t l=0;l<links;l++)if(carried[l] && (double)carried[l]/rate[l]>end)end=(double)carried[l]/rate[l];
+  for(uint32_t l=0;l<machines;l++)if(carried[l] && (double)carried[l]/rate[l]>end)end=(double)carried[l]/rate[l];
   return end;
 }
 

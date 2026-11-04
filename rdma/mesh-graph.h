@@ -122,16 +122,16 @@ double mesh_graph_trees_rate(uint32_t vertices, uint32_t trees, const uint32_t *
    (makespan of equal jobs on uniform machines with release times, which earliest finish solves exactly). count[p]
    its units; their completion time. A part of no rate takes none. */
 double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count);
-/* Units in list order over `links` parallel machines by earliest finish (Graham's list scheduling: R. L. Graham,
+/* Units in list order over `machines` parallel machines by earliest finish (Graham's list scheduling: R. L. Graham,
    "Bounds for certain multiprocessing anomalies", Bell System Technical Journal 45 (1966); each machine of its own
    rate, so equal rates give Graham's least-loaded machine): unit k, bytes[k] long, goes to the machine l whose bytes
    with unit k's added, over rate[l] (bytes a time), end soonest, a tie to the lower l, so parallel machines of unequal
    rate end together (the machines in the caller's order; its arithmetic is +, / and < alone, correctly rounded, so two
-   parties computing from the same operands assign one list alike). link[k] its machine (UINT32_MAX where no machine
-   has rate), carried[l] (room for `links`) the bytes each takes; their completion time, INFINITY where a unit has no
+   parties computing from the same operands assign one list alike). machine[k] its machine (UINT32_MAX where no machine
+   has rate), carried[l] (room for `machines`) the bytes each takes; their completion time, INFINITY where a unit has no
    machine. A machine of no rate takes none. */
-double mesh_graph_list_schedule(uint32_t links, const double *rate, uint64_t units, const uint64_t *bytes,
-                                uint32_t *link, uint64_t *carried);
+double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t units, const uint64_t *bytes,
+                                uint32_t *machine, uint64_t *carried);
 /* 2026-11-04, sub-assignment 2: mesh_graph_happens_before (b399746f), a bit table of the paths over a template
    unrolled across `iterations` executions, is removed with its helpers in mesh-graph.c.  Why: C3.3's unroll factor u,
    each value's L and every interference test come from least lags over the template alone (mesh_graph_lags;
