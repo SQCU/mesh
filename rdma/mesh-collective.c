@@ -130,6 +130,9 @@ struct plan {
                                              vertices + 1 entries (mesh_graph_rows by tail) */
   uint32_t *head,*lag;                    /* edge k's head vertex, and its execution distance (the head's execution is
                                              the tail's + lag) */
+  /* the allocator's output (plan_allocate) */
+  uint64_t *colour;                       /* instance (v, t)'s first block in the window: colour[v x executions + t],
+                                             its page k arena page window.first + (colour + k) x block */
 };
 
 struct plan_key { uint32_t source,identity,index; };
@@ -311,13 +314,121 @@ static int plan_template(struct plan *p,const struct mesh_dependence *dependence
   return 0;
 }
 
-/* The one allocator (design/disjoint-pages-change-request.md, Appendix A, A3 and Appendix B;
-   design/disjoint-pages-coordination.md, "The allocator"): every instance (v, t) of p->value, t < executions, its pages
-   inside the program's window, by happens-before over p's template.  Called once a plan, after the template and
-   before anything is erased or written.  Sub-assignment 4 writes it: until then it assigns nothing. */
+/* -- the one allocator (design/disjoint-pages-change-request.md, Appendix A, A3, and Appendix B) ------------------- */
+
+/* the items' order (design/disjoint-pages-coordination.md, "The allocator"): a value's blocks, largest first, then its
+   place in the plan's demand order; each value's executions follow in turn */
+struct plan_sized { uint64_t blocks; uint32_t value; };
+static int plan_sized_order(const void *a,const void *b){
+  const struct plan_sized *x=a,*y=b;
+  if(x->blocks!=y->blocks)return x->blocks>y->blocks?-1:1;
+  return (x->value>y->value)-(x->value<y->value);
+}
+/* mesh_graph_happens_before's edges: the template's, edge k's head and execution distance */
+static uint32_t plan_head(const void *context,size_t k){ return ((const struct plan *)context)->head[k]; }
+static uint32_t plan_lag(const void *context,size_t k){ return ((const struct plan *)context)->lag[k]; }
+/* mesh_graph_happens_before's table at this node: its sources this node's reads p->read[0 .. reads), its targets the
+   values' writes (value x's target x), `words` words a pair */
+struct plan_reach { const struct plan *p; const uint64_t *reach; size_t words; };
+/* every read of value v in execution t happens before value w's write in execution t + distance: a path of one or
+   more edges from each read to the write, the table's bit at that distance */
+static int plan_before(const struct plan_reach *table,uint32_t v,uint32_t w,uint32_t distance){
+  const struct plan_value *x=table->p->value+v;
+  for(uint32_t j=x->read;j<x->read+x->reads;j++)
+    if(!(table->reach[((size_t)j*table->p->values+w)*table->words+distance/64]>>(distance%64)&1))return 0;
+  return 1;
+}
+/* mesh_graph_left_edge's interference: item v x executions + t is instance (v, t).  A = (v, t) and B = (w, u), t <=
+   u, interfere unless every read of A happens before B's write at distance u - t or, in one execution (t == u), every
+   read of B before A's write; a path never reaches an earlier execution (no lag is negative), so for t < u B's reads
+   are never before A's write (design/disjoint-pages-change-request.md, Appendix A, A3, "Interference, by
+   happens-before"; design/disjoint-pages-coordination.md, "The allocator") */
+static int plan_interferes(const void *context,uint32_t a,uint32_t b){
+  const struct plan_reach *table=context;
+  const uint32_t executions=table->p->executions;
+  uint32_t v=a/executions,t=a-v*executions,w=b/executions,u=b-w*executions;
+  if(t>u){const uint32_t x=v,s=t;v=w;t=u;w=x;u=s;}
+  return !plan_before(table,v,w,u-t) && (t!=u || !plan_before(table,w,v,0));
+}
+
+/* The one allocator (design/disjoint-pages-change-request.md, Appendix A, A3, "What it is", "Interference, by
+   happens-before", "The assignment" and "Its failure", and Appendix B; design/disjoint-pages-coordination.md, "The
+   allocator"): every instance (v, t) of p->value, t < executions, its pages inside the program's window, decided
+   once a plan, after the template and before anything is erased or written.  2026-11-03, sub-assignment 4: the body
+   owner 3 left empty.
+   - The items: item v x executions + t is instance (v, t), its value's `blocks` blocks, ordered by blocks (largest
+     first), then by value in the plan's demand order (p->value's), then by execution.
+   - Happens-before over the template unrolled across the executions (mesh-graph.h mesh_graph_happens_before), its
+     sources this node's reads and its targets the values' writes.  Each template vertex is one demand's and each
+     demand at most one value here, so p->read names no vertex twice and no two values share a write: the index tables
+     are p->read and the values' writes as they are.  A lag-0 cycle in the declared dependences (EDEADLK) is
+     mesh_plan's EINVAL.
+   - Two instances share a block only where the table orders every read of one before the other's write
+     (plan_interferes): the program's own edges then order the last read before the next write, so nothing is
+     counted, checked or waited on while the plan runs; no other reuse.
+   - The colours are blocks of the program's window (mesh-dataflow.h struct mesh_ctx `window`), window.count / block
+     of them: the left-edge colouring, greedy by size (mesh-graph.h mesh_graph_left_edge), instance (v, t) at blocks
+     [colour, colour + blocks), its page k arena page window.first + (colour + k) x block.  Where the table holds no
+     bit (no read at this node happens before any write at this node, at any distance: no program edge reaches back,
+     as where there are no dependences), every pair interferes, and the colouring's own result is each instance at
+     the end of the one before it in that order (the placed runs one run from colour 0): it is taken so, without the
+     colouring's pairwise tests.  A value's executions are then one run, instance t at its first + t x blocks.
+   - No room in the window (the colouring's ENOSPC) is ENOMEM, before anything runs: no fallback, nothing allocated
+     at run time.
+   Cost: mesh_graph_happens_before's O(V^2 + E) order, O(executions x (V + E) x ceil(reads / 64)) word operations and
+   a table of reads x values x ceil(executions / 64) words; one pass over the table; then, with no bit, one pass over
+   the items, else mesh_graph_left_edge's walk, O(items^2) interference tests at worst, each over A's reads, a table
+   word each.  e2b's plan (values ~ 100, executions up to 2048, no dependences, so no bit): 204,800 items placed in
+   one pass, a table of ~ 10^6 words and ~ 10^8 word operations, inside a second.  A plan of that size whose program
+   edges reach back, so that blocks are reused, bounds the walk at ~ 2 x 10^10 tests, past ~8 s.
+   0; EINVAL; ENOMEM. */
 static int plan_allocate(struct plan *p){
-  (void)p;
-  return 0;
+  const uint32_t values=p->values,executions=p->executions;
+  if(!values)return 0;
+  const uint64_t capacity=p->context->window.count/p->context->M->block;
+  const uint32_t reads=p->value[values-1].read+p->value[values-1].reads;
+  const size_t words=((size_t)executions+63)/64;
+  size_t pairs,cells;
+  if((uint64_t)values*executions>=UINT32_MAX || __builtin_mul_overflow((size_t)reads,(size_t)values,&pairs) ||
+     __builtin_mul_overflow(pairs,words,&cells) || cells>=SIZE_MAX/sizeof(uint64_t))return ENOMEM;
+  const uint32_t items=values*executions;
+  struct plan_sized *sized=malloc((size_t)values*sizeof *sized);
+  uint32_t *write=malloc((size_t)values*sizeof *write),*order=NULL;
+  uint64_t *reach=calloc(cells,sizeof *reach),*size=NULL,used=0;
+  p->colour=malloc((size_t)items*sizeof *p->colour);
+  int status=!sized || !write || !reach || !p->colour?ENOMEM:0;
+  if(!status){
+    for(uint32_t x=0;x<values;x++){write[x]=p->value[x].write;sized[x]=(struct plan_sized){p->value[x].blocks,x};}
+    qsort(sized,values,sizeof *sized,plan_sized_order);
+    status=mesh_graph_happens_before(p->vertices,p->first,plan_head,plan_lag,p,executions,reads,p->read,values,write,
+                                     reach);
+    if(status==EDEADLK)status=EINVAL;
+  }
+  uint64_t any=0;
+  for(size_t c=0;!status && c<cells && !any;c++)any=reach[c];
+  if(!status && !any){
+    /* every pair interferes: the left-edge colouring's own placement, each instance after the last */
+    uint64_t at=0;
+    for(uint32_t s=0;!status && s<values;s++)for(uint32_t t=0;t<executions;t++){
+      if(sized[s].blocks>capacity-at){status=ENOMEM;break;}
+      p->colour[(size_t)sized[s].value*executions+t]=at;
+      at+=sized[s].blocks;
+    }
+  }else if(!status){
+    order=malloc((size_t)items*sizeof *order);
+    size=malloc((size_t)items*sizeof *size);
+    if(!order || !size)status=ENOMEM;
+    for(uint32_t s=0,at=0;!status && s<values;s++)for(uint32_t t=0;t<executions;t++){
+      const uint32_t item=sized[s].value*executions+t;
+      order[at++]=item;
+      size[item]=sized[s].blocks;
+    }
+    const struct plan_reach table={p,reach,words};
+    if(!status)status=mesh_graph_left_edge(items,size,order,plan_interferes,&table,capacity,p->colour,&used);
+    if(status==ENOSPC)status=ENOMEM;
+  }
+  free(sized);free(write);free(reach);free(order);free(size);
+  return status;
 }
 
 /* slot s's page k of a section, its row (mesh-collective.h `section`) */
@@ -678,7 +789,7 @@ done:
   free(key);free(placed);free(p.demand);free(p.of);
   free(root);free(up);free(down);free(demand);free(p.parent);free(share);
   free(p.tree);free(p.run);free(rate);free(latency);free(trees);
-  free(p.child);free(p.value);free(p.read);free(p.first);free(p.head);free(p.lag);
+  free(p.child);free(p.value);free(p.read);free(p.first);free(p.head);free(p.lag);free(p.colour);
   return status;
 }
 
