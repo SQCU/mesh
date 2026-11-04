@@ -127,12 +127,19 @@ uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,str
    (`map_room` = MESH_MAP_ROOM of struct mesh_record at `map_off`), then the arena at a block boundary.  A plan's state
    (struct mesh_state: its phases, counts, supplied words and status) is no area of the layout: mesh_plan places it in
    the arena with the plan's other values (hdr `state`). */
-/* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", item
-   2, and Appendix A, A3): the supplied words and the landed list are areas of the layout, where 107's words were a
-   section each plan allocated outside the window (mesh-dataflow.h `send_off`; mesh.h struct mesh_hop's note), and the
-   map's records are laid out once with the region (`map_off`, `map_room`), where the bridge leased arena pages for
-   them and leased again larger as the mesh grew; no page of the map is taken from the arena.  What must stay: the
-   landed list in its own area, apart from the pages it tells of; the map's room fixed with the region. */
+/* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, Appendix A, A3): the map's records are laid
+   out once with the region (`map_off`, `map_room`), where the bridge leased arena pages for them and leased again
+   larger as the mesh grew; no page of the map is taken from the arena.  What must stay: the map's room fixed with the
+   region. */
+/* 2026-11-04, sub-assignment 1 (design/disjoint-pages-change-request.md, Appendix C, C3.2, C3.4, C3.7 and C4;
+   design/disjoint-pages-revision-coordination.md, "The layout"): reversing 108's areas of the supplied words
+   (`word_capacity`, 8 bytes a hop) and of the landed list (`landed_capacity`, 40 bytes a hop) at hdr `word_off` and
+   `landed_off`, which every plan reused in place and so zeroed behind a wait for the ports to drop the previous plan.
+   Why: C4 removes those fixed areas; the allocator places every value, the landed list and the supplied words among
+   them (C3.2), and a new plan's state is in new pages, never the previous plan's, so nothing erases a plan or waits
+   for one to be erased (C3.4) and nothing is zeroed or reset (C3.7).  What must stay: the plan's state in its own
+   section, apart from the data pages it tells of (mesh.h struct mesh_hop's note, "The state section"), placed by
+   mesh_plan alone; no area of the layout holds a plan's words. */
 struct mesh_geometry { uint32_t pgsz,block,pages,rows,links,wire_pages,hops; };
 static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   uint32_t blocks=g.pages/g.block,arena=blocks*g.block;
