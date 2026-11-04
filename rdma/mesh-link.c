@@ -148,12 +148,32 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    SIGTERM).  A region that cannot be read is left as it is, and this bridge ends.  1
    adopted, 0 made; *out its descriptor; *geometry fitted to the object's size */
 /* Differs from the tag, its interfaces: the layout version is main's MESH_VERSION (main has one version, its layout's,
-   which every client's mesh_attach compares), where the tag had MESH_LAYOUT; the layout is main's
-   mesh_layout of the configuration's geometry, and an object holds it where its size is at least main's computed
-   length (`geometry->length`, as every client's mesh_attach takes a region: length <= st_size), in place of the tag's
-   mesh_layout_within, which main has not: geometry is not fitted to the object, and an object smaller than the
-   configuration's layout is refused as the tag refuses one that holds none.  Two layouts are the same where every field
-   main's mesh_layout sets is (the tag's rule: its fields were those its mesh_layout set) */
+   which every client's mesh_attach compares), where the tag had MESH_LAYOUT; the layout is main's mesh_layout of the
+   configuration's geometry (`layout`, region_open's operand), fitted to an existing object as at the tag by
+   mesh_layout_within below.  Two layouts are the same where every field main's mesh_layout sets is (the tag's rule:
+   its fields were those its mesh_layout set) */
+/* 2026-11-04, review R2 (L1), reversing this file's first form (d77eec2a), which refused an object smaller than the
+   configuration's length: a configuration that grew the region then left the bridge exiting 1 and its heartbeat
+   opening it again, forever.  What must stay: the layout fitted to the object, a bridge ending only where none fits */
+/* tag pre-return-20261103 rdma/mesh.h:290-302 mesh_layout_within, verbatim but main's mesh_layout (378dbd5f): the
+   configuration's geometry `g` (its rows, window and page lists' room as configured, 0 still mesh_layout's default)
+   laid with `pages` the most whole blocks the object's bytes hold beside the metadata, where the tag's took pgsz and
+   block alone.  Defined here, mesh.h being sub-assignment 9's; main's mesh.h has none */
+/* the layout that fits a region object of `bytes` (its size, fixed when it was made): its arena the most pages its
+   metadata leaves, so a layout whose metadata grew or shrank takes the same object's pages (mesh-link.c region_open);
+   0 where none fits */
+static inline uint64_t mesh_layout_within(struct hdr *h,struct mesh_geometry g,uint64_t bytes){
+  /* blocks: lo the most known to fit, hi the most that might (a layout's length grows with its arena) */
+  uint64_t lo=0,hi=bytes/g.pgsz/g.block;
+  if(hi>UINT32_MAX/g.block)hi=UINT32_MAX/g.block;
+  while(lo<hi){
+    const uint64_t mid=lo+(hi-lo+1)/2;
+    g.pages=(uint32_t)(mid*g.block);
+    if(mesh_layout(h,g)<=bytes)lo=mid;else hi=mid-1;
+  }
+  g.pages=(uint32_t)(lo*g.block);
+  return lo && mesh_layout(h,g)<=bytes?h->length:0;
+}
 static int region_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->wire_pages==b->wire_pages && a->links==b->links &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
@@ -196,8 +216,8 @@ static void region_orphans_end(void){
     }
   }
 }
-/* tag pre-return-20261103 rdma/mesh-link.c:1796-1833 region_open, verbatim but main's layout (region_same's note) and the bridge area's bounds (07949b28 378dbd5f 11807bec abeffc1b 306b22be 3f72cbde 0905738c 1835bef4 1ffbd907 ad55cbf4 33ca0dab d70e843a f06759d4 8e5df675 6f90dc97 b346ef2b 923d73fd) */
-static int region_open(struct hdr *geometry,int *out){
+/* tag pre-return-20261103 rdma/mesh-link.c:1796-1833 region_open, verbatim but main's layout (region_same's note: the configuration's geometry `layout` an operand, for the fit) and the bridge area's bounds (07949b28 378dbd5f 11807bec abeffc1b 306b22be 3f72cbde 0905738c 1835bef4 1ffbd907 ad55cbf4 33ca0dab d70e843a f06759d4 8e5df675 6f90dc97 b346ef2b 923d73fd) */
+static int region_open(struct hdr *geometry,struct mesh_geometry layout,int *out){
   int fd=shm_open(MESH_NAME,O_RDWR,0);
   if(fd<0 && errno!=ENOENT){exit(1);}
   struct stat shape={0};
@@ -205,7 +225,7 @@ static int region_open(struct hdr *geometry,int *out){
   if(fd>=0 && !shape.st_size){close(fd);fd=-1;shm_unlink(MESH_NAME);}
   if(fd>=0){
     const size_t size=(size_t)shape.st_size;
-    if(geometry->length>size)die("the region object holds no layout of this configuration (smaller than its length)");
+    if(!mesh_layout_within(geometry,layout,size))die("the region object holds no layout");
     struct hdr *old=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
     if(old==MAP_FAILED){exit(1);}
     if(old->magic==MESH_MAGIC){
@@ -248,15 +268,21 @@ static int region_open(struct hdr *geometry,int *out){
    same end), the closed rows released, a map or health serial a bridge that died mid-write left odd made even (its
    readers wait while it is odd), and the map's records this bridge's to write again (map_adopt) */
 /* tag pre-return-20261103 rdma/mesh-link.c:1835-1868 region_adopt, verbatim but main's region (4bb01da0 f440f786 a1c70649 7876150c 11c52f5e 3f72cbde 0905738c 1835bef4 d9e6d3de 5dcb4f69 ed429e7c 76b85f5e f9f2aff0 ad55cbf4 33ca0dab 292d4516 88fa2452 db2748a9 2fb2b270 8fc0d3d7 f06759d4 6f90dc97 923d73fd) */
-/* Differs from the tag, its interfaces: main's region has no streams (the tag's loop over them is left out: the page
-   lists' words are the data path's, mesh-flow.c streams_cancel, and stay as the plan wrote them) and no client slots,
-   but one client word (hdr `client`, its process the low 32 bits, its start hdr `client_start`: mesh-holders.h), which
+/* Differs from the tag, its interfaces: main's region has no streams; in place of the tag's loop storing each one's
+   landed words lost, this node's landed words of the plan written not landed are cancelled (mesh-flow.c
+   streams_cancel(NULL), the stop's own cancellation: UINT64_MAX where a word reads 0), so a wait on a dead bridge's
+   plan reads the loss, as at the tag, rather than its deadline; and no client slots, but one client word (hdr `client`, its process the low 32 bits, its start hdr `client_start`: mesh-holders.h), which
    is retired where its process does not hold the region (mesh_holds) by main's own retirement (mesh-dataflow.c
    mesh_retire, as mesh_attach retires a vacant word whose process is gone), where the tag finished a slot's
    retirement half done; and main's link table (struct mesh_link_info) has `peer` and `bandwidth` plain (stored
    atomically as the tag's, by __atomic_store_n), `phase` and `code` in `port`, and `port.prepared` (the plan a port's
    data path loaded, which no new child has) cleared beside them */
 static void region_adopt(void){
+  /* 2026-11-04, review R2 (L2), reversing this file's first form (d77eec2a), which left the plan's words as a dead
+     bridge left them: a client waiting on one reached its deadline instead of the loss.  No port is found yet
+     (port_count 0), so this is the plan's receives' words alone.  What must stay: the adopted region's landed words
+     not landed read lost before `bridge_pid` is set */
+  streams_cancel(NULL);
   struct mesh_link_info *links=mesh_links(M);
   for(uint32_t p=0;p<MESH_PORTS;p++){
     __atomic_store_n(&links[p].peer,0,__ATOMIC_SEQ_CST);atomic_store(&links[p].port.phase,MESH_UNKNOWN);atomic_store(&links[p].port.code,0);
@@ -347,7 +373,11 @@ int main(int argc,char **argv){
   if((uint64_t)shape.block*pg+MESH_FRAME>MESH_REQUEST_BYTES)die("transport chunk exceeds native request capacity");
   if(region_bytes/pg<shape.block || region_bytes/pg>UINT32_MAX){exit(1);}
   struct hdr geometry={0};
-  shape.pgsz=pg;shape.pages=(uint32_t)(region_bytes/pg);shape.links=MESH_PORTS;
+  /* review R2 (L1): `pages` whole blocks, region_bytes / pg cut to the block, as the tag's mesh_layout laid its arena
+     (pages / block x block) where main's lays `pages` whole: the layout of an object this bridge makes is then the one
+     mesh_layout_within fits to it at the next start (whole blocks), so a restart adopts it.  What must stay: a made
+     region's layout its own fit */
+  shape.pgsz=pg;shape.pages=(uint32_t)(region_bytes/pg/shape.block*shape.block);shape.links=MESH_PORTS;
   mesh_layout(&geometry,shape);
   /* design/transport.md section 2: the bridge's port bound before its region is read, so a second bridge of the node
      (one started beside the heartbeat's, or while the last one ends) ends at its bind, never touching the region */
@@ -369,7 +399,7 @@ int main(int argc,char **argv){
     addresses=-1;
   }
   int fd=-1;
-  const int adopted=region_open(&geometry,&fd);
+  const int adopted=region_open(&geometry,shape,&fd);
   if(adopted)region_adopt();
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
   M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
