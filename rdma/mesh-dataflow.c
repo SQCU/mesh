@@ -255,22 +255,6 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(mesh_plane(c->M,MESH_ROW_OWN),first,count);
 }
 
-/* design/algorithm-sources.md#index-hand-off */
-/* design/prepared-machine.md#M18 */
-/* its queue argument replaced by mesh_plan (mesh-collective.h); removed at sub-assignment 16 */
-struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t queue){
-  struct hdr *m=c->M;
-  struct mesh_publication *publication=mesh_publication_at(m,row);
-  uint32_t *count=&publication->sends;
-  struct mesh_target *targets=publication->targets;
-  uint32_t destination=mesh_notice_queue(m,c->client,queue);
-  uint64_t first=m->notice_off+(uint64_t)destination*m->notice_bytes;
-  for(uint32_t i=0;i<*count;i++)if(targets[i].stream>=first && targets[i].stream<first+m->notice_bytes)return &targets[i];
-  struct mesh_target *target=&targets[(*count)++];
-  *target=(struct mesh_target){.stream=first};
-  return target;
-}
-
 /* design/prepared-machine.md#M13 */
 /* design/prepared-machine.md#M04 */
 /* design/algorithm-sources.md#programkernel_call */

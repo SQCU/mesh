@@ -23,7 +23,6 @@ for name, result, arguments in (
         ('mesh_section_create', C.c_int, [CONTEXT, Z, U, C.c_int, C.POINTER(Section)]),
         ('mesh_section_slice', C.c_int, [CONTEXT, Section, Z, Z, U, U, C.POINTER(Section)]),
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
-        ('mesh_transfers_prepare', C.c_int, [CONTEXT, U, U, U]),
         ('mesh_host_inputs', C.c_int, [CONTEXT]),
         ('mesh_transfers_start', C.c_int, [CONTEXT]),
         ('mesh_host_publish', None, [CONTEXT, Section, U]),

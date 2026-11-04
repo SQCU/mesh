@@ -7,8 +7,7 @@
 /* design/pages-and-functions.md#what-the-page-table-is */
 struct mesh_range { uint32_t first,count; };
 /* `send_off`, `send_bytes`: the region offset and the bytes of the words this client's plan allocated (mesh-collective.h
-   mesh_plan: a section outside the window, zeroed; mesh_transfers_prepare's SEND cells in the form it replaces), which
-   mesh-metal.m wraps for the GPU and its cancellation covers */
+   mesh_plan: a section outside the window, zeroed), which mesh-metal.m wraps for the GPU and its cancellation covers */
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes; uint32_t rows,arena,wire,shared_pages,row_cursor,wire_cursor,bulk_cursor; int fd; };
 struct mesh_link_view { uint32_t peer,phase; char device[32]; uint64_t bandwidth; };
 /* design/algorithm-sources.md#meshobserve */
@@ -24,15 +23,6 @@ static inline struct mesh_range mesh_arena_range(const struct hdr *m,int wire){
 }
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
-/* design/algorithm-sources.md#programcopy */
-/* replaced by mesh_plan (mesh-collective.h); removed at sub-assignment 16 */
-static inline uint32_t mesh_peer_channel(struct mesh_ctx *c,uint32_t peer,uint32_t queue){
-  for(uint32_t i=0;i<c->M->links;i++)if(mesh_links(c->M)[i].peer==peer){
-    if(queue<c->M->qps)return i*c->M->qps+queue;
-    queue-=c->M->qps;
-  }
-  return MESH_ABSENT;
-}
 /* the region attached: the client's compare-and-swap on hdr `client`, its start beside it (hdr `client_start`), and the
    region's version read again after the swap; 0, EINVAL where the region is not of this layout or expired as the client
    was taken (it is let go), EADDRINUSE where another live client holds it, else the errno */
@@ -48,9 +38,6 @@ void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t 
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
-/* design/algorithm-sources.md#index-hand-off */
-/* its queue argument replaced by mesh_plan (mesh-collective.h), which records a row's words itself; removed at sub-assignment 16 */
-struct mesh_target *mesh_publish_bind(struct mesh_ctx *,uint32_t row,uint32_t queue);
 /* design/algorithm-sources.md#programkernel_call */
 uint32_t mesh_publication_prepare(struct hdr *,uint32_t row,struct prepared_publication *);
 /* a retired client's closed rows released, none while a port's requests may name their pages; the count kept */
