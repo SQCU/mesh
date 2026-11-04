@@ -162,9 +162,10 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    Cancellation: UINT64_MAX in a cancel word, which releases no send (no hop names a cancel word).  The bridge cancels
    a receive not landed (link_close, plan_cancel) by storing it into its execution's cancel word, the record's start
    landed_off + ((word - landed_off) / landed_stride) x landed_stride; the program cancels its executions by one
-   mesh_cancel range {offset landed_off, count executions, stride landed_stride}; and a GPU lane whose reads of a
-   step's mask reach their bound stores it into that step's cancel word (metal-microbench metal_recording.m, a remote
-   read), so the step is cancelled where the host reads its record after the run.
+   mesh_cancel range {offset landed_off, count executions, stride landed_stride}; and a GPU lane whose reads of step
+   t's mask reach their bound stores it, where it reads 0, into the cancel word of its step's record and of every
+   later step's, records t .. executions - 1 (metal-microbench metal_recording.m, a remote read), so every later step
+   ends at its first pass and the host reads them cancelled after the run.
    Both ends: for adjacent nodes a and b, execution t's entries at a naming b with MESH_SEND and those at b naming a
    with MESH_RECEIVE are the same hops in the same order.  Both bridges assign the pair's hops in list order (execution
    0's, then execution 1's, ...) to the pair's cables and queue pairs by one rule from the map (struct mesh_reach;
