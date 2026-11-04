@@ -968,9 +968,11 @@ int guard_raise(struct port *port){
 
 /* this node's receives of the plan written from the node of map index `from` (UINT32_MAX: every receive) cancelled in
    the bridge parent (streams_cancel, streams_let_go, plan_stale), as link_close cancels its child's, where that plan's
-   generation (hdr `plan`) is `generation` (0: whichever plan is written; 2026-11-04, sub-assignment 1, for plan_stale,
-   which judged one generation stale, so that a plan written between its judgment and this walk, whose map may stand,
-   is not cancelled: design/disjoint-pages-rulings-coordination.md, R2): for each such entry of the
+   generation (hdr `plan`) is `generation`, the one its caller read (streams_cancel and streams_let_go: hdr `plan` read
+   (acquire) at the call; plan_stale: the plan it judged stale), and nothing where another is written (2026-11-04,
+   sub-assignment 1, design/disjoint-pages-rulings-coordination.md, R2, and review 8's finding 7: every call names its
+   generation, one form, so that a plan written between plan_stale's judgment and this walk, whose map may stand, is
+   not cancelled): for each such entry of the
    list (copy c's at [c n, c n + n)), its range's count of copy c raised to its final value, the entry's `pages` x the
    executions t < `executions` (the plan's word, read once) with t mod u == c, never lowered, and woken (count_raise;
    design/disjoint-pages-change-request.md, C3.1; design/disjoint-pages-revision-coordination.md, "The bridge"); no
@@ -1012,7 +1014,7 @@ int guard_raise(struct port *port){
 static void plan_cancel(uint32_t from,uint64_t generation){
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_acquire);
-  if(!hops || (generation && plan!=generation))return;
+  if(!hops || plan!=generation)return;
   struct mesh_state *words=mesh_plan_state(M);
   const uint32_t copies=words?words->copies:0;
   if(!copies || hops%copies)return;
@@ -1050,8 +1052,9 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    lists: the tag's streams of a port live no more and their words ~0; here, as its link is lost or the bridge stops
    (mesh-ports.c port_lost, mesh-children.c child_reaped, the stop), this node's receives not landed from the port's
    peer (its index in the map; none where the map holds no record of it), every one where `port` is NULL, cancelled
-   (plan_cancel: each one's count raised to its final value, no phase written; design/disjoint-pages-change-request.md,
-   C3.1: "A link loss is such a cancellation"), and the port's (every port's) plan no longer loaded (`prepared` 0) where
+   (plan_cancel of the plan written, its generation hdr `plan` read at the call, review 8's finding 7: each one's
+   count raised to its final value, no phase written; design/disjoint-pages-change-request.md, C3.1: "A link loss is
+   such a cancellation"), and the port's (every port's) plan no longer loaded (`prepared` 0) where
    no child of it lives: a live child's requests may still name the plan's pages, so its `prepared` is its own to clear
    (link_close) or its reap's (child_reaped, after `port->child` is 0).  A receive the port's child lands after the
    cancellation flips its phase and adds its arrival beyond the final value, which a reader's test (the count at least
@@ -1065,7 +1068,7 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
 static struct cancelled { uint32_t node,index,every; } cancelled[MESH_PORTS];
 void streams_cancel(const struct port *port){
   if(!port){
-    plan_cancel(UINT32_MAX,0);
+    plan_cancel(UINT32_MAX,atomic_load_explicit(&M->plan,memory_order_acquire));
     for(uint32_t p=0;p<port_count;p++)
       if(!ports[p].child)atomic_store_explicit(&mesh_links(M)[ports[p].index].port.prepared,0,memory_order_release);
     return;
@@ -1078,22 +1081,24 @@ void streams_cancel(const struct port *port){
     free(records);
   }
   if(last->node){
-    if(last->every)plan_cancel(UINT32_MAX,0);
-    else if(last->index!=UINT32_MAX)plan_cancel(last->index,0);
+    const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_acquire);
+    if(last->every)plan_cancel(UINT32_MAX,plan);
+    else if(last->index!=UINT32_MAX)plan_cancel(last->index,plan);
   }
   if(!port->child)atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:712-722 streams_let_go (60b00774), reduced to what it is under the page
    lists: the tag let a gone client's streams go; here, on the bridge's turn over its clients (mesh-records.c
    clients_turn, before its release of retired claims), where no client holds the region (hdr `client` 0) and a plan
-   stays written, this node's receives of it cancelled (plan_cancel: each one's count raised to its final value, no
-   phase written), so no consumer reads an execution of a plan whose client is gone as whole; a relay's forward of a
-   page not landed is never released (its phase unchanged).  A client's retirement (mesh-dataflow.c mesh_retire)
+   stays written, this node's receives of it cancelled (plan_cancel of its generation, hdr `plan` read at the call,
+   review 8's finding 7: each one's count raised to its final value, no phase written), so no consumer reads an
+   execution of a plan whose client is gone as whole; a relay's forward of a page not landed is never released (its
+   phase unchanged).  A client's retirement (mesh-dataflow.c mesh_retire)
    stores `hops` 0 before it closes the client's claims, so its own plan is no longer written here and this finds none
    (2026-11-04, sub-assignment 6: the cancel word gone, C4) */
 void streams_let_go(void){
   if(atomic_load_explicit(&M->client,memory_order_acquire))return;
-  plan_cancel(UINT32_MAX,0);
+  plan_cancel(UINT32_MAX,atomic_load_explicit(&M->plan,memory_order_acquire));
 }
 /* A plan stands only while its map does (design/disjoint-pages-change-request.md, D.2 and D.3.6; RFC 2328 section 16:
    routes come from one version of the database, and a change recomputes them; design/disjoint-pages-rulings-
