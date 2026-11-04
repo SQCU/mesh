@@ -183,9 +183,20 @@ struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,f
    that reports none makes no queue pair.  Every bridge of this source states 1 + its budget (mesh-ports.c port_greet),
    so only a bridge before budgets sends 0, and its LINK then names lanes this end's plan does not (link_heard: EPROTO).
    What must stay: `count` 1 + the device's budget, and the plan from both ends' smaller */
-enum { HELLO=1, FAREWELL, RECORD, LINK };
+/* 2026-11-04, design/compilation-coordination.md, "The sequencer's messages (mesh-bridge.h, B2)" (the operator's ruling
+   1 of 2026-11-04: "The sequencer's messages travel on the bridges' existing control sockets, as new message kinds in
+   mesh-ports.c's handlers; MESH_VERSION moves"): SUBMIT and ORDER join the wire, so the note above's "nothing else" no
+   longer holds.  A SUBMIT and an ORDER carry a struct mesh_order (`bytes` its sizeof): the island's fixed sequencer's
+   messages (X. Defago, A. Schiper and P. Urban, ACM Comput. Surv. 36(4) 2004, section 7.1, Fig. 5, UB;
+   design/aot-compilation-change-request.md A7; the contract's Q2-Q4).  `version` carries mesh.h MESH_VERSION.  What
+   must stay: the four kinds' values and struct message's layout */
+enum { HELLO=1, FAREWELL, RECORD, LINK, SUBMIT, ORDER };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
+/* the payload of a SUBMIT and an ORDER (`bytes` sizeof): plan (group, epoch) made on map serial `serial`, its nodes
+   (a set of map indices) and sender; its function executions [first, end); in an ORDER, `sequence` the number the
+   sequencer gave `first` (first + k numbered sequence + k), 0 in a SUBMIT */
+struct mesh_order { uint64_t group,epoch,serial,first,end,sequence,nodes; uint32_t sender,padding; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:0; }
 
 /* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: each stream's
@@ -446,7 +457,10 @@ void guard_wake(struct port *port);
 int port_threads(struct port *port);
 void streams_open(struct port *port,uint32_t node,uint64_t bandwidth);
 void streams_cancel(const struct port *port);
-void streams_let_go(void);
+/* 2026-11-04, design/compilation-coordination.md, "The sequencer's messages (mesh-bridge.h, B2)": `void
+   streams_let_go(void)` goes: retirement closes a gone client's claims (mesh-dataflow.h mesh_retire), and the ports end
+   its plans (mesh-flow.c).  What must stay: streams_cancel and plan_stale, declared as before (mesh-children.c, a
+   lifecycle file, calls streams_cancel) */
 /* the plan written cancelled where its map has moved (its entries' serial not hdr `map_serial`): mesh-records.c map_put
    and map_adopt, after a write that moved the serial, on the bridge parent's one event-loop thread
    (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2) */
