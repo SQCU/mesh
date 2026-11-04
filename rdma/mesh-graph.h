@@ -1,0 +1,116 @@
+/* design/rubrics.md:422 (C9): the graph algorithms, one copy each, for every consumer of weights or samples on a graph.
+   A function here knows vertices, edges and the operands its consumer passes (weights, visits, a next hop); it knows
+   no cable, collective or tensor.  Python's are rdma/mesh_graph.py's. */
+/* Source: pre-return-20261103 rdma/mesh-graph.h, the declarations of the functions mesh-graph.c brings, verbatim;
+   mesh_graph_list_schedule is new (design/page-queue-change-request.md, "The rule both ends compute"). */
+#ifndef MESH_GRAPH_H
+#define MESH_GRAPH_H
+#include <stddef.h>
+#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Directed edges in compressed rows: vertex v's leave as edges [first[v], first[v + 1]), edge k entering
+   `head(context, k)`. */
+/* A topological order of such edges' `vertices` vertices: ordinal[v] v's place, each place taken by the
+   lowest-numbered vertex whose every edge in leaves a placed one.  `indegree` holds `vertices` words.  0, or EDEADLK
+   where a cycle leaves vertices unplaced (their ordinal UINT32_MAX). */
+int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                     const void *context, uint32_t *indegree, uint32_t *ordinal);
+/* Each marked vertex's depth over the edges into it (vertex v's row [first[v], first[v + 1]) of head[]: the vertices
+   whose work it follows): 0 where its row reaches no marked vertex, else one past the greatest depth among the marked
+   ones it reaches, taken over a topological order (mesh_graph_order).  0; EDEADLK where the rows hold a cycle; ENOMEM */
+int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
+/* Chu-Liu/Edmonds: the minimum spanning arborescence of nodes [0, N) rooted at `root` in which each other node v
+   takes one edge e with to[e] == v (its parent from[e]); chosen[v] that edge, the root's -1; 0, or -1 where a node has
+   none.  Each node's lightest edge; a cycle among them contracted, the edges into it weighing their excess over the
+   edge they would replace, the contracted graph's arborescence expanded (the edge into a cycle replaces the cycle's
+   edge into the same node). */
+int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
+                            const double *weight, int32_t *chosen);
+/* The least-weight spanning arborescence of nodes [0, N) rooted at `root` in which every node lies within `depth`
+   edges of the root (a hop-bounded arborescence; Chu-Liu/Edmonds' has no bound): chosen[v] the edge into v, the
+   root's -1; 0, or -1 where no such arborescence spans.  Exact, by depth-first search over each node's edges in, a
+   branch cut where its weight with each node left's lightest edge in reaches the best found or a node's walk to the
+   root passes `depth`: its cost the product of the nodes' in-degrees at worst (the problem is NP-hard for depth 2
+   and beyond), a few hundred leaves on a collective of five. */
+int mesh_graph_arborescence_within(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
+                                   const double *weight, uint32_t depth, int32_t *chosen);
+/* Items chained by a key, latest first, as a solver finds them (its distinct trees of one demand or of one root):
+   head[key] that key's latest item (UINT32_MAX: none) and next[k] the one before item k. mesh_graph_keyed_find gives
+   the key's item for which equal(context, k) holds, or UINT32_MAX, and reads that key's items alone;
+   mesh_graph_keyed_add chains item k to its key. */
+uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
+                               int (*equal)(const void *context, uint32_t k), const void *context);
+void mesh_graph_keyed_add(uint32_t *head, uint32_t *next, uint32_t key, uint32_t k);
+/* exp and log of IEEE-exact operations alone (+, -, x, / correctly rounded; frexp, ldexp, floor exact), so that every
+   node computes the same trees and the same shares from them, whatever its libm */
+double mesh_graph_exp(double x);
+double mesh_graph_log(double x);
+/* A concurrent flow of demands over an undirected graph by multiplicative weights (a planner's routing solve:
+   mesh-plan.h mesh_solve). Edge e joins from[e] and to[e], capacity[e] each way. Demand d's tree is rooted at root[d]
+   and reaches each vertex v for which leaf(context, d, v) holds; up[d] bytes cross it toward the root and down[d] from
+   it. Each of `rounds` rounds routes every demand along its least-length tree, a direction's length
+   exp(eps (load / capacity - most) / width) / capacity weighed by the bytes that cross it, and adds a round's share of
+   those bytes to the loads. Each demand's distinct trees are kept, in the order found: tree k's demand demand[k], its
+   parents parent[k * vertices ..] (the root its own, a vertex off the tree UINT32_MAX), its share share[k] (the
+   rounds that chose it over all rounds). Their count; UINT32_MAX where eps is not positive, a root is no vertex, a leaf
+   has no route, or more than room trees are found. */
+uint32_t mesh_graph_flow(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const double *capacity,
+                         uint32_t count, const uint32_t *root, const double *up, const double *down,
+                         int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
+                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share);
+/* Spanning trees packed by Garg and Koenemann's rounds (a communicator's own forms: mesh-plan.h mesh_trees_pack). Edge e
+   makes vertex to[e] a child of from[e], its route crossing directed hops crossing[through[e]] to
+   crossing[through[e + 1] - 1], hop k of capacity[k]. Every root r for which rooted(context, r) holds is given a demand
+   of one, packed along least-weight arborescences (mesh_graph_arborescence) until the hops' lengths reach one. Each
+   root's `most` heaviest distinct trees are kept, root by root: root[k], parents parent[k * vertices ..] and log
+   weight log_weight[k], the log of its share of its root's kept flow. Their count; 0 where no arborescence spans.
+   `shallow`: each root's arborescences are those within its eccentricity's depth alone (the most edges its
+   breadth-first layering puts between it and a vertex; mesh_graph_arborescence_within), so each tree is as shallow as
+   a tree from that root can be: where a hop costs a fixed time far past its bytes' (a small collective), a tree's
+   time is its depth's hops. */
+uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const uint32_t *through,
+                         const uint32_t *crossing, uint32_t hops, const double *capacity,
+                         int (*rooted)(const void *context, uint32_t r), const void *context, double eps, uint32_t most,
+                         int shallow, uint32_t *root, uint32_t *parent, double *log_weight);
+/* Trees' loads on their directed edges: each tree k (root root[k], parents parent[k * vertices ..]) of weight weight[k]
+   adds weight[k] to load[u * vertices + v] for each of its edges u -> v (u v's parent); `load` is the caller's,
+   vertices x vertices, added to. */
+void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
+                           const double *weight, double *load);
+/* [first, first + length) cut at the multiples of `cell` (a grid over the whole operand): start[i], count[i] and the
+   cell's index index[i] of each run; their number. A run inside another's range is cut at the same edges, so each of
+   its pieces lies within one of the other's (libnccl-mesh's spread over a pair's parallel cables: a forward's piece
+   within one COPY's piece, the cell's index choosing the channel alike at both ends). */
+uint32_t mesh_graph_grid_cut(uint64_t first, uint64_t length, uint64_t cell, uint64_t *start, uint64_t *count, uint64_t *index);
+/* A tree's depth (its root root, parents parent[..], a vertex off it UINT32_MAX): the most edges from the root to a
+   vertex on it, mesh_graph_depth's over each vertex's parent; UINT32_MAX where its parents hold a cycle */
+uint32_t mesh_graph_tree_depth(uint32_t vertices, uint32_t root, const uint32_t *parent);
+/* The rate every root gets at once where each root's flow is cut over its trees by their weights (weights a root's
+   summing to one): the least, over directed edges u -> v, of capacity[u * vertices + v] over the trees' load there
+   (mesh_graph_tree_loads), in capacity's units; 0 where an edge a tree crosses has no capacity. */
+double mesh_graph_trees_rate(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
+                             const double *weight, const double *capacity);
+/* `units` equal units over `parts` parallel routes by earliest finish: part p takes its first unit latency[p] after
+   the start and then one each 1 / rate[p] (rate in units a time); unit k goes where it would finish soonest, so a
+   unit takes the quickest route and many spread over every route with rate, a slower route taking fewer of the first
+   (makespan of equal jobs on uniform machines with release times, which earliest finish solves exactly). count[p]
+   its units; their completion time. A part of no rate takes none. */
+double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count);
+/* Units in list order over `links` parallel links by earliest finish (Graham's list scheduling: R. L. Graham, "Bounds
+   for certain multiprocessing anomalies", Bell System Technical Journal 45 (1966); each link a machine of its own
+   rate, so equal rates give Graham's least-loaded machine): unit k, bytes[k] long, goes to the link whose bytes with
+   unit k's added, over rate[l] (bytes a time), end soonest, a tie to the lower l, so parallel links of unequal rate end
+   together (a node pair's links, the caller's in order of cable id and then queue-pair index, both ends assigning one
+   list alike: its arithmetic is +, / and < alone, correctly rounded, so every node computes the same links from the
+   same operands). link[k] its link (UINT32_MAX where no link has rate), carried[l] (room for `links`) the bytes each
+   takes; their completion time, INFINITY where a unit has no link. A link of no rate takes none. */
+double mesh_graph_list_schedule(uint32_t links, const double *rate, uint64_t units, const uint64_t *bytes,
+                                uint32_t *link, uint64_t *carried);
+
+#ifdef __cplusplus
+}
+#endif
+#endif
