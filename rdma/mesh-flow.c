@@ -176,7 +176,8 @@ static inline _Atomic uint64_t *region_word(uint64_t offset){ return (_Atomic ui
    verbs call: the progress thread posts as it serves (link_receive_progress, link_send_progress).  0, or an error
    value: ESTALE, ETIMEDOUT or ENOMEM reading the map, EHOSTUNREACH where the pair has units but no link of rate,
    EPROTO where the map gives this cable a queue pair its link does not hold, EMSGSIZE where a page is more frames than
-   a lane it is assigned can hold */
+   a lane it is assigned can hold, ENOTSUP where the plan rings and a page this cable receives into is one this node
+   sends from (below) */
 static int link_prepare(struct port *port){
   struct link *l=&port->link;
   struct flow *f=flows+port->index;
@@ -227,6 +228,19 @@ static int link_prepare(struct port *port){
     for(uint64_t j=0;j<n;j++)if(list[j].node==index && list[j].direction==(uint32_t)d)pick[d][picks[d]++]=(uint32_t)j;
     units[d]=picks[d]*executions;
   }
+  /* A page this node both receives into and sends from (a relay's, or a destination's that forwards it) is used again
+     every `depth` executions, so where the plan rings, its receive of execution t may be posted only once the page's
+     SENDs of execution t - depth have completed, not only its receives landed (the coordinator, 2026-11-03, from
+     mesh_plan 80e2e4d3).  Those SENDs are another port's child's (the page goes on to another node, over another
+     cable), and no word of the region tells their completion: a hop names its release word and its landed word, no
+     sent word (mesh.h struct mesh_hop; mesh-collective.c plan_word lays the words 32 a line, and a landed word reads
+     exactly 1 once landed).  So such a plan is refused (ENOTSUP) where it rings, not served into a page a SEND may
+     still be reading.  Every slot holds the same hops, a relay's SENDs from its receive's page in each, so slot 0
+     tells.  What must stay: the refusal, until the plan carries a sent word per SEND and execution, stored by the
+     SEND's child at its completion, which this child reads before posting the page's next receive */
+  for(uint64_t i=0;depth<executions && i<picks[MESH_RECEIVE];i++)
+    for(uint64_t j=0;j<n;j++)
+      if(list[j].direction==MESH_SEND && list[j].page==list[pick[MESH_RECEIVE][i]].page){error=ENOTSUP;goto failed;}
   const uint64_t most=units[0]>units[1]?units[0]:units[1];
   if(most){
     bytes=malloc(most*sizeof *bytes);carried=malloc((links?links:1)*sizeof *carried);
