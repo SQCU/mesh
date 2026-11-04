@@ -4,18 +4,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_reach, 6379e868 */
+/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_reach, 6379e868; `parent` added
+   (design/compilation-coordination.md, "The graph module", Q3): a vertex's parent is the vertex at the queue's head
+   when it is first reached, the breadth-first tree of that same walk. */
 /* mesh-graph.h */
 uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
-                          const void *context, uint32_t from, uint32_t *order, unsigned char *reached) {
-  for (uint32_t v = 0; v < vertices; v++) reached[v] = 0;
+                          const void *context, uint32_t from, uint32_t *order, unsigned char *reached, uint32_t *parent) {
+  for (uint32_t v = 0; v < vertices; v++) { reached[v] = 0; if (parent) parent[v] = UINT32_MAX; }
   uint32_t count = 1;
   order[0] = from; reached[from] = 1;
+  if (parent) parent[from] = from;
   for (uint32_t head = 0; head < count; head++)
     for (uint32_t e = 0; e < edges; e++)
       for (uint32_t side = 0; side < 2; side++) {
         const uint32_t other = end(context, e, 1 - side);
-        if (end(context, e, side) == order[head] && !reached[other]) { reached[other] = 1; order[count++] = other; }
+        if (end(context, e, side) == order[head] && !reached[other]) {
+          reached[other] = 1; order[count++] = other;
+          if (parent) parent[other] = order[head];
+        }
       }
   return count;
 }

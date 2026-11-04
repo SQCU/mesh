@@ -5,7 +5,9 @@
    mesh_graph_list_schedule is new (design/page-queue-change-request.md, "The rule both ends compute");
    mesh_graph_left_edge is new (design/disjoint-pages-change-request.md, Appendix A, A3, "The assignment";
    design/disjoint-pages-coordination.md, "The allocator"); mesh_graph_lags is new (design/disjoint-pages-change-request.md, Appendix C, C3.3;
-   design/disjoint-pages-revision-coordination.md, D5 and "The allocator"). */
+   design/disjoint-pages-revision-coordination.md, D5 and "The allocator"); mesh_graph_bottom_levels and
+   mesh_graph_contention_schedule are new, and mesh_graph_reach gains `parent` (design/plan-to-bridge-change-request.md,
+   R5; design/compilation-coordination.md, "The graph module" and T3 to T5, Q3). */
 #ifndef MESH_GRAPH_H
 #define MESH_GRAPH_H
 #include <stddef.h>
@@ -16,9 +18,12 @@ extern "C" {
 
 /* The vertices `from` reaches over `edges` undirected edges, edge e joining `end(context, e, 0)` and
    `end(context, e, 1)` (each below `vertices`), breadth first: their count; `order` (room for `vertices`) the vertices
-   in the order reached, `reached` (room for `vertices`) 1 for each and 0 for every other. */
+   in the order reached, `reached` (room for `vertices`) 1 for each and 0 for every other.  `parent` (room for
+   `vertices`; NULL: none): each reached vertex's breadth-first parent, the vertex whose edge first reached it (`from`
+   its own; a vertex not reached UINT32_MAX).  Callers pass NULL but mesh-records.c's island tree
+   (design/compilation-coordination.md, Q3). */
 uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
-                          const void *context, uint32_t from, uint32_t *order, unsigned char *reached);
+                          const void *context, uint32_t from, uint32_t *order, unsigned char *reached, uint32_t *parent);
 /* Directed edges in compressed rows: vertex v's leave as edges [first[v], first[v + 1]), edge k entering
    `head(context, k)`. */
 /* A topological order of such edges' `vertices` vertices: ordinal[v] v's place, each place taken by the
@@ -158,6 +163,28 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
 int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *order,
                          int (*interferes)(const void *context, uint32_t a, uint32_t b), const void *context,
                          uint64_t capacity, uint64_t *colour, uint64_t *used);
+/* O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, eq. (7): bl(n) = w(n) + max over the edges e = (n, m) out of n of
+   {cost[e] + bl(m)}, over a topological order (mesh_graph_order).  Task n weighs weight[n]; edge e runs from[e] ->
+   to[e].  level[n] out.  0; EINVAL where the edges hold a cycle or name no task; ENOMEM */
+int mesh_graph_bottom_levels(uint32_t tasks, const double *weight, size_t edges, const uint32_t *from, const uint32_t *to,
+                             const double *cost, double *level);
+/* O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, Algorithm 1 with Algorithm 2 (list scheduling in the contention
+   model).  Task n on processor[n] (given: the placement operand), weight[n] long.  Edge e from[e] -> to[e] of cost[e]
+   crosses links link[route[e] .. route[e + 1]) in route order (route: edges + 1 entries); a local edge
+   (processor[from] == processor[to]) has an empty route and finishes with its origin (15); a remote edge with an empty
+   route is EINVAL.  Link l's relative data rate rate[l] > 0, so an edge occupies it cost[e] / rate[l] (§5).  Route
+   entries with the same communication[r] on the same link are one occupation of it: the first scheduled takes its
+   interval and the others its times (design/compilation-coordination.md, T4).  Tasks in decreasing bottom level
+   (eq. 7), a tie by a topological ordinal (mesh_graph_order) then by index; for each, its incoming edges in index
+   order, each remote one scheduled on its links by Condition 6 and (14), nonaligned, by the end technique
+   (design/compilation-coordination.md, T5); then the task at max(its processor's finish, its data-ready time (3)) by
+   the end technique.  start[n] its start; link_start[r] the start of route entry r on its link.  Arithmetic +, -, x,
+   / and comparisons alone, correctly rounded, so every party computes the same schedule from the same operands.
+   0; EINVAL; ENOMEM */
+int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const uint32_t *processor, size_t edges,
+                                   const uint32_t *from, const uint32_t *to, const double *cost, const size_t *route,
+                                   const uint32_t *link, const uint32_t *communication, uint32_t links,
+                                   const double *rate, double *start, double *link_start);
 
 #ifdef __cplusplus
 }
