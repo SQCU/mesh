@@ -19,6 +19,11 @@
    mesh_paired and mesh_join, its bound there MESH_STREAMS, here MESH_PORTS) */
 /* declared here until mesh-dataflow.h carries it */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
+/* tag pre-return-20261103 rdma/mesh-graph.h mesh_graph_reach, its signature (6552ecaf, 6379e868): the graph module's
+   breadth-first reach, which map_put's prune calls (design/rubrics.md:422, C9) */
+/* declared here until mesh-graph.h carries it */
+uint32_t mesh_graph_reach(uint32_t vertices,uint32_t edges,uint32_t (*end)(const void *context,uint32_t e,uint32_t side),
+                          const void *context,uint32_t from,uint32_t *order,unsigned char *reached);
 
 /* tag pre-return-20261103 rdma/mesh-records.c busy_tell (3f72cbde), adapted: a client's hold is main's client word */
 /* design/transport.md section 14: the streams held, an owner word naming a client (a stream whose holding ended with
@@ -117,7 +122,11 @@ void map_adopt(void){
    records stay in that order (the held map is in it, and the prune keeps the order), and a node's index is its place
    (mesh.h `map_serial`); and `map_serial` moves, while `map` is odd, where the write changes the map's nodes (which,
    or how many) or any cable (a record's `reached` or any field of a reach entry: peer node, ports, queue pairs,
-   bandwidth), and not where it changes only the rest of a record (its sequence, boot, region, memory, model) */
+   bandwidth), and not where it changes only the rest of a record (its sequence, boot, region, memory, model); and the
+   reach from this node is the graph module's (mesh_graph_reach over the joins, C9), not a walk of its own here, its
+   reached set the tag's walk's */
+/* an edge's end for mesh_graph_reach: join e's record on `side` (map_put) */
+static uint32_t map_end(const void *context,uint32_t e,uint32_t side){ return ((const uint32_t (*)[2])context)[e][side]; }
 static void map_put(const struct mesh_record *record){
   const uint64_t n=atomic_load(&M->map_nodes);
   struct mesh_record *r=mesh_records(M);
@@ -127,16 +136,20 @@ static void map_put(const struct mesh_record *record){
   const uint64_t count=added?n+1:n;
   struct mesh_record *next=malloc(count*sizeof *next);
   unsigned char *reached=calloc(count,1);
-  uint32_t *order=malloc(count*sizeof *order),head=0,tail=0;
-  if(!next || !reached || !order){free(next);free(reached);free(order);return;}
+  uint32_t *order=malloc(count*sizeof *order),(*join)[2]=malloc((count*(count-1)/2+1)*sizeof *join);
+  if(!next || !reached || !order || !join){free(next);free(reached);free(order);free(join);return;}
   memcpy(next,r,(size_t)at*sizeof *r);
   memcpy(next+at,record,sizeof *record);
   memcpy(next+at+1,r+at+!added,(size_t)(n-at-!added)*sizeof *r);
-  for(uint64_t k=0;k<count;k++)if(next[k].node==M->node){reached[k]=1;order[tail++]=(uint32_t)k;}
-  while(head<tail){
-    uint32_t a=order[head++];double beta;
-    for(uint64_t b=0;b<count;b++)if(!reached[b] && mesh_joined(next+a,next+b,&beta)){reached[b]=1;order[tail++]=(uint32_t)b;}
+  /* not the tag's lines: the joins (mesh_joined, symmetric) as edges, and this node's record the reach's start; none
+     reached where the map holds no record of this node, as the tag's walk seeded none */
+  uint64_t self=count,joins=0;
+  for(uint64_t a=0;a<count;a++){
+    if(next[a].node==M->node)self=a;
+    for(uint64_t b=a+1;b<count;b++){double beta;if(mesh_joined(next+a,next+b,&beta)){join[joins][0]=(uint32_t)a;join[joins][1]=(uint32_t)b;joins++;}}
   }
+  if(self<count)mesh_graph_reach((uint32_t)count,(uint32_t)joins,map_end,join,(uint32_t)self,order,reached);
+  free(join);
   uint64_t kept=0;
   for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+kept++,next+k,sizeof *next);
   if(kept!=n || memcmp(next,r,(size_t)n*sizeof *r)){

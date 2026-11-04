@@ -50,28 +50,16 @@ static int map_index(const struct mesh_record *r,int n,uint32_t node){
   for(int i=0;i<n;i++)if(r[i].node==node)return i;
   return -1;
 }
-/* the capacity of the map's node pair (a, b), in bits a second: the sum of their cables, each a reach entry of a's
-   naming b whose peer entry b's record lists back (its node a, its ports the same two crossed), at the lesser of the two
-   entries' bandwidth (struct mesh_reach; struct mesh_hop, "Both ends"); 0 where no cable joins them */
-static uint64_t map_capacity(const struct mesh_record *a,const struct mesh_record *b){
-  uint64_t sum=0;
-  for(uint32_t i=0;i<a->reached && i<MESH_PORTS;i++){
-    const struct mesh_reach *e=a->reach+i;
-    if(e->node!=b->node)continue;
-    for(uint32_t j=0;j<b->reached && j<MESH_PORTS;j++){
-      const struct mesh_reach *f=b->reach+j;
-      if(f->node==a->node && f->port==e->peer_port && f->peer_port==e->port){sum+=e->bandwidth<f->bandwidth?e->bandwidth:f->bandwidth;break;}
-    }
-  }
-  return sum;
-}
 /* mesh-stat --map: the map for the drivers, one JSON line, read from a mapping of the region to read alone, under the
    map's seqlock (map_read): {"serial": the map serial, "self": this node's index, "nodes": [{"index": its index,
-   "node": its node id, "model": its hw.model, "reach": [{"node": the index of a node it is joined to, "bandwidth": the
-   pair's capacity, bits a second (map_capacity)}, ...], "cables": [{"node": the peer's index (null: not in the map),
-   "port", "peer_port", "qps", "bandwidth": the record's reach entry as it lists it}, ...]}, ...]}.  Indices are the
-   map's, its records in ascending node id.  The drivers read the node-level fields; "cables" is the bridge's (the
-   rule's inputs, CONTRACT "mesh-stat (8)").  On failure {"up":false,"errno":E} and status 1 */
+   "node": its node id, "model": its hw.model, "reach": [{"node": the peer's index, "bandwidth": bits a second, "port",
+   "peer_port", "qps"}, ...]}, ...]}.  Indices are the map's, its records in ascending node id.  "reach" is the
+   record's reach as the map holds it, an entry a cable (struct mesh_reach), so a node pair several cables join is
+   listed once a cable, each at the bandwidth that record gives it: no cable is matched, summed or taken at the lesser of
+   its two ends here (that join is the map reader's and the bridges' rule's, one copy, design/rubrics.md:422 C9).  An
+   entry naming a node the map holds no record of (a cable its peer's record does not yet list) has no index and is left
+   out.  The drivers read "node" and "bandwidth"; "port", "peer_port" and "qps" are the bridge's (the rule's inputs,
+   CONTRACT "mesh-stat (8)": its cables).  On failure {"up":false,"errno":E} and status 1 */
 static int map_print(struct hdr *m,size_t length){
   struct mesh_record *r=NULL;
   uint64_t serial=0;
@@ -88,20 +76,13 @@ static int map_print(struct hdr *m,size_t length){
     for(const char *c=r[i].model;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
     printf("\",\"reach\":[");
     int first=1;
-    for(int j=0;j<n;j++){
-      const uint64_t capacity=j==i?0:map_capacity(r+i,r+j);
-      if(!capacity)continue;
-      printf("%s{\"node\":%d,\"bandwidth\":%llu}",first?"":",",j,(unsigned long long)capacity);
-      first=0;
-    }
-    printf("],\"cables\":[");
     for(uint32_t k=0;k<r[i].reached && k<MESH_PORTS;k++){
       const struct mesh_reach *e=r[i].reach+k;
       const int j=map_index(r,n,e->node);
-      printf("%s{\"node\":",k?",":"");
-      if(j<0)printf("null");
-      else printf("%d",j);
-      printf(",\"port\":%u,\"peer_port\":%u,\"qps\":%u,\"bandwidth\":%llu}",e->port,e->peer_port,e->qps,(unsigned long long)e->bandwidth);
+      if(j<0)continue;
+      printf("%s{\"node\":%d,\"bandwidth\":%llu,\"port\":%u,\"peer_port\":%u,\"qps\":%u}",first?"":",",j,
+             (unsigned long long)e->bandwidth,e->port,e->peer_port,e->qps);
+      first=0;
     }
     printf("]}");
   }
