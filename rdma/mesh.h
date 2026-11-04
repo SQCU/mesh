@@ -238,8 +238,9 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
       is written.
    4. `hops` 0 (release), a release fence, `plan` woken.
    5. The entries, u x n; hdr `state`; `plan` = g.
-   6. The map read again: ESTALE where its serial moved, or the map reader's own error; then g's claim is closed,
-      `hops` stays 0, and the previous plan, which no longer stands, has its claims closed too.
+   6. The map read again: ESTALE where its serial moved, or the map reader's own error; then, `hops` staying 0, hdr
+      `state` is stored 0 (release), g's claim is closed, and the previous plan, which no longer stands, has its
+      claims closed too.
    7. `hops` (release), `plan` woken.
    8. Every earlier claim of the client closed (mesh_claim_close).
    Nothing is erased and nothing waits: a plan's state and pages are new pages, never the previous plan's (C3.4).  The
@@ -340,9 +341,11 @@ struct hdr {
      note), never read or written; the map's room, `map_room` records at `map_off` (mesh-map.h mesh_layout) */
   uint64_t vacant9,vacant10,vacant11,vacant12,vacant13,map_room;
   /* 109 (design/disjoint-pages-revision-coordination.md, "The region"): the region offset of the current plan's state
-     section (struct mesh_state; mesh_plan_state reads it with acquire), 0 where no plan is written.  mesh_plan writes
-     it with the entries, after the section's words are set and before `hops` (struct mesh_hop's note, "Writing a
-     plan"), and nothing else writes it */
+     section (struct mesh_state; mesh_plan_state reads it with acquire), 0 where no plan stands.  mesh_plan writes it
+     with the entries, after the section's words are set and before `hops` (struct mesh_hop's note, "Writing a plan").
+     It is stored 0 (release) by mesh_plan's ESTALE path, with `hops` 0 (that note's step 6), and by mesh_retire, with
+     `hops` 0, before it closes the retiring client's claims (mesh-dataflow.c), so no reader of `state` is led to a
+     state section whose claim the bridge may release.  Nothing else writes it */
   _Atomic uint64_t state;
 };
 /* every field at its 106 offset, the 108 fields after them, the 109 field after those (the vacant bytes' notes above
@@ -395,7 +398,8 @@ static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct me
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
 /* the page lists: the plan's entries (struct mesh_hop), hdr `hops` of them at `hop_off` */
 static inline struct mesh_hop *mesh_hops(struct hdr *m){ return (struct mesh_hop *)((char *)m+m->hop_off); }
-/* the current plan's state section (struct mesh_state at hdr `state`, acquire), NULL where no plan is written */
+/* the current plan's state section (struct mesh_state at hdr `state`, acquire), NULL where no plan stands (hdr
+   `state`'s note) */
 static inline struct mesh_state *mesh_plan_state(struct hdr *m){
   const uint64_t at=atomic_load_explicit(&m->state,memory_order_acquire);
   return at?(struct mesh_state *)((char *)m+at):NULL;
