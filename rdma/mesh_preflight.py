@@ -15,7 +15,9 @@ It only observes. Nothing is locked, claimed or changed, and no node list is con
 
 Busy, anywhere in the targets' collective:
 - a process other than a bridge with a mesh library loaded (a mesh client or program, whatever the bridge's version);
-- the hourly (mesh_hourly.py);
+- the hourly (mesh_hourly.py), other than the one this launch runs in: the hourly runs main's programs (run_pair.py,
+  whose preflight this is) in its own session, and an hourly in the probe's session is the launch itself (2026-11-03,
+  with rdma/mesh_hourly.py: before, every hourly launch found itself busy; an hourly in any other session still is);
 - the GPU at --gpu-busy percent or more.
 
 Blocked, on a target, by what the launch says it will use:
@@ -75,11 +77,17 @@ def probe(region=None):
                                                    'IOThunderboltLocalNode'))
     far = re.findall(UUID % 'Domain UUID', run('ioreg', '-r', '-d', '1', '-l', '-w', '0', '-c',
                                                'IOThunderboltXDomainLink'))
-    processes = {}
+    processes, session = {}, os.getsid(0)
     for line in run('ps', '-axo', 'pid=,command=').splitlines():
         pid, _, command = line.strip().partition(' ')
         if pid.isdigit():
             processes[int(pid)] = command.strip()
+
+    def other(pid):
+        try:
+            return os.getsid(pid) != session
+        except OSError:
+            return False
     bridges = {pid: c for pid, c in processes.items() if os.path.basename(c.split(' ')[0]) in BRIDGES}
     loaded, pid = set(), None
     for line in run('lsof', '-n', '-w', '-d', 'txt', '-Fpn').splitlines():
@@ -122,7 +130,7 @@ def probe(region=None):
             'memsize': memsize, 'wired': wired, 'unpinned': memsize - wired, 'ports': ports,
             'domains': sorted(set(domains)), 'far': far,
             'bridges': {str(k): v for k, v in bridges.items()}, 'clients': {str(k): v for k, v in clients.items()},
-            'hourly': [c for c in processes.values() if 'mesh_hourly.py' in c],
+            'hourly': [c for p, c in processes.items() if 'mesh_hourly.py' in c and other(p)],
             'listening': listening, 'gpu': max(gpu) if gpu else None, 'region_exists': region_exists,
             'tailnet': tailnet}
 
@@ -154,6 +162,48 @@ def read(via, identity, region):
         return None
 
 
+def joined(f):
+    """Whether the node of probe `f` is in a collective: any of its RDMA ports is PORT_ACTIVE."""
+    return any(state == 'PORT_ACTIVE' for state in f['ports'].values())
+
+
+def discover(here, targets=(), identity=None, region=None):
+    """The nodes around this one, from `here` (its probe): every node whose beacon answers and each of `targets`, read
+    in parallel. (facts, name_of, via, silent, cables): each node's probe by host; each name that reached a node, its
+    host; each host's ssh destination ('local' for this node); {name: beacon host or target} for each that did not
+    answer; and cables(host), [(far Domain UUID, the host owning it or None)] for each host-to-host link of the node."""
+    facts, via = {here['host']: here}, {here['host']: 'local'}
+    name_of = {'local': here['host'], here['host']: here['host']}
+    by_uuid, answers, asked = {here['uuid']: here['host']}, {}, {}
+
+    def gather(vias):
+        """Read every via in parallel; a node reached by two names is one node (its IOPlatformUUID)."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(vias))) as pool:
+            got = dict(zip(vias, pool.map(lambda v: read(v, identity, region), vias)))
+        for v, f in got.items():
+            answers[v] = f
+            if f and f['uuid'] in by_uuid:
+                name_of[v] = by_uuid[f['uuid']]
+            elif f:
+                facts[f['host']], by_uuid[f['uuid']], via[f['host']] = f, f['host'], v
+                name_of[v] = name_of[f['host']] = name_of[f['host'] + '.local'] = f['host']
+
+    # a beacon's node at the tailnet address of its serial (the tailnet names each node by its serial, and its host
+    # key is known there), else at its .local host
+    for i, (host, serial) in beacons().items():
+        if i != here['uuid']:
+            asked.setdefault(here['tailnet'].get((serial or '').lower(), host), host)
+    gather(sorted(asked))
+    gather(sorted({t for t in targets if t not in name_of}))
+    silent = {v: asked.get(v, v) for v, f in sorted(answers.items()) if not f}
+    owner = {d: n for n, f in facts.items() for d in f['domains']}
+
+    def cables(n):
+        return [(d, owner.get(d)) for d in facts[n]['far']]
+
+    return facts, name_of, via, silent, cables
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--probe', action='store_true', help=argparse.SUPPRESS)
@@ -172,32 +222,8 @@ def main():
         return 0
 
     here = probe(a.region)
-    facts, name_of = {here['host']: here}, {'local': here['host'], here['host']: here['host']}
-    by_uuid, answers = {here['uuid']: here['host']}, {}
-
-    def gather(vias):
-        """Read every via in parallel; a node reached by two names is one node (its IOPlatformUUID)."""
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(vias))) as pool:
-            got = dict(zip(vias, pool.map(lambda v: read(v, a.ssh_identity, a.region), vias)))
-        for via, f in got.items():
-            answers[via] = f
-            if f and f['uuid'] in by_uuid:
-                name_of[via] = by_uuid[f['uuid']]
-            elif f:
-                facts[f['host']], by_uuid[f['uuid']] = f, f['host']
-                name_of[via] = name_of[f['host']] = name_of[f['host'] + '.local'] = f['host']
-
-    # a beacon's node at the tailnet address of its serial (the tailnet names each node by its serial, and its host
-    # key is known there), else at its .local host
-    gather(sorted({here['tailnet'].get((serial or '').lower(), host) for i, (host, serial) in beacons().items()
-                   if i != here['uuid']}))
-    gather(sorted({t for t in a.target if t not in name_of}))
-    silent = sorted(v for v, f in answers.items() if not f)
-    owner = {d: n for n, f in facts.items() for d in f['domains']}
-
-    def cables(n):
-        return [(d, owner.get(d)) for d in facts[n]['far']]
-
+    facts, name_of, _, silent, cables = discover(here, a.target, a.ssh_identity, a.region)
+    silent = sorted(silent)
     targets = [name_of.get(t, t) for t in (a.target or ['local'])]
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import mesh_graph  # the graph module (C9); the launcher's side only, after --probe has returned
