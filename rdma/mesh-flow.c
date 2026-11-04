@@ -7,8 +7,8 @@
    recorded E2B decode, metal-microbench docs/measurement.md): SENDs prepared once a plan and chained per queue pair,
    each posted as its word releases it; receives prepared once a plan, posted ahead in a window and refilled as they
    land; completions polled through the provider's own functions (mesh-verbs.h struct mesh_verbs `poll`, struct
-   mesh_queue `send`, `receive`); traced variants under MESH_LEDGER.  Their inputs are the page lists, in place of the
-   per-link, per-queue transfer lists (mesh_transfers, mesh_order_length) and the --link form's link_configure.  The
+   mesh_queue `send`, `receive`); traced variants under MESH_LEDGER.  Their inputs are the page lists, which replaced
+   d6dceac's per-link, per-queue transfer lists and its --link form's link_configure (both since removed).  The
    progress thread, the guard around its device's verbs calls and a port's halts are tag pre-return-20261103
    rdma/mesh-link.c's, verbatim but at interfaces.  No main (the binary's is mesh-link.c's, the child's mesh-child.c's)
    and no verbs teardown: a halt clears `served` and moves `pairing`, and the child's exit is the teardown (mesh-child.c
@@ -769,7 +769,13 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    `port` is NULL, and the port's (every port's) plan no longer loaded (`prepared` 0) where no child of it lives: a
    live child's requests may still name the plan's pages, so its `prepared` is its own to clear (link_close) or its
    reap's (child_reaped, after `port->child` is 0).  A receive the port's child lands after it stores its position over
-   the cancellation: the page's bytes did land */
+   the cancellation: the page's bytes did land, and the tag's cancel again (child_heard's connect of a lost pairing,
+   child_reaped) cancels it once more.  A cancel again comes after the loss has zeroed `port->peer` (mesh-ports.c
+   port_lost, which cancels first), so each port's peer at its last cancel with one is kept (`cancelled`, the parent's,
+   its node, its map index then, or every receive where the map was not read) and a cancel with no peer cancels by it,
+   as at the tag (review R2, C1).  The parent never sees its child load a plan, so the peer is kept at that first cancel,
+   where the loss's own cancel reads it */
+static struct cancelled { uint32_t node,index,every; } cancelled[MESH_PORTS];
 void streams_cancel(const struct port *port){
   if(!port){
     plan_cancel(UINT32_MAX);
@@ -777,12 +783,17 @@ void streams_cancel(const struct port *port){
       if(!ports[p].child)atomic_store_explicit(&mesh_links(M)[ports[p].index].port.prepared,0,memory_order_release);
     return;
   }
-  struct mesh_record *records=NULL;uint64_t count=0,serial=0;
-  if(port->peer && !map_read(&records,&count,&serial)){
-    const uint32_t from=map_index(records,count,port->peer);
+  struct cancelled *last=cancelled+port->index;
+  if(port->peer){
+    struct mesh_record *records=NULL;uint64_t count=0,serial=0;
+    const int error=map_read(&records,&count,&serial);
+    *last=(struct cancelled){.node=port->peer,.index=error?UINT32_MAX:map_index(records,count,port->peer),.every=error!=0};
     free(records);
-    if(from!=UINT32_MAX)plan_cancel(from);
-  } else if(port->peer)plan_cancel(UINT32_MAX);
+  }
+  if(last->node){
+    if(last->every)plan_cancel(UINT32_MAX);
+    else if(last->index!=UINT32_MAX)plan_cancel(last->index);
+  }
   if(!port->child)atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:712-722 streams_let_go (60b00774), reduced to what it is under the page
