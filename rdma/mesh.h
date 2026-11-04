@@ -131,7 +131,10 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
      (mesh_wired): the page sent, the page a receive lands in, or a relay's page.  A hop moves that whole page, `block`
      arena pages (block x pgsz bytes), from it or into it; nothing is copied.
    - `node`: the adjacent node by its index in the map (hdr `map_serial`): a send's next hop, a receive's previous hop.
-   - `direction`: MESH_SEND or MESH_RECEIVE; `padding` 0.
+   - `direction`: MESH_SEND or MESH_RECEIVE.
+   - `forwards`, the plan call's, so the bridge matches no entries: on a receive, its page's forwards, the send hops of
+     the slot that name its landed word; on a send, 1 where it is a forwarding SEND (its word a landed word of a
+     receive at this node), else 0.
    - `word`: the region offset of the hop's word of execution 0, an _Atomic uint64_t (8-aligned, anywhere in the
      region: no SGE names it); `position`: the value that releases a send or that a receive's landing stores,
      0 < position < UINT64_MAX.
@@ -140,11 +143,11 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
    mesh-metal.m).  A plan runs hdr `executions` times, t = 0 .. executions - 1, its pages ringing through hdr `depth`
    slots (depth == executions: no ring).  These and hdr `hop_stride` are the plan's values, beside the list.
    - The list is `hops` = depth x n entries, slot s's n at [s n, s n + n).  Every slot holds the same n hops in the same
-     order, with the same node, direction, word, position and serial; only the pages differ.
+     order, with the same node, direction, forwards, word, position and serial; only the pages differ.
    - Which page execution t uses: slot (t mod depth)'s page of the hop.  A hop's receive of execution t is posted only
      once its receives of executions 0 .. t - (depth - 1) have landed (main's receive window, a slot short of the ring)
-     and, from t = depth, once its cell of execution t - depth reads at offset 8 (acquire) the page's forwards (below),
-     so no two posted receives name one page and no landing overwrites a page a forwarding SEND still reads.
+     and, from t = depth, once its cell of execution t - depth reads at offset 8 (acquire) its `forwards` (below), so no
+     two posted receives name one page and no landing overwrites a page a forwarding SEND still reads.
    - Execution t's word of an entry is offset 0 of its cell of execution t: the 256-byte cell at region offset `word`
      + t x `hop_stride`, `hop_stride` 256 for every word of the plan, no two words' cells overlapping.  This is the
      GPU's word protocol as it is: its stores and waits are at a binding's offset + t x stride, and here the
@@ -154,8 +157,8 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
      never cleared.
    - A landed word's cell of execution t holds at offset 8 (an _Atomic uint64_t) its page's sent count of t: the
      forwarding SENDs of t from that page whose completion was taken, each port's child adding 1 (release) as it takes
-     one.  A forwarding SEND is a send hop whose `word` is a receive's landed word, as a relay's are; a page's forwards
-     are the send hops of a slot naming its receive's word.
+     one of a send whose `forwards` is 1.  A forwarding SEND is a send hop whose `word` is a receive's landed word, as
+     a relay's are; the receive's `forwards` counts them.
    - What releases a send in execution t: its word of execution t reaching `position` (acquire; position <= value <
      UINT64_MAX).  That word is a supplied word, stored with release by its producer after its last write to the page:
      the GPU's publication store (prepared_publication `argument` = `position`) or mesh_host_publish; or, at a relay,
@@ -178,7 +181,7 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
    the bridge reads none of it while `hops` (acquire) is 0, and stores the generation it loaded in each port's
    mesh_links(m)[p].port.prepared.  A plan whose entries' `serial` is not `map_serial` when it is loaded is refused:
    the call fails by error and its caller plans again on the map as it is. */
-struct mesh_hop { uint32_t page,node,direction,padding; uint64_t word,position,serial; };
+struct mesh_hop { uint32_t page,node,direction,forwards; uint64_t word,position,serial; };
 _Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16,"mesh_hop");
 
 /* design/prepared-machine.md#M01 */
