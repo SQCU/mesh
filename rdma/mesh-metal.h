@@ -13,8 +13,10 @@ _Static_assert(sizeof(struct mesh_metal_publication)==24,"prepared publication b
 _Static_assert(sizeof(struct mesh_metal_transport)==24,"prepared Metal transport");
 _Static_assert(sizeof(struct mesh_metal_input)==24,"prepared numerical input");
 /* design/algorithm-sources.md#resident-metal */
+/* the plan's words (mesh_plan; the context's send_off, send_bytes) wrapped for the GPU, and their cancellation */
 int mesh_metal_transport_create(struct mesh_ctx *,void *,struct mesh_metal_transport *);
 /* design/algorithm-sources.md#resident-metal */
+/* the input of one received page: `operand` a range of one page (EINVAL else), its landed word and the plan's stride */
 int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,struct mesh_metal_input *);
 /* design/algorithm-sources.md#resident-metal */
 int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_section *,uint32_t,uint32_t,struct mesh_metal_publication *);

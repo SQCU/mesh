@@ -1,5 +1,7 @@
 #include <signal.h>
 #include "mesh-dataflow.h"
+/* mesh_transfers_start's declaration: defined here, beside the map reader it reads */
+#include "mesh-call.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -7,6 +9,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
+#include <time.h>
+/* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, which the tag's libmesh reached through its mesh.h: the
+   bound of libmesh's waits (the map read, the client's start).  Here until mesh.h carries it: mesh-bridge.h holds it
+   for the bridge, and no client includes mesh-bridge.h.  The same tokens, so either definition stands beside the other */
+#ifndef MESH_PLATFORM_NS
+#define MESH_PLATFORM_NS UINT64_C(5000000000)
+#endif
 /* design/pages-and-functions.md#what-the-page-table-is */
 static void mesh_reclaim(struct hdr *);
 
@@ -69,15 +78,23 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   uint64_t client=(((atomic_fetch_add_explicit(&memory->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff))<<32)|(uint32_t)getpid(),vacant=0;
   while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,client,memory_order_seq_cst,memory_order_acquire)){
-    if(!vacant || !kill((pid_t)(uint32_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); close(file); return EADDRINUSE; }
+    /* an earlier client whose process is gone (mesh-holders.h mesh_gone, main's kill/ESRCH test) is retired */
+    if(!vacant || !mesh_gone((pid_t)(uint32_t)vacant)){ munmap(memory,(size_t)info.st_size); close(file); return EADDRINUSE; }
     mesh_retire(memory,vacant);
     vacant=0;
   }
+  /* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_slot_take:284, the slot's start as hdr `client_start`: with
+     `client`'s pid, this client's identity as a holder of the region (mesh-holders.h mesh_holds) */
+  memory->client_start=mesh_started(getpid());
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
   atomic_store_explicit(&memory->client,client,memory_order_release);
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file};
+  /* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_attach: the expiry (a store, seq_cst) read again after the
+     client's compare-exchange (seq_cst): a client the heartbeat's read of the holders missed reads it expired here,
+     and is let go */
+  if(__atomic_load_n(&memory->version,__ATOMIC_SEQ_CST)!=MESH_VERSION){mesh_detach(c);return EINVAL;}
   return 0;
 }
 
@@ -221,6 +238,7 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
 
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M18 */
+/* its queue argument replaced by mesh_plan (mesh-collective.h); removed at sub-assignment 16 */
 struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t queue){
   struct hdr *m=c->M;
   struct mesh_publication *publication=mesh_publication_at(m,row);
@@ -237,6 +255,10 @@ struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t q
 /* design/prepared-machine.md#M13 */
 /* design/prepared-machine.md#M04 */
 /* design/algorithm-sources.md#programkernel_call */
+/* A row's release words as mesh_plan records them (mesh-collective.h): `targets[0].stream` the region offset of a send's
+   release word of execution 0 (count 1, stride 1) and the publication's `argument` the `position` that releases it
+   (struct mesh_hop), stored there at execution t's word, + t x hop_stride (sizeof(struct mesh_send)), by the GPU or
+   mesh_host_publish.  The SEND cells' wr_id the replaced form stored is not read: a release word is one word, no cell */
 uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_publication *records){
   struct mesh_publication *publication=mesh_publication_at(m,row);
   uint32_t count=0;
@@ -244,11 +266,147 @@ uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_pub
     struct mesh_target target=publication->targets[i];
     for(uint32_t k=0;k<target.count;k++){
       if(records){
-        struct mesh_send *cell=(void *)((char *)m+target.stream+sizeof(struct mesh_send)*target.stride*k);
-        records[count]=(struct prepared_publication){.destination=(uintptr_t)cell,.argument=cell->request.wr_id};
+        char *word=(char *)m+target.stream+sizeof(struct mesh_send)*target.stride*k;
+        records[count]=(struct prepared_publication){.destination=(uintptr_t)word,
+          .argument=atomic_load_explicit(&publication->argument,memory_order_relaxed)};
       }
       count++;
     }
   }
   return count;
+}
+
+/* The map reader and the client's start (mesh-dataflow.h mesh_nodes_read, mesh-call.h mesh_transfers_start).  The
+   map's records, a cable's both ends and its ports stay in this file: the collective is given node pairs and summed
+   capacity (struct mesh_nodes), and the start a status. */
+
+/* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_records_read, adapted: the map's records as one serial left them,
+   the seqlock's reader (mesh.h mesh_map_whole), copied into r (MESH_NODES_MOST of room) with their count and the map's
+   serial (hdr `map_serial`, moved only while `map` is odd); the read ended by `deadline` (the monotonic clock's ns),
+   which its caller sets MESH_PLATFORM_NS past the start of its wait.  It differs from the tag's: no copy is allocated
+   (the room is the reader's MESH_NODES_MOST, E2BIG past it); main has no expiry to register (mesh_expiry_set), so
+   past the deadline it returns ETIMEDOUT, or ESRCH where the bridge's process is gone (its write left open); and an
+   open write is waited on until the deadline, where the tag looked again each MESH_PAUSE_NS */
+static int mesh_map_copy(struct mesh_ctx *c,uint64_t deadline,struct mesh_record *r,uint32_t *count,uint64_t *serial){
+  struct hdr *m=c->M;
+  for(;;){
+    const uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire),now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    if(now>=deadline)return mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_acquire))?ESRCH:ETIMEDOUT;
+    if(before&1){
+      os_sync_wait_on_address_with_timeout(&m->map,before,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                                           OS_CLOCK_MACH_ABSOLUTE_TIME,deadline-now);
+      continue;
+    }
+    const uint64_t nodes=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
+    *serial=atomic_load_explicit(&m->map_serial,memory_order_relaxed);
+    const int fits=at>=sizeof *m && at<=c->len && nodes<=(c->len-at)/sizeof *r;
+    if(fits && nodes<=MESH_NODES_MOST)memcpy(r,(char *)m+at,nodes*sizeof *r);
+    if(!mesh_map_whole(m,before))continue;
+    if(!fits)return EINVAL;
+    if(nodes>MESH_NODES_MOST)return E2BIG;
+    *count=(uint32_t)nodes;return 0;
+  }
+}
+
+/* the records' indices in ascending node-id order: order[i] the record of map index i */
+static void mesh_map_order(const struct mesh_record *r,uint32_t count,uint32_t *order){
+  for(uint32_t i=0;i<count;i++){
+    uint32_t k=i;
+    for(;k && r[order[k-1]].node>r[i].node;k--)order[k]=order[k-1];
+    order[k]=i;
+  }
+}
+
+/* the cables between a's node and b's that both records list (mesh.h struct mesh_reach: each record lists a cable from
+   its own side, so b's entry names a's node with the two ports swapped), each at the lesser of its two entries'
+   bandwidths: their summed bandwidth (bits a second), and a's port of each in port[] where given (a's record lists at
+   most MESH_PORTS).  A cable one record lists alone (the other's record not yet heard) is not counted: both bridges'
+   rule reads a cable from both records, so neither end assigns it a page.  The tag's join (mesh_join) took the fewer
+   of the two ends' counts at the least bandwidth of all; a cable here is matched by its ports, at its own bandwidth */
+static uint64_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,uint32_t *port,uint32_t *cables){
+  uint64_t sum=0;
+  uint32_t n=0;
+  for(uint32_t i=0;i<a->reached && i<MESH_PORTS;i++){
+    const struct mesh_reach *e=&a->reach[i];
+    if(e->node!=b->node)continue;
+    for(uint32_t k=0;k<b->reached && k<MESH_PORTS;k++){
+      const struct mesh_reach *f=&b->reach[k];
+      if(f->node!=a->node || f->port!=e->peer_port || f->peer_port!=e->port)continue;
+      sum+=e->bandwidth<f->bandwidth?e->bandwidth:f->bandwidth;
+      if(port)port[n]=e->port;
+      n++;
+      break;
+    }
+  }
+  if(cables)*cables=n;
+  return sum;
+}
+
+int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
+  struct mesh_record r[MESH_NODES_MOST];
+  uint32_t count,order[MESH_NODES_MOST];
+  uint64_t serial;
+  int error=mesh_map_copy(c,clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS,r,&count,&serial);
+  if(error)return error;
+  mesh_map_order(r,count,order);
+  *out=(struct mesh_nodes){.serial=serial,.count=count,.self=MESH_ABSENT};
+  for(uint32_t i=0;i<count;i++){
+    out->node[i]=r[order[i]].node;
+    if(out->node[i]==c->M->node)out->self=i;
+    for(uint32_t j=0;j<i;j++)out->capacity[i][j]=out->capacity[j][i]=mesh_cables(r+order[i],r+order[j],NULL,NULL);
+  }
+  return out->self==MESH_ABSENT?ENOENT:0;
+}
+
+/* design/prepared-machine.md#M06 */
+/* design/algorithm-sources.md#programcopy */
+/* The configured latch (hdr `configured`'s compare-exchange) and the unbounded spin on each link's `prepared` are gone:
+   the plan is the bridge's to find (hdr `plan`, `hops`), and each port whose cable carries it stores `plan` in its
+   `prepared` once its data path has loaded it, or sets MESH_STOPPED and `code` where it refuses it.  The ports waited
+   on are this node's cables, in the map at the plan's serial, to the nodes the hops name (map indices, struct
+   mesh_hop `node`), as mesh_cables matches them.  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read
+   and the ports' wait together.  A spin, bounded: `prepared` is stored with no wake.  A port stopped with no code
+   returns ENOTCONN, so that a stop never reads as a start */
+int mesh_transfers_start(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
+  const uint64_t hops=atomic_load_explicit(&m->hops,memory_order_acquire),plan=atomic_load_explicit(&m->plan,memory_order_relaxed);
+  if(!hops)return 0;
+  if(hops>m->hop_capacity)return EINVAL;
+  struct mesh_record r[MESH_NODES_MOST];
+  uint32_t count,order[MESH_NODES_MOST];
+  uint64_t serial;
+  int error=mesh_map_copy(context,deadline,r,&count,&serial);
+  if(error)return error;
+  if(serial!=plan)return ESTALE;
+  mesh_map_order(r,count,order);
+  uint32_t self=count;
+  for(uint32_t i=0;i<count;i++)if(r[i].node==m->node)self=i;
+  if(self==count)return ENOENT;
+  uint64_t named=0;
+  for(uint64_t k=0;k<hops;k++){
+    const uint32_t node=mesh_hops(m)[k].node;
+    if(node>=count)return EINVAL;
+    named|=UINT64_C(1)<<node;
+  }
+  /* a call names at most MESH_PORTS of this node's cables, so this holds them even where two records named one node */
+  uint32_t port[MESH_PORTS*MESH_NODES_MOST],ports=0;
+  for(uint32_t j=0;j<count;j++)if(named>>j&1){
+    uint32_t cables;
+    mesh_cables(r+self,r+order[j],port+ports,&cables);
+    ports+=cables;
+  }
+  const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
+  for(uint32_t i=0;i<ports;i++){
+    if(port[i]>=links)return EINVAL;
+    struct mesh_port_info *info=&mesh_links(m)[port[i]].port;
+    while(atomic_load_explicit(&info->prepared,memory_order_acquire)!=plan){
+      if(atomic_load_explicit(&info->phase,memory_order_acquire)==MESH_STOPPED){
+        const int64_t code=atomic_load_explicit(&info->code,memory_order_relaxed);
+        return code?(int)code:ENOTCONN;
+      }
+      if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline)return ETIMEDOUT;
+    }
+  }
+  return 0;
 }

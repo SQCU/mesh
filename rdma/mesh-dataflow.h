@@ -1,9 +1,14 @@
 #ifndef MESH_DATAFLOW_H
 #define MESH_DATAFLOW_H
 #include "mesh.h"
+/* mesh_started, mesh_holds, mesh_gone (sub-assignment 4's header; tag pre-return-20261103 rdma/mesh-dataflow.h) */
+#include "mesh-holders.h"
 #include <errno.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 struct mesh_range { uint32_t first,count; };
+/* `send_off`, `send_bytes`: the region offset and the bytes of the words this client's plan allocated (mesh-collective.h
+   mesh_plan: a section outside the window, zeroed; mesh_transfers_prepare's SEND cells in the form it replaces), which
+   mesh-metal.m wraps for the GPU and its cancellation covers */
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes; uint32_t rows,arena,wire,shared_pages,row_cursor,wire_cursor,bulk_cursor; int fd; };
 struct mesh_link_view { uint32_t peer,phase; char device[32]; uint64_t bandwidth; };
 /* design/algorithm-sources.md#meshobserve */
@@ -20,6 +25,7 @@ static inline struct mesh_range mesh_arena_range(const struct hdr *m,int wire){
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 /* design/algorithm-sources.md#programcopy */
+/* replaced by mesh_plan (mesh-collective.h); removed at sub-assignment 16 */
 static inline uint32_t mesh_peer_channel(struct mesh_ctx *c,uint32_t peer,uint32_t queue){
   for(uint32_t i=0;i<c->M->links;i++)if(mesh_links(c->M)[i].peer==peer){
     if(queue<c->M->qps)return i*c->M->qps+queue;
@@ -27,6 +33,9 @@ static inline uint32_t mesh_peer_channel(struct mesh_ctx *c,uint32_t peer,uint32
   }
   return MESH_ABSENT;
 }
+/* the region attached: the client's compare-and-swap on hdr `client`, its start beside it (hdr `client_start`), and the
+   region's version read again after the swap; 0, EINVAL where the region is not of this layout or expired as the client
+   was taken (it is let go), EADDRINUSE where another live client holds it, else the errno */
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 /* design/algorithm-sources.md#programtensor */
@@ -40,8 +49,26 @@ void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t 
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 /* design/algorithm-sources.md#index-hand-off */
+/* its queue argument replaced by mesh_plan (mesh-collective.h), which records a row's words itself; removed at sub-assignment 16 */
 struct mesh_target *mesh_publish_bind(struct mesh_ctx *,uint32_t row,uint32_t queue);
 /* design/algorithm-sources.md#programkernel_call */
 uint32_t mesh_publication_prepare(struct hdr *,uint32_t row,struct prepared_publication *);
 void mesh_retired_release(struct hdr *);
+
+/* The map reader (design/page-queue-change-request.md, "What the collective decides, and what the bridge decides"): the
+   collective sees node-level adjacency and each node pair's capacity, nothing else; no cable, port or queue pair.
+   `serial` is the map's (hdr `map_serial`, the one a plan is made against: struct mesh_hop `serial`); `count` the map's
+   nodes, at most MESH_NODES_MOST; `node[i]` the node id of index i, a node's index its place in ascending node-id order
+   among the map's records; `self` this node's index; `capacity[i][j]` == `capacity[j][i]` the bits a second of the
+   cables between i and j, summed, each cable one both nodes' records list (its port at each end, swapped) at the
+   lesser of the two entries' bandwidths, as the bridges' rule reads it (mesh.h struct mesh_reach); 0 where none joins
+   them. */
+#define MESH_NODES_MOST 32
+struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NODES_MOST];
+                    uint64_t capacity[MESH_NODES_MOST][MESH_NODES_MOST]; /* bits/s, a pair's cables summed; 0 none */ };
+/* 0, or an error value: ETIMEDOUT where no whole copy was read within MESH_PLATFORM_NS of its start, ESRCH where the
+   bridge left its write open (its process gone), E2BIG past MESH_NODES_MOST records, EINVAL where the records lie
+   outside the region, ENOENT where the map holds no record of this node (hdr `node`); read under the map seqlock
+   (mesh.h mesh_map_whole) */
+int mesh_nodes_read(struct mesh_ctx *,struct mesh_nodes *);
 #endif

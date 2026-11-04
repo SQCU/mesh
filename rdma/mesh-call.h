@@ -5,8 +5,16 @@
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 
 /* design/algorithm-sources.md#programcopy */
+/* replaced by mesh_plan (mesh-collective.h); removed at sub-assignment 16 */
 int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section,uint32_t invocation_pages);
+/* replaced by mesh_plan (mesh-collective.h); removed at sub-assignment 16 */
 int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations,uint32_t depth);
+/* the client's start, once mesh_plan has written this node's hops (design/page-queue-change-request.md, in place of
+   the configured latch and its unbounded spin; defined in mesh-dataflow.c beside the map reader it reads): for every port whose cable joins this node to a node some hop names, at the plan's
+   map serial, a wait, bounded by MESH_PLATFORM_NS from its start, until the port's data path has loaded the plan
+   (struct mesh_port_info `prepared` == hdr `plan`); 0 (also where no hop is written), that port's `code` where its
+   data path refused the plan (phase MESH_STOPPED), ETIMEDOUT past the bound, ESTALE where the map moved since the plan
+   was made (plan again), or the map reader's error value (mesh-dataflow.h mesh_nodes_read) */
 int mesh_transfers_start(struct mesh_ctx *);
 
 /* design/algorithm-sources.md#programtensor */

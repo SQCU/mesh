@@ -26,6 +26,7 @@ static int mesh_section_wired(struct hdr *m,struct mesh_section section){
 
 /* design/prepared-machine.md#M08 */
 /* design/algorithm-sources.md#programcopy */
+/* replaced by mesh_plan (mesh-collective.h); removed at sub-assignment 16 */
 int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section,uint32_t invocation_pages){
   struct hdr *m=context->M;
   if(queue>=m->links*m->qps)return EINVAL;
@@ -66,6 +67,7 @@ static int mesh_transfer_compare(const void *a,const void *b){
 }
 
 /* design/algorithm-sources.md#programcopy */
+/* replaced by mesh_plan (mesh-collective.h); removed at sub-assignment 16 */
 int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invocations,uint32_t depth){
   struct hdr *m=context->M;
   if(!slots || slots>mesh_rows(m) || !invocations)return EINVAL;
@@ -172,26 +174,8 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   return 0;
 }
 
-/* design/prepared-machine.md#M06 */
-/* design/algorithm-sources.md#programcopy */
-int mesh_transfers_start(struct mesh_ctx *context){
-  struct hdr *m=context->M;
-  /* design/prepared-machine.md#M12 */
-  uint64_t idle=0;
-  if(!atomic_compare_exchange_strong_explicit(&m->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
-  /* design/prepared-machine.md#M26 */
-  mesh_control_notify(m);
-  for(uint32_t p=0;p<m->links;p++){
-    uint32_t transfers=0;
-    for(uint32_t q=0;q<m->qps;q++)for(int d=0;d<2;d++)transfers+=atomic_load(mesh_order_length(m,context->client,p*m->qps+q,d));
-    if(!transfers)continue;
-    struct mesh_port_info *port=&mesh_links(m)[p].port;
-    while(atomic_load_explicit(&port->prepared,memory_order_acquire)!=context->client){}
-    if(atomic_load_explicit(&port->phase,memory_order_relaxed)==MESH_STOPPED)
-      return (int)atomic_load_explicit(&port->code,memory_order_relaxed);
-  }
-  return 0;
-}
+/* mesh_transfers_start: mesh-dataflow.c, beside the map reader whose copy of the map it reads (its configured latch and
+   unbounded spin on `prepared` gave way to a bounded wait for the ports the plan's hops reach) */
 
 /* design/algorithm-sources.md#programtensor */
 int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int wire,struct mesh_section *section){
