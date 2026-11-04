@@ -276,9 +276,11 @@ map's records (`map_room`), then the arena at a block boundary.
 - `struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };` unchanged. `mesh_section_create`
   is removed: mesh_plan names every value's rows (below). `void *mesh_section_address(struct mesh_ctx *,struct
   mesh_section,uint32_t index)` and `mesh_section_constant` stay. `mesh_backing_bind` and `mesh_device_bind` stay.
-- `int mesh_transfers_start(struct mesh_ctx *,uint64_t executions);`: the plan's state word `executions` raised to
-  `executions` (a compare-and-swap loop that never lowers it; release), `plan` woken, then the bounded wait for the ports
-  (as now). EINVAL where no plan is written (hdr `state` 0).
+- `int mesh_transfers_start(struct mesh_ctx *,uint64_t executions);`: the bounded wait for the ports (as now) first,
+  then the plan's state word `executions` raised to `executions` (a compare-and-swap loop that never lowers it;
+  release) and `plan` woken. EINVAL where no plan is written (hdr `state` 0). Every port loads a plan before any of its
+  executions is served; a port refuses to load a plan whose `executions` is already above 0 (a re-paired child cannot
+  know which executions landed), so it posts nothing of it (the coordinator's ruling on 6's finding).
 - Removed: `mesh_plan_erased`, `mesh_publication_prepare`, mesh_claim's claim at attach, the wait at attach, the
   `local` run and its laying out of values at creation.
 
@@ -424,7 +426,9 @@ int mesh_metal_waits_start(struct mesh_metal_transport *,void *event,const struc
 void mesh_metal_waits_stop(struct mesh_metal_waiter *);  /* async-signal-safe: one store and one wake */
 int mesh_metal_waits_end(struct mesh_metal_waiter *);    /* joined and freed: 0, ETIMEDOUT (a deadline), ECANCELED (a stop) */
 /* the GPU's status after the run (struct mesh_status): 0 where no pass failed; EPROTO where one found a field ahead;
-   else `cause` where it is not 0, else ENOLINK (the bridge cancelled); *first the first failed execution */
+   else `cause` where it is not 0, else ENOLINK (the bridge cancelled); *first the first failed execution.  Where any
+   pass found a field behind, its cause is returned whatever `ahead` holds: a cancelled receive's field is never
+   written, so later rounds read it as ahead (6's finding); EPROTO only where `ahead` > 0 and `behind` is 0 */
 int mesh_metal_status(struct mesh_metal_transport *,int cause,uint64_t *first);
 ```
 The program's cancellation (`transport.cancel`, mesh_cancel) goes: a stop is mesh_metal_waits_stop. The direct
@@ -655,6 +659,21 @@ work proceeds.)
   by item index; a value at another node named on stderr by its node, identity and source. Routed: 2 to remove
   mesh_graph_happens_before.
 - 2 again: 86b7026f (mesh_graph_happens_before and its helpers removed, nothing outside mesh-graph naming it).
+- 6 (mesh-flow.c): 04b5e561 (records one a template entry, per-lane cursors (execution, copy, round, index), the
+  landing's XOR of bit field + (j & 1) for the record's j-th landing, the count's add and the wake at a multiple of the
+  entry's `pages`, the sends released by the supplied word or the receive's phase, cancellations raising counts to
+  their final value with no phase written; the announcement kept as D10's; landed_cancel, the cancel stores, the OR and
+  the erase's pairing gone). Its evidence: plan_cancel and the release on the parent's one thread, stated at
+  plan_cancel. The provider (Apple's libthunderboltrdma, not in the tree) is recorded as encoding a receive's SGE into
+  its own queue at the post (design/RDMA-KERNEL-RECOVERY.md 27-29, design/TELEMETRY-LOSS-20260904.md 73-77), so a
+  record reposted while an earlier posting is outstanding looks safe, not proven: open. Its additions: EINVAL for a plan
+  with no state, copies not dividing `hops`, a misplaced field or a receive of 0 pages; EAGAIN where `hops` reads 0 or
+  moved; traces sized by records. Its findings: (1) a cancelled receive's field reads ahead one and two rounds later and
+  landed three later, so the cause read EPROTO: ruled, mesh_metal_status returns the behind-cause wherever a field was
+  behind (to 8); the stale reads at later rounds are of a run already failed: open, as the status's form; (2) a
+  re-paired child reloading the plan would serve from execution 0 over arrivals already counted: ruled, the start waits
+  for the ports before it raises `executions` (to 5) and a port refuses a plan whose `executions` is above 0 (to 6);
+  (3) design/prepared-machine.md#M08 describes the old receive record: open.
 
 ### Reviews and where their findings went
 
