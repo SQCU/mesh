@@ -17,8 +17,9 @@
    their bytes left vacant so every other field keeps its place (struct hdr), and their areas gone from the layout.
    108: the plan's ring and its per-page cells gone (design/disjoint-pages-change-request.md, "Claude's proposal: the
    canonical path", items 1-3): hdr `depth` and `hop_stride` left vacant (`vacant7`, `vacant8`); the supplied words, the
-   landed list and the map's records laid out as their own areas (`word_off`, `landed_off`, `map_off` and their room,
-   appended); struct mesh_hop's `forwards` gone and `position` its `mask`; struct mesh_cancel_range's `stride` */
+   landed list and the map's records laid out as their own areas (`word_off`, `landed_off` and their room appended,
+   `map_off` the layout's with `map_room`); struct mesh_hop's `forwards` gone and `position` its `mask`; struct
+   mesh_publication's `landed`; struct mesh_cancel_range's `stride` */
 #define MESH_VERSION 108u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
@@ -64,6 +65,13 @@ struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M10 */
+/* a row's publication, which the plan call writes on instance 0's rows of a declared section (108,
+   design/disjoint-pages-coordination.md, "The plan's words", its rows' publications): a destination page's `landed`
+   its bit b in its execution's landed record, `device_input` hdr `landed_off` (execution 0's record) and
+   `device_stride` hdr `landed_stride`; a source range's first row's `sends` its targets, `targets[i]` {the region
+   offset of mesh_supplied(m, r, 0), count 1, stride 1} and `argument` MESH_SUPPLIED, execution t's word at `stream` +
+   t x MESH_WORD_STRIDE (struct mesh_hop, "Supplied words" and "The landed list").  `landed` takes the padding at
+   offset 4 (2026-11-03, sub-assignment 1), so no field moves */
 struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t landed; _Atomic uint64_t argument; uint64_t device_input,device_stride; struct mesh_target targets[]; };
 _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 && offsetof(struct mesh_publication,landed)==4 && offsetof(struct mesh_publication,argument)==8 && offsetof(struct mesh_publication,device_input)==16 && offsetof(struct mesh_publication,device_stride)==24 && offsetof(struct mesh_publication,targets)==32,"mesh_publication");
 /* design/prepared-machine.md#M13 */
@@ -84,7 +92,9 @@ struct mesh_holder { uint32_t pid,unit; uint64_t start; };
    (`bridge_off`) rather than after the tag's MESH_PORTS link infos */
 /* the bridge's own pages of the region, recorded in the bridge area so the next bridge adopts them with the region
    instead of leasing them again: each port's link pages and its streams' lists, the duds' block and the map's pages
-   (MESH_ABSENT where none); and the processes of the bridge that hold the region, each by its pid and start
+   (MESH_ABSENT where none; 2026-11-03: the bridge leases no arena page, so `link`, `ones` and `map` are recorded
+   MESH_ABSENT and `map_pages` 0 and none is read for a page, the map's records being the layout's area at hdr
+   `map_off` from 108; the fields stay so none moves); and the processes of the bridge that hold the region, each by its pid and start
    (mesh_started): the bridge's own start (beside the header's `bridge_pid`) and each child, which registers the region
    and holds it until its exit, in an entry no live child holds (twice the ports: an earlier launch's child that has not
    ended keeps its entry), so the heartbeat unlinks an expired region only once none of them lives.  Fields are only
@@ -94,69 +104,84 @@ struct mesh_bridge_pages { uint32_t link[MESH_PORTS],ones,map,map_pages,padding;
 _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pages,bridge_start)==(MESH_PORTS+4)*sizeof(uint32_t),
                "mesh_bridge_pages");
 
-/* The page lists (design/page-queue-change-request.md, "The page lists (the queue)"): this node's hops, which the plan
-   call writes once a plan and the bridge alone reads, in place of the per-link, per-queue transfer lists (removed at
-   107).  An entry is one hop of one page:
+/* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", items
+   1-3; Appendix A, A4): reversing this comment's 105-107 form (17612857, 90962999, 52aeae89), the plan's ring and its
+   cells are gone: hdr `depth`'s slots (execution t on slot t mod depth's page, a receive held on earlier executions'
+   landings and on its page's forwards, struct mesh_hop's `forwards`) and the 256-byte cell a word an execution (hdr
+   `hop_stride`, a landed word a page, its sent count at offset 8).  Why: the ring reused pages under waits between
+   executions, which nothing asked for, and the per-page words had every reader fence one word a page for a landing
+   the bridge already learns from its completion (the change request, "The turns").  What must stay: the list
+   unrolled, an entry an execution's own hop; no hop of one execution waits on another's; a landing sets one bit of its
+   execution's landed record, in the landed list's own area, and writes nothing beside its page. */
+/* The page lists (design/page-queue-change-request.md, "The page lists (the queue)", superseded in part by
+   design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path"): this node's hops, which the plan
+   call writes once a plan and the bridge alone reads.  An entry is one hop of one page in one execution:
    - `page`: an arena page of this region (mesh_at), a multiple of `block`, its block within the registered window
-     (mesh_wired): the page sent, the page a receive lands in, or a relay's page.  A hop moves that whole page, `block`
-     arena pages (block x pgsz bytes), from it or into it; nothing is copied.
+     (mesh_wired): the page sent, the page a receive lands in, or a relay's page, a page like any other.  A hop moves
+     that whole page, `block` arena pages (block x pgsz bytes), from it or into it; nothing is copied.
    - `node`: the adjacent node by its index in the map (hdr `map_serial`): a send's next hop, a receive's previous hop.
-   - `direction`: MESH_SEND or MESH_RECEIVE.
-   - `forwards`, the plan call's, so the bridge matches no entries: on a receive, its page's forwards, the send hops of
-     the slot that name its landed word; on a send, 1 where it is a forwarding SEND (its word a landed word of a
-     receive at this node), else 0.
-   - `word`: the region offset of the hop's word of execution 0, an _Atomic uint64_t (8-aligned, anywhere in the
-     region: no SGE names it); `position`: the value that releases a send or that a receive's landing stores,
-     0 < position < UINT64_MAX.
+   - `direction`: MESH_SEND or MESH_RECEIVE; `padding` unused.
+   - `word`: the region offset of the _Atomic uint64_t the hop names in its execution, a supplied word or a word of a
+     landed record (below), never a cancel word; `mask`: the bits of it the hop names.  No SGE names either area.
    - `serial`: the map serial the plan was made against, every entry's the same.
-   Executions (main's invocations and ring depth: d6dceac mesh-call.c mesh_transfers_prepare and mesh-flow.c
-   link_configure, mesh-metal.m).  A plan runs hdr `executions` times, t = 0 .. executions - 1, its pages ringing
-   through hdr `depth` slots (depth == executions: no ring).  These and hdr `hop_stride` are the plan's values, beside the list.
-   - The list is `hops` = depth x n entries, slot s's n at [s n, s n + n).  Every slot holds the same n hops in the same
-     order, with the same node, direction, forwards, word, position and serial; only the pages differ.
-   - Which page execution t uses: slot (t mod depth)'s page of the hop.  A hop's receive of execution t is posted only
-     once its receives of executions 0 .. t - (depth - 1) have landed (main's receive window, a slot short of the ring)
-     and, from t = depth, once its cell of execution t - depth reads at offset 8 (acquire) its `forwards` (below), so no
-     two posted receives name one page and no landing overwrites a page a forwarding SEND still reads.
-   - Execution t's word of an entry is offset 0 of its cell of execution t: the 256-byte cell at region offset `word`
-     + t x `hop_stride`, `hop_stride` 256 for every word of the plan, no two words' cells overlapping.  This is the
-     GPU's word protocol as it is: its stores and waits are at a binding's offset + t x stride, and here the
-     publication's stride (mesh_metal_publication `stride`, which its completion statuses share for the GPU's direct
-     publication) and the receive's (mesh_metal_input `stride`) are `hop_stride`, main's 256 (struct mesh_send, struct
-     mesh_output_status).  Every cell of every execution reads 0 when the plan is loaded; a word is written once and
-     never cleared.
-   - A landed word's cell of execution t holds at offset 8 (an _Atomic uint64_t) its page's sent count of t: the
-     forwarding SENDs of t from that page whose completion was taken, each port's child adding 1 (release) as it takes
-     one of a send whose `forwards` is 1.  A forwarding SEND is a send hop whose `word` is a receive's landed word, as
-     a relay's are; the receive's `forwards` counts them.
-   - What releases a send in execution t: its word of execution t reaching `position` (acquire; position <= value <
-     UINT64_MAX).  That word is a supplied word, stored with release by its producer after its last write to the page:
-     the GPU's publication store (prepared_publication `argument` = `position`) or mesh_host_publish; or, at a relay,
-     the landed word of the hop relayed: a relay's send names its receive's word and position.  Several sends may name
-     one word (a range's pages released by one store, a page sent to several nodes).
-   - What a receive's landing stores in execution t: `position`, with release, into its word of execution t, once the
-     page's bytes are in its page.  A landed word (offset 0) has that one writer: no other receive of a slot and no
-     producer names it, so it tells of one page.  A reader of several pages waits on each one's word (a GPU range a
-     page): a transfer's pages spread over every cable and queue pair and land in any order, unlike main's chunks on
-     one queue pair, whose last word stood for all (mesh_host_arrived, mesh_metal_receive_prepare).
-   - UINT64_MAX in a word is cancellation (main's mesh_cancel; the GPU's waits end on ~0): it releases nothing.  The
-     bridge stores it into this node's landed words not landed when it ends the plan's executions.
-   Both ends: for adjacent nodes a and b, a slot's entries at a naming b with MESH_SEND and those at b naming a with
-   MESH_RECEIVE are the same hops in the same order.  Both bridges assign the pair's hops of every execution in turn
-   (execution 0's in list order, then execution 1's, ...) to the pair's cables and queue pairs by one rule from the map
-   (struct mesh_reach; design/page-queue-change-request.md, "The rule both ends compute"), and each queue pair carries
-   its hops in that order: the k-th SEND on a queue pair fills the k-th receive posted on it.
-   Writing a plan: the plan call stores `hops` 0 (release), writes the entries, `executions`, `depth`, `hop_stride` and
-   `plan`, the plan's generation (the last plan's + 1, never 0), then stores `hops` (release), at most `hop_capacity`;
-   the bridge reads none of it while `hops` (acquire) is 0, and stores the generation it loaded in each port's
-   mesh_links(m)[p].port.prepared.  A plan whose entries' `serial` is not `map_serial` when it is loaded is refused:
-   the call fails by error and its caller plans again on the map as it is. */
+   Executions (main's invocations).  A plan runs hdr `executions` times, t = 0 .. executions - 1, unrolled
+   (Appendix A, A3, "Repeated executions are unrolled, not ringed"): the list is `hops` = executions x n entries,
+   execution t's n at [t n, t n + n).  Every execution's entries are the same hops in the same order, with the same
+   `node`, `direction` and `serial`; `page`, `word` and `mask` are execution t's own.  The plan's one allocator assigns
+   every execution's pages before the first runs, two value instances sharing a page only where the plan's dependence
+   graph orders every read of the one before the other's first write (Appendix A, A3, and Appendix B: as CUDA graph
+   memory nodes reuse memory), so nothing live at once shares a page and no execution waits on another's pages.
+   - What releases a send: `(atomic_load(word, acquire) & mask) == mask`.  A send from a range's source names its
+     range's supplied word of its execution (`mask` MESH_SUPPLIED); a forwarding send (a relay's, or a destination's
+     that forwards the page on) names the `word` and `mask` of its node's receive of the same page in the same
+     execution, so that landing releases it.  Several sends may name one word (a range's pages released by one store, a
+     page sent to several nodes).
+   - What a receive's landing does: `atomic_fetch_or(word, mask, release)` once the page's bytes are in its page, its
+     bit of its execution's landed record (below) set; nothing else is written for it.
+   Supplied words (the change request, proposal item 3: a supplied word stays what releases a send, and one store
+   still releases a range): `word_capacity` bytes at hdr `word_off`.  Release r (this node's r-th range it is the
+   source of, in the plan's demand order) of execution t is mesh_supplied(m, r, t), a release's executions
+   MESH_WORD_STRIDE apart.  The plan call zeroes those it uses; the producer stores MESH_SUPPLIED (release) after its
+   last write to the range in execution t (the GPU's publication, prepared_publication `argument`, or
+   mesh_host_publish).  Nothing cancels a supplied word: 0 releases nothing.
+   The landed list (proposal item 2): `landed_capacity` bytes at hdr `landed_off`, a contiguous array in its own area
+   of the region beside the page table and the page lists, not beside the pages it tells of.  Execution t's landed
+   record is mesh_landed_record(m, t), hdr `landed_stride` bytes, landed_stride = 32 x ceil((1 + ceil(R / 64)) / 4)
+   where R is this node's receive hops in one execution (the same in every execution; R = 0 gives 32), so a record is
+   whole 32-byte vectors.  Its word 0 is the execution's cancel word: 0, or UINT64_MAX once cancelled.  Bit b (b < R,
+   the execution's b-th receive hop in list order) is bit b % 64 of word 1 + b / 64: that receive's `word` is the region
+   offset of that word and its `mask` 1 << (b % 64).  A destination's pages of one range are consecutive receive hops at
+   that node, so a range's bits are one run [first, first + P) (P its pages), and whether a range has landed is a few
+   words of one record (its run's words and the cancel word), which a reader takes with vector loads, not a word a page
+   (proposal items 2 and 4).  Read-after-write is honoured by that mask, not by waiting: work whose input pages have
+   not landed is predicated off and taken on a later pass, and nothing spins on a page (proposal item 2).  The plan
+   call zeroes records 0 .. executions - 1; nothing clears a bit while the plan stands.
+   Cancellation: UINT64_MAX in a cancel word, which releases no send (no hop names a cancel word).  The bridge cancels
+   a receive not landed (link_close, plan_cancel) by storing it into its execution's cancel word, the record's start
+   landed_off + ((word - landed_off) / landed_stride) x landed_stride; the program cancels its executions by one
+   mesh_cancel range {offset landed_off, count executions, stride landed_stride}.
+   Both ends: for adjacent nodes a and b, execution t's entries at a naming b with MESH_SEND and those at b naming a
+   with MESH_RECEIVE are the same hops in the same order.  Both bridges assign the pair's hops in list order (execution
+   0's, then execution 1's, ...) to the pair's cables and queue pairs by one rule from the map (struct mesh_reach;
+   design/page-queue-change-request.md, "The rule both ends compute"), and each queue pair carries its hops in that
+   order: the k-th SEND on a queue pair fills the k-th receive posted on it.
+   Writing a plan (design/disjoint-pages-coordination.md, "Writing a plan"): the plan call computes everything first
+   (its demands, routes, values, dependence graph and allocation), so a failure there leaves the previous plan standing.
+   Then it stores `hops` 0 (release) and a release fence and wakes `plan`; awaits, bounded, no port's `prepared`
+   holding the previous generation (mesh_plan_erased); binds the declared sections' rows to their pages; zeroes the
+   supplied words and landed records it uses; writes the entries, `executions`, `landed_stride` and `plan`, the plan's
+   generation (the last plan's + 1, never 0); reads the map's serial again (ESTALE where it moved); stores `hops`
+   (release); and wakes `plan`.  ENOSPC past `hop_capacity`, `word_capacity` or `landed_capacity`; ENOMEM where the
+   allocator finds no room in the program's window.  The bridge reads none of it while `hops` (acquire) is 0, and
+   stores the generation it loaded in each port's mesh_links(m)[p].port.prepared.  A plan whose entries' `serial` is
+   not `map_serial` when it is loaded is refused: the call fails by error and its caller plans again on the map as it
+   is. */
+struct mesh_hop { uint32_t page,node,direction,padding; uint64_t word,mask,serial; };
+_Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,mask)==24,"mesh_hop");
 /* the value a producer stores into a supplied word (struct mesh_hop, "Supplied words") */
 #define MESH_SUPPLIED UINT64_C(1)
 /* the bytes between one supplied word's consecutive executions (mesh_supplied) */
 #define MESH_WORD_STRIDE 8u
-struct mesh_hop { uint32_t page,node,direction,padding; uint64_t word,mask,serial; };
-_Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16,"mesh_hop");
 
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
@@ -168,10 +193,15 @@ _Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16
    ones (a recorded start of 0 matches the pid alone), and mesh-heartbeat.c region_own waits on those holders.  Closing
    the gap would move `bridge_off` from 296 to 248, where a 106 region keeps `hops`, and its pages would be read as
    pids.  What must stay: no field moves (the assert below); a field is only ever appended. */
+/* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, Appendix A, A4, "the hdr fields `depth` and
+   `hop_stride` that serve them"): at 108 the plan's ring depth `depth` and word stride `hop_stride` went with the ring
+   and its cells (struct mesh_hop's note), their bytes left vacant the same way (`vacant7`, `vacant8`), and the layout's
+   areas of the supplied words, the landed list and the map's records appended after `stopping`.  What must stay: as
+   above. */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,vacant0,links;
   uint32_t vacant1,wire_pages;
-  /* 108: the plan's ring depth, gone with the ring (design/disjoint-pages-change-request.md, Appendix A, A4); vacant */
+  /* the ring depth's bytes until 108 (the note above), never read or written */
   uint32_t vacant7;
   /* the page lists: the executions of the plan written (struct mesh_hop), main's invocations */
   uint32_t executions;
@@ -181,12 +211,16 @@ struct hdr {
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
   /* the page lists (struct mesh_hop, mesh_hops): room for `hop_capacity` entries at `hop_off` (mesh_geometry `hops`),
-     the plan's word stride `hop_stride`, `hops` the entries of the plan written (0 none) and `plan` its generation (the
-     last plan's + 1, never 0; each port's mesh_links(m)[p].port.prepared the generation the bridge loaded) */
+     `hops` the entries of the plan written (0 none) and `plan` its generation (the last plan's + 1, never 0; each
+     port's mesh_links(m)[p].port.prepared the generation the bridge loaded); `vacant8` the word stride's bytes until
+     108 (the note above), never read or written */
   uint64_t hop_off,hop_capacity,vacant8;
   _Atomic uint64_t hops,plan;
   /* tag pre-return-20261103 rdma/mesh.h struct hdr `map`, `map_off`, `map_nodes`, verbatim: the map's seqlock
-     (mesh_notify, mesh_map_whole) and its `map_nodes` records at `map_off` (mesh_records) */
+     (mesh_notify, mesh_map_whole) and its `map_nodes` records at `map_off` (mesh_records), at most `map_room`.  From
+     108 `map_off` is the layout's (mesh-map.h mesh_layout), set once with the region, where it was arena pages the
+     bridge leased and leased again larger (design/disjoint-pages-change-request.md, Appendix A, A3, "The bridge's own
+     pages (its records) are laid out once with the region") */
   _Atomic uint64_t map,map_off,map_nodes;
   /* the map's serial: moved by one (mesh-records.c, while `map` is odd) at every change of the map's nodes or cables
      (a record added or dropped, any field of a reach entry); a plan is made against it (struct mesh_hop `serial`).
@@ -203,9 +237,14 @@ struct hdr {
      been (`idle_since`, the wall clock in ns; 0 while any is); `stopping` stored 0 as the region opens */
   uint64_t boot;
   _Atomic uint64_t health,busy,idle_since,stopping;
+  /* 108 (design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", items 2 and 3; Appendix A,
+     A3): the layout's (mesh-map.h mesh_layout) supplied words, `word_capacity` bytes at `word_off` (mesh_supplied),
+     its landed list, `landed_capacity` bytes at `landed_off` (mesh_landed_record), and the map's room, `map_room`
+     records at `map_off`; and the plan's `landed_stride`, the bytes of each of its landed records, which the plan call
+     writes before `hops` as it writes `executions` (struct mesh_hop) */
   uint64_t word_off,word_capacity,landed_off,landed_capacity,landed_stride,map_room;
 };
-/* every field at its 106 offset (the vacant bytes' note above struct hdr) */
+/* every field at its 106 offset, the 108 fields after them (the vacant bytes' notes above struct hdr) */
 _Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)==36 && offsetof(struct hdr,planes_off)==56 &&
   offsetof(struct hdr,target_off)==104 && offsetof(struct hdr,data_off)==128 && offsetof(struct hdr,target_stride)==152 &&
   offsetof(struct hdr,client)==160 && offsetof(struct hdr,hop_off)==224 && offsetof(struct hdr,map_serial)==288 &&
@@ -225,6 +264,10 @@ _Static_assert(sizeof(struct mesh_cancel_range)==32 && offsetof(struct mesh_canc
   sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
+/* range `link` of a cancellation: for j < count, the word at region offset `offset` + j x `stride` stored UINT64_MAX
+   (release) where it reads 0, and `requested` set.  `stride` from 108 (2026-11-03, sub-assignment 1), where the words
+   were consecutive: the program's one range is every execution's cancel word of the landed list, {landed_off,
+   executions, landed_stride} (struct mesh_hop, "Cancellation") */
 static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t link){
   const struct mesh_cancel_range range=cancel->ranges[link];
   for(uint64_t j=0;j<range.count;j++){
@@ -284,10 +327,11 @@ static inline _Atomic uint64_t *mesh_landed_record(struct hdr *m,uint64_t t){
 }
 /* tag pre-return-20261103 rdma/mesh.h mesh_records and mesh_map_whole, verbatim; mesh_records moved to mesh-map.h
    (review R1, C1) */
-/* the map, `map_nodes` records at `map_off` in arena pages the bridge leases for itself, and leases again larger as
-   the mesh grows; the bridge notifies `map`, its serial, before and after each change (odd while it writes; its own
-   record is in before the region opens, so a client never reads 0), and a reader's copy is whole where `map` read
-   (acquired) before it was even and is unchanged after it */
+/* the map, `map_nodes` records at `map_off`, at most `map_room` (the layout's area of the map from 108, where it was
+   arena pages the bridge leased for itself, and leased again larger as the mesh grew); the bridge notifies `map`, its
+   serial, before and after each change (odd while it writes; its own record is in before the region opens, so a
+   client never reads 0), and a reader's copy is whole where `map` read (acquired) before it was even and is unchanged
+   after it */
 static inline int mesh_map_whole(struct hdr *m,uint64_t before){
   atomic_thread_fence(memory_order_acquire);
   return !(before&1) && atomic_load_explicit(&m->map,memory_order_relaxed)==before;
