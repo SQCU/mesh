@@ -265,3 +265,10 @@ This section is Claude's, not the operator's. With it, this document is the unit
 - `make -C rdma` and `make -C rdma native-audit` build clean in mesh, and `make .build/e2b_replay` in
   metal-microbench.
 - Every wait is bounded, and every failure is an error value, never a hardware fault.
+
+## Superseded in part
+
+design/disjoint-pages-change-request.md (2026-11-03) replaces two things the implementation of this change built: the
+plan's ring (`depth` slots, `t mod depth`, the receive window, the forwards gate) and the per-page readiness cells.
+Pages are assigned by the one allocator of its Appendix A, and landings are read by mask from a contiguous landed list
+in its own section of the region. Everything else here stands.

@@ -360,10 +360,11 @@ functions in scope; and the canonical path.
 
 This section is Claude's. With it, this document is the unit of work.
 
-1. **One allocator, by liveness, at compile time.** `mesh_plan` assigns pages so no two values live at the same time
-   share a page, including the same value in adjacent executions (the static family above: interference by liveness,
-   greedy by size). The ring goes: `depth`, `t mod depth`, the slot layout, the receive window, and the forwards gate.
-   A relay's page is a page like any other, assigned by liveness.
+1. **One allocator, at compile time, as Appendix A defines it and the operator ruled (Appendix B).** `mesh_plan`
+   unrolls the plan's executions into value instances and assigns their pages once, before the first execution.
+   Pages are reused only where the plan's dependence graph orders the last read before the next write, as CUDA graph
+   memory nodes reuse memory where the graph's topology guarantees it. The ring goes: `depth`, `t mod depth`, the
+   slot layout, the receive window, and the forwards gate. A relay's page is a page like any other.
 2. **Read-after-write by mask.** Each node's landings go into one contiguous list in its own section of the region,
    beside the page table and the page lists: the pages of each step that have landed, as a dense bitmask or index list.
    A step reads its mask with vector loads, and lanes or threadgroups whose input pages haven't landed are predicated
@@ -468,3 +469,15 @@ bridge's own pages (its records) are laid out once with the region, not taken fr
   `mesh-records.c`'s call. One claim of a program's section at attach remains.
 - `plan_pages`' `depth` slots and `plan_row`'s slot arithmetic.
 - `mesh-flow.c`'s receive window and its forwards gate, and the hdr fields `depth` and `hop_stride` that serve them.
+
+## Appendix B: the operator's ruling on the allocator
+
+**The operator:**
+
+> "This is how CUDA graph memory nodes reuse memory." this + unrolling is the user's proposal for how all of this is
+> implemented for the subsidiary component of this change request. okay. append the relevant proposals to the change
+> request document(s) and we are ready to have a subagent implement them.
+
+So the allocator is implemented as Appendix A's A3 states it: the plan's executions unrolled into value instances, and
+pages reused only where the dependence graph's topology guarantees the lifetimes don't overlap, as CUDA graph memory
+nodes do. No other allocation strategy is in scope.
