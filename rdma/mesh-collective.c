@@ -25,7 +25,7 @@ void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint
   struct hdr *m=context->M;
   const struct mesh_publication *publication=mesh_publication_at(m,section.first);
   if(!publication->sends)return;
-  atomic_store_explicit((_Atomic uint64_t *)((char *)m+publication->targets[0].stream),execution+1,memory_order_release);
+  atomic_store_explicit((_Atomic uint64_t *)((char *)m+publication->targets[0].word),execution+1,memory_order_release);
 }
 
 /* mesh-collective.h mesh_host_arrived (C3.1, C3.7; the contract's "The region", the phases and `counts`, and D1):
@@ -951,7 +951,7 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
     struct mesh_publication *publication=mesh_publication_at(m,row);
     if(d && d->source==p.self){
       publication->sends=1;
-      publication->targets[0]=(struct mesh_target){.stream=base+p.supplied+(uint64_t)d->release*sizeof(uint64_t),
+      publication->targets[0]=(struct mesh_target){.word=base+p.supplied+(uint64_t)d->release*sizeof(uint64_t),
                                                    .count=1,.stride=0};
       publication->state=base;
     }else if(d){

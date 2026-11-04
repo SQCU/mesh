@@ -96,7 +96,7 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
 /* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7; design/disjoint-pages-revision-coordination.md,
    "The region" (struct mesh_publication), D9 and "Publications" */
 /* A source range's supplied word, from its first row's publication, which mesh_plan writes: `sends` 1, `targets[0]`
-   {stream: the region offset of its supplied word, count 1, stride 0} and `state` the plan's state section.  The
+   {word: the region offset of its supplied word, count 1, stride 0} and `state` the plan's state section.  The
    offset is made relative to the transport's; the word lies inside the buffer, at 8.  Its one writer is the range's
    producer, which raises it by one after its last write of each execution (D9), through the recorder's binding of the
    buffer at this offset.  EINVAL where the row names no source range (`sends` not 1), where its `state` is not the
@@ -115,11 +115,11 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
   *publication=(struct mesh_metal_publication){0};
   if(!transport->state || operand.first>=mesh_rows(m))return EINVAL;
   const struct mesh_publication *head=mesh_publication_at(m,operand.first);
-  const uint64_t at=transport->offset,stream=head->targets[0].stream;
+  const uint64_t at=transport->offset,word=head->targets[0].word;
   if(head->sends!=1 || head->state!=at || head->state!=atomic_load_explicit(&m->state,memory_order_acquire) ||
-     stream<at || (stream-at)%sizeof(uint64_t) || stream-at>transport->bytes-sizeof(uint64_t))
+     word<at || (word-at)%sizeof(uint64_t) || word-at>transport->bytes-sizeof(uint64_t))
     return EINVAL;
-  publication->supplied=stream-at;
+  publication->supplied=word-at;
   return 0;
 }
 

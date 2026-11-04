@@ -60,7 +60,10 @@ _Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_e
   offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16,"mesh_page_entry");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
-struct mesh_target { uint64_t stream; uint32_t count,stride; };
+/* a publication's target: `word` the region offset of a source range's supplied word, `count` 1, `stride` 0 (struct
+   mesh_publication below).  2026-11-04, sub-assignment 2 (the operator's ruling of 2026-11-04 on transport names):
+   `stream` renamed `word`; the size and every offset unchanged (the assert below) */
+struct mesh_target { uint64_t word; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M10 */
@@ -71,7 +74,7 @@ _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
    - a received range's first row (a range this node consumes; copy 0's first row): `pages` its pages P; `phases` the
      region offset of its copy-0 phase group, copy c's at phases + c x mesh_group_bytes(P); `count` the region offset
      of its copy-0 count word, copy c's at count + 8 c; `state` hdr `state`;
-   - a source range's first row: `sends` 1; `targets[0]` {stream: the region offset of its supplied word, count 1,
+   - a source range's first row: `sends` 1; `targets[0]` {word: the region offset of its supplied word, count 1,
      stride 0}; `state` hdr `state`.
    2026-11-04, sub-assignment 1 (C3.1, C3.7 and C4): at 109 `landed` (a page's bit in its execution's landed record),
    `argument` (MESH_SUPPLIED), `device_input` and `device_stride` (hdr `landed_off`, `landed_stride`) became `pages`,
