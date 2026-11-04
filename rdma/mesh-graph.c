@@ -688,10 +688,27 @@ struct left_edge_run { uint64_t start,end; uint32_t item; };
    and one move).  This is the offset calculation of Pisarchyk and Lee's greedy by size (the tensors placed so far
    walked in offset order), at the lowest colour free of interference, where theirs takes the smallest gap that fits.
    Cost: each item walks the placed runs once, so O(items^2) interference tests and run moves at worst (items all
-   interfering: items^2 / 2 tests, 4.5 x 10^8 for 30,000), and O(items) memory. */
+   interfering: items^2 / 2 tests, 4.5 x 10^8 for 30,000), and O(items) memory.
+   `interferes` NULL, every pair interfering: the walk's result without the walk.  The placed runs then lie end to
+   end from colour 0 in the caller's order, so each item's lowest start is the end of the runs before it (an empty
+   run, which overlaps none, colour 0 as above), and ENOSPC where that end passes capacity - size: O(items), no
+   memory. */
 int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *order,
                          int (*interferes)(const void *context, uint32_t a, uint32_t b), const void *context,
                          uint64_t capacity, uint64_t *colour, uint64_t *used) {
+  if (!interferes) {
+    uint64_t end = 0;
+    int full = 0;
+    for (uint32_t n = 0; n < items; n++) {
+      const uint32_t i = order[n];
+      const uint64_t need = size[i];
+      if (need > capacity - end) { full = 1; break; }
+      colour[i] = need ? end : 0;
+      end += need;
+    }
+    *used = end;
+    return full ? ENOSPC : 0;
+  }
   struct left_edge_run *placed = malloc(((size_t)items + 1) * sizeof *placed);
   size_t count = 0;
   uint64_t most = 0;

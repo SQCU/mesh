@@ -146,7 +146,9 @@ int mesh_graph_happens_before(uint32_t vertices, const size_t *first, uint32_t (
    Golumbic 1980; with sizes, greedy by size: Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020): the items in the
    caller's order order[0 .. items), item i given colours [colour[i], colour[i] + size[i]) at the lowest colour where
    its run overlaps no item placed before it that it interferes with (interferes(context, a, b) != 0, symmetric);
-   *used the most colour[i] + size[i].  0; ENOSPC where a run would pass `capacity`; ENOMEM. */
+   *used the most colour[i] + size[i].  `interferes` NULL: every pair interferes, so each item in that order takes the
+   colours just past the runs before it (colour[order[0]] 0, each next the end of the runs before it, the sum of their
+   sizes; an empty run colour 0), in O(items).  0; ENOSPC where a run would pass `capacity`; ENOMEM. */
 int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *order,
                          int (*interferes)(const void *context, uint32_t a, uint32_t b), const void *context,
                          uint64_t capacity, uint64_t *colour, uint64_t *used);
