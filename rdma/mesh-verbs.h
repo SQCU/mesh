@@ -26,12 +26,25 @@
    virtual-address boundary.  The window is mapped at a bank-aligned base and is required to fit in
    one bank, which makes every region cut interior to that bank and a straddle impossible. */
 #define MESH_BANK ((size_t)1<<32)
+/* device_gid's and port_bandwidth's inputs, verbatim from tag pre-return-20261103 etc/bridge/thunderbolt.h (5eabe91e) */
+#define MESH_GID_ADDRESSES 16
+#define MESH_GID_ENTRIES 256
+/* ibv_port_attr speed/width codes, in bits/second and lanes respectively. */
+#define MESH_PORT_SPEEDS { [1]=2500000000, [2]=5000000000, [4]=10000000000, [8]=10000000000, [16]=14000000000, [32]=25000000000, [64]=50000000000, [128]=100000000000 }
+#define MESH_PORT_WIDTHS { [1]=1, [2]=4, [4]=8, [8]=12 }
 struct mesh_wire { char *data; size_t length; };
+/* A port's device. Added from tag pre-return-20261103 rdma/mesh-verbs.h struct mesh_device: the queue pairs it holds
+   against those it can use (`pairs`, `max_pairs`: its max_qp less MESH_PROVIDER_RESERVED_QPS, device_up; 76be3217,
+   f35a0447, the rule of bd85613e design/HETEROGENEOUS-LINKS.md), and its port's attributes and own address (`port`,
+   `gid`, `gid_index`, `gid_matched`, as device_gid chooses it), which the child's open, make and connect read. */
 struct mesh_device {
   const char *name;
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
-  uint32_t region_count,frame_capacity;
+  uint32_t region_count,frame_capacity,pairs,max_pairs;
   char *wire; size_t extent,payload;
+  struct ibv_port_attr port;
+  union ibv_gid gid;
+  uint8_t gid_index,gid_matched;
   pthread_mutex_t setup;
 };
 /* design/prepared-machine.md#M09 */
@@ -47,19 +60,29 @@ static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t
     .lkey=device->regions[offset/device->extent]->lkey};
 }
 /* design/algorithm-sources.md#programcopy */
+/* `sent` and `send_capacity` from tag pre-return-20261103 rdma/mesh-verbs.h struct mesh_queue: a queue pair pair_up
+   makes completes its receives on `completion`, its SENDs on `sent`. The device completes every SEND, IBV_SEND_SIGNALED
+   or not (the bridge's census: send completions equal requests), so a SEND's completion is its queue's retirement and
+   lands where the send thread polls it. verbs_up's queue pairs (the --link form) complete both on `completion`. */
 struct mesh_queue {
   _Alignas(64) struct ibv_qp *pair;
-  struct ibv_cq *completion;
+  struct ibv_cq *completion,*sent;
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
   int (*send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
   int (*receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
-  uint32_t receive_capacity;
+  uint32_t receive_capacity,send_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
+/* `count`, `sent`, `psn` and `poll` from tag pre-return-20261103 rdma/mesh-verbs.h struct mesh_verbs (76be3217): a
+   link's queue pairs on one port (`count` entries of `queues`, by lane, an entry of a lane left out of its plan holding
+   none) and their two completion queues, polled through `poll`. `wire`, `listener`, `peer`, `completion_entries`,
+   `bandwidth`, the addresses, `service` and `deadline` are the --link form's (removed at sub-assignment 16). */
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
-  struct mesh_queue *queues; int qp_count,listener;
-  struct ibv_cq *completion;
+  struct mesh_queue *queues; int qp_count,count,listener;
+  struct ibv_cq *completion,*sent;
+  uint32_t psn;
+  int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
   uint32_t peer,completion_entries[2];
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
@@ -69,7 +92,9 @@ struct mesh_verbs {
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
-static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
+/* __attribute__((unused)) on this, die and the --link form's functions below, as the tag's wire_map and die: every file
+   of the resident bridge includes this header, and one that calls none of them builds with -Werror */
+static __attribute__((unused)) int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   wire->length=(size_t)m->wire_pages*m->pgsz;
   wire->data=NULL;
   if(wire->length>MESH_BANK){errno=ENOMEM;return -1;}
@@ -86,21 +111,17 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   return 0;
 }
 static const char *shm; static _Atomic sig_atomic_t stop;
-/* 2026-11-04: down_pair's header is deleted so this bridge fails at compile instead of at run time. It destroyed
-   queue pairs with receives still posted (as a failing run leaves them), the action behind the Mini's kernel data
-   aborts of 10-16/17, inside an unbounded retry (link_close's while(!down_pair(...))). What must replace it: the
-   failport's flush-before-destroy (lanes_flush: only queue pairs with work outstanding to Error, completions drained
-   until 0.5 s quiet or 5 s, then destroy), in the resident bridge that replaces this one. */
-  while(provider->qp_count){ struct ibv_qp *q=provider->queues[provider->qp_count-1].pair; if(q && ibv_destroy_qp(q))return 0; provider->queues[--provider->qp_count].pair=NULL; }
-  if(provider->completion){
-    if(ibv_destroy_cq(provider->completion))return 0;
-    provider->completion=NULL;
-  }
-  free(provider->queues);provider->queues=NULL;
-  return 1;
-}
+/* 2026-11-04: down_pair stays deleted, under every name: b89e6362 deleted its header so this bridge fails at compile
+   instead of at run time, and its orphaned body is deleted now. It destroyed queue pairs with receives still posted (as
+   a failing run leaves them), the action behind the Mini's kernel data aborts of 10-16/17, inside an unbounded retry
+   (link_close's while(!down_pair(...))). Its replacement is the port child's end, mesh-child.c's lanes_flush and exit
+   (tag pre-return-20261103 rdma/mesh-link.c lanes_flush and child_leave; 437e2c38, 60be5eb7, bc17811b): only the queue
+   pairs with work outstanding moved to the error state, their completions taken until 0.5 s quiet or 5 s, the region's
+   registrations released, then the child's exit, at which the kernel releases its queue pairs (pair_up below: made once
+   in a child's life). No queue pair is destroyed while a peer may post. */
+/* --link form (removed at sub-assignment 16): main's end of the bridge; replaced by the port child's exit (mesh-child.c) */
 /* design/algorithm-sources.md#programcopy */
-static int down_device(struct mesh_device *device){
+static __attribute__((unused)) int down_device(struct mesh_device *device){
   while(device->region_count){
     if(ibv_dereg_mr(device->regions[device->region_count-1]))return 0;
     device->region_count--;
@@ -110,14 +131,15 @@ static int down_device(struct mesh_device *device){
   if(device->context){if(ibv_close_device(device->context))return 0;device->context=NULL;}
   return 1;
 }
-static void down(void){ if(shm)shm_unlink(shm); }
-static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
-static void onsig(int s){ (void)s; stop++; }
+static __attribute__((unused)) void down(void){ if(shm)shm_unlink(shm); }
+static __attribute__((unused)) void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
+static __attribute__((unused)) void onsig(int s){ (void)s; stop++; }
 
 /* design/collective-dependency-ledger.md#d13-connection-metadata-is-setup-work */
 struct qpi { uint32_t xmagic, xsize; uint32_t pgsz; uint16_t lid; uint8_t gid[16]; uint32_t node,count; };
 #define XMAGIC 0x4d595048u
 
+/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-ports.c port_lost, mesh-lanes.c link_lapsed */
 /* design/algorithm-sources.md#programcopy */
 static int pairing_active(struct hdr *m,uint64_t client,uint64_t deadline){
   if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=client){errno=ECANCELED;return 0;}
@@ -125,6 +147,7 @@ static int pairing_active(struct hdr *m,uint64_t client,uint64_t deadline){
   return 1;
 }
 
+/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-ports.c hello_heard's dial */
 /* design/algorithm-sources.md#programcopy */
 static int dial(struct addrinfo *a,struct hdr *m,uint64_t client,uint64_t deadline){
   if(!pairing_active(m,client,deadline))return -1;
@@ -147,6 +170,7 @@ failed:;
   int error=errno;close(f);errno=error;return -1;
 }
 
+/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: its one listener, paired by mesh-ports.c */
 /* design/algorithm-sources.md#programcopy */
 static int listener_up(struct mesh_verbs *provider){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_PASSIVE|AI_NUMERICHOST|AI_NUMERICSERV},*r;
@@ -161,6 +185,7 @@ static int listener_up(struct mesh_verbs *provider){
   if(error){ close(provider->listener); provider->listener=-1;errno=code;return -1; }
   return 0; }
 
+/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-ports.c port_say, control_heard (HELLO, LINK) */
 /* design/algorithm-sources.md#programcopy */
 static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t receive_bytes,struct hdr *m,uint64_t client,uint64_t deadline){
   size_t sent=0,got=0;
@@ -182,6 +207,7 @@ static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t re
   return -1;
 }
 
+/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-ports.c hello_heard, the listener's accept */
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M08 */
 static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
@@ -261,6 +287,11 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   device->wire=wire->data;device->extent=extent;device->payload=stride;
   fprintf(stderr,"register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
     device->name,span,extent,regions,(unsigned long long)mesh_arena_pages(m)*(uint64_t)m->pgsz);
+  /* the queue pair budget, verbatim from tag pre-return-20261103 rdma/mesh-verbs.h device_up (f35a0447; 76be3217's
+     max_qp - 1, the rule of bd85613e design/HETEROGENEOUS-LINKS.md): the queue pairs this device can use, its max_qp less
+     those its provider holds itself. Both ends' smaller is the pairing's (mesh-ports.c port_heard). */
+  device->max_pairs=capabilities.max_qp>MESH_PROVIDER_RESERVED_QPS?
+    (uint32_t)capabilities.max_qp-MESH_PROVIDER_RESERVED_QPS:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity){error=EOPNOTSUPP;goto done;}
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
@@ -305,10 +336,123 @@ static int port_gid(struct ibv_context *context,const struct ibv_port_attr *port
   *index=(uint8_t)chosen;
   return 0;
 }
+/* device_gid: verbatim from tag pre-return-20261103 rdma/mesh-verbs.h (de96b545, 672f6f7f, 5eabe91e; port_gid above is its port, for verbs_up) */
+/* the port's own address (its GID), its index in the port's GID table, and whether it is an address the port's
+   interface holds (`gid_matched`), chosen from the whole table (up to 256 entries) against the interface's addresses:
+   the entry equal to an IPv6 link-local address `interface` holds (getifaddrs, compared as bytes; BSD embeds the scope
+   in bytes 2-3 of a link-local address it reports, which the comparison clears), the address mesh-fabric-init assigns
+   and the peer at the cable's other end reaches (README "Addressing").  Where no entry is one of those (an interface not
+   yet addressed), the table's link-local entry (fe80::/10), else its
+   first nonzero entry, `gid_matched` 0 so its opening says so.  A Thunderbolt port's table does not always begin at
+   index 0 (the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed
+   every queue pair's connection with EIO), and its first entry is not always its address: the M5 Ultra Studio's macOS
+   27 rdma_en3 (2026-10-21) held [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its interface's fe80:: link-local, [2]
+   its fd6d ULA, and the Mini (macOS 26) failed every lane's connection toward [0] with EIO */
+static __attribute__((unused)) int device_gid(struct mesh_device *device,const char *interface){
+  enum { HELD=MESH_GID_ADDRESSES, ENTRIES=MESH_GID_ENTRIES };
+  struct in6_addr held[HELD];
+  union ibv_gid table[ENTRIES];
+  int helds=0,chosen=-1,matched=0,linklocal=-1,first=-1;
+  struct ifaddrs *all=NULL;
+  if(!getifaddrs(&all)){
+    for(const struct ifaddrs *a=all;a && helds<HELD;a=a->ifa_next){
+      if(!a->ifa_addr || a->ifa_addr->sa_family!=AF_INET6 || strcmp(a->ifa_name,interface))continue;
+      struct in6_addr x=((const struct sockaddr_in6 *)(const void *)a->ifa_addr)->sin6_addr;
+      if(!IN6_IS_ADDR_LINKLOCAL(&x))continue;
+      x.s6_addr[2]=x.s6_addr[3]=0;
+      held[helds++]=x;
+    }
+    freeifaddrs(all);
+  }
+  const int entries=device->port.gid_tbl_len<ENTRIES?device->port.gid_tbl_len:ENTRIES;
+  for(int i=0;i<entries;i++){
+    int nonzero=0;
+    if(ibv_query_gid(device->context,1,i,table+i))continue;
+    for(int b=0;b<16;b++)nonzero|=table[i].raw[b];
+    if(!nonzero)continue;
+    if(first<0)first=i;
+    if(linklocal<0 && table[i].raw[0]==0xfe && (table[i].raw[1]&0xc0)==0x80)linklocal=i;
+    for(int h=0;h<helds && chosen<0;h++)if(!memcmp(table[i].raw,held[h].s6_addr,16)){chosen=i;matched=1;}
+  }
+  if(chosen<0)chosen=linklocal>=0?linklocal:first;
+  if(chosen<0)return ENXIO;
+  device->gid=table[chosen];device->gid_index=(uint8_t)chosen;device->gid_matched=(uint8_t)matched;
+  return 0;
+}
+/* pair_make: verbatim from tag pre-return-20261103 rdma/mesh-verbs.h (ceff26ec) */
+/* design/transport.md */
+/* queue pair q made on the provider's completion queues, UC, its capacities read, and moved to INIT (d6dceac verbs_up's
+   attributes and mask, as every pairing since); the device's count of its queue pairs one more.  0, or the error */
+static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
+  struct mesh_device *device=provider->device;
+  const uint32_t frames=device->frame_capacity;
+  struct mesh_queue *queue=&provider->queues[q];
+  queue->completion=provider->completion;queue->sent=provider->sent;
+  queue->poll=provider->completion->context->ops.poll_cq;
+  struct ibv_qp_init_attr qi={.send_cq=queue->sent,.recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
+    .cap={.max_send_wr=frames,.max_recv_wr=frames,.max_send_sge=1,.max_recv_sge=1}};
+  if(!(queue->pair=ibv_create_qp(device->domain,&qi)))return errno?errno:EIO;
+  device->pairs++;
+  queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
+  struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
+  if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual))return errno?errno:EIO;
+  queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
+  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
+  if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
+  return 0;
+}
+/* pair_up: verbatim from tag pre-return-20261103 rdma/mesh-verbs.h (76be3217) */
+/* a UC queue pair in INIT for each lane of `plan` (a bit a lane, design/HETEROGENEOUS-LINKS.md), queue q lane q, against
+   the device's usable queue pairs, on the provider's two completion queues: a link's, made once in its port child's life
+   (design/transport.md section 14: no queue pair is moved to another state, destroyed or forgotten; the kernel releases
+   them at the child's exit).  0, or the error (ENOSPC: the device holds no more queue pairs). */
+static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,uint32_t plan){
+  struct mesh_device *device=provider->device;
+  const uint32_t count=(uint32_t)__builtin_popcount(plan),entries=plan?32-(uint32_t)__builtin_clz(plan):0;
+  if(device->pairs+count>device->max_pairs)return ENOSPC;
+  uint32_t frames=device->frame_capacity;
+  provider->queues=calloc(entries?entries:1,sizeof *provider->queues);
+  if(!provider->queues)return ENOMEM;
+  provider->count=(int)entries;provider->psn=arc4random()&0xffffff;
+  if(!provider->completion && !(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
+  if(!provider->sent && !(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
+  provider->poll=provider->completion->context->ops.poll_cq;
+  for(uint32_t q=0;q<entries;q++){
+    if(!(plan>>q&1))continue;
+    const int error=pair_make(provider,(int)q);
+    if(provider->queues[q].pair)provider->qp_count++;
+    if(error)return error;
+  }
+  return 0;
+}
+/* queue_receive, queue_send: verbatim from tag pre-return-20261103 rdma/mesh-verbs.h (ceff26ec) */
+/* design/algorithm-sources.md#programcopy */
+/* queue pair q ready to receive from the peer's (`remote`: its queue pair number and first sequence number), the peer's
+   port at `lid` and `gid`; ready to send */
+static __attribute__((unused)) int queue_receive(struct mesh_verbs *provider,int q,const uint32_t *remote,uint16_t lid,const uint8_t *gid){
+  struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[1],.dest_qp_num=remote[0],
+    .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=provider->device->gid_index}}};
+  memcpy(&r.ah_attr.grh.dgid,gid,16);
+  if(ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))return errno?errno:EIO;
+  return 0;
+}
+static __attribute__((unused)) int queue_send(struct mesh_verbs *provider,int q){
+  struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(provider->psn+(uint32_t)q)&0xffffff};
+  if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
+  return 0;
+}
+/* port_bandwidth: verbatim from tag pre-return-20261103 rdma/mesh-verbs.h (5eabe91e; verbs_up's tables before it) */
+/* design/algorithm-sources.md#link */
+static __attribute__((unused)) uint64_t port_bandwidth(const struct ibv_port_attr *port){
+  static const uint64_t speeds[UINT8_MAX+1]=MESH_PORT_SPEEDS;
+  static const uint8_t widths[UINT8_MAX+1]=MESH_PORT_WIDTHS;
+  return speeds[port->active_speed]*widths[port->active_width];
+}
+/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-lanes.c device_open, link_make, link_connect */
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M08 */
-static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
+static __attribute__((unused)) int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   struct ibv_port_attr pa;
   if(device_up(provider->device,provider->wire,m,&pa))return -1;
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
@@ -367,10 +511,8 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     int rc=ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
     if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
   }
-  /* design/algorithm-sources.md#link */
-  static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
-  static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
-  provider->bandwidth=speeds[pa.active_speed]*widths[pa.active_width];
+  /* the same tables, one copy: port_bandwidth */
+  provider->bandwidth=port_bandwidth(&pa);
   fprintf(stderr,"pair up: %s node %d gid %u\n",ibv_get_device_name(provider->device->context->device),m->node,
     gid_index);
   return f; }
