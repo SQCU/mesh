@@ -54,6 +54,11 @@
    MESH_PLATFORM_NS is mesh.h's, its one copy (review R2, B2: this header's removed) */
 #define MESH_FLUSH_QUIET_NS UINT64_C(500000000)
 #define MESH_PAUSE_NS UINT64_C(3000000000)
+/* How long the bridge awaits each child it asked to end, and again after a SIGKILL. The operator, 2026-11-03: "if
+   there's an unexamined hardware race and the compromise was 1.3 seconds, you can have 1.3 seconds. you can't have 13
+   seconds because there was a 500ms hardware race." 1.3 s is the recorded deregistration before exit (bc17811b). It
+   replaces the tag's 2 x MESH_PLATFORM_NS + MESH_PAUSE_NS (13 s) and MESH_PLATFORM_NS more (18 s) in children_end. */
+#define MESH_CHILD_END_NS UINT64_C(1300000000)
 /* tag etc/bridge/layout.h: port_opened's hold after its device's k-th refused registration in a row, MESH_RETRY_FIRST_SECONDS
    2^min(k-1, MESH_RETRY_MAX_SHIFT) s, at most MESH_RETRY_MAX_SECONDS */
 #define MESH_RETRY_FIRST_SECONDS 60u

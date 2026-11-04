@@ -240,11 +240,10 @@ void child_reaped(struct port *port){
 
 /* tag pre-return-20261103 rdma/mesh-link.c:2079-2121, main after the windows' hold, verbatim as a function (3f72cbde 90179f5e 07949b28) */
 void children_end(void){
-  /* design/transport.md section 14, "A process a port": this bridge ends after its children, never before.  Each is
-     asked to end (CHILD_END: it closes, its lanes flushed, child_leave) and awaited for as long as its own bounds can
-     take (its windows' MESH_PLATFORM_NS and its flush's), reaped as it ends (waitpid: its exit whole, the kernel's
+  /* This bridge ends after its children, never before.  Each is asked to end (CHILD_END: it closes, its lanes
+     flushed, child_leave), awaited MESH_CHILD_END_NS and reaped as it ends (waitpid: its exit whole, the kernel's
      release of its device's objects and its pages done); one not reaped by then is ended (SIGKILL) and awaited
-     MESH_PLATFORM_NS more.  One the kernel holds in its exit past that stays named in the region's holder table (struct
+     MESH_CHILD_END_NS more.  One the kernel holds in its exit past that stays named in the region's holder table (struct
      mesh_holder: its pid, device and start), so no later launch's child opens its device while it lives
      (child_elsewhere), and it is named here.  Each exit heard on a queue of the children's exits alone (EVFILT_PROC) */
   for(uint32_t p=0;p<port_count;p++)child_send(ports+p,(struct child_message){.kind=CHILD_END});
@@ -253,7 +252,7 @@ void children_end(void){
     struct kevent64_s watch;EV_SET64(&watch,(uint64_t)ports[p].child,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,p,0,0);
     kevent64(exits,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
   }
-  const uint64_t asked=clock_ns()+2*MESH_PLATFORM_NS+MESH_PAUSE_NS,killed=asked+MESH_PLATFORM_NS;
+  const uint64_t asked=clock_ns()+MESH_CHILD_END_NS,killed=asked+MESH_CHILD_END_NS;
   for(int kill_sent=0;;){
     uint32_t left=0;
     for(uint32_t p=0;p<port_count;p++)if(ports[p].child){
@@ -265,16 +264,16 @@ void children_end(void){
     if(at>=asked && !kill_sent){
       kill_sent=1;
       for(uint32_t p=0;p<port_count;p++)if(ports[p].child){
-        mesh_say("bridge","link %u (%s): child %d has not ended %.0f s after it was asked: ended (SIGKILL)",ports[p].index,
-                 ports[p].name,(int)ports[p].child,(double)(2*MESH_PLATFORM_NS+MESH_PAUSE_NS)/1e9);
+        mesh_say("bridge","link %u (%s): child %d has not ended %.1f s after it was asked: ended (SIGKILL)",ports[p].index,
+                 ports[p].name,(int)ports[p].child,(double)MESH_CHILD_END_NS/1e9);
         kill(ports[p].child,SIGKILL);
       }
     }
     if(at>=killed){
       for(uint32_t p=0;p<port_count;p++)if(ports[p].child)
-        mesh_say("bridge","link %u (%s): child %d not reaped %.0f s after its SIGKILL: its exit waits in the kernel, named "
+        mesh_say("bridge","link %u (%s): child %d not reaped %.1f s after its SIGKILL: its exit waits in the kernel, named "
                  "in the region's holders, so no later child opens its device while it lives",ports[p].index,ports[p].name,
-                 (int)ports[p].child,(double)MESH_PLATFORM_NS/1e9);
+                 (int)ports[p].child,(double)MESH_CHILD_END_NS/1e9);
       break;
     }
     const uint64_t until=kill_sent?killed:asked;
