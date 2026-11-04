@@ -9,12 +9,12 @@ struct mesh_range { uint32_t first,count; };
 /* The program's section of the region (design/disjoint-pages-change-request.md, Appendix A, A3, "Sharing the region
    between programs", and A4: "One claim of a program's section at attach remains"), taken once by mesh_attach and held
    until the client retires; nothing else takes rows or pages from the region:
-   - `rows`: the claim's rows of the page table, [first, first + count).  Its first two are the claim's heads, which
-     record its page runs for the bridge's release (mesh_retired_release): row `first` the window run's, row `first`
-     + 1 the local run's, each its run's first page in its entry's `mapping` (MESH_ABSENT where the run is empty) and
-     its pages in its buffer's `pages`.  The sections' rows follow, from `first` + 2.
+   - `rows`: the claim's rows of the page table, [first, first + count), two or more.  Its first two are the claim's
+     heads, which record it for the bridge's release (mesh_retired_release): row `first` holds the client's owner word
+     and the window run (and the claim's rows), row `first` + 1 the local run (mesh-dataflow.c mesh_claim).  The
+     sections' rows follow, from `first` + 2.
    - `window`: arena pages [first, first + count), block-aligned, inside the registered window: the pages the plan's
-     allocator assigns (mesh-collective.h mesh_plan), and no one else.
+     allocator assigns (mesh-collective.h mesh_plan), and no one else.  An empty run is {0, 0}.
    - `local`: arena pages [first, first + count), block-aligned, outside the registered window (where the window is the
      whole arena, the upper half of the claim's run): the pages of the values no plan names (mesh-call.h
      mesh_section_create, wire 0), laid out in creation order.
@@ -59,8 +59,8 @@ void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t 
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 /* design/algorithm-sources.md#programkernel_call */
 uint32_t mesh_publication_prepare(struct hdr *,uint32_t row,struct prepared_publication *);
-/* a retired client's claim released, its rows and its head rows' page runs, none while a port's requests may name
-   their pages; the rows kept */
+/* a retired client's claim released, its head rows' page runs and then its rows, none while a port's requests may
+   name their pages; the claims kept */
 uint32_t mesh_retired_release(struct hdr *);
 
 /* The map reader (design/page-queue-change-request.md, "What the collective decides, and what the bridge decides"): the

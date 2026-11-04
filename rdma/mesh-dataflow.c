@@ -14,10 +14,12 @@
 #include <unistd.h>
 #include <limits.h>
 #include <time.h>
-/* design/pages-and-functions.md#what-the-page-table-is */
-static void mesh_reclaim(struct hdr *);
-
 /* design/algorithm-sources.md#programtensor */
+/* 2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 "Sharing the region between programs"
+   (sub-assignment 7): the client's rows are no longer let go here (main's form cleared each owned row's bit of
+   MESH_ROW_OWN, the pages kept by MESH_ROW_HOT until a reclaim).  The client's claim is closed whole: its head row
+   (mesh_claim), the one row its owner word names, and nothing of it is let go until the bridge's release
+   (mesh_retired_release).  What must stay: a retired claim's rows and pages held until that release */
 void mesh_retire(struct hdr *m,uint64_t client){
   uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff);
   uint64_t retiring=(client&(UINT64_C(1)<<63))|(generation<<32)|(uint32_t)getpid();
@@ -25,8 +27,8 @@ void mesh_retire(struct hdr *m,uint64_t client){
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
-      if(buffer->pages)atomic_store_explicit(&buffer->closed,1,memory_order_release);
-      mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
+      atomic_store_explicit(&buffer->closed,1,memory_order_release);
+      break;
     }
   }
   atomic_store_explicit(&m->client,0,memory_order_release);
@@ -35,6 +37,84 @@ void mesh_retire(struct hdr *m,uint64_t client){
   /* the ports' progress threads wait on hdr `plan` while idle (mesh-flow.c): woken, they read the retirement at once,
      not MESH_PAUSE_NS later */
   os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+}
+
+/* The program's claim (design/disjoint-pages-change-request.md, Appendix A, A3 "Sharing the region between programs";
+   A4, "One claim of a program's section at attach remains"; mesh-dataflow.h struct mesh_ctx), in place of the
+   call-site allocators (A2: first fit at the call that needs memory), which went with mesh_rows_alloc and
+   mesh_arena_alloc: one client holds the region at a time (hdr `client`), so its claim takes every row and page free,
+   the widest run of each, and excludes what a retired client's claim still holds (its bits set until
+   mesh_retired_release).  Nothing else takes rows or pages from the region: the bridge's own areas are laid out with it
+   (mesh-map.h mesh_layout). */
+
+/* the first index in [at, end) whose bit of `bits` is `set`, else `end` */
+static uint32_t mesh_bit_next(_Atomic uint64_t *bits,uint32_t at,uint32_t end,int set){
+  while(at<end){
+    uint64_t word=atomic_load_explicit(&bits[at/64],memory_order_acquire);
+    if(!set)word=~word;
+    word&=~UINT64_C(0)<<(at%64);
+    if(word){
+      const uint32_t found=at/64*64+(uint32_t)__builtin_ctzll(word);
+      return found<end?found:end;
+    }
+    at=at/64*64+64;
+  }
+  return end;
+}
+
+/* the widest run of clear bits in [begin, end), its first and its count multiples of `align`; {0, 0} where none */
+static struct mesh_range mesh_bit_widest(_Atomic uint64_t *bits,uint32_t begin,uint32_t end,uint32_t align){
+  struct mesh_range widest={0,0};
+  for(uint32_t at=begin;at<end;){
+    const uint32_t clear=mesh_bit_next(bits,at,end,0),set=mesh_bit_next(bits,clear,end,1);
+    const uint64_t first=((uint64_t)clear+align-1)/align*align,last=(uint64_t)set/align*align;
+    if(last>first && last-first>widest.count)widest=(struct mesh_range){(uint32_t)first,(uint32_t)(last-first)};
+    at=set;
+  }
+  return widest;
+}
+
+/* The claim, recorded in its first two rows, its heads, so the bridge's release finds it after a later client has
+   attached (mesh_retired_release):
+   - row `rows.first`: its buffer's `owner` the client (`closed` once it retires) and `pages` the window run's pages; its
+     entry's `mapping` the window run's first page (low half; MESH_ABSENT where the run is empty) and the claim's rows
+     (high half);
+   - row `rows.first` + 1: its buffer's `pages` the local run's pages, its entry's `mapping` the local run's first page
+     (MESH_ABSENT where empty); no owner.
+   The claim's rows are held by their bits of MESH_ROW_OWN and its pages by their bits of the arena's; no other row
+   holds an owner word or `pages`.  The window's run is the widest free block-aligned run inside the registered window
+   (mesh_arena_range(m, 1)), the local run the widest outside it (mesh_arena_range(m, 0)).  Where the window is the
+   whole arena, mesh_arena_range's one range over it, the claim's one run is halved, `local` its upper half: the change
+   request says nothing of that case, and this is its one run split so neither kind of section is refused outright.
+   0; ENOMEM where fewer than two rows are free (nothing is taken) */
+static int mesh_claim(struct mesh_ctx *c){
+  struct hdr *m=c->M;
+  const uint32_t block=m->block;
+  _Atomic uint64_t *own=mesh_plane(m,MESH_ROW_OWN),*bits=mesh_arena_bits(m);
+  const struct mesh_range rows=mesh_bit_widest(own,0,mesh_rows(m),1);
+  if(rows.count<2)return ENOMEM;
+  mesh_bits_set(own,rows.first,rows.count);
+  const struct mesh_range wired=mesh_arena_range(m,1),outside=mesh_arena_range(m,0);
+  struct mesh_range window=mesh_bit_widest(bits,wired.first,wired.first+wired.count,block),local;
+  if(!outside.first){
+    const uint32_t half=window.count/block/2*block;
+    window.count-=half;
+    local=half?(struct mesh_range){window.first+window.count,half}:(struct mesh_range){0,0};
+  }else local=mesh_bit_widest(bits,outside.first,outside.first+outside.count,block);
+  if(window.count)mesh_bits_set(bits,window.first,window.count);
+  if(local.count)mesh_bits_set(bits,local.first,local.count);
+  struct mesh_buffer *head=&mesh_buffers(m)[rows.first],*second=head+1;
+  atomic_store_explicit(&mesh_page(m)[rows.first+1].mapping,local.count?local.first:MESH_ABSENT,memory_order_relaxed);
+  second->pages=local.count;second->constant=0;
+  atomic_store_explicit(&second->closed,0,memory_order_relaxed);
+  atomic_store_explicit(&mesh_page(m)[rows.first].mapping,
+    (uint64_t)rows.count<<32|(window.count?window.first:MESH_ABSENT),memory_order_relaxed);
+  head->pages=window.count;head->constant=0;
+  atomic_store_explicit(&head->closed,0,memory_order_relaxed);
+  atomic_store_explicit(&head->owner,c->client,memory_order_release);
+  c->rows=rows;c->window=window;c->local=local;
+  c->row_cursor=rows.first+2;c->local_cursor=local.first;
+  return 0;
 }
 
 int mesh_attach(struct mesh_ctx *c,const char *name){
@@ -69,6 +149,13 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
      client's compare-exchange (seq_cst): a client the heartbeat's read of the holders missed reads it expired here,
      and is let go */
   if(__atomic_load_n(&memory->version,__ATOMIC_SEQ_CST)!=MESH_VERSION){mesh_detach(c);return EINVAL;}
+  /* a retired claim no port's request names is released before this one is taken, as the bridge's turn would release
+     it (mesh-records.c clients_turn), so a client attached just after another let go claims the pages that one held:
+     the bridge's turn may read that client's ports before they have let its plan go, and look again only
+     MESH_PAUSE_NS later.  The same release, by its rule (mesh_holding_retained) */
+  mesh_retired_release(memory);
+  const int claimed=mesh_claim(c);
+  if(claimed){mesh_detach(c);return claimed;}
   return 0;
 }
 
@@ -82,75 +169,9 @@ int mesh_detach(struct mesh_ctx *c){
   return error;
 }
 
-/* design/algorithm-sources.md#programkernel_call */
-/* One first-fit scan over an explicit pair of bitmaps and an explicit range.  The caller names the
-   bitmaps because the arena bitmap is indexed by arena page and the row planes by row: they are two
-   index spaces and sharing one sizing is what forced rows >= pages. */
-static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
-                          _Atomic uint64_t *own,_Atomic uint64_t *hot){
-  for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
-    uint32_t next=first;
-    for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
-      uint64_t occupied=(atomic_load_explicit(&own[w],memory_order_acquire)|atomic_load_explicit(&hot[w],memory_order_acquire))&mesh_word_mask(first,count,w);
-      if(occupied) next=w*64+64-(uint32_t)__builtin_clzll(occupied);
-    }
-    if(next==first){ mesh_bits_set(own,first,count); return first; }
-    first=(next+align-1)/align*align;
-  }
-  return MESH_ABSENT;
-}
-
-/* design/algorithm-sources.md#programkernel_call */
-/* The cursor resumes where the last allocation ended, so preparing N operands over P pages costs
-   O(P) in total rather than O(N*P); a full scan and then a reclaim still back it, so the result is
-   the same page the unresumed scan would have returned whenever nothing has been released. */
-static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
-                              _Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t *cursor){
-  uint32_t resume=*cursor<begin||*cursor>end?begin:*cursor;
-  uint32_t first=mesh_scan(count,align,resume,end,own,hot);
-  if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,begin,end,own,hot);
-  if(first==MESH_ABSENT){ mesh_reclaim(c->M); first=mesh_scan(count,align,begin,end,own,hot); }
-  if(first==MESH_ABSENT){ errno=ENOMEM; return MESH_ABSENT; }
-  *cursor=first+count;
-  return first;
-}
-
-uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
-  if(!count){ errno=EINVAL; return MESH_ABSENT; }
-  uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT),&c->row_cursor);
-  if(first==MESH_ABSENT) return first;
-  for(uint32_t r=first;r<first+count;r++){
-    atomic_store_explicit(&mesh_page(c->M)[r].device,0,memory_order_relaxed);
-    atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
-    struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
-    atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-    buffer->pages=buffer->constant=0;
-    struct mesh_publication *publication=mesh_publication_at(c->M,r);
-    publication->sends=publication->device_input=publication->device_stride=0;
-    atomic_store_explicit(&publication->argument,0,memory_order_relaxed);
-    atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
-  }
-  c->rows+=count;
-  return first;
-}
-
-/* design/prepared-machine.md#M01 */
-/* design/prepared-machine.md#M09 */
-/* Two ranges over one arena and one bitmap: [0,wire_pages) is registered and is the only memory an
-   SGE may name; [wire_pages,arena) is addressable by every client and by the GPU and is never
-   registered, so it costs virtual memory and neither wired pages nor an MR slot. */
-uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align,int wire){
-  struct hdr *m=c->M;
-  if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
-  struct mesh_range range=mesh_arena_range(m,wire);
-  _Atomic uint64_t *bits=mesh_arena_bits(m);
-  uint32_t first=mesh_allocate(c,pages,align,range.first,range.first+range.count,bits,bits,
-    wire?&c->wire_cursor:&c->bulk_cursor);
-  if(first!=MESH_ABSENT){ c->arena+=pages; if(wire)c->wire+=pages; }
-  return first;
-}
-
 /* design/algorithm-sources.md#programtensor */
+/* the plan's binding of an instance's rows to its pages (mesh-collective.h mesh_plan), and mesh_section_create's of a
+   local section's: no page is taken here, only named */
 void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t page,uint32_t index){
   for(uint32_t offset=0;offset<pages;offset+=c->M->block){
     struct mesh_page_entry *entry=&mesh_page(c->M)[first+offset/c->M->block];
@@ -162,32 +183,6 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint64_t address){
   if(row!=MESH_ABSENT)atomic_store_explicit(&mesh_page(c->M)[row].device,address,memory_order_relaxed);
-}
-
-/* design/algorithm-sources.md#programtensor */
-static void mesh_buffer_reclaim(struct hdr *m,uint32_t row){
-  struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-  uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
-  if(!owner || !atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed))return;
-  atomic_fetch_and_explicit(&mesh_plane(m,MESH_FREE)[row/64],~(UINT64_C(1)<<(row%64)),memory_order_relaxed);
-  uint32_t pages=buffer->pages;
-  for(uint32_t offset=0;offset<pages;offset+=m->block){
-    uint32_t page=atomic_load_explicit(&mesh_page(m)[row+offset/m->block].mapping,memory_order_acquire);
-    if(page!=MESH_ABSENT)mesh_bits_clear(mesh_arena_bits(m),page,m->block);
-  }
-  atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-  mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),row,pages/m->block);
-}
-
-/* design/algorithm-sources.md#programtensor */
-static void mesh_reclaim(struct hdr *m){
-  for(uint32_t word=0;word<mesh_words(m);word++){
-    uint64_t available=atomic_load_explicit(&mesh_plane(m,MESH_FREE)[word],memory_order_acquire);
-    while(available){
-      uint32_t row=word*64+(uint32_t)__builtin_ctzll(available);available&=available-1;
-      mesh_buffer_reclaim(m,row);
-    }
-  }
 }
 
 /* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_holding_retained, adapted to the page lists: whether a retired
@@ -215,36 +210,52 @@ static int mesh_holding_retained(struct hdr *m){
 /* design/algorithm-sources.md#programtensor */
 /* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_retired_release, adapted: a retired client's closed rows
    released, but none while a port's requests may name their pages (mesh_holding_retained); the count kept, which the
-   tag's clients_turn keeps `unreleased` by.  Main's form released every closed row at once */
+   tag's clients_turn keeps `unreleased` by.  Main's form released every closed row at once.
+   2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 "Sharing the region between programs"
+   (sub-assignment 7): what is released is a retired client's claim (mesh_claim), whole, from its head row: its two
+   page runs' bits of the arena, then its rows' bits of MESH_ROW_OWN, last, so no later claim takes a row whose head
+   fields are still being read.  Main's form marked each closed row MESH_FREE for the next allocating client's reclaim
+   (mesh_reclaim, gone with the call-site allocators).  The head's fields are read before its owner word is taken back:
+   they are stored before the owner (mesh_claim) and changed only by the release that takes it, so a release that
+   loses the exchange (the bridge's and an attaching client's may run at once) reads nothing another claim wrote.
+   A head is never the table's last row, and its rows lie in the table: mesh_claim takes two or more of them.  The count
+   returned is of the claims kept.  What must stay: mesh_holding_retained's rule; the rows let go after the pages, and
+   only by the exchange's winner */
 uint32_t mesh_retired_release(struct hdr *m){
   const int retained=mesh_holding_retained(m);
   uint32_t kept=0;
   for(uint32_t row=0;row<mesh_rows(m);row++){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
-    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && retained){kept++;continue;}
-    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
-       atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
-      atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-      mesh_bits_set(mesh_plane(m,MESH_FREE),row,1);
-      atomic_store_explicit(&buffer->owner,owner,memory_order_release);
-    }
+    struct mesh_buffer *head=&mesh_buffers(m)[row];
+    uint64_t owner=atomic_load_explicit(&head->owner,memory_order_acquire);
+    if(!owner || !atomic_load_explicit(&head->closed,memory_order_acquire))continue;
+    if(retained){kept++;continue;}
+    struct mesh_buffer *second=head+1;
+    struct mesh_page_entry *entry=&mesh_page(m)[row];
+    const uint64_t window=atomic_load_explicit(&entry->mapping,memory_order_relaxed),
+                   local=atomic_load_explicit(&entry[1].mapping,memory_order_relaxed);
+    const uint32_t window_pages=head->pages,local_pages=second->pages,rows=(uint32_t)(window>>32);
+    if(!atomic_compare_exchange_strong_explicit(&head->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed))continue;
+    if(window_pages)mesh_bits_clear(mesh_arena_bits(m),(uint32_t)window,window_pages);
+    if(local_pages)mesh_bits_clear(mesh_arena_bits(m),(uint32_t)local,local_pages);
+    head->pages=second->pages=0;
+    atomic_store_explicit(&entry->mapping,MESH_ABSENT,memory_order_relaxed);
+    atomic_store_explicit(&entry[1].mapping,MESH_ABSENT,memory_order_relaxed);
+    atomic_store_explicit(&head->closed,0,memory_order_release);
+    mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,rows);
   }
   return kept;
-}
-
-/* design/algorithm-sources.md#program */
-void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  mesh_bits_clear(mesh_plane(c->M,MESH_ROW_OWN),first,count);
 }
 
 /* design/prepared-machine.md#M13 */
 /* design/prepared-machine.md#M04 */
 /* design/algorithm-sources.md#programkernel_call */
-/* A row's release words as mesh_plan records them (mesh-collective.h): `targets[0].stream` the region offset of a send's
-   release word of execution 0 (count 1, stride 1) and the publication's `argument` the `position` that releases it
-   (struct mesh_hop), stored there at execution t's word, + t x hop_stride (sizeof(struct mesh_send)), by the GPU or
-   mesh_host_publish.  The SEND cells' wr_id the replaced form stored is not read: a release word is one word, no cell */
+/* A row's supplied words as mesh_plan records them (design/disjoint-pages-coordination.md, "Rows' publications"):
+   `targets[i].stream` the region offset of a range's supplied word of execution 0 (mesh.h mesh_supplied; count 1,
+   stride 1) and the publication's `argument` MESH_SUPPLIED, stored there at execution t's word, `stream` + t x
+   MESH_WORD_STRIDE, by the GPU or mesh_host_publish.  A target's word k is `stream` + MESH_WORD_STRIDE x `stride` x k.
+   2026-11-03, design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", item 3
+   (sub-assignment 7): no 256-byte cell (sizeof(struct mesh_send), hdr `hop_stride`) a word; a supplied word is one
+   word, MESH_WORD_STRIDE apart.  What must stay: one store releases a range */
 uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_publication *records){
   struct mesh_publication *publication=mesh_publication_at(m,row);
   uint32_t count=0;
@@ -252,7 +263,7 @@ uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_pub
     struct mesh_target target=publication->targets[i];
     for(uint32_t k=0;k<target.count;k++){
       if(records){
-        char *word=(char *)m+target.stream+sizeof(struct mesh_send)*target.stride*k;
+        char *word=(char *)m+target.stream+(uint64_t)MESH_WORD_STRIDE*target.stride*k;
         records[count]=(struct prepared_publication){.destination=(uintptr_t)word,
           .argument=atomic_load_explicit(&publication->argument,memory_order_relaxed)};
       }
@@ -430,5 +441,25 @@ int mesh_transfers_start(struct mesh_ctx *context){
       return code?(int)code:ENOTCONN;
     }
   }
+  return 0;
+}
+
+/* mesh-call.h mesh_plan_erased (design/disjoint-pages-change-request.md, Appendix A, A3; design/
+   disjoint-pages-coordination.md, "Writing a plan"): mesh_plan, having stored hdr `hops` 0 and woken `plan`, waits here
+   until no port's data path holds the previous plan, whose supplied words and landed records it is about to zero and
+   rewrite: each port's `prepared` leaves `generation` once its data path has let the plan go (mesh-flow.c link_close),
+   and never comes back to it, `hops` being 0.  It replaces the retention of the plan's words section (the context's
+   `send_off`, `send_bytes`, gone), the words being fixed areas of the layout.  Every port of the link table is read
+   (mesh_holding_retained's bound), not only those a hop names: a port the map no longer lists may still hold it.  A
+   spin, bounded by one deadline, MESH_PLATFORM_NS from the start, as mesh_transfers_start's: `prepared` is stored with
+   no wake */
+int mesh_plan_erased(struct mesh_ctx *context,uint64_t generation){
+  if(!generation)return 0;
+  struct hdr *m=context->M;
+  const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
+  const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
+  for(uint32_t p=0;p<links;p++)
+    while(atomic_load_explicit(&mesh_links(m)[p].port.prepared,memory_order_acquire)==generation)
+      if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline)return ETIMEDOUT;
   return 0;
 }
