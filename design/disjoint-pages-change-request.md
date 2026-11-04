@@ -1585,10 +1585,14 @@ this document, it holds.
    - for a send, its release event; for a receive, its phase field and its range's count (C3.7);
    - its chain, and its place in that chain (item 5).
 5. **Its chains.** For each adjacent node and direction, the events behind those exchanges, ordered by the allocator's
-   happens-before, split into the fewest chains (Dilworth; Fulkerson). An event's pages keep page order within it. Round
-   t + 1 of a chain follows round t, because each event's next instance follows it (the coordination's D5). Both ends
-   compute the same chains from the same template, so both know each arrival as (plan, chain, place, round). Different
-   plans' events are never ordered, so their chains stay apart.
+   happens-before, split into the fewest chains (Dilworth; Fulkerson). An event's pages keep page order within it. A
+   chain must also be one across rounds: its round t + 1 stays after its round t only where its last event of round t
+   precedes its first event of round t + 1 (a least lag of at most 1). Elsewhere the chain is cut there, greedily from
+   its first event, which makes the fewest cuts. A chain of one event always passes, since each event's next instance
+   follows it (the coordination's D5). Both ends compute the same chains from the same template, so both know each
+   arrival as (plan, chain, place, round). Different plans' events are never ordered, so their chains stay apart.
+   (Corrected 2026-11-04: the first text said every chain's round t + 1 follows its round t, which holds only for a
+   chain of one event.)
 6. **Its priorities:** each event's longest path to the end of its round.
 7. **Its placement.** Each exchange's page and bytes are one 8-byte entry of its range's placement table, an entry per
    page and copy, in the plan's state section. The bridge and the GPU's readers both read placement there, and nowhere
@@ -1599,6 +1603,8 @@ this document, it holds.
      it describes, and landed in the receiver's table before they come. Its entries are relative to a pool the allocator
      placed, so the map is the table itself.
    - An entry of 0 bytes means no exchange that round. It lands when its map lands.
+   - No program decides placement at run time yet, so no map is built until one does. A mapped range's tables then go
+     inside the registered window, where landings can go; the state section lies outside it.
 
 **What the bridge does with it, and gives back.**
 - Each chain progresses by itself. An exchange waits only on its release and on the earlier exchanges of its own chain.

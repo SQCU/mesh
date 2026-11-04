@@ -55,3 +55,7 @@ other projects, such as a game bot, and old dated records; they are not listed h
   agent's contract for that change request's Appendix D, items D.3.2 to D.3.6 (D.3.1, and D.5 added during the work,
   outside it): the file split, the names files share, its decisions with their sources, and the record of the work,
   its reviews and what is open.
+- [design/plan-bridge-coordination.md](design/plan-bridge-coordination.md): the implementation contract for that change
+  request's D.5 (what a plan gives the bridge) and D.3.1 (any number of programs), drafted by a planning agent and
+  reviewed by Claude: the file split, the layouts, the chain and priority algorithms, the bridge's carriers and segment
+  headers, each plan in its claim, the GPU's placed pass; the rulings it waits on.
