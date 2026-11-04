@@ -4,10 +4,14 @@ import os
 U, Q, Z = C.c_uint32, C.c_uint64, C.c_size_t
 
 
+class Range(C.Structure):
+    _fields_ = [('first', U), ('count', U)]
+
+
+# mesh-dataflow.h struct mesh_ctx: the program's claim (`rows`, `window`, `local`) and its cursors
 class Context(C.Structure):
-    _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('client', 'send_off', 'send_bytes')),
-                *((k, U) for k in ('rows', 'arena', 'wire', 'shared_pages', 'row_cursor', 'wire_cursor', 'bulk_cursor')),
-                ('fd', C.c_int)]
+    _fields_ = [('M', C.c_void_p), ('len', Z), ('client', Q), *((k, Range) for k in ('rows', 'window', 'local')),
+                *((k, U) for k in ('row_cursor', 'local_cursor')), ('fd', C.c_int)]
 
 
 class Section(C.Structure):
@@ -21,7 +25,6 @@ for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_section_create', C.c_int, [CONTEXT, Z, U, C.c_int, C.POINTER(Section)]),
-        ('mesh_section_slice', C.c_int, [CONTEXT, Section, Z, Z, U, U, C.POINTER(Section)]),
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
         ('mesh_host_inputs', C.c_int, [CONTEXT]),
         ('mesh_transfers_start', C.c_int, [CONTEXT]),
