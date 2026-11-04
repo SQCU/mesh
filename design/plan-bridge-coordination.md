@@ -9,6 +9,13 @@ D.3.2–D.3.6 unit has closed. The change request holds wherever this file diffe
 
 ## Claude's review, and the rulings it asks for
 
+**Withdrawn, 2026-11-04, after the operator's question ("wht is a shared carrier? why are you talking about waits?").**
+§5's segment headers, sent on each of the bridge's lines ahead of their pages, and the trade-offs built on them (R-A,
+R-B, and Claude's replacement for D7) are construction, not canon. The SCTP and QUIC citations don't support them: both
+carry a stream's identity in the same packet as its data and reassemble from a receive buffer by copying, which is the
+staging form data-model §3 rules out. §5 is to be rewritten from the canon and the failport's code before anything in
+it is built. Everything outside §5 stands as reviewed.
+
 Taken as written: the file split; the layouts; (group, epoch); the graph functions; attach taking nothing; each plan in
 its claim; discovery through `plans`; the identity pages laid out with the region (D5); the GPU's placed pass and its
 cost. D3 is sound: an announcement has to live in memory that reclamation can't reuse, as a hazard pointer does (M. M.
