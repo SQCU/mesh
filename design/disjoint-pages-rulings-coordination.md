@@ -10,6 +10,11 @@ sub-assignment, its commits, each review finding and where it went, the builds, 
 D.3.1 (any number of programs at once) is not in this unit: it waits on the operator's ruling recorded in D.2. Nothing
 here changes the client word, the attach, the region header's one plan (hdr `client`, `hops`, `plan`, `state`), the
 ports' `prepared`, the bridge's one flow per port, or the launchers.
+(2026-11-04, after the work began: the change request gained D.5, "What the plan gives the bridge" (mesh 4cdff8b3),
+which settles D.2's open question and on which D.3.1 now stands; D.5 holds over everything earlier, D.3.5's u rounds in
+flight among it ("hold per chain"). This unit was dispatched before D.5, with D.3.1 excluded; D.5's names, chains,
+placement tables and priorities are not in it, and its D.3.5 is per lane in order, the bridge's one flow per port that
+D.3.1 replaces. Both are open for the unit that implements D.3.1 and D.5.)
 
 design/disjoint-pages-revision-coordination.md, the previous coordinator's contract, stays in force except where D.3
 changes it: its four rules, its rules for every sub-agent, the form of its file split, the names files share, its
@@ -95,7 +100,8 @@ run) are reversed by D.3.4, D.3.2 and D.3.3, and are not repeated here in anothe
 
 `void plan_stale(void);` in mesh-flow.c, declared in mesh-bridge.h beside streams_cancel and streams_let_go. Where a
 plan stands (hdr `hops` above 0) and its entries' `serial` is not hdr `map_serial` as the bridge parent reads it, every
-receive of it not landed is cancelled: plan_cancel(UINT32_MAX), the plan read whole as plan_cancel reads it, each
+receive of it not landed is cancelled: plan_cancel(UINT32_MAX, the generation it judged stale) (2026-11-04, 1's
+accepted difference and review 8's finding 7: every call of plan_cancel names its generation), the plan read whole as plan_cancel reads it, each
 cancellation an arrival on its count with no phase written. Called by mesh-records.c map_put and map_adopt after any
 write that moved `map_serial` (after the write's closing notification), on the bridge parent's one event-loop thread
 (R2).
@@ -115,7 +121,7 @@ not the plan's entries' `serial`, the start returns ESTALE (R3).
 // the delegate's Metal 3 interface, at capture alone: nothing the run executes passes through it (D.3.4)
 @property(readonly) id<MTLCommandQueue> recordingQueue;
 - (instancetype)initWithDevice:(id<MTLDevice>)device;
-- (id)capture:(void (^)(void))encode repetitions:(NSUInteger)repetitions;
+- (id)capture:(void (^)(void))encode;   // 2026-11-04 (review 9's finding 1): `repetitions` gone, the replay periodic
 - (void)receive:(id<MTLBuffer>)operand;
 - (void)publish:(id<MTLBuffer>)operand;
 - (uint32_t)levels:(id)capture;
@@ -148,6 +154,12 @@ NSIndexSet *MetalReplayPublishing(struct MetalReplay *);
 // *written the waits; waits NULL counts (the room a second call takes); raises where `room` is short
 NSUInteger MetalReplayWaits(struct MetalReplay *, NSRange range, uint64_t base, struct MetalWait *waits, NSUInteger room,
     NSUInteger *written);
+// 2026-11-04 (review 10's finding 1): in place of the line above, one repetition's waits, the waiter computing
+// repetition t's: struct MetalWait { uint64_t count; uint32_t pages, copies, pass, padding; } (mesh-metal.h struct
+// mesh_metal_wait), and
+// NSUInteger MetalReplayWaits(struct MetalReplay *, struct MetalWait *waits, NSUInteger room, NSUInteger *written);
+// (2026-11-04, review 10's finding 9: MetalEncoder exported, R7's one encoder)
+// id<MTL4ComputeCommandEncoder> MetalEncoder(id<MTL4CommandBuffer> command);
 // repetitions [range) committed to `queue` (the replay's residency set the caller's, on the queue), every command
 // buffer from `allocator` and committed with `options`: the commands through each first pass's compaction in one
 // command buffer, committed; then [queue waitForEvent:event value:base + p + 1]; then that pass's later form and the
@@ -156,15 +168,19 @@ NSUInteger MetalReplayEncode(id<MTL4CommandQueue> queue, id<MTL4CommandAllocator
     struct MetalReplay *, NSRange range, id<MTLSharedEvent> event, uint64_t base);
 ```
 
-`struct MetalValue`, `struct MetalRemote`, `struct MetalWait`, `struct MetalReplay`, METAL_RECORDING_BUFFERS and
-METAL_RECORDING_COMMANDS are unchanged. Gone: `place:operand:...stride:output:`, MetalReplayEncode's MTLCommandBuffer
+`struct MetalValue`, `struct MetalRemote`, `struct MetalReplay`, METAL_RECORDING_BUFFERS and METAL_RECORDING_COMMANDS
+are unchanged (`struct MetalWait` changed with review 10's finding 1, above). The replay is periodic (review 9's
+finding 1): replay: builds L repetitions, L the least common multiple of the copies a capture binds, 4u of each
+received operand a first pass reads and the step word's copies; every range is in the run's numbering, repetition t
+from slot t mod L. Gone: `place:operand:...stride:output:`, MetalReplayEncode's MTLCommandBuffer
 form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form, MetalReplayOptimize's blit form.
 
 ### The program's copies and events (tools/e2b_replay.m, owner 7; for the reviewers)
 
 - k = 2, the host's lag, declared by the program (D.3.3: "With the host writing step t + 1 while the GPU runs step t,
-  the lag is 2"). Every per-step host input (the manifest's host inputs, the token, the index commands' outputs, the
-  step word) and every per-chunk prefill input is a value of `lag` k, placed with k copies and bound with
+  the lag is 2"). Every per-step host input (the manifest's host inputs, the token, the step word; 2026-11-04, review
+  10's finding 8: not the index commands' outputs, which the GPU writes in queue order, one copy as every other
+  GPU-written per-step operand) and every per-chunk prefill input is a value of `lag` k, placed with k copies and bound with
   place:operand:...copies:k ahead: (1 for the token where it is the step's output, else 0).
 - Three MTLSharedEvents, one writer each, values only rising: the input event (the host), the step event (the queue's
   signalEvent:value:), the landed event (the client's waiter, mesh-metal.h).
@@ -199,12 +215,14 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   PLDI 1988 (modulo variable expansion: a value live across k iterations gets k copies).
 - **R5 (D.3.3, D.3.4): the host's loop, one step at a time.** For each step t, on the program's one thread: the step
   event waited for at t - k + 1 (step t - k done; none for t < k), bounded (waitUntilSignaledValue:timeoutMS:,
-  MESH_PLATFORM_NS x k) and ending as ETIMEDOUT; allocator t mod k reset; step t - k's host-read outputs read (its
+  MESH_PLATFORM_NS x k; 2026-11-04, review 9's finding 9: MESH_PLATFORM_NS x (the passes of the steps it covers + 1
+  each), the waiter's own bound) and ending as ETIMEDOUT; allocator t mod k reset; step t - k's host-read outputs read (its
   token, from its copy); step t's inputs written into copy t mod k (the step word t among them); the input event set
   to t + 1; then [queue waitForEvent:input value:t + 1]; step t's commands committed (the index commands' repetition t,
   then MetalReplayEncode of repetition t, its base the passes before it); then [queue signalEvent:step value:t + 1].
   A step is committed only once its inputs are written and its input event set, so no queue wait the program commits
-  outlives the host: on a failure or a stop nothing more is committed, the waiter is stopped (mesh_metal_waits_stop),
+  outlives the host: on a failure or a stop (2026-11-04, review 9's finding 3: or a failure the status or the landed
+  event shows before a step is committed) nothing more is committed, the waiter is stopped (mesh_metal_waits_stop),
   and every committed later pass is ended by the waiter's `final` as now. The run's end: the step event waited for at
   `steps`, bounded, then the last k steps' outputs read. The prefill has the same loop over its chunks, with no later
   pass. Source: D.3.3 (the host writes step t once the queue has signalled step t - k, then sets its input event; the
@@ -215,7 +233,9 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   that read the step's host inputs) can no longer run every step ahead in the preparation, since each step's inputs
   exist only in their copy from step t - k's end; repetition t of them runs in step t, after the input wait and before
   step t's other commands, and their outputs are values of `lag` k like the inputs they are computed from. Source:
-  D.3.3 ("Nothing the run binds grows with its steps").
+  D.3.3 ("Nothing the run binds grows with its steps"). (2026-11-04, review 10's finding 8: their outputs are one copy,
+  not `lag` k: `lag` is for a producer ordered by an event, and these are written by GPU commands in queue order, which
+  R7's barrier orders after every earlier read, as for every other GPU-written per-step operand.)
 - **R7 (D.3.4): order between encoders.** MTL4 tracks no hazard between encoders. Every MTL4 compute encoder this code
   makes begins with barrierAfterQueueStages:(MTLStageDispatch | MTLStageBlit) beforeStages:(MTLStageDispatch |
   MTLStageBlit) visibilityOptions:MTL4VisibilityOptionDevice (MTL4CommandEncoder.h:50-72: the encoder's work waits for
@@ -242,7 +262,10 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   handler signals, waited for with a timeout. Source: D.3.4.
 - **R11 (D.3.4): the waits before the encoding.** mesh_metal_waits_start copies every wait at its start (mesh-metal.m),
   while the decode is committed a step at a time (R5), so the waits are written for the whole run before the waiter
-  starts, by MetalReplayWaits, and MetalReplayEncode writes none.
+  starts, by MetalReplayWaits, and MetalReplayEncode writes none. (2026-11-04, review 10's finding 1: one repetition's
+  waits, not the run's, {the count word of copy 0, P, u, the pass}, from which the waiter computes repetition t's
+  {count + 8 (t mod u), (t / u + 1) x P, t x passes + pass + 1}: a table of the run's waits was the trip-count
+  unrolling C1 rejected; MetalReplayEncode's base for step t is t x passes.)
 - **R12 (D.3.4): what stays Metal 3.** recordingQueue and the delegate's command buffers during a capture
   (MetalQueueRecorder, MetalCommandRecorder, their bounded completions, MetalCompletion and MetalCompleted at the
   delegate's commits). Everything else this code commits is MTL4: the decode, the prefill, the preparation (the
@@ -501,6 +524,14 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   capture never binds) to 4; 8 (note: the index commands' outputs are lag k though their producer is the GPU in queue
   order, a second form of the kind) to 7 (one copy) and R6 amended; 9 (note: R7's encoder written twice, MetalEncoder
   and e2b's encoder_of, against C9) to 4 (exported) and 7 (used).
+  The fixes so far: 1 0b27dd1a (mesh-call.h's and mesh-dataflow.c's text: the receives end with the plan as any
+  cancelled run's do, by the bridge's own means); 2 f7b5f405 (mesh-metal.h: struct mesh_metal_wait {count, pages,
+  copies, pass} and mesh_metal_waits_start(..., passes, repetitions, ...), `final` repetitions x passes), 7e5881e4
+  (mesh-metal.m: one repetition's waits copied once, each repetition's computed as the waiter walks t; EINVAL beside
+  those the coordinator listed where repetitions x passes or the last target would overflow 64 bits); 4 08083277
+  (metal_recording.h: struct MetalWait in that layout, MetalReplayWaits of one repetition, MetalEncoder exported,
+  capture: raising after the first replay:); 6 (this file): its names and R5, R6, R11 brought to the code with dated
+  notes, D.5 recorded.
 
 ### Integration
 
