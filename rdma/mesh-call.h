@@ -22,7 +22,7 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    end at once with an error, or the start returns ESTALE and the program runs none of them and plans again.  The raise
    left standing reads no execution as landed that has not: `executions` only rises, the program reads and releases
    nothing of an execution it does not run, and the plan's end (the next plan, or the program's retirement) cancels
-   every receive of it not landed.  It does not end without effect: the bridge has taken the raised executions'
+   every receive of it not landed.  It does not end without effect: the bridge has already set the raised executions'
    receives, which end with the plan as any cancelled run's do, the bridge ending and re-pairing the links toward the
    adjacent nodes they wait on (review 8's finding 1).  A second start on the same plan waits as the first and raises
    it.  0 (also where no hop is written), EINVAL where no
