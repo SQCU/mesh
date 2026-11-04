@@ -614,6 +614,21 @@ work proceeds.)
   while its claim was closed, so the release could free pages a cancellation still wrote, and a port could load the
   stale plan for the next client. Ruled and routed to 5: mesh_retire unpublishes (`hops` 0) before it closes the claims
   (the contract's mesh_retire line).
+- 8 (mesh-metal.{h,m}): bced27dc (the interface), 27e6a12e (the transport over the state section, inputs and the
+  publication as offsets, the waiter on os_sync_wait_on_address_with_timeout in 10 ms slices with MESH_PLATFORM_NS
+  deadlines, mesh_metal_status; the cancellation section, the records, the statuses and every mesh_section_create call
+  gone). Its additions to the contract: mesh_metal_waits_end may return EINVAL (the system refusing a count word);
+  waits_start refuses a NULL event, a misplaced count word, decreasing values or `final` below the last. Routed: the
+  state section's order and alignment and the first rows' `state` to 3; the wake's size 8 and SHARED flag to 6; the
+  calling rules (no ranges or invocations; `final` at least the last value; the transport outliving the waiter; the
+  stop handler's pointer cleared before waits_end) to 4's brief.
+- 12 (metal_native, kernels, native_bench): da887881, 7a6be840, 1015ef42. struct MetalNativePlan reports the partial
+  sums (`partialBytes`, `partialSlot`, a data value) and the arrival counters (`counterBytes`, `counterSlot`, a state
+  value) as two bindings, since one pointer cannot reach two values the allocator places apart; the kernels read
+  `mn_arrivals` (their one change); both kernels' counters restore at their last arrival (projection :232, argmax :68).
+  For 11: the sums a METAL_EXECUTION value at the dispatch's level, state 0; the counters METAL_INVARIANT, state 1; the
+  memset at line 1546 gone. Its caveat, open: a threadgroup that ends as an error in a later pass never arrives, so its
+  block's counter stays raised for the rest of that plan (the status has already failed the run; nothing spins).
 
 ### Reviews and where their findings went
 
