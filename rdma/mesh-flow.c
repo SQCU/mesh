@@ -217,7 +217,7 @@ static int link_prepare(struct port *port){
   }
   /* each direction's hops of the pair, slot 0's in list order (every slot holds the same hops in the same order) */
   uint32_t *pick[2]={NULL,NULL};uint64_t picks[2]={0,0},units[2]={0,0};
-  uint64_t *bytes=NULL,*carried=NULL,*forwards=NULL;uint32_t *assigned[2]={NULL,NULL};unsigned char *forwarding=NULL;
+  uint64_t *bytes=NULL,*carried=NULL;uint32_t *assigned[2]={NULL,NULL};
   for(int d=0;d<2 && index!=UINT32_MAX;d++){
     if(!(pick[d]=malloc((n?n:1)*sizeof *pick[d]))){error=ENOMEM;goto failed;}
     for(uint64_t j=0;j<n;j++)if(list[j].node==index && list[j].direction==(uint32_t)d)pick[d][picks[d]++]=(uint32_t)j;
@@ -227,20 +227,9 @@ static int link_prepare(struct port *port){
      every `depth` executions, so its receive of execution t is posted, from t = depth, only once the page's
      forwarding SENDs of t - depth have completed (mesh.h: its word's cell of t - depth at offset 8, the sent count,
      reads the page's forwards; the coordinator, 2026-11-03).  Those SENDs are other ports' children's, each adding 1 as
-     it takes one's completion.  A page's forwards: the send hops of a slot naming its receive's word (slot 0's: every
-     slot holds the same hops); a SEND forwards where its word is a receive's landed word of a slot */
-  forwarding=malloc((picks[MESH_SEND]?picks[MESH_SEND]:1)*sizeof *forwarding);
-  forwards=malloc((picks[MESH_RECEIVE]?picks[MESH_RECEIVE]:1)*sizeof *forwards);
-  if(!forwarding || !forwards){error=ENOMEM;goto failed;}
-  for(uint64_t i=0;i<picks[MESH_SEND];i++){
-    forwarding[i]=0;
-    for(uint64_t j=0;j<n && !forwarding[i];j++)
-      forwarding[i]=list[j].direction==MESH_RECEIVE && list[j].word==list[pick[MESH_SEND][i]].word;
-  }
-  for(uint64_t i=0;i<picks[MESH_RECEIVE];i++){
-    forwards[i]=0;
-    for(uint64_t j=0;j<n;j++)forwards[i]+=list[j].direction==MESH_SEND && list[j].word==list[pick[MESH_RECEIVE][i]].word;
-  }
+     it takes one's completion.  Both are the plan's data (struct mesh_hop `forwards`, mesh_plan's): a receive hop's the
+     page's forwards, the send hops of a slot naming its landed word; a send hop's 1 where it forwards (its word a
+     landed word at this node), else 0 */
   const uint64_t most=units[0]>units[1]?units[0]:units[1];
   if(most){
     bytes=malloc(most*sizeof *bytes);carried=malloc((links?links:1)*sizeof *carried);
@@ -277,7 +266,7 @@ static int link_prepare(struct port *port){
   if((f->send_count && !f->sends) || (f->receive_count && !f->receives) || (picks[MESH_RECEIVE] && !f->landing)){error=ENOMEM;goto failed;}
   for(uint64_t i=0;i<picks[MESH_RECEIVE];i++)
     f->landing[i]=(struct flow_hop){.word=list[pick[MESH_RECEIVE][i]].word,.position=list[pick[MESH_RECEIVE][i]].position,
-                                    .forwards=forwards[i]};
+                                    .forwards=list[pick[MESH_RECEIVE][i]].forwards};
   struct prepared_send *send_fill[MESH_LINK_LANES];
   struct prepared_receive *receive_fill[MESH_LINK_LANES],*receive_last[MESH_LINK_LANES];
   f->lanes=0;
@@ -298,14 +287,14 @@ static int link_prepare(struct port *port){
     _Atomic uint64_t *word=region_word(list[j].word+t*f->stride);
     if(d==MESH_SEND){
       struct prepared_send *record=send_fill[q]++;
-      *record=(struct prepared_send){.word=word,.position=list[j].position,.span=span,.forwarding=forwarding[i]};
+      *record=(struct prepared_send){.word=word,.position=list[j].position,.span=span,.forwarding=list[j].forwards!=0};
       record->request=(struct ibv_send_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND,
         .send_flags=IBV_SEND_SIGNALED};
     } else {
       struct prepared_receive *record=receive_fill[q]++;
       *record=(struct prepared_receive){.span=span,.pair=l->provider.queues[q].pair,.input=word,.argument=list[j].position,
         .hop=(uint32_t)i,.need=depth<executions && t+1>window?(uint32_t)(t+1-window):0,
-        .sent=t>=depth && forwards[i]?region_word(list[j].word+(t-depth)*f->stride+sizeof(uint64_t)):NULL};
+        .sent=t>=depth && list[j].forwards?region_word(list[j].word+(t-depth)*f->stride+sizeof(uint64_t)):NULL};
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
       if(receive_last[q])receive_last[q]->next=&record->request;
       receive_last[q]=record;
@@ -328,11 +317,11 @@ static int link_prepare(struct port *port){
       sizeof(struct prepared_send),sizeof(struct prepared_receive),executions,depth,window);
   f->sent=f->landed=0;
   for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);}
-  free(bytes);free(carried);free(forwarding);free(forwards);
+  free(bytes);free(carried);
   return 0;
 failed:
   for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);free(f->trace[d]);f->trace[d]=NULL;}
-  free(bytes);free(carried);free(forwarding);free(forwards);
+  free(bytes);free(carried);
   free(f->sends);free(f->receives);free(f->landing);
   f->sends=NULL;f->receives=NULL;f->landing=NULL;f->send_count=f->receive_count=0;f->lanes=0;
   return error;
