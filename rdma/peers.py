@@ -260,21 +260,6 @@ def realize(graph: dict, transfers: list[dict], numerical_identity: str) -> dict
                    transfers=sorted(transfers, key=lambda t: (t["source"], t["target"], t["channel"])))
     return dict(topology=graph, routes=routes, program=program, topology_id=topology_id, program_id=fingerprint(program))
 
-def bridge_arguments(realized: dict) -> dict:
-    graph = realized["topology"]
-    identities = {node["identity"]: i for i, node in enumerate(graph["nodes"])}
-    endpoints = {(n["identity"], p["port"]): p for n in graph["nodes"] for p in n["ports"]}
-    commands = {}
-    for identity, number in identities.items():
-        links = sorted((tuple(a), tuple(b)) if a[0] == identity else (tuple(b), tuple(a))
-                       for a, b in graph["edges"] if identity in (a[0], b[0]))
-        arguments = ["-I", str(number)]
-        for a, b in links:
-            local, remote = endpoints[a], endpoints[b]
-            arguments += ["--link", f"rdma_{a[1]},{identities[b[0]]},{local['address']}%{a[1]},{remote['address']}%{a[1]}"]
-        commands[identity] = dict(node=number, arguments=arguments)
-    return commands
-
 def reachable(addr: str, port: int = 22, timeout: float = 2.0) -> bool:
     try:
         with socket.create_connection((addr, port), timeout=timeout):
@@ -324,7 +309,6 @@ if __name__ == "__main__":
             observed = specification["observations"]
             graph = topology(list(observed.values()) if isinstance(observed, dict) else observed)
             compiled = realize(graph, specification["transfers"], specification["numerical_identity"])
-            compiled["bridges"] = bridge_arguments(compiled)
             print(json.dumps(compiled, indent=2))
         sys.exit(0)
     if len(sys.argv) > 1:
