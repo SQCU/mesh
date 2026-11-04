@@ -36,9 +36,10 @@
      else MESH_ABSENT.  That value is MESH_EXECUTION and wire, its bytes the range's, and one range's alone.
    - `bytes`: the range's bytes, at every rank.
    Dependences (struct mesh_dependence): the program's own data edges at one node, event `from` before event `to`, `to`
-   in execution t + lag where `from` is in t.  An event is declared[i]'s production at its source or its consumption
-   at declared[i]'s destination.  With the transport's own edges (a range produced before it is sent, a page landed
-   before it is forwarded, sent before it lands, landed before it is consumed) they are the plan's dependence template.
+   in execution t + lag where `from` is in t.  An event is declared[i]'s production at its source, its consumption at
+   declared[i]'s destination, or the source's own read of the range it sends.  With the transport's own edges (a range
+   produced before it is sent and before its source reads it, a page landed before it is forwarded, sent before it
+   lands, landed before it is consumed) they are the plan's dependence template.
 
    mesh_plan refuses a destination its source reaches by no path (mesh-graph.h mesh_graph_reach), routes every declared
    transfer at once (mesh_graph_flow), cuts each range's pages over its trees by their shares (mesh_graph_fill), and
@@ -90,9 +91,16 @@ struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,
 struct mesh_declared { uint32_t source,destination,identity,order,value,padding; size_t bytes; };
 /* a program's data edge at one node: event `from` happens before event `to`, `to` in execution t + lag where `from`
    is in t.  An event is declared[i]'s production at its source (its kinds bit set: MESH_FROM_PRODUCED for `from`,
-   MESH_TO_PRODUCED for `to`) or its consumption at declared[i]'s destination (bit clear); both events at one node */
+   MESH_TO_PRODUCED for `to`) or its consumption at declared[i]'s destination (bit clear); both events at one node.
+   (added 2026-11-04, the coordinator's ruling on 13's and 14's finding; design/disjoint-pages-revision-coordination.md,
+   "The plan call") With its source-read bit set (MESH_FROM_SOURCE_READ for `from`, MESH_TO_SOURCE_READ for `to`), the
+   event is declared[i]'s consumption at its SOURCE: the source's own read of the range it sends (a holder's combine
+   reading its own partial, a broadcast source or a single owner reading what it publishes); the source's value's reads
+   then include it.  An end with both its produced and its source-read bit is EINVAL */
 #define MESH_FROM_PRODUCED 1u
 #define MESH_TO_PRODUCED 2u
+#define MESH_FROM_SOURCE_READ 4u
+#define MESH_TO_SOURCE_READ 8u
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
 int mesh_plan(struct mesh_ctx *,const struct mesh_declared *,uint32_t count,struct mesh_value *,uint32_t values,
               const struct mesh_dependence *,uint32_t dependences);

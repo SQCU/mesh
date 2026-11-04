@@ -83,6 +83,7 @@ struct plan_demand {
   uint64_t on;                            /* the nodes its trees reach past its source (a set of map indices), the
                                              trees the fill gave pages alone: each has its W and L */
   uint32_t forwards;                      /* its distinct tree edges y -> c over those trees, each its F */
+  uint32_t own;                           /* 1 where a dependence names its source's own read: it has S(d) */
   uint32_t vertex;                        /* its first template vertex, P(d); the rest follow (plan_landed) */
   uint32_t value;                         /* its routed value at this node, p->here[value]; MESH_ABSENT where this node
                                              holds none of its pages */
@@ -95,9 +96,10 @@ struct plan_demand {
 /* A routed value (design/disjoint-pages-change-request.md, C3.3; design/disjoint-pages-revision-coordination.md, "The
    allocator"): demand `demand`'s pages at node `node`, its source or a node its trees reach (a destination or a relay),
    at every node, since u is the collective's.  Its write is P at the source, W(node) elsewhere; its reads
-   p->read[read .. read + reads), F(node, c) for each c it forwards to, ascending, then C(node) at a destination: at
-   least one (every leaf of a tree is a destination, so a relay forwards).  `source`: its first row among the least
-   lags' sources (plan_unroll), its write, then its reads in turn. */
+   p->read[read .. read + reads), F(node, c) for each c it forwards to, ascending, then C(node) at a destination, then
+   S at the source where its demand has one (the source's own read): at least one (every leaf of a tree is a
+   destination, so a relay forwards).  `source`: its first row among the least lags' sources (plan_unroll), its write,
+   then its reads in turn. */
 struct plan_value { uint32_t demand,node,write,read,reads,source; };
 /* One of this node's hops of one copy (plan_walk; mesh.h struct mesh_hop), every copy's the same: routed value
    p->here[value]'s page `page`, sent to or received from `node`, of demand `demand`.  `field`: a receive's field in its
@@ -196,7 +198,13 @@ static uint32_t plan_rank(uint64_t set,uint32_t v){ return (uint32_t)__builtin_p
    first write, an edge out of it after its last); for each node y of `on` in ascending order, W(i, y) its first
    landing at y and L(i, y) its last; for each tree edge y -> c in (y, c) order, F(i, y, c), y's last forward to c; for
    each destination z in ascending order, C(i, z), z's consumption (an edge into it is before its first read, an edge
-   out of it after its last). */
+   out of it after its last); last, where its `own` is 1, S(i), its source's own read of it (the same).
+   2026-11-04, sub-assignment 3 (the coordinator's ruling on 13's and 14's finding; design/disjoint-pages-revision-
+   coordination.md, "The allocator"): S(i) added.  Why: a source's local read of the range it sends was in no event,
+   its value's reads its forwards alone, so the allocator could let a later landing reuse its pages while the source
+   still read them (in e2b, a peer's exchange k + 1 landing in the pages of this node's exchange-k partial as its own
+   combine reads it).  S(i) exists only where a dependence names it: a read with no edge out has no unroll bound.
+   What must stay: every other vertex's place, so the offsets below hold. */
 static uint32_t plan_produced(const struct plan *p,uint32_t i){ return p->demand[i].vertex; }
 static uint32_t plan_landed(const struct plan *p,uint32_t i,uint32_t y,int last){
   return p->demand[i].vertex+1+2*plan_rank(p->demand[i].on,y)+(uint32_t)!!last;
@@ -211,14 +219,21 @@ static uint32_t plan_consumed(const struct plan *p,uint32_t i,uint32_t z){
   const struct plan_demand *d=p->demand+i;
   return d->vertex+1+2*(uint32_t)__builtin_popcountll(d->on)+d->forwards+plan_rank(d->leaves,z);
 }
-/* a program event (mesh-collective.h struct mesh_dependence): declared[i]'s production at its source, P of its demand,
-   or its consumption at its destination, C of its demand there */
-static uint32_t plan_event(const struct plan *p,uint32_t i,int produced){
-  return produced?plan_produced(p,p->of[i]):plan_consumed(p,p->of[i],p->declared[i].destination);
+static uint32_t plan_own(const struct plan *p,uint32_t i){
+  const struct plan_demand *d=p->demand+i;
+  return d->vertex+1+2*(uint32_t)__builtin_popcountll(d->on)+d->forwards+(uint32_t)__builtin_popcountll(d->leaves);
 }
-/* the node an event is at */
-static uint32_t plan_event_node(const struct mesh_declared *declared,uint32_t i,int produced){
-  return produced?declared[i].source:declared[i].destination;
+/* a program event (mesh-collective.h struct mesh_dependence), from its end's bits (`produced` MESH_FROM_PRODUCED or
+   MESH_TO_PRODUCED, `own` MESH_FROM_SOURCE_READ or MESH_TO_SOURCE_READ): declared[i]'s production at its source, P of
+   its demand; its source's own read, S of its demand; or its consumption at its destination, C of its demand there */
+static uint32_t plan_event(const struct plan *p,uint32_t i,int produced,int own){
+  if(produced)return plan_produced(p,p->of[i]);
+  if(own)return plan_own(p,p->of[i]);
+  return plan_consumed(p,p->of[i],p->declared[i].destination);
+}
+/* the node an event is at: the source for a production or the source's own read, else the destination */
+static uint32_t plan_event_node(const struct mesh_declared *declared,uint32_t i,int produced,int own){
+  return produced || own?declared[i].source:declared[i].destination;
 }
 /* a template edge before its row is known (mesh_graph_rows' records, keyed by tail) */
 struct plan_edge { uint32_t tail,head,lag; };
@@ -230,11 +245,13 @@ static uint32_t plan_edge_tail(const void *context,size_t k){ return ((const str
      them, from its row of the tree's vertices keyed by parent (mesh_graph_rows, as plan_walk reads them; no walk over
      a parent table here, C9), make `child` and `on`.
    - The template's edges, all of lag 0 but the program's: P -> W(y) for every y of `on`; P -> F(source, c); W(y) ->
-     L(y); W(y) -> F(y, c); F(y, c) -> L(c); L(z) -> C(z); and each dependence e one edge from its `from` event's vertex
-     to its `to` event's (plan_event: P of the demand where its kinds bit is set, else C at the declared transfer's
-     destination), of lag e.lag.  Every edge is sound: its tail happens before its head whatever the cables do (a range
-     is produced before it is sent; a page lands before it is forwarded, is sent before it lands, and lands before it
-     is consumed; the program's edges are its own claims).  Grouped into rows by tail (mesh_graph_rows), so every rank
+     L(y); W(y) -> F(y, c); F(y, c) -> L(c); L(z) -> C(z); P -> S where the demand has S; and each dependence e one
+     edge from its `from` event's vertex to its `to` event's (plan_event: P of the demand where its produced bit is
+     set, S where its source-read bit is, else C at the declared transfer's destination), of lag e.lag.  A demand has S
+     where a dependence's end names its source's own read.  Every edge is sound: its tail happens before its head
+     whatever the cables do (a range is produced before it is sent and before its source reads it; a page lands before
+     it is forwarded, is sent before it lands, and lands before it is consumed; the program's edges are its own
+     claims).  Grouped into rows by tail (mesh_graph_rows), so every rank
      numbers them alike.
    - The routed values, at every node, demand by demand and a demand's by ascending node: its source's, and each node
      of `on`'s (a destination's or a relay's), each with its write and reads (struct plan_value); this node's among them
@@ -251,6 +268,11 @@ static int plan_template(struct plan *p,const struct mesh_dependence *dependence
   p->child=calloc((size_t)p->demands*n+1,sizeof *p->child);
   if(!p->child)return ENOMEM;
   uint64_t vertices=0,edges=dependences,values=0,reads=0;
+  for(uint32_t k=0;k<dependences;k++){
+    const struct mesh_dependence *x=dependence+k;
+    if(x->kinds&MESH_FROM_SOURCE_READ)p->demand[p->of[x->from]].own=1;
+    if(x->kinds&MESH_TO_SOURCE_READ)p->demand[p->of[x->to]].own=1;
+  }
   for(uint32_t i=0;i<p->demands;i++){
     struct plan_demand *d=p->demand+i;
     uint64_t *below=p->child+(size_t)i*n;
@@ -264,10 +286,10 @@ static int plan_template(struct plan *p,const struct mesh_dependence *dependence
     for(uint32_t y=0;y<n;y++){d->on|=below[y];d->forwards+=(uint32_t)__builtin_popcountll(below[y]);}
     const uint64_t on=(uint64_t)__builtin_popcountll(d->on),leaves=(uint64_t)__builtin_popcountll(d->leaves);
     d->vertex=(uint32_t)vertices;
-    vertices+=1+2*on+d->forwards+leaves;
-    edges+=2*on+2*(uint64_t)d->forwards+leaves;
+    vertices+=1+2*on+d->forwards+leaves+d->own;
+    edges+=2*on+2*(uint64_t)d->forwards+leaves+d->own;
     values+=1+on;
-    reads+=d->forwards+leaves;
+    reads+=d->forwards+leaves+d->own;
     if(vertices>=UINT32_MAX || reads+values>=UINT32_MAX)return ENOMEM;
   }
   p->vertices=(uint32_t)vertices;
@@ -302,11 +324,13 @@ static int plan_template(struct plan *p,const struct mesh_dependence *dependence
       const uint32_t z=(uint32_t)__builtin_ctzll(s);
       edge[e++]=(struct plan_edge){plan_landed(p,i,z,1),plan_consumed(p,i,z),0};
     }
+    if(d->own)edge[e++]=(struct plan_edge){produced,plan_own(p,i),0};
   }
   for(uint32_t k=0;k<dependences;k++){
     const struct mesh_dependence *x=dependence+k;
-    edge[e++]=(struct plan_edge){plan_event(p,x->from,!!(x->kinds&MESH_FROM_PRODUCED)),
-                                 plan_event(p,x->to,!!(x->kinds&MESH_TO_PRODUCED)),x->lag};
+    edge[e++]=(struct plan_edge){
+      plan_event(p,x->from,!!(x->kinds&MESH_FROM_PRODUCED),!!(x->kinds&MESH_FROM_SOURCE_READ)),
+      plan_event(p,x->to,!!(x->kinds&MESH_TO_PRODUCED),!!(x->kinds&MESH_TO_SOURCE_READ)),x->lag};
   }
   mesh_graph_rows(p->vertices,p->edges,plan_edge_tail,edge,p->first,order);
   for(size_t k=0;k<p->edges;k++){p->head[k]=edge[order[k]].head;p->lag[k]=edge[order[k]].lag;}
@@ -324,6 +348,7 @@ static int plan_template(struct plan *p,const struct mesh_dependence *dependence
                              .source=source};
       for(uint64_t c=p->child[(size_t)i*n+x];c;c&=c-1)p->read[at++]=plan_forwarded(p,i,x,(uint32_t)__builtin_ctzll(c));
       if(d->leaves>>x&1)p->read[at++]=plan_consumed(p,i,x);
+      if(x==d->source && d->own)p->read[at++]=plan_own(p,i);
       v->reads=at-v->read;
       source+=1+v->reads;
       if(x==self){d->value=p->local;p->here[p->local++]=p->values;}
@@ -687,13 +712,16 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
     if(!v->section.bytes || v->kind>MESH_EXECUTION || v->wire>1 || v->state>1)return EINVAL;
     if(plan_blocks(m,v->section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
   }
-  /* a program's data edge: its two declared transfers, its kinds, both events at one node, a lag a least lag can hold
-     (mesh_graph_lags: UINT32_MAX is no walk) */
+  /* a program's data edge: its two declared transfers, its kinds (no end both produced and its source's own read),
+     both events at one node, a lag a least lag can hold (mesh_graph_lags: UINT32_MAX is no walk) */
+  const uint32_t kinds=MESH_FROM_PRODUCED|MESH_TO_PRODUCED|MESH_FROM_SOURCE_READ|MESH_TO_SOURCE_READ;
   for(uint32_t e=0;e<dependences;e++){
     const struct mesh_dependence *x=dependence+e;
-    if(x->from>=count || x->to>=count || x->kinds&~(MESH_FROM_PRODUCED|MESH_TO_PRODUCED) || x->lag==UINT32_MAX ||
-       plan_event_node(declared,x->from,!!(x->kinds&MESH_FROM_PRODUCED))!=
-       plan_event_node(declared,x->to,!!(x->kinds&MESH_TO_PRODUCED)))return EINVAL;
+    const int from_produced=!!(x->kinds&MESH_FROM_PRODUCED),from_own=!!(x->kinds&MESH_FROM_SOURCE_READ),
+              to_produced=!!(x->kinds&MESH_TO_PRODUCED),to_own=!!(x->kinds&MESH_TO_SOURCE_READ);
+    if(x->from>=count || x->to>=count || x->kinds&~kinds || (from_produced && from_own) || (to_produced && to_own) ||
+       x->lag==UINT32_MAX || plan_event_node(declared,x->from,from_produced,from_own)!=
+       plan_event_node(declared,x->to,to_produced,to_own))return EINVAL;
   }
   struct mesh_nodes nodes,after;
   int status=mesh_nodes_read(context,&nodes);
