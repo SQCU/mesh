@@ -68,9 +68,9 @@ _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
    mesh_hop's note, "The state section"), by the section's first row.  mesh_plan writes every row it claims,
    once, with the plan's other rows (design/disjoint-pages-change-request.md, Appendix C, C3.2;
    design/disjoint-pages-revision-coordination.md, "The region"), and nothing else writes it.  Every field is 0 but:
-   - a received range's first row (copy 0's first row): `pages` its pages P; `phases` the region offset of its copy-0
-     phase group, copy c's at phases + c x mesh_group_bytes(P); `count` the region offset of its copy-0 count word,
-     copy c's at count + 8 c; `state` hdr `state`;
+   - a received range's first row (a range this node consumes; copy 0's first row): `pages` its pages P; `phases` the
+     region offset of its copy-0 phase group, copy c's at phases + c x mesh_group_bytes(P); `count` the region offset
+     of its copy-0 count word, copy c's at count + 8 c; `state` hdr `state`;
    - a source range's first row: `sends` 1; `targets[0]` {stream: the region offset of its supplied word, count 1,
      stride 0}; `state` hdr `state`.
    2026-11-04, sub-assignment 1 (C3.1, C3.7 and C4): at 109 `landed` (a page's bit in its execution's landed record),
@@ -166,11 +166,14 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      receive of the same page in the same copy; `count` 0; `pages` 0.  Execution t's send is released once that field
      reads (acquire) mesh_phase(t / u + 1), its receive's landing in execution t.
    - A receive: `page` its page; `word` the region offset of the uint64 holding its phase field and `field` the
-     field's low bit (even, < 64); `count` the region offset of its range's count word for this copy; `pages` its
-     range's pages P.  Its landing in execution t, once the page's bytes are in its page (after the poll's acquire), is
-     one atomic XOR of bit `field` + ((t / u) & 1) of `word` (release), then the count + 1 (release), then, where the
-     count it made is a multiple of `pages`, the count word's waiters woken (os_sync_wake_by_address_all,
-     OS_SYNC_WAKE_BY_ADDRESS_SHARED).  Nothing else is written for it, and nothing in or beside its page.
+     field's low bit (even, < 64); `count` the region offset of its range's count word for this copy, or 0 where this
+     node does not consume the range (a relay's own receive: its forwards are released by its phase, nobody waits on a
+     count, and the state section has no count word for it); `pages` its range's pages P.  Its landing in execution t,
+     once the page's bytes are in its page (after the poll's acquire), is one atomic XOR of bit `field` + ((t / u) & 1)
+     of `word` (release), then, where `count` is not 0, the count + 1 (release), then, where the count it made is a
+     multiple of `pages`, the count word's waiters woken (os_sync_wake_by_address_all, OS_SYNC_WAKE_BY_ADDRESS_SHARED).
+     Nothing else is written for it, and nothing in or beside its page; for a receive whose `count` is 0 the bridge
+     adds, wakes and raises nothing.
    Phases (C3.7: PTX's mbarrier phase bit, widened to two).  A receive of copy c lands in executions c, c + u, c + 2u,
    ...; its field starts at 00, and after execution t's landing holds mesh_phase(t / u + 1), Gray 00 01 11 10: a
    landing flips one bit, which never carries into the next field.  A reader of execution t compares the field with
@@ -180,40 +183,43 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    The state section (C3.2, C3.7; struct mesh_state at hdr `state`, mesh_plan_state): the plan's state, the landed
    list's own section, which mesh_plan places with the plan's values (an invariant of the plan, no page-table row
    naming it), in new pages for every plan, apart from the data pages it tells of.  Each word has one writer:
-   - `phases`: the phase list, a dense array of 2-bit fields.  For received range g (g < `ranges`, in the plan's
-     demand order) and copy c, a group of mesh_group_bytes(P_g) bytes, groups in (g, c) order, g major; page k of the
-     range (k < P_g) has its field at bits [2 (k % 32), 2 (k % 32) + 2) of uint64 word k / 32 of its group.  A group is
+   - `phases`: the phase list, a dense array of 2-bit fields.  For each range this node receives (one it consumes,
+     or a relay's own, whose forwards its phases release), in the plan's demand order, and copy c, a group of
+     mesh_group_bytes(P) bytes, groups in (range, c) order, range major; page k of the range (k < P) has its field at
+     bits [2 (k % 32), 2 (k % 32) + 2) of uint64 word k / 32 of its group.  A group is
      whole lanes (MESH_LANE_BYTES, a compile-time 16: 64 fields), so a lane's load never spans two groups and a reader
      takes a range's copy with ceil(P / 64) loads.  A field's one writer is the bridge's data path that takes its
      receive.
-   - `counts`: `ranges` x `copies` uint64 words, range g's copy c at index g x copies + c.  A count takes arrivals (+1
-     a landing; a cancellation raises it to its final value, below) and only rises; execution t of range g is complete
-     at (t / u + 1) x P_g on the count of copy t mod u.  Per received range and copy, where C3.1 counts once a node
-     (D1, a departure): a decode's exchanges are read in sequence, each computed from the read of the one before, so a
-     pass held for every receive of its execution would wait on receives its peers send only after their own reads,
-     and every pass would be held to its deadline; Portals 4's counting events (one counter an operation set) and PTX's
-     mbarrier (one a tile) count once a unit of work.  Per copy, since with u >= 2 execution t + 1's landings into the
-     other copy can arrive before t's are all in.
+   - `counts`: `ranges` x `copies` uint64 words, `ranges` the received ranges this node consumes (a relay's own
+     receives have none), range g (in the plan's demand order) copy c's at index g x copies + c.  A count takes
+     arrivals (+1 a landing; a cancellation raises it to its final value, below) and only rises; execution t of range
+     g is complete at (t / u + 1) x P_g on the count of copy t mod u.  Per received range and copy, where C3.1 counts
+     once a node (D1, a departure): a decode's exchanges are read in sequence, each computed from the read of the one
+     before, so a pass held for every receive of its execution would wait on receives its peers send only after their
+     own reads, and every pass would be held to its deadline; Portals 4's counting events (one counter an operation set)
+     and PTX's mbarrier (one a tile) count once a unit of work.  Per copy, since with u >= 2 execution t + 1's
+     landings into the other copy can arrive before t's are all in.
    - `supplied`: `releases` uint64 words, release r this node's r-th source range in the plan's demand order.  Its
      one writer is the range's producer, which raises it to t + 1 after its last write in execution t (release): a
      host producer stores t + 1 (mesh_host_publish), a GPU producer adds 1, its executions running in order (D9).  One
      word serves every execution; nothing cancels it.
    - `status`: one struct mesh_status, the GPU's alone: `behind` the later passes that found a field one behind,
      `ahead` those that found anything else, `first` the greatest ~t over them (0 none: the first failed execution is
-     ~first).  The host reads it after the run.
+     ~first; 32 bits, so exact below 2^32 executions).  The host reads it after the run.
    - `executions`: the executions the bridge serves, raised (never lowered) by the client's start
      (mesh_transfers_start, D2), so the bridge posts exactly the receives its peers send and compile time never sees
      the run's length.
-   - `copies` u; `receives` this node's receives a copy (the sum of its received ranges' pages); `ranges` and
-     `releases` as above.
+   - `copies` u; `receives` this node's receives a copy (the sum of the pages of every range it receives); `ranges`
+     and `releases` as above.
    Every word is set to its starting value once, where mesh_plan places the section (D3), as mbarrier.init runs once
    a kernel: the phases, counts, supplied words, status and `executions` 0.  None is reset, and none written to an
    earlier value, while the plan stands.
    Cancellation (C3.1: cancellations arrive on the count, as arrivals do on an mbarrier).  Where a plan ends with
    receives not landed, and where the bridge cancels (mesh-flow.c link_close, plan_cancel), each such receive's count
    word is raised (a compare-and-swap loop that never lowers it; release) to its final value, P x the executions t <
-   `executions` with t mod u its copy, then woken.  No phase is written for a cancellation, so a reader finds the
-   receive one phase behind, and the GPU's later pass counts it in `status`.  No other word is a cancellation's.
+   `executions` with t mod u its copy, then woken (a receive whose `count` is 0 has none to raise).  No phase is
+   written for a cancellation, so a reader finds the receive one phase behind, and the GPU's later pass counts it in
+   `status`.  No other word is a cancellation's.
    Both ends: for adjacent nodes a and b, copy c's entries at a naming b with MESH_SEND and those at b naming a with
    MESH_RECEIVE are the same hops in the same order, and u is the collective's, so both ends hold the same copies.
    Both bridges assign the pair's hops in list order (copy 0's, then copy 1's, ...) to the pair's cables and queue
@@ -254,7 +260,8 @@ _Static_assert(sizeof(struct mesh_hop)==48 && offsetof(struct mesh_hop,word)==16
 static inline uint32_t mesh_phase(uint64_t k){ k&=3; return (uint32_t)(k^(k>>1)); }
 /* the bytes of one phase group: a received range of `pages` pages in one copy, whole lanes */
 static inline uint64_t mesh_group_bytes(uint32_t pages){ return ((uint64_t)pages+63)/64*MESH_LANE_BYTES; }
-/* the GPU's alone (struct mesh_hop's note, "The state section") */
+/* the GPU's alone (struct mesh_hop's note, "The state section"): `first` is 32 bits, the greatest ~t (t's low 32
+   bits) over the failed passes, so the first failed execution it names is exact below 2^32 executions */
 struct mesh_status { _Atomic uint32_t behind,ahead,first,padding; };
 _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahead)==4 &&
   offsetof(struct mesh_status,first)==8,"mesh_status");
