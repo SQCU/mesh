@@ -175,10 +175,21 @@ here with their evidence and in the final report.
   plan cannot begin serving it after the release looked: a port announces the generation it loads (`prepared`), fences
   and reads `hops` and `plan` again, withdrawing where they moved (Fraser's announced epoch and its re-read); the
   release fences before it reads the announcements. Nobody waits.
-- **D11: LiteRT's weights are LiteRT's.** e2b's model weights are the delegate's own GPU buffers inside its compiled
+- **D11: LiteRT's weights, and its unrenamed buffers, are LiteRT's.** e2b's model weights are the delegate's own GPU buffers inside its compiled
   models (metal_recording.m MetalNativeSubstitute reads them as the delegate bound them), never region pages; C3.2's
   "weights" in e2b are the region values the program binds (its native stages' operands, the KV cache, the prepared host
-  inputs), all of which the plan places as invariants.
+  inputs), all of which the plan places as invariants. The delegate's internal buffers the recorder does not rename
+  (MetalPrepareDataflow renames a value one store-only kernel defines whole; the others are written in part, at an
+  offset, or read before they are written, e.g. the prefill's KV conversions) stay the delegate's allocations as
+  before, bound as captured: they were never the recorder's pool, and placing them would need their capture-time
+  content carried into the placed pages, which no C3 item covers (review 16's finding 5b).
+- **D12 (departure): the run's per-step host inputs are sized by the run.** The host-prepared decode operands
+  (positions, masks, cache parameters, the accepted schedule, the token stream) hold one instance a step, written
+  before the first execution, so their pages grow with the steps and a plan placed for N steps serves N (review 16's
+  finding 2, against C3.3's "a plan runs any number of executions" and C3.5's "pages that don't grow with its steps").
+  Holding them in u copies would need a producer of each step's inputs ordered against the GPU's reads (a host write
+  after a GPU signal, or a kernel computing them from the step), which C3 does not name. The routed values, the
+  capture's values and the state section do not grow with the steps.
 
 ## Names files share
 
@@ -790,6 +801,14 @@ work proceeds.)
   operand apart from a row kernel that releases a sent one (else the release would wait behind the mask); each first
   pass one more level and two encoders; in a 2D or 3D partial dispatchThreads threadgroup the later form's SIMD builtins
   are the full threadgroup's (1D exact; no e2b reader is of that kind): open. 11 launched.
+- 11 (metal_recording.m, third): d5b478e1 (the native K split's partial sums a METAL_EXECUTION value and its counters a
+  METAL_INVARIANT state value, bound at their slots, both forms of a masked reader binding them; the
+  newBufferWithLength and the memset gone; Dawn's setBytes immediates, the last recorder allocation a replayed command
+  bound, now entries at 256-byte offsets of one invariant value a capture, written once where placed, as the phase
+  table is). Its read of the file against the four rules: no fill of a value of the run, no other recorder allocation
+  bound by a replayed command, no spin, one writer a state word (counts and max aside), no literal plan address, no
+  old form left. Its notes: a delegate fillBuffer passes through at capture onto stand-in or the delegate's own memory
+  and is never replayed; the delegate's unrenamed buffers (D11). Review 16's items 4, 6 and 9 routed to it after.
 
 ### Reviews and where their findings went
 
@@ -807,8 +826,36 @@ work proceeds.)
   unstated) to 5 (6f4c84ea) and this contract; 6 (a cancellation's final value computed from `executions` at that
   moment): open (bounded); 7 (status `first` 32 bits) to 1 (the note); 8 (a `copies` fallback) to 3; 9 (D8: a second
   program gets EADDRINUSE, against C3.4's "any number of programs"; a re-plan needs room for both plans' claims): open.
+- 16 (the GPU and program side, at 184683ec: 8's, 9's, 10's, 12's, 13's, 4's and 14's commits; every file compiles
+  alone): no lane waits, no UINT64_MAX stores, no plan-dependent literal in a kernel, nothing read from stand-in memory
+  after the capture, the waiter's system calls as the SDK declares them, the decode's submission, the chains and the
+  manifest's rule (but 3 and 4) found sound; no fill lands in stand-in memory during a capture (ml_drift clears a
+  buffer only on a client's clear). Findings and where they went: 1 (defect: the host's mask fills wrote only each
+  row's 1s, the 0s having come from the removed memset, so a reused page's stale bytes would read as visible) to 4
+  (every host fill writes its whole value instance: the producer writing its value, rule 1); 2 (the host-prepared
+  per-step inputs are sized by `steps`, so their pages grow with the run and a plan for N steps serves N): ruled a
+  departure, D12; 3 (ml_drift's special and composite fusions put several operators outside FUSED in one kernel;
+  LinkNodes never links past a graph output, and no fusion pairs a routed read with a routed write in e2b's routes):
+  open, for other programs; 4 (the recorder's fusions judge hazards by capture-buffer identity, while placement may
+  give two routed operands one page) to 11 (every routed operand aliases every other in MetalPromoteOperand,
+  MetalFuseRows and MetalInlineMaps); 5a (the native partials) with 11 (d5b478e1); 5b (the delegate's unrenamed
+  buffers stay Dawn's): ruled, D11 extended; 6 (unbounded waits on local GPU work) to 4 (the preparation, prefill and
+  profile waits bounded at MESH_PLATFORM_NS x their repetitions) and 11 (the capture's waits bounded, raising); 7 (a
+  waiter's ETIMEDOUT or ECANCELED with the status 0 printed tokens as a success) to 4 (the waiter's cause is the run's
+  error); 8 (the completion bound of MESH_PLATFORM_NS after the waiter would fail a healthy rank whose GPU lags its
+  landings) to 4 (MESH_PLATFORM_NS x steps); 9 (a direct publication's restoring counter goes out of step after a
+  failed later pass and would release a range early, a peer reading it as landed) to 11 (a producer that is a masked
+  reader releases by the one-thread dispatch, refused otherwise); 10 (metal_native.h's comment on the slots) to 12;
+  11 (a dead check and a stale comment around MetalReplayEncode's room) to 4. Its own slip: one `git show` output
+  written to the scratchpad and deleted in the same session. The scratchpad's files of this round are MSL snippets and
+  notes; the source copies there (abd-mesh-link.c, coll-86e.c, flow-head.c and others) date from 2026-11-03, before
+  this round, and were left untouched.
 
 ### Open at the end
+
+- D12: the per-step host inputs grow with the run (review 16's finding 2). ml_drift's special and composite fusions
+  can put operators outside prepare_e2b.py's FUSED set in one kernel; e2b's routes are not affected, other programs may
+  be (finding 3).
 
 - metal_recording.m's later form: in a 2D or 3D dispatchThreads grid's partial threadgroup its SIMD builtins are the
   full threadgroup's, not the original partial one's (1D exact; no e2b reader is of that kind; owner 10).
