@@ -263,7 +263,8 @@ static void flow_executions(struct flow *f,uint64_t executions){
    serves (link_receive_progress, link_send_progress).  0, or an error value: ESTALE, ETIMEDOUT or ENOMEM reading the
    map, EINVAL where the plan has no state, its copies do not divide the list, or an entry's `field` or `pages` is none
    a plan writes (mesh.h struct mesh_hop: a field's low bit even and below 64, a receive's pages at least 1), and
-   `hops` and `plan` still read as loaded (else EAGAIN: plan_refused),
+   `hops` and `plan` still read as loaded (else EAGAIN: plan_refused), EALREADY where this port carries units of a
+   plan whose run has begun (its `executions` above 0 at the load: the note at the refusal, below),
    EHOSTUNREACH where the pair has units but no link of rate, EPROTO where the map gives this cable a queue pair its
    link does not hold, EMSGSIZE where a page is more frames than a lane it is assigned can hold; or EAGAIN, no refusal,
    where the plan was written again while it was read.  On 0 the port's `prepared` is the plan's generation, stored
@@ -352,10 +353,30 @@ static int link_prepare(struct port *port){
   /* a page a lane's queue cannot hold refused, not left unposted: its frames past the lane's receive room (lane_reset's
      frame_capacity) or past its SEND gate's (link_connect) */
   const uint64_t frames=frames_of(page_bytes()).n;
-  for(uint32_t q=0;q<MESH_LINK_LANES;q++)
+  uint64_t carried_units=0;
+  for(uint32_t q=0;q<MESH_LINK_LANES;q++){
     if((lane_units[MESH_RECEIVE][q] && frames>l->lane[q].frame_capacity) || (lane_units[MESH_SEND][q] && frames>l->gate[q].capacity.n)){
       error=EMSGSIZE;goto failed;
     }
+    carried_units+=lane_units[MESH_SEND][q]+lane_units[MESH_RECEIVE][q];
+  }
+  /* 2026-11-04, the coordinator's ruling on sub-assignment 6's finding 2 (a re-paired child loading the plan again):
+     a plan whose run has begun, its state's `executions` (acquire) above 0 at this load, is refused (EALREADY, by
+     link_run's refusal: `code`, phase MESH_STOPPED, `prepared` the refused generation), where this port carries units
+     of it.  Why: a record's executions are counted from the load (`landings`, the cursors at execution 0), and a load
+     after the run began cannot know which executions landed or were sent before it; mesh-dataflow.c
+     mesh_transfers_start raises `executions` only once every port its hops name has loaded the plan, so a load that
+     reads above 0 is a late one (a child re-paired on the same plan, or a port loading after the start).  Such a port
+     posts nothing of the plan, so the next plan finds no request of it outstanding on its queue pairs, and its
+     `prepared` is cleared by link_close once `hops`, `plan` or the client moves, so the release of the plan's claim
+     is held no longer than the plan stands.  Where the port carries no unit of the plan it is loaded as before
+     (differs from the ruling's text, which refuses every such load): it posts nothing either way, and a refused port
+     whose cable reaches a node a hop names would fail the next start's wait (STOPPED) with nothing to serve.  A read
+     torn by a plan written again is EAGAIN, not a refusal (plan_refused).  What must stay: no record served from a
+     load after its run began */
+  if(carried_units && atomic_load_explicit(&words->executions,memory_order_acquire)){
+    error=plan_refused(hops,plan,EALREADY);goto failed;
+  }
   /* the records, by lane, copy and assignment order: first[q (u + 1) + c] lane q's copy c's first, each lane's units
      counted by copy and summed in that order (copy pick / n; a lane's units come in list order, so in copy order) */
   f->send_count=f->receive_count=0;
