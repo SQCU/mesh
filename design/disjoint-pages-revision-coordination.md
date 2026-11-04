@@ -220,7 +220,10 @@ here with their evidence and in the final report.
   copy. `hops` = u x n: copy c's n entries at [c n, c n + n), every copy the same hops in the same order with the same
   `node`, `direction`, `serial`; `page`, `word`, `field`, `count` are copy c's own. Execution t runs copy t mod u.
   - A receive: `page` its page; `word` the region offset of the uint64 holding its field, `field` the field's low bit
-    (even, < 64); `count` the region offset of its range's count word for this copy; `pages` its range's pages P.
+    (even, < 64); `count` the region offset of its range's count word for this copy, or 0 where this node does not
+    consume the range (a relay's own receive: its forwards are released by its phase and nobody waits on a count, so
+    the bridge adds, wakes and raises nothing for it; review 15's finding 1); `pages` P_g, the pages this node receives
+    of the range a copy.
   - A send from its range's source: `word` the region offset of the range's supplied word; `field` MESH_ABSENT;
     `count` 0; `pages` 0. Execution t's send is released once the word reads (acquire) at least t + 1.
   - A forwarding send (a relay's, or a destination's that sends the page on): `word` and `field` of its node's receive
@@ -267,7 +270,8 @@ map's records (`map_room`), then the arena at a block boundary.
   A run is taken by setting its bits atomically; a bit already set (the bridge's release and an attaching client run
   at once) undoes what this call set and scans on past it, so the scan ends in at most one pass over the bitmap.
 - `mesh_retire(m, client)`: after its compare-and-swap of the client word, hdr `hops` stored 0 (release, a release
-  fence, `plan` woken), then every claim of the client closed, then the client word cleared (as now). A retired plan is
+  fence, `plan` woken; hdr `state` stored 0 with it, review 15's finding 2), then every claim of the client closed,
+  then the client word cleared (as now). A retired plan is
   unpublished before its claim can be released (RCU's order: nothing reaches what is reclaimed), so the bridge
   parent's cancellations never compute a store from it and no port loads it for the next client (owner 7's finding).
 - `uint32_t mesh_retired_release(struct hdr *)`: a seq_cst fence, then each closed claim whose generation no port's
@@ -279,8 +283,9 @@ map's records (`map_room`), then the arena at a block boundary.
 - `int mesh_transfers_start(struct mesh_ctx *,uint64_t executions);`: the bounded wait for the ports (as now) first,
   then the plan's state word `executions` raised to `executions` (a compare-and-swap loop that never lowers it;
   release) and `plan` woken. EINVAL where no plan is written (hdr `state` 0). Every port loads a plan before any of its
-  executions is served; a port refuses to load a plan whose `executions` is already above 0 (a re-paired child cannot
-  know which executions landed), so it posts nothing of it (the coordinator's ruling on 6's finding).
+  executions is served; a port that carries units of a plan refuses to load it where its `executions` is already
+  above 0 (a re-paired child cannot know which executions landed), so it posts nothing of it (the coordinator's ruling
+  on 6's finding; a port with no units posts nothing either way and is not refused).
 - Removed: `mesh_plan_erased`, `mesh_publication_prepare`, mesh_claim's claim at attach, the wait at attach, the
   `local` run and its laying out of values at creation.
 
@@ -320,7 +325,8 @@ uint64_t mesh_host_arrived(struct mesh_ctx *,struct mesh_section,uint64_t execut
 - A value a declared transfer names here is MESH_EXECUTION and wire, and one demand's alone (EINVAL otherwise). Wire
   values lie in the registered window; the rest outside it.
 - `state` 1: the value is state (a GPU counter the program keeps): mesh_plan writes it to 0 once when it places it
-  (D3). `state` 0: data, never written by the plan.
+  (D3); only a local MESH_INVARIANT value may be state (EINVAL otherwise: review 15's finding 3). `state` 0: data,
+  never written by the plan.
 - Out, for each value: `section.first` its first row, `pages` P x block (P its blocks), `bytes` as given, `count` its
   copies (u for a routed value; 1 for every other), `stride` P: copy c's rows at first + c x P + k, k < P, and its first
   byte at mesh_section_address(section, c). A program binds execution t of a routed value to copy t mod count.
@@ -754,10 +760,43 @@ work proceeds.)
   signal source on a serial queue, the pointer cleared by dispatch_sync before waits_end); the completion bound of
   MESH_PLATFORM_NS would fail a long decode with no later pass (to MESH_PLATFORM_NS x (passes ? 1 : steps)). The
   preparation's, prefill's and profile's waits are on local GPU work with no spin and no remote dependency: left.
+- 4 again: e9333def (the stop through a libdispatch signal source on a serial queue, the waiter's pointer set and
+  cleared by dispatch_sync, the async-signal handler and its atomic gone; the completion bound MESH_PLATFORM_NS x
+  (passes ? 1 : steps), from the waiter's end or the commit).
+- 5 again: 6f4c84ea (mesh_retire stores `hops` 0 and `state` 0, a release fence, `plan` woken, before closing claims;
+  the late-load refusal's qualification stated).
 
 ### Reviews and where their findings went
 
+- 15 (the mesh side, at c2f7f36f; every mesh file compiles alone): the layouts, the allocator's rule, the bridge's
+  phase and counter arithmetic, the memory orders, the threads, C9 and every C4 removal found sound. Findings and
+  where they went: 1 (defect: the bridge's landing gained a second atomic, a 64-bit division and a wake system call
+  where a count completes, every landing for a one-page range, and at a relay where nothing waits) to 3 (a relay's own
+  receive gets `count` 0 and no count word), 6 (no add, wake or raise where `count` is 0; the wake where the add makes
+  (j + 1) x pages, no division) and 1 (the notes); the one wake a range and execution at a destination is C3.1's own
+  ("woken by the bridge's arrivals"): open, for the transport readings; 2 (defect: mesh_retire left hdr `state`
+  naming the retired plan, so a start or a transport could reach released pages) to 5 (6f4c84ea); 3 (defect: `state` 1
+  accepted on routed and execution values, which would zero data pages or share a counter's pages) to 3 (EINVAL
+  unless a local invariant); 4 (gap: after an upstream loss a relay's forwards are never released, so the node past
+  it reads ETIMEDOUT at its deadline, not ENOLINK): open (bounded); 5 (the late-load refusal's qualification
+  unstated) to 5 (6f4c84ea) and this contract; 6 (a cancellation's final value computed from `executions` at that
+  moment): open (bounded); 7 (status `first` 32 bits) to 1 (the note); 8 (a `copies` fallback) to 3; 9 (D8: a second
+  program gets EADDRINUSE, against C3.4's "any number of programs"; a re-plan needs room for both plans' claims): open.
+
 ### Open at the end
+
+- The bridge wakes a destination's count word once a range and execution (C3.1's design: the client's thread waits on
+  the count's address, woken by the bridge's arrivals). For e2b's one-page partials that is a system call a landing on
+  the progress thread. Its cost is for the transport readings to show (docs/measurement.md); the literature's remedy,
+  a waiter's indication that the bridge reads before waking (U. Drepper, Futexes are tricky, 2005), is not cited by C3
+  and is not implemented.
+- After an upstream loss a relay's forwards are never released, so the node past it reads ETIMEDOUT at its waiter's
+  deadline, not ENOLINK (bounded; review 15's finding 4). A cancellation's final value is computed from `executions` as
+  it reads then (bounded; finding 6).
+- D8: one client attached at a time stays; a second program gets EADDRINUSE, where C3.4 says any number of programs
+  hold disjoint sections at once. Claims per plan and their release support any number of claims; serving several
+  programs' plans at once needs a page list a client, which no C3 item or C4 entry names. A re-plan claims its pages
+  while the standing plan's claim is held, so it needs room for both.
 
 - metal_recording.m MetalPrepareDataflow's level assignment (a longest-path walk over the dispatches, from before this
   change) is a graph computation outside the graph module (C9); moving it needs libmetal_recording to link libmesh.
