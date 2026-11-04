@@ -142,6 +142,31 @@ static int plan_pages(struct hdr *m,const struct mesh_section *section,uint64_t 
   }
   return 0;
 }
+/* A plan's own section (its relay pages, its words) released by the region's closed path, as mesh-dataflow.c
+   mesh_retire releases a retired client's rows: each row of it this client owns closed where it heads a buffer, and
+   given up (mesh_rows_release).  The bridge's mesh_retired_release frees closed rows only while no port's `prepared`
+   holds a plan, since a port's outstanding requests may still name their pages.  The allocator's reclaim
+   (mesh_reclaim) then takes their pages back.  So the pages stay held while a port may still post on them, and are
+   freed within a liveness turn of the bridge (MESH_PAUSE_NS) once none does.  Added for review R1 round 2 (P1):
+   c5bffd0c's plan call released none of its sections. */
+static void plan_release(struct mesh_ctx *context,struct mesh_section section){
+  struct hdr *m=context->M;
+  if(section.first==MESH_ABSENT)return;
+  const uint32_t rows=section.stride?section.count*section.stride:1;
+  for(uint32_t r=section.first;r<section.first+rows;r++){
+    struct mesh_buffer *buffer=&mesh_buffers(m)[r];
+    if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==context->client && buffer->pages)
+      atomic_store_explicit(&buffer->closed,1,memory_order_release);
+  }
+  mesh_rows_release(context,section.first,rows);
+}
+/* The sections of the plan this process last wrote (its relay pages and its words), with the region and client that
+   own them, so the plan that replaces it releases them (plan_release).  Kept here because struct mesh_ctx
+   (mesh-dataflow.h) has no field for them.  One record: the plan of another region or client is not this one's to
+   release, and a retired client's rows were closed by its retirement (mesh_retire). */
+static struct plan_held { struct hdr *m; uint64_t client; struct mesh_section relay,words; } plan_held={
+  .relay={.first=MESH_ABSENT},.words={.first=MESH_ABSENT}};
+
 /* word w's region offset in execution 0: each word of each execution its own hop_stride-byte cell (mesh.h struct
    mesh_hop: the word at offset 0, a landed word's page's sent count at offset 8), word w's cells its executions'
    in turn, so execution t's word is at it + t x hop_stride and no two words' cells overlap.  Changed from c5bffd0c's
@@ -254,6 +279,10 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   struct plan p={.context=context,.declared=declared,.n=n,.self=nodes.self,.depth=depth,.executions=executions,
                  .serial=nodes.serial};
+  /* this call's sections, released where it fails (plan_release); `erased` once the previous plan is gone (hdr `hops`
+     0), from which a failure leaves no plan and no words named */
+  struct mesh_section relay={.first=MESH_ABSENT},words={.first=MESH_ABSENT};
+  int erased=0;
   struct plan_key *key=malloc(((size_t)count+1)*sizeof *key);
   uint32_t *root=NULL,*demand=NULL;
   size_t *trees=NULL;
@@ -354,26 +383,43 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
     struct plan_demand *d=p.demand+i;
     if(d->mine!=MESH_ABSENT && (status=plan_pages(m,&declared[d->mine].section,d->pages,depth)))goto done;
   }
-  /* this node's relay pages, in the registered window, and the plan's words, outside it, zeroed */
-  for(uint32_t i=0;i<p.demands;i++){
-    struct plan_demand *d=p.demand+i;
-    if(!d->relayed)continue;
-    if((status=mesh_section_create(context,d->pages*block,depth,1,&d->relay)))goto done;
-    if((status=plan_pages(m,&d->relay,d->pages,depth)))goto done;
+  /* this node's relay pages, in the registered window: one section for the plan, its `depth` slots each every relayed
+     demand's pages in turn, so a plan holds two sections (these and its words) to release */
+  uint64_t relays=0;
+  for(uint32_t i=0;i<p.demands;i++)if(p.demand[i].relayed)relays+=p.demand[i].pages;
+  if(relays){
+    if((status=mesh_section_create(context,relays*block,depth,1,&relay)))goto done;
+    if((status=plan_pages(m,&relay,relays,depth)))goto done;
+    /* demand d's relay pages: a view of the section from its first page, slot s's rows `relays` apart (plan_row) */
+    for(uint32_t i=0,at=0;i<p.demands;i++){
+      struct plan_demand *d=p.demand+i;
+      if(!d->relayed)continue;
+      d->relay=(struct mesh_section){relay.first+at,relay.pages,d->bytes,depth,relay.stride};
+      at+=(uint32_t)d->pages;
+    }
   }
-  /* a cell a word and execution (plan_word), at least one word's */
+  /* the plan's words, outside the window, zeroed: a cell a word and execution (plan_word), at least one word's */
   const uint64_t total=p.releases+p.landed;
-  struct mesh_section words;
   if((status=mesh_section_create(context,(total?total:1)*executions*sizeof(struct mesh_send),1,0,&words)))goto done;
   void *address=mesh_section_address(context,words,0);
   memset(address,0,words.bytes);
   p.words=(uintptr_t)address-(uintptr_t)m;
-  /* mesh-metal.m's publication buffer: the plan's words, the GPU's release stores and its waits on landed words */
-  context->send_off=p.words;
-  context->send_bytes=(uint64_t)words.pages*m->pgsz;
 
-  /* mesh.h's order of writing a plan: `hops` 0, the entries, executions, depth, hop_stride and plan, then `hops` */
+  /* mesh.h's order of writing a plan: `hops` 0, the entries, executions, depth, hop_stride and plan, then `hops`.  The
+     release fence keeps the entries' writes after the store of 0 (review R1 round 2, S2: a release store orders what
+     precedes it, not what follows), so a bridge that read `hops` and `plan`, then the entries, then them again after
+     an acquire fence (mesh-flow.c, b3cc9990) sees a change wherever it read a torn list */
   atomic_store_explicit(&m->hops,0,memory_order_release);
+  atomic_thread_fence(memory_order_release);
+  /* the previous plan is gone: its sections released (plan_release keeps them held while a port may still post on
+     them), and its words no longer named for the GPU */
+  erased=1;
+  if(plan_held.m==m && plan_held.client==context->client){
+    plan_release(context,plan_held.relay);
+    plan_release(context,plan_held.words);
+  }
+  plan_held=(struct plan_held){.relay={.first=MESH_ABSENT},.words={.first=MESH_ABSENT}};
+  context->send_off=context->send_bytes=0;
   for(uint32_t i=0;i<p.demands;i++){
     const struct plan_demand *d=p.demand+i;
     if(d->mine==MESH_ABSENT)continue;
@@ -398,7 +444,15 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   atomic_store_explicit(&m->hops,(uint64_t)depth*p.hops,memory_order_release);
   /* the bridge's progress threads watch `plan` with bounded waits (CONTRACT.md "Wave-2 interfaces") */
   os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  /* this plan's sections, the next plan's to release; mesh-metal.m's publication buffer its words, the GPU's release
+     stores and its waits on landed words */
+  plan_held=(struct plan_held){m,context->client,relay,words};
+  context->send_off=p.words;
+  context->send_bytes=(uint64_t)words.pages*m->pgsz;
 done:
+  /* a failed call's own sections released; once the previous plan was erased, none is left named */
+  if(status){plan_release(context,relay);plan_release(context,words);}
+  if(status && erased)context->send_off=context->send_bytes=0;
   free(key);free(p.demand);free(root);free(up);free(down);free(demand);free(p.parent);free(share);
   free(p.tree);free(p.run);free(rate);free(latency);free(trees);
   return status;

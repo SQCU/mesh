@@ -32,7 +32,8 @@
    with `device_stride` = hop_stride, a source page's release word as `targets[0]` = {word, 1, 1} with `sends` = 1 and
    `argument` = its position.  Each entry carries the map serial and its `forwards` (a receive's: the sends here that
    forward its page; a send's: 1 where it forwards a landed page); hdr `plan` is the plan's generation (the last
-   plan's + 1, never 0).
+   plan's + 1, never 0).  A plan's relay pages and words are released, by the region's closed path, when the next plan
+   erases it, and a failed call's own as it fails; the bridge frees them once no port's requests may name them.
    Returns 0; EINVAL for a malformed transfer or a page outside the registered window; EHOSTUNREACH for a source or
    destination not in the map, or with no Thunderbolt-5 path within it; ENOSPC past hdr `hop_capacity` (or a page's
    publication targets); ESTALE where the map moved while planning (plan again on the map as it is); ENOMEM; or the
