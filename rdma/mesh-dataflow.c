@@ -79,13 +79,19 @@ static uint32_t mesh_head_after(struct hdr *m,uint32_t row,uint64_t owner){
    the release could free pages the bridge parent's plan_cancel still raised counts in, and a port's link_run (`hops`
    and `client`) reloaded the stale plan for the next client, posting receives no peer would fill.  With `hops` 0
    nothing reaches the retired plan: plan_cancel returns at its first read, the ports end it (link_close) and clear
-   `prepared`, and the release frees the claim on a later turn.  Nothing waits.  What must stay: `hops` 0 before any
-   claim is closed */
+   `prepared`, and the release frees the claim on a later turn.  Nothing waits.
+   2026-11-04, sub-assignment 5, the coordinator's ruling on review 15's finding 2: hdr `state` 0 beside `hops` 0, in
+   the order `hops` 0, `state` 0 (each release), a release fence, `plan` woken, as mesh_plan's ESTALE path leaves them.
+   Why: with `state` left naming the retired plan's state section, whose claim the bridge then releases, a start before
+   the next plan passed mesh_transfers_start's `state` check and raised `executions` in a released page, and
+   mesh_metal_transport_create would wrap released pages.  What must stay: `hops` 0 and `state` 0 before any claim is
+   closed */
 void mesh_retire(struct hdr *m,uint64_t client){
   uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff);
   uint64_t retiring=(client&(UINT64_C(1)<<63))|(generation<<32)|(uint32_t)getpid();
   if(!atomic_compare_exchange_strong_explicit(&m->client,&client,retiring,memory_order_seq_cst,memory_order_acquire))return;
   atomic_store_explicit(&m->hops,0,memory_order_release);
+  atomic_store_explicit(&m->state,0,memory_order_release);
   atomic_thread_fence(memory_order_release);
   os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   const uint32_t rows=mesh_rows(m);
@@ -476,9 +482,10 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
    2026-11-04, sub-assignment 5, the coordinator's ruling on owner 6's finding (mesh-flow.c 04b5e561): the raise after
    the wait, where this note's first form raised `executions` before it.  Why: a port child that pairs again after a
    loss loads the same plan and would serve executions from 0 again over phases and counts that already hold
-   arrivals; so every port loads a plan before any of its executions is served, and a port refuses to load a plan
-   whose `executions` is already above 0 (mesh-flow.c), which holds only where the start raises it after every named
-   port has loaded.  A second start on the same plan (its ports loaded and serving) waits as the first did and raises
+   arrivals; so every port loads a plan before any of its executions is served, and a port that carries units of the
+   plan refuses to load it where its `executions` is already above 0 (mesh-flow.c; a port with none posts nothing and
+   loads it, since a refusal would read MESH_STOPPED to the next start: the coordinator's ruling on review 15's finding
+   5), which holds only where the start raises it after every named port has loaded.  A second start on the same plan (its ports loaded and serving) waits as the first did and raises
    it.  What must stay: the wait bounded by one deadline; the raise only after every named port holds the plan */
 static int mesh_ports_loaded(struct mesh_ctx *context){
   struct hdr *m=context->M;

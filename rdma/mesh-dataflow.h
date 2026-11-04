@@ -36,8 +36,9 @@ static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return 
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 /* design/algorithm-sources.md#programtensor */
-/* the client retired: once the client word is the retirer's, hdr `hops` 0 (its plan unpublished, release, `plan`
-   woken: the coordinator's ruling on owner 7's finding, mesh-dataflow.c), every claim it owns closed (struct
+/* the client retired: once the client word is the retirer's, hdr `hops` 0 and `state` 0 (its plan unpublished, release,
+   `plan` woken: the coordinator's rulings on owner 7's finding and review 15's finding 2, mesh-dataflow.c), every claim
+   it owns closed (struct
    mesh_buffer `closed` on each head whose `owner` it is), then hdr `client` cleared; nothing is let go here, the bridge
    releasing each closed claim once no port holds it (mesh_retired_release) */
 void mesh_retire(struct hdr *,uint64_t client);
