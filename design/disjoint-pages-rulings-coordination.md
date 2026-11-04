@@ -416,6 +416,16 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   and the failed-status check; prepared-machine.md:105 and :161 still describe M08's old design) to 1; 7 (plan_cancel's
   generation 0, "whichever plan is written", a second form) to 1 (every caller names its generation); 8 (hello_budget(0)
   0 departs from the tag) recorded with 6's commit above.
+  The fixes: 1 2ecb0f8c (plan_cancel acts only where the plan written is the generation it is given; streams_cancel and
+  streams_let_go read hdr `plan` at the call and pass it; the 0 case gone), 6379bfc0 (mesh.h's Cancellation paragraph
+  and its closing sentence state D.3.6 and R3's ESTALE after the raise), 8547afbd and d8ca39e2 (the start's text in
+  mesh-call.h and mesh-dataflow.c: no execution read as landed that has not; the receives set for the raised
+  executions end with the plan as any cancelled run's do), b12c49ec (M08's assignment clause as link_prepare does it,
+  the failed status failing the link; prepared-machine.md:105 and :161 date-marked as M08 before the page lists); 2
+  e2a5214d (mesh_graph_list_schedule's `machines` and `machine`; its one caller passes them by position, unchanged).
+  The C9 hook's remark on 2ecb0f8c, that plan_cancel's walk over the hop list belongs in the graph module: ruled it
+  stays (a linear pass over this node's entries raising their counts, no graph traversal; the walk predates this unit,
+  which changed only its generation check), as plan_walk and mesh_ports_loaded were ruled before.
 
 ### Integration
 
