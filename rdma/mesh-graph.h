@@ -3,9 +3,8 @@
    no cable, collective or tensor.  Python's are rdma/mesh_graph.py's. */
 /* Source: pre-return-20261103 rdma/mesh-graph.h, the declarations of the functions mesh-graph.c brings, verbatim;
    mesh_graph_list_schedule is new (design/page-queue-change-request.md, "The rule both ends compute");
-   mesh_graph_happens_before and mesh_graph_left_edge are new (design/disjoint-pages-change-request.md, Appendix A,
-   A3, "Interference, by happens-before" and "The assignment"; design/disjoint-pages-coordination.md, "The
-   allocator"); mesh_graph_lags is new (design/disjoint-pages-change-request.md, Appendix C, C3.3;
+   mesh_graph_left_edge is new (design/disjoint-pages-change-request.md, Appendix A, A3, "The assignment";
+   design/disjoint-pages-coordination.md, "The allocator"); mesh_graph_lags is new (design/disjoint-pages-change-request.md, Appendix C, C3.3;
    design/disjoint-pages-revision-coordination.md, D5 and "The allocator"). */
 #ifndef MESH_GRAPH_H
 #define MESH_GRAPH_H
@@ -132,17 +131,14 @@ double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate
    takes; their completion time, INFINITY where a unit has no link. A link of no rate takes none. */
 double mesh_graph_list_schedule(uint32_t links, const double *rate, uint64_t units, const uint64_t *bytes,
                                 uint32_t *link, uint64_t *carried);
-/* Happens-before over a dependence graph repeated `iterations` times, its edges carrying iteration distances (M. Lam,
-   PLDI 1988; B. R. Rau, MICRO 1994): template vertex v of iteration i is (v, i); template edge k, in the row
-   [first[v], first[v + 1]) of the vertex v it leaves, joins (v, i) to (head(context, k), i + lag(context, k)) for every
-   i, lag >= 0.  For source[s] (s < sources) and target[x] (x < targets), bit L % 64 of
-   reach[(s * targets + x) * words + L / 64] (words = (iterations + 63) / 64) is set where a path of one or more edges
-   joins (source[s], i) to (target[x], i + L) for i + L < iterations (the same for every such i).  0; EDEADLK where the
-   lag-0 edges hold a cycle; ENOMEM. */
-int mesh_graph_happens_before(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                              uint32_t (*lag)(const void *context, size_t k), const void *context, uint32_t iterations,
-                              uint32_t sources, const uint32_t *source, uint32_t targets, const uint32_t *target,
-                              uint64_t *reach);
+/* 2026-11-04, sub-assignment 2: mesh_graph_happens_before (b399746f), a bit table of the paths over a template
+   unrolled across `iterations` executions, is removed with its helpers in mesh-graph.c.  Why: C3.3's unroll factor u,
+   each value's L and every interference test come from least lags over the template alone (mesh_graph_lags;
+   design/disjoint-pages-change-request.md, C3.3; design/disjoint-pages-revision-coordination.md, D5), never from a
+   table over the run's executions, which made a plan's compile time grow with the run's length (C1); its last caller,
+   mesh-collective.c's 2026-11-03 allocator, went in baede218.  What must stay: nothing in a plan's graph computation
+   depends on the run's length; a lag-0 cycle is found by mesh_graph_order over the lag-0 edges alone (EDEADLK), as
+   this function found one and mesh-collective.c now does. */
 /* The least total lag over walks of one or more edges from source[s] to target[x] (s < sources, x < targets), in the
    directed graph whose vertex v's edges are [first[v], first[v + 1]), edge k entering head(context, k) and carrying
    lag(context, k) >= 0 (E. W. Dijkstra, A note on two problems in connexion with graphs, Numerische Mathematik 1,
