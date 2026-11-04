@@ -106,8 +106,15 @@ _Static_assert(offsetof(struct ibv_wc,status)==8 && offsetof(struct ibv_wc,opcod
 _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
 
 /* tag rdma/mesh-bridge.h MESH_LINK_LANES, its value (MESH_LANE_FIRST + MESH_LINK_STREAMS MESH_STREAM_LANES: 2 + 4 2,
-   etc/bridge/layout.h): the most queue pairs a link makes, every one a macOS 26 device holds for it (max_qp 11 less
-   MESH_PROVIDER_RESERVED_QPS; 76be3217, "every lane at ten").  The stream layout it was summed from does not come over */
+   etc/bridge/layout.h): a compile-time capacity, the bound of a link's arrays (struct link, struct message `pair`,
+   struct child_message, mesh-flow.c's cursors and its rule's links) and of `served`'s bits, and no device's count.  A
+   link makes link_plan's queue pairs, the fewer of this capacity and the pairing's budget, which is the smaller of what
+   its two ends' devices report on the run (mesh-verbs.h device_up `max_pairs`, mesh-ports.c port_heard): a device that
+   reports more makes this many, one that reports fewer its own.  The stream layout it was summed from does not come
+   over.  2026-11-04, the count audit (design/disjoint-pages-rulings-coordination.md; the operator's ruling of
+   2026-11-04, design/disjoint-pages-change-request.md D.1): this note gave the value as every queue pair a macOS 26
+   device holds for a link (its max_qp less MESH_PROVIDER_RESERVED_QPS), one OS's count, which no code reads.  What
+   must stay: link_plan's fewer of the budget and this; the tag's value */
 #define MESH_LINK_LANES 10u
 _Static_assert(MESH_LINK_LANES<32,"a bit a lane");
 /* tag rdma/mesh-bridge.h link_plan (76be3217), adapted: the queue pairs a link makes, a bit a queue pair, from `budget`,
@@ -166,12 +173,20 @@ struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,f
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
    a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
    sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` 1 + the
-   queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
-   sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
+   queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget), as its device reported
+   them on the run (mesh-verbs.h device_up `max_pairs`); a HELLO that states none (`count` 0) gives a budget of 0 */
+/* 2026-11-04, the count audit (design/disjoint-pages-rulings-coordination.md; the operator's ruling of 2026-11-04,
+   design/disjoint-pages-change-request.md D.1: "No code may single-case an OS or assume a count"): hello_budget(0),
+   the tag's MESH_LINK_LANES for a bridge before budgets, is 0, adapted from tag pre-return-20261103
+   rdma/mesh-bridge.h:133 hello_budget (76be3217).  Why: that took a peer that reports no count as holding MESH_LINK_LANES queue pairs, an
+   assumed count; with 0 the pairing's budget is the smaller of the two reports (mesh-ports.c port_heard), and a peer
+   that reports none makes no queue pair.  Every bridge of this source states 1 + its budget (mesh-ports.c port_greet),
+   so only a bridge before budgets sends 0, and its LINK then names lanes this end's plan does not (link_heard: EPROTO).
+   What must stay: `count` 1 + the device's budget, and the plan from both ends' smaller */
 enum { HELLO=1, FAREWELL, RECORD, LINK };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
-static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
+static inline uint32_t hello_budget(uint32_t count){ return count?count-1:0; }
 
 /* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: each stream's
    holding (`held`, `hold`, `sending`, `landing`, `wire`: the walks and the streams' identities) */
