@@ -94,14 +94,14 @@ of each sub-assignment, its commits, each review finding and where it went, and 
 |---|---|
 | mesh rdma/mesh.h, rdma/mesh-map.h | 1 |
 | mesh rdma/mesh-graph.h, rdma/mesh-graph.c | 2 |
-| mesh rdma/mesh-collective.h, rdma/mesh-collective.c | 3, then 4 |
+| mesh rdma/mesh-collective.h, rdma/mesh-collective.c | 3 |
 | mesh rdma/mesh-dataflow.h, rdma/mesh-dataflow.c, rdma/mesh-call.h, rdma/mesh-call.c, rdma/mesh.py | 5 |
 | mesh rdma/mesh-flow.c | 6 |
 | mesh rdma/mesh-link.c, rdma/mesh-records.c, rdma/mesh-stat.c, rdma/mesh-bridge.h | 7 |
 | mesh rdma/mesh-metal.h, rdma/mesh-metal.m | 8 |
 | metal-microbench metal_recording.h, metal_recording.m | 9, then 10, then 11 |
 | metal-microbench metal_native.h, metal_native.m, native_projection.metal, tools/native_bench.m | 12 |
-| metal-microbench tools/e2b_replay.m | 13 |
+| metal-microbench tools/e2b_replay.m | 13, then 4 |
 | metal-microbench tools/prepare_e2b.py | 14 |
 | reviews (written findings only) | 15 (mesh side), 16 (GPU and program side), 17 (the four rules across both) |
 | rdma/Makefile, this file, INDEX.md | coordinator |
@@ -347,7 +347,7 @@ uint64_t mesh_host_arrived(struct mesh_ctx *,struct mesh_section,uint64_t execut
 - Cost: Dijkstra from each source, O(sources x (E + V log V)) once a plan, and the colouring's walk, quadratic at worst
   in this node's items (values x u). Nothing depends on the run's length.
 
-### Writing a plan (mesh-collective.c, owner 4)
+### Writing a plan (mesh-collective.c, owner 3)
 
 1. Compute everything first: demands, routing, template, least lags, u, items, colourings, this node's entries of one
    copy (plan_walk) and every room: ENOSPC past `hop_capacity`.
@@ -520,7 +520,7 @@ For each recorded dispatch that reads a received operand, in each repetition t:
   threadgroup writes its own before any are read), its arrival counters a state value; both placed by the plan.
   Owner 12 reports the counters' offset and bytes in struct MetalNativePlan beside partialBytes.
 
-### The program (tools/e2b_replay.m, owner 13) and its manifest (tools/prepare_e2b.py, owner 14)
+### The program (tools/e2b_replay.m, owners 13 then 4) and its manifest (tools/prepare_e2b.py, owner 14)
 
 - The manifest: each rank stage of each region (regions[l].ranks[r]) gains `"dataflow"`, the routed operands that
   stage writes and reads, in the order its program computes them: a list of {"write": name} and {"read": name}
@@ -544,19 +544,19 @@ For each recorded dispatch that reads a received operand, in each repetition t:
 
 | item | owners |
 |---|---|
-| C3.1 masked first pass, compaction, indirect later pass, event wait, counts, cancellations as arrivals, client's signal, mesh_read_N's waits gone | 10, 8, 6, 13, 1 |
-| C3.2 every value placed by the allocator (pooled intermediates, counters, state section, no records) | 3, 4, 9, 11, 12, 13 |
-| C3.3 unrolling by modulo variable expansion, `executions` no input | 2, 3, 4, 5, 13 |
-| C3.4 nothing grabs; claims per plan; deferred release | 5, 4, 7, 6 |
+| C3.1 masked first pass, compaction, indirect later pass, event wait, counts, cancellations as arrivals, client's signal, mesh_read_N's waits gone | 10, 8, 6, 4, 1 |
+| C3.2 every value placed by the allocator (pooled intermediates, counters, state section, no records) | 3, 9, 11, 12, 13 |
+| C3.3 unrolling by modulo variable expansion, `executions` no input | 2, 3, 5, 13 |
+| C3.4 nothing grabs; claims per plan; deferred release | 5, 3, 7, 6 |
 | C3.5 the normal program's data edges | 14, 13 |
-| C3.6 every race closed, every wait bounded | 4, 5, 6, 8, 10, 13 |
-| C3.7 nothing zeroed or reset; phases, rising words, restoring counters | 1, 4, 6, 10, 11, 12, 13 |
+| C3.6 every race closed, every wait bounded | 3, 5, 6, 8, 10, 4 |
+| C3.7 nothing zeroed or reset; phases, rising words, restoring counters | 1, 3, 6, 10, 11, 12, 13 |
 | C3.8 what judges it: the builds | coordinator |
-| C4 mesh-collective.c `executions` and its items; the memset (749-757); the word zeroing (759-763) | 3, 4 |
+| C4 mesh-collective.c `executions` and its items; the memset (749-757); the word zeroing (759-763) | 3 |
 | C4 mesh-call.h, mesh-dataflow.c mesh_plan_erased and its fence pair; mesh-flow.c's side | 5, 6 |
 | C4 mesh.h `word_off`, `landed_off`; the ORed bits and the UINT64_MAX cancel word; MESH_SUPPLIED | 1, 6, 8 |
 | C4 mesh-dataflow.c mesh_claim at attach, its wait, the local run | 5 |
-| C4 metal_recording.m both lane waits; mesh_seen's failed value; a lane's UINT64_MAX and the host's read; line 1546 | 10, 11, 13 |
+| C4 metal_recording.m both lane waits; mesh_seen's failed value; a lane's UINT64_MAX and the host's read; line 1546 | 10, 11, 4 |
 | C4 e2b_replay.m `NULL, 0`; the steps != executions refusals; lines 627 and 840 | 13, 9 |
 
 ## Record
@@ -568,10 +568,12 @@ work proceeds.)
 
 1. mesh.h, mesh-map.h: the region, the state section's structs, the hop entry, the publication's fields, removals.
 2. mesh-graph.{h,c}: mesh_graph_lags; mesh_graph_happens_before removed once nothing calls it.
-3. mesh-collective.{h,c}, first: the call's new signature, values, the template's program edges of four kinds, least
-   lags and u, items, interference, the two colourings.
-4. mesh-collective.c, second: the claim, the state section's placement and initialization, rows, publications, the
-   entries of u copies, the writing order, the host functions; the memset and the word zeroing gone.
+3. mesh-collective.{h,c}: the call's new signature, values, the template's program edges of four kinds, least lags
+   and u, items, interference, the two colourings; the claim, the state section's placement and initialization, rows,
+   publications, the entries of u copies, the writing order, the host functions; the memset and the word zeroing gone.
+4. tools/e2b_replay.m, second (after 13): the decode's MTLCommandBuffer, its event and waiter, the stop handler, the
+   bounded completion wait, the run's error value from the waiter and the status; the MTL4 submission and the read of
+   cancel words gone.
 5. mesh-dataflow.{h,c}, mesh-call.{h,c}, mesh.py: attach claims nothing; claims per plan, their close and release;
    sections named by the plan; the start's executions; mesh_plan_erased gone.
 6. mesh-flow.c: the template's copies, phases, counts, the supplied threshold, cancellations as arrivals, rising
@@ -584,8 +586,8 @@ work proceeds.)
     its waits; the lane waits gone.
 11. metal_recording.m, third: publications by the supplied word, the restoring counter, the native partials.
 12. metal_native.{h,m}, native_projection.metal, tools/native_bench.m: the K-part buffer's counters reported apart.
-13. tools/e2b_replay.m: capture, plan, bind; data edges; the decode's command buffer, event and waiter; bounded waits;
-    the zeroing and the refusals gone.
+13. tools/e2b_replay.m, first: capture, plan, bind; values, declared transfers and data edges; the host inputs into
+    placed pages; the zeroing and the refusals gone.
 14. tools/prepare_e2b.py: each rank stage's dataflow in the manifest.
 15, 16, 17. Reviews: written findings, routed to owners.
 
