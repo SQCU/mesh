@@ -574,8 +574,8 @@ static void plan_walk(struct plan *p){
    mesh_plan_erased), every declared instance's rows bound to its pages and those pages zeroed, the supplied words and
    landed records zeroed, the rows' publications and the entries written, the map read again and `hops` stored.  It
    reverses the slots' tail: plan_pages' check of rows bound before the plan, the relay and words sections, hops
-   written slot by slot (the note before plan_page).  What must stay: every failure but the erase's ETIMEDOUT and the
-   map's ESTALE found before `hops` is stored 0. */
+   written slot by slot (the note before plan_page).  What must stay: every failure but the erase's ETIMEDOUT, the
+   map's ESTALE and the map reader's error on its second read found before `hops` is stored 0. */
 int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint32_t count,uint32_t executions,
               const struct mesh_dependence *dependence,uint32_t dependences){
   struct hdr *m=context->M;
@@ -730,10 +730,10 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   const uint64_t previous=atomic_load_explicit(&m->plan,memory_order_relaxed);
   if((status=mesh_plan_erased(context,previous)))goto done;
   /* this plan's `executions` and `landed_stride` first, while `hops` is 0, so that mesh.h's helpers (mesh_supplied,
-     mesh_landed_record) name this plan's words wherever they are zeroed and written below (review 12's finding 7).
-     The contract lists them with the entries; the bridge reads either only after `hops` (acquire) and drops what it
-     read where `hops` or `plan` moved (mesh-flow.c link_prepare, plan_cancel), so the earlier store changes nothing it
-     can take as whole */
+     mesh_landed_record) name this plan's words wherever they are zeroed and written below (review 12's finding 7;
+     design/disjoint-pages-coordination.md, "Writing a plan": right after the erase, before the binding).  The bridge
+     reads either only after `hops` (acquire) and drops what it read where `hops` or `plan` moved (mesh-flow.c
+     link_prepare, plan_cancel) */
   m->executions=executions;
   m->landed_stride=stride;
   /* each declared section's instances bound to their pages: instance t's rows first + t x stride .. + P to its pages

@@ -50,7 +50,10 @@
      execution t, mesh_supplied(m, r, t): its producer stores MESH_SUPPLIED (release) after its last write to the range
      in execution t, and that one store releases the range's sends; nothing cancels it, and 0 releases nothing;
    - execution t's landed record, mesh_landed_record(m, t), hdr `landed_stride` bytes: word 0 its cancel word (0, or
-     UINT64_MAX once cancelled), then bit b for the b-th receive hop of the execution in list order (word 1 + b / 64,
+     UINT64_MAX once cancelled, which three writers store: the bridge, for a receive not landed as it ends the plan,
+     mesh-flow.c link_close and plan_cancel; the program's cancellation, mesh.h mesh_cancel over every execution's
+     cancel word; and the GPU lane whose wait on the step reaches its bound, metal_recording.m mesh_read_N), then bit b
+     for the b-th receive hop of the execution in list order (word 1 + b / 64,
      bit b % 64), which its landing ORs in (release) and nothing clears while the plan stands.  A destination's pages of
      one range are one run of bits [first, first + P).  The landed list lies in its own section of the region, beside
      the page lists and never beside a page: a reader reads a step's mask, not a word a page.
@@ -59,8 +62,9 @@
    with no receive `device_input` 0; a source range's first row `targets[0]` = {region offset of mesh_supplied(m, r,
    0), 1, 1}, `sends` 1, `argument` = MESH_SUPPLIED, execution t's word at `stream` + t x MESH_WORD_STRIDE.  Each entry
    carries the map serial; hdr `plan` is the plan's generation (the last plan's + 1, never 0).  Every failure but
-   ETIMEDOUT and ESTALE is found before the previous plan is touched, and leaves it standing; with those two the
-   previous plan no longer stands (hdr `hops` 0) and no new one is written.
+   ETIMEDOUT (the erase), ESTALE and the map reader's error on its second read is found before the previous plan is
+   touched, and leaves it standing; with those the previous plan no longer stands (hdr `hops` 0) and no new one is
+   written.
    Returns 0; EINVAL for a malformed transfer or dependence (an index past `count`, a consumed range's destination not
    the produced range's source, dependences of lag 0 ordering an execution's work in a cycle), or a held section not of
    the form above (a row outside the claim's section rows, or bound outside `window`, or rows two ranges' sections at
