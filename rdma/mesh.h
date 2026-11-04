@@ -13,8 +13,9 @@
 /* 105: the page lists (struct mesh_hop) and the bridge's pages (struct mesh_bridge_pages) in the layout, the map's
    fields (struct mesh_record) in the header, `executions` in place of its padding
    (design/page-queue-change-request.md).  106: the tag's header fields `boot`, `health`, `busy`, `idle_since`,
-   `stopping` appended */
-#define MESH_VERSION 106u
+   `stopping` appended.  107: the --link form's and the per-link, per-queue transfer lists' header fields removed,
+   their bytes left vacant so every other field keeps its place (struct hdr), and their areas gone from the layout */
+#define MESH_VERSION 107u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -22,11 +23,6 @@
 #ifndef MESH_PLATFORM_NS
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
 #endif
-/* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
-#define MESH_QPS 8
-/* replaced by struct mesh_hop (the page lists); removed at sub-assignment 16 */
-struct mesh_transfer { uint32_t local_row,binding,count,stride,invocation_pages,first; uint64_t bytes; };
-_Static_assert(sizeof(struct mesh_transfer)==32,"M08 prepared transfer");
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
@@ -50,7 +46,6 @@ _Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_e
   offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16,"mesh_page_entry");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
-#define MESH_NOTICE_BANKS 2
 /* design/prepared-machine.md#M04 */
 struct mesh_send {
   _Alignas(128) _Atomic uint64_t ready;
@@ -58,11 +53,9 @@ struct mesh_send {
   _Alignas(32) struct ibv_sge span;
   struct ibv_send_wr request;
 };
-struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
   offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
-_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==32,"M04/M12");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
@@ -73,8 +66,7 @@ _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publi
 struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argument,padding[2]; };
 _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
-/* a port's link, at `link_off`: the resident bridge's MESH_PORTS of them (MESH_UNKNOWN where it has no such port), the
-   --link form's `links` */
+/* a port's link, at `link_off`: the resident bridge's MESH_PORTS of them (MESH_UNKNOWN where it has no such port) */
 struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; };
 
 /* tag pre-return-20261103 rdma/mesh-observe.h MESH_PORTS: the most ports (there MESH_STREAMS / MESH_LINK_STREAMS) */
@@ -125,8 +117,8 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_PORTS]; struct mesh_health health; };
 
 /* The page lists (design/page-queue-change-request.md, "The page lists (the queue)"): this node's hops, which the plan
-   call writes once a plan and the bridge alone reads, in place of the per-link, per-queue transfer lists (struct
-   mesh_transfer, mesh_order_length).  An entry is one hop of one page:
+   call writes once a plan and the bridge alone reads, in place of the per-link, per-queue transfer lists (removed at
+   107).  An entry is one hop of one page:
    - `page`: an arena page of this region (mesh_at), a multiple of `block`, its block within the registered window
      (mesh_wired): the page sent, the page a receive lands in, or a relay's page.  A hop moves that whole page, `block`
      arena pages (block x pgsz bytes), from it or into it; nothing is copied.
@@ -139,9 +131,9 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
      region: no SGE names it); `position`: the value that releases a send or that a receive's landing stores,
      0 < position < UINT64_MAX.
    - `serial`: the map serial the plan was made against, every entry's the same.
-   Executions (main's invocations and ring depth: mesh-call.c mesh_transfers_prepare, mesh-flow.c link_configure,
-   mesh-metal.m).  A plan runs hdr `executions` times, t = 0 .. executions - 1, its pages ringing through hdr `depth`
-   slots (depth == executions: no ring).  These and hdr `hop_stride` are the plan's values, beside the list.
+   Executions (main's invocations and ring depth: d6dceac mesh-call.c mesh_transfers_prepare and mesh-flow.c
+   link_configure, mesh-metal.m).  A plan runs hdr `executions` times, t = 0 .. executions - 1, its pages ringing
+   through hdr `depth` slots (depth == executions: no ring).  These and hdr `hop_stride` are the plan's values, beside the list.
    - The list is `hops` = depth x n entries, slot s's n at [s n, s n + n).  Every slot holds the same n hops in the same
      order, with the same node, direction, forwards, word, position and serial; only the pages differ.
    - Which page execution t uses: slot (t mod depth)'s page of the hop.  A hop's receive of execution t is posted only
@@ -186,17 +178,24 @@ _Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16
 
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
+/* 2026-11-04, sub-assignment 16 (design/page-queue-change-request.md, "Order, and what judges it"): the header fields
+   only the --link form and its per-link, per-queue transfer lists read were removed at 107, and their bytes are left
+   vacant (`vacant0` .. `vacant6`, never read or written) rather than closed up, so every other field keeps the offset
+   it had at 106.  Why: a region is read at these offsets after its layout is expired (version 0, so no layout check
+   applies): mesh-link.c region_open takes its `bridge_off` and the children recorded there, and signals the running
+   ones (a recorded start of 0 matches the pid alone), and mesh-heartbeat.c region_own waits on those holders.  Closing
+   the gap would move `bridge_off` from 296 to 248, where a 106 region keeps `hops`, and its pages would be read as
+   pids.  What must stay: no field moves (the assert below); a field is only ever appended. */
 struct hdr {
-  uint32_t magic,version,pgsz,block,rows,node,qps,links;
-  uint32_t orders,wire_pages;
-  /* the ring depth of the transfer lists and of the page lists (struct mesh_hop): execution t uses slot t mod depth */
+  uint32_t magic,version,pgsz,block,rows,node,vacant0,links;
+  uint32_t vacant1,wire_pages;
+  /* the ring depth of the page lists (struct mesh_hop): execution t uses slot t mod depth */
   _Atomic uint32_t depth;
   /* the page lists: the executions of the plan written (struct mesh_hop), main's invocations */
   uint32_t executions;
-  _Atomic uint64_t configured;
-  /* length_off, order_off: the per-link, per-queue transfer lists, replaced by hop_off; removed at sub-assignment 16 */
-  uint64_t planes_off,arena_off,page_off,buffer_off,link_off,length_off,target_off,order_off,notice_off,data_off,length;
-  uint64_t notice_bytes,target_stride;
+  uint64_t vacant2;
+  uint64_t planes_off,arena_off,page_off,buffer_off,link_off,vacant3,target_off,vacant4,vacant5,data_off,length;
+  uint64_t vacant6,target_stride;
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
   /* the page lists (struct mesh_hop, mesh_hops): room for `hop_capacity` entries at `hop_off` (mesh_geometry `hops`),
@@ -223,6 +222,12 @@ struct hdr {
   uint64_t boot;
   _Atomic uint64_t health,busy,idle_since,stopping;
 };
+/* every field at its 106 offset (the vacant bytes' note above struct hdr) */
+_Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)==36 && offsetof(struct hdr,planes_off)==56 &&
+  offsetof(struct hdr,target_off)==104 && offsetof(struct hdr,data_off)==128 && offsetof(struct hdr,target_stride)==152 &&
+  offsetof(struct hdr,client)==160 && offsetof(struct hdr,hop_off)==224 && offsetof(struct hdr,map_serial)==288 &&
+  offsetof(struct hdr,bridge_off)==296 && offsetof(struct hdr,client_start)==304 && offsetof(struct hdr,stopping)==344 &&
+  sizeof(struct hdr)==352,"struct hdr: no field moves");
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/prepared-machine.md#M07 */
@@ -255,8 +260,6 @@ static inline void mesh_notify(_Atomic uint64_t *word){
   atomic_thread_fence(memory_order_release);
   os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
-/* design/algorithm-sources.md#programtensor */
-static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*m->links+queue;}
 /* design/algorithm-sources.md#programcopy */
 static inline struct mesh_link_info *mesh_links(struct hdr *m){return (struct mesh_link_info *)((char *)m+m->link_off);}
 /* design/algorithm-sources.md#index-hand-off */
@@ -278,17 +281,6 @@ static inline int mesh_wired(const struct hdr *m,uint64_t offset,uint64_t bytes)
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
-/* ledger D5 */
-/* one index for the transfer list and for its length: both are (bank,queue,direction), both stride by the
-   runtime queue count, so a client built with another MESH_QPS cannot disagree with the bridge about either */
-/* replaced by mesh_hops (the page lists); removed at sub-assignment 16 */
-static inline size_t mesh_order_index(const struct hdr *m,uint64_t owner,uint32_t queue,int direction){
-  return (((size_t)(owner>>63)*m->links*m->qps)+queue)*2+(uint32_t)direction;
-}
-/* replaced by mesh_hops (the page lists); removed at sub-assignment 16 */
-static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+mesh_order_index(m,owner,queue,direction)*m->orders; }
-/* replaced by hdr `hops` (the entries of the plan written); removed at sub-assignment 16 */
-static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (_Atomic uint32_t*)((unsigned char*)m+m->length_off)+mesh_order_index(m,owner,queue,direction); }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
 /* the page lists: the plan's entries (struct mesh_hop), hdr `hops` of them at `hop_off` */
 static inline struct mesh_hop *mesh_hops(struct hdr *m){ return (struct mesh_hop *)((char *)m+m->hop_off); }
@@ -328,49 +320,36 @@ static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t c
   for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++) atomic_fetch_and_explicit(&p[w],~mesh_word_mask(first,count,w),memory_order_acq_rel);
 }
 
-/* design/algorithm-sources.md#index-hand-off */
-static inline void *mesh_events(struct hdr *m,uint32_t queue){
-  return (char *)m+m->notice_off+(uint64_t)queue*m->notice_bytes;
-}
-
 /* design/algorithm-sources.md#programkernel_call */
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M08 */
 /* Four independent dimensions, none of them derived from another: arena pages, page-table rows,
-   transfer-list entries (orders) and the registered window.  rows was welded to pages because the
+   the page lists' room (`hops`) and the registered window.  rows was welded to pages because the
    arena bitmap lived in a row plane and the order table was rows-strided; both are now their own
    table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else.  `hops`: the page lists' room
-   (struct mesh_hop); absent (0), `rows`, as `orders`. */
-/* links x qps: the count of the per-link, per-queue transfer lists, replaced by hops; removed at sub-assignment 16 */
-struct mesh_geometry { uint32_t pgsz,block,pages,rows,orders,links,qps,wire_pages,hops; };
+   (struct mesh_hop); absent (0), `rows`.  `links`: the link table's ports (MESH_PORTS, mesh-link.c). */
+struct mesh_geometry { uint32_t pgsz,block,pages,rows,links,wire_pages,hops; };
 static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   uint32_t blocks=g.pages/g.block,arena=blocks*g.block;
   if(!g.rows)g.rows=arena;
-  if(!g.orders)g.orders=g.rows;
   if(!g.hops)g.hops=g.rows;
   if(!g.wire_pages || g.wire_pages>arena)g.wire_pages=arena;
   g.wire_pages=(g.wire_pages+g.block-1)/g.block*g.block;
   if(g.wire_pages>arena)g.wire_pages=arena;
   uint32_t pgsz=g.pgsz;
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)g.rows+63)/64;
-  h->pgsz=pgsz; h->block=g.block; h->rows=g.rows; h->orders=g.orders; h->wire_pages=g.wire_pages;
-  h->links=g.links; h->qps=g.qps;
+  h->pgsz=pgsz; h->block=g.block; h->rows=g.rows; h->wire_pages=g.wire_pages;
+  h->links=g.links;
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->arena_off=at; at+=(((uint64_t)arena+63)/64)*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)(g.links>MESH_PORTS?g.links:MESH_PORTS)*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
-  /* replaced by hop_off (the page lists); removed at sub-assignment 16 */
-  h->length_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*g.links*g.qps*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
-  /* replaced by hop_off (the page lists); removed at sub-assignment 16 */
-  h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*g.links*g.qps*g.orders*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
   h->hop_off=at; h->hop_capacity=g.hops; at+=(uint64_t)g.hops*sizeof(struct mesh_hop); at=(at+pgsz-1)/pgsz*pgsz;
   h->bridge_off=at; at+=sizeof(struct mesh_bridge_pages); at=(at+pgsz-1)/pgsz*pgsz;
-  h->notice_bytes=sizeof(struct mesh_tx);
   uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;
-  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*g.links*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)g.pages*pgsz;
   h->length=at; return at;
 }

@@ -10,7 +10,7 @@
    counts no frames of a link.  The cancellation covers the same words: mesh_cancel(m, cancel, 0) stores UINT64_MAX
    in every word of the plan still 0, so every wait on a landing not landed ends, and a release word not yet stored
    releases nothing until its producer stores it.  The bridge cancels its own landed words where it ends the plan
-   (mesh.h), so it reads no link's cancellation (struct mesh_tx `cancel`, which nothing of this form writes).  EINVAL
+   (mesh.h), so it reads no link's cancellation (the --link form's per-link notice, removed at layout 107).  EINVAL
    where no plan's words are there (mesh_plan not called) */
 int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mesh_metal_transport *transport){
   *transport=(struct mesh_metal_transport){0};

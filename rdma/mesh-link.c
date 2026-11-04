@@ -155,13 +155,11 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    configuration's layout is refused as the tag refuses one that holds none.  Two layouts are the same where every field
    main's mesh_layout sets is (the tag's rule: its fields were those its mesh_layout set) */
 static int region_same(const struct hdr *a,const struct hdr *b){
-  return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->orders==b->orders && a->wire_pages==b->wire_pages &&
-         a->links==b->links && a->qps==b->qps &&
+  return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->wire_pages==b->wire_pages && a->links==b->links &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
-         a->link_off==b->link_off && a->length_off==b->length_off && a->target_stride==b->target_stride && a->target_off==b->target_off &&
-         a->order_off==b->order_off && a->hop_off==b->hop_off && a->hop_capacity==b->hop_capacity &&
-         a->bridge_off==b->bridge_off && a->notice_bytes==b->notice_bytes && a->notice_off==b->notice_off && a->data_off==b->data_off &&
-         a->length==b->length;
+         a->link_off==b->link_off && a->target_stride==b->target_stride && a->target_off==b->target_off &&
+         a->hop_off==b->hop_off && a->hop_capacity==b->hop_capacity &&
+         a->bridge_off==b->bridge_off && a->data_off==b->data_off && a->length==b->length;
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:1764 region_children, verbatim (07949b28) */
 static struct mesh_holder region_children[2*MESH_PORTS];
@@ -343,9 +341,7 @@ int main(int argc,char **argv){
      least size are a block's (main's mesh-flow.c checks, block x pg and arena < block), and the rows, the window and
      the page lists' room are the configuration's.  `links` is MESH_PORTS: the link table holds the resident bridge's
      MESH_PORTS ports (mesh.h struct mesh_link_info), hdr `links` is the count clients read of it (mesh-dataflow.c
-     mesh_observe), and each publication has room for a target a port (`target_stride`).  `qps` and `orders` are 0:
-     no per-link, per-queue transfer list is laid (replaced by the page lists, struct mesh_hop), so main's old binds
-     find no queue and return EINVAL (mesh-call.c mesh_transfer_bind: queue >= links x qps) */
+     mesh_observe), and each publication has room for a target a port (`target_stride`) */
   if(!shape.block)shape.block=1;
   /* design/transport.md */
   if((uint64_t)shape.block*pg+MESH_FRAME>MESH_REQUEST_BYTES)die("transport chunk exceeds native request capacity");
