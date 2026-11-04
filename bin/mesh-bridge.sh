@@ -2,7 +2,9 @@
 # The node's bridge, a launchd job the node keeps (design/page-queue-change-request.md, "Replacing the --link form": the
 # run's driver starts no bridge; "The bridge's process lifecycle": the failport's).  The job's form is tag
 # pre-return-20261103 bin/mesh-user.sh lines 36-62, for this repo's paths:
-# - io.mesh.bridge runs the heartbeat (rdma/mesh-heartbeat.c) with the bridge image and the configuration's path, its
+# - io.mesh.bridge, the user's job in user/<uid>, its Background session (LimitLoadToSessionType; tag mesh-user.sh:49,
+#   56, 61, bin/mesh-launchd-agent.sh:6): no GUI login needed, as a gui/<uid> domain is;
+# - it runs the heartbeat (rdma/mesh-heartbeat.c) with the bridge image and the configuration's path, its
 #   ProgramArguments alone; the heartbeat opens the resident bridge (mesh-flow CONFIGURATION) in a process group of its
 #   own and closes it when asked;
 # - RunAtLoad; KeepAlive {SuccessfulExit: false}: a heartbeat that ended 0 (launchd's stop of the job, a release) is not
@@ -20,15 +22,19 @@
 #   SIGHUP, which restarts the bridge on the configuration and on the images installed (the heartbeat's own included),
 #   the region kept.
 # bridge.conf's node= and links= were the --link form's and are not read: the bridge finds its ports and its node itself.
-# Neither are region= (the node has one region, mesh.h MESH_NAME, and one bridge: no label of a second region's) nor
-# mesh_qps (the queue pairs are the bridge's to negotiate at each pairing).
+# Neither are region= (the node has one region, mesh.h MESH_NAME, and one bridge: no label of a second region's),
+# mesh_qps (the queue pairs are the bridge's to negotiate at each pairing) nor scope= (the job is the user's, as above).
+# A node runs one bridge: main's earlier job (the --link form's mesh-flow), in gui/<uid> where bridge.conf said
+# scope=gui, is booted out before this one loads; in system (scope=system, /Library/LaunchDaemons) it is root's, and
+# start refuses while it is in place.
 #   mesh-bridge.sh start    the configuration and the job written; the job loaded where it is not, a loaded job of
 #                           another program (the --link form's mesh-flow) stopped first; a loaded heartbeat sent SIGHUP
-#                           where the configuration changed
+#                           where the configuration changed; the bridge ready within 8 s, or an error naming what is not
 #   mesh-bridge.sh restart  as start, a loaded heartbeat sent SIGHUP whatever changed: the bridge restarted on the images
 #                           make install-bridge installed, its region kept
 #   mesh-bridge.sh stop     the job booted out (launchd's SIGTERM to the heartbeat: the bridge closed by SIGTERM, its
-#                           region released, then the heartbeat ends), awaited 30 s and never escalated
+#                           region released, then the heartbeat ends, at most 5 MESH_PLATFORM_NS on), awaited 30 s and
+#                           never escalated; main's earlier gui/<uid> job where it is the one loaded
 #   mesh-bridge.sh status | ready
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -43,7 +49,7 @@ HEARTBEAT="$(dirname "$BIN")/mesh-heartbeat"
 STAT="$(dirname "$BIN")/mesh-stat"; [ -x "$STAT" ] || STAT="$ROOT/rdma/mesh-stat"
 case "$BIN" in *-wt/*|*/.build/*|/tmp/*|/private/tmp/*) echo "mesh-bridge: refusing to launch the bridge from a worktree, build or scratch path ($BIN); run make install-bridge" >&2; exit 65 ;; esac
 
-scope=gui; mesh_pct=
+mesh_pct=
 mesh_arena_pages=; mesh_block_pages=; mesh_rows=; mesh_window_pages=; mesh_hops=
 
 if [ -f "$CONF" ]; then . "$CONF"; fi
@@ -51,19 +57,13 @@ mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
 mesh_block_pages="${MESH_BLOCK_PAGES:-$mesh_block_pages}"
 region=/mesh0
 
-case "$scope" in
-system)
-  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_BLOCK_PAGES="$mesh_block_pages" "$0" "$@"; fi
-  DOM=system; PLIST=/Library/LaunchDaemons/$LABEL.plist
-  SUPPORT=/usr/local/mesh
-  LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}" ;;
-gui)
-  DOM="gui/$(id -u)"; PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-  SUPPORT="$HOME/Library/Application Support"
-  LOGDIR="${MESH_LOG_DIR:-$HOME/.mesh-logs}" ;;
-*) echo "mesh-bridge: invalid configured scope $scope" >&2; exit 64 ;;
-esac
-CONFIGURATION="$SUPPORT/$LABEL/configuration.plist"
+# the tag's domain (bin/mesh-launchd-agent.sh:6) and its paths: the job's definition, its configuration (tag
+# mesh-user.sh:22, 36) and this repo's log
+DOM="user/$(id -u)"; PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+CONFIGURATION="$HOME/Library/Application Support/$LABEL/configuration.plist"
+LOGDIR="${MESH_LOG_DIR:-$HOME/.mesh-logs}"
+# main's earlier job, the --link form's, where bridge.conf said scope=gui; scope=system's was a LaunchDaemon
+FORMER="gui/$(id -u)"; DAEMON=/Library/LaunchDaemons/$LABEL.plist
 
 # the configuration from bridge.conf, written to $CONFIGURATION.new; renew=1 where its bytes differ from the one in place
 configuration_write() {
@@ -127,7 +127,7 @@ write_plist() {
 <!-- the node's bridge (bin/mesh-bridge.sh): its heartbeat (rdma/mesh-heartbeat), which opens and closes the bridge; a new binary or configuration is installed by rename and the heartbeat's SIGHUP restarts both on them, the region kept; SIGUSR1 releases the bridge and its region, SIGTERM releases them and ends the heartbeat -->
 <plist version="1.0"><dict><key>Label</key><string>$LABEL</string>
 <key>ProgramArguments</key><array><string>$HEARTBEAT</string><string>$BIN</string><string>$CONFIGURATION</string></array>
-<key>AbandonProcessGroup</key><true/>
+<key>LimitLoadToSessionType</key><string>Background</string><key>AbandonProcessGroup</key><true/>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>60</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$LOGDIR/$LABEL.log</string></dict></plist>
 PL
@@ -136,7 +136,7 @@ PL
   mv -f "$PLIST.new" "$PLIST"
 }
 
-pid_of() { launchctl print "$DOM/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3}'; }
+pid_of() { launchctl print "${1:-$DOM}/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3}'; }
 # the loaded job's program (tag bin/mesh-user.sh line 56), by its physical path
 program_of() {
   program=$(launchctl print "$DOM/$LABEL" 2>/dev/null | awk '/^[[:space:]]*program = /{sub(/^[[:space:]]*program = /,""); print; exit}')
@@ -146,9 +146,12 @@ program_of() {
 bridge_of() { "$STAT" "$region" 2>/dev/null | sed -n 's/.*"bridge_pid":\([1-9][0-9]*\).*/\1/p'; }
 client_attached() { "$STAT" "$region" 2>/dev/null | grep -qE '"client":[1-9]'; }
 
+# the job in DOMAIN stopped (default: this job's, else main's earlier gui/<uid> job where that is the one loaded)
 do_stop() {
-  p=$(pid_of); b=$(bridge_of)
-  launchctl bootout "$DOM/$LABEL" >/dev/null 2>&1 & request=$!
+  d=${1:-$DOM}
+  [ -n "${1:-}" ] || launchctl print "$d/$LABEL" >/dev/null 2>&1 || ! launchctl print "$FORMER/$LABEL" >/dev/null 2>&1 || d=$FORMER
+  p=$(pid_of "$d"); b=$(bridge_of)
+  launchctl bootout "$d/$LABEL" >/dev/null 2>&1 & request=$!
   for _ in $(seq 1 300); do
     if ! kill -0 "$request" 2>/dev/null && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; } && { [ -z "$b" ] || ! kill -0 "$b" 2>/dev/null; }; then break; fi
     sleep 0.1
@@ -165,6 +168,19 @@ do_start() {
   force=${1:-}
   [ -x "$BIN" ] && [ -x "$HEARTBEAT" ] || { echo "mesh-bridge: no bridge image and heartbeat at $(dirname "$BIN"); run make install-bridge" >&2; return 66; }
   configuration_write || return $?
+  if [ -e "$DAEMON" ] || launchctl print "system/$LABEL" >/dev/null 2>&1; then
+    rm -f "$new"
+    echo "mesh-bridge: main's earlier system job ($DAEMON, system/$LABEL) is in place, root's, and a node runs one bridge; boot it out and remove its definition as root first" >&2
+    return 1
+  fi
+  if launchctl print "$FORMER/$LABEL" >/dev/null 2>&1; then
+    if [ -z "$force" ] && [ -n "$(pid_of "$FORMER")" ] && client_attached; then
+      rm -f "$new"
+      echo "mesh-bridge: main's earlier job ($FORMER/$LABEL) runs with a client attached; not replacing it" >&2; return 1
+    fi
+    echo "mesh-bridge: main's earlier job ($FORMER/$LABEL) is loaded; stopping it for the heartbeat's job in $DOM"
+    do_stop "$FORMER" || { rm -f "$new"; return 1; }
+  fi
   if launchctl print "$DOM/$LABEL" >/dev/null 2>&1; then
     running=$(program_of); p=$(pid_of)
     if [ -n "$p" ] && [ "$running" = "$(cd "$(dirname "$HEARTBEAT")" && pwd -P)/$(basename "$HEARTBEAT")" ]; then
@@ -193,21 +209,25 @@ do_start() {
       fi
       echo "mesh-bridge: running another program (${running:-unknown}); replacing it with the heartbeat's job"
     fi
-    do_stop || { rm -f "$new"; return 1; }
+    do_stop "$DOM" || { rm -f "$new"; return 1; }
   fi
   configuration_install; wire_check || return $?; write_plist || return $?
   launchctl bootstrap "$DOM" "$PLIST" || return $?
-  for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; sleep 0.01; done
-  p=$(pid_of)
-  [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOGDIR/$LABEL.log" >&2; return 1; }
-  for _ in $(seq 1 1200); do
-    if "$STAT" --ready "$region" >/dev/null 2>&1; then
+  # the job's heartbeat and its bridge awaited 8 s at most from here (the project's bound on a wait), the job left loaded
+  deadline=$((SECONDS+8)); p=
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    p=$(pid_of)
+    if [ -n "$p" ] && "$STAT" --ready "$region" >/dev/null 2>&1; then
       echo "mesh-bridge: running as $p (its heartbeat), bridge $(bridge_of), region of $region_bytes bytes"
       return 0
     fi
     sleep 0.1
   done
-  echo "mesh-bridge: setup incomplete; see $LOGDIR/$LABEL.log" >&2
+  if [ -z "$p" ]; then
+    echo "mesh-bridge: $DOM/$LABEL is loaded but its heartbeat had not started 8 s on; see $LOGDIR/$LABEL.log" >&2
+  else
+    echo "mesh-bridge: its heartbeat $p runs, but 8 s on no bridge was ready (mesh-stat --ready: no region $region of this version with its bridge alive); the job stays loaded; see $LOGDIR/$LABEL.log" >&2
+  fi
   return 1
 }
 

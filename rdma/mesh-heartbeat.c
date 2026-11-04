@@ -47,10 +47,10 @@
 #include <time.h>
 #include <unistd.h>
 
-/* declared here until a header without verbs carries them: main has them in mesh-bridge.h alone (MESH_PLATFORM_NS,
-   mesh_say; mesh_clock_ns as its clock_ns), which includes mesh-verbs.h, and the heartbeat holds no device */
-/* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, MESH_LOG_BYTES, MESH_DIAGNOSTIC_BYTES, verbatim */
-#define MESH_PLATFORM_NS UINT64_C(5000000000)
+/* declared here until a header without verbs carries them: main has them in mesh-bridge.h alone (mesh_say and its
+   bounds; mesh_clock_ns as its clock_ns), which includes mesh-verbs.h, and the heartbeat holds no device.
+   MESH_PLATFORM_NS is mesh.h's */
+/* tag pre-return-20261103 etc/bridge/layout.h MESH_LOG_BYTES, MESH_DIAGNOSTIC_BYTES, verbatim */
 #define MESH_LOG_BYTES 4194304
 #define MESH_DIAGNOSTIC_BYTES 640
 /* tag pre-return-20261103 rdma/mesh.h mesh_clock_ns, verbatim (c119d3e2) */
@@ -115,9 +115,12 @@ static struct hdr *region_map(size_t *size,int writable){
 /* region `m`'s bridge area, where it lies within its `size` bytes, else NULL */
 static struct mesh_bridge_pages *region_own(struct hdr *m,size_t size){
   /* differs from the tag: main's bridge pages are at `bridge_off` itself (mesh.h mesh_bridge_pages), not after
-     MESH_PORTS link infos there, and the bound is written so a `bridge_off` past `size` cannot wrap the sum */
+     MESH_PORTS link infos there, and only where `bridge_off` lies past the header, as mesh-link.c region_open reads
+     them: an object a layout before 105 left (main's --link bridge's) has no bridge area and reads 0 there, which would
+     take the header's own words for the bridge's start and its children.  The bound is written so a `bridge_off` past
+     `size` cannot wrap the sum */
   const uint64_t at=m->bridge_off;
-  return m->magic==MESH_MAGIC && at<=size && size-at>=sizeof(struct mesh_bridge_pages)?mesh_bridge_pages(m):NULL;
+  return m->magic==MESH_MAGIC && at>=sizeof *m && at<=size && size-at>=sizeof(struct mesh_bridge_pages)?mesh_bridge_pages(m):NULL;
 }
 /* the live bridge serving region `m` (its `bridge_pid` of the start it recorded), or 0 */
 static pid_t bridge_of(struct hdr *m,size_t size,uint64_t *start){
