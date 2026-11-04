@@ -9,12 +9,7 @@
 /* not the tag's: main's mesh-bridge.h does not include the library's header (the tag's included mesh-call.h), and
    mesh_arena_alloc, mesh_retire and mesh_retired_release are declared there */
 #include "mesh-dataflow.h"
-
-/* tag pre-return-20261103 etc/bridge/layout.h MESH_HEALTH_NS, verbatim: a health sample's period (health_turn) */
-/* defined here until mesh-bridge.h carries it */
-#ifndef MESH_HEALTH_NS
-#define MESH_HEALTH_NS UINT64_C(10000000000)
-#endif
+/* MESH_HEALTH_NS is mesh-bridge.h's (review R2, B2) */
 #include "mesh-graph.h"
 
 /* tag pre-return-20261103 rdma/mesh-records.c busy_tell (3f72cbde), adapted: a client's hold is main's client word */

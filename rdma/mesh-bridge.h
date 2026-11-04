@@ -461,5 +461,10 @@ static __attribute__((always_inline)) inline uint32_t link_lane(const struct lin
 #ifndef MESH_REQUEST_BYTES
 #define MESH_REQUEST_BYTES 16773120u
 #endif
+/* moved from mesh-records.c, its "defined here until mesh-bridge.h carries it" (review R2, B2) */
+/* tag pre-return-20261103 etc/bridge/layout.h MESH_HEALTH_NS, verbatim: a health sample's period (health_turn) */
+#ifndef MESH_HEALTH_NS
+#define MESH_HEALTH_NS UINT64_C(10000000000)
+#endif
 
 #endif
