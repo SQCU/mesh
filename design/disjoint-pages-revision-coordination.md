@@ -703,6 +703,21 @@ work proceeds.)
   peers' partials, whose read is in the chain, so it is ordered: open for other programs (to the reviewers); (b) a
   blit fillBuffer still runs during a capture and would land in stand-in memory: unverified. The decode's submission
   left to 4 (launched).
+- 6 again: f975d78b (link_prepare refuses with EALREADY, by link_run's refusal, a plan whose `executions` reads above 0
+  at load; only where this port carries units of the plan, since a port with none posts nothing and would otherwise
+  read STOPPED to the next start; a torn read EAGAIN, not a refusal).
+- 14 (tools/prepare_e2b.py): 16965d44 (dataflow(): each rank stage's "dataflow" after the routes are filtered, each
+  routed operand once a rank; writes in program order; a read after the last write it is not shown, by data edges over
+  every rank's stages and outside the delegate's fusable kernels, to precede). Its differences: maxloc_reduce's reads
+  (a stage with no "ranks") go at the end of the ranked stage before it, else they would have no chain edge; a read
+  pushed past a later stage's write is listed in that stage. Conservative choices (sound, fewer reuses): reads ordered
+  only by level barriers, or reaching a write through a fusable elementwise chain, pushed later; a read with no reader
+  found at the end. Its findings: the C9 hook asked its ancestor and kernel-span walks into the graph module: ruled,
+  they go through rdma/mesh_graph.py's reach and walk (routed back to 14); its assumption that two operators outside
+  FUSED never share a kernel: open, for the reviewers; the source's own reads (also 13's (a)): ruled unsound for e2b
+  (a peer's exchange k + 1 may land while this node's combine still reads its own exchange-k partial) and the event
+  model extended (0ab084aa): MESH_FROM_SOURCE_READ / MESH_TO_SOURCE_READ, the template's S(d); routed to 3 (the vertex
+  and kinds), 14 (emit them), 4 (map them).
 
 ### Reviews and where their findings went
 
