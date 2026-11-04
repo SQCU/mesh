@@ -620,8 +620,8 @@ restatement of them.
   which is right.
 - Report item 5 called fresh pages for every step "correct". The operator's ruling: the code isn't correct when it
   avoids demonstrating the requirements.
-- The operator made no ruling on report item 3. Its attach wait goes with C3.4 and its bound mark with C3.1. The erased
-  flag and its fences stand or go with C3.6.
+- Report item 3's mechanisms: see C5. They come from neither this request nor the literature as they are used, and
+  they go (C4).
 
 ### C3. Claude's proposal: the revision
 
@@ -632,8 +632,10 @@ restatement of them.
      interface, Sandia SAND2012-10087), and the queue's own event wait (CUDA stream memory operations,
      cuStreamWaitValue32; Metal's MTLSharedEvent). There is one wait per pass, held by the queue. No lane reads a word
      in a loop.
-   - The count rises with every landing and every cancellation, and the client raises it at the step's deadline, so the
-     wait ends in bounded time. Lanes whose pages never landed end as an error the host reports.
+   - The bridge alone writes the landed list and its count, which rises with every landing and every cancellation. The
+     client alone signals the queue's event: when the count is complete, or at the step's deadline. So the wait ends in
+     bounded time, and each word has one writer. Lanes whose pages never landed end as an error the host reports.
+   - This is not waitless. It is one wait per pass, held by the queue; no lane waits.
 2. **The allocator places every value.** Weights, the KV cache, pooled intermediates, exchanges, the GPU's publication
    records and the landed list are all placed by `mesh_plan`'s allocator, in the pages it computes. Values written
    before the first execution and read by every execution (weights; the KV cache as one array) are placed once, for the
@@ -657,7 +659,8 @@ restatement of them.
    the order its command buffer runs them. `tools/prepare_e2b.py` writes them into the manifest where it doesn't
    already. The run's pages then don't grow with its steps.
 6. **Every race is closed and every wait is bounded,** including:
-   - a cancel from plan_cancel that lands after a re-plan zeroes the landed records;
+   - a cancel from plan_cancel that lands after a re-plan zeroes the landed records (removed by items 2 and 4: no plan
+     rewrites another's records; C5);
    - a port that keeps a retired client's plan past MESH_PLATFORM_NS (this goes with item 4);
    - a local countdown wait that ends with zeros and no mark;
    - a link loss and a GPU bound that both read as `ETIMEDOUT`;
@@ -673,3 +676,48 @@ restatement of them.
 - `executions` as an input of `mesh_plan`, its per-execution items, and e2b_replay.m's refusals where steps differ from
   executions (24ec8cda, cfada099, and 472390a8's comment).
 - `NULL, 0` at e2b_replay.m:579.
+- `mesh_plan_erased` (mesh-call.h; mesh-dataflow.c), its seq_cst fence pair with the ports' data path (mesh-flow.c),
+  and the supplied words' and landed list's fixed areas of the layout (hdr `word_off`, `landed_off`) that it guards.
+- The wait at attach for the ports to drop a retired client's plan, before `mesh_claim`.
+- The GPU lane's write of `UINT64_MAX` into a step's landed record at its bound, and `mesh_seen`'s failed value.
+
+### C5. Report item 3
+
+**The operator:**
+
+> do you think item 3 is endorsed by any particular algorithm? is it waitless, zero copy, one-sided-writing, etc?
+
+**Claude:**
+
+> No. None of the three comes from the specification, and none comes from an algorithm in the literature as it's used
+> here. All three are waits, and all three need both sides to take part. Zero-copy doesn't apply to any of them, since
+> they're control words, not data. Each covers a place where something still live is overwritten, or where memory is
+> held that nothing uses.
+>
+> - **The erased flag and its Dekker fences** (`mesh_plan_erased`, mesh-dataflow.c). A new plan zeroes and rewrites the
+>   previous plan's supplied words and landed records in place, because they sit at fixed offsets in the layout. Before
+>   doing that, it stores `hops = 0`, issues a seq_cst fence, and spins for up to MESH_PLATFORM_NS (5 s) until no
+>   port's `prepared` still holds the old generation. Each port fences on its side too.
+>   - The fence pair is a correct store–fence–load primitive (Dekker, in E. W. Dijkstra, Cooperating sequential
+>     processes, 1965).
+>   - What it builds is RCU's grace-period wait without RCU's copy (P. E. McKenney and J. D. Slingwine, Read-copy
+>     update, PDCS 1998). RCU publishes the new version to new memory and reclaims the old one later. It never waits
+>     so that it can overwrite in place.
+>   - It also creates the cancel race: a late `plan_cancel` lands in records the new plan has just zeroed.
+>   - Once the allocator places the records (C3.2) and a program holds only its plan's pages (C3.4), a new plan's
+>     records are new pages. The bridge's own turn releases the old ones once no port holds them, which is deferred
+>     reclamation (RCU's call_rcu; K. Fraser, Practical lock-freedom, 2004). Then there is no wait, no fence pair and
+>     no race.
+> - **The 5 s wait at attach.** A new client spins until the ports drop a retired client's plan, releases that claim,
+>   then takes everything free. No algorithm calls for this. It is the grab waiting to reclaim memory so it can grab
+>   again. With C3.4 a client takes only what its plan uses, from what is free, so the wait has nothing to do.
+> - **The bound mark.** A lane that reaches its 2^23-poll bound writes `UINT64_MAX` into the step's landed record, and
+>   the host reads it after the run. That record then has five writers: landings, `link_close`, `plan_cancel`, a GPU
+>   lane and the program's stop. One-sided protocols keep each landing word to one writer, the transport (NCCL's LL
+>   flags; L. Lamport, On interprocess communication, Distributed Computing 1(2), 1986, single-writer registers). The
+>   mark exists only because lanes spin (report item 1). With masking, no lane has a bound to reach.
+>
+> Applying the same test to C3.1: it isn't waitless either. It has one wait per pass, held by the command queue. In a
+> chain of dependent steps like decode, some ordering point is unavoidable. Its wording also gave the landed count two
+> writers ("the client raises it at the step's deadline"). Fixed: the bridge alone writes the landed list and its
+> count, and the client alone signals the queue's event, when the count is complete or at the deadline.
