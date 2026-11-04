@@ -32,7 +32,9 @@ void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint
   struct mesh_publication *publication=mesh_publication_at(m,section.first);
   const uint64_t argument=atomic_load_explicit(&publication->argument,memory_order_relaxed);
   for(uint32_t i=0;i<publication->sends;i++)for(uint32_t k=0;k<publication->targets[i].count;k++){
-    const uint64_t word=publication->targets[i].stream+m->hop_stride*((uint64_t)publication->targets[i].stride*k+invocation);
+    /* 2026-11-03, sub-assignment 3: MESH_WORD_STRIDE in place of hdr `hop_stride`, vacant at 108 (mesh.h), so the file
+       compiles; sub-assignment 5 writes this body */
+    const uint64_t word=publication->targets[i].stream+MESH_WORD_STRIDE*((uint64_t)publication->targets[i].stride*k+invocation);
     atomic_store_explicit((_Atomic uint64_t *)((char *)m+word),argument,memory_order_release);
   }
 }
@@ -183,6 +185,9 @@ static uint64_t plan_word(const struct plan *p,uint64_t w){
 static int plan_hop(struct plan *p,const struct plan_demand *d,uint64_t k,uint32_t direction,uint32_t node,uint64_t w,
                     uint32_t forwards,uint64_t hop){
   struct hdr *m=p->context->M;
+  /* 2026-11-03, sub-assignment 3: struct mesh_hop's `forwards` is gone and `position` is its `mask` at 108 (mesh.h), so
+     the file compiles; sub-assignment 5 replaces the hop writing */
+  (void)forwards;
   const struct mesh_section *section=d->mine!=MESH_ABSENT?&p->declared[d->mine].section:&d->relay;
   const uint64_t word=plan_word(p,w);
   const uint32_t room=(uint32_t)((m->target_stride-offsetof(struct mesh_publication,targets))/sizeof(struct mesh_target));
@@ -190,7 +195,7 @@ static int plan_hop(struct plan *p,const struct plan_demand *d,uint64_t k,uint32
     const uint32_t row=plan_row(m,section,s,k);
     mesh_hops(m)[(size_t)s*p->hops+hop]=(struct mesh_hop){
       .page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row].mapping,memory_order_relaxed),.node=node,
-      .direction=direction,.forwards=forwards,.word=word,.position=MESH_PLAN_POSITION,.serial=p->serial};
+      .direction=direction,.word=word,.mask=MESH_PLAN_POSITION,.serial=p->serial};
     struct mesh_publication *publication=mesh_publication_at(m,row);
     if(direction==MESH_RECEIVE){
       /* a landed word has one writer: another receive into this page would be two posted receives on one page */
@@ -267,10 +272,18 @@ static int plan_walk(struct plan *p,int write){
    and destinations the relays, members all.  The pages: each demand's pages cut over its trees by their shares by
    earliest finish (mesh_graph_fill), a tree's pages one run of them.  Every rank computes the same demands, trees and
    pages from the same declared transfers and map, and writes its own hops of them (plan_walk). */
-int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint32_t count,uint32_t executions,uint32_t depth){
+int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint32_t count,uint32_t executions,
+              const struct mesh_dependence *dependence,uint32_t dependences){
   struct hdr *m=context->M;
-  if(!executions || (count && !declared))return EINVAL;
-  if(!depth || depth>executions)depth=executions;
+  if(!executions || (count && !declared) || (dependences && !dependence))return EINVAL;
+  /* a program's data edge joins a range consumed at a node to a range that node produces (mesh-collective.h struct
+     mesh_dependence) */
+  for(uint32_t e=0;e<dependences;e++)
+    if(dependence[e].consumed>=count || dependence[e].produced>=count ||
+       declared[dependence[e].consumed].destination!=declared[dependence[e].produced].source)return EINVAL;
+  /* the old tail's slots, one an execution: sub-assignment 5 replaces that tail (no depth: design/disjoint-pages-
+     change-request.md, Appendix A, A4) */
+  const uint32_t depth=executions;
   struct mesh_nodes nodes,after;
   int status=mesh_nodes_read(context,&nodes);
   if(status)return status;
@@ -431,8 +444,6 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   }
   if((status=plan_walk(&p,1)))goto done;
   m->executions=executions;
-  atomic_store_explicit(&m->depth,depth,memory_order_relaxed);
-  m->hop_stride=sizeof(struct mesh_send);
   /* `plan` the plan's generation, its previous value + 1 and never 0, and the map serial the plan was made against its
      entries' `serial` alone, so a second plan on an unchanged map is told from the first (the coordinator's change to
      CONTRACT.md's interface and mesh.h's comment above struct mesh_hop; 17612857 had `plan` the map serial).  What
