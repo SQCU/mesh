@@ -22,9 +22,10 @@
 /* the bridge-side region types (the map's records and cables, the link table, the layout), moved out of the client
    headers (review R1, C1; the change request, "Queue pairs and links belong to the bridge") */
 #include "mesh-map.h"
-/* tag rdma/mesh-bridge.h: its system headers.  Its mesh-call.h, mesh-observe.h and mesh-graph.h are left out: the client
-   context is named by its tag alone (`bridge`) and the client slots' `owned` does not come over, the observe header's
-   mesh_say is mesh-map.h's (main's mesh-map.h holds struct mesh_link_info), and the walks' chains are named by nothing here */
+/* tag rdma/mesh-bridge.h: its system headers.  Its mesh-call.h, mesh-observe.h and mesh-graph.h are left out: no client
+   context is named here (the tag's `bridge` is gone: the externs' note) and the client slots' `owned` does not come
+   over, the observe header's mesh_say is mesh-map.h's (main's mesh-map.h holds struct mesh_link_info), and the walks'
+   chains are named by nothing here */
 #include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
@@ -322,15 +323,19 @@ extern _Atomic uint64_t exit_at;
 extern _Atomic uint32_t faulted,terminated;
 extern char self_path[PATH_MAX];
 extern uint32_t ones;
-/* the rest of tag rdma/mesh-bridge.h's externs, defined in mesh-link.c with the tag's types: the arena pages the bridge
-   holds itself (`held_pages`), this node's available memory and model as its record carries them, the bridge's own
-   context (`bridge`, mesh-call.h struct mesh_ctx, named here by its tag alone), the clients' slots' owners and the
-   ones not released (`owners`: its bound, the tag's MESH_CLIENTS, given at its definition; `unreleased`), the record
-   sequence and the nodes heard (`known`) */
-struct mesh_ctx;
-extern uint64_t held_pages,memory,sequence;
+/* the rest of tag rdma/mesh-bridge.h's externs, defined in mesh-link.c with the tag's types: this node's available
+   memory and model as its record carries them, the clients' slots' owners and the ones not released (`owners`: its
+   bound, the tag's MESH_CLIENTS, given at its definition; `unreleased`), the record sequence and the nodes heard
+   (`known`) */
+/* 2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 ("Sharing the region between programs": "The
+   bridge's own pages (its records) are laid out once with the region, not taken from any program's section") and A4
+   (mesh-records.c's call of mesh_arena_alloc goes): the tag's `held_pages` (the arena pages the bridge held itself) and
+   `bridge` (its own client context, mesh-call.h struct mesh_ctx, declared forward here) are removed with their
+   definitions (mesh-link.c).  The map's records, the last of the bridge's arena pages, are the layout's area (hdr
+   `map_off`, `map_room`; mesh-records.c map_grow's note), so the bridge holds no arena page and allocates nothing
+   from the arena.  What must stay: no bridge state counts or takes arena pages */
+extern uint64_t memory,sequence;
 extern char model[MESH_MODEL_BYTES];
-extern struct mesh_ctx bridge;
 extern uint64_t owners[];
 extern int unreleased;
 extern struct known known[MESH_KNOWN];

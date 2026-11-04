@@ -2,12 +2,14 @@
    node's record and every other node's newest heard, in the region for the collective and the bridges' rule to read
    (mesh.h struct mesh_record, struct mesh_reach, hdr `map`, `map_serial`), its health samples, and the client's
    watch.  From tag pre-return-20261103 rdma/mesh-records.c, whole; only interfaces are adapted (main's region fields,
-   its one client word, its arena calls), and each line that is not the tag's has a note at its spot.  The map holds
+   its one client word, the map's area laid out with the region in place of the tag's arena lease), and each line that
+   is not the tag's has a note at its spot.  The map holds
    Thunderbolt-5-linked members only: a record no paired path from this node reaches is left out (map_put), and every
    reach entry is a cable a port paired (mesh-ports.c record_reach). */
 #include "mesh-bridge.h"
 /* not the tag's: main's mesh-bridge.h does not include the library's header (the tag's included mesh-call.h), and
-   mesh_arena_alloc, mesh_retire and mesh_retired_release are declared there */
+   mesh_retire and mesh_retired_release are declared there (mesh_arena_alloc, the tag's third, is called here no
+   longer: map_grow's note) */
 #include "mesh-dataflow.h"
 /* MESH_HEALTH_NS is mesh-bridge.h's (review R2, B2) */
 #include "mesh-graph.h"
@@ -27,8 +29,8 @@ static void busy_tell(void){
   else if(!atomic_load_explicit(&M->idle_since,memory_order_relaxed))atomic_store_explicit(&M->idle_since,clock_gettime_nsec_np(CLOCK_REALTIME),memory_order_relaxed);
   atomic_store_explicit(&M->busy,busy,memory_order_release);
 }
-/* tag pre-return-20261103 rdma/mesh-records.c, the map's lease (3f72cbde), verbatim */
-static uint32_t map_page,map_pages,map_room;
+/* tag pre-return-20261103 rdma/mesh-records.c, the map's lease (3f72cbde), `static uint32_t map_page,map_pages,map_room;`,
+   is not here: no lease exists (map_grow's note); the map's room is hdr `map_room` */
 /* tag pre-return-20261103 rdma/mesh-records.c available_now (3f72cbde), verbatim */
 /* design/transport.md: the bytes the kernel can give without pressure (kern.memorystatus_level percent of
    the node's memory), read now */
@@ -64,41 +66,34 @@ static struct known *known_at(uint32_t node){
   if(at)*at=(struct known){.node=node};
   return at;
 }
-/* tag pre-return-20261103 rdma/mesh-records.c map_grow (3f72cbde), adapted: main's mesh_arena_alloc */
-/* design/transport.md, #region: the map, a record a node: this node's own, rebuilt from its port table when
-   that changes (its sequence one more), and every other node's newest heard; each change written between two
-   notifications of the map serial (odd while it writes), the records in arena pages the bridge leases and leases again
-   larger as the mesh grows; nodes no paired path reaches dropped */
-static int map_grow(uint64_t records){
-  if(records<=map_room)return 0;
-  /* differs from the tag: main's mesh_arena_alloc takes the range as its fourth operand; 0, the arena outside the
-     registered window (mesh-dataflow.h mesh_arena_range), since no SGE names the map and the window is the plans' */
-  uint32_t pages=(uint32_t)((records*2*sizeof(struct mesh_record)+M->pgsz-1)/M->pgsz),page=mesh_arena_alloc(&bridge,pages,1,0);
-  if(page==MESH_ABSENT)return ENOMEM;
-  memcpy(mesh_at(M,page),mesh_records(M),(size_t)atomic_load(&M->map_nodes)*sizeof(struct mesh_record));
-  atomic_store(&M->map_off,(uint64_t)(mesh_at(M,page)-(unsigned char *)M));
-  mesh_bridge_pages(M)->map=page;mesh_bridge_pages(M)->map_pages=pages;
-  if(map_pages)mesh_bits_clear(mesh_arena_bits(M),map_page,map_pages);
-  held_pages+=pages;held_pages-=map_pages;
-  map_page=page;map_pages=pages;map_room=(uint32_t)((uint64_t)pages*M->pgsz/sizeof(struct mesh_record));
-  return 0;
-}
+/* tag pre-return-20261103 rdma/mesh-records.c map_grow (3f72cbde), adapted then to main's mesh_arena_alloc, is not
+   here.  2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 ("Sharing the region between programs":
+   "The bridge's own pages (its records) are laid out once with the region, not taken from any program's section") and
+   A4 (mesh-records.c's call of mesh_arena_alloc goes), reversing this file's first form, in which map_grow leased the
+   records arena pages outside the registered window (mesh_arena_alloc of the bridge's own context `bridge`), leased
+   again twice as large when the map outgrew them, and recorded them in struct mesh_bridge_pages `map`, `map_pages` and
+   `held_pages`.  Why: the arena is the programs' sections alone, and a page the bridge took there was one call-site
+   allocation among those A4 removes.  Now the map's records are its area of the layout: hdr `map_room` records
+   (MESH_MAP_ROOM) at hdr `map_off`, both set by mesh_layout (mesh-map.h) before the arena and never moved, so nothing
+   grows, nothing is copied and the bridge holds no arena page.  What must stay: the map is written at `map_off` and
+   within `map_room` alone; a map past the room leaves its records past it out (map_put), as the tag left out what a
+   failed lease could not hold */
 /* tag pre-return-20261103 rdma/mesh-records.c map_adopt (3f72cbde), adapted: the records' clearing is a change of the
    map's nodes */
 /* design/transport.md section 2: an adopted region's map pages, recorded by the bridge before (mesh-observe.h struct
    mesh_bridge_pages), taken again as this bridge's, its records none until this bridge writes its own */
+/* differs from the tag (2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3, "Sharing the region
+   between programs"): the map's area is the layout's (hdr `map_off`, `map_room`), which region_open's region_same
+   (mesh-link.c) found the same in the adopted region as in this bridge's layout, so nothing is taken again: the tag's
+   test of `map` (MESH_ABSENT where none was leased), its taking of `map`, `map_pages` and the room, the held pages'
+   count and the store of `map_off` go, and the area is adopted as it lies */
 void map_adopt(void){
-  const struct mesh_bridge_pages *own=mesh_bridge_pages(M);
-  if(own->map==MESH_ABSENT)return;
-  map_page=own->map;map_pages=own->map_pages;map_room=(uint32_t)((uint64_t)map_pages*M->pgsz/sizeof(struct mesh_record));
-  held_pages+=map_pages;
   /* differs from the tag: the records cleared between two notifications of `map`, and `map_serial` moved where any
      were held, since every change of the map's nodes moves it (mesh.h `map_serial`): a plan made against the earlier
      bridge's map is refused.  region_adopt (mesh-link.c) has made `map` even before this, as at the tag */
   mesh_notify(&M->map);
   if(atomic_load(&M->map_nodes))atomic_fetch_add(&M->map_serial,1);
   atomic_store(&M->map_nodes,0);
-  atomic_store(&M->map_off,(uint64_t)(mesh_at(M,map_page)-(unsigned char *)M));
   mesh_notify(&M->map);
 }
 /* tag pre-return-20261103 rdma/mesh-records.c map_put (3f72cbde, abeffc1b), adapted: node-id order and the map serial */
@@ -140,15 +135,16 @@ static void map_put(const struct mesh_record *record){
   uint64_t kept=0;
   for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+kept++,next+k,sizeof *next);
   if(kept!=n || memcmp(next,r,(size_t)n*sizeof *r)){
-    /* not the tag's: whether the nodes or a cable change, read before the write (map_grow may move the records) */
+    /* not the tag's: whether the nodes or a cable change, read before the write (the write replaces the records read) */
     int moved=kept!=n;
     for(uint64_t k=0;!moved && k<kept;k++)
       moved=next[k].node!=r[k].node || next[k].reached!=r[k].reached ||
         memcmp(next[k].reach,r[k].reach,(size_t)MIN(next[k].reached,(uint32_t)MESH_PORTS)*sizeof *next[k].reach);
     mesh_notify(&M->map);
-    map_grow(kept);
-    /* `moved=1` not the tag's: records a failed lease leaves out are a change of the map's nodes */
-    if(kept>map_room){kept=map_room;moved=1;}
+    /* not the tag's (2026-11-03, map_grow's note): the tag's `map_grow(kept);` gone, and the room the layout's hdr
+       `map_room`, the tag's leased `map_room`; `moved=1` not the tag's: records past the room, left out as the tag left
+       out those a failed lease could not hold, are a change of the map's nodes */
+    if(kept>M->map_room){kept=M->map_room;moved=1;}
     memcpy(mesh_records(M),next,(size_t)kept*sizeof *next);
     atomic_store(&M->map_nodes,kept);
     if(moved)atomic_fetch_add(&M->map_serial,1);
@@ -182,11 +178,15 @@ struct mesh_record *record_held(uint32_t node){
   return NULL;
 }
 /* tag pre-return-20261103 rdma/mesh-records.c record_changed (3f72cbde), adapted: the arena's bytes, MESH_PORTS */
-/* differs from the tag: `region` is the arena's bytes less the bridge's own, as at the tag, whose wire mapping was the
-   arena (tag mesh-verbs.h wire_map); main's `wire` is the registered window alone (mesh-verbs.h wire_map).  The reach's
-   room is MESH_PORTS cables (mesh.h struct mesh_record), the tag's MESH_STREAMS streams */
+/* differs from the tag: `region` is the arena's bytes, as at the tag, whose wire mapping was the arena (tag
+   mesh-verbs.h wire_map); main's `wire` is the registered window alone (mesh-verbs.h wire_map).  The reach's room is
+   MESH_PORTS cables (mesh.h struct mesh_record), the tag's MESH_STREAMS streams */
+/* 2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 ("Sharing the region between programs"): the
+   tag's `- held_pages*M->pgsz` goes, since the bridge holds no arena page (its map is the layout's area, map_grow's
+   note, and it leases no link pages or duds' block, mesh-link.c): every arena byte is the programs'.  What must stay:
+   `region` the bytes the programs' sections may take */
 void record_changed(void){
-  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=(uint64_t)mesh_arena_pages(M)*M->pgsz-held_pages*M->pgsz,.memory=memory};
+  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=(uint64_t)mesh_arena_pages(M)*M->pgsz,.memory=memory};
   memcpy(own.model,model,sizeof own.model);
   own.reached=record_reach(own.reach,MESH_PORTS);
   own.health=health;

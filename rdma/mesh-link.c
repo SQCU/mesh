@@ -12,7 +12,8 @@
 /* tag pre-return-20261103 rdma/mesh-link.c:1-7, its includes: those of this file's pieces (spawn.h, sys/wait.h,
    crt_externs.h and mach/mach_time.h went with the children's code, mesh-children.c), with main's headers of the
    holder probes (mesh-holders.h: mesh_started, mesh_holds; libproc.h with them) and of the client library (mesh-dataflow.h:
-   struct mesh_ctx, the bridge's own `bridge`; mesh_retire, mesh_retired_release), which mesh-bridge.h does not include */
+   mesh_retire, mesh_retired_release, which take the region; struct mesh_ctx no longer, the bridge's own `bridge` gone:
+   the shared state's note), which mesh-bridge.h does not include */
 #include "mesh-bridge.h"
 #include "mesh-holders.h"
 #include "mesh-dataflow.h"
@@ -23,14 +24,18 @@
 /* mesh-verbs.h: the stop flag every loop reads */
 _Atomic sig_atomic_t stop;
 /* tag pre-return-20261103 rdma/mesh-link.c:12-18 the shared state, verbatim but `wire` main's type, `finding`, `found`
-   and `finder` mesh-ports.c's (mesh-bridge.h), and `bridge` struct mesh_ctx of main's mesh-dataflow.h (3f72cbde 0905738c 1835bef4 5dcb4f69 b71dcb36 7c500c88 f9f2aff0 ad55cbf4 33ca0dab ba674fbe e68bba3e 8e5df675 8df706e2 b346ef2b 7e0a797e 1f9be1d5 a8952de9 c24265e0 6b33cc33) */
+   and `finder` mesh-ports.c's (mesh-bridge.h), and `bridge` not here (3f72cbde 0905738c 1835bef4 5dcb4f69 b71dcb36 7c500c88 f9f2aff0 ad55cbf4 33ca0dab ba674fbe e68bba3e 8e5df675 8df706e2 b346ef2b 7e0a797e 1f9be1d5 a8952de9 c24265e0 6b33cc33) */
+/* 2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 ("Sharing the region between programs") and A4
+   (mesh-records.c's call of mesh_arena_alloc goes): the tag's `struct mesh_ctx bridge={.fd=-1};`, the bridge's own
+   client context (main's mesh-dataflow.h struct mesh_ctx), is removed with its one use, mesh-records.c map_grow's
+   lease (and main's `bridge.M=M;` below): the bridge allocates nothing from the arena, and mesh_retire and
+   mesh_retired_release take the region.  What must stay: no context of the bridge's takes rows or pages */
 struct hdr *M;
 struct mesh_wire wire;
 struct port ports[MESH_PORTS];
 uint32_t port_count;
 int events=-1,listener=-1,hello=-1,network=-1,addresses=-1,unreleased;
 uint64_t now,sequence;
-struct mesh_ctx bridge={.fd=-1};
 /* tag pre-return-20261103 rdma/mesh-link.c:26-27 faulted, verbatim but not static (mesh-bridge.h) (3f72cbde 0905738c cf483b3e 7c500c88 f9f2aff0 b53804bf ad55cbf4 33ca0dab ba674fbe 128d0e84 0e34c13e a8952de9 d71970f8 d62c879b 8bbc01a5 f090d50d 5b49fbb9) */
 /* the ports a provider's doorbell fault was absorbed on (fault_heard), a bit a port */
 _Atomic uint32_t faulted;
@@ -48,12 +53,16 @@ struct known known[MESH_KNOWN];
 uint64_t owners[1];
 /* design/transport.md: this node's record, its region, memory and model with its ports and health */
 char model[MESH_MODEL_BYTES];
-/* tag pre-return-20261103 rdma/mesh-link.c:1027-1030 ones and held_pages, verbatim.  No duds' block is taken
+/* tag pre-return-20261103 rdma/mesh-link.c:1027-1030 ones, verbatim, and `held_pages` not here.  No duds' block is taken
    (link_reserve is left out: the contract's "Link pages"), so `ones` stays MESH_ABSENT, as each child is told (3f72cbde 33ca0dab 2fb2b270 6f90dc97 923d73fd a8952de9 ceff26ec 6b33cc33) */
 /* design/transport.md section 10: the all-ones block every dud is sent from (stream_send), taken and filled at the
    bridge's start, never written again */
 uint32_t ones=MESH_ABSENT;
-uint64_t held_pages;
+/* 2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 ("Sharing the region between programs": "The
+   bridge's own pages (its records) are laid out once with the region"): the tag's `uint64_t held_pages;`, the arena
+   pages the bridge held itself, is removed.  Its last holding was the map's lease (mesh-records.c map_grow's note),
+   and with the map the layout's area, no link pages and no duds' block, the bridge holds no arena page.  What must
+   stay: a record's `region` the arena's bytes whole (mesh-records.c record_changed) */
 /* tag pre-return-20261103 rdma/mesh-link.c:1128-1132 terminated, verbatim but not static (mesh-bridge.h) (abeffc1b 3f72cbde b53804bf ad55cbf4 33ca0dab ba674fbe 736ce24d a8952de9 d71970f8 d62c879b 8bbc01a5 6b33cc33) */
 /* design/transport.md B9b (EXIT-RECLAIM.md P2, and P3 as a window in place of IOServiceWaitQuiet): a
    Thunderbolt RDMA peer interface's termination, which IOKit tells in its first phase (kIOTerminatedNotification), on
@@ -152,6 +161,11 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    configuration's geometry (`layout`, region_open's operand), fitted to an existing object as at the tag by
    mesh_layout_within below.  Two layouts are the same where every field main's mesh_layout sets is (the tag's rule:
    its fields were those its mesh_layout set) */
+/* 2026-11-03, design/disjoint-pages-coordination.md, "The layout": mesh_layout sets the supplied words' area
+   (`word_off`, `word_capacity`), the landed list's (`landed_off`, `landed_capacity`) and the map's records' (`map_off`,
+   now the layout's, and `map_room`), so each is compared, by the rule above; `landed_stride` is the plan's, not the
+   layout's, and is not.  What must stay: every field mesh_layout sets compared, so an adopted region's areas lie where
+   this bridge's layout puts them (mesh-records.c map_adopt takes the map's area as it lies) */
 /* 2026-11-04, review R2 (L1), reversing this file's first form (d77eec2a), which refused an object smaller than the
    configuration's length: a configuration that grew the region then left the bridge exiting 1 and its heartbeat
    opening it again, forever.  What must stay: the layout fitted to the object, a bridge ending only where none fits */
@@ -161,7 +175,11 @@ static int region_same(const struct hdr *a,const struct hdr *b){
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
          a->link_off==b->link_off && a->target_stride==b->target_stride && a->target_off==b->target_off &&
          a->hop_off==b->hop_off && a->hop_capacity==b->hop_capacity &&
-         a->bridge_off==b->bridge_off && a->data_off==b->data_off && a->length==b->length;
+         a->word_off==b->word_off && a->word_capacity==b->word_capacity && a->landed_off==b->landed_off &&
+         a->landed_capacity==b->landed_capacity &&
+         a->bridge_off==b->bridge_off &&
+         atomic_load_explicit(&a->map_off,memory_order_relaxed)==atomic_load_explicit(&b->map_off,memory_order_relaxed) &&
+         a->map_room==b->map_room && a->data_off==b->data_off && a->length==b->length;
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:1764 region_children, verbatim (07949b28) */
 static struct mesh_holder region_children[2*MESH_PORTS];
@@ -236,6 +254,11 @@ static int region_open(struct hdr *geometry,struct mesh_geometry layout,int *out
   for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_bridge_pages *own=mesh_bridge_pages(M);
   for(uint32_t p=0;p<MESH_PORTS;p++)own->link[p]=MESH_ABSENT;
+  /* 2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 ("Sharing the region between programs"): the
+     tag's line, kept, but `map` and `map_pages` are now only recorded vacant (MESH_ABSENT, 0) and never written again:
+     no map lease exists, the map's records being the layout's area (hdr `map_off`, `map_room`; mesh-records.c
+     map_grow's note), and the fields stay since struct mesh_bridge_pages is only appended to (mesh.h).  What must
+     stay: no reader takes the map's place from them */
   own->ones=own->map=MESH_ABSENT;own->map_pages=0;
   for(uint32_t e=0;e<2*MESH_PORTS;e++)
     if(region_children[e].pid && mesh_holds((pid_t)region_children[e].pid,region_children[e].start))own->child[e]=region_children[e];
@@ -387,7 +410,7 @@ int main(int argc,char **argv){
   M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
-  bridge.M=M;
+  /* the tag's `bridge.M=M;` is not here: the bridge's own context is gone (the shared state's note, 2026-11-03) */
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
   /* design/transport.md: the node's memory and hardware model, which its record carries with its region */
   size_t size=sizeof memory;
@@ -395,10 +418,15 @@ int main(int argc,char **argv){
   sysctl_text("hw.model",model,sizeof model);
   health_init();
   record_changed();
-  if(!atomic_load(&M->map_nodes))die("the map's lease");
+  /* differs from the tag (2026-11-03, mesh-records.c map_grow's note): the tag's `die("the map's lease")`, its message
+     now what an empty map after this node's own record means, there being no lease to fail: map_put could not hold
+     the record (its copies' allocation, which leaves the map as it was).  What must stay: no region opens without this
+     node's record in its map */
+  if(!atomic_load(&M->map_nodes))die("this node's record is not in the map");
   /* left out: the tag's link_reserve() here, its link pages and the duds' block (the coordinator's contract, "Link
      pages": this design leases no link pages and posts nothing on lanes that carry nothing), so each port's `link[p]`
-     and `ones` stay MESH_ABSENT as region_open laid them, and `held_pages` is the map's alone */
+     and `ones` stay MESH_ABSENT as region_open laid them; the bridge holds no arena page (`held_pages` gone,
+     2026-11-03) */
   int watched[4]={listener,hello,network,addresses};
   for(int i=0;i<4 && watched[i]>=0;i++){EV_SET64(&event,(uint64_t)watched[i],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");}
   EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
