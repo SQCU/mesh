@@ -102,9 +102,9 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
 int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_section *sections,uint32_t ranges,uint32_t invocations,struct mesh_metal_publication *publication){
   struct hdr *m=context->M;
-  if(invocations>m->executions)return EINVAL;
   uint32_t count=mesh_publication_prepare(m,sections[0].first,NULL);
   *publication=(struct mesh_metal_publication){.count=count*ranges,.stride=MESH_WORD_STRIDE};
+  if(invocations>m->executions)return EINVAL;
   if(!count)return 0;
   struct mesh_section records;
   /* design/prepared-machine.md#M10 */
