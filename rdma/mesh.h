@@ -97,11 +97,11 @@ struct mesh_holder { uint32_t pid,unit; uint64_t start; };
    instead of leasing them again: each port's link pages and its streams' lists, the duds' block and the map's pages
    (MESH_ABSENT where none; 2026-11-03: the bridge leases no arena page, so `link`, `ones` and `map` are recorded
    MESH_ABSENT and `map_pages` 0 and none is read for a page, the map's records being the layout's area at hdr
-   `map_off` from 108; the fields stay so none moves); and the processes of the bridge that hold the region, each by its pid and start
-   (mesh_started): the bridge's own start (beside the header's `bridge_pid`) and each child, which registers the region
-   and holds it until its exit, in an entry no live child holds (twice the ports: an earlier launch's child that has not
-   ended keeps its entry), so the heartbeat unlinks an expired region only once none of them lives.  Fields are only
-   ever appended */
+   `map_off` from 108; the fields stay so none moves); and the processes of the bridge that hold the region, each by
+   its pid and start (mesh_started): the bridge's own start (beside the header's `bridge_pid`) and each child, which
+   registers the region and holds it until its exit, in an entry no live child holds (twice the ports: an earlier
+   launch's child that has not ended keeps its entry), so the heartbeat unlinks an expired region only once none of
+   them lives.  Fields are only ever appended */
 struct mesh_bridge_pages { uint32_t link[MESH_PORTS],ones,map,map_pages,padding; uint64_t bridge_start;
   struct mesh_holder child[2*MESH_PORTS]; };
 _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pages,bridge_start)==(MESH_PORTS+4)*sizeof(uint32_t),
@@ -168,17 +168,26 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    0's, then execution 1's, ...) to the pair's cables and queue pairs by one rule from the map (struct mesh_reach;
    design/page-queue-change-request.md, "The rule both ends compute"), and each queue pair carries its hops in that
    order: the k-th SEND on a queue pair fills the k-th receive posted on it.
-   Writing a plan (design/disjoint-pages-coordination.md, "Writing a plan"): the plan call computes everything first
-   (its demands, routes, values, dependence graph and allocation), so a failure there leaves the previous plan standing.
-   Then it stores `hops` 0 (release) and a release fence and wakes `plan`; awaits, bounded, no port's `prepared`
-   holding the previous generation (mesh_plan_erased); binds the declared sections' rows to their pages; zeroes the
-   supplied words and landed records it uses; writes the entries, `executions`, `landed_stride` and `plan`, the plan's
-   generation (the last plan's + 1, never 0); reads the map's serial again (ESTALE where it moved); stores `hops`
-   (release); and wakes `plan`.  ENOSPC past `hop_capacity`, `word_capacity` or `landed_capacity`; ENOMEM where the
-   allocator finds no room in the program's window.  The bridge reads none of it while `hops` (acquire) is 0, and
-   stores the generation it loaded in each port's mesh_links(m)[p].port.prepared.  A plan whose entries' `serial` is
-   not `map_serial` when it is loaded is refused: the call fails by error and its caller plans again on the map as it
-   is. */
+   Writing a plan (design/disjoint-pages-coordination.md, "Writing a plan", and the coordinator's rulings on its zeroing
+   and its erase): the plan call computes everything first (its demands, routes, values, dependence graph and
+   allocation), so a failure there leaves the previous plan standing.  Then, in this order, it
+   - stores `hops` 0 (release) and a release fence, and wakes `plan`;
+   - awaits no port's `prepared` holding the previous generation (mesh_plan_erased: a seq_cst fence, then a wait bounded
+     by MESH_PLATFORM_NS, ETIMEDOUT past it), so the areas and pages the previous plan named are the next plan's to
+     reuse;
+   - binds the declared sections' rows to their pages and zeroes every page it binds, since a peer's SEND held in
+     credit lands as soon as this node's bridge loads the plan (a program zeroes no routed operand after mesh_plan);
+   - writes `executions` and `landed_stride`, then zeroes through them (mesh_supplied, mesh_landed_record) the supplied
+     words and landed records it uses;
+   - writes the entries and `plan`, the plan's generation (the last plan's + 1, never 0);
+   - reads the map's serial again (ESTALE where it moved);
+   - stores `hops` (release), and wakes `plan`.
+   ENOSPC past `hop_capacity`, `word_capacity` or `landed_capacity`; ENOMEM where the allocator finds no room in the
+   program's window.  The bridge reads none of it while `hops` (acquire) is 0.  A port loading a plan stores its
+   generation in its mesh_links(m)[p].port.prepared before its last reading of `hops` and `plan`, with a seq_cst fence
+   between, and clears `prepared` where either moved, so no port begins serving a plan the plan call has found erased.
+   A plan whose entries' `serial` is not `map_serial` when it is loaded is refused: the call fails by error and its
+   caller plans again on the map as it is. */
 struct mesh_hop { uint32_t page,node,direction,padding; uint64_t word,mask,serial; };
 _Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,mask)==24,"mesh_hop");
 /* the value a producer stores into a supplied word (struct mesh_hop, "Supplied words") */
@@ -244,7 +253,8 @@ struct hdr {
      A3): the layout's (mesh-map.h mesh_layout) supplied words, `word_capacity` bytes at `word_off` (mesh_supplied),
      its landed list, `landed_capacity` bytes at `landed_off` (mesh_landed_record), and the map's room, `map_room`
      records at `map_off`; and the plan's `landed_stride`, the bytes of each of its landed records, which the plan call
-     writes before `hops` as it writes `executions` (struct mesh_hop) */
+     writes with `executions`, before it zeroes the records through them and before `hops` (struct mesh_hop, "Writing
+     a plan") */
   uint64_t word_off,word_capacity,landed_off,landed_capacity,landed_stride,map_room;
 };
 /* every field at its 106 offset, the 108 fields after them (the vacant bytes' notes above struct hdr) */
