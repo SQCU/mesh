@@ -30,3 +30,7 @@ other projects, such as a game bot, and old dated records; they are not listed h
   code and the functions in scope.
 - [design/page-queue-coordination.md](design/page-queue-coordination.md): the coordinating agent's notes for that
   change, verbatim: the contract its sub-agents worked to, and the record of each sub-assignment and review finding.
+- [design/disjoint-pages-change-request.md](design/disjoint-pages-change-request.md): the operator's and Claude's
+  turns of 2026-11-03, verbatim, on the page readiness word and the plan's ring: pages assigned by liveness so nothing
+  live shares a page, read-after-write by masks read from a contiguous landed list, no ring and no per-page cells. With
+  the literature, the state of the code and the functions in scope.
