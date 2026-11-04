@@ -12,7 +12,8 @@
    its landed record): mesh_cancel(m, cancel, 0) stores UINT64_MAX into each still 0, so every step not yet whole ends
    as cancelled; a supplied word is not cancelled, since 0 releases nothing.  The bridge cancels its own receives not
    landed by the same cancel words where it ends the plan (mesh.h), so it reads no link's cancellation (the --link
-   form's per-link notice, removed at layout 107).  EINVAL where no plan is written (hdr `hops` 0).
+   form's per-link notice, removed at layout 107).  EINVAL where no plan was ever written (hdr `plan` 0: the generation,
+   never 0 once written); a plan that gives this node no hop still has both areas wrapped (review 13, finding 12).
    2026-11-03, sub-assignment 9 (design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", items
    2 and 3): reversing one section of the plan's words at the context's send_off, its 256-byte cells holding both the
    supplied words and a landed word a page (`inputs` the same buffer retained), whose cancellation stored UINT64_MAX in
@@ -22,7 +23,7 @@
 int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mesh_metal_transport *transport){
   *transport=(struct mesh_metal_transport){0};
   struct hdr *m=context->M;
-  if(!atomic_load_explicit(&m->hops,memory_order_acquire))return EINVAL;
+  if(!atomic_load_explicit(&m->plan,memory_order_acquire))return EINVAL;
   const uint64_t page=m->pgsz;
   /* design/prepared-machine.md#M17 */
   transport->publication=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)m+m->word_off
@@ -50,8 +51,9 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
    rows first + k, k < P, hold bits first .. first + P - 1 of one record: the input is that run, `offset` execution 0's
    record in the landed list's buffer and `stride` the records' stride, and a reader learns its step's range has landed
    from the record's cancel word and the words holding the run, not from a word a page.  The run's words lie inside a
-   record, and every execution's record inside the buffer.  EINVAL where a page has no receive of the plan (no record
-   named, or another one than its range's), or where the bits are not one run.
+   record, and every execution's record inside the buffer.  EINVAL where a page has no receive of the plan (its
+   publication naming other than execution 0's record, hdr landed_off, at hdr landed_stride: the contract fixes both;
+   review 13, finding 10), or where the bits are not one run.
    2026-11-03, sub-assignment 9: reversing one input a received page, its own landed word (`device_input`'s cell at
    hop_stride), a range of more than one page refused (mesh.h mesh_row_chunks): "one page a range".  Why: a page's
    own word had every reading thread fence one word a page; the mask tells of the whole range in a few words (the change
@@ -70,7 +72,7 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
     if(delivery->device_input!=record || delivery->device_stride!=stride || delivery->landed!=first+k)return EINVAL;
   }
   id<MTLBuffer> memory=transport->inputs;
-  if(!record || !stride || record<m->landed_off)return EINVAL;
+  if(record!=m->landed_off || stride!=m->landed_stride || !stride)return EINVAL;
   const uint64_t offset=record-m->landed_off;
   if((1+((uint64_t)first+pages+63)/64)*sizeof(uint64_t)>stride || offset+(uint64_t)m->executions*stride>memory.length)
     return EINVAL;
@@ -89,7 +91,9 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
    releases every send of the range's pages (the change request, proposal item 3).  With `invocations`, the statuses
    (struct mesh_output_status), one a range and invocation, range j's of invocation t at j x (invocations + 1) + t,
    each seeded with its range's bytes: the direct publication binds them and the supplied words at the one
-   per-execution stride.  Every record's word of every execution lies in the supplied words' buffer, else EINVAL.
+   per-execution stride.  Every record's word of every execution lies in the supplied words' buffer, else EINVAL; and
+   EINVAL where `invocations` passes hdr executions, since a store at t >= executions would land in the next release's
+   words and release another range's sends early (review 13, finding 11).
    2026-11-03, sub-assignment 9 (design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", item
    3): reversing `stride` hdr hop_stride (256-byte cells, a plan of another stride refused) and the records relative to
    the context's send_off.  Why: the cells and send_off are gone; a supplied word's executions are MESH_WORD_STRIDE
@@ -98,6 +102,7 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
 int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_section *sections,uint32_t ranges,uint32_t invocations,struct mesh_metal_publication *publication){
   struct hdr *m=context->M;
+  if(invocations>m->executions)return EINVAL;
   uint32_t count=mesh_publication_prepare(m,sections[0].first,NULL);
   *publication=(struct mesh_metal_publication){.count=count*ranges,.stride=MESH_WORD_STRIDE};
   if(!count)return 0;

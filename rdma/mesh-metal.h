@@ -32,8 +32,8 @@ _Static_assert(sizeof(struct mesh_metal_transport)==24,"prepared Metal transport
 _Static_assert(sizeof(struct mesh_metal_input)==32,"prepared numerical input");
 /* design/algorithm-sources.md#resident-metal */
 /* the supplied words' area and the landed list's area wrapped for the GPU, and the program's cancellation: one range,
-   every execution's cancel word ({landed_off, executions, landed_stride}); EINVAL where no plan is written (hdr `hops`
-   0) */
+   every execution's cancel word ({landed_off, executions, landed_stride}); EINVAL where no plan was ever written (hdr
+   `plan` 0) */
 int mesh_metal_transport_create(struct mesh_ctx *,void *,struct mesh_metal_transport *);
 /* design/algorithm-sources.md#resident-metal */
 /* the input of a declared destination section (mesh-collective.h mesh_plan, its count the plan's executions): its
