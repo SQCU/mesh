@@ -20,3 +20,11 @@ other projects, such as a game bot, and old dated records; they are not listed h
 - [design/data-model.md](design/data-model.md): the hardware and the paths bytes take through it.
   These facts explain why writes use pages and masks, and why their work is compiled before a call.
   The later sections derive the limits on bridge code, routes, and collectives in plain prose near grades 4-6.
+
+## Change requests
+
+- [design/page-queue-change-request.md](design/page-queue-change-request.md): the operator's statements of 2026-11-03,
+  verbatim: collectives of any node count, relays within the Thunderbolt 5 fabric, every transfer interleaved, a page
+  queue per node that only the bridge consumes over every link, queue pairs kept inside the bridge, the --link form
+  replaced only once its replacement covers it, the failport's process lifecycle reused verbatim. With the state of the
+  code and the functions in scope.
