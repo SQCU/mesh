@@ -665,6 +665,14 @@ restatement of them.
    - a local countdown wait that ends with zeros and no mark;
    - a link loss and a GPU bound that both read as `ETIMEDOUT`;
    - the host's final completion wait in `e2b_replay.m`.
+7. **Nothing is zeroed or reset (C6).** No data page is zeroed: every read of a placed value follows a write of the
+   same bytes, and a mask never reads outside its page. No word is reset; each records state relative to its
+   execution:
+   - a supplied word holds the plan's generation and the execution, packed so it only rises, and a reader compares it;
+   - a cancel word holds the first execution cancelled, compared, never `UINT64_MAX`;
+   - a landing XORs its bit, and the expected sense flips each time its record copy is reused (sense reversal). A copy
+     is set to its first sense once, when the allocator places it: u records, not one per execution;
+   - the queue's event and the landed count only rise, and execution t waits for its own target.
 
 ### C4. What goes
 
@@ -680,6 +688,8 @@ restatement of them.
   and the supplied words' and landed list's fixed areas of the layout (hdr `word_off`, `landed_off`) that it guards.
 - The wait at attach for the ports to drop a retired client's plan, before `mesh_claim`.
 - The GPU lane's write of `UINT64_MAX` into a step's landed record at its bound, and `mesh_seen`'s failed value.
+- mesh-collective.c's `memset` of every declared instance's pages before `hops` (lines 749–757), and its word-by-word
+  zeroing of the supplied words and landed records (lines 759–763).
 
 ### C5. Report item 3
 
@@ -721,3 +731,76 @@ restatement of them.
 > chain of dependent steps like decode, some ordering point is unavoidable. Its wording also gave the landed count two
 > writers ("the client raises it at the step's deadline"). Fixed: the bridge alone writes the landed list and its
 > count, and the client alone signals the queue's event, when the count is complete or at the deadline.
+
+### C6. Why a plan zeroes
+
+**The operator:**
+
+> "s: a new plan zeroes and rewrites the previous plan's supplied words and " why is this necessary and how much
+> bandwidth does this wate? algorithms review please? data model? what is the hardware like at the level of registers
+> and superscalar executions of operations we can load widely and implicitly literally concurrently? command buffers?
+
+**Claude:**
+
+> It isn't necessary. The zeroing exists because of two choices. First, the plan's words record absolute state
+> ("0 = not yet") in areas that get reused in place. Second, it tidies bytes that no computation reads.
+> `mesh_plan_erased` (the 5 s fence-and-spin) exists only so this zeroing doesn't race ports that are still reading
+> the old words. Drop the zeroing and the erase has nothing left to protect.
+>
+> **What gets zeroed.** This is mesh-collective.c:749–763. It runs on every `mesh_plan`, on one CPU thread, before
+> `hops` is stored.
+> - **Every declared page of every execution** (the `memset` at line 757).
+>   - **The cost:** one extra write of the node's whole routed data for the run, so 16 steps means 16 steps' worth of
+>     pages. Every zeroed byte is then overwritten by its landing or its producer, so these are dead stores.
+>   - **Reuse saves nothing:** a page two instances share is zeroed once for each, as the code's own comment says.
+>   - **Where it came from:** e2b_replay.m used to do it, for two reasons. One was to take first-touch page faults
+>     early, but the region is now wired once at registration (data-model §2). The other was to make "an instance's
+>     untouched tail deterministic": the bytes past a value's end in its last page, which no kernel reads.
+>   - **Why it moved into `mesh_plan`:** the hardware holds a SEND in credit until its receive is posted (§3), so
+>     zeroing after the plan would erase data that had already landed.
+> - **The supplied words and landed records.** That's releases × executions × 8 B, plus executions × the record
+>   stride: kilobytes. But they're written one 8-byte atomic store at a time, the narrowest store the core has. A plain
+>   fill moves 32 B per `stp`, or a whole cache block per `dc zva`.
+>
+> There's no per-step bandwidth cost. Each plan writes the run's routed bytes once more, one thread, before the first
+> step can start.
+>
+> **Algorithms review.** A word needs a reset only if it records absolute state. The literature avoids that in four
+> ways, and none of them resets anything:
+> - **Sequence or epoch values** (NCCL's LL/LL128 flags carry the step; NVSHMEM signals rise and are waited on with
+>   ≥). A stale word never matches the current epoch. This fits the supplied words, using the plan's generation and
+>   the execution number packed so the value only rises. It also fits the cancel word: "cancelled from execution t",
+>   compared rather than set to `UINT64_MAX`.
+> - **Sense reversal, or phase parity** (Mellor-Crummey & Scott 1991; PTX mbarrier's phase bit). A landing XORs its
+>   bit instead of ORing it, and the expected sense flips each time a record copy is reused.
+>   - The landed list stays one dense bit per page.
+>   - A copy is set to its first sense only once, when the allocator places it: u records, not one per execution.
+>   - It's safe because the allocator reuses a copy only where the last read happens before the next landing.
+> - **Counted completion with rising thresholds** (Portals 4 counting events; `MTLSharedEvent`'s 64-bit value, which
+>   only rises). Execution t waits for the count to reach its own target.
+> - **Data pages need nothing.** Every read in a placed value follows a write of the same bytes, and a mask never
+>   reads outside its page (§6).
+>
+> **Data model.** §5 already rules this out. "Once the plan is set, new input values can follow the same writes."
+> Peers' returned work "already tells us what we need to know. We do not ask for a separate receipt." A per-plan reset
+> is a receipt in another form.
+>
+> **The hardware at register level.**
+> - **GPU.**
+>   - A SIMD-group is 32 lanes in lockstep, with a per-lane execution mask, which is what predication uses.
+>   - With 16-byte vector loads per lane, one coalesced load reads 512 B: the landed bits of 4,096 pages. Testing a
+>     lane's pages is then an AND or XOR in registers.
+>   - `simd_ballot` turns 32 predicates into one mask. `simd_prefix_exclusive_sum` compacts the not-yet-landed work
+>     into a dense list (Blelloch's scan, already cited in the request).
+>   - Kernels stream at about 620 GB/s of the 1.2 TB/s (data-model §1).
+> - **CPU** (bridge and planner). 128-bit NEON registers, several load/store pipes, 32 B per `ldp`/`stp`. Plain fills
+>   vectorize; loops of `_Atomic` stores don't.
+> - **Command buffers.** Within one command buffer, Metal already provides masking and its later pass without any
+>   lane waiting:
+>   - `dispatchThreadgroups(indirectBuffer:)` reads its threadgroup count from GPU memory when the dispatch starts.
+>     The masked pass writes the later pass's size, which is zero when everything has landed.
+>   - `encodeWaitForEvent:value:` holds back the encoders after it in the same command buffer until the bridge's count
+>     reaches its value. The value only rises and is never reset.
+>   - That removes the coordinator's reason for spinning: it said that with every step in one command buffer, a later
+>     dispatch would run immediately.
+>   - Concurrent compute encoders with explicit memory barriers let independent work fill the gap.
