@@ -809,6 +809,18 @@ work proceeds.)
   bound by a replayed command, no spin, one writer a state word (counts and max aside), no literal plan address, no
   old form left. Its notes: a delegate fillBuffer passes through at capture onto stand-in or the delegate's own memory
   and is never replayed; the delegate's unrenamed buffers (D11). Review 16's items 4, 6 and 9 routed to it after.
+- After review 16: 4 d30502db (host_elements, host_mask, host_bytes: every host fill writes its whole instance;
+  commit_bounded for the preparation, prefill and profile at MESH_PLATFORM_NS x max(1, repetitions); the waiter's cause
+  the run's error; the completion bound MESH_PLATFORM_NS x steps; the waits' room from a first MetalReplayEncode call);
+  12 40870df8 (the slots' comment as the code does it); 11 5527b33d (MetalRoutedAccess and MetalRoutedConflict: every
+  routed operand aliases every other in MetalPromoteOperand, MetalFuseRows, MetalInlineMaps and MetalFuseEpilogue),
+  81370709 (the same rule in MetalPrepareDataflow's levels, since one level's commands run concurrently: beyond the
+  ruling, accepted), 7d6ddc41 (the capture's waits bounded at METAL_PLATFORM_NS, raising), b5ee451c (a producer that
+  reads a received operand gets no direct publication and no folded release; capture refuses a first pass whose later
+  form holds a release or a restoring counter). 11's findings, ruled: a native K split in a masked reader has finding
+  9's defect, so the delegate's kernel is kept there and capture refuses a masked reader binding a split's counters
+  (routed to 11); one kernel reading one routed operand and writing another is sound by prepare_e2b.py's rule (its
+  read is listed after the write, so the two never share pages).
 
 ### Reviews and where their findings went
 
