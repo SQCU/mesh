@@ -209,6 +209,18 @@ int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *hea
   return result;
 }
 
+/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_rows, d8d861b5 */
+/* mesh-graph.h mesh_graph_rows */
+void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *context, size_t k), const void *context,
+                     size_t *first, size_t *order) {
+  for (uint32_t v = 0; v <= keys; v++) first[v] = 0;
+  for (size_t k = 0; k < items; k++) first[key(context, k) + 1]++;
+  for (uint32_t v = 0; v < keys; v++) first[v + 1] += first[v];
+  for (size_t k = 0; k < items; k++) order[first[key(context, k)]++] = k;
+  for (uint32_t v = keys; v > 0; v--) first[v] = first[v - 1];
+  first[0] = 0;
+}
+
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_keyed_find and mesh_graph_keyed_add, d8d861b5 */
 /* mesh-graph.h mesh_graph_keyed_find */
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
