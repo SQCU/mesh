@@ -336,7 +336,9 @@ static int link_prepare(struct port *port){
   }
   atomic_store_explicit(&info->prepared,plan,memory_order_release);
   atomic_thread_fence(memory_order_seq_cst);
-  if(atomic_load_explicit(&M->hops,memory_order_relaxed)!=hops ||
+  /* `hops` acquire: where it reads a next plan's count equal to this one's (a re-plan of the same size), the `plan`
+     load after it reads that plan's generation (written before its `hops`, release), so the check fails */
+  if(atomic_load_explicit(&M->hops,memory_order_acquire)!=hops ||
      atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan){
     atomic_store_explicit(&info->prepared,0,memory_order_release);
     error=EAGAIN;goto failed;
@@ -766,7 +768,8 @@ static void plan_cancel(uint32_t from){
     if(direction!=MESH_RECEIVE || (from!=UINT32_MAX && node!=from))continue;
     const uint64_t word=list[j].word,mask=list[j].mask;
     atomic_thread_fence(memory_order_acquire);
-    if(atomic_load_explicit(&M->hops,memory_order_relaxed)!=hops ||
+    /* `hops` acquire, as link_prepare's check: a re-plan of the same size is seen as `plan` moved */
+    if(atomic_load_explicit(&M->hops,memory_order_acquire)!=hops ||
        atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan)return;
     if((atomic_load_explicit(region_word(word),memory_order_relaxed)&mask)==mask)continue;
     atomic_store_explicit(landed_cancel(word,stride),UINT64_MAX,memory_order_release);
