@@ -17,7 +17,10 @@
      each execution); `wire` 1 where it lies in the registered window, 0 outside it; `state` 1 where it is state (a GPU
      counter the program keeps), which the plan writes to 0 once where it places it (the contract's D3), 0 for data,
      which the plan never writes; and, for a local MESH_EXECUTION value (one no declared transfer names), `begin` <=
-     `end`, its first and last positions on this node's own program order in one execution.
+     `end`, its first and last positions on this node's own program order in one execution.  `state` 1 is EINVAL but
+     on a local MESH_INVARIANT value outside the window (wire 0, named by no declared transfer): the plan never writes
+     a routed value's pages, and state shares pages with nothing (2026-11-04, review 15's finding 3, the coordinator's
+     ruling).
    - Out: `section`, every field: `first` its first row, `pages` P x block (P its blocks), `bytes` as given, `count` its
      copies (u for a routed value, 1 for every other), `stride` P.  Copy c's rows are first + c x P + k, k < P, and its
      first byte mesh_section_address(section, c).  A program binds execution t of a routed value to copy t mod count.
@@ -83,8 +86,9 @@
    the same declared transfers and dependences in the same order; every failure but ESTALE and the second map read's
    found before anything is written. */
 enum { MESH_INVARIANT, MESH_EXECUTION };
-/* a value at this node.  In: section.bytes (> 0), kind, wire, state, and for a local MESH_EXECUTION value its first and
-   last positions on this node's own program order in one execution, begin <= end.  Out: section, every field */
+/* a value at this node.  In: section.bytes (> 0), kind, wire, state (1 only on a local MESH_INVARIANT value, wire 0),
+   and for a local MESH_EXECUTION value its first and last positions on this node's own program order in one
+   execution, begin <= end.  Out: section, every field */
 struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,padding; };
 /* one declared transfer, the same at every rank but `value`: the index in `values` of this node's value of the range
    where this node is its source or a destination, else MESH_ABSENT; `bytes` the range's bytes at every rank */

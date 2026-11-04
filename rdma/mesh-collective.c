@@ -46,7 +46,7 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,struct mesh_section section,
   const struct mesh_publication *head=mesh_publication_at(m,section.first);
   if(!head->pages || !head->state)return 0;
   const struct mesh_state *state=(const struct mesh_state *)((char *)m+head->state);
-  const uint64_t copies=state->copies?state->copies:1,copy=execution%copies,round=execution/copies,pages=head->pages;
+  const uint64_t copies=state->copies,copy=execution%copies,round=execution/copies,pages=head->pages;
   const uint32_t expected=mesh_phase(round+1),behind=mesh_phase(round);
   const uint64_t count=atomic_load_explicit((_Atomic uint64_t *)((char *)m+head->count+8*copy),memory_order_acquire);
   _Atomic uint64_t *group=(_Atomic uint64_t *)((char *)m+head->phases+copy*mesh_group_bytes(head->pages));
@@ -91,6 +91,9 @@ struct plan_demand {
      pages lands here), and its pages that land here in one copy, P_g (its pages P at a destination; a relay's those of
      the trees it is on) */
   uint32_t range,received;
+  /* its consumed range here: h, among the received ranges this node is a destination of, in the plan's demand order,
+     its count words' row (MESH_ABSENT elsewhere: a relay's receives count nothing, review 15's finding 1) */
+  uint32_t consumed;
   uint64_t group;                         /* range g's copy-0 phase group, its offset in the phase list (plan_layout) */
 };
 /* A routed value (design/disjoint-pages-change-request.md, C3.3; design/disjoint-pages-revision-coordination.md, "The
@@ -124,7 +127,7 @@ struct plan {
   /* this node's hops of one copy, every copy's in this order (plan_walk): */
   struct plan_entry *entry;               /* entry[0 .. entries), NULL while plan_walk counts */
   uint64_t entries,receives;              /* their count (n of mesh.h's u x n) and their receives */
-  uint32_t ranges;                        /* this node's received ranges */
+  uint32_t ranges,consumed;               /* this node's received ranges, and those it consumes (a destination's) */
   /* The dependence template (plan_template), one execution's, every rank's the same from the same declared transfers,
      dependences and map; each edge carries the execution distance `lag` from its tail's execution to its head's. */
   uint64_t *child;                        /* child[i x n + y]: the nodes y sends demand i's pages to over its trees (a
@@ -475,7 +478,10 @@ static int plan_unroll(struct plan *p){
      group_g the sum of u x mesh_group_bytes(P_g') over g' < g (groups in (g, c) order, g major; each whole lanes, so a
      lane's MESH_LANE_BYTES never spans two groups); page k of the range (k < P_g) at bits [2 (k % 32), 2 (k % 32) + 2)
      of uint64 word k / 32 of its group;
-   - `counts`: ranges x u uint64 words, range g's copy c at index g x u + c;
+   - `counts`: consumed x u uint64 words, consumed range h's copy c at index h x u + c: a count word for each range
+     this node is a destination of, none for a relay's receives, which no consumer here waits on and whose forwards
+     their phases release (review 15's finding 1, the coordinator's ruling); struct mesh_state `ranges` is `consumed`,
+     the counts' rows, while the phase list holds a group for every received range, a relay's among them;
    - `supplied`: releases uint64 words, release r's at index r;
    - `status`: one struct mesh_status;
    - `words`: the end of the status, the bytes mesh_plan starts (D3).
@@ -492,7 +498,7 @@ static void plan_layout(struct plan *p){
     at+=(uint64_t)p->copies*mesh_group_bytes(d->received);
   }
   p->counts=plan_align(p->phases+at);
-  p->supplied=plan_align(p->counts+(uint64_t)p->ranges*p->copies*sizeof(uint64_t));
+  p->supplied=plan_align(p->counts+(uint64_t)p->consumed*p->copies*sizeof(uint64_t));
   p->status=plan_align(p->supplied+p->releases*sizeof(uint64_t));
   p->words=p->status+sizeof(struct mesh_status);
 }
@@ -633,7 +639,7 @@ static void plan_walk(struct plan *p){
   const uint32_t n=p->n,self=p->self;
   size_t first[(size_t)n+2],child[(size_t)n+1];
   uint64_t at=0,receives=0;
-  if(!p->entry)p->ranges=0;
+  if(!p->entry)p->ranges=p->consumed=0;
   for(uint32_t i=0;i<p->demands;i++){
     struct plan_demand *d=p->demand+i;
     uint32_t field=0;
@@ -660,6 +666,7 @@ static void plan_walk(struct plan *p){
     if(!p->entry){
       d->received=field;
       d->range=field?p->ranges++:MESH_ABSENT;
+      d->consumed=field && d->leaves>>self&1?p->consumed++:MESH_ABSENT;
       receives+=field;
     }
   }
@@ -709,7 +716,8 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   /* a value: its bytes, its kind, and its wire and state flags */
   for(uint32_t j=0;j<given;j++){
     const struct mesh_value *v=values+j;
-    if(!v->section.bytes || v->kind>MESH_EXECUTION || v->wire>1 || v->state>1)return EINVAL;
+    if(!v->section.bytes || v->kind>MESH_EXECUTION || v->wire>1 || v->state>1 ||
+       (v->state && (v->wire || v->kind!=MESH_INVARIANT)))return EINVAL;
     if(plan_blocks(m,v->section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
   }
   /* a program's data edge: its two declared transfers, its kinds (no end both produced and its source's own read),
@@ -876,7 +884,7 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   struct mesh_state *state=(struct mesh_state *)mesh_at(m,at);
   state->copies=u;
   state->receives=(uint32_t)p.receives;
-  state->ranges=p.ranges;
+  state->ranges=p.consumed;
   state->releases=(uint32_t)p.releases;
   state->phases=base+p.phases;
   state->counts=base+p.counts;
@@ -884,8 +892,9 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   state->status=base+p.status;
   /* every value's rows, from the head's next, copy c's rows first + c x P + k bound to its copy's pages (an item's
      first page, plan_item_page), named clean as mesh_section_create named them (no device, no owner, no publication:
-     every field of a row's publication 0 but its range's words below); a `state` 1 value's bytes 0 once, every copy's
-     (D3); a routed value's copies its demand's routed value's here (plan_page), a relay's value no row's */
+     every field of a row's publication 0 but its range's words below); a `state` 1 value's bytes 0 once, its one copy
+     (D3: a local invariant outside the window alone); a routed value's copies its demand's routed value's here
+     (plan_page), a relay's value no row's */
   uint32_t row=p.claim.rows.first+1;
   for(uint32_t j=0,other=0;j<given;j++){
     struct mesh_value *v=values+j;
@@ -917,7 +926,7 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
     }else if(d){
       publication->pages=d->received;
       publication->phases=base+p.phases+d->group;
-      publication->count=base+p.counts+(uint64_t)d->range*u*sizeof(uint64_t);
+      publication->count=base+p.counts+(uint64_t)d->consumed*u*sizeof(uint64_t);
       publication->state=base;
     }
     row+=copies*P;
@@ -931,7 +940,8 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   atomic_thread_fence(memory_order_release);
   os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   /* 5. the entries, copy c's n at [c n, c n + n), each naming copy c's page and words (mesh.h struct mesh_hop): a
-     receive its field's word and low bit in its range's copy-c group, its range's copy-c count word and P_g; a
+     receive its field's word and low bit in its range's copy-c group, its range's copy-c count word where this node
+     consumes the range (0 at a relay, whose receive the bridge counts nothing for: review 15's finding 1) and P_g; a
      forwarding send its receive's word and field; a send from the range's source its release's supplied word */
   struct mesh_hop *hop=mesh_hops(m);
   for(uint32_t c=0;c<u;c++)for(uint64_t j=0;j<p.entries;j++){
@@ -944,7 +954,7 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
       h.word=base+p.phases+d->group+(uint64_t)c*mesh_group_bytes(d->received)+(uint64_t)e->field/32*sizeof(uint64_t);
       h.field=2*(e->field%32);
       if(e->direction==MESH_RECEIVE){
-        h.count=base+p.counts+((uint64_t)d->range*u+c)*sizeof(uint64_t);
+        if(d->consumed!=MESH_ABSENT)h.count=base+p.counts+((uint64_t)d->consumed*u+c)*sizeof(uint64_t);
         h.pages=d->received;
       }
     }
