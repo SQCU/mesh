@@ -153,10 +153,11 @@ On how parity is shown:
   `mesh_allreduce_bind` (binds the steps onto `mesh_transfer_bind`).
 - The E2B programs are prepared for two ranks: `tools/mesh/run_pair.py`'s `--split-dir` default
   `.build/e2b-ffn/arms-20260923/decode-tp2-{split}`.
-- In progress, uncommitted in mesh `rdma/`: a resident bridge that pairs its own ports and keeps a map of the fabric
-  (`mesh-flow.c`, `mesh-verbs.h`, `mesh-stat.c`, new `mesh-bridge.h`, `mesh-map.h`, `mesh-graph.h`). The failport's
-  process lifecycle (tag `pre-return-20261103`: `rdma/mesh-heartbeat.c`, and in `rdma/mesh-link.c` the per-port child
-  processes, their stop, reaping, flush and exit, and the holder table) is being brought into it verbatim.
+- Nothing of this change is in progress. The resident bridge that pairs its own ports and keeps a map, and the
+  failport's process lifecycle (tag `pre-return-20261103`: `rdma/mesh-heartbeat.c`, and in `rdma/mesh-link.c` the
+  per-port child processes, their stop, reaping, flush and exit, and the holder table), are both to be brought in by
+  this change. An earlier agent's partial attempt was stopped and set aside in mesh's git stash
+  (`stopped-agent-partial-2026-11-03`). It is not main and not part of this change.
 
 ## Scope
 
