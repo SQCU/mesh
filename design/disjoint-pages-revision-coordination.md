@@ -736,6 +736,11 @@ work proceeds.)
   in the source value's reads; an end with both bits, or bits past the four, EINVAL). A source read needs an outgoing
   dependence, else no write is ordered after it and the plan fails ENOMEM naming the value: the program's chains give
   every event one (to the next, the last to the first at lag 1).
+- 14 again: 77b04223 (the source's own reads emitted in the source rank's list wherever its stages read the operand or
+  a view of it, each after its own write, so no P -> S lag-0 cycle; the ancestor test as mesh_graph.reach([producer],
+  parents) once a write and the kernel span as mesh_graph.reach over (operator, fusable steps left) states, its own
+  order and bitsets gone; the FUSED assumption stated in the docstring as open). tools/draft/build_draft.py imports
+  prepare_e2b, so it now needs the mesh checkout beside it too (the path stalls.py uses).
 
 ### Reviews and where their findings went
 
