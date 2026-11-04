@@ -15,8 +15,9 @@
    its receive's phase of execution t.  Nothing here writes a data page.
    Its native forms are the d6dceac transport's (MESH_VERSION 104, restored 2026-10-01: the source of the fastest
    recorded E2B decode, metal-microbench docs/measurement.md): SENDs prepared once a plan, each posted in its queue
-   pair's order as its word releases it; receives prepared once a plan, posted ahead as their queue pair has room; a
-   record of either posted once for each execution of its copy (link_prepare); completions polled through the
+   pair's order as its word releases it; receives prepared once a plan, posted in their queue pair's order as it has
+   room, a receive record again only once its last posting has landed; a record of either posted once for each
+   execution of its copy (link_prepare, link_receive_drain); completions polled through the
    provider's own functions (mesh-verbs.h struct mesh_verbs `poll`, struct mesh_queue `send`, `receive`); traced
    variants under MESH_LEDGER.  Their inputs are the page lists, which replaced d6dceac's per-link, per-queue transfer
    lists and its --link form's link_configure (both since removed).  The progress thread, the guard around its device's
@@ -28,7 +29,11 @@
    word), which unrolled by the run's length and gave the landed record five writers (C1; C4).  What must stay: the
    k-th SEND on a queue pair fills the k-th receive posted on it; nothing is written in or beside a page; no request is
    taken back but by the child's exit.  mesh-dataflow.h is no longer included: mesh_cables, the one thing this file
-   took from it, is mesh-map.h's (through mesh-bridge.h) */
+   took from it, is mesh-map.h's (through mesh-bridge.h).
+   2026-11-04, sub-assignment 1 (design/disjoint-pages-change-request.md, D.3.5 and D.4; design/disjoint-pages-rulings-
+   coordination.md, R1): reversing this note's receives "posted ahead as their queue pair has room", under which a
+   receive record was posted again while an earlier posting of it might be outstanding: a received page is now named
+   once per landing.  What must stay: as above */
 #include "mesh-bridge.h"
 #include "mesh-graph.h"
 
@@ -59,8 +64,12 @@ _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_sen
    takes the range's `pages` arrivals an execution, NULL where its entry's `count` is 0 (a relay's own receive: its
    forwards are released by its phase and nobody waits on a count of it, so it adds, wakes and is raised for nothing;
    2026-11-04, the coordinator's ruling on review 15's finding 1); `landings` the record's completions since the load, the progress
-   thread's alone (its j-th is execution copy + j u: link_prepare), and `copy` its copy.  Every field its landing
-   reads is in its second 64 bytes, the 128-byte line its request starts.
+   thread's alone (its j-th is execution copy + j u: link_prepare), which also holds back its next posting: its round
+   j is posted only once `landings` reads j, so at most one posting of it is outstanding and its page is named by at
+   most one posted receive (link_receive_drain; 2026-11-04, sub-assignment 1: design/disjoint-pages-change-request.md,
+   D.3.5, design/disjoint-pages-rulings-coordination.md, R1, reversing its posting again while an earlier posting
+   might be outstanding; what must stay: the record's request never changed once written); and `copy` its copy.  Every
+   field its landing reads is in its second 64 bytes, the 128-byte line its request starts.
    2026-11-04, sub-assignment 6: reversing 2026-11-03's `input`, `mask` and `cancel` (its bit of its execution's landed
    record, ORed in, and that record's cancel word, stored UINT64_MAX by link_close: C4); `next` (its queue pair's chain
    of receives each posted once) and `pair` gone, the lane's cursor walking its records (struct cursor) and the queue
@@ -250,16 +259,16 @@ static void flow_executions(struct flow *f,uint64_t executions){
    the units on this port's cable, each on its queue pair (lane q, link_plan), one record each, by lane, copy and
    assignment order (struct flow `first`).  A lane serves the executions in order, execution t's records on it copy
    t mod u's in assignment order (struct cursor), so in every execution the k-th SEND on a queue pair fills the k-th
-   receive posted on it.  A record is posted once for each execution of its copy, and again while an earlier posting
-   of it may be outstanding: the provider takes a request at its post (mesh-verbs.h pair_make binds the provider's own
-   ops.post_send and ops.post_recv; its tbt_post_recv encodes the SGE's address bits and key into its own receive queue
-   and publishes the queue's producer index, design/RDMA-KERNEL-RECOVERY.md, its September 5 notes, and
-   design/TELEMETRY-LOSS-20260904.md, "What is not yet established"; rdma-core's ibv_post_recv(3) and ibv_post_send(3)
-   hold a request's buffers, not the request, until its completion), and a queue pair's receives complete in the order
-   posted (Hilland et al., RDMA Protocol Verbs Specification, section 8.2.2: design/prepared-machine.md#M08), so a
-   receive record's j-th completion since the load is execution copy + j u (`landings`).  Two postings may then name
-   one page; the hardware writes it only as a SEND takes a receive, and the peer's SEND of execution t + u follows this
-   node's reads of t by the allocator's order (C3.3), not by anything here.  A SEND sends its page once released
+   receive posted on it.  A record is posted once for each execution of its copy, and a receive record again only once
+   its last posting has landed (link_receive_drain: its round j, j = t / u, only once its `landings` reads j, the
+   lane's posting stopping at the first record that has not), so a page is named by at most one posted receive at any
+   moment and enters its list again only once its last landing has landed (design/disjoint-pages-change-request.md,
+   D.2, "How many pages are in flight at once", and D.3.5; design/disjoint-pages-rulings-coordination.md, R1).  A queue
+   pair's receives complete in the order posted (Hilland et al., RDMA Protocol Verbs Specification, section 8.2.2:
+   design/prepared-machine.md#M08), so a receive record's j-th completion since the load is execution copy + j u
+   (`landings`).  A posting after the last landing is in time: the hardware holds a SEND until its receive is posted
+   (the data model, section 3), and the peer's SEND of execution t + u follows this node's reads of t, which follow t's
+   landing, by the allocator's order (C3.3), not by anything here.  A SEND sends its page once released
    (link_send_drain); a relay is no special case, its SEND naming its receive's word and field.  A receive lands in its
    page and writes its phase and its count alone (link_receive_drain).  No verbs call: the progress thread posts as it
    serves (link_receive_progress, link_send_progress).  0, or an error value: ESTALE, ETIMEDOUT or ENOMEM reading the
@@ -277,6 +286,13 @@ static void flow_executions(struct flow *f,uint64_t executions){
    and the load's work grew with the run's length; now one record a template entry, posted once for each execution of
    its copy, so they are the template's whatever the run's length.  What must stay: both ends pick and assign the same
    u x n list in list order; each lane's executions in order; a record's request unchanged once written here.
+   2026-11-04, sub-assignment 1 (design/disjoint-pages-change-request.md, D.3.5 and D.4; design/disjoint-pages-rulings-
+   coordination.md, R1): reversing sub-assignment 6's note here, that a record was posted again while an earlier
+   posting of it might be outstanding, relying on the provider taking a request at its post (its tbt_post_recv read
+   from the disassembly, never documented), so that two postings could name one page.  Why: nothing required it; it
+   gained nothing over the u rounds the copies give, and named one page in two transfers at once (D.2).  What must
+   stay: the k-th SEND on a queue pair fills the k-th receive posted on it (both ends' one assignment, in list order);
+   each lane's executions in order; no request taken back but by the child's exit.
    2026-11-03, sub-assignment 6 (design/disjoint-pages-change-request.md, "Claude's proposal" 1 and 3; Appendix A, A4):
    the ring went from the bridge: plan_shape (hdr `depth`, a slot's hops, execution t's page the slot t mod depth's
    and its word the cell at word + t hop_stride), the receive window (a receive of t posted once its hop's executions
@@ -517,15 +533,26 @@ failed:
    first 2026-11-04 test, the count a multiple of `pages` (a 64-bit division a landing), a multiply and a compare, and
    no add for a relay's own receive.  It is counted
    (the lane's `got` and frames, which lanes_flush reads); a failed one, or one of other than a whole page, fails the
-   link (link_failed), never retried.  Then each served lane's receives posted ahead, its cursor's (struct cursor: the
-   executions in order, execution t's records copy t mod u's), through the executions below the plan's `executions` as
-   link_run last read it, while its queue has room (the tag's requests, MESH_LANE_UNITS, and its frames,
-   frame_capacity), and on nothing else: no receive waits on another's landing; at most MESH_POST_QUANTUM a pass.  0
-   where the link failed.
+   link (link_failed), never retried.  Then, after this pass's completions, each served lane's receives posted, its
+   cursor's (struct cursor: the executions in order, execution t's records copy t mod u's), through the executions
+   below the plan's `executions` as link_run last read it, while its queue has room (the tag's requests,
+   MESH_LANE_UNITS, and its frames, frame_capacity), a record of round j (execution t, j = t / u, the cursor's `round`)
+   only once its `landings` reads at least j: its last posting has landed (one load, from the line its request
+   starts).  The lane's posting stops at the first record that has not, so its order stays, and a page is named by at
+   most one posted receive at any moment (design/disjoint-pages-change-request.md, D.2, "How many pages are in flight
+   at once", and D.3.5; design/disjoint-pages-rulings-coordination.md, R1).  A receive waits on its own record's last
+   landing alone, and behind the earlier receives of its lane, whose order the peer's SENDs fill; at most
+   MESH_POST_QUANTUM a pass.  0 where the link failed.
    2026-11-04, sub-assignment 6: reversing 2026-11-03's landing, its record's `mask` ORed into its execution's landed
    record (C4: the landed record's ORed bits), and its chain of receives each posted once (`next`).  What must stay: the
    XOR before the add, both after the poll's acquire; no load, fence or call a landing more but the wake at a range's
-   end; each lane's executions in order */
+   end; each lane's executions in order.
+   2026-11-04, sub-assignment 1 (design/disjoint-pages-change-request.md, D.3.5 and D.4; design/disjoint-pages-rulings-
+   coordination.md, R1): reversing sub-assignment 6's posting "ahead", on nothing but the queue's room, which posted a
+   record again while an earlier posting of it might be outstanding, so two postings named one page.  Why: it gained
+   nothing over the u rounds the plan's copies already give, and rested on the provider copying a request at its post,
+   which nothing documents (D.2).  What must stay: the completions taken before the posting in the same pass, so a
+   landing frees its record's next round at once; each lane's executions in order, no record skipped */
 static __attribute__((always_inline)) inline int link_receive_drain(struct port *port,struct flow *f,uint32_t served,int traced){
   struct link *l=&port->link;
   struct ibv_wc done[MESH_COMPLETION_BATCH];
@@ -573,6 +600,7 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
     for(uint32_t budget=MESH_POST_QUANTUM;budget;budget--){
       while(at.at==at.end && at.execution<executions)cursor_step(&at,first,copies);
       if(at.execution>=executions)break;
+      if(f->receives[at.at].landings<at.round)break;
       if(state->posted-state->got>=MESH_LANE_UNITS || state->frames_posted-state->frames_retired+each>state->frame_capacity)break;
       struct ibv_recv_wr *bad;
       const int error=queue->receive(queue->pair,&f->receives[at.at].request,&bad);
