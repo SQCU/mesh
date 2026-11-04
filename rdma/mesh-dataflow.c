@@ -1,5 +1,9 @@
 #include <signal.h>
 #include "mesh-dataflow.h"
+/* the library's own internals that reduce the map to node pairs (mesh_cables, mesh_joined, mesh_nodes_read) and wait on
+   the ports' data paths (mesh_links, mesh_transfers_start): the bridge-side region types, which no client header
+   includes (review R1, C1) */
+#include "mesh-map.h"
 /* mesh_transfers_start's declaration: defined here, beside the map reader it reads */
 #include "mesh-call.h"
 #include <stdlib.h>

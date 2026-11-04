@@ -11,7 +11,7 @@ CPPFLAGS += -DMESH_PROVIDER_RESERVED_QPS=$(MESH_PROVIDER_RESERVED_QPS)
 # mesh-graph.c's exp, log, flow and pack (review R1, round 2); the tag had the same hole.  Every node builds with its own
 # SDK, so the contraction is refused here for every translation unit, not left to one file's pragma
 CFLAGS_EXACT = -ffp-contract=off
-HEADERS = mesh.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h
+HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h
 # the resident bridge (design/page-queue-change-request.md): its main and event loop (mesh-link.c), its ports' children
 # from the parent's side (mesh-children.c) and their own (mesh-child.c), discovery and pairing (mesh-ports.c), the
 # kernel's loss and change events (mesh-events.c), the child's verbs jobs (mesh-lanes.c), the map (mesh-records.c) and
@@ -31,7 +31,7 @@ mesh-flow: $(BRIDGE) $(HEADERS) Makefile
 # the bridge's heartbeat (tag pre-return-20261103 rdma/Makefile): no device, no verbs, its own translation unit
 mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-holders.h Makefile
 	cc $(CPPFLAGS) -O2 -Wall -Wextra -Werror -o $@ mesh-heartbeat.c
-mesh-stat: mesh-stat.c mesh.h mesh-holders.h
+mesh-stat: mesh-stat.c mesh.h mesh-map.h mesh-holders.h
 	cc -O2 -o $@ mesh-stat.c
 libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) Makefile
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc

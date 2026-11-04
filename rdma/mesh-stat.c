@@ -1,4 +1,6 @@
 #include "mesh.h"
+/* the map's records and the link table this tool prints, bridge-side (review R1, C1: moved out of mesh.h) */
+#include "mesh-map.h"
 #include "mesh-holders.h"
 #include <sys/mman.h>
 #include <sys/stat.h>

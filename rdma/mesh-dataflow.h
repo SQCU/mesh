@@ -55,17 +55,6 @@ struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NOD
    outside the region, ENOENT where the map holds no record of this node (hdr `node`); read under the map seqlock
    (mesh.h mesh_map_whole) */
 int mesh_nodes_read(struct mesh_ctx *,struct mesh_nodes *);
-/* tag pre-return-20261103 rdma/mesh-dataflow.h mesh_joined, verbatim (the bridge's map reads it: mesh-records.c; the
-   collective reads mesh_nodes_read, which sums a pair's capacity through the same join) */
-/* the one join of two nodes' records: the cables each one's bridge reaches the other over (both records list them,
-   mesh_cables), 0 where none; *beta 8e9 over the least bandwidth either reports of them (0 where neither reports one) */
-int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
-/* The bridge's per-cable join (mesh-flow.c link_prepare, "The rule both ends compute"), the one matching of two
-   records' cables that mesh_joined and mesh_nodes_read read too: the cables a and b both list for each other, ports
-   matching both ways, each `key` (the lower node id's port index, the higher's), sorted by key, `bandwidth` and `qps`
-   each the lesser of the two records'; `out` holds MESH_PORTS; their count.  No client API gives a cable: hidden, so
-   libmesh.dylib does not export it, and the bridge's image, built from mesh-dataflow.c, calls it */
-struct mesh_cable { uint32_t key[2],qps; uint64_t bandwidth; };
-__attribute__((visibility("hidden")))
-uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,struct mesh_cable *out /* room MESH_PORTS */);
+/* mesh_joined, struct mesh_cable and mesh_cables, which name records and cables, are mesh-map.h's, bridge-side (review
+   R1, C1) */
 #endif

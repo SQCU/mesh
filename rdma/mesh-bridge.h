@@ -19,9 +19,12 @@
 #define MESH_PROVIDER_RESERVED_QPS 1
 #endif
 #include "mesh-verbs.h"
+/* the bridge-side region types (the map's records and cables, the link table, the layout), moved out of the client
+   headers (review R1, C1; the change request, "Queue pairs and links belong to the bridge") */
+#include "mesh-map.h"
 /* tag rdma/mesh-bridge.h: its system headers.  Its mesh-call.h, mesh-observe.h and mesh-graph.h are left out: the client
    context is named by its tag alone (`bridge`) and the client slots' `owned` does not come over, the observe header's
-   mesh_say is below (main's mesh.h holds struct mesh_link_info), and the walks' chains are named by nothing here */
+   mesh_say is below (main's mesh-map.h holds struct mesh_link_info), and the walks' chains are named by nothing here */
 #include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
@@ -76,8 +79,8 @@
    posts in a pass before the pass reaps completions, and the completions one poll takes (lanes_flush, the data path) */
 #define MESH_POST_QUANTUM 64u
 #define MESH_COMPLETION_BATCH 64
-/* tag etc/bridge/layout.h: the bytes of this node's model as its record carries it (`model`, sysctl hw.model) */
-#define MESH_MODEL_BYTES 32
+/* MESH_MODEL_BYTES, the bytes of this node's model as its record carries it (`model`, sysctl hw.model), is mesh-map.h's,
+   its one copy (review R2, B2) */
 /* tag etc/bridge/layout.h XMAGIC, its value, renamed: the wire's magic, what marks a datagram or a control stream's
    header as the mesh's (struct message `magic`), the value version 131 sends, fixed.  Named MESH_WIRE_MAGIC because
    main's --link form had its own XMAGIC (mesh-verbs.h struct qpi, removed at sub-assignment 16); what must stay is
@@ -372,7 +375,7 @@ static inline void quiet_until(_Atomic uint64_t *at,uint64_t until){
 /* The page table's quantum: the bridge's storage geometry and every lane unit's bytes. */
 static inline uint64_t page_bytes(void){ return (uint64_t)M->block*M->pgsz; }
 
-/* the region's types the prototypes below name, by pointer alone (mesh.h) */
+/* the region's types the prototypes below name, by pointer alone (mesh-map.h) */
 struct mesh_record;
 struct mesh_reach;
 
