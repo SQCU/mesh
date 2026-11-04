@@ -172,7 +172,7 @@ int mesh_graph_bottom_levels(uint32_t tasks, const double *weight, size_t edges,
    model).  Task n on processor[n] (given: the placement operand), weight[n] long.  Edge e from[e] -> to[e] of cost[e]
    crosses links link[route[e] .. route[e + 1]) in route order (route: edges + 1 entries); a local edge
    (processor[from] == processor[to]) has an empty route and finishes with its origin (15); a remote edge with an empty
-   route is EINVAL.  Link l's relative data rate rate[l] > 0, so an edge occupies it cost[e] / rate[l] (§5).  Route
+   route, or a local edge with a route, is EINVAL.  Link l's relative data rate rate[l] > 0, so an edge occupies it cost[e] / rate[l] (§5).  Route
    entries with the same communication[r] on the same link are one occupation of it: the first scheduled takes its
    interval and the others its times (design/compilation-coordination.md, T4).  Tasks in decreasing bottom level
    (eq. 7), a tie by a topological ordinal (mesh_graph_order) then by index; for each, its incoming edges in index

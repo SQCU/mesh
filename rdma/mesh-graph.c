@@ -1,5 +1,6 @@
 #include "mesh-graph.h"
 #include <errno.h>
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -732,5 +733,200 @@ int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *o
   }
   *used = most;
   free(placed);
+  return result;
+}
+
+/* New (design/plan-to-bridge-change-request.md, R5; design/compilation-coordination.md, "The graph module" and T3):
+   no tag source.
+   levels' rows: compressed row entry k is edge order[k], which enters to[order[k]] */
+struct levels_rows { const uint32_t *to; const size_t *order; };
+static uint32_t levels_head(const void *context, size_t k) {
+  const struct levels_rows *rows = context;
+  return rows->to[rows->order[k]];
+}
+/* O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, §2.2.1 eq. (7): bl(ni) = w(ni) + max over nj ∈ succ(ni)
+   {c(eij) + bl(nj)}, "the length of the longest path leaving the node", each edge out of ni a term.  The edges out of
+   each task as compressed rows (mesh_graph_rows keyed by from[e]; depth_head reads the k-th word), a topological order
+   of them (mesh_graph_order: ordinal[n] n's place, every edge's origin placed before its end; its EDEADLK, a cycle,
+   is EINVAL), then eq. (7) from the last place to the first, so every successor's level stands before a predecessor
+   takes it; a task with no edge out (a sink node) is w alone.  Each term one correctly rounded +, the max by
+   comparisons.  Every allocation precedes the first level written, so ENOMEM writes none. */
+static int levels(uint32_t tasks, const double *weight, size_t edges, const uint32_t *from, const uint32_t *to,
+                  const double *cost, double *level, uint32_t *ordinal) {
+  for (size_t e = 0; e < edges; e++) if (from[e] >= tasks || to[e] >= tasks) return EINVAL;
+  if (edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
+  size_t *first = malloc(((size_t)tasks + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
+  uint32_t *indegree = malloc(((size_t)tasks + 1) * sizeof *indegree), *inverse = malloc(((size_t)tasks + 1) * sizeof *inverse);
+  int result = !first || !order || !indegree || !inverse ? ENOMEM : 0;
+  if (!result) {
+    mesh_graph_rows(tasks, edges, depth_head, from, first, order);
+    const struct levels_rows rows = {to, order};
+    if (mesh_graph_order(tasks, first, levels_head, &rows, indegree, ordinal)) result = EINVAL;
+  }
+  for (uint32_t n = 0; !result && n < tasks; n++) inverse[ordinal[n]] = n;
+  for (uint32_t p = tasks; !result && p-- > 0;) {
+    const uint32_t n = inverse[p];
+    double most = 0;
+    for (size_t k = first[n]; k < first[n + 1]; k++) {
+      const double through = cost[order[k]] + level[to[order[k]]];
+      if (k == first[n] || through > most) most = through;
+    }
+    level[n] = weight[n] + most;
+  }
+  free(first); free(order); free(indegree); free(inverse);
+  return result;
+}
+/* mesh-graph.h mesh_graph_bottom_levels: eq. (7) as levels takes it, its topological order let go */
+int mesh_graph_bottom_levels(uint32_t tasks, const double *weight, size_t edges, const uint32_t *from, const uint32_t *to,
+                             const double *cost, double *level) {
+  uint32_t *ordinal = malloc(((size_t)tasks + 1) * sizeof *ordinal);
+  const int result = ordinal ? levels(tasks, weight, edges, from, to, cost, level, ordinal) : ENOMEM;
+  free(ordinal);
+  return result;
+}
+
+/* New (design/plan-to-bridge-change-request.md, R5; design/compilation-coordination.md, "The graph module", T3 to
+   T5): no tag source.
+   mesh_graph_contention_schedule's list (Algorithm 1, part 1): a task by decreasing bottom level, then increasing
+   topological ordinal */
+struct schedule_task { double level; uint32_t ordinal, task; };
+static int schedule_task_before(const void *a, const void *b) {
+  const struct schedule_task *x = a, *y = b;
+  if (x->level != y->level) return x->level > y->level ? -1 : 1;
+  return x->ordinal < y->ordinal ? -1 : x->ordinal > y->ordinal;
+}
+/* mesh_graph_contention_schedule's labels: item `item` of key `key`, sorted by (key, item) */
+struct schedule_key { uint64_t key; size_t item; };
+static int schedule_key_before(const void *a, const void *b) {
+  const struct schedule_key *x = a, *y = b;
+  if (x->key != y->key) return x->key < y->key ? -1 : 1;
+  return x->item < y->item ? -1 : x->item > y->item;
+}
+/* keys[0 .. count), each an item (from base on) and its key: leader[item - base] the least item of its key, so the
+   items of one key name one leader.  The order is total (no two items alike), so every party's sort ends alike. */
+static void schedule_leaders(size_t count, struct schedule_key *keys, size_t base, size_t *leader) {
+  qsort(keys, count, sizeof *keys, schedule_key_before);
+  for (size_t i = 0; i < count; i++)
+    leader[keys[i].item - base] = i && keys[i].key == keys[i - 1].key ? leader[keys[i - 1].item - base] : keys[i].item;
+}
+/* mesh-graph.h mesh_graph_contention_schedule.  O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, §6.1: Algorithm 1
+   (list scheduling, §2.2.1) with its line 6 performed as Algorithm 2 (the scheduling of a free node in the contention
+   model), each edge scheduled on its route as §5.2 states it.
+   - Algorithm 1, part 1, "Sort nodes n ∈ V into list L, according to priority scheme and precedence constraints":
+     decreasing bottom level, eq. (7) (levels, mesh_graph_bottom_levels' computation; design/compilation-coordination.md,
+     T3), a tie by the topological ordinal levels takes them over.  No two tasks share an ordinal, so the contract's
+     further tie by index never arises.  The list meets the precedence constraints: with every weight and cost >= 0 a
+     predecessor's level is no less than its successor's (a correctly rounded + of a term >= 0 is no less than the
+     term), and at an equal level its ordinal is the lower, so every task is free (its predecessors scheduled) at its
+     turn.
+   - Algorithm 1, line 5, "Find processor P ∈ P that allows earliest finish time of n": P is processor[n], given (the
+     placement operand: design/aot-compilation-change-request.md, A2; design/plan-to-bridge-change-request.md, R5), so
+     §6.1's tentative scheduling on every processor, the incoming edges removed from the links between tries, does not
+     arise.  A processor is a label (the operands name no count of them): tasks of equal processor[] are on one, whose
+     last finish is kept at the least such task (schedule_leaders).
+   - Algorithm 2, "for each ni ∈ pred(nj) in a definite order": the edges into nj in the order of their indices (§6.1,
+     "the edges might be processed in the order of their indices"; mesh_graph_rows keyed by to[e] keeps their order).
+     "if proc(ni) ≠ P then determine route R = <L1, ..., Ll> from proc(ni) to P": R is the operand's
+     link[route[e] .. route[e + 1]), in route order; "schedule eij on R" (§5.2, below); then "schedule nj on P".
+   - An edge on its route, §5.2, nonaligned (§5.1.1; §5.1.3, "the nonaligned approach appears to better reflect the
+     behavior of communication networks and its utilization in edge scheduling is proposed"): on link Lk,
+     ς(e, Lk) = c(e) / b(Lk) (§5), b(L) the operand rate[]; the idle interval [A, B] the end technique's, A the link's
+     last finish and B = ∞ (Condition 3 and Condition 6 admit the end or the insertion technique;
+     design/compilation-coordination.md, T5), in which Condition 6, (12) B - A >= ς(e, Lk) and (13), always holds; the
+     start (14): ts(e, L1) = max{A, tf(ni)}, and for k > 1 ts(e, Lk) = max{A, tf(e, Lk-1) - ς(e, Lk), ts(e, L1)},
+     which meets Condition 5's causality, (10) and (11); tf(e, Lk) = ts(e, Lk) + ς(e, Lk), then the link's last finish
+     (one edge on a link at a time, Condition 4, (9)).
+   - Where this differs from the paper (design/compilation-coordination.md, T4): route entries of one
+     communication[r] on one link are one occupation of it.  The first scheduled takes its interval by (14); every
+     later one takes that start and finish as they stand and occupies nothing more, and the entries after it on its
+     own route follow it by (14), causality from its finish and its route's first start.  Sinnen and Sousa schedule
+     each edge on its own; the consumer's communications cross a link once for all the edges that need them there.
+     What must stay: one occupation per (communication, link), held by the first entry scheduled.
+   - An edge's finish, Definition 8 (15): tf(ni) where proc(ni) = proc(nj), else tf(e, Ll).  nj's data-ready time (3):
+     the max of its edges' finishes, 0 for a source node; its start (8): ts(nj, P) = max{A, tdr(nj, P)}, A the
+     processor's last finish (the end technique, [tf(P), ∞), in which Condition 3's (6) always holds); its finish
+     ts(nj, P) + w(nj), then the processor's last finish.
+   start[n] ts(n, proc(n)); link_start[r] ts(e, Lk) of route entry r.  Arithmetic: +, -, / and comparisons alone, each
+   correctly rounded (no libm; the file is compiled with -ffp-contract=off), and both sorts' orders total, so every
+   party computes the same schedule from the same operands.  EINVAL: a weight or cost negative or not finite, a rate
+   not > 0, an edge naming no task, a route running backward (route[e] > route[e + 1]) or naming no link, a remote
+   edge with no route or a local edge with one, a cycle, or a time past the doubles' range (operands whose sums
+   overflow).  Every allocation precedes the first output written, so ENOMEM writes none. */
+int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const uint32_t *processor, size_t edges,
+                                   const uint32_t *from, const uint32_t *to, const double *cost, const size_t *route,
+                                   const uint32_t *link, const uint32_t *communication, uint32_t links,
+                                   const double *rate, double *start, double *link_start) {
+  for (uint32_t n = 0; n < tasks; n++) if (!(weight[n] >= 0 && weight[n] <= DBL_MAX)) return EINVAL;
+  for (uint32_t l = 0; l < links; l++) if (!(rate[l] > 0)) return EINVAL;
+  for (size_t e = 0; e < edges; e++) {
+    if (from[e] >= tasks || to[e] >= tasks || !(cost[e] >= 0 && cost[e] <= DBL_MAX) || route[e] > route[e + 1]) return EINVAL;
+    if ((processor[from[e]] == processor[to[e]]) != (route[e] == route[e + 1])) return EINVAL;
+  }
+  const size_t base = route[0], entries = route[edges] - base;
+  for (size_t r = base; r < route[edges]; r++) if (link[r] >= links) return EINVAL;
+  if (edges >= SIZE_MAX / sizeof(struct schedule_key) || entries >= SIZE_MAX / sizeof(struct schedule_key)) return ENOMEM;
+  const size_t keyed = entries > tasks ? entries : tasks;
+  double *level = malloc(((size_t)tasks + 1) * sizeof *level), *finish = malloc(((size_t)tasks + 1) * sizeof *finish);
+  double *busy = malloc(((size_t)tasks + 1) * sizeof *busy), *free_at = malloc(((size_t)links + 1) * sizeof *free_at);
+  double *end = malloc((entries + 1) * sizeof *end);
+  uint32_t *ordinal = malloc(((size_t)tasks + 1) * sizeof *ordinal);
+  struct schedule_task *list = malloc(((size_t)tasks + 1) * sizeof *list);
+  struct schedule_key *keys = malloc((keyed + 1) * sizeof *keys);
+  size_t *home = malloc(((size_t)tasks + 1) * sizeof *home), *leader = malloc((entries + 1) * sizeof *leader);
+  size_t *holder = malloc((entries + 1) * sizeof *holder);
+  size_t *in = malloc(((size_t)tasks + 1) * sizeof *in), *into = malloc((edges + 1) * sizeof *into);
+  int result = !level || !finish || !busy || !free_at || !end || !ordinal || !list || !keys || !home || !leader ||
+               !holder || !in || !into ? ENOMEM : 0;
+  if (!result) result = levels(tasks, weight, edges, from, to, cost, level, ordinal);
+  if (!result) {
+    for (uint32_t n = 0; n < tasks; n++) keys[n] = (struct schedule_key){processor[n], n};
+    schedule_leaders(tasks, keys, 0, home);
+    for (size_t r = base; r < route[edges]; r++)
+      keys[r - base] = (struct schedule_key){(uint64_t)communication[r] << 32 | link[r], r};
+    schedule_leaders(entries, keys, base, leader);
+    for (uint32_t n = 0; n < tasks; n++) { list[n] = (struct schedule_task){level[n], ordinal[n], n}; busy[n] = 0; }
+    qsort(list, tasks, sizeof *list, schedule_task_before);
+    mesh_graph_rows(tasks, edges, depth_head, to, in, into);
+    for (uint32_t l = 0; l < links; l++) free_at[l] = 0;
+    for (size_t r = 0; r < entries; r++) holder[r] = SIZE_MAX;
+  }
+  for (uint32_t i = 0; !result && i < tasks; i++) {
+    const uint32_t nj = list[i].task, P = processor[nj];
+    double ready = 0;
+    for (size_t k = in[nj]; !result && k < in[nj + 1]; k++) {
+      const size_t e = into[k];
+      const uint32_t ni = from[e];
+      double arrive = finish[ni], first_start = 0;
+      if (processor[ni] != P)
+        for (size_t r = route[e]; r < route[e + 1]; r++) {
+          const double occupy = cost[e] / rate[link[r]];
+          const size_t g = leader[r - base] - base;
+          if (holder[g] == SIZE_MAX) {
+            double s = free_at[link[r]];
+            if (r == route[e]) { if (finish[ni] > s) s = finish[ni]; }
+            else { if (arrive - occupy > s) s = arrive - occupy; if (first_start > s) s = first_start; }
+            link_start[r] = s;
+            end[r - base] = s + occupy;
+            if (!(end[r - base] <= DBL_MAX)) { result = EINVAL; break; }
+            free_at[link[r]] = end[r - base];
+            holder[g] = r;
+          } else {
+            link_start[r] = link_start[holder[g]];
+            end[r - base] = end[holder[g] - base];
+          }
+          if (r == route[e]) first_start = link_start[r];
+          arrive = end[r - base];
+        }
+      if (arrive > ready) ready = arrive;
+    }
+    if (result) break;
+    const double A = busy[home[nj]];
+    start[nj] = A > ready ? A : ready;
+    finish[nj] = start[nj] + weight[nj];
+    if (!(finish[nj] <= DBL_MAX)) { result = EINVAL; break; }
+    busy[home[nj]] = finish[nj];
+  }
+  free(level); free(finish); free(busy); free(free_at); free(end); free(ordinal); free(list); free(keys); free(home);
+  free(leader); free(holder); free(in); free(into);
   return result;
 }
