@@ -3,75 +3,107 @@
    (design/page-queue-change-request.md, "Claude's proposal": "The page lists (the queue)", "What the bridge decides",
    "The rule both ends compute", "The functions"; and the operator's "The page queue" and "Interleaving every
    transfer": every inbound link used, a ready page waiting only behind earlier pages of its own queue pair), as
-   design/disjoint-pages-change-request.md changes it ("Claude's proposal: the canonical path", 1 to 3): every page of
-   every execution assigned once, before the first, by the plan's one allocator (its Appendix A, A3), so no execution
-   waits on another's, a relay's page a page like any other; and each landing marked in the landed list, its bit in its
-   execution's record (mesh.h), no word or cell a page.
+   design/disjoint-pages-change-request.md, Appendix C, C3, changes it (design/disjoint-pages-revision-coordination.md,
+   "The bridge"): a plan is u copies of one execution's hops, its template, execution t running copy t mod u, every
+   page placed once by the plan's one allocator (C3.3, modulo variable expansion: M. Lam, Software pipelining, PLDI
+   1988), so it runs any number of executions, the client's start saying how many (the plan's state word `executions`,
+   which only rises: the contract's D2); and its state lives apart from its pages, in the plan's state section (mesh.h
+   struct mesh_state; C3.7), no word of it written to an earlier value: a landing flips its receive's 2-bit Gray-coded
+   phase (PTX's mbarrier phase bit, widened to two) and adds one to its range's count of its copy (counted completion,
+   C3.1: Portals 4's counting events; the contract's D1), and a cancellation arrives on that count with no phase written
+   (C3.1).  A send of execution t is released by its range's supplied word reading at least t + 1, or, forwarding, by
+   its receive's phase of execution t.  Nothing here writes a data page.
    Its native forms are the d6dceac transport's (MESH_VERSION 104, restored 2026-10-01: the source of the fastest
-   recorded E2B decode, metal-microbench docs/measurement.md): SENDs prepared once a plan and chained per queue pair,
-   each posted as its word releases it; receives prepared once a plan, posted ahead as their queue pair has room and
-   refilled as they land; completions polled through the provider's own functions (mesh-verbs.h struct mesh_verbs
-   `poll`, struct mesh_queue `send`, `receive`); traced variants under MESH_LEDGER.  Their inputs are the page lists,
-   which replaced d6dceac's per-link, per-queue transfer lists and its --link form's link_configure (both since
-   removed).  The
-   progress thread, the guard around its device's verbs calls and a port's halts are tag pre-return-20261103
-   rdma/mesh-link.c's, verbatim but at interfaces.  No main (the binary's is mesh-link.c's, the child's mesh-child.c's)
-   and no verbs teardown: a halt clears `served` and moves `pairing`, and the child's exit is the teardown (mesh-child.c
-   child_leave, lanes_flush; down_pair stays deleted). */
+   recorded E2B decode, metal-microbench docs/measurement.md): SENDs prepared once a plan, each posted in its queue
+   pair's order as its word releases it; receives prepared once a plan, posted ahead as their queue pair has room; a
+   record of either posted once for each execution of its copy (link_prepare); completions polled through the
+   provider's own functions (mesh-verbs.h struct mesh_verbs `poll`, struct mesh_queue `send`, `receive`); traced
+   variants under MESH_LEDGER.  Their inputs are the page lists, which replaced d6dceac's per-link, per-queue transfer
+   lists and its --link form's link_configure (both since removed).  The progress thread, the guard around its device's
+   verbs calls and a port's halts are tag pre-return-20261103 rdma/mesh-link.c's, verbatim but at interfaces.  No main
+   (the binary's is mesh-link.c's, the child's mesh-child.c's) and no verbs teardown: a halt clears `served` and moves
+   `pairing`, and the child's exit is the teardown (mesh-child.c child_leave, lanes_flush; down_pair stays deleted).
+   2026-11-04, sub-assignment 6: reversing this note's 2026-11-03 form (every execution's entries unrolled into the
+   list, a landing's bit ORed into its execution's landed record, a cancellation UINT64_MAX in that record's cancel
+   word), which unrolled by the run's length and gave the landed record five writers (C1; C4).  What must stay: the
+   k-th SEND on a queue pair fills the k-th receive posted on it; nothing is written in or beside a page; no request is
+   taken back but by the child's exit.  mesh-dataflow.h is no longer included: mesh_cables, the one thing this file
+   took from it, is mesh-map.h's (through mesh-bridge.h) */
 #include "mesh-bridge.h"
 #include "mesh-graph.h"
-#include "mesh-dataflow.h"
 
 /* design/prepared-machine.md#M29: d6dceac's prepared SEND (its span and request, one cache line's worth of what the
-   post reads), its release now its entry's word and `mask` (mesh.h struct mesh_hop): released where the word holds
-   every bit of the mask (a range's supplied word MESH_SUPPLIED, or a forwarding SEND's its receive's bit in its
-   execution's landed record), in place of the client's `ready` continuation (struct mesh_send): the word is the
-   region's, the record the child's.  `position` renamed `mask`, and `forwarding` gone with the forwards gate
-   (link_prepare's note of 2026-11-03) */
+   post reads), its release its entry's `word` and `field` (mesh.h struct mesh_hop; design/disjoint-pages-change-
+   request.md, C3.7): from its range's source (`field` MESH_ABSENT), execution t's send released where the range's
+   supplied word reads (acquire) at least t + 1, its producer's release of t; forwarding (a relay's, or a destination's
+   that sends the page on), where its receive's phase field, bits [field, field + 2) of `word`, reads (acquire)
+   mesh_phase(t / u + 1), that receive's landing of t; t the execution its lane's cursor serves (struct cursor).  The
+   word is the plan's state section's, the record the child's.  One record a template entry, posted once for each
+   execution of its copy (link_prepare).
+   2026-11-04, sub-assignment 6: `mask` (2026-11-03: the bits of its word its release needed, MESH_SUPPLIED or its
+   receive's bit of its execution's landed record) is `field`, the landed records and MESH_SUPPLIED gone (C4).  What
+   must stay: the word and field in the line the post reads */
 struct prepared_send {
   _Alignas(128) _Atomic uint64_t *word;
-  uint64_t mask;
+  uint32_t field,padding;
   struct ibv_sge span;
   struct ibv_send_wr request;
 };
 _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_send)==128 &&
-  offsetof(struct prepared_send,mask)==8 && offsetof(struct prepared_send,span)==16 &&
+  offsetof(struct prepared_send,field)==8 && offsetof(struct prepared_send,span)==16 &&
   offsetof(struct prepared_send,request)==32 &&
   offsetof(struct prepared_send,request.send_flags)+sizeof(unsigned int)<=128,"M29");
-/* design/prepared-machine.md#M08: d6dceac's prepared receive, verbatim but what its landing stores: its landed word
-   `input` (the word of its execution's landed record that holds its bit, mesh.h) and its bit `mask` in place of the
-   value `argument`, which its landing ORs in; `next` the next receive on its queue pair; `cancel` added, its
-   execution's cancel word (its landed record's word 0), which link_close stores UINT64_MAX where its bit is not set.
-   `hop`, `need` and `sent` (the receive window's and the forwards gate's) gone (link_prepare's note of 2026-11-03) */
+/* design/prepared-machine.md#M08: d6dceac's prepared receive, its request and span verbatim, and what its landing
+   writes (design/disjoint-pages-change-request.md, C3.1 and C3.7; design/disjoint-pages-revision-coordination.md, "The
+   bridge"): its phase field, bits [field, field + 2) of `word`, and `count`, its range's count word of its copy, which
+   takes the range's `pages` arrivals an execution; `landings` the record's completions since the load, the progress
+   thread's alone (its j-th is execution copy + j u: link_prepare), and `copy` its copy.  Every field its landing
+   reads is in its second 64 bytes, the 128-byte line its request starts.
+   2026-11-04, sub-assignment 6: reversing 2026-11-03's `input`, `mask` and `cancel` (its bit of its execution's landed
+   record, ORed in, and that record's cancel word, stored UINT64_MAX by link_close: C4); `next` (its queue pair's chain
+   of receives each posted once) and `pair` gone, the lane's cursor walking its records (struct cursor) and the queue
+   pair the lane's.  What must stay: the record one line, its request never changed once link_prepare has written it */
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
-  _Alignas(32) struct ibv_recv_wr *next;
-  struct ibv_qp *pair;
-  _Atomic uint64_t *input;
-  uint64_t mask;
-  _Atomic uint64_t *cancel;
+  _Alignas(64) _Atomic uint64_t *word;
+  _Atomic uint64_t *count;
+  uint64_t landings;
+  uint32_t field,pages,copy,padding;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
-  offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,next)==64 &&
-  offsetof(struct prepared_receive,pair)==72 && offsetof(struct prepared_receive,input)==80 &&
-  offsetof(struct prepared_receive,mask)==88 && offsetof(struct prepared_receive,cancel)==96,"M08 M09");
+  offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,word)==64 &&
+  offsetof(struct prepared_receive,count)==72 && offsetof(struct prepared_receive,landings)==80 &&
+  offsetof(struct prepared_receive,field)==88 && offsetof(struct prepared_receive,pages)==92 &&
+  offsetof(struct prepared_receive,copy)==96,"M08 M09");
 /* design/prepared-machine.md#M27 */
 struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
 _Static_assert(sizeof(struct mesh_trace)==32 && _Alignof(struct mesh_trace)==32,"M27");
+/* A lane's place in the executions it serves one way (design/disjoint-pages-revision-coordination.md, "The bridge":
+   each lane in execution order, execution t's records on it copy t mod u's, in assignment order): execution t
+   (`execution`), its copy t mod u (`copy`) and t / u (`round`), and the records of that copy on the lane still to post
+   in t, indexes [at, end) of its direction's records.  Kept in registers through a pass (link_receive_drain,
+   link_send_drain), so a post costs no division */
+struct cursor { uint64_t execution,round,at,end; uint32_t copy,padding; };
 /* A port's plan as its child serves it, the progress thread's alone: none loaded; refused (the view `hops`, `plan` it
-   refused, until the plan call writes again); served; done (every SEND of its share completed, every receive landed);
-   or ended with work outstanding on the link's queue pairs, which only the child's exit releases (LINK_STREAMS_ENDED),
-   so nothing more is loaded in the child's life.  Its records by lane: SENDs [send_at[k], send_end[k]) still to post,
-   receives from receive_next[k] on (a chain), the completions of its share (`sent`, `landed`) against its counts, and
-   the traces (MESH_LEDGER) */
+   refused, until the plan call writes again); served; done (every record served every execution below the plan's
+   `executions` as link_run last read it: every SEND completed, every receive landed; served again where that word
+   rises); or ended with work outstanding on the link's queue pairs, which only the child's exit releases
+   (LINK_STREAMS_ENDED), so nothing more is loaded in the child's life.  The plan's state (`words`, its `copies` u), its
+   records by lane, copy and assignment order (lane q's copy c at [first[q (u + 1) + c], first[q (u + 1) + c + 1]) of
+   its direction's), each lane's cursor each way, the lanes that carry each way (`carrying`, `lanes` either), the
+   executions last read and the completions they ask (`send_total`, `receive_total`) against those taken (`sent`,
+   `landed`), and the traces (MESH_LEDGER) */
 enum { FLOW_NONE, FLOW_REFUSED, FLOW_SERVING, FLOW_DONE, FLOW_ENDED };
 struct flow {
   int state,ledger,refused;
-  uint32_t lanes;
-  uint64_t hops,plan,client,send_count,receive_count,sent,landed;
-  struct prepared_send *sends,*send_at[MESH_LINK_LANES],*send_end[MESH_LINK_LANES];
-  struct prepared_receive *receives,*receive_next[MESH_LINK_LANES];
+  uint32_t lanes,carrying[2],copies;
+  uint64_t hops,plan,client,executions,send_count,receive_count,send_total,receive_total,sent,landed;
+  struct mesh_state *words;
+  struct prepared_send *sends;
+  struct prepared_receive *receives;
+  uint64_t *first[2];
+  struct cursor cursor[2][MESH_LINK_LANES];
   struct mesh_trace *trace[2];
   size_t traced[2],trace_capacity[2];
 };
@@ -152,40 +184,95 @@ static uint32_t map_index(const struct mesh_record *records,uint64_t count,uint3
   return held?index:UINT32_MAX;
 }
 static inline _Atomic uint64_t *region_word(uint64_t offset){ return (_Atomic uint64_t *)(void *)((char *)M+offset); }
-/* the cancel word of the execution whose landed record holds the word at region offset `word`: that record's word 0,
-   the record starting at landed_off + ((word - landed_off) / landed_stride) x landed_stride (mesh.h, the landed list:
-   design/disjoint-pages-change-request.md, "Claude's proposal" 2).  hdr `landed_off` is the layout's; `stride` is hdr
-   `landed_stride`, the plan's, which its caller reads after `hops` (acquire) and checks with the entry it read (the
-   plan read whole: link_prepare, plan_cancel).  It is never 0 while `hops` is nonzero: the plan call writes it, at
-   least 32 (R = 0 gives 32), before it stores `hops` (mesh.h, "Writing a plan") */
-static inline _Atomic uint64_t *landed_cancel(uint64_t word,uint64_t stride){
-  const uint64_t base=M->landed_off;
-  return region_word(base+(word-base)/stride*stride);
+/* 2026-11-04, sub-assignment 6: landed_cancel (2026-11-03: an execution's cancel word, its landed record's word 0,
+   found from a word of the record and hdr `landed_stride`) is gone with the landed records and the cancel word (C4);
+   a cancellation is count_raise's */
+/* the executions t < `executions` with t mod u == `copy` (u `copies`): those a record of that copy serves */
+static inline uint64_t copy_executions(uint64_t executions,uint32_t copies,uint32_t copy){
+  return executions>copy?(executions-copy-1)/copies+1:0;
+}
+/* A cancellation's arrival (design/disjoint-pages-change-request.md, C3.1: "Landings and cancellations both arrive on
+   the count, as arrivals do on an mbarrier"; design/disjoint-pages-revision-coordination.md, "The bridge"): the count
+   word raised to `final` and never lowered, by a compare-and-swap (release) that stores only above what it read and is
+   tried again only where another arrival moved the word between (so it ends within the arrivals still to come, a
+   range's P an execution), then the word's waiters woken (os_sync_wake_by_address_all, 8 bytes, region-shared: the
+   client's waiter's os_sync_wait_on_address_with_timeout, mesh-metal.m) where this call raised it.  A count at or past
+   `final` is left as it is, so several records or entries of one range raise its word once.  No phase is written:
+   the first execution the receive did not land reads its field one phase behind (mesh.h, "Phases") */
+static void count_raise(_Atomic uint64_t *count,uint64_t final){
+  uint64_t seen=atomic_load_explicit(count,memory_order_relaxed);
+  while(seen<final && !atomic_compare_exchange_weak_explicit(count,&seen,final,memory_order_release,memory_order_relaxed)){}
+  if(seen<final)os_sync_wake_by_address_all(count,sizeof *count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+}
+/* a load's refusal of a plan none writes (link_prepare's EINVAL), or EAGAIN where `hops` or `plan` moved since the load
+   read them (the plan read whole, as at link_prepare's last check: an acquire fence after what it read, then both
+   again), so a read torn by a plan written again is never refused */
+static int plan_refused(uint64_t hops,uint64_t plan,int error){
+  atomic_thread_fence(memory_order_acquire);
+  return atomic_load_explicit(&M->hops,memory_order_acquire)!=hops || atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan?
+    EAGAIN:error;
+}
+/* a lane's cursor at the next execution, on that execution's copy's records on the lane (`first` the lane's u + 1
+   bounds, struct flow) */
+static inline void cursor_step(struct cursor *at,const uint64_t *first,uint32_t copies){
+  at->execution++;
+  if(++at->copy==copies){at->copy=0;at->round++;}
+  at->at=first[at->copy];at->end=first[at->copy+1];
+}
+/* the executions to serve, the plan's word as link_run read it, and the completions they ask each way: every record of
+   copy c once for each execution t < executions with t mod u == c (copy_executions) */
+static void flow_executions(struct flow *f,uint64_t executions){
+  uint64_t total[2]={0,0};
+  const uint64_t width=(uint64_t)f->copies+1;
+  for(int d=0;d<2;d++)for(uint32_t q=0;q<MESH_LINK_LANES;q++){
+    const uint64_t *first=f->first[d]+q*width;
+    for(uint32_t c=0;c<f->copies;c++)total[d]+=(first[c+1]-first[c])*copy_executions(executions,f->copies,c);
+  }
+  f->executions=executions;f->send_total=total[MESH_SEND];f->receive_total=total[MESH_RECEIVE];
 }
 
 /* The rule both ends compute (design/page-queue-change-request.md; mesh.h struct mesh_hop, "Both ends"), and this
    port's share of the plan built from it.  The plan written (hdr `plan` its generation) is refused (ESTALE) where its
    entries' `serial` is not the map's serial as one whole reading of the map left it.  The cables between this node and
    the port's peer are the reach entries both records list for each other (each from its own side, the ports crossed),
-   one cable an entry of each (mesh-dataflow.h mesh_cables, the one per-cable join); a cable's key is (the lower
-   node id's port index, the higher's), cables in key order; its bandwidth the lesser of the two records' and its queue
-   pairs the lesser of the two (the pairing's, the same at both ends).  The pair's links are each cable's queue pairs
-   0 .. qps - 1 in (key, queue pair) order, each of rate the cable's bandwidth over its queue pairs.  Each direction's
-   hops of the pair (the list's entries naming the peer's index, in list order: the list is every execution's entries
-   in execution order, execution 0's, then 1's, ..., mesh.h) are its units in that order, every one a page (block x
-   pgsz bytes), assigned by mesh_graph_list_schedule (Graham's list scheduling, mesh-graph.h): this node's SENDs to the
-   peer are the peer's receives from this node, so both ends assign one list alike.  Kept: the units on this port's
-   cable, each on its queue pair (lane q, link_plan), in assignment order, so the k-th SEND on a queue pair fills the
-   k-th receive posted on it.  An entry's `page`, `word` and `mask` are its execution's own.  A SEND sends its page,
-   released where its word holds every bit of its `mask`; a relay is no special case, its SEND naming its receive's
-   word and mask.  A receive lands in its page, ORs its `mask` into its word (its bit in its execution's landed record)
-   and is posted as its lane's queue has room (link_receive_drain); its execution's cancel word is the record's word 0
-   (landed_cancel).  No verbs call: the progress thread posts as it serves (link_receive_progress,
-   link_send_progress).  0, or an error value: ESTALE, ETIMEDOUT or ENOMEM reading the map, EHOSTUNREACH where the
-   pair has units but no link of rate, EPROTO where the map gives this cable a queue pair its link does not hold,
-   EMSGSIZE where a page is more frames than a lane it is assigned can hold; or EAGAIN, no refusal, where the plan was
-   written again while it was read.  On 0 the port's `prepared` is the plan's generation, stored before the last check
-   (below); on an error it is as it was, 0.
+   one cable an entry of each (mesh-map.h mesh_cables, the one per-cable join); a cable's key is (the lower node id's
+   port index, the higher's), cables in key order; its bandwidth the lesser of the two records' and its queue pairs the
+   lesser of the two (the pairing's, the same at both ends).  The pair's links are each cable's queue pairs
+   0 .. qps - 1 in (key, queue pair) order, each of rate the cable's bandwidth over its queue pairs.  The plan's list
+   is its template, u copies of one execution's n hops (`hops` = u n, copy c's at [c n, c n + n); u the plan's state's
+   `copies`, mesh.h struct mesh_state, read after `hops`: design/disjoint-pages-change-request.md, C3.3).  Each
+   direction's hops of the pair (the template's entries naming the peer's index, in list order: copy 0's, then copy
+   1's, ...) are its units in that order, every one a page (block x pgsz bytes), assigned by mesh_graph_list_schedule
+   (Graham's list scheduling, mesh-graph.h): this node's SENDs to the peer are the peer's receives from this node, and
+   u is the collective's (the contract's D5: every rank computes the same), so both ends assign one list alike.  Kept:
+   the units on this port's cable, each on its queue pair (lane q, link_plan), one record each, by lane, copy and
+   assignment order (struct flow `first`).  A lane serves the executions in order, execution t's records on it copy
+   t mod u's in assignment order (struct cursor), so in every execution the k-th SEND on a queue pair fills the k-th
+   receive posted on it.  A record is posted once for each execution of its copy, and again while an earlier posting
+   of it may be outstanding: the provider takes a request at its post (mesh-verbs.h pair_make binds the provider's own
+   ops.post_send and ops.post_recv; its tbt_post_recv encodes the SGE's address bits and key into its own receive queue
+   and publishes the queue's producer index, design/RDMA-KERNEL-RECOVERY.md, its September 5 notes, and
+   design/TELEMETRY-LOSS-20260904.md, "What is not yet established"; rdma-core's ibv_post_recv(3) and ibv_post_send(3)
+   hold a request's buffers, not the request, until its completion), and a queue pair's receives complete in the order
+   posted (Hilland et al., RDMA Protocol Verbs Specification, section 8.2.2: design/prepared-machine.md#M08), so a
+   receive record's j-th completion since the load is execution copy + j u (`landings`).  Two postings may then name
+   one page; the hardware writes it only as a SEND takes a receive, and the peer's SEND of execution t + u follows this
+   node's reads of t by the allocator's order (C3.3), not by anything here.  A SEND sends its page once released
+   (link_send_drain); a relay is no special case, its SEND naming its receive's word and field.  A receive lands in its
+   page and writes its phase and its count alone (link_receive_drain).  No verbs call: the progress thread posts as it
+   serves (link_receive_progress, link_send_progress).  0, or an error value: ESTALE, ETIMEDOUT or ENOMEM reading the
+   map, EINVAL where the plan has no state, its copies do not divide the list, or an entry's `field` or `pages` is none
+   a plan writes (mesh.h struct mesh_hop: a field's low bit even and below 64, a receive's pages at least 1), and
+   `hops` and `plan` still read as loaded (else EAGAIN: plan_refused),
+   EHOSTUNREACH where the pair has units but no link of rate, EPROTO where the map gives this cable a queue pair its
+   link does not hold, EMSGSIZE where a page is more frames than a lane it is assigned can hold; or EAGAIN, no refusal,
+   where the plan was written again while it was read.  On 0 the port's `prepared` is the plan's generation, stored
+   before the last check (below); on an error it is as it was, 0.
+   2026-11-04, sub-assignment 6 (design/disjoint-pages-change-request.md, C1, C3.3, C4): reversing 2026-11-03's list of
+   every execution's entries (executions x n, hdr `executions`), one record an entry, each posted once, so the records
+   and the load's work grew with the run's length; now one record a template entry, posted once for each execution of
+   its copy, so they are the template's whatever the run's length.  What must stay: both ends pick and assign the same
+   u x n list in list order; each lane's executions in order; a record's request unchanged once written here.
    2026-11-03, sub-assignment 6 (design/disjoint-pages-change-request.md, "Claude's proposal" 1 and 3; Appendix A, A4):
    the ring went from the bridge: plan_shape (hdr `depth`, a slot's hops, execution t's page the slot t mod depth's
    and its word the cell at word + t hop_stride), the receive window (a receive of t posted once its hop's executions
@@ -205,17 +292,23 @@ static int link_prepare(struct port *port){
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_relaxed);
   f->hops=hops;f->plan=plan;f->client=atomic_load_explicit(&M->client,memory_order_acquire);
-  const uint64_t landed_stride=M->landed_stride;
+  /* `hops` 0 since link_run read it: the plan call's first store, so the plan is being written again (EAGAIN) */
+  if(!hops)return EAGAIN;
+  /* the plan's state, written before `hops` (mesh.h, "Writing a plan", step 5): its copies divide the list */
+  struct mesh_state *words=mesh_plan_state(M);
+  const uint32_t copies=words?words->copies:0;
+  if(!copies || hops%copies)return plan_refused(hops,plan,EINVAL);
+  const uint64_t n=hops/copies,width=(uint64_t)copies+1;
   const struct mesh_hop *list=mesh_hops(M);
   struct mesh_record *records=NULL;uint64_t count=0,serial=0;
   int error=map_read(&records,&count,&serial);
   if(error)return error;
-  if(hops && list[0].serial!=serial){free(records);return ESTALE;}
+  if(list[0].serial!=serial){free(records);return ESTALE;}
   const uint32_t self=M->node,peer=port->peer,index=map_index(records,count,peer);
   const struct mesh_record *mine=NULL,*theirs=NULL;
   for(uint64_t r=0;r<count;r++){if(records[r].node==self)mine=records+r;if(records[r].node==peer)theirs=records+r;}
-  /* the pair's cables, the one per-cable join (mesh-dataflow.h mesh_cables, which mesh_joined and mesh_nodes_read read
-     too: C9), in key order; this port's the one whose key names it at this node's end */
+  /* the pair's cables, the one per-cable join (mesh-map.h mesh_cables, which mesh_joined and mesh_nodes_read read too:
+     C9), in key order; this port's the one whose key names it at this node's end */
   struct mesh_cable cables[MESH_PORTS];
   const uint32_t cable_count=mine && theirs?mesh_cables(mine,theirs,cables):0,end=self<peer?0:1;
   free(records);
@@ -227,12 +320,12 @@ static int link_prepare(struct port *port){
       rate[links]=(double)cables[c].bandwidth/(double)cables[c].qps;on[links]=c;queue[links]=q;links++;
     }
   }
-  /* each direction's hops of the pair, its units: the list's entries naming the peer, picked once over the whole list,
-     in list order (execution order) */
+  /* each direction's hops of the pair, its units: the template's entries naming the peer, picked once over the whole
+     list, in list order (copy order) */
   uint32_t *pick[2]={NULL,NULL};uint64_t units[2]={0,0};
   uint64_t *bytes=NULL,*carried=NULL;uint32_t *assigned[2]={NULL,NULL};
   for(int d=0;d<2 && index!=UINT32_MAX;d++){
-    if(!(pick[d]=malloc((hops?hops:1)*sizeof *pick[d]))){error=ENOMEM;goto failed;}
+    if(!(pick[d]=malloc(hops*sizeof *pick[d]))){error=ENOMEM;goto failed;}
     for(uint64_t j=0;j<hops;j++)
       if(list[j].node==index && list[j].direction==(uint32_t)d)pick[d][units[d]++]=(uint32_t)j;
   }
@@ -263,44 +356,53 @@ static int link_prepare(struct port *port){
     if((lane_units[MESH_RECEIVE][q] && frames>l->lane[q].frame_capacity) || (lane_units[MESH_SEND][q] && frames>l->gate[q].capacity.n)){
       error=EMSGSIZE;goto failed;
     }
-  /* the records, by lane in assignment order */
+  /* the records, by lane, copy and assignment order: first[q (u + 1) + c] lane q's copy c's first, each lane's units
+     counted by copy and summed in that order (copy pick / n; a lane's units come in list order, so in copy order) */
   f->send_count=f->receive_count=0;
   for(uint32_t q=0;q<MESH_LINK_LANES;q++){f->send_count+=lane_units[MESH_SEND][q];f->receive_count+=lane_units[MESH_RECEIVE][q];}
   f->sends=f->send_count?aligned_alloc(128,f->send_count*sizeof *f->sends):NULL;
   f->receives=f->receive_count?aligned_alloc(128,f->receive_count*sizeof *f->receives):NULL;
-  if((f->send_count && !f->sends) || (f->receive_count && !f->receives)){error=ENOMEM;goto failed;}
-  struct prepared_send *send_fill[MESH_LINK_LANES];
-  struct prepared_receive *receive_fill[MESH_LINK_LANES],*receive_last[MESH_LINK_LANES];
-  f->lanes=0;
-  for(uint64_t q=0,s=0,r=0;q<MESH_LINK_LANES;q++){
-    f->send_at[q]=send_fill[q]=f->sends?f->sends+s:NULL;f->send_end[q]=f->sends?f->sends+s+lane_units[MESH_SEND][q]:NULL;
-    s+=lane_units[MESH_SEND][q];
-    f->receive_next[q]=receive_fill[q]=lane_units[MESH_RECEIVE][q]?f->receives+r:NULL;receive_last[q]=NULL;
-    r+=lane_units[MESH_RECEIVE][q];
-    if(lane_units[MESH_SEND][q] || lane_units[MESH_RECEIVE][q])f->lanes|=UINT32_C(1)<<q;
+  for(int d=0;d<2;d++)f->first[d]=calloc(MESH_LINK_LANES*width,sizeof *f->first[d]);
+  if((f->send_count && !f->sends) || (f->receive_count && !f->receives) || !f->first[0] || !f->first[1]){error=ENOMEM;goto failed;}
+  uint64_t fill[2][MESH_LINK_LANES];
+  f->carrying[0]=f->carrying[1]=0;
+  for(int d=0;d<2;d++){
+    uint64_t *first=f->first[d],at=0;
+    for(uint64_t k=0;k<units[d];k++)if(assigned[d][k]!=UINT32_MAX)first[assigned[d][k]*width+pick[d][k]/n]++;
+    for(uint32_t q=0;q<MESH_LINK_LANES;q++){
+      for(uint32_t c=0;c<copies;c++){const uint64_t m=first[q*width+c];first[q*width+c]=at;at+=m;}
+      first[q*width+copies]=at;
+      fill[d][q]=first[q*width];
+      f->cursor[d][q]=(struct cursor){.at=first[q*width],.end=first[q*width+1]};
+      if(lane_units[d][q])f->carrying[d]|=UINT32_C(1)<<q;
+    }
   }
+  f->lanes=f->carrying[MESH_SEND]|f->carrying[MESH_RECEIVE];
   for(int d=0;d<2;d++)for(uint64_t k=0;k<units[d];k++){
     const uint32_t q=assigned[d][k];
     if(q==UINT32_MAX)continue;
     const struct mesh_hop *hop=list+pick[d][k];
+    /* a field the shifts below cannot hold, or a receive of no pages, is none a plan writes: refused (EINVAL) */
+    if(((d==MESH_RECEIVE || hop->field!=MESH_ABSENT) && (hop->field>62 || hop->field&1)) || (d==MESH_RECEIVE && !hop->pages)){
+      error=plan_refused(hops,plan,EINVAL);goto failed;
+    }
     const struct ibv_sge span=wire_span(&port->device,(uint64_t)hop->page*M->pgsz,page_bytes());
-    _Atomic uint64_t *word=region_word(hop->word);
     if(d==MESH_SEND){
-      struct prepared_send *record=send_fill[q]++;
-      *record=(struct prepared_send){.word=word,.mask=hop->mask,.span=span};
+      struct prepared_send *record=f->sends+fill[d][q]++;
+      *record=(struct prepared_send){.word=region_word(hop->word),.field=hop->field,.span=span};
       record->request=(struct ibv_send_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND,
         .send_flags=IBV_SEND_SIGNALED};
     } else {
-      struct prepared_receive *record=receive_fill[q]++;
-      *record=(struct prepared_receive){.span=span,.pair=l->provider.queues[q].pair,.input=word,.mask=hop->mask,
-        .cancel=landed_cancel(hop->word,landed_stride)};
+      struct prepared_receive *record=f->receives+fill[d][q]++;
+      *record=(struct prepared_receive){.span=span,.word=region_word(hop->word),.count=region_word(hop->count),
+        .field=hop->field,.pages=hop->pages,.copy=(uint32_t)(pick[d][k]/n)};
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
-      if(receive_last[q])receive_last[q]->next=&record->request;
-      receive_last[q]=record;
     }
   }
   /* design/prepared-machine.md#M27 (its traces' room taken before the plan is told loaded, below, so the only failure
-     after that store is a plan written again: no refusal follows it) */
+     after that store is a plan written again: no refusal follows it).  Room for one event a record each way, its first
+     u executions' worth (each record's first posting, or the first landings), sized here once and written while room
+     lasts (link_receive_drain, link_send_drain), so a trace is bounded by the template whatever the run's length */
   const char *ledger=getenv("MESH_LEDGER");
   f->ledger=ledger && ledger[0] && !(ledger[0]=='0' && !ledger[1]);
   const uint64_t traces[2]={f->send_count,f->receive_count};
@@ -309,25 +411,29 @@ static int link_prepare(struct port *port){
     if(!f->trace_capacity[d])continue;
     if(!(f->trace[d]=aligned_alloc(32,(f->trace_capacity[d]+1)*sizeof(struct mesh_trace)))){error=ENOMEM;goto failed;}
   }
-  /* The plan told loaded, then read whole.  2026-11-03, sub-assignment 6 (reviewer 12's defect 1 on 5d919bd7, on the
-     coordinator's routing): the port's `prepared` (the generation it loads, release) is stored here, before the last
-     check, where link_run stored it after link_prepare returned.  Why: the landed list and the supplied words are fixed
-     areas the next plan reuses (mesh.h, "Writing a plan"), so a port must never begin serving a plan the plan call has
-     already found erased; with the store after the check, the check could read the old `hops` and `plan`, the plan call
-     store `hops` 0 and read `prepared` 0 (mesh_plan_erased), and the port then store `prepared` and serve the old plan
-     while the new one zeroes and rewrites those areas.  Now each side stores, fences seq_cst and reads the other's word
-     (Dekker's pairing: E. W. Dijkstra, Cooperating sequential processes, 1965): this port `prepared` then `hops` and
-     `plan`; the plan call `hops` 0 then `prepared` (its fence at mesh-dataflow.c mesh_plan_erased's start).  At least
-     one sees the other's store: the plan call waits (bounded) for this port's `prepared` to clear (link_close), or this
-     check sees `hops` or `plan` moved and stores `prepared` 0 again before EAGAIN.  The refusal's order stays: no
-     refusal follows this store, and a refusal stores `code` and phase before `prepared` (link_run); and so does a
-     load's: a refusal of this child's undone (`code` 0, phase MESH_PAIRED) before `prepared` is stored, moved here
-     from link_run with it.  The check is the plan read whole too (review R1, round 2): the entries and the landed
-     list's stride were read after `hops` (acquire); were the plan written again meanwhile (its `hops` 0 first, then a
+  /* The plan told loaded, then read whole.  The port's `prepared` (the generation it loads, release) is this port's
+     announcement for the deferred reclamation of a retired plan's pages (design/disjoint-pages-change-request.md, C3.4:
+     RCU's call_rcu, P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004,
+     epoch-based reclamation; design/disjoint-pages-revision-coordination.md, D10): the bridge parent's turn releases a
+     closed claim once no port's `prepared` holds its generation (mesh-dataflow.c mesh_retired_release: a seq_cst
+     fence, then the announcements read), and a claim is closed only once its plan is no longer the one written (hdr
+     `hops` 0 or a later plan's: mesh-collective.c mesh_plan, mesh-dataflow.c mesh_retire).  So `prepared` is stored,
+     then a seq_cst fence, then `hops` and `plan` read again (Fraser's announced epoch and its re-read): of the two
+     fences, where the release's comes first this re-read sees `hops` or `plan` moved and the load withdraws
+     (`prepared` 0, EAGAIN) before anything is posted; where this one comes first the release reads this generation and
+     keeps the claim.  Nobody waits.  The re-read is the plan read whole too (review R1, round 2): the entries and the
+     plan's state were read after `hops` (acquire); were the plan written again meanwhile (its `hops` 0 first, then a
      new generation `plan`, the plan call's release fence after the 0), a read of the new writes is seen here, after
      the fence (seq_cst, an acquire fence as well), as `hops` or `plan` moved, and what was read is dropped (EAGAIN:
-     link_run tries again on its next pass) before any of it is posted.  What must stay: `prepared` stored before the
-     fence and the check, and nothing posted before both */
+     link_run tries again on its next pass).  The refusal's order stays: no refusal follows this store, and a refusal
+     stores `code` and phase before `prepared` (link_run); and so does a load's: a refusal of this child's undone
+     (`code` 0, phase MESH_PAIRED) before `prepared` is stored.
+     2026-11-04, sub-assignment 6: reversing this note's 2026-11-03 form (reviewer 12's defect 1 on 5d919bd7), in which
+     the announcement paired with mesh_plan_erased, the plan call's bounded wait (a Dekker store-fence-load pair: E. W.
+     Dijkstra, Cooperating sequential processes, 1965) for no port to hold a plan whose fixed areas it would zero and
+     rewrite in place.  That wait went with the rewriting in place (C4; C3.4: a new plan's state is in new pages), and
+     the announcement is now the reclamation's.  What must stay: `prepared` stored before the fence and the re-read,
+     nothing posted before both, and the store moved here from link_run with the undoing of a refusal */
   struct mesh_port_info *info=&mesh_links(M)[port->index].port;
   if(f->refused){
     f->refused=0;
@@ -343,21 +449,26 @@ static int link_prepare(struct port *port){
     atomic_store_explicit(&info->prepared,0,memory_order_release);
     error=EAGAIN;goto failed;
   }
+  /* the trace layout, the plan's copies and executions read from its state (the executions as the load finds them;
+     link_run reads them again each pass) */
   if(f->ledger)for(uint32_t q=0;q<MESH_LINK_LANES;q++)if(f->lanes>>q&1)
     fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"lane\":%u,\"send_base\":%llu,\"sends\":%llu,\"receive_base\":%llu,\"receives\":%llu,"
-      "\"send_record_bytes\":%zu,\"receive_record_bytes\":%zu,\"executions\":%u}\n",port->index,M->node,q,
-      (unsigned long long)(uintptr_t)f->send_at[q],(unsigned long long)lane_units[MESH_SEND][q],
-      (unsigned long long)(uintptr_t)f->receive_next[q],(unsigned long long)lane_units[MESH_RECEIVE][q],
-      sizeof(struct prepared_send),sizeof(struct prepared_receive),M->executions);
-  f->sent=f->landed=0;
+      "\"send_record_bytes\":%zu,\"receive_record_bytes\":%zu,\"copies\":%u,\"executions\":%llu}\n",port->index,M->node,q,
+      (unsigned long long)(uintptr_t)(f->sends?f->sends+f->first[MESH_SEND][q*width]:NULL),
+      (unsigned long long)lane_units[MESH_SEND][q],
+      (unsigned long long)(uintptr_t)(f->receives?f->receives+f->first[MESH_RECEIVE][q*width]:NULL),
+      (unsigned long long)lane_units[MESH_RECEIVE][q],sizeof(struct prepared_send),sizeof(struct prepared_receive),copies,
+      (unsigned long long)atomic_load_explicit(&words->executions,memory_order_acquire));
+  f->words=words;f->copies=copies;
+  f->executions=f->send_total=f->receive_total=f->sent=f->landed=0;
   for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);}
   free(bytes);free(carried);
   return 0;
 failed:
-  for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);free(f->trace[d]);f->trace[d]=NULL;}
+  for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);free(f->trace[d]);f->trace[d]=NULL;free(f->first[d]);f->first[d]=NULL;}
   free(bytes);free(carried);
   free(f->sends);free(f->receives);
-  f->sends=NULL;f->receives=NULL;f->send_count=f->receive_count=0;f->lanes=0;
+  f->sends=NULL;f->receives=NULL;f->send_count=f->receive_count=0;f->lanes=f->carrying[0]=f->carrying[1]=0;
   return error;
 }
 
@@ -366,13 +477,24 @@ failed:
 /* design/algorithm-sources.md#programcopy */
 /* d6dceac's receive drain (its unordered form: a completion names its record), now one pass of the port's progress
    thread over the link's receive completions (the queue pairs' shared queue, `completion`), in the tag's batches
-   (rdma/mesh-link.c link_receive): each landing of a lane served ORs its record's `mask` (release) into its landed
-   word, marking its bit in its execution's landed record (mesh.h; design/disjoint-pages-change-request.md, "Claude's
-   proposal" 2), after the acquire the poll's DMA asks, and is counted (the lane's `got` and frames, which lanes_flush
-   reads); a failed one, or one of other than a whole page, fails the link (link_failed), never retried.  Then each
-   served lane's receives posted ahead from its chain, in order, while its queue has room (the tag's requests,
-   MESH_LANE_UNITS, and its frames, frame_capacity), and nothing else: no receive waits on another execution's landings
-   or forwards (link_prepare's note of 2026-11-03); at most MESH_POST_QUANTUM a pass.  0 where the link failed */
+   (rdma/mesh-link.c link_receive): each landing of a lane served, after the acquire the poll's DMA asks, is its
+   record's j-th since the load (`landings`), execution t = copy + j u (link_prepare), and writes the plan's state alone
+   (design/disjoint-pages-change-request.md, C3.1 and C3.7; design/disjoint-pages-revision-coordination.md, "The
+   bridge"; mesh.h struct mesh_hop, a receive): its phase field flipped by one atomic XOR (release) of bit field +
+   ((t / u) & 1), t / u being j, so the field reads mesh_phase(t / u + 1); then its range's count of its copy one more
+   (an atomic add, release); and, where the count it made is a multiple of the entry's `pages` (the pages this node
+   receives of the range a copy: an execution's arrivals in), the count word's waiters woken
+   (os_sync_wake_by_address_all, 8 bytes, region-shared, as the client's waiter waits: mesh-metal.m).  It is counted
+   (the lane's `got` and frames, which lanes_flush reads); a failed one, or one of other than a whole page, fails the
+   link (link_failed), never retried.  Then each served lane's receives posted ahead, its cursor's (struct cursor: the
+   executions in order, execution t's records copy t mod u's), through the executions below the plan's `executions` as
+   link_run last read it, while its queue has room (the tag's requests, MESH_LANE_UNITS, and its frames,
+   frame_capacity), and on nothing else: no receive waits on another's landing; at most MESH_POST_QUANTUM a pass.  0
+   where the link failed.
+   2026-11-04, sub-assignment 6: reversing 2026-11-03's landing, its record's `mask` ORed into its execution's landed
+   record (C4: the landed record's ORed bits), and its chain of receives each posted once (`next`).  What must stay: the
+   XOR before the add, both after the poll's acquire; no load, fence or call a landing more but the wake at a range's
+   end; each lane's executions in order */
 static __attribute__((always_inline)) inline int link_receive_drain(struct port *port,struct flow *f,uint32_t served,int traced){
   struct link *l=&port->link;
   struct ibv_wc done[MESH_COMPLETION_BATCH];
@@ -397,7 +519,10 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
       if(done[i].byte_len!=page){link_failed(port,EMSGSIZE);return 0;}
       const uint64_t polled=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
       struct prepared_receive *record=(void *)(uintptr_t)done[i].wr_id;
-      atomic_fetch_or_explicit(record->input,record->mask,memory_order_release);
+      const uint64_t round=record->landings++;
+      atomic_fetch_xor_explicit(record->word,UINT64_C(1)<<(record->field+(round&1)),memory_order_release);
+      if((atomic_fetch_add_explicit(record->count,1,memory_order_release)+1)%record->pages==0)
+        os_sync_wake_by_address_all(record->count,sizeof *record->count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
       struct lane_state *state=l->lane+lane;
       state->got++;state->frames_retired+=each;f->landed++;
       if(traced && f->traced[MESH_RECEIVE]<capacity){
@@ -406,20 +531,25 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
       }
     }
   }
-  for(uint32_t lanes=f->lanes&served;lanes;lanes&=lanes-1){
+  const uint64_t executions=f->executions;
+  const uint32_t copies=f->copies;
+  for(uint32_t lanes=f->carrying[MESH_RECEIVE]&served;lanes;lanes&=lanes-1){
     const uint32_t k=(uint32_t)__builtin_ctz(lanes);
     struct lane_state *state=l->lane+k;
     const struct mesh_queue *queue=l->provider.queues+k;
-    struct prepared_receive *record=f->receive_next[k];
-    for(uint32_t budget=MESH_POST_QUANTUM;record && budget;budget--){
+    const uint64_t *first=f->first[MESH_RECEIVE]+k*((uint64_t)copies+1);
+    struct cursor at=f->cursor[MESH_RECEIVE][k];
+    for(uint32_t budget=MESH_POST_QUANTUM;budget;budget--){
+      while(at.at==at.end && at.execution<executions)cursor_step(&at,first,copies);
+      if(at.execution>=executions)break;
       if(state->posted-state->got>=MESH_LANE_UNITS || state->frames_posted-state->frames_retired+each>state->frame_capacity)break;
       struct ibv_recv_wr *bad;
-      const int error=queue->receive(record->pair,&record->request,&bad);
+      const int error=queue->receive(queue->pair,&f->receives[at.at].request,&bad);
       if(error){lane_lost(port,k,error<0?-error:error);break;}
       state->frames_posted+=each;state->posted++;
-      record=(struct prepared_receive *)(void *)record->next;
+      at.at++;
     }
-    f->receive_next[k]=record;
+    f->cursor[MESH_RECEIVE][k]=at;
   }
   return 1;
 }
@@ -437,15 +567,22 @@ static int link_receive_progress(struct port *port,uint32_t served){
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M15 */
 /* design/algorithm-sources.md#independent-native-queues */
-/* d6dceac's send drain (each queue pair's chain from its cursor, a record posted as its release word holds, through the
-   provider's own post), now one pass of the port's progress thread: the SEND completions first, on their own queue
+/* d6dceac's send drain (each queue pair's records from its cursor, a record posted as its release word holds, through
+   the provider's own post), now one pass of the port's progress thread: the SEND completions first, on their own queue
    (`sent`, mesh-verbs.h pair_up), in the tag's batches (rdma/mesh-link.c link_send), each of a lane served retiring its
    frames through the lane's gate and counted (`done`), a failed one failing the link (no completion counts a page's
-   forwards: link_prepare's note of 2026-11-03); then each served lane's SENDs in order, each once its word holds every
-   bit of its `mask` (acquire: a range's supplied word MESH_SUPPLIED, or a forwarding SEND's receive's bit; a
-   cancellation is a landed record's word 0, which no SEND names, so it releases nothing), while the lane's gate holds
-   its frames and its requests are under MESH_LANE_UNITS, at most MESH_POST_QUANTUM a pass.  A ready page waits only
-   behind earlier pages of its own queue pair.  0 where the link failed */
+   forwards: link_prepare's note of 2026-11-03); then each served lane's SENDs, its cursor's (struct cursor: the
+   executions in order, execution t's records copy t mod u's), through the executions below the plan's `executions` as
+   link_run last read it, each of execution t once released, one acquire load of its word
+   (design/disjoint-pages-change-request.md, C3.7; design/disjoint-pages-revision-coordination.md, "The bridge"): from
+   its range's source (`field` MESH_ABSENT) where the range's supplied word reads at least t + 1, its producer's
+   release of t; forwarding, where its receive's phase field reads mesh_phase(t / u + 1), that receive's landing of t
+   (a cancellation writes no phase, so it releases nothing); while the lane's gate holds its frames and its requests are
+   under MESH_LANE_UNITS, at most MESH_POST_QUANTUM a pass.  A ready page waits only behind earlier pages of its own
+   queue pair.  0 where the link failed.
+   2026-11-04, sub-assignment 6: reversing 2026-11-03's release, a word holding every bit of the record's `mask`
+   (MESH_SUPPLIED, or its receive's bit of its execution's landed record: C4).  What must stay: one acquire load a send,
+   and each lane's executions in order */
 static __attribute__((always_inline)) inline int link_send_drain(struct port *port,struct flow *f,uint32_t served,int traced){
   struct link *l=&port->link;
   struct ibv_wc done[MESH_COMPLETION_BATCH];
@@ -463,15 +600,22 @@ static __attribute__((always_inline)) inline int link_send_drain(struct port *po
       gate_retire(l->gate+lane,each);l->lane[lane].done++;f->sent++;
     }
   }
-  for(uint32_t lanes=f->lanes&served;lanes;lanes&=lanes-1){
+  const uint64_t executions=f->executions;
+  const uint32_t copies=f->copies;
+  for(uint32_t lanes=f->carrying[MESH_SEND]&served;lanes;lanes&=lanes-1){
     const uint32_t k=(uint32_t)__builtin_ctz(lanes);
     struct lane_state *state=l->lane+k;
     struct send_gate *gate=l->gate+k;
     const struct mesh_queue *queue=l->provider.queues+k;
     int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=queue->send;
-    struct prepared_send *record=f->send_at[k],*const end=f->send_end[k];
-    for(uint32_t budget=MESH_POST_QUANTUM;record<end && budget;budget--){
-      if((atomic_load_explicit(record->word,memory_order_acquire)&record->mask)!=record->mask)break;
+    const uint64_t *first=f->first[MESH_SEND]+k*((uint64_t)copies+1);
+    struct cursor at=f->cursor[MESH_SEND][k];
+    for(uint32_t budget=MESH_POST_QUANTUM;budget;budget--){
+      while(at.at==at.end && at.execution<executions)cursor_step(&at,first,copies);
+      if(at.execution>=executions)break;
+      struct prepared_send *record=f->sends+at.at;
+      const uint64_t word=atomic_load_explicit(record->word,memory_order_acquire);
+      if(record->field==MESH_ABSENT?word<=at.execution:((word>>record->field)&3)!=mesh_phase(at.round+1))break;
       if(state->sent-state->done>=MESH_LANE_UNITS || !gate_holds(gate,each))break;
       const uint64_t observed=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
       struct ibv_send_wr *bad;
@@ -483,9 +627,9 @@ static __attribute__((always_inline)) inline int link_send_drain(struct port *po
       if(error){lane_lost(port,k,error<0?-error:error);break;}
       gate_post(gate,each);
       __atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);gate->requests++;
-      record++;
+      at.at++;
     }
-    f->send_at[k]=record;
+    f->cursor[MESH_SEND][k]=at;
   }
   return 1;
 }
@@ -503,13 +647,20 @@ static int link_send_progress(struct port *port,uint32_t served){
 /* design/algorithm-sources.md#meshresult */
 /* The end of the plan a port's child serves, on its progress thread: where the plan was written again (hdr `hops` 0,
    the plan call's first store, or another plan's), where the link serves no lane (a halt, a loss), and as the child
-   closes.  Each of its receives whose bit its execution's landed record does not hold cancels that execution:
-   UINT64_MAX stored (release) into the record's cancel word, its word 0 (mesh.h, the landed list; landed_cancel),
-   never cleared while the plan stands; a landing's bit is in another word of the record, so no landing is overwritten
-   (2026-11-03, sub-assignment 6: was UINT64_MAX into each landed word of its own that read 0, the per-page words gone,
-   design/disjoint-pages-change-request.md, "Claude's proposal" 3); its traces told (d6dceac link_close's lines); its
-   records freed; and the port's
-   `prepared` 0, no plan loaded.  Where a SEND or receive of the link's queue pairs is outstanding (the lanes' counts),
+   closes.  Each of its receives not landed for every execution it serves (its `landings` below the executions t <
+   `executions` of its copy, the plan's word read now, so a rise since the last pass is cancelled too) is cancelled, the
+   cancellation an arrival (design/disjoint-pages-change-request.md, C3.1: "Landings and cancellations both arrive on
+   the count ... A link loss is such a cancellation"; design/disjoint-pages-revision-coordination.md, "The bridge"):
+   its range's count of its copy raised to its final value, the entry's `pages` x those executions, never lowered, and
+   woken (count_raise); no phase is written.  These stores land in the plan's own pages while this port's `prepared`
+   still holds the plan (stored 0 below, after them, release), so the bridge's release of a retired plan's claim (D10:
+   mesh-dataflow.c mesh_retired_release, its fence, then the announcements read) comes after them.  Its traces told
+   (d6dceac link_close's lines); its records freed; and the port's `prepared` 0, no plan loaded.
+   2026-11-04, sub-assignment 6: reversing 2026-11-03's cancellation, UINT64_MAX stored into the cancel word of the
+   execution whose landed record lacked a receive's bit (C4: the cancel word and the landed record's several writers);
+   a cancellation now has the one form a landing has, an arrival on its count.  What must stay: a count only raised,
+   never a phase written for a cancellation, and `prepared` cleared after every store into the plan's pages.
+   Where a SEND or receive of the link's queue pairs is outstanding (the lanes' counts),
    nothing more is loaded in the child's life, and where the link still serves, it is lost as the tag loses a link whose
    holdings ended with units outstanding (rdma/mesh-link.c stream_end: `lost` LINK_STREAMS_ENDED, every lane `broken`,
    so the child tells CHILD_BROKEN and its parent loses the link): a posted receive is never taken back but by the
@@ -526,11 +677,12 @@ static void link_close(struct port *port,uint32_t served){
     atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
     return;
   }
-  /* a receive's bit is this thread's alone to set (its landing, link_receive_drain), so its read here is relaxed */
+  /* a record's `landings` is this thread's alone (its landings, link_receive_drain) */
+  const uint64_t executions=atomic_load_explicit(&f->words->executions,memory_order_acquire);
   for(uint64_t r=0;r<f->receive_count;r++){
     const struct prepared_receive *record=f->receives+r;
-    if((atomic_load_explicit(record->input,memory_order_relaxed)&record->mask)!=record->mask)
-      atomic_store_explicit(record->cancel,UINT64_MAX,memory_order_release);
+    const uint64_t serves=copy_executions(executions,f->copies,record->copy);
+    if(record->landings<serves)count_raise(record->count,(uint64_t)record->pages*serves);
   }
   /* design/prepared-machine.md#M27 */
   for(int d=0;d<2;d++){
@@ -545,8 +697,10 @@ static void link_close(struct port *port,uint32_t served){
   for(uint32_t k=0;k<MESH_LINK_LANES;k++)
     if(l->plan>>k&1 && (l->lane[k].sent!=l->lane[k].done || l->lane[k].posted!=l->lane[k].got))outstanding|=UINT32_C(1)<<k;
   free(f->sends);free(f->receives);
-  f->sends=NULL;f->receives=NULL;f->send_count=f->receive_count=0;f->lanes=0;
-  memset(f->send_at,0,sizeof f->send_at);memset(f->send_end,0,sizeof f->send_end);memset(f->receive_next,0,sizeof f->receive_next);
+  f->sends=NULL;f->receives=NULL;f->send_count=f->receive_count=0;f->lanes=f->carrying[0]=f->carrying[1]=0;
+  for(int d=0;d<2;d++){free(f->first[d]);f->first[d]=NULL;}
+  memset(f->cursor,0,sizeof f->cursor);
+  f->words=NULL;f->copies=0;f->executions=f->send_total=f->receive_total=0;
   f->state=outstanding?FLOW_ENDED:FLOW_NONE;
   /* `prepared` 0 at once where nothing is outstanding; else it stays the plan's until the parent reaps the child
      (mesh-children.c child_reaped, streams_cancel), so a retired client's rows its requests name are kept
@@ -569,9 +723,15 @@ static void link_close(struct port *port,uint32_t served){
    every port whose cable reaches a node a hop names, so it is stored where the rule gave this cable no page too), or
    refused, the port's phase MESH_STOPPED, its `code` the refusal's and its `prepared` the refused
    generation (CONTRACT "A plan loaded", review R1 round 2), until the plan call writes again, or read torn and tried
-   again on the next pass; a plan loaded
-   served, its receives, then its SENDs (a landed relay page's SEND goes in the same pass), until every SEND of its share
-   completed and every receive landed.  1 while it serves a plan with work left, 0 idle */
+   again on the next pass; a plan loaded served, its receives, then its SENDs (a landed relay page's SEND goes in the
+   same pass), through the executions below the plan's `executions`, read (acquire) each pass the plan is served or
+   done (one load a pass: the client's start raises it, design/disjoint-pages-revision-coordination.md, D2, and wakes
+   `plan`, on which the idle thread waits: port_progress), until every record has served every one of them (every
+   SEND completed, every receive landed: done), and served again where it rises (done to served).  1 while it serves a
+   plan with work left, 0 idle.
+   2026-11-04, sub-assignment 6: reversing 2026-11-03's done, every record's one posting completed with hdr
+   `executions` fixed at the plan (C3.3: no input of the plan); what must stay: done only where every execution the
+   word asks is served */
 static int link_run(struct port *port,uint32_t served){
   struct flow *f=flows+port->index;
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
@@ -601,9 +761,13 @@ static int link_run(struct port *port,uint32_t served){
        check (its note of 2026-11-03, reviewer 12's defect 1) */
     f->state=FLOW_SERVING;
   }
+  if(f->state==FLOW_SERVING || f->state==FLOW_DONE){
+    const uint64_t executions=atomic_load_explicit(&f->words->executions,memory_order_acquire);
+    if(executions>f->executions){flow_executions(f,executions);f->state=FLOW_SERVING;}
+  }
   if(f->state!=FLOW_SERVING)return 0;
   if(!link_receive_progress(port,served) || !link_send_progress(port,served))return 0;
-  if(f->sent==f->send_count && f->landed==f->receive_count){f->state=FLOW_DONE;return 0;}
+  if(f->sent==f->send_total && f->landed==f->receive_total){f->state=FLOW_DONE;return 0;}
   return 1;
 }
 
@@ -742,37 +906,61 @@ int guard_raise(struct port *port){
   return 1;
 }
 
-/* this node's receives of the plan written from the node of map index `from` (UINT32_MAX: every receive) that have not
-   landed cancel their executions: for each such entry of the list (every execution's, in execution order) whose bit
-   its word does not hold, UINT64_MAX stored (release) into its execution's cancel word (landed_cancel; mesh.h, the
-   landed list), never cleared while the plan stands.  2026-11-03, sub-assignment 6
-   (design/disjoint-pages-change-request.md, "Claude's proposal" 3): was UINT64_MAX into each of the hop's
-   per-execution landed words that read 0, each found at word + t hop_stride over hdr `executions`; the per-page words
-   went, and each entry's word is its execution's own.
+/* this node's receives of the plan written from the node of map index `from` (UINT32_MAX: every receive) cancelled in
+   the bridge parent (streams_cancel, streams_let_go), as link_close cancels its child's: for each such entry of the
+   list (copy c's at [c n, c n + n)), its range's count of copy c raised to its final value, the entry's `pages` x the
+   executions t < `executions` (the plan's word, read once) with t mod u == c, never lowered, and woken (count_raise;
+   design/disjoint-pages-change-request.md, C3.1; design/disjoint-pages-revision-coordination.md, "The bridge"); no
+   phase is written.  The parent keeps no record of which receives landed (the children's `landings`), so it raises
+   every such count: one already at its final value (every arrival in, or an earlier cancellation) is left as it is,
+   and the entries of one range raise its word once.  A plan with no state, or whose copies do not divide its list,
+   which every port refuses (link_prepare, EINVAL), names no count to raise.
+   2026-11-04, sub-assignment 6: reversing 2026-11-03's cancellation, UINT64_MAX stored into the cancel word of each
+   not-landed entry's execution (C4: the cancel word); what must stay: a count only raised, and no phase written.
    The plan read whole, as link_prepare reads it (b3cc9990's re-read; 2026-11-03, sub-assignment 6, on the
-   coordinator's routing): this runs in the bridge's parent (streams_cancel, streams_let_go), which no port's
-   `prepared` holds, so the plan call's wait on those (mesh_plan_erased) does not order it before a rewrite.  The plan
-   call stores `hops` 0 (release) and a release fence before it rewrites any entry, and moves `plan` (mesh.h, "Writing a
-   plan").  So `hops` and `plan` are read (acquire) once before the walk; each receive entry's fields are read, then an
-   acquire fence, then `hops` and `plan` again, and the walk stops where either moved: an entry read that saw a rewrite
-   is never acted on, and no cancel word is computed from one.  Only then is its bit tested and its execution's cancel
-   word stored.  What must stay: no store from an entry read before its check */
+   coordinator's routing), as before: the plan call stores `hops` 0 (release) and a release fence before it writes any
+   entry or its state, and moves `plan` (mesh.h, "Writing a plan"; mesh_retire stores `hops` 0 the same way before it
+   closes a retiring client's claims).  So `hops` and `plan` are read (acquire) once before the walk, then the plan's
+   state (its `copies` u and `executions`); each receive entry's fields are read, then an acquire fence, then `hops`
+   and `plan` again, and the walk stops where either moved: an entry read that saw a rewrite is never acted on, and no
+   count word is computed from one or from that state.
+   Where its stores land (design/disjoint-pages-change-request.md, C3.6): in the plan's pages while its claim still
+   holds them.  Every caller of this walk and of the release of a retired plan's claim (mesh-dataflow.c
+   mesh_retired_release) runs on the bridge parent's one event-loop thread, mesh-link.c main's: streams_cancel from
+   mesh-ports.c port_lost (called from the loop's turns and events alone: link_turn, ports_stalled, control_heard,
+   hello_heard, port_flush, port_say, port_greet, port_watch, the message handlers, mesh-events.c network_heard and
+   terminations_turn, mesh-children.c child_spawn and child_reaped), from mesh-children.c child_heard and child_reaped
+   (the loop's events), from mesh-link.c region_adopt (main, before the loop) and from the stop (main, after it);
+   streams_let_go from mesh-records.c clients_turn (the loop's turn, before its release); and the release from
+   clients_turn and region_adopt (after its streams_cancel) alone.  The parent's other threads (control_watch, the
+   finder's queue's block in ports_find, the terminations' queue's peer_terminated and peer_arrived) call none of
+   them.  So a release never runs inside this walk, and a claim is closed only once its plan is no longer the one
+   written (`hops` 0 or a later plan's, before the close: mesh_plan, mesh_retire): a count word computed from an entry
+   the re-check found current is stored while that plan's claim holds its pages, closed or not, and the release that
+   frees them runs later on this thread.  What must stay: no store from an entry read before its check; this walk and
+   the release on one thread; and no claim closed while its plan is still the one written */
 static void plan_cancel(uint32_t from){
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_acquire);
   if(!hops)return;
-  const uint64_t stride=M->landed_stride;
+  struct mesh_state *words=mesh_plan_state(M);
+  const uint32_t copies=words?words->copies:0;
+  if(!copies || hops%copies)return;
+  const uint64_t executions=atomic_load_explicit(&words->executions,memory_order_acquire),n=hops/copies;
   const struct mesh_hop *list=mesh_hops(M);
-  for(uint64_t j=0;j<hops;j++){
-    const uint32_t direction=list[j].direction,node=list[j].node;
-    if(direction!=MESH_RECEIVE || (from!=UINT32_MAX && node!=from))continue;
-    const uint64_t word=list[j].word,mask=list[j].mask;
-    atomic_thread_fence(memory_order_acquire);
-    /* `hops` acquire, as link_prepare's check: a re-plan of the same size is seen as `plan` moved */
-    if(atomic_load_explicit(&M->hops,memory_order_acquire)!=hops ||
-       atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan)return;
-    if((atomic_load_explicit(region_word(word),memory_order_relaxed)&mask)==mask)continue;
-    atomic_store_explicit(landed_cancel(word,stride),UINT64_MAX,memory_order_release);
+  for(uint32_t c=0;c<copies;c++){
+    const uint64_t serves=copy_executions(executions,copies,c);
+    if(!serves)continue;
+    for(uint64_t j=c*n;j<c*n+n;j++){
+      const uint32_t direction=list[j].direction,node=list[j].node;
+      if(direction!=MESH_RECEIVE || (from!=UINT32_MAX && node!=from))continue;
+      const uint64_t count=list[j].count,pages=list[j].pages;
+      atomic_thread_fence(memory_order_acquire);
+      /* `hops` acquire, as link_prepare's check: a re-plan of the same size is seen as `plan` moved */
+      if(atomic_load_explicit(&M->hops,memory_order_acquire)!=hops ||
+         atomic_load_explicit(&M->plan,memory_order_relaxed)!=plan)return;
+      count_raise(region_word(count),pages*serves);
+    }
   }
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:619-654 streams_open (11807bec), reduced to what it is under the page lists:
@@ -790,13 +978,15 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
 /* tag pre-return-20261103 rdma/mesh-link.c:699-711 streams_cancel (11807bec), reduced to what it is under the page
    lists: the tag's streams of a port live no more and their words ~0; here, as its link is lost or the bridge stops
    (mesh-ports.c port_lost, mesh-children.c child_reaped, the stop), this node's receives not landed from the port's
-   peer (its index in the map; none where the map holds no record of it), every one where `port` is NULL, cancelling
-   their executions (plan_cancel), and the port's (every port's) plan no longer loaded (`prepared` 0) where no child of
-   it lives: a live child's requests may still name the plan's pages, so its `prepared` is its own to clear
+   peer (its index in the map; none where the map holds no record of it), every one where `port` is NULL, cancelled
+   (plan_cancel: each one's count raised to its final value, no phase written; design/disjoint-pages-change-request.md,
+   C3.1: "A link loss is such a cancellation"), and the port's (every port's) plan no longer loaded (`prepared` 0) where
+   no child of it lives: a live child's requests may still name the plan's pages, so its `prepared` is its own to clear
    (link_close) or its reap's (child_reaped, after `port->child` is 0).  A receive the port's child lands after the
-   cancellation sets its bit beside it, and its execution stays cancelled (a cancel word is never cleared while the plan
-   stands); the tag's cancel again (child_heard's connect of a lost pairing, child_reaped) cancels the executions of
-   the receives not landed by then.  A cancel again comes after the loss has zeroed `port->peer` (mesh-ports.c
+   cancellation flips its phase and adds its arrival beyond the final value, which a reader's test (the count at least
+   its target) reads as the raise; the tag's cancel again (child_heard's connect of a lost pairing, child_reaped)
+   raises the counts of the executions the plan's `executions` asks by then (2026-11-04, sub-assignment 6: the cancel
+   word, UINT64_MAX and never cleared, gone: C4).  A cancel again comes after the loss has zeroed `port->peer` (mesh-ports.c
    port_lost, which cancels first), so each port's peer at its last cancel with one is kept (`cancelled`, the parent's,
    its node, its map index then, or every receive where the map was not read) and a cancel with no peer cancels by it,
    as at the tag (review R2, C1).  The parent never sees its child load a plan, so the peer is kept at that first cancel,
@@ -824,10 +1014,12 @@ void streams_cancel(const struct port *port){
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:712-722 streams_let_go (60b00774), reduced to what it is under the page
    lists: the tag let a gone client's streams go; here, on the bridge's turn over its clients (mesh-records.c
-   clients_turn), where no client holds the region (hdr `client` 0: its holder retired, mesh-dataflow.c mesh_retire) and
-   a plan stays written, this node's receives of it not landed cancel their executions (plan_cancel), so no consumer
-   reads a step of a plan whose client is gone as whole; a relay's forward of a page not landed is never released (its
-   bit unset) */
+   clients_turn, before its release of retired claims), where no client holds the region (hdr `client` 0) and a plan
+   stays written, this node's receives of it cancelled (plan_cancel: each one's count raised to its final value, no
+   phase written), so no consumer reads an execution of a plan whose client is gone as whole; a relay's forward of a
+   page not landed is never released (its phase unchanged).  A client's retirement (mesh-dataflow.c mesh_retire)
+   stores `hops` 0 before it closes the client's claims, so its own plan is no longer written here and this finds none
+   (2026-11-04, sub-assignment 6: the cancel word gone, C4) */
 void streams_let_go(void){
   if(atomic_load_explicit(&M->client,memory_order_acquire))return;
   plan_cancel(UINT32_MAX);
