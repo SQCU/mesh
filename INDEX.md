@@ -53,6 +53,10 @@ other projects, such as a game bot, and old dated records; they are not listed h
   (Sinnen; Garg and Könemann), both chosen elsewhere; collectives over packed trees (Blink) lowered to page
   instructions (MSCCLang); one schedule per function; function executions ordered by one scheduler per island
   (Pathways); the IR operand; the serialized operand in MSCCL-IR's shape, running only existing kernels.
+- [design/compilation-coordination.md](design/compilation-coordination.md): the coordinating agent's contract for
+  the two change requests above (the file split, the names files share, the task graph and its contention schedule,
+  plans in their claims and the island's fixed sequencer, the provisional operands, the sources read) and the record
+  of the work, its reviews and what is open.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.
