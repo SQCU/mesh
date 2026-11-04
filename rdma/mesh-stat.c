@@ -51,14 +51,14 @@ static int map_index(const struct mesh_record *r,int n,uint32_t node){
 }
 /* mesh-stat --map: the map for the drivers, one JSON line, read from a mapping of the region to read alone, under the
    map's seqlock (map_read): {"serial": the map serial, "self": this node's index, "nodes": [{"index": its index,
-   "node": its node id, "model": its hw.model, "reach": [{"node": the peer's index, "bandwidth": bits a second, "port",
-   "peer_port", "qps"}, ...]}, ...]}.  Indices are the map's, its records in ascending node id.  "reach" is the
+   "node": its node id, "model": its hw.model, "reach": [{"node": the peer's index, "bandwidth": bits a second},
+   ...]}, ...]}.  Indices are the map's, its records in ascending node id.  "reach" is the
    record's reach as the map holds it, an entry a cable (struct mesh_reach), so a node pair several cables join is
    listed once a cable, each at the bandwidth that record gives it: no cable is matched, summed or taken at the lesser of
    its two ends here (that join is the map reader's and the bridges' rule's, one copy, design/rubrics.md:422 C9).  An
    entry naming a node the map holds no record of (a cable its peer's record does not yet list) has no index and is left
-   out.  The drivers read "node" and "bandwidth"; "port", "peer_port" and "qps" are the bridge's (the rule's inputs,
-   CONTRACT "mesh-stat (8)": its cables).  On failure {"up":false,"errno":E} and status 1 */
+   out.  An entry is a node pair and its bandwidth alone: the cable's ports and queue pairs (the rule's inputs) stay the
+   bridge's and are not printed.  On failure {"up":false,"errno":E} and status 1 */
 static int map_print(struct hdr *m,size_t length){
   struct mesh_record *r=NULL;
   uint64_t serial=0;
@@ -79,8 +79,10 @@ static int map_print(struct hdr *m,size_t length){
       const struct mesh_reach *e=r[i].reach+k;
       const int j=map_index(r,n,e->node);
       if(j<0)continue;
-      printf("%s{\"node\":%d,\"bandwidth\":%llu,\"port\":%u,\"peer_port\":%u,\"qps\":%u}",first?"":",",j,
-             (unsigned long long)e->bandwidth,e->port,e->peer_port,e->qps);
+      /* the coordinator, at integration (review R2, final): a reach entry tells the drivers a node pair and its
+         bandwidth alone, as CONTRACT's mesh-stat line fixes; no port, peer port or queue-pair count leaves the bridge
+         for a driver (design/page-queue-change-request.md: no cable, queue pair or link identity outside it) */
+      printf("%s{\"node\":%d,\"bandwidth\":%llu}",first?"":",",j,(unsigned long long)e->bandwidth);
       first=0;
     }
     printf("]}");
