@@ -198,8 +198,8 @@ here with their evidence and in the final report.
 - `struct mesh_status { _Atomic uint32_t behind,ahead,first,padding; };` (16 bytes), the GPU's alone: `behind` the later
   passes that found a field one behind, `ahead` those that found anything else, `first` the greatest ~t over them
   (0 none: the first failed execution is ~first).
-- `struct mesh_state { _Alignas(64) uint32_t copies,receives,ranges,releases; uint64_t phases,counts,supplied,status;
-  _Atomic uint64_t executions; uint64_t padding; };` (64 bytes), at the start of the plan's state section:
+- `struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases; uint64_t
+  phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding; };` (64 bytes), at the start of the plan's state section:
   - `copies` u; `receives` this node's receives a copy (the sum of its received ranges' pages); `ranges` this node's
     received ranges; `releases` this node's source ranges. The offsets below are region offsets.
   - `phases`: the phase list. For received range g (g < ranges, in the plan's demand order) and copy c, a group of
@@ -229,8 +229,8 @@ here with their evidence and in the final report.
   - Both ends: for adjacent a and b, copy c's entries at a naming b with MESH_SEND and those at b naming a with
     MESH_RECEIVE are the same hops in the same order. u is the collective's (D5: every rank computes the same), so both
     ends hold the same copies.
-- `struct mesh_publication { _Alignas(64) uint32_t sends,pages; uint64_t phases,count,state; struct mesh_target
-  targets[]; };` (offsets 0, 4, 8, 16, 24, targets 32). mesh_plan writes every row it claims; all fields 0 but:
+- `struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t pages; uint64_t phases,count,state; struct
+  mesh_target targets[]; };` (offsets 0, 4, 8, 16, 24, targets 32). mesh_plan writes every row it claims; all fields 0 but:
   - a received range's first row (copy 0's first row): `pages` P, `phases` the region offset of its copy-0 group (copy
     c's at phases + c x mesh_group_bytes(P)), `count` the region offset of its copy-0 count word (copy c's at count +
     8 c), `state` hdr `state`;
@@ -594,6 +594,15 @@ work proceeds.)
 15, 16, 17. Reviews: written findings, routed to owners.
 
 ### Commits and routing
+
+- 1 (mesh.h, mesh-map.h): 533e55a8 (layout 109: the state section's structs, the 48-byte hop entry, the publication's
+  fields, the vacant hdr fields, removals including struct mesh_send, which only comments named), b3764cbd (the notes).
+  Its finding on this contract: `_Alignas(64)` written on a declarator list aligns every name in it (struct mesh_state
+  came out 256 bytes, struct mesh_publication 128); it aligned the first member alone, offsets and sizes as the
+  contract gives; the contract's two lines corrected to that form.
+- 2 (mesh-graph): 8fa729b1 (mesh_graph_lags). Its findings, routed to 3: a lag-0 cycle through no routed write vertex
+  does not show as D(x -> x) == 0, so the lag-0 edges alone go through mesh_graph_order (EDEADLK as EINVAL); the
+  interference callback looks D_vw up in a table made once. mesh_graph_happens_before stays until 3 no longer calls it.
 
 ### Reviews and where their findings went
 
