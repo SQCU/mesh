@@ -355,7 +355,8 @@ uint64_t mesh_host_arrived(struct mesh_ctx *,struct mesh_section,uint64_t execut
 1. Compute everything first: demands, routing, template, least lags, u, items, colourings, this node's entries of one
    copy (plan_walk) and every room: ENOSPC past `hop_capacity`.
 2. The generation g = hdr `plan` + 1 (never 0). Claim: mesh_claim_take(context, g, rows, window blocks x block, local
-   blocks x block): rows the sum of every value's count x P. ENOMEM leaves the previous plan standing.
+   blocks x block): rows 1 + the sum of every value's count x P (the claim's first row is its head, which records
+   the claim and holds no value; values' rows from rows.first + 1). ENOMEM leaves the previous plan standing.
 3. Initialize the state section (its struct mesh_state, every other word 0) and every `state` value's bytes to 0 (D3);
    bind every value's rows (mesh_backing_bind, copy c's rows to copy c's pages); write every claimed row's publication.
    No data page is written.
@@ -629,6 +630,17 @@ work proceeds.)
   For 11: the sums a METAL_EXECUTION value at the dispatch's level, state 0; the counters METAL_INVARIANT, state 1; the
   memset at line 1546 gone. Its caveat, open: a threadgroup that ends as an error in a later pass never arrives, so its
   block's counter stays raised for the rest of that plan (the status has already failed the run; nothing spins).
+- 5 (mesh-dataflow.{h,c}, mesh-call.{h,c}, mesh.py): e119fef3 (the interfaces), 967292bc (claims per plan: first fit
+  of rows, window and local runs by atomic sets, undone on a raced bit; close by generation; mesh_retire unpublishing
+  first, per the ruling; the release per generation; the start raising `executions`; nothing at attach;
+  mesh_claim, mesh_bit_widest, mesh_publication_prepare, mesh_plan_erased, mesh_section_create removed), e7e7436d
+  (mesh.py). The head row's encoding: buffer `owner` the client (stored last), `closed`, `pages` the rows' count; page
+  entry `mapping` window.count << 32 | window.first, `address` local.count << 32 | local.first, `device` the
+  generation. Its differences: the head holds no value, so the rows asked are 1 + the sum (the contract's step 2
+  corrected; routed to 3); the release's seq_cst fence comes after each closed claim's acquire load of `closed` and
+  before its ports' `prepared` are read (a fence before that load orders nothing the closer stored), which is D10's
+  wording; EINVAL for rows 0 and for hdr `state` outside the region. It wrote a draft fragment of mesh-dataflow.c to the
+  scratchpad and deleted it unused in the same step (against the rule; no copy remains, every edit made in place).
 
 ### Reviews and where their findings went
 
