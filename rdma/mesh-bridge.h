@@ -50,10 +50,10 @@
 
 /* tag etc/bridge/layout.h: the bridge's bounds.  A flush ends once no completion has come for MESH_FLUSH_QUIET_NS
    (lanes_flush); MESH_PAUSE_NS paces the bridge's looks (a hello, the child's turn); no call, message or window of the
-   bridge is held past MESH_PLATFORM_NS unconcluded (message_send, child_leave, port_lost's quiet window) */
+   bridge is held past MESH_PLATFORM_NS unconcluded (message_send, child_leave, port_lost's quiet window).
+   MESH_PLATFORM_NS is mesh.h's, its one copy (review R2, B2: this header's removed) */
 #define MESH_FLUSH_QUIET_NS UINT64_C(500000000)
 #define MESH_PAUSE_NS UINT64_C(3000000000)
-#define MESH_PLATFORM_NS UINT64_C(5000000000)
 /* tag etc/bridge/layout.h: port_opened's hold after its device's k-th refused registration in a row, MESH_RETRY_FIRST_SECONDS
    2^min(k-1, MESH_RETRY_MAX_SHIFT) s, at most MESH_RETRY_MAX_SECONDS */
 #define MESH_RETRY_FIRST_SECONDS 60u

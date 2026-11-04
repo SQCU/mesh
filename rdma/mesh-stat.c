@@ -11,11 +11,8 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
-/* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, its value (mesh-bridge.h holds it for the bridge, whose
-   header this tool does not include): the bound of the map's read (map_read) */
-#ifndef MESH_PLATFORM_NS
-#define MESH_PLATFORM_NS UINT64_C(5000000000)
-#endif
+/* MESH_PLATFORM_NS, the bound of the map's read (map_read), is mesh.h's, its one copy (review R2, B2: this file's
+   removed) */
 /* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_records_read (a3c8df9e, c119d3e2), adapted: the region mapped here
    read-only, the bound a deadline of its own, the serial read with the records */
 /* the map's records as one serial left them, the seqlock's reader (mesh.h mesh_map_whole): a copy in *out the caller
