@@ -1,6 +1,6 @@
 /* design/rubrics.md:422 (C9): the graph algorithms, one copy each, for every consumer of weights or samples on a graph.
    A function here knows vertices, edges and the operands its consumer passes (weights, visits, a next hop); it knows
-   no cable, collective or tensor.  Python's are rdma/mesh_graph.py's. */
+   nothing of what they stand for, no collective, tensor or transfer.  Python's are rdma/mesh_graph.py's. */
 /* Source: pre-return-20261103 rdma/mesh-graph.h, the declarations of the functions mesh-graph.c brings, verbatim;
    mesh_graph_list_schedule is new (design/page-queue-change-request.md, "The rule both ends compute");
    mesh_graph_left_edge is new (design/disjoint-pages-change-request.md, Appendix A, A3, "The assignment";
@@ -104,8 +104,9 @@ void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *ro
                            const double *weight, double *load);
 /* [first, first + length) cut at the multiples of `cell` (a grid over the whole operand): start[i], count[i] and the
    cell's index index[i] of each run; their number. A run inside another's range is cut at the same edges, so each of
-   its pieces lies within one of the other's (libnccl-mesh's spread over a pair's parallel cables: a forward's piece
-   within one COPY's piece, the cell's index choosing the channel alike at both ends). */
+   its pieces lies within one of the other's (a consumer that gives each cell, by its index, to one of several parallel
+   machines gives an inner run's piece the machine of the outer piece holding it, and two parties cutting the same
+   operands give it alike). */
 uint32_t mesh_graph_grid_cut(uint64_t first, uint64_t length, uint64_t cell, uint64_t *start, uint64_t *count, uint64_t *index);
 /* A tree's depth (its root root, parents parent[..], a vertex off it UINT32_MAX): the most edges from the root to a
    vertex on it, mesh_graph_depth's over each vertex's parent; UINT32_MAX where its parents hold a cycle */
@@ -121,14 +122,14 @@ double mesh_graph_trees_rate(uint32_t vertices, uint32_t trees, const uint32_t *
    (makespan of equal jobs on uniform machines with release times, which earliest finish solves exactly). count[p]
    its units; their completion time. A part of no rate takes none. */
 double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count);
-/* Units in list order over `links` parallel links by earliest finish (Graham's list scheduling: R. L. Graham, "Bounds
-   for certain multiprocessing anomalies", Bell System Technical Journal 45 (1966); each link a machine of its own
-   rate, so equal rates give Graham's least-loaded machine): unit k, bytes[k] long, goes to the link whose bytes with
-   unit k's added, over rate[l] (bytes a time), end soonest, a tie to the lower l, so parallel links of unequal rate end
-   together (a node pair's links, the caller's in order of cable id and then queue-pair index, both ends assigning one
-   list alike: its arithmetic is +, / and < alone, correctly rounded, so every node computes the same links from the
-   same operands). link[k] its link (UINT32_MAX where no link has rate), carried[l] (room for `links`) the bytes each
-   takes; their completion time, INFINITY where a unit has no link. A link of no rate takes none. */
+/* Units in list order over `links` parallel machines by earliest finish (Graham's list scheduling: R. L. Graham,
+   "Bounds for certain multiprocessing anomalies", Bell System Technical Journal 45 (1966); each machine of its own
+   rate, so equal rates give Graham's least-loaded machine): unit k, bytes[k] long, goes to the machine l whose bytes
+   with unit k's added, over rate[l] (bytes a time), end soonest, a tie to the lower l, so parallel machines of unequal
+   rate end together (the machines in the caller's order; its arithmetic is +, / and < alone, correctly rounded, so two
+   parties computing from the same operands assign one list alike). link[k] its machine (UINT32_MAX where no machine
+   has rate), carried[l] (room for `links`) the bytes each takes; their completion time, INFINITY where a unit has no
+   machine. A machine of no rate takes none. */
 double mesh_graph_list_schedule(uint32_t links, const double *rate, uint64_t units, const uint64_t *bytes,
                                 uint32_t *link, uint64_t *carried);
 /* 2026-11-04, sub-assignment 2: mesh_graph_happens_before (b399746f), a bit table of the paths over a template

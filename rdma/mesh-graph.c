@@ -363,8 +363,8 @@ uint32_t mesh_graph_pack(uint32_t n, uint32_t m, const uint32_t *from, const uin
      breadth-first layering), searched over every edge (mesh_graph_arborescence_within).
      Changed from the layering's edges alone (an edge from layer d to d + 1, so a tree its root's shortest paths),
      which left out trees as shallow that cross a layer's own edges (m5ult3 -> Mini -> m5ult2, depth 2): its packing
-     carried 26.7 GB/s into a rank on the 13 cables where trees within depth 2 carry 30, the Mini's three cables'
-     whole cut (9bb6972a, the trees' linear program, 2026-11-03). What must stay: every tree
+     carried 26.7 GB/s into a rank where trees within depth 2 carry 30, the whole capacity of the cut around the Mini
+     (9bb6972a, the trees' linear program, 2026-11-03). What must stay: every tree
      as shallow as one from its root can be (a small segment's units on a tree of its root's eccentricity, run-23).
      Changed from the tag in this comment alone: the measurement is cited as 9bb6972a's message, which records it,
      where the tag cited a document deleted with everything citing it (mesh 90677543, metal-microbench 7aa6491a). */
@@ -545,8 +545,8 @@ double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate
 }
 
 /* New beside mesh_graph_fill (design/page-queue-change-request.md, "The rule both ends compute"): no tag source.
-   mesh-graph.h mesh_graph_list_schedule: each unit in list order to the link it would end soonest on, the links
-   scanned in order so a tie keeps the lower link */
+   mesh-graph.h mesh_graph_list_schedule: each unit in list order to the machine it would end soonest on, the machines
+   scanned in order so a tie keeps the lower one */
 double mesh_graph_list_schedule(uint32_t links, const double *rate, uint64_t units, const uint64_t *bytes,
                                 uint32_t *link, uint64_t *carried){
   for(uint32_t l=0;l<links;l++)carried[l]=0;
