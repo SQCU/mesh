@@ -10,10 +10,13 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 104u
+/* 105: the page lists (struct mesh_hop) and the bridge's pages (struct mesh_bridge_pages) in the layout, the map's
+   fields (struct mesh_record) in the header, `executions` in place of its padding (design/page-queue-change-request.md) */
+#define MESH_VERSION 105u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
+/* replaced by struct mesh_hop (the page lists); removed at sub-assignment 16 */
 struct mesh_transfer { uint32_t local_row,binding,count,stride,invocation_pages,first; uint64_t bytes; };
 _Static_assert(sizeof(struct mesh_transfer)==32,"M08 prepared transfer");
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
@@ -62,19 +65,137 @@ _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publi
 struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argument,padding[2]; };
 _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
+/* a port's link, at `link_off`: the resident bridge's MESH_PORTS of them (MESH_UNKNOWN where it has no such port), the
+   --link form's `links` */
 struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; };
+
+/* tag pre-return-20261103 rdma/mesh-observe.h MESH_PORTS: the most ports (there MESH_STREAMS / MESH_LINK_STREAMS) */
+#define MESH_PORTS 8u
+/* tag pre-return-20261103 rdma/mesh-observe.h struct mesh_holder, verbatim */
+/* a holder of the region (a port's child): its pid, its device (`unit`: its interface's unit + 1; 0, any, as builds
+   before 8ac5c9fb's form wrote) and its start (mesh-holders.h mesh_started) */
+struct mesh_holder { uint32_t pid,unit; uint64_t start; };
+/* tag pre-return-20261103 rdma/mesh-observe.h struct mesh_bridge_pages, verbatim, at the layout's bridge area
+   (`bridge_off`) rather than after the tag's MESH_PORTS link infos */
+/* the bridge's own pages of the region, recorded in the bridge area so the next bridge adopts them with the region
+   instead of leasing them again: each port's link pages and its streams' lists, the duds' block and the map's pages
+   (MESH_ABSENT where none); and the processes of the bridge that hold the region, each by its pid and start
+   (mesh_started): the bridge's own start (beside the header's `bridge_pid`) and each child, which registers the region
+   and holds it until its exit, in an entry no live child holds (twice the ports: an earlier launch's child that has not
+   ended keeps its entry), so the heartbeat unlinks an expired region only once none of them lives.  Fields are only
+   ever appended */
+struct mesh_bridge_pages { uint32_t link[MESH_PORTS],ones,map,map_pages,padding; uint64_t bridge_start;
+  struct mesh_holder child[2*MESH_PORTS]; };
+_Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pages,bridge_start)==(MESH_PORTS+4)*sizeof(uint32_t),
+               "mesh_bridge_pages");
+
+/* tag pre-return-20261103 etc/bridge/layout.h MESH_MODEL_BYTES */
+#define MESH_MODEL_BYTES 32
+/* tag pre-return-20261103 rdma/mesh-plan.h struct mesh_health, verbatim */
+/* what a node's record carries of its health to every bridge: `booted`, the wall clock of the node's boot (ns since
+   the epoch), and its `available` memory as its bridge last sampled it (the bytes the kernel can give without
+   pressure, the measure jetsam keeps: kern.memorystatus_level percent of hw.memsize). */
+struct mesh_health { uint64_t booted,available; };
+/* tag pre-return-20261103 rdma/mesh-plan.h struct mesh_reach, adapted: an entry a cable, not a stream */
+/* a cable of the record's node, as its pairing made it: `node` the peer node at its other end, `port` the record's
+   node's port index and `peer_port` the peer's (the index each bridge gave its port), `qps` the queue pairs the
+   pairing negotiated, the same at both ends, and `bandwidth` its bandwidth in bits a second.  Each of the two records
+   lists the cable from its own side; a cable's id, the same at both ends, is its port at the end of the lower node
+   id.  The bridges' rule reads cables (struct mesh_hop, "Both ends"); the collective reads only node pairs and each
+   pair's capacity, the sum of its cables' bandwidth, never a port or queue pair. */
+struct mesh_reach { uint32_t node,port,peer_port,qps; uint64_t bandwidth; };
+_Static_assert(sizeof(struct mesh_reach)==24,"mesh_reach");
+/* tag pre-return-20261103 rdma/mesh.h struct mesh_record, verbatim but `reach`: MESH_PORTS cables, not MESH_STREAMS
+   streams */
+/* a node's record, the newest of which every bridge floods to the mesh: its node and boot, the record's sequence in
+   that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the bridge holds
+   itself: struct mesh_bridge_pages), the node's memory in bytes and hardware model (hw.model, MESH_MODEL_BYTES with its NUL), and the `reached`
+   cables of its node (struct mesh_reach).  No host name: a name a person reads is a label the readers take from the
+   name table by node number (etc/mesh-nodes.json, rdma/peers.py label; AGENTS.md "A node is its hardware; names are
+   virtual") */
+struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
+  char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_PORTS]; struct mesh_health health; };
+
+/* The page lists (design/page-queue-change-request.md, "The page lists (the queue)"): this node's hops, which the plan
+   call writes once a plan and the bridge alone reads, in place of the per-link, per-queue transfer lists (struct
+   mesh_transfer, mesh_order_length).  An entry is one hop of one page:
+   - `page`: an arena page of this region (mesh_at), a multiple of `block`, its block within the registered window
+     (mesh_wired): the page sent, the page a receive lands in, or a relay's page.  A hop moves that whole page, `block`
+     arena pages (block x pgsz bytes), from it or into it; nothing is copied.
+   - `node`: the adjacent node by its index in the map (hdr `map_serial`): a send's next hop, a receive's previous hop.
+   - `direction`: MESH_SEND or MESH_RECEIVE; `padding` 0.
+   - `word`: the region offset of the hop's word of execution 0, an _Atomic uint64_t (8-aligned, anywhere in the
+     region: no SGE names it); `position`: the value that releases a send or that a receive's landing stores,
+     0 < position < UINT64_MAX.
+   - `serial`: the map serial the plan was made against, every entry's the same, hdr `plan`.
+   Executions (main's invocations and ring depth: mesh-call.c mesh_transfers_prepare, mesh-flow.c link_configure,
+   mesh-metal.m).  A plan runs hdr `executions` times, t = 0 .. executions - 1, its pages ringing through hdr `depth`
+   slots (depth == executions: no ring).  These and hdr `hop_stride` are the plan's values, beside the list.
+   - The list is `hops` = depth x n entries, slot s's n at [s n, s n + n).  Every slot holds the same n hops in the same
+     order, with the same node, direction, word, position and serial; only the pages differ.
+   - Which page execution t uses: slot (t mod depth)'s page of the hop.  A hop's receive of execution t is posted only
+     once its receives of executions 0 .. t - (depth - 1) have landed (main's receive window, a slot short of the ring),
+     so no two posted receives name one page.
+   - Execution t's word of an entry is the word at region offset `word` + t x `hop_stride`, one stride for every word
+     of the plan.  This is the GPU's word protocol as it is: its stores and waits are at a binding's offset + t x
+     stride, and here the publication's stride (mesh_metal_publication `stride`, which its completion statuses share
+     for the GPU's direct publication) and the receive's (mesh_metal_input `stride`) are `hop_stride`.  Every word of
+     every execution reads 0 when the plan is loaded, and is written once and never cleared.
+   - What releases a send in execution t: its word of execution t reaching `position` (acquire; position <= value <
+     UINT64_MAX).  That word is a supplied word, stored with release by its producer after its last write to the page:
+     the GPU's publication store (prepared_publication `argument` = `position`) or mesh_host_publish; or, at a relay,
+     the landed word of the hop relayed: a relay's send names its receive's word and position.  Several sends may name
+     one word (a range's pages released by one store, a page sent to several nodes).
+   - What a receive's landing stores in execution t: `position`, with release, into its word of execution t, once the
+     page's bytes are in its page.  A landed word has that one writer: no other receive of a slot and no producer
+     names it, so it tells of one page.  A reader of several pages waits on each one's word (a GPU range a page): a
+     transfer's pages spread over every cable and queue pair and land in any order, unlike main's chunks on one queue
+     pair, whose last word stood for all (mesh_host_arrived, mesh_metal_receive_prepare).
+   - UINT64_MAX in a word is cancellation (main's mesh_cancel; the GPU's waits end on ~0): it releases nothing.  The
+     bridge stores it into this node's landed words not landed when it ends the plan's executions.
+   Both ends: for adjacent nodes a and b, a slot's entries at a naming b with MESH_SEND and those at b naming a with
+   MESH_RECEIVE are the same hops in the same order.  Both bridges assign the pair's hops of every execution in turn
+   (execution 0's in list order, then execution 1's, ...) to the pair's cables and queue pairs by one rule from the map
+   (struct mesh_reach; design/page-queue-change-request.md, "The rule both ends compute"), and each queue pair carries
+   its hops in that order: the k-th SEND on a queue pair fills the k-th receive posted on it.
+   Writing a plan: the plan call stores `hops` 0 (release), writes the entries, `executions`, `depth`, `hop_stride` and
+   `plan`, then stores `hops` (release), at most `hop_capacity`; the bridge reads none of it while `hops` (acquire) is
+   0.  A plan whose `plan` is not `map_serial` when it is loaded is refused: the call fails by error and its caller
+   plans again on the map as it is. */
+struct mesh_hop { uint32_t page,node,direction,padding; uint64_t word,position,serial; };
+_Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16,"mesh_hop");
+
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   uint32_t orders,wire_pages;
+  /* the ring depth of the transfer lists and of the page lists (struct mesh_hop): execution t uses slot t mod depth */
   _Atomic uint32_t depth;
-  uint32_t padding;
+  /* the page lists: the executions of the plan written (struct mesh_hop), main's invocations */
+  uint32_t executions;
   _Atomic uint64_t configured;
+  /* length_off, order_off: the per-link, per-queue transfer lists, replaced by hop_off; removed at sub-assignment 16 */
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,length_off,target_off,order_off,notice_off,data_off,length;
   uint64_t notice_bytes,target_stride;
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
+  /* the page lists (struct mesh_hop, mesh_hops): room for `hop_capacity` entries at `hop_off` (mesh_geometry `hops`),
+     the plan's word stride `hop_stride`, `hops` the entries of the plan written (0 none) and `plan` the map serial it
+     was made against */
+  uint64_t hop_off,hop_capacity,hop_stride;
+  _Atomic uint64_t hops,plan;
+  /* tag pre-return-20261103 rdma/mesh.h struct hdr `map`, `map_off`, `map_nodes`, verbatim: the map's seqlock
+     (mesh_notify, mesh_map_whole) and its `map_nodes` records at `map_off` (mesh_records) */
+  _Atomic uint64_t map,map_off,map_nodes;
+  /* the map's serial: moved by one (mesh-records.c, while `map` is odd) at every change of the map's nodes or cables
+     (a record added or dropped, any field of a reach entry); a plan is made against it (struct mesh_hop `serial`,
+     `plan`).  A node's index is its place in ascending node-id order among the map's records. */
+  _Atomic uint64_t map_serial;
+  /* the bridge's pages (struct mesh_bridge_pages) at `bridge_off`; the attached client's start (mesh-holders.h
+     mesh_started), with `client`'s low 32 bits its identity as a holder of the region */
+  uint64_t bridge_off;
+  _Atomic uint64_t client_start;
 };
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
@@ -99,6 +220,14 @@ static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,ui
 static inline void mesh_control_notify(struct hdr *m){
   atomic_fetch_add_explicit(&m->control,1,memory_order_release);
   os_sync_wake_by_address_all(&m->control,sizeof m->control,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+}
+/* tag pre-return-20261103 rdma/mesh.h mesh_notify, verbatim */
+/* design/algorithm-sources.md#meshresult: a shared word (`control`, `map`) bumped and its waiters woken, the writes
+   after it ordered behind it */
+static inline void mesh_notify(_Atomic uint64_t *word){
+  atomic_fetch_add_explicit(word,1,memory_order_release);
+  atomic_thread_fence(memory_order_release);
+  os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
 /* design/algorithm-sources.md#programtensor */
 static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*m->links+queue;}
@@ -126,12 +255,32 @@ static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct me
 /* ledger D5 */
 /* one index for the transfer list and for its length: both are (bank,queue,direction), both stride by the
    runtime queue count, so a client built with another MESH_QPS cannot disagree with the bridge about either */
+/* replaced by mesh_hops (the page lists); removed at sub-assignment 16 */
 static inline size_t mesh_order_index(const struct hdr *m,uint64_t owner,uint32_t queue,int direction){
   return (((size_t)(owner>>63)*m->links*m->qps)+queue)*2+(uint32_t)direction;
 }
+/* replaced by mesh_hops (the page lists); removed at sub-assignment 16 */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+mesh_order_index(m,owner,queue,direction)*m->orders; }
+/* replaced by hdr `hops` (the entries of the plan written); removed at sub-assignment 16 */
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (_Atomic uint32_t*)((unsigned char*)m+m->length_off)+mesh_order_index(m,owner,queue,direction); }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
+/* the page lists: the plan's entries (struct mesh_hop), hdr `hops` of them at `hop_off` */
+static inline struct mesh_hop *mesh_hops(struct hdr *m){ return (struct mesh_hop *)((char *)m+m->hop_off); }
+/* tag pre-return-20261103 rdma/mesh.h mesh_records and mesh_map_whole, verbatim */
+/* the map, `map_nodes` records at `map_off` in arena pages the bridge leases for itself, and leases again larger as
+   the mesh grows; the bridge notifies `map`, its serial, before and after each change (odd while it writes; its own
+   record is in before the region opens, so a client never reads 0), and a reader's copy is whole where `map` read
+   (acquired) before it was even and is unchanged after it */
+static inline struct mesh_record *mesh_records(struct hdr *m){ return (struct mesh_record *)((char *)m+atomic_load_explicit(&m->map_off,memory_order_relaxed)); }
+static inline int mesh_map_whole(struct hdr *m,uint64_t before){
+  atomic_thread_fence(memory_order_acquire);
+  return !(before&1) && atomic_load_explicit(&m->map,memory_order_relaxed)==before;
+}
+/* tag pre-return-20261103 rdma/mesh-observe.h mesh_bridge_pages, at the layout's bridge area (`bridge_off`), no link
+   infos before it */
+static inline struct mesh_bridge_pages *mesh_bridge_pages(struct hdr *m){
+  return (struct mesh_bridge_pages *)((char *)m+m->bridge_off);
+}
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M08 */
 static inline uint32_t mesh_row_chunks(struct hdr *m,uint32_t row,uint64_t bytes){
@@ -164,8 +313,10 @@ static inline void *mesh_events(struct hdr *m,uint32_t queue){
 /* Four independent dimensions, none of them derived from another: arena pages, page-table rows,
    transfer-list entries (orders) and the registered window.  rows was welded to pages because the
    arena bitmap lived in a row plane and the order table was rows-strided; both are now their own
-   table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else. */
-struct mesh_geometry { uint32_t pgsz,block,pages,rows,orders,links,qps,wire_pages; };
+   table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else.  `hops`: the page lists' room
+   (struct mesh_hop), 0 none. */
+/* links x qps: the count of the per-link, per-queue transfer lists, replaced by hops; removed at sub-assignment 16 */
+struct mesh_geometry { uint32_t pgsz,block,pages,rows,orders,links,qps,wire_pages,hops; };
 static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   uint32_t blocks=g.pages/g.block,arena=blocks*g.block;
   if(!g.rows)g.rows=arena;
@@ -181,11 +332,15 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->arena_off=at; at+=(((uint64_t)arena+63)/64)*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->link_off=at; at+=(uint64_t)g.links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
+  h->link_off=at; at+=(uint64_t)(g.links>MESH_PORTS?g.links:MESH_PORTS)*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
+  /* replaced by hop_off (the page lists); removed at sub-assignment 16 */
   h->length_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*g.links*g.qps*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
+  /* replaced by hop_off (the page lists); removed at sub-assignment 16 */
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*g.links*g.qps*g.orders*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
+  h->hop_off=at; h->hop_capacity=g.hops; at+=(uint64_t)g.hops*sizeof(struct mesh_hop); at=(at+pgsz-1)/pgsz*pgsz;
+  h->bridge_off=at; at+=sizeof(struct mesh_bridge_pages); at=(at+pgsz-1)/pgsz*pgsz;
   h->notice_bytes=sizeof(struct mesh_tx);
   uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*g.links*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
