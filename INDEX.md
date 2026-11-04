@@ -48,6 +48,12 @@ other projects, such as a game bot, and old dated records; they are not listed h
   upward rank, edge scheduling under contention); compiled metadata (Hoefler, Siebert and Lumsdaine); nothing outside
   the bridge knowing the transport; plans holding only their allocations, several programs as one composite schedule.
   It supersedes D.2's model, D.3.1 and D.5 of the disjoint-pages change request.
+- [design/aot-compilation-change-request.md](design/aot-compilation-change-request.md): what the ahead-of-time
+  compilation must do, requirement by requirement, each quoting the operator and naming its cited method: captured
+  graphs with shapes and types (PyTorch 2), sharding annotations and partitioning (GSPMD), collectives lowered to page
+  transfers (MSCCLang) and routed jointly (Garg and Könemann), one schedule in one topological order, programs that run
+  at once ordered by one scheduler per island (Pathways), the task graph as the IR, and the serialized schedule in
+  MSCCL-IR's shape.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.

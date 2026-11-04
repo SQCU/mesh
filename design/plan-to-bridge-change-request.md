@@ -7,7 +7,7 @@ from in the literature. The method is used as its source states it.
 
 It replaces design/transfer-schedule-change-request.md, which is removed, and design/disjoint-pages-change-request.md
 D.2's model of a transfer, D.3.1 and D.5. Everything else in that change request stands as implemented (mesh 1fd0cca0,
-metal-microbench 3135184e). The one point it leaves for the operator is at R8.
+metal-microbench 3135184e). How a program becomes this plan is design/aot-compilation-change-request.md.
 
 ## R1. Transfers are pages by view, from queues of desired transfers
 
@@ -156,10 +156,9 @@ metal-microbench 3135184e). The one point it leaves for the operator is at R8.
 - **Method, transfers:** programs that run at once are scheduled as one composite task graph (H. Zhao and R.
   Sakellariou, Scheduling multiple DAGs onto heterogeneous systems, IPDPS 2006). The DAGs are composed into one and
   scheduled with a single list scheduler (R5).
-- **For the operator:** a composite schedule needs every program that runs at once to be known when they are planned.
-  That is the premise of the operator's turn ("with the shapes and coarse bin packing requierments of allocation known
-  aot"). Which call composes several programs' task graphs into one plan, made alike at every node, is not stated in the
-  turns.
+- **Composition:** design/aot-compilation-change-request.md A6. One scheduler per island orders every program's
+  computations consistently (Barham et al., Pathways, MLSys 2022, §4.4), and composes their task graphs into one
+  (Zhao and Sakellariou, 2006). Which process is the island's scheduler is left there for the operator.
 - **Code:**
   - rdma/mesh-dataflow.c: `mesh_attach`'s compare-and-swap and EADDRINUSE go, and attaching only maps the region.
   - The rest of R8's code follows the operator's answer.
