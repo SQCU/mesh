@@ -172,8 +172,12 @@ design/aot-compilation-change-request.md.
   - Pages: each plan claims exactly its pages and releases them on retirement, by deferred reclamation (P. E. McKenney
     and J. D. Slingwine, Read-copy update, PDCS 1998; K. Fraser, Practical lock-freedom, PhD thesis, Cambridge, 2004).
     This is C3.4, as now.
-  - Function executions of programs that run at once are ordered consistently by one scheduler for the island:
-    design/aot-compilation-change-request.md A7 (P. Barham et al., Pathways, MLSys 2022, §4.4).
+  - Function executions of programs that run at once are ordered consistently by one scheduler for the island, a fixed
+    sequencer in the bridge of the island's highest-numbered live node: design/aot-compilation-change-request.md A7
+    (P. Barham et al., Pathways, MLSys 2022, §4.4; Défago, Schiper and Urbán, 2004; Garcia-Molina, 1982).
+  - Placement and weights reach the plan as operands, passed in by the program from whatever function chooses them
+    (aot-compilation A2, A3). Today that is e2b's existing hand partition and unit weights, and any other choosing
+    function can replace them.
 - **Code:** rdma/mesh-dataflow.c: `mesh_attach`'s compare-and-swap and EADDRINUSE go, and attaching only maps the
   region.
 

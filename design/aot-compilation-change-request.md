@@ -123,8 +123,19 @@ is defined later, apart from all of this.
     order."
   - The island is the map's Thunderbolt-linked component (A4).
   - Each function execution runs its own compiled schedule (A6).
-- **For the operator:** which process is the island's scheduler. Pathways runs one per island, and neither the turns nor
-  the paper say where it runs on this fabric.
+- **The scheduler is a fixed sequencer.**
+  > it is rqeuired to choose nad use a scheduler. cite anyhthing do anything but don't use idiomatic citation free claude
+  > code anywhere here
+  - It is the fixed-sequencer class of total-order broadcast (X. Défago, A. Schiper and P. Urbán, Total order broadcast
+    and multicast algorithms: taxonomy and survey, ACM Comput. Surv. 36(4), 2004).
+  - One process, the sequencer, gives every function execution submitted on the island its sequence number, in the
+    order the submissions reach it. Pathways' scheduler is first-in, first-out in just this way (§4.4).
+  - Every node serves function executions in sequence-number order.
+  - A program submits each of its function executions to its node's bridge, and the bridge forwards it to the
+    sequencer.
+- **The sequencer is the bridge of the island's highest-numbered live node.** That is the bully algorithm's coordinator,
+  the highest-numbered process alive (H. Garcia-Molina, Elections in a distributed computing system, IEEE Trans.
+  Comput. C-31(1), 1982). Which nodes are alive is the map's, which every bridge holds (mesh-records.c).
 
 ## A8. The IR operand
 
