@@ -16,7 +16,9 @@ of each sub-assignment, its commits, each review finding and where it went, and 
    masked lanes).
 2. State lives apart from the data, in the plan's state section (the landed list's own section). Each state word has one
    writer; counts take arrivals. No state word is reset while its plan stands: phases are 2-bit Gray codes, supplied
-   words and counts only rise.
+   words and counts only rise. (A phase's one writer is per field: a 64-bit word holds 32 receives' fields, which
+   different port children flip by atomic XOR of disjoint bits. The status's words take the GPU's counts and its
+   atomic max: review 17's note 5.)
 3. Everything is placed once, at compile time, by the one allocator in `mesh_plan`, with modulo variable expansion by
    lifetime (u copies from happens-before; `executions` is no input of the plan). A program holds exactly the pages its
    plan uses. Nothing is claimed at attach.
@@ -183,6 +185,13 @@ here with their evidence and in the final report.
   offset, or read before they are written, e.g. the prefill's KV conversions) stay the delegate's allocations as
   before, bound as captured: they were never the recorder's pool, and placing them would need their capture-time
   content carried into the placed pages, which no C3 item covers (review 16's finding 5b).
+- **D13: a node that has failed an execution releases nothing more.** C3.1 has a failed later pass count its failure
+  in the step's status and end, but its node's later releases would still raise their supplied words, so the bridge
+  would send stale pages and a healthy peer would read them as landed and finish with no error (review 17's finding 1:
+  reachable where one rank is stopped, ranks start more than MESH_PLATFORM_NS apart, or a link is lost among three or
+  more nodes). So every GPU release raises its supplied word only where this node's status reads no failure; else it
+  raises nothing, the peers' counts never reach their targets, and their waiters end with ETIMEDOUT, an error value.
+  It is C3's own status and supplied word (fail-stop), with nothing added.
 - **D12 (departure): the run's per-step host inputs are sized by the run.** The host-prepared decode operands
   (positions, masks, cache parameters, the accepted schedule, the token stream) hold one instance a step, written
   before the first execution, so their pages grow with the steps and a plan placed for N steps serves N (review 16's
@@ -211,15 +220,18 @@ here with their evidence and in the final report.
   (0 none: the first failed execution is ~first).
 - `struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases; uint64_t
   phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding; };` (64 bytes), at the start of the plan's state section:
-  - `copies` u; `receives` this node's receives a copy (the sum of its received ranges' pages); `ranges` this node's
-    received ranges; `releases` this node's source ranges. The offsets below are region offsets.
-  - `phases`: the phase list. For received range g (g < ranges, in the plan's demand order) and copy c, a group of
+  - `copies` u; `receives` this node's receives a copy (the sum of its received ranges' pages, a relay's included);
+    `ranges` the received ranges this node consumes (it is their destination; review 15's finding 1); `releases` this
+    node's source ranges. The offsets below are region offsets.
+  - `phases`: the phase list. For each range g this node receives (one it consumes or a relay's own, in the plan's
+    demand order) and copy c, a group of
     `mesh_group_bytes(P_g)` bytes, `static inline uint64_t mesh_group_bytes(uint32_t pages){ return ((uint64_t)pages
     + 63) / 64 * MESH_LANE_BYTES; }`, groups in (g, c) order, g major; page k of the range (k < P_g) has its field at
     bits [2 (k % 32), 2 (k % 32) + 2) of uint64 word k / 32 of its group. A group never shares a lane's 16 bytes with
     another.
-  - `counts`: ranges x copies uint64 words, range g's copy c at index g x copies + c. Each takes arrivals (+1 a
-    landing, D1; a cancellation raises it to its final value, below) and only rises.
+  - `counts`: ranges x copies uint64 words, consumed range h's copy c at index h x copies + c (none for a relay's own
+    receives, whose entries carry `count` 0). Each takes arrivals (+1 a landing, D1; a cancellation raises it to its
+    final value, below) and only rises.
   - `supplied`: releases uint64 words, release r (this node's r-th source range in the plan's demand order). Its one
     writer is the range's producer, which raises it to t + 1 after its last write in execution t (D9).
   - `status`: one struct mesh_status.
@@ -834,6 +846,17 @@ work proceeds.)
 
 ### Reviews and where their findings went
 
+- 17 (both repos together, at mesh eeceb5f8 and metal-microbench 7d752a8c; every file compiles alone; the lifecycle
+  files unchanged since be188c6e): one received and one sent range traced from mesh_plan through the bridge, mesh-metal,
+  the recorder and e2b_replay, every party agreeing on every offset, index, bit and value; every finding the record
+  said fixed found fixed in the code; D1-D12 accurate to the code. Findings and where they went: 1 (gap: a node that
+  failed an execution still released its sends, so a peer read stale ranges as landed with no error) ruled D13 and
+  routed to 11; 2 (mesh.h said nothing but mesh_plan writes hdr `state`; step 6 omitted the ESTALE path's `state` 0)
+  to 1; 3 (this contract's struct mesh_state text predated review 15's finding 1) corrected here; 4 (three open items
+  missing from the list) added; 5 (one writer is per phase field; the status takes counts and a max) stated at rule 2;
+  6 (e2b_replay.m's adapter wait, from before this change, unbounded) to 4; 7 (the scratchpad's source copies from
+  2026-11-03) listed open for the operator.
+
 - 15 (the mesh side, at c2f7f36f; every mesh file compiles alone): the layouts, the allocator's rule, the bridge's
   phase and counter arithmetic, the memory orders, the threads, C9 and every C4 removal found sound. Findings and
   where they went: 1 (defect: the bridge's landing gained a second atomic, a 64-bit division and a wake system call
@@ -874,6 +897,15 @@ work proceeds.)
   this round, and were left untouched.
 
 ### Open at the end
+
+- Whether Apple's provider lets a receive record be posted again while an earlier posting of it is outstanding
+  (mesh-flow.c relies on the work request being copied at the post; recorded as encoded into the provider's own queue,
+  design/RDMA-KERNEL-RECOVERY.md 27-29 and design/TELEMETRY-LOSS-20260904.md 73-77, not proven). design/prepared-
+  machine.md#M08, cited by mesh-flow.c, still describes the old receive record. A cancelled receive's field, never
+  written, reads as landed three rounds later; the run has already failed by then (6's findings; review 17's note 4).
+- This session's scratchpad holds source-named copies (abd-mesh-link.c, coll-86e.c, flow-head.c and others) dated
+  2026-11-03, before this round; this round's implementers wrote only MSL snippets and notes there. They were left for
+  the operator, against the rule that no source is copied anywhere.
 
 - D12: the per-step host inputs grow with the run (review 16's finding 2). ml_drift's special and composite fusions
   can put operators outside prepare_e2b.py's FUSED set in one kernel; e2b's routes are not affected, other programs may
