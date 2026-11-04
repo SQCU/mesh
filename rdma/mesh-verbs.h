@@ -6,6 +6,7 @@
 #include <sys/sysctl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <ifaddrs.h>
 #include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -266,6 +267,42 @@ done:
   if(error){errno=error;return -1;}
   return 0;
 }
+/* The GID that is this port's own link-local address, as the failport's device_gid chose it (672f6f7f, de96b545).
+   Index 0 is not that entry on every device: macOS 27's M5 Ultra lists [0] 23ff:..., [1] fe80..., [2] its ULA, and the
+   Mini's en4 after its 10-16 restart had its one entry at index 1; pairing on index 0 failed with EIO on both.
+   Else the first link-local entry, else the first non-zero one. */
+static int port_gid(struct ibv_context *context,const struct ibv_port_attr *port,const char *device,
+                    union ibv_gid *gid,uint8_t *index){
+  enum { HELD=8, ENTRIES=256 };
+  const char *interface=strncmp(device,"rdma_",5)?device:device+5;
+  struct in6_addr held[HELD];int helds=0,chosen=-1,linklocal=-1,first=-1;
+  struct ifaddrs *all=NULL;
+  if(!getifaddrs(&all)){
+    for(const struct ifaddrs *a=all;a && helds<HELD;a=a->ifa_next){
+      if(!a->ifa_addr || a->ifa_addr->sa_family!=AF_INET6 || strcmp(a->ifa_name,interface))continue;
+      struct in6_addr x=((const struct sockaddr_in6 *)(const void *)a->ifa_addr)->sin6_addr;
+      if(!IN6_IS_ADDR_LINKLOCAL(&x))continue;
+      x.s6_addr[2]=x.s6_addr[3]=0;   /* the kernel's embedded scope, absent from the GID */
+      held[helds++]=x;
+    }
+    freeifaddrs(all);
+  }
+  const int entries=port->gid_tbl_len<ENTRIES?port->gid_tbl_len:ENTRIES;
+  for(int i=0;i<entries && chosen<0;i++){
+    union ibv_gid entry;int nonzero=0;
+    if(ibv_query_gid(context,1,i,&entry))continue;
+    for(int b=0;b<16;b++)nonzero|=entry.raw[b];
+    if(!nonzero)continue;
+    if(first<0)first=i;
+    if(linklocal<0 && entry.raw[0]==0xfe && (entry.raw[1]&0xc0)==0x80)linklocal=i;
+    for(int h=0;h<helds && chosen<0;h++)if(!memcmp(entry.raw,held[h].s6_addr,16))chosen=i;
+  }
+  if(chosen<0)chosen=linklocal>=0?linklocal:first;
+  if(chosen<0)return ENXIO;
+  if(ibv_query_gid(context,1,chosen,gid))return errno?errno:EIO;
+  *index=(uint8_t)chosen;
+  return 0;
+}
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M08 */
@@ -302,7 +339,9 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
-  union ibv_gid gid; if(ibv_query_gid(provider->device->context,1,0,&gid)){ close(f); return -1; }
+  union ibv_gid gid; uint8_t gid_index=0;
+  int gid_error=port_gid(provider->device->context,&pa,provider->device->name,&gid,&gid_index);
+  if(gid_error){ close(f); errno=gid_error; return -1; }
   uint32_t psn=arc4random()&0xffffff;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
   memcpy(mine.gid,&gid,16);
@@ -315,7 +354,7 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     if(exchange(f,local,remote,sizeof local,sizeof remote,m,client,provider->deadline)){close(f);return -1;}
     struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[1],
       .dest_qp_num=remote[0],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
-        .grh={.hop_limit=1,.sgid_index=0}}};
+        .grh={.hop_limit=1,.sgid_index=gid_index}}};
     memcpy(&r.ah_attr.grh.dgid,you.gid,16);
     int rc=ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
     if(rc){fprintf(stderr,"rtr %d rc %d\n",q,rc);close(f);return -1;}
@@ -330,5 +369,6 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
   static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
   provider->bandwidth=speeds[pa.active_speed]*widths[pa.active_width];
-  fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->device->context->device),m->node);
+  fprintf(stderr,"pair up: %s node %d gid %u\n",ibv_get_device_name(provider->device->context->device),m->node,
+    gid_index);
   return f; }
