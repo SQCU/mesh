@@ -43,17 +43,16 @@ other projects, such as a game bot, and old dated records; they are not listed h
   design/plan-to-bridge-change-request.md.
 - [design/plan-to-bridge-change-request.md](design/plan-to-bridge-change-request.md): what the code must do after the
   operator's turns of 2026-11-04, requirement by requirement, each quoting the operator and naming its cited method:
-  pages by view from queues of desired transfers (U-Net, VIA); the page table with static binding; the task graph with
-  functions that need an operand whole or take pages in any order; a static schedule with costs (list scheduling, HEFT's
-  upward rank, edge scheduling under contention); compiled metadata (Hoefler, Siebert and Lumsdaine); nothing outside
-  the bridge knowing the transport; plans holding only their allocations, several programs as one composite schedule.
-  It supersedes D.2's model, D.3.1 and D.5 of the disjoint-pages change request.
+  pages by view (U-Net, VIA); the page table, bound statically as C3.3 states; the task graph G = (V, E, w, c);
+  functions that need an operand whole and streaming functions that take pages in any order (Graefe; Gibbons; coflows,
+  Chowdhury and Stoica); list scheduling by bottom level with edge scheduling under contention (Sinnen and Sousa);
+  compiled metadata (Hoefler, Siebert and Lumsdaine); nothing outside the bridge knowing the transport; a program as
+  its function calls. It supersedes D.2's model, D.3.1 and D.5 of the disjoint-pages change request.
 - [design/aot-compilation-change-request.md](design/aot-compilation-change-request.md): what the ahead-of-time
-  compilation must do, requirement by requirement, each quoting the operator and naming its cited method: captured
-  graphs with shapes and types (PyTorch 2), sharding annotations and partitioning (GSPMD), collectives lowered to page
-  transfers (MSCCLang) and routed jointly (Garg and Könemann), one schedule in one topological order, programs that run
-  at once ordered by one scheduler per island (Pathways), the task graph as the IR, and the serialized schedule in
-  MSCCL-IR's shape.
+  compilation must do: captured graphs (PyTorch 2); the placement operand (GSPMD, Alpa) and the weighting operand
+  (Sinnen; Garg and Könemann), both chosen elsewhere; collectives over packed trees (Blink) lowered to page
+  instructions (MSCCLang); one schedule per function; function executions ordered by one scheduler per island
+  (Pathways); the IR operand; the serialized operand in MSCCL-IR's shape, running only existing kernels.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.

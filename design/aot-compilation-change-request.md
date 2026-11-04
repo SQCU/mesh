@@ -89,8 +89,8 @@ is defined later, apart from all of this.
     collectives on packed spanning trees.
     - §3.1: a broadcast's optimal rate is reached "by finding the maximal packing of a number of directed spanning trees
       or arborescences in the graph".
-    - §3.2: the packing is a multiplicative-weight update for fractional packing, the method `mesh_graph_pack`
-      implements by Garg and Könemann's rounds.
+    - §3.2: the packing is a multiplicative-weight update for fractional packing. `mesh_graph_pack`'s Garg and
+      Könemann rounds are a multiplicative-weight method of the same kind.
     - §3.3: "to do an AllReduce operation on the directed graph, we first run a reduce operation to a chosen root vertex
       using the undirected graph and then do a broadcast operation from the root vertex using the same tree but with
       links going in the reverse direction."
