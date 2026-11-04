@@ -207,6 +207,11 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,struct mesh_section section,
    plan is loaded (mesh.h struct mesh_hop), so one value releases or tells every one */
 #define MESH_PLAN_POSITION 1
 
+/* declared here until mesh-graph.h carries it: tag pre-return-20261103 rdma/mesh-graph.h mesh_graph_rows (d8d861b5),
+   for the graph module's owner (sub-assignment 11g) to bring verbatim */
+void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *context, size_t k), const void *context,
+                     size_t *first, size_t *order);
+
 /* a demand: the declared transfers of one identity from one source, one range to each of their destinations */
 struct plan_demand {
   uint32_t source,identity,order,first;   /* first: its first declared transfer, the tie after `order` */
@@ -224,7 +229,8 @@ struct plan {
   struct plan_demand *demand;             /* the demands, by order and first transfer */
   uint32_t demands,n,self,depth,executions;
   uint64_t serial;
-  uint32_t *tree,*parent;                 /* tree[j] the solve's tree, demand by demand; parent its, tree by tree */
+  size_t *tree;                           /* tree[j] the solve's tree, demand by demand (mesh_graph_rows) */
+  uint32_t *parent;                       /* the solve's parents, tree by tree */
   uint64_t *run;                          /* run[j]: tree[j]'s pages of its demand */
   uint64_t hops,releases,landed,words;    /* this node's hops a slot, release and landed words; the words' offset */
 };
@@ -252,6 +258,17 @@ static uint32_t plan_end(const void *context,uint32_t e,uint32_t side){
 static int plan_leaf(const void *context,uint32_t d,uint32_t v){
   return (int)(((const struct plan_demand *)context)[d].leaves>>v&1);
 }
+/* mesh_graph_rows' keys: a solved tree's demand (its trees grouped by demand) */
+static uint32_t plan_tree_demand(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
+/* mesh_graph_rows' keys: a vertex's parent on a tree, so a vertex's row its children; the root and a vertex off the
+   tree key `n`, past every vertex */
+struct plan_tree { const uint32_t *parent; uint32_t n,root; };
+static uint32_t plan_tree_parent(const void *context,size_t v){
+  const struct plan_tree *tree=context;
+  return v==tree->root || tree->parent[v]>=tree->n?tree->n:tree->parent[v];
+}
+/* mesh_graph_climb's visit: the vertex one step up, a vertex's parent */
+static void plan_tree_up(void *consumer,uint32_t at,uint32_t step){ if(step==1)*(uint32_t *)consumer=at; }
 
 /* slot s's page k of a section, its row (mesh-collective.h `section`) */
 static uint32_t plan_row(const struct hdr *m,const struct mesh_section *section,uint32_t slot,uint64_t page){
@@ -312,44 +329,42 @@ static int plan_hop(struct plan *p,const struct plan_demand *d,uint64_t k,uint32
   return 0;
 }
 
-/* Every hop of the plan in one order, the same at every rank: the demands by order and first transfer, a demand's
-   pages tree by tree, a page's edges by the vertex they enter.  This node's own hops are visited in that order, so for
-   a pair a -> b, a's sends to b and b's receives from a are the same hops in the same order (mesh.h "Both ends").
-   Counting (write 0): this node's hops a slot, its landed words and the demands it relays; writing: each hop in every
-   slot.  A tree's edges are the graph module's (mesh-graph.h mesh_graph_tree_loads: edge u -> v of a tree its weight
-   at load[u n + v]); this reads only this node's row (its sends) and column (its receive) of them (C9: no walk over a
-   parent table here: the C9 review of c5bffd0c). */
+/* Every page of the plan in one order, the same at every rank: the demands by order and first transfer, a demand's
+   pages tree by tree.  A tree carries a page over a node pair once at most, so visiting this node's hops page by page
+   in that order, for a pair a -> b, a's sends to b and b's receives from a are the same hops in the same order (mesh.h
+   "Both ends").  A page's hops here: its receive from this node's parent on the tree (mesh-graph.h mesh_graph_climb's
+   first step), then its sends to this node's children (its row of the tree's vertices keyed by parent,
+   mesh_graph_rows), in their order.  Counting (write 0): this node's hops a slot, its landed words and the demands it
+   relays; writing: each hop in every slot.  The tree's edges are the graph module's: no walk over a parent table here
+   (the C9 reviews of c5bffd0c and c9ffedcf). */
 static int plan_walk(struct plan *p,int write){
   const uint32_t n=p->n,self=p->self;
-  const double one=1;
-  double load[(size_t)n*n];
+  size_t first[(size_t)n+2],child[(size_t)n+1];
   uint64_t hop=0,landed=0;
   for(uint32_t i=0;i<p->demands;i++){
     struct plan_demand *d=p->demand+i;
     uint64_t k=0;
     for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
       const uint64_t end=k+p->run[j];
-      memset(load,0,sizeof load);
-      mesh_graph_tree_loads(n,1,&d->source,p->parent+(size_t)p->tree[j]*n,&one,load);
-      /* this node's edge in (from its parent), and whether it sends on this tree at all */
-      uint32_t in=MESH_ABSENT,out=0;
-      for(uint32_t u=0;u<n;u++){
-        if(load[(size_t)u*n+self]>0)in=u;
-        if(load[(size_t)self*n+u]>0)out=1;
-      }
-      if(in==MESH_ABSENT && !out){k=end;continue;}
+      const struct plan_tree tree={p->parent+p->tree[j]*n,n,d->source};
+      uint32_t in=MESH_ABSENT;
+      mesh_graph_climb(tree.parent,n,d->source,self,plan_tree_up,&in);
+      mesh_graph_rows(n+1,n,plan_tree_parent,&tree,first,child);
+      if(in==MESH_ABSENT && first[self+1]==first[self]){k=end;continue;}
       for(;k<end;k++){
         /* this node's word of page k: the source's release word, else its receive's landed word, which releases the
            sends it forwards (a relay's, or a destination's on the way to another) */
         const uint64_t w=self==d->source?d->release:p->releases+landed++;
-        for(uint32_t v=0;v<n;v++){
-          const int receive=v==self && in!=MESH_ABSENT;
-          if(!receive && !(load[(size_t)self*n+v]>0))continue;
+        if(in!=MESH_ABSENT){
           if(write){
-            const int status=plan_hop(p,d,k,receive?MESH_RECEIVE:MESH_SEND,receive?in:v,w,hop);
+            const int status=plan_hop(p,d,k,MESH_RECEIVE,in,w,hop);
             if(status)return status;
-          }else if(receive && d->mine==MESH_ABSENT)d->relayed=1;
+          }else if(d->mine==MESH_ABSENT)d->relayed=1;
           hop++;
+        }
+        for(size_t c=first[self];c<first[self+1];c++,hop++)if(write){
+          const int status=plan_hop(p,d,k,MESH_SEND,(uint32_t)child[c],w,hop);
+          if(status)return status;
         }
       }
     }
@@ -382,6 +397,7 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
                  .serial=nodes.serial};
   struct plan_key *key=malloc(((size_t)count+1)*sizeof *key);
   uint32_t *root=NULL,*demand=NULL;
+  size_t *trees=NULL;
   double *up=NULL,*down=NULL,*share=NULL,*rate=NULL,*latency=NULL;
   p.demand=calloc((size_t)count+1,sizeof *p.demand);
   if(!key || !p.demand){status=ENOMEM;goto done;}
@@ -457,10 +473,11 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
     p.run=calloc((size_t)made+1,sizeof *p.run);
     rate=malloc(((size_t)made+1)*sizeof *rate);
     latency=calloc((size_t)made+1,sizeof *latency);
-    if(!p.tree || !p.run || !rate || !latency){status=ENOMEM;goto done;}
-    for(uint32_t k=0;k<made;k++)p.demand[demand[k]].trees++;
-    for(uint32_t i=0,at=0;i<p.demands;i++){p.demand[i].tree=at;at+=p.demand[i].trees;p.demand[i].trees=0;}
-    for(uint32_t k=0;k<made;k++){struct plan_demand *d=p.demand+demand[k];p.tree[d->tree+d->trees++]=k;}
+    trees=malloc(((size_t)p.demands+1)*sizeof *trees);
+    if(!p.tree || !p.run || !rate || !latency || !trees){status=ENOMEM;goto done;}
+    /* the solved trees grouped by demand, in the order the solve found them */
+    mesh_graph_rows(p.demands,made,plan_tree_demand,demand,trees,p.tree);
+    for(uint32_t i=0;i<p.demands;i++){p.demand[i].tree=(uint32_t)trees[i];p.demand[i].trees=(uint32_t)(trees[i+1]-trees[i]);}
     for(uint32_t j=0;j<made;j++)rate[j]=share[p.tree[j]];
     for(uint32_t i=0;i<p.demands;i++){
       struct plan_demand *d=p.demand+i;
@@ -523,7 +540,7 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 done:
   free(key);free(p.demand);free(root);free(up);free(down);free(demand);free(p.parent);free(share);
-  free(p.tree);free(p.run);free(rate);free(latency);
+  free(p.tree);free(p.run);free(rate);free(latency);free(trees);
   return status;
 }
 
