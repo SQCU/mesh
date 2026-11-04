@@ -536,10 +536,13 @@ static int mesh_ports_loaded(struct mesh_ctx *context){
    readers would end at their deadline (ETIMEDOUT), not at once.  The start raises, fences and reads the serial: of the
    two fences one comes first, and a load after the later one sees the store before the earlier one, so at least one
    side sees the other.  Either the cancellation covers the raised executions, or the start reads the moved serial and
-   returns ESTALE, and the program runs none of them and plans again on the map as it is.  The raise left standing is
-   safe: `executions` only rises (C3.7, no state word set back while its plan stands), the program reads and releases
-   nothing of an execution it does not run, and the plan's end (the next plan, or the program's retirement) cancels
-   every receive of it not landed.  The pairing is D10's announcement, fence and re-read
+   returns ESTALE, and the program runs none of them and plans again on the map as it is.  The raise left standing
+   reads no execution as landed that has not: `executions` only rises (C3.7, no state word set back while its plan
+   stands), the program reads and releases nothing of an execution it does not run, and the plan's end (the next
+   plan, or the program's retirement) cancels every receive of it not landed.  That is its safety, not that nothing
+   follows: the bridge has already set the raised executions' receives, which end with the plan as any cancelled run's do,
+   the bridge ending and re-pairing the links toward the adjacent nodes they wait on (review 8's finding 1).  The
+   pairing is D10's announcement, fence and re-read
    (design/disjoint-pages-revision-coordination.md; K. Fraser, Practical lock-freedom, 2004), and the rule is the one
    mesh_ports_loaded applies before its wait (its ESTALE), applied after the raise; nobody waits.  The fence after the
    wake, so every raise is woken as before.  What must stay: the raise before the fence, the serial's read after it */

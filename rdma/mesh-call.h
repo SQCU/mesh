@@ -20,9 +20,12 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    `executions`, fences and reads the serial; so at least one sees the other (D10's announcement, fence and re-read;
    K. Fraser, Practical lock-freedom, 2004).  Either the cancellation covers the raised executions, whose readers then
    end at once with an error, or the start returns ESTALE and the program runs none of them and plans again.  The raise
-   left standing is safe: `executions` only rises, the program reads and releases nothing of an execution it does not
-   run, and the plan's end (the next plan, or the program's retirement) cancels every receive of it not landed.  A
-   second start on the same plan waits as the first and raises it.  0 (also where no hop is written), EINVAL where no
+   left standing reads no execution as landed that has not: `executions` only rises, the program reads and releases
+   nothing of an execution it does not run, and the plan's end (the next plan, or the program's retirement) cancels
+   every receive of it not landed.  It does not end without effect: the bridge has taken the raised executions'
+   receives, which end with the plan as any cancelled run's do, the bridge ending and re-pairing the links toward the
+   adjacent nodes they wait on (review 8's finding 1).  A second start on the same plan waits as the first and raises
+   it.  0 (also where no hop is written), EINVAL where no
    plan is written (hdr `state` 0), the bridge's code where it refused the plan toward an adjacent node (phase
    MESH_STOPPED), ETIMEDOUT past the bound, ESTALE where the map moved since the plan was made (plan again), or the map
    reader's error value (mesh-dataflow.h mesh_nodes_read): each with `executions` not raised, but the ESTALE after the
