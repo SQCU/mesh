@@ -679,7 +679,25 @@ work proceeds.)
   `executions` raised; nothing raised on an error). The C9 hook's remark that mesh_ports_loaded moves into the graph
   module: ruled it stays (it picks this node's cables to the nodes the hops name and waits on their ports; no graph
   algorithm, and mesh-graph knows no cable).
+- 13 (tools/e2b_replay.m, first): 6fb94beb (stand-in memory for the captures, said at the spot to hold no value of
+  the run; the three captures with receive: and publish: in phase 2's; mesh_plan with every operand and capture value,
+  the declared transfers' `value` and `bytes`, and every rank's dataflow chained (lag 0, the last to the first at lag
+  1), refused naming tools/prepare_e2b.py where a sending stage has none; one MTLBuffer a value; the bind; host inputs
+  into placed pages; `NULL, 0`, the steps != executions refusals, the strided check, both memsets, every
+  mesh_section_create and the old receive and publish forms gone). Its readings: an event appears once in a rank's
+  chain (a production at its first write, a consumption at its last read), since a repeated one would close a lag-0
+  cycle; `value` set per transfer where this rank is that transfer's source or destination; a solo run (rank -1) is
+  planned too, the plan being the only allocator. Its findings: (a) a source reading its own range has no event kind,
+  so no template edge orders that read before the range's next write; in e2b the read sits in the combine with the
+  peers' partials, whose read is in the chain, so it is ordered: open for other programs (to the reviewers); (b) a
+  blit fillBuffer still runs during a capture and would land in stand-in memory: unverified. The decode's submission
+  left to 4 (launched).
 
 ### Reviews and where their findings went
 
 ### Open at the end
+
+- With no zeroing (C3.7), a delegate kernel that reads bytes no producer wrote under a multiplicative mask (an
+  attention's p x V over a KV cache's slots past the position) depends on those bytes being finite; a page last left
+  holding a NaN would reach the output. The operator's ruling (C1) is that bytes no mask picks are never data; LiteRT's
+  kernels are not the mesh's to change. The parity run will show it.
