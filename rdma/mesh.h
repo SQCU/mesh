@@ -190,8 +190,9 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    8. stores `hops` (release), and wakes `plan`.
    The bridge reads none of it while `hops` (acquire) is 0.  A port loading a plan stores its generation in its
    mesh_links(m)[p].port.prepared before its last reading of `hops` and `plan`, with a seq_cst fence between, and
-   clears `prepared` where either moved, so no port begins serving a plan the plan call has found erased.  A plan whose entries' `serial` is not `map_serial` when it is loaded is refused: the call fails by error and its
-   caller plans again on the map as it is. */
+   clears `prepared` where either moved, so no port begins serving a plan the plan call has found erased.  A plan
+   whose entries' `serial` is not `map_serial` when it is loaded is refused: the call fails by error and its caller
+   plans again on the map as it is. */
 struct mesh_hop { uint32_t page,node,direction,padding; uint64_t word,mask,serial; };
 _Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,mask)==24,"mesh_hop");
 /* the value a producer stores into a supplied word (struct mesh_hop, "Supplied words") */
