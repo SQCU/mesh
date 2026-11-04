@@ -641,6 +641,19 @@ work proceeds.)
   before its ports' `prepared` are read (a fence before that load orders nothing the closer stored), which is D10's
   wording; EINVAL for rows 0 and for hdr `state` outside the region. It wrote a draft fragment of mesh-dataflow.c to the
   scratchpad and deleted it unused in the same step (against the rule; no copy remains, every edit made in place).
+- 3 (mesh-collective.{h,c}): e2dcc0cf (the call), baede218 (the template with the program's four kinds of edges and
+  every node's routed values; plan_acyclic, the lag-0 edges through mesh_graph_order, EDEADLK as EINVAL, on 2's
+  finding; plan_unroll, least lags, the D5 check, u and a D_vw table; plan_layout; plan_place, the two greedy-by-size
+  colourings; plan_walk; the writing order; the host functions; `executions`, plan_section, plan_disjoint,
+  plan_before, the happens-before table, the memset, the word zeroing, the erase's call and mesh_host_inputs gone).
+  The state section as built: struct mesh_state at +0; the phase list from +64, range g's copy c group at 64 + group_g
+  + c x mesh_group_bytes(P_g) (group_g the earlier ranges' u groups); the counts, index g x u + c; the supplied words;
+  the status; each 64-aligned; zeroed once to the status's end, rounded to whole blocks. Its differences: a hop's
+  `pages` is P_g, the pages this node receives of the range a copy (fewer at a relay on some trees only; routed to 6);
+  hdr `state` stored 0 on the ESTALE path; a lag of UINT32_MAX, `wire` or `state` above 1 refused (EINVAL); each value
+  row's device, buffer fields and publication cleared by the plan (mesh_section_create did that before); ties ordered
+  by item index; a value at another node named on stderr by its node, identity and source. Routed: 2 to remove
+  mesh_graph_happens_before.
 
 ### Reviews and where their findings went
 
