@@ -11,6 +11,11 @@
 extern "C" {
 #endif
 
+/* The vertices `from` reaches over `edges` undirected edges, edge e joining `end(context, e, 0)` and
+   `end(context, e, 1)` (each below `vertices`), breadth first: their count; `order` (room for `vertices`) the vertices
+   in the order reached, `reached` (room for `vertices`) 1 for each and 0 for every other. */
+uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
+                          const void *context, uint32_t from, uint32_t *order, unsigned char *reached);
 /* Directed edges in compressed rows: vertex v's leave as edges [first[v], first[v + 1]), edge k entering
    `head(context, k)`. */
 /* A topological order of such edges' `vertices` vertices: ordinal[v] v's place, each place taken by the
@@ -37,6 +42,15 @@ int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_
    and beyond), a few hundred leaves on a collective of five. */
 int mesh_graph_arborescence_within(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
                                    const double *weight, uint32_t depth, int32_t *chosen);
+/* The walk up a parent table from `from` (parent[v]: v's next vertex up): `visit(consumer, at, step)` for each vertex
+   it meets, `from` at step 0, until one that is `root` (UINT32_MAX: none) or whose parent names none
+   (parent[at] >= vertices), visited last; a vertex its own parent (outside a tree) climbs in place.  The steps to that vertex; UINT32_MAX where `vertices` steps meet none (a
+   cycle), steps 0 to `vertices` visited.  `visit` NULL: none. */
+uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from,
+                          void (*visit)(void *consumer, uint32_t at, uint32_t step), void *consumer);
+/* The length of the cycle a climb from `from` returns to `from` on (the first step past 0 it meets `from` again);
+   0 where it does not within `vertices` steps. */
+uint32_t mesh_graph_cycle_length(const uint32_t *parent, uint32_t vertices, uint32_t from);
 /* Items chained by a key, latest first, as a solver finds them (its distinct trees of one demand or of one root):
    head[key] that key's latest item (UINT32_MAX: none) and next[k] the one before item k. mesh_graph_keyed_find gives
    the key's item for which equal(context, k) holds, or UINT32_MAX, and reads that key's items alone;

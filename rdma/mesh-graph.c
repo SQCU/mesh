@@ -4,6 +4,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_reach, 6379e868 */
+/* mesh-graph.h */
+uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
+                          const void *context, uint32_t from, uint32_t *order, unsigned char *reached) {
+  for (uint32_t v = 0; v < vertices; v++) reached[v] = 0;
+  uint32_t count = 1;
+  order[0] = from; reached[from] = 1;
+  for (uint32_t head = 0; head < count; head++)
+    for (uint32_t e = 0; e < edges; e++)
+      for (uint32_t side = 0; side < 2; side++) {
+        const uint32_t other = end(context, e, 1 - side);
+        if (end(context, e, side) == order[head] && !reached[other]) { reached[other] = 1; order[count++] = other; }
+      }
+  return count;
+}
+
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_order, ec2ad141 */
 /* mesh-graph.h */
 int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
@@ -142,6 +158,32 @@ int mesh_graph_arborescence(uint32_t N,uint32_t root,uint32_t E,const uint32_t *
 done:
   free(best);free(id);free(seen);free(nfrom);free(nto);free(origin);free(nweight);free(nchosen);free(cyclic);
   return status;
+}
+
+/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_climb, 7e7f8726 */
+/* mesh-graph.h */
+uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from,
+                          void (*visit)(void *consumer, uint32_t at, uint32_t step), void *consumer) {
+  uint32_t at = from;
+  for (uint32_t step = 0; step <= vertices; step++) {
+    if (visit) visit(consumer, at, step);
+    if (at == root || parent[at] >= vertices) return step;
+    at = parent[at];
+  }
+  return UINT32_MAX;
+}
+
+/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_cycle_length with climb_return, f21a4d24 */
+/* mesh-graph.h: the climb's visits, a cycle's return (the tag's comment here names the level's height and the mark
+   too, whose functions are not brought) */
+static void climb_return(void *consumer, uint32_t at, uint32_t step) {
+  uint32_t *found = consumer;
+  if (step && at == found[0] && !found[1]) found[1] = step;
+}
+uint32_t mesh_graph_cycle_length(const uint32_t *parent, uint32_t vertices, uint32_t from) {
+  uint32_t found[2] = {from, 0};
+  mesh_graph_climb(parent, vertices, UINT32_MAX, from, climb_return, found);
+  return found[1];
 }
 
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_depth with depth_head, 8cd0c480 */
