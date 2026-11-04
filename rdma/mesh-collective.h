@@ -34,7 +34,7 @@
      execution t - k has ended, and execution t reads it only after that write.
    - Out: `section`, every field: `first` its first row, `pages` P x block (P its blocks), `bytes` as given, `count` its
      copies (u for a routed value, k for a value of `lag` k >= 1, 1 for every other), `stride` P.  Copy c's rows are
-     first + c x P + k, k < P, and its first byte mesh_section_address(section, c).  A program binds execution t of a
+     first + c x P + i, i < P, and its first byte mesh_section_address(section, c).  A program binds execution t of a
      routed value to copy t mod count, and execution t of a value of `lag` k to copy t mod k.  Its addresses are known
      after the plan, never before.
 
@@ -66,10 +66,12 @@
    mesh-call.h mesh_transfers_start).  The one allocator then places, once, every item at this node: each routed
    value's u copies (a relay's value among them, which no `values` entry names and no row holds), each local value and
    the state section, by two greedy-by-size colourings (mesh_graph_left_edge), the wire items in the registered window
-   and the rest outside it.  Two items share pages only where happens-before orders the last read of one before the
-   next write of the other at every distance at which their executions meet.  The plan claims exactly the rows and
-   pages it places (mesh-dataflow.h mesh_claim_take), and closes this client's earlier claims, which the bridge
-   releases once no port holds them (C3.4); nothing is claimed at attach, and nothing waits for a release.
+   and the rest outside it; a value of `lag` k >= 1 is k items, its copies, outside the window.  Two items share pages
+   only where happens-before orders the last read of one before the next write of the other at every distance at which
+   their executions meet; a copy of a value of `lag` k >= 1 shares with none, since no edge of the template orders its
+   write.  The plan claims exactly the rows and pages it places (mesh-dataflow.h mesh_claim_take), and closes this
+   client's earlier claims, which the bridge releases once it holds them no more (C3.4); nothing is claimed at attach,
+   and nothing waits for a release.
 
    The state section (mesh.h struct mesh_state, at hdr `state`), an invariant item outside the window, apart from every
    data page: the struct, then the phase list (each received range's 2-bit Gray-coded phase a page, a group a copy),

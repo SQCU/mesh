@@ -14,12 +14,13 @@ _Static_assert(MESH_NODES_MOST<=64,"a demand's destinations are one 64-bit set o
 
 /* mesh-collective.h mesh_host_publish (design/disjoint-pages-change-request.md, C3.7; design/disjoint-pages-revision-
    coordination.md, "The region", `supplied`, and D9): execution + 1 stored (release) into the supplied word a source
-   range's first row names (`targets[0].stream`, which mesh_plan writes), after the caller's writes to the range in that
-   execution.  One store releases every send of the range's pages, and the word only rises while the caller's
-   executions run in order.  A row that is no source range's first names no target (`sends` 0), and nothing is stored.
+   range's first row names (its publication's first target, which mesh_plan writes), after the caller's writes to the
+   range in that execution.  One store releases every send of the range's pages, and the word only rises while the
+   caller's executions run in order.  A row that is no source range's first names no target (`sends` 0), and nothing is
+   stored.
    2026-11-04, sub-assignment 3: reversing 2026-11-03's form (sub-assignment 5), MESH_SUPPLIED stored into execution t's
-   own word at `stream` + t x MESH_WORD_STRIDE.  Why: one word serves every execution, its value saying which, and no
-   word is reset while its plan stands (C3.7).  What must stay: one store, release, after the range's last write. */
+   own word at the target's word + t x MESH_WORD_STRIDE.  Why: one word serves every execution, its value saying which,
+   and no word is reset while its plan stands (C3.7).  What must stay: one store, release, after the range's last write. */
 void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint64_t execution){
   struct hdr *m=context->M;
   const struct mesh_publication *publication=mesh_publication_at(m,section.first);
@@ -146,7 +147,8 @@ struct plan {
   /* the state section (plan_layout), offsets from its start */
   uint64_t phases,counts,supplied,status,words;
   /* the items (plan_place): routed copies (a, c) at item a x u + c, then this node's other values (others[k] the index
-     in `values` of item local x u + k), then the state section, item `state` */
+     in `values` of item local x u + k; a value of lag k >= 1 k consecutive items, its copies in order), then the state
+     section, item `state` */
   uint32_t *others,other,state;
   uint64_t *colour;                       /* item i's first block in its space */
   uint64_t window,outside;                /* the blocks each colouring uses (mesh_graph_left_edge's `used`) */
@@ -252,7 +254,7 @@ static uint32_t plan_edge_tail(const void *context,size_t k){ return ((const str
      edge from its `from` event's vertex to its `to` event's (plan_event: P of the demand where its produced bit is
      set, S where its source-read bit is, else C at the declared transfer's destination), of lag e.lag.  A demand has S
      where a dependence's end names its source's own read.  Every edge is sound: its tail happens before its head
-     whatever the cables do (a range is produced before it is sent and before its source reads it; a page lands before
+     however the pages travel (a range is produced before it is sent and before its source reads it; a page lands before
      it is forwarded, is sent before it lands, and lands before it is consumed; the program's edges are its own
      claims).  Grouped into rows by tail (mesh_graph_rows), so every rank
      numbers them alike.
@@ -422,7 +424,7 @@ static void plan_name(const struct plan *p,uint32_t v,const char *what,uint32_t 
    - L(v) = the largest D(r -> write v) over v's reads r, the least lag at which every read of v in execution t happens
      before its write in t + L; UINT32_MAX (a read nothing orders before a later write) is ENOMEM naming the value;
    - u = the largest L(v) over every routed value at every node, 1 where there is none.  Every rank computes the same
-     template, lags and u, so both ends of every cable hold the same copies;
+     template, lags and u, so both nodes of every adjacent pair hold the same copies;
    - between[a x local + b] = D_ab, the largest D(r -> write b) over this node's routed value a's reads r, for every
      pair of this node's routed values, so the colouring's tests (plan_interferes) are table reads.
    0; ENOMEM. */
@@ -505,7 +507,7 @@ static void plan_layout(struct plan *p){
 
 /* the colouring's order (the contract's "The allocator"): greedy by size, an item's blocks largest first, then its
    index, which is the value order (this node's routed values in demand order, then its other values in `values`'s
-   order, then the state section) and, within a routed value, the copy */
+   order, then the state section) and, within a routed value or a value of lag k >= 1, the copy */
 struct plan_sized { uint64_t blocks; uint32_t item; };
 static int plan_sized_order(const void *a,const void *b){
   const struct plan_sized *x=a,*y=b;
@@ -514,9 +516,13 @@ static int plan_sized_order(const void *a,const void *b){
 }
 /* mesh_graph_left_edge's interference, the contract's rule (two items interfere unless it lets them share):
    - an invariant (the state section among them) interferes with every other item;
-   - two local execution values share only where their [begin, end] on this node's program order do not overlap (this
-     node's work runs in that order, execution after execution); a local execution value interferes with every routed
-     copy;
+   - a copy of a value of lag k >= 1 (mesh-collective.h struct mesh_value `lag`) interferes with every other item, its
+     own value's other copies among them: its write is ordered by an event of the program's, a host producer's, not by
+     an edge of the template, so no order the plan knows lets it share a page (design/disjoint-pages-change-request.md,
+     D.3.3; design/disjoint-pages-rulings-coordination.md, R4);
+   - two local execution values of lag 0 share only where their [begin, end] on this node's program order do not
+     overlap (this node's work runs in that order, execution after execution); a local execution value interferes with
+     every routed copy;
    - routed copies (v, c) and (w, c'), D_vw = between[v x local + w], d = (c' - c) mod u: where d > 0 they share only
      if d >= D_vw and u - d >= D_wv; where d == 0 (v != w) only if D_vw <= u, D_wv <= u and D_vw == 0 or D_wv == 0.
      These are the distances at which their executions meet (t and t' with t' - t = d mod u: d, d - u, d + u, ...);
@@ -529,7 +535,7 @@ static int plan_interferes(const void *context,uint32_t a,uint32_t b){
   if(a>=routed || b>=routed){
     if(a<routed || b<routed || a==p->state || b==p->state)return 1;
     const struct mesh_value *x=p->given+p->others[a-routed],*y=p->given+p->others[b-routed];
-    if(x->kind==MESH_INVARIANT || y->kind==MESH_INVARIANT)return 1;
+    if(x->kind==MESH_INVARIANT || y->kind==MESH_INVARIANT || x->lag || y->lag)return 1;
     return x->begin<=y->end && y->begin<=x->end;
   }
   const uint32_t v=a/u,c=a%u,w=b/u,c2=b%u,d=(c2+u-c)%u;
@@ -544,7 +550,9 @@ static int plan_interferes(const void *context,uint32_t a,uint32_t b){
    - The items: each of this node's routed values' u copies (a, c), its demand's P blocks each, a relay's value among
      them (this node on a demand's trees but neither its source nor a destination: no `values` entry names it and no
      row holds it); each other value in `values` (a local invariant or a local execution value), its bytes in blocks,
-     one each; the state section (plan_layout's `words` in blocks), one, invariant, no rows.
+     one each but a value of lag k >= 1, which has k, its copies, P blocks each (Lam's modulo variable expansion: a
+     value live across k executions gets k copies; R4); the state section (plan_layout's `words` in blocks), one,
+     invariant, no rows.
    - Two colourings by mesh_graph_left_edge, greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020; the
      order plan_sized_order gives): the wire items (every routed copy, and the other values whose `wire` is 1) in the
      window space, every other item (the state section among them) in the local space, each in blocks, its capacity
@@ -563,17 +571,25 @@ static int plan_interferes(const void *context,uint32_t a,uint32_t b){
    plan_interferes over mesh_graph_happens_before's bits) and the window alone.  Why: the unroll factor is the longest
    lifetime, not the trip count (C1, C3.3), and the allocator places every value, the state section's words among them
    (C3.2).  What must stay: the items' order, greedy by size; ENOMEM before anything is written.
+   2026-11-04, sub-assignment 2 (design/disjoint-pages-rulings-coordination.md, R4): reversing one copy for every value
+   but a routed one.  A value of lag k >= 1 (a host producer's input, ordered by the program's events) is k items, its
+   copies, each interfering with every other item, all outside the window.  Why: the per-step host inputs had an
+   instance per step, sized by the run (design/disjoint-pages-revision-coordination.md, D12); D.3.3 gives them copies
+   by the lag the program declares, as modulo variable expansion does for any value, so nothing bound grows with the
+   steps.  What must stay: a value of lag 0 one item as before; the items' order; ENOMEM before anything is written.
    0; ENOMEM. */
 static int plan_place(struct plan *p){
   struct hdr *m=p->context->M;
   const uint32_t u=p->copies;
-  uint64_t routed;
-  if(__builtin_mul_overflow((uint64_t)p->local,(uint64_t)u,&routed) || routed+p->givens+1>=UINT32_MAX)return ENOMEM;
-  p->others=malloc(((size_t)p->givens+1)*sizeof *p->others);
-  if(!p->others)return ENOMEM;
-  /* this node's values no declared transfer names, in `values`'s order */
+  uint64_t routed,others=0;
+  if(__builtin_mul_overflow((uint64_t)p->local,(uint64_t)u,&routed) || routed>=UINT32_MAX)return ENOMEM;
+  /* this node's values no declared transfer names, in `values`'s order, a value of lag k its k copies in copy order */
+  for(uint32_t j=0;j<p->givens;j++)
+    if(p->named[j]==MESH_ABSENT && (others+=p->given[j].lag?p->given[j].lag:1)>=UINT32_MAX)return ENOMEM;
+  if(routed+others+1>=UINT32_MAX || !(p->others=malloc(((size_t)others+1)*sizeof *p->others)))return ENOMEM;
   p->other=0;
-  for(uint32_t j=0;j<p->givens;j++)if(p->named[j]==MESH_ABSENT)p->others[p->other++]=j;
+  for(uint32_t j=0;j<p->givens;j++)if(p->named[j]==MESH_ABSENT)
+    for(uint32_t c=0;c<(p->given[j].lag?p->given[j].lag:1);c++)p->others[p->other++]=j;
   p->state=(uint32_t)routed+p->other;
   const uint32_t items=p->state+1;
   struct plan_sized *sized=malloc((size_t)items*sizeof *sized);
@@ -676,8 +692,9 @@ static void plan_walk(struct plan *p){
 
 /* mesh-collective.h mesh_plan.  The demands: the declared transfers grouped by source and identity, a range to each of
    its destinations, ordered by `order` and then the declared order.  The routing: every demand at once over the map's
-   node graph (a node pair an edge where both its records give it cables, of the lesser of their summed capacities;
-   no cable, queue pair or link), a destination its source reaches by no path refused (mesh-graph.h mesh_graph_reach),
+   node graph (a node pair an edge where the map gives it a capacity both ways, of the lesser of the two: mesh-
+   dataflow.h struct mesh_nodes `capacity`, D.2's node pairs and their capacities from the map, and nothing else of
+   how the bridge carries pages), a destination its source reaches by no path refused (mesh-graph.h mesh_graph_reach),
    by the concurrent-flow solve (mesh_graph_flow, Garg and Koenemann's multiplicative weights, the tag's mesh_solve
    rounds and room), demand d a tree rooted at its source reaching its destinations, its bytes down from the root: each
    demand's trees and their shares, a tree's vertices past its source and destinations the relays, members all.  The
@@ -687,10 +704,12 @@ static void plan_walk(struct plan *p){
    Then, in the contract's order ("Writing a plan"):
    1. everything computed first: the template (plan_template), no lag-0 cycle (plan_acyclic), the least lags and u
       (plan_unroll), this node's entries of one copy counted and every room (ENOSPC where u x n passes hdr
-      `hop_capacity`), the state section's layout (plan_layout), the items and both colourings (plan_place);
+      `hop_capacity`; ENOMEM where the rows pass a row's index), the state section's layout (plan_layout), the items
+      and both colourings (plan_place);
    2. the generation g = hdr `plan` + 1 (never 0), and the claim (mesh-dataflow.h mesh_claim_take): rows, the head and
-      every value's count x P after it; window pages, the window colouring's blocks x block; local pages, the local
-      one's.  ENOMEM leaves the previous plan standing;
+      every value's count x P after it (count u for a routed value, k for a value of lag k >= 1, 1 for every other);
+      window pages, the window colouring's blocks x block; local pages, the local one's.  ENOMEM leaves the previous
+      plan standing;
    3. the state section started once (D3: its words 0, then struct mesh_state's `copies`, `receives`, `ranges`,
       `releases` and region offsets), every `state` 1 value's bytes 0 once (D3), every value's rows named and bound
       copy by copy (mesh_backing_bind), every value row's publication written; no data page is written;
@@ -699,8 +718,8 @@ static void plan_walk(struct plan *p){
    6. the map read again: ESTALE where its serial moved (or the reader's error): g's claim closed and every earlier one
       (the previous plan no longer stands), hdr `state` 0, `hops` 0;
    7. `hops` (release), `plan` woken;
-   8. every earlier claim of this client closed (mesh_claim_close(context, g, 1)), which the bridge releases once no
-      port holds its generation (D10).  Nothing waits for it.
+   8. every earlier claim of this client closed (mesh_claim_close(context, g, 1)), which the bridge releases once it
+      holds its generation no more (D10).  Nothing waits for it.
    2026-11-04, sub-assignment 3: reversing 2026-11-03's (sub-assignments 3 and 5's) tail: `executions` as an input and
    its per-execution items; plan_section's check of sections mesh_section_create made (values now come in through
    `values`); the memset of every declared instance's pages before `hops`; the word-by-word zeroing of the supplied
@@ -713,11 +732,14 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
               uint32_t given,const struct mesh_dependence *dependence,uint32_t dependences){
   struct hdr *m=context->M;
   if((count && !declared) || (given && !values) || (dependences && !dependence))return EINVAL;
-  /* a value: its bytes, its kind, and its wire and state flags */
+  /* a value: its bytes, its kind, its wire and state flags, and its lag (k >= 1 only on an execution value outside the
+     window that is no state: design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-
+     coordination.md, R4; that no declared transfer names it is the declared transfers' test below) */
   for(uint32_t j=0;j<given;j++){
     const struct mesh_value *v=values+j;
     if(!v->section.bytes || v->kind>MESH_EXECUTION || v->wire>1 || v->state>1 ||
-       (v->state && (v->wire || v->kind!=MESH_INVARIANT)))return EINVAL;
+       (v->state && (v->wire || v->kind!=MESH_INVARIANT)) ||
+       (v->lag && (v->kind!=MESH_EXECUTION || v->wire || v->state)))return EINVAL;
     if(plan_blocks(m,v->section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
   }
   /* a program's data edge: its two declared transfers, its kinds (no end both produced and its source's own read),
@@ -752,7 +774,7 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;
     if(t->source>=n || t->destination>=n){status=EHOSTUNREACH;goto done;}
-    /* a transfer to its own source crosses no cable, and nothing is copied */
+    /* a transfer to its own source passes between no node pair, and nothing is copied */
     if(t->source==t->destination || !t->bytes){status=EINVAL;goto done;}
     if(plan_blocks(m,t->bytes)>=UINT32_MAX/m->block){status=ENOMEM;goto done;}
     key[i]=(struct plan_key){t->source,t->identity,i};
@@ -770,23 +792,27 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
     d->leaves|=UINT64_C(1)<<t->destination;
     if(t->order<d->order)d->order=t->order;
     /* `value`: MESH_ABSENT where this node is neither the transfer's source nor its destination; else an execution
-       value in the window of the range's bytes, the source's one value of every transfer of the range, one range's
-       alone */
+       value in the window of the range's bytes and of lag 0 (a value of lag k >= 1 is written by a producer the
+       program orders by an event, which no declared transfer is: R4), the source's one value of every transfer of the
+       range, one range's alone */
     if(t->source!=p.self && t->destination!=p.self){
       if(t->value!=MESH_ABSENT){status=EINVAL;goto done;}
       continue;
     }
     if(t->value>=given){status=EINVAL;goto done;}
     const struct mesh_value *v=values+t->value;
-    if(v->kind!=MESH_EXECUTION || !v->wire || v->section.bytes!=t->bytes ||
+    if(v->kind!=MESH_EXECUTION || !v->wire || v->lag || v->section.bytes!=t->bytes ||
        (t->source==p.self && d->mine!=MESH_ABSENT && d->mine!=t->value) ||
        (named[t->value]!=MESH_ABSENT && named[t->value]!=d->first)){status=EINVAL;goto done;}
     named[t->value]=d->first;
     d->mine=t->value;
   }
-  /* a local execution value's positions */
+  /* a local execution value's positions, a value of lag 0's alone (a value of lag k >= 1 is ordered by the program's
+     events, not by its positions, which are not read: R4) */
   for(uint32_t j=0;j<given;j++)
-    if(named[j]==MESH_ABSENT && values[j].kind==MESH_EXECUTION && values[j].begin>values[j].end){status=EINVAL;goto done;}
+    if(named[j]==MESH_ABSENT && values[j].kind==MESH_EXECUTION && !values[j].lag && values[j].begin>values[j].end){
+      status=EINVAL;goto done;
+    }
   qsort(p.demand,p.demands,sizeof *p.demand,plan_demand_order);
   /* each declared transfer's demand in the plan's order: a demand's place before the sort is its first transfer's */
   for(uint32_t i=0;i<p.demands;i++)placed[p.of[p.demand[i].first]]=i;
@@ -861,12 +887,16 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
   if(p.receives>=UINT32_MAX || __builtin_mul_overflow(p.entries,(uint64_t)u,&entries) || entries>m->hop_capacity){
     status=ENOSPC;goto done;
   }
+  /* every value's rows: count x P, count u for a routed value, k for a value of lag k >= 1 and 1 for every other, after
+     the claim's head (each term below 2^64 - 2^32, P below UINT32_MAX / block, so no sum wraps before the test) */
+  for(uint32_t j=0;j<given && rows<UINT32_MAX;j++){
+    const uint64_t copies=named[j]!=MESH_ABSENT?u:values[j].lag?values[j].lag:1;
+    rows+=copies*plan_blocks(m,values[j].section.bytes);
+  }
+  if(rows>=UINT32_MAX){status=ENOMEM;goto done;}
   plan_layout(&p);
   if((status=plan_place(&p)))goto done;
-  /* every value's rows: count x P, count u for a routed value and 1 for every other, after the claim's head */
-  for(uint32_t j=0;j<given;j++)
-    rows+=(named[j]!=MESH_ABSENT?(uint64_t)u:1)*plan_blocks(m,values[j].section.bytes);
-  if(rows>=UINT32_MAX || p.window*m->block>=UINT32_MAX || p.outside*m->block>=UINT32_MAX){status=ENOMEM;goto done;}
+  if(p.window*m->block>=UINT32_MAX || p.outside*m->block>=UINT32_MAX){status=ENOMEM;goto done;}
   if(!(p.entry=malloc((p.entries+1)*sizeof *p.entry))){status=ENOMEM;goto done;}
   plan_walk(&p);
 
@@ -894,12 +924,13 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
      first page, plan_item_page), named clean as mesh_section_create named them (no device, no owner, no publication:
      every field of a row's publication 0 but its range's words below); a `state` 1 value's bytes 0 once, its one copy
      (D3: a local invariant outside the window alone); a routed value's copies its demand's routed value's here
-     (plan_page), a relay's value no row's */
+     (plan_page), a relay's value no row's; a value of lag k >= 1's copy c its item local x u + other + c (its k items
+     in copy order), its rows bound to that item's pages, every row's publication 0 as every local value's (R4) */
   uint32_t row=p.claim.rows.first+1;
   for(uint32_t j=0,other=0;j<given;j++){
     struct mesh_value *v=values+j;
     const struct plan_demand *d=named[j]!=MESH_ABSENT?p.demand+p.of[named[j]]:NULL;
-    const uint32_t P=(uint32_t)plan_blocks(m,v->section.bytes),copies=d?u:1;
+    const uint32_t P=(uint32_t)plan_blocks(m,v->section.bytes),copies=d?u:v->lag?v->lag:1;
     v->section=(struct mesh_section){row,P*m->block,v->section.bytes,copies,P};
     for(uint32_t r=row;r<row+copies*P;r++){
       atomic_store_explicit(&mesh_page(m)[r].device,0,memory_order_relaxed);
@@ -910,11 +941,11 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
       memset(mesh_publication_at(m,r),0,(size_t)m->target_stride);
     }
     for(uint32_t c=0;c<copies;c++){
-      const uint32_t page=d?plan_page(&p,d->value,c,0):plan_item_page(&p,u*p.local+other,v->wire);
+      const uint32_t page=d?plan_page(&p,d->value,c,0):plan_item_page(&p,u*p.local+other+c,v->wire);
       mesh_backing_bind(context,row+c*P,P*m->block,page,c);
       if(v->state)memset(mesh_at(m,page),0,v->section.bytes);
     }
-    if(!d)other++;
+    if(!d)other+=copies;
     /* a received range's first row: its pages, its copy-0 group and count word, the state section; a source range's:
        its supplied word, the one target a host or GPU producer stores into */
     struct mesh_publication *publication=mesh_publication_at(m,row);
@@ -934,8 +965,8 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
 
   /* 4. `hops` 0 (release), and a release fence that keeps every write below after it (review R1 round 2, S2: a release
      store orders what precedes it, not what follows), so a bridge that read `hops` and `plan`, then the entries, then
-     them again after an acquire fence (mesh-flow.c link_prepare, plan_cancel) sees a change wherever it read a torn
-     list; then `plan` woken, so the ports' progress threads, which wait on it, let the previous plan go now */
+     them again after an acquire fence (mesh-flow.c: its load of a plan, and plan_cancel) sees a change wherever it
+     read a torn list; then `plan` woken, so the bridge, which waits on it, lets the previous plan go now */
   atomic_store_explicit(&m->hops,0,memory_order_release);
   atomic_thread_fence(memory_order_release);
   os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
@@ -974,10 +1005,10 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
     mesh_claim_close(context,generation,1);
     goto done;
   }
-  /* 7. `hops`; the bridge's progress threads watch `plan` with bounded waits (CONTRACT.md "Wave-2 interfaces") */
+  /* 7. `hops`; the bridge watches `plan` with bounded waits (CONTRACT.md "Wave-2 interfaces") */
   atomic_store_explicit(&m->hops,entries,memory_order_release);
   os_sync_wake_by_address_all(&m->plan,sizeof m->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-  /* 8. every earlier claim of this client closed, released by the bridge once no port holds its generation (D10) */
+  /* 8. every earlier claim of this client closed, released by the bridge once it holds its generation no more (D10) */
   mesh_claim_close(context,generation,1);
 done:
   free(key);free(placed);free(named);free(p.demand);free(p.of);
