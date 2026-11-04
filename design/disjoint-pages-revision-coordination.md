@@ -506,7 +506,7 @@ For each recorded dispatch that reads a received operand, in each repetition t:
   failed value 0xfffffffe, the 2^23 bounds and every UINT64_MAX store. A local input (a producer on the same queue) is
   ordered by the command order and the level barrier, and reads with a plain load.
 
-### Publications (metal_recording.m, owner 11; metal_native, owner 12)
+### Publications (metal_recording.m, owner 9; the native partials owner 11, with metal_native, owner 12)
 
 - A sent range's release: after its producer's last write of execution t, one system-scope release fence and an atomic
   add of 1 to the range's supplied word (D9), through a binding of the state buffer at the word's offset (no literal
@@ -581,10 +581,12 @@ work proceeds.)
 7. mesh-link.c, mesh-records.c, mesh-stat.c, mesh-bridge.h: the layout's compare, the release's callers, any read of a
    vacated field.
 8. mesh-metal.{h,m}: the transport over the state section, inputs and publications as offsets, the waiter, the status.
-9. metal_recording.{h,m}, first: capture, values, place, replay; the pool gone; bindings in place of literals.
+9. metal_recording.{h,m}, first: capture, values, place, replay; the pool gone; bindings in place of literals;
+   publications by the supplied word and the restoring counter.
 10. metal_recording.m, second: the masked first pass, the compaction, the later pass, the status, MetalReplayEncode and
-    its waits; the lane waits gone.
-11. metal_recording.m, third: publications by the supplied word, the restoring counter, the native partials.
+    its waits; both lane waits in mesh_read_N gone (remote and local).
+11. metal_recording.m, third: the native partials (data and state values; line 1546's memset gone), and the file read
+    whole against the four rules.
 12. metal_native.{h,m}, native_projection.metal, tools/native_bench.m: the K-part buffer's counters reported apart.
 13. tools/e2b_replay.m, first: capture, plan, bind; values, declared transfers and data edges; the host inputs into
     placed pages; the zeroing and the refusals gone.
