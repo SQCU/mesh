@@ -38,11 +38,13 @@ static inline struct mesh_range mesh_arena_range(const struct hdr *m,int wire){
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 /* the region attached: the client's compare-and-swap on hdr `client`, its start beside it (hdr `client_start`), the
-   region's version read again after the swap, and the program's one claim (struct mesh_ctx `rows`, `window`, `local`):
-   the widest run of free rows and, of the arena's free pages, the widest block-aligned run in the registered window and
-   the widest outside it, none of them a page or row a retired client's claim still holds; 0, EINVAL where the region
-   is not of this layout or expired as the client was taken (it is let go), EADDRINUSE where another live client holds
-   it, ENOMEM where fewer than the claim's two head rows are free (it is let go), else the errno */
+   region's version read again after the swap, a retired client's claim released (mesh_retired_release, waited for
+   while a port's `prepared` holds a plan, bounded by MESH_PLATFORM_NS), and the program's one claim (struct mesh_ctx
+   `rows`, `window`, `local`): the widest run of free rows and, of the arena's free pages, the widest block-aligned run
+   in the registered window and the widest outside it, none of them a page or row a retired client's claim still holds;
+   0, EINVAL where the region is not of this layout or expired as the client was taken (it is let go), EADDRINUSE where
+   another live client holds it, ENOMEM where fewer than the claim's two head rows are free (it is let go), else the
+   errno */
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 /* design/algorithm-sources.md#programtensor */

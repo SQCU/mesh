@@ -13,7 +13,7 @@ static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){ret
 /* design/algorithm-sources.md#programtensor */
 /* 2026-11-03, design/disjoint-pages-change-request.md, Appendix A, A3 "What it is" and A4 (sub-assignment 7): a
    section's rows and pages are no longer taken at its call (main's form: mesh_rows_alloc, then mesh_arena_alloc in the
-   window or out of it, first fit, with the rows' MESH_ROW_HOT and owner words for their reclaim).  Its rows are the
+   window or out of it, first fit, with a row plane and owner words for their reclaim).  Its rows are the
    next of the program's claim (mesh-dataflow.h struct mesh_ctx `row_cursor`), cleaned as mesh_rows_alloc cleaned them;
    a `wire` 1 section's pages are the plan's allocator's, inside the claim's `window` (mesh-collective.h mesh_plan), so
    none is bound here; a `wire` 0 section's are the next of the claim's `local` run (`local_cursor`), bound and touched

@@ -117,6 +117,8 @@ static int mesh_claim(struct mesh_ctx *c){
   return 0;
 }
 
+static int mesh_holding_retained(struct hdr *);
+
 int mesh_attach(struct mesh_ctx *c,const char *name){
   if(c->M) return 0;
   if(!name) name=getenv("MESH_REGION");
@@ -149,11 +151,19 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
      client's compare-exchange (seq_cst): a client the heartbeat's read of the holders missed reads it expired here,
      and is let go */
   if(__atomic_load_n(&memory->version,__ATOMIC_SEQ_CST)!=MESH_VERSION){mesh_detach(c);return EINVAL;}
-  /* a retired claim no port's request names is released before this one is taken, as the bridge's turn would release
-     it (mesh-records.c clients_turn), so a client attached just after another let go claims the pages that one held:
-     the bridge's turn may read that client's ports before they have let its plan go, and look again only
-     MESH_PAUSE_NS later.  The same release, by its rule (mesh_holding_retained) */
-  mesh_retired_release(memory);
+  /* A retired claim is released before this one is taken, as the bridge's turn would release it (mesh-records.c
+     clients_turn), by the same function and its rule (mesh_holding_retained): a claim takes every free row and page, so
+     a client attached just after another let go (back-to-back runs, the hourly) would otherwise find that one's claim
+     still held, fewer than two rows free, and ENOMEM.  While a port's `prepared` still holds a plan (this client has
+     made none yet, so it is the retired client's, or a lost port's until its child is reaped) the claim is kept; the
+     ports let it go on their next pass once the client word changes (mesh_retire wakes them on hdr `plan`).  So a wait,
+     bounded by MESH_PLATFORM_NS from its start (review 12, finding 3): a spin, as mesh_transfers_start's (`prepared` is
+     stored with no wake), on the ports alone, the release called again once none holds a plan.  Past the bound the
+     claim takes what is free, ENOMEM where that is fewer than two rows: the retired claim stays held while a port's
+     requests may name its pages */
+  const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
+  while(mesh_retired_release(memory) && clock_gettime_nsec_np(CLOCK_MONOTONIC)<deadline)
+    while(mesh_holding_retained(memory) && clock_gettime_nsec_np(CLOCK_MONOTONIC)<deadline);
   const int claimed=mesh_claim(c);
   if(claimed){mesh_detach(c);return claimed;}
   return 0;
@@ -455,6 +465,11 @@ int mesh_transfers_start(struct mesh_ctx *context){
    no wake */
 int mesh_plan_erased(struct mesh_ctx *context,uint64_t generation){
   if(!generation)return 0;
+  /* Dekker's pair with a port's data path (review 12, finding 1): the caller has stored hdr `hops` 0, and a port stores
+     its `prepared` before its last read of `hops`, a seq_cst fence between (mesh-flow.c).  With this fence between the
+     caller's store and the reads below, either the port reads `hops` 0 and withdraws, or this wait reads its
+     `prepared`; without it a port could begin serving the erased plan after this returned */
+  atomic_thread_fence(memory_order_seq_cst);
   struct hdr *m=context->M;
   const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
   const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
