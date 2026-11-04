@@ -122,12 +122,11 @@ uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,str
    table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else.  `hops`: the page lists' room
    (struct mesh_hop); absent (0), `rows`.  `links`: the link table's ports (MESH_PORTS, mesh-link.c).
    The areas, in order, each at a page boundary and owning the rest of its last page: the row planes (MESH_PLANES,
-   MESH_ROW_OWN alone), the arena bitmap, the page table, the buffers, the link table, the publications, the page lists (`hops` entries), the
-   supplied words (`word_capacity`, 8 bytes a hop: a plan's supplied words, one a release an execution, are at most
-   its send hops), the landed list (`landed_capacity`, 40 bytes a hop: a plan's landed records, `landed_stride` bytes
-   an execution, are at most 32 bytes a hop where an execution has a hop), the bridge's pages (struct
-   mesh_bridge_pages), the map's records (`map_room` = MESH_MAP_ROOM of struct mesh_record at `map_off`), then the
-   arena at a block boundary. */
+   MESH_ROW_OWN alone), the arena bitmap, the page table, the buffers, the link table, the publications, the page lists
+   (`hops` entries of struct mesh_hop, 48 bytes each), the bridge's pages (struct mesh_bridge_pages), the map's records
+   (`map_room` = MESH_MAP_ROOM of struct mesh_record at `map_off`), then the arena at a block boundary.  A plan's state
+   (struct mesh_state: its phases, counts, supplied words and status) is no area of the layout: mesh_plan places it in
+   the arena with the plan's other values (hdr `state`). */
 /* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", item
    2, and Appendix A, A3): the supplied words and the landed list are areas of the layout, where 107's words were a
    section each plan allocated outside the window (mesh-dataflow.h `send_off`; mesh.h struct mesh_hop's note), and the
@@ -154,8 +153,6 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
   h->hop_off=at; h->hop_capacity=g.hops; at+=(uint64_t)g.hops*sizeof(struct mesh_hop); at=(at+pgsz-1)/pgsz*pgsz;
-  h->word_off=at; h->word_capacity=(uint64_t)g.hops*MESH_WORD_STRIDE; at+=h->word_capacity; at=(at+pgsz-1)/pgsz*pgsz;
-  h->landed_off=at; h->landed_capacity=(uint64_t)g.hops*40; at+=h->landed_capacity; at=(at+pgsz-1)/pgsz*pgsz;
   h->bridge_off=at; at+=sizeof(struct mesh_bridge_pages); at=(at+pgsz-1)/pgsz*pgsz;
   atomic_store_explicit(&h->map_off,at,memory_order_relaxed); h->map_room=MESH_MAP_ROOM;
   at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;

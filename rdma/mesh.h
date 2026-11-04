@@ -19,8 +19,14 @@
    canonical path", items 1-3): hdr `depth` and `hop_stride` left vacant (`vacant7`, `vacant8`); the supplied words, the
    landed list and the map's records laid out as their own areas (`word_off`, `landed_off` and their room appended,
    `map_off` the layout's with `map_room`); struct mesh_hop's `forwards` gone and `position` its `mask`; struct
-   mesh_publication's `landed`; struct mesh_cancel_range's `stride` */
-#define MESH_VERSION 108u
+   mesh_publication's `landed`; struct mesh_cancel_range's `stride`.  109: the plan's state section (struct
+   mesh_state at hdr `state`, appended) in place of the layout's supplied words and landed list (hdr `word_off` ..
+   `landed_stride` left vacant, `vacant9` .. `vacant13`, and `executions` `vacant14`), the receives' 2-bit phases and
+   counts, struct mesh_hop's `field`, `count` and `pages` (48 bytes), struct mesh_publication's `pages`, `phases`,
+   `count` and `state`; the cancel word, mesh_cancel and the GPU's publication records gone
+   (design/disjoint-pages-change-request.md, Appendix C, C3 and C4; design/disjoint-pages-revision-coordination.md,
+   "The region") */
+#define MESH_VERSION 109u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -54,32 +60,21 @@ _Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_e
   offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16,"mesh_page_entry");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
-/* design/prepared-machine.md#M04 */
-struct mesh_send {
-  _Alignas(128) _Atomic uint64_t ready;
-  uintptr_t pair;
-  _Alignas(32) struct ibv_sge span;
-  struct ibv_send_wr request;
-};
-_Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
-  offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 &&
-  offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M10 */
-/* a row's publication, which the plan call writes on instance 0's rows of a declared section (108,
-   design/disjoint-pages-coordination.md, "The plan's words", its rows' publications): a destination page's `landed`
-   its bit b in its execution's landed record, `device_input` hdr `landed_off` (execution 0's record) and
-   `device_stride` hdr `landed_stride`; a source range's first row's `sends` its targets, `targets[i]` {the region
-   offset of mesh_supplied(m, r, 0), count 1, stride 1} and `argument` MESH_SUPPLIED, execution t's word at `stream` +
-   t x MESH_WORD_STRIDE (struct mesh_hop, "Supplied words" and "The landed list").  `landed` takes the padding at
-   offset 4 (2026-11-03, sub-assignment 1), so no field moves */
-struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t landed; _Atomic uint64_t argument; uint64_t device_input,device_stride; struct mesh_target targets[]; };
-_Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 && offsetof(struct mesh_publication,landed)==4 && offsetof(struct mesh_publication,argument)==8 && offsetof(struct mesh_publication,device_input)==16 && offsetof(struct mesh_publication,device_stride)==24 && offsetof(struct mesh_publication,targets)==32,"mesh_publication");
-/* design/prepared-machine.md#M13 */
-struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argument,padding[2]; };
-_Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
+/* a row's publication, which mesh_plan writes on every row it claims (design/disjoint-pages-revision-coordination.md,
+   "The region"): every field 0 but, on a received range's first row (copy 0's first row), `pages` its pages P,
+   `phases` the region offset of its copy-0 phase group (copy c's at phases + c x mesh_group_bytes(P)), `count` the
+   region offset of its copy-0 count word (copy c's at count + 8 c) and `state` hdr `state`; on a source range's first
+   row, `sends` 1, `targets[0]` {stream: the region offset of its supplied word, count 1, stride 0} and `state` hdr
+   `state` (struct mesh_state) */
+struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t pages; uint64_t phases,count,state; struct mesh_target targets[]; };
+_Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 &&
+  offsetof(struct mesh_publication,sends)==0 && offsetof(struct mesh_publication,pages)==4 &&
+  offsetof(struct mesh_publication,phases)==8 && offsetof(struct mesh_publication,count)==16 &&
+  offsetof(struct mesh_publication,state)==24 && offsetof(struct mesh_publication,targets)==32,"mesh_publication");
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
 /* the bridge-side region types (the map's records and cables, the link table, the layout) are mesh-map.h's, which no
    client includes (reviews R1, C1 and R2, B2; design/page-queue-change-request.md, "Queue pairs and links belong to the
@@ -194,12 +189,28 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    clears `prepared` where either moved, so no port begins serving a plan the plan call has found erased.  A plan
    whose entries' `serial` is not `map_serial` when it is loaded is refused: the call fails by error and its caller
    plans again on the map as it is. */
-struct mesh_hop { uint32_t page,node,direction,padding; uint64_t word,mask,serial; };
-_Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,mask)==24,"mesh_hop");
-/* the value a producer stores into a supplied word (struct mesh_hop, "Supplied words") */
-#define MESH_SUPPLIED UINT64_C(1)
-/* the bytes between one supplied word's consecutive executions (mesh_supplied) */
-#define MESH_WORD_STRIDE 8u
+struct mesh_hop { uint32_t page,node,direction,field; uint64_t word,count; uint32_t pages,padding; uint64_t serial; };
+_Static_assert(sizeof(struct mesh_hop)==48 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,count)==24 &&
+  offsetof(struct mesh_hop,pages)==32 && offsetof(struct mesh_hop,serial)==40,"mesh_hop");
+/* the bytes one lane loads of the phase list: 64 receives' phases (struct mesh_state `phases`) */
+#define MESH_LANE_BYTES 16u
+/* the phase code, Gray 00 01 11 10 (struct mesh_hop's note, "Phases") */
+static inline uint32_t mesh_phase(uint64_t k){ k&=3; return (uint32_t)(k^(k>>1)); }
+/* the bytes of one phase group: a received range of `pages` pages in one copy, whole lanes */
+static inline uint64_t mesh_group_bytes(uint32_t pages){ return ((uint64_t)pages+63)/64*MESH_LANE_BYTES; }
+/* the GPU's alone (struct mesh_hop's note, "The state section") */
+struct mesh_status { _Atomic uint32_t behind,ahead,first,padding; };
+_Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahead)==4 &&
+  offsetof(struct mesh_status,first)==8,"mesh_status");
+/* the start of the plan's state section, at hdr `state` (struct mesh_hop's note, "The state section"); `phases`,
+   `counts`, `supplied` and `status` region offsets */
+struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases; uint64_t phases,counts,supplied,status;
+  _Atomic uint64_t executions; uint64_t padding; };
+_Static_assert(sizeof(struct mesh_state)==64 && _Alignof(struct mesh_state)==64 && offsetof(struct mesh_state,receives)==4 &&
+  offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
+  offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
+  offsetof(struct mesh_state,supplied)==32 && offsetof(struct mesh_state,status)==40 &&
+  offsetof(struct mesh_state,executions)==48 && offsetof(struct mesh_state,padding)==56,"mesh_state");
 
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
@@ -221,8 +232,8 @@ struct hdr {
   uint32_t vacant1,wire_pages;
   /* the ring depth's bytes until 108 (the note above), never read or written */
   uint32_t vacant7;
-  /* the page lists: the executions of the plan written (struct mesh_hop), main's invocations */
-  uint32_t executions;
+  /* the plan's executions until 109 (struct mesh_hop's note), never read or written */
+  uint32_t vacant14;
   uint64_t vacant2;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,vacant3,target_off,vacant4,vacant5,data_off,length;
   uint64_t vacant6,target_stride;
@@ -255,48 +266,27 @@ struct hdr {
      been (`idle_since`, the wall clock in ns; 0 while any is); `stopping` stored 0 as the region opens */
   uint64_t boot;
   _Atomic uint64_t health,busy,idle_since,stopping;
-  /* 108 (design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", items 2 and 3; Appendix A,
-     A3): the layout's (mesh-map.h mesh_layout) supplied words, `word_capacity` bytes at `word_off` (mesh_supplied),
-     its landed list, `landed_capacity` bytes at `landed_off` (mesh_landed_record), and the map's room, `map_room`
-     records at `map_off`; and the plan's `landed_stride`, the bytes of each of its landed records, which the plan call
-     writes with `executions` once the previous plan is erased, before it binds its rows and zeroes and writes its words
-     through them, and before `hops` (struct mesh_hop, "Writing a plan") */
-  uint64_t word_off,word_capacity,landed_off,landed_capacity,landed_stride,map_room;
+  /* the supplied words' and landed list's area and room and the landed records' stride until 109 (struct mesh_hop's
+     note), never read or written; the map's room, `map_room` records at `map_off` (mesh-map.h mesh_layout) */
+  uint64_t vacant9,vacant10,vacant11,vacant12,vacant13,map_room;
+  /* 109: the region offset of the current plan's state section (struct mesh_state, mesh_plan_state), written by
+     mesh_plan before `hops`; 0 none */
+  _Atomic uint64_t state;
 };
-/* every field at its 106 offset, the 108 fields after them (the vacant bytes' notes above struct hdr) */
+/* every field at its 106 offset, the 108 fields after them, the 109 field after those (the vacant bytes' notes above
+   struct hdr) */
 _Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)==36 && offsetof(struct hdr,planes_off)==56 &&
   offsetof(struct hdr,target_off)==104 && offsetof(struct hdr,data_off)==128 && offsetof(struct hdr,target_stride)==152 &&
   offsetof(struct hdr,client)==160 && offsetof(struct hdr,hop_off)==224 && offsetof(struct hdr,map_serial)==288 &&
   offsetof(struct hdr,bridge_off)==296 && offsetof(struct hdr,client_start)==304 && offsetof(struct hdr,stopping)==344 &&
-  offsetof(struct hdr,vacant7)==40 && offsetof(struct hdr,executions)==44 && offsetof(struct hdr,vacant8)==240 &&
+  offsetof(struct hdr,vacant7)==40 && offsetof(struct hdr,vacant14)==44 && offsetof(struct hdr,vacant8)==240 &&
   offsetof(struct hdr,hops)==248 && offsetof(struct hdr,plan)==256 && offsetof(struct hdr,map_off)==272 &&
-  offsetof(struct hdr,word_off)==352 && offsetof(struct hdr,landed_stride)==384 && offsetof(struct hdr,map_room)==392 &&
-  sizeof(struct hdr)==400,"struct hdr: no field moves");
+  offsetof(struct hdr,vacant9)==352 && offsetof(struct hdr,vacant13)==384 && offsetof(struct hdr,map_room)==392 &&
+  offsetof(struct hdr,state)==400 && sizeof(struct hdr)==408,"struct hdr: no field moves");
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/prepared-machine.md#M07 */
 _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
-/* design/prepared-machine.md#M12 */
-struct mesh_cancel_range { _Alignas(32) uint64_t offset; uint64_t count,stride,padding; };
-struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t padding[7]; struct mesh_cancel_range ranges[]; };
-_Static_assert(sizeof(struct mesh_cancel_range)==32 && offsetof(struct mesh_cancel_range,count)==8 && offsetof(struct mesh_cancel_range,stride)==16 &&
-  sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
-/* design/algorithm-sources.md#meshresult */
-/* design/prepared-machine.md#M12 */
-/* range `link` of a cancellation: for j < count, the word at region offset `offset` + j x `stride` stored UINT64_MAX
-   (release) where it reads 0, and `requested` set.  `stride` from 108 (2026-11-03, sub-assignment 1), where the words
-   were consecutive: the program's one range is every execution's cancel word of the landed list, {landed_off,
-   executions, landed_stride} (struct mesh_hop, "Cancellation") */
-static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t link){
-  const struct mesh_cancel_range range=cancel->ranges[link];
-  for(uint64_t j=0;j<range.count;j++){
-    _Atomic uint64_t *word=(_Atomic uint64_t *)((char *)m+range.offset+j*range.stride);
-    if(!atomic_load_explicit(word,memory_order_relaxed)){
-      atomic_store_explicit(&cancel->requested,1,memory_order_release);
-      atomic_store_explicit(word,UINT64_MAX,memory_order_release);
-    }
-  }
-}
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M26 */
 static inline void mesh_control_notify(struct hdr *m){
@@ -333,16 +323,10 @@ static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct me
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
 /* the page lists: the plan's entries (struct mesh_hop), hdr `hops` of them at `hop_off` */
 static inline struct mesh_hop *mesh_hops(struct hdr *m){ return (struct mesh_hop *)((char *)m+m->hop_off); }
-/* the supplied word of release `release` (this node's release-th range it is the source of, in the plan's demand order)
-   in execution t: a release's words of every execution consecutive, MESH_WORD_STRIDE apart, at `word_off` (struct
-   mesh_hop, "Supplied words") */
-static inline _Atomic uint64_t *mesh_supplied(struct hdr *m,uint64_t release,uint64_t t){
-  return (_Atomic uint64_t *)((char *)m+m->word_off+(release*m->executions+t)*MESH_WORD_STRIDE);
-}
-/* execution t's landed record, `landed_stride` bytes at `landed_off`: its cancel word, then its receive hops' bits
-   (struct mesh_hop, "The landed list") */
-static inline _Atomic uint64_t *mesh_landed_record(struct hdr *m,uint64_t t){
-  return (_Atomic uint64_t *)((char *)m+m->landed_off+t*m->landed_stride);
+/* the current plan's state section (struct mesh_state at hdr `state`, acquire), NULL where no plan is written */
+static inline struct mesh_state *mesh_plan_state(struct hdr *m){
+  const uint64_t at=atomic_load_explicit(&m->state,memory_order_acquire);
+  return at?(struct mesh_state *)((char *)m+at):NULL;
 }
 /* tag pre-return-20261103 rdma/mesh.h mesh_records and mesh_map_whole, verbatim; mesh_records moved to mesh-map.h
    (review R1, C1) */
