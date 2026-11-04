@@ -61,8 +61,8 @@ uint32_t mesh_retired_release(struct hdr *);
    `serial` is the map's (hdr `map_serial`, the one a plan is made against: struct mesh_hop `serial`); `count` the map's
    nodes, at most MESH_NODES_MOST; `node[i]` the node id of index i, a node's index its place in ascending node-id order
    among the map's records; `self` this node's index; `capacity[i][j]` == `capacity[j][i]` the bits a second of the
-   cables between i and j, summed: the pair's join (mesh_joined), the fewer of the two records' cable counts, each at
-   the least bandwidth either reports; 0 where none joins them. */
+   cables between i and j, summed, each a cable both records list (mesh_cables) at the lesser of its two bandwidths;
+   0 where none joins them. */
 #define MESH_NODES_MOST 32
 struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NODES_MOST];
                     uint64_t capacity[MESH_NODES_MOST][MESH_NODES_MOST]; /* bits/s, a pair's cables summed; 0 none */ };
@@ -73,7 +73,15 @@ struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NOD
 int mesh_nodes_read(struct mesh_ctx *,struct mesh_nodes *);
 /* tag pre-return-20261103 rdma/mesh-dataflow.h mesh_joined, verbatim (the bridge's map reads it: mesh-records.c; the
    collective reads mesh_nodes_read, which sums a pair's capacity through the same join) */
-/* the one join of two nodes' records: the cables each one's bridge reaches the other over, the fewer of the two ends'
-   counts (0: none); *beta 8e9 over the least bandwidth either reports of them (0 where neither reports one) */
+/* the one join of two nodes' records: the cables each one's bridge reaches the other over (both records list them,
+   mesh_cables), 0 where none; *beta 8e9 over the least bandwidth either reports of them (0 where neither reports one) */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
+/* The bridge's per-cable join (mesh-flow.c link_prepare, "The rule both ends compute"), the one matching of two
+   records' cables that mesh_joined and mesh_nodes_read read too: the cables a and b both list for each other, ports
+   matching both ways, each `key` (the lower node id's port index, the higher's), sorted by key, `bandwidth` and `qps`
+   each the lesser of the two records'; `out` holds MESH_PORTS; their count.  No client API gives a cable: hidden, so
+   libmesh.dylib does not export it, and the bridge's image, built from mesh-dataflow.c, calls it */
+struct mesh_cable { uint32_t key[2],qps; uint64_t bandwidth; };
+__attribute__((visibility("hidden")))
+uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,struct mesh_cable *out /* room MESH_PORTS */);
 #endif
