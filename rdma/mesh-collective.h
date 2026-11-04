@@ -21,10 +21,22 @@
      on a local MESH_INVARIANT value outside the window (wire 0, named by no declared transfer): the plan never writes
      a routed value's pages, and state shares pages with nothing (2026-11-04, review 15's finding 3, the coordinator's
      ruling).
+   - In: `lag` (design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-coordination.md, R4; M.
+     Lam, Software pipelining, PLDI 1988: modulo variable expansion, a value live across k executions gets k copies).
+     `lag` 0: as before (one copy; a routed value's u).  `lag` k >= 1: the value's instance of execution t is written by
+     a producer the program orders by an event, not by its own order (a host producer, D.3.3: "The program declares the
+     host's lag, and the allocator gives them copies by it, as modulo variable expansion does for any value").  The
+     value must be MESH_EXECUTION, wire 0, state 0, and named by no declared transfer (EINVAL otherwise); its `begin`
+     and `end` are not read.  The plan gives it k copies: `section.count` k, `stride` P, execution t's instance copy
+     t mod k at mesh_section_address(section, t mod k).  Each copy is an item of its own that interferes with every
+     other item (its write is ordered by no edge of the template, so it shares no page with anything).  The program's
+     side of the order, which the plan neither knows nor checks: copy t mod k is written for execution t only after
+     execution t - k has ended, and execution t reads it only after that write.
    - Out: `section`, every field: `first` its first row, `pages` P x block (P its blocks), `bytes` as given, `count` its
-     copies (u for a routed value, 1 for every other), `stride` P.  Copy c's rows are first + c x P + k, k < P, and its
-     first byte mesh_section_address(section, c).  A program binds execution t of a routed value to copy t mod count.
-     Its addresses are known after the plan, never before.
+     copies (u for a routed value, k for a value of `lag` k >= 1, 1 for every other), `stride` P.  Copy c's rows are
+     first + c x P + k, k < P, and its first byte mesh_section_address(section, c).  A program binds execution t of a
+     routed value to copy t mod count, and execution t of a value of `lag` k to copy t mod k.  Its addresses are known
+     after the plan, never before.
 
    Declared transfers (struct mesh_declared): an operand range from rank `source` to rank `destination`, ranks the
    map's indices (mesh_nodes_read: a node's place in ascending node-id order).  Every rank passes the same declared
@@ -87,9 +99,14 @@
    found before anything is written. */
 enum { MESH_INVARIANT, MESH_EXECUTION };
 /* a value at this node.  In: section.bytes (> 0), kind, wire, state (1 only on a local MESH_INVARIANT value, wire 0),
-   and for a local MESH_EXECUTION value its first and last positions on this node's own program order in one
-   execution, begin <= end.  Out: section, every field */
-struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,padding; };
+   for a local MESH_EXECUTION value of lag 0 its first and last positions on this node's own program order in one
+   execution, begin <= end, and lag: 0 for a value the program's own order writes (one copy; a routed value's u), k >= 1
+   for one a producer the program orders by an event writes (a host input: MESH_EXECUTION, wire 0, state 0, named by no
+   declared transfer, begin and end not read; k copies, execution t's at copy t mod k, written for t only after
+   execution t - k has ended and read by t only after that write: the program's order, which the plan does not check;
+   design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-coordination.md, R4).  Out: section,
+   every field */
+struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag; };
 /* one declared transfer, the same at every rank but `value`: the index in `values` of this node's value of the range
    where this node is its source or a destination, else MESH_ABSENT; `bytes` the range's bytes at every rank */
 struct mesh_declared { uint32_t source,destination,identity,order,value,padding; size_t bytes; };
