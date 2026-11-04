@@ -52,7 +52,8 @@
    - execution t's landed record, mesh_landed_record(m, t), hdr `landed_stride` bytes: word 0 its cancel word (0, or
      UINT64_MAX once cancelled, which three writers store: the bridge, for a receive not landed as it ends the plan,
      mesh-flow.c link_close and plan_cancel; the program's cancellation, mesh.h mesh_cancel over every execution's
-     cancel word; and the GPU lane whose wait on the step reaches its bound, metal_recording.m mesh_read_N), then bit b
+     cancel word; and the GPU lane whose wait on a step reaches its bound, which stores it into the cancel word of that
+     step and of every later one, records t .. executions - 1, metal_recording.m mesh_read_N), then bit b
      for the b-th receive hop of the execution in list order (word 1 + b / 64,
      bit b % 64), which its landing ORs in (release) and nothing clears while the plan stands.  A destination's pages of
      one range are one run of bits [first, first + P).  The landed list lies in its own section of the region, beside
