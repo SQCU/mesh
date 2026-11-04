@@ -1,49 +1,51 @@
 #ifndef MESH_METAL_H
 #define MESH_METAL_H
 #include "mesh-call.h"
-/* design/prepared-machine.md#M07 */
-/* the plan's two areas for the GPU (mesh.h struct mesh_hop, "Supplied words" and "The landed list"), wrapped once:
-   `publication` the supplied words' area (hdr word_off, word_capacity), `inputs` the landed list's area (hdr landed_off,
-   landed_capacity); `cancel` the program's cancellation of its executions */
-struct mesh_metal_transport { void *publication,*inputs; struct mesh_cancellation *cancel; };
-/* design/disjoint-pages-change-request.md, "Claude's proposal: the canonical path", item 4: a received range's input,
-   read by mask from the landed list: `landed` the landed list's buffer (the transport's `inputs`, retained), `offset`
-   the byte offset in it of execution 0's landed record and `stride` hdr landed_stride, so execution t's record is at
-   offset + t x stride; [first, first + count) the range's bits in a record (bit b is bit b % 64 of word 1 + b / 64; word
-   0 the execution's cancel word).
-   2026-11-03, sub-assignment 9: reversing {completion, offset, stride}, one input a page, its own landed word at a
-   256-byte cell an execution (hdr hop_stride).  Why: every reading thread fenced one word a page for a landing the
-   bridge already learns from its completion (the change request, "The turns").  What must stay: execution t's word at
-   offset + t x stride of one buffer, as the recorder binds an input. */
-struct mesh_metal_input { void *landed; uint64_t offset,stride; uint32_t first,count; };
-/* design/prepared-machine.md#M10 */
-struct mesh_metal_publication { void *records,*completion; uint32_t count,stride; };
-/* design/prepared-machine.md#M28 */
-/* a range's countdown of one invocation, MESH_WORD_STRIDE bytes, so the direct publication binds the statuses and the
-   supplied words at one per-execution stride.
-   2026-11-03, sub-assignment 9: reversing the 256-byte, 128-aligned cell (the size of struct mesh_send, the plan's
-   hop_stride), which the plan's cells set.  Why: the cells are gone (the change request, proposal item 3) and a
-   supplied word's executions are MESH_WORD_STRIDE apart (mesh.h mesh_supplied).  What must stay: sizeof this struct is
-   the publication's `stride`. */
-struct mesh_output_status { uint32_t remaining,padding; };
-_Static_assert(sizeof(struct mesh_output_status)==MESH_WORD_STRIDE,"M28");
-_Static_assert(sizeof(struct mesh_metal_publication)==24,"prepared publication binding");
-_Static_assert(sizeof(struct mesh_metal_transport)==24,"prepared Metal transport");
-_Static_assert(sizeof(struct mesh_metal_input)==32,"prepared numerical input");
-/* design/algorithm-sources.md#resident-metal */
-/* the supplied words' area and the landed list's area wrapped for the GPU, and the program's cancellation: one range,
-   every execution's cancel word ({landed_off, executions, landed_stride}); EINVAL where no plan was ever written (hdr
-   `plan` 0) */
-int mesh_metal_transport_create(struct mesh_ctx *,void *,struct mesh_metal_transport *);
-/* design/algorithm-sources.md#resident-metal */
-/* the input of a declared destination section (mesh-collective.h mesh_plan, its count the plan's executions): its
-   range's bit run, from instance 0's rows' publications; EINVAL where a page has no receive or the bits are not one
-   run */
-int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,struct mesh_metal_input *);
-/* design/algorithm-sources.md#resident-metal */
-/* the publication of `ranges` source sections: records relative to the supplied words' buffer, `stride`
-   MESH_WORD_STRIDE; with `invocations`, the statuses (struct mesh_output_status), one a range and invocation */
-int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_section *,uint32_t,uint32_t,struct mesh_metal_publication *);
-/* design/algorithm-sources.md#resident-metal */
+/* The GPU's side of the plan's words (design/disjoint-pages-change-request.md, Appendix C, C3.1, C3.2, C3.6 and C3.7;
+   design/disjoint-pages-revision-coordination.md, "The GPU's side of the plan's words", D1, D2 and D7).
+   2026-11-04, sub-assignment 8: reversing sub-assignment 9's 2026-11-03 forms: the transport's two layout areas (the
+   supplied words, hdr word_off, and the landed list, hdr landed_off) and the program's cancellation (`cancel`, its
+   cancel words stored UINT64_MAX by mesh_cancel); an input's landed list retained with its execution records at
+   offset + t x stride and its range's bit run; the publication's records (struct prepared_publication) and statuses
+   (struct mesh_output_status, one a range and invocation) in sections laid out at the call (mesh_section_create).  Why:
+   the areas and the cancel word are gone (mesh.h 109); the plan's state section is its own pages, placed by the plan
+   (C3.2, C3.4); a receive's state is a 2-bit phase a copy and its range's count a copy (C3.7, D1); cancellations arrive
+   on the counts, and a stop is mesh_metal_waits_stop (C3.1); the recorder binds a supplied word itself and raises it by
+   one (D9); its restoring counter replaces the statuses (the contract, "Publications").  What must stay: the plan's
+   words wrapped once, by address, with no copy; one input a received range and one supplied word a source range, as
+   byte offsets in that one buffer; nothing here creates a section. */
+/* the plan's state section wrapped once for the GPU: `state` an MTLBuffer over its pages (no copy), `words` its struct
+   mesh_state, `offset` its region offset (hdr state), `bytes` its length; EINVAL where no plan is written */
+struct mesh_metal_transport { void *state; struct mesh_state *words; uint64_t offset,bytes; };
+int mesh_metal_transport_create(struct mesh_ctx *,void *device,struct mesh_metal_transport *);
 void mesh_metal_transport_destroy(struct mesh_metal_transport *);
+/* a received range's words, byte offsets in the transport's buffer: copy c's phase group at phases + c x group, its
+   count word at count + 8 c; pages P; copies u */
+struct mesh_metal_input { uint64_t phases,group,count; uint32_t pages,copies; };
+int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,struct mesh_metal_input *);
+/* a source range's supplied word, its byte offset in the transport's buffer */
+struct mesh_metal_publication { uint64_t supplied; };
+int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,
+                                   struct mesh_metal_publication *);
+/* the client's signalling of the queue's event (C3.1): a wait of `value` is met once the count word at byte offset
+   `count` of the transport's buffer reads at least `target`; the event (an id<MTLSharedEvent>) is set to each value once
+   every wait of that value or less is met, in order.  The thread waits on each count word with
+   os_sync_wait_on_address_with_timeout (OS_SYNC_WAIT_ON_ADDRESS_SHARED), woken by the bridge's arrivals; a value not
+   met within MESH_PLATFORM_NS of the last value set, or a stop, sets the event to `final` at once and ends */
+struct mesh_metal_wait { uint64_t count,target,value; };
+struct mesh_metal_waiter;
+int mesh_metal_waits_start(struct mesh_metal_transport *,void *event,const struct mesh_metal_wait *,size_t waits,
+                           uint64_t final,struct mesh_metal_waiter **);
+void mesh_metal_waits_stop(struct mesh_metal_waiter *);  /* async-signal-safe: one store and one wake */
+int mesh_metal_waits_end(struct mesh_metal_waiter *);    /* joined and freed: 0, ETIMEDOUT (a deadline), ECANCELED (a stop) */
+/* the GPU's status after the run (struct mesh_status): 0 where no pass failed; EPROTO where one found a field ahead;
+   else `cause` where it is not 0, else ENOLINK (the bridge cancelled); *first the first failed execution */
+int mesh_metal_status(struct mesh_metal_transport *,int cause,uint64_t *first);
+_Static_assert(sizeof(struct mesh_metal_transport)==32,"mesh_metal_transport");
+_Static_assert(sizeof(struct mesh_metal_input)==32 && offsetof(struct mesh_metal_input,group)==8 &&
+  offsetof(struct mesh_metal_input,count)==16 && offsetof(struct mesh_metal_input,pages)==24 &&
+  offsetof(struct mesh_metal_input,copies)==28,"mesh_metal_input: metal_recording.h struct MetalRemote");
+_Static_assert(sizeof(struct mesh_metal_publication)==8,"mesh_metal_publication");
+_Static_assert(sizeof(struct mesh_metal_wait)==24 && offsetof(struct mesh_metal_wait,target)==8 &&
+  offsetof(struct mesh_metal_wait,value)==16,"mesh_metal_wait: metal_recording.h struct MetalWait");
 #endif
