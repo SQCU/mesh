@@ -670,8 +670,13 @@ restatement of them.
    execution:
    - a supplied word holds the plan's generation and the execution, packed so it only rises, and a reader compares it;
    - a cancel word holds the first execution cancelled, compared, never `UINT64_MAX`;
-   - a landing XORs its bit, and the expected sense flips each time its record copy is reused (sense reversal). A copy
-     is set to its first sense once, when the allocator places it: u records, not one per execution;
+   - each page has a 2-bit phase in the dense landed list, Gray-coded 00, 01, 11, 10: PTX mbarrier's phase bit,
+     widened to two (C7). A landing flips one bit, one atomic XOR, never a carry into the next page's field. A reader
+     of execution t compares the field with the phase t expects: equal, landed; one behind, not yet; else a write ran
+     ahead of the allocator's order, an error. A list's fields start at 00 when the allocator places it, once per plan
+     as `mbarrier.init` is once per kernel, and the supplied and cancel words start the same way; nothing starts or
+     resets per execution, and no data page is written but by its producer or its landing. Each lane loads
+     `MESH_LANE_BYTES` = 16 bytes of the list, a compile-time constant;
    - the queue's event and the landed count only rise, and execution t waits for its own target.
 
 ### C4. What goes
@@ -690,6 +695,10 @@ restatement of them.
 - The GPU lane's write of `UINT64_MAX` into a step's landed record at its bound, and `mesh_seen`'s failed value.
 - mesh-collective.c's `memset` of every declared instance's pages before `hops` (lines 749–757), and its word-by-word
   zeroing of the supplied words and landed records (lines 759–763).
+- tools/e2b_replay.m's zeroing of every local operand's whole extent (line 627) and of every pooled intermediate
+  (line 840).
+- metal_recording.m's zeroing of the projection kernels' partial sums (line 1546); the arrival counters after them keep
+  their start, and native_projection.metal's last arrival restores the count, as mbarrier's phase completion reloads it.
 
 ### C5. Report item 3
 
@@ -804,3 +813,74 @@ restatement of them.
 >   - That removes the coordinator's reason for spinning: it said that with every step in one command buffer, a later
 >     dispatch would run immediately.
 >   - Concurrent compute encoders with explicit memory barriers let independent work fill the gap.
+
+### C7. Data pages need nothing
+
+**The operator:**
+
+> "- Data pages need nothing. " it is this specific requirement which should draw more attention from you. i would
+> suggest the ptx mbarrier phase bit and similar; if you want to rotate through an int2 of phases instead of the
+> reductive int1 (or bit) go for it, idc.
+> "- Every declared page of every execution "
+> yeah thats too much. i could tolerate a waste of bandwidth for absolute state tracking pages or indexings within them
+> but the other algorithsm review tells us we don't even *need* that. so we need to get rid of this entire class of
+> waste.
+> "- Command buffers. Within one command buffer, Metal already provides masking and its later pass without any lane
+> waiting:"
+> so all of the remarks the user wrote about masking and paging were foreshadowing the literal hardware's literal abi
+> and literal properties. the situation is worse than you realized: the session was with a world-class simd programmer
+> this entire time.
+> "Two things I haven't verified:
+> - Apple's per-lane load width. " idk compile time constant or pick something arbitrary and nonmaladaptive. i don't
+> care about this in fine grained detail rn compared to wasting bandwidth on every page use on prealgorithmic hunches.
+> "- Whether any kernel reads a value's tail bytes. "
+> what's a tail bytes? i don't know how to use a computer iwht less than 16 registers and less than 64 bits of
+> concurrent reads per cycle because i wasn't born in 1930. review the data model etc.
+
+**Claude:**
+
+> Yes. Pages, masks, a dense list kept apart from the data, compile-time placement and phases are the hardware's own
+> terms: execution masks, wide coalesced loads, indirect dispatch, events whose values only rise. My earlier documents
+> treated them as preferences to argue with.
+>
+> **What a "tail" is.** It's a scalar-loop word: the bytes left over when a value's length isn't a multiple of the
+> loop's step. I meant the bytes between a value's last element and the end of its last page. The data model has no
+> such thing:
+> - **A page is the unit.** "A mask picks values within one page… It cannot name a place outside that page" (§6).
+> - **Every load is a whole vector inside a page,** and the mask decides which lanes count. Bytes no mask picks are
+>   never data, whatever they hold.
+> - **The guarding happens in registers, not memory.**
+>   - Apply a mask with select, never by multiplying by 0 or 1, since 0 × NaN is NaN.
+>   - A reduction puts its identity into masked-off lanes: `select(identity, x, m)`.
+>   - Hopper's TMA does this in hardware: it fills out-of-bounds tile elements with zero as it loads, and nothing
+>     zeroes memory.
+>
+> So the "unverified" item was the scalar hunch itself, and I've dropped it. Faulting pages in is the region's job,
+> done once when it's wired (§2), never a program's `memset`.
+>
+> **Data pages need nothing.** A data page holds payload only. Its producer or its landing writes each byte once per
+> use, consumers read it, and nothing else touches it: no header, no flag, no zeroing. All state lives in the landed
+> list's own section. That's the floor for traffic: one write per byte, plus its reads.
+>
+> **The phases** (mbarrier's phase bit, widened to two):
+> - **Encoding:** each page gets a 2-bit phase in the dense landed list, Gray-coded 00 → 01 → 11 → 10. Each step
+>   flips exactly one bit, so a landing is one atomic XOR of one bit. Unlike an add, it never carries into the next
+>   page's field.
+> - **Reading:** a reader of execution t compares the field with the phase t expects. Equal means landed; one behind
+>   means not yet. Anything else means a write ran ahead of the allocator's ordering, which a 1-bit parity can't
+>   detect.
+> - **Starting:** fields start at 00 when the allocator places the list, once per plan, the way `mbarrier.init` runs
+>   once per kernel. That's 2 bits per page, never per execution, and never in a data page. Supplied and cancel words
+>   rise with the executions and start the same way.
+> - **Loads:** each lane loads `MESH_LANE_BYTES` = 16 bytes of the list, a compile-time constant, which covers 64
+>   pages' phases.
+> - **The landed count** behind the queue's event only rises.
+>
+> **The rest of this waste in the serving code** (C4 already lists mesh-collective.c:757 and 762–763):
+> - e2b_replay.m:627 zeroes every local operand's whole extent, for first-touch faults and the tail.
+> - e2b_replay.m:840 zeroes every pooled intermediate.
+> - metal_recording.m:1546 zeroes the projection kernels' partial sums, which every threadgroup writes before anything
+>   reads them. The arrival counters after them already work like an mbarrier: the last arrival restores the count
+>   (native_projection.metal:232), the way phase completion reloads it.
+>
+> Only mesh-link.c:245 stays: it zeroes the region's header once, when the bridge creates the region.
