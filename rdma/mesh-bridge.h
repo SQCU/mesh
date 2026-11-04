@@ -454,10 +454,11 @@ uint64_t windows_end(void);
 /* mesh-ports.c: tag rdma/mesh-link.c:780-802 ports_stalled and :23-25 `stalled` (static there) */
 void ports_stalled(void);
 extern _Atomic int stalled;
-/* mesh-ports.c: a port with a peer.  The tag tested `port->control>=0`; the control socket now closes after the pairing's
-   one exchange (the coordinator's instruction), so a paired port is one whose socket is open or whose peer's hello was
-   heard (`greeted`, cleared by port_lost).  Every "has a peer" test of the tag's reads this one */
-static inline int port_paired(const struct port *port){ return port->control>=0 || port->greeted; }
+/* a port with a peer or a pairing under way: its control socket open, the tag's `port->control>=0`, read by every file
+   where the tag tested it for "has a peer" (mesh-ports.c port_open, port_opened, port_hello; mesh-link.c's accept and
+   turn_due; mesh-events.c arrivals_turn).  The socket stays open for the link's life, as at the tag (ade422e4; review
+   R2's P1/P2: with UC queue pairs a dead peer is heard only as the socket's end), so this is the tag's test; one copy */
+static inline int port_paired(const struct port *port){ return port->control>=0; }
 /* tag rdma/mesh-link.c:268-274 link_lane (c24265e0), verbatim: the lane a completion's queue pair number names: one of
    the link's lanes, else MESH_LINK_LANES (dropped; a lane its plan leaves out has the number UINT32_MAX, which no queue
    pair has) */
