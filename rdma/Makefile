@@ -29,7 +29,7 @@ mesh-flow: $(BRIDGE) $(HEADERS) Makefile
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
 # the bridge's heartbeat (tag pre-return-20261103 rdma/Makefile): no device, no verbs, its own translation unit
-mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-holders.h Makefile
+mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-map.h mesh-holders.h Makefile
 	cc $(CPPFLAGS) -O2 -Wall -Wextra -Werror -o $@ mesh-heartbeat.c
 mesh-stat: mesh-stat.c mesh.h mesh-map.h mesh-holders.h
 	cc -O2 -o $@ mesh-stat.c

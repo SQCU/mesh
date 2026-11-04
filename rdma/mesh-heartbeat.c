@@ -27,8 +27,12 @@
    region's holders lives, and makes it again in place. */
 #include "mesh.h"
 /* differs from the tag: mesh_holds is mesh-holders.h's (the tag's mesh-dataflow.h), and mesh-observe.h is not main's
-   (its mesh_say is below); no verbs header is included here, mesh-bridge.h's mesh-verbs.h least of all */
+   (its mesh_say is mesh-map.h's); no verbs header is included here, mesh-bridge.h's mesh-verbs.h least of all */
 #include "mesh-holders.h"
+/* mesh_say, its bounds and the monotonic clock, their one copy with the bridge's (review R2, B2: this file's own
+   copies removed); the tag's mesh.h mesh_clock_ns is that clock, clock_ns, so this file's two readings of it name
+   clock_ns, the one change to its bodies */
+#include "mesh-map.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -46,40 +50,6 @@
 #include <sysexits.h>
 #include <time.h>
 #include <unistd.h>
-
-/* declared here until a header without verbs carries them: main has them in mesh-bridge.h alone (mesh_say and its
-   bounds; mesh_clock_ns as its clock_ns), which includes mesh-verbs.h, and the heartbeat holds no device.
-   MESH_PLATFORM_NS is mesh.h's */
-/* tag pre-return-20261103 etc/bridge/layout.h MESH_LOG_BYTES, MESH_DIAGNOSTIC_BYTES, verbatim */
-#define MESH_LOG_BYTES 4194304
-#define MESH_DIAGNOSTIC_BYTES 640
-/* tag pre-return-20261103 rdma/mesh.h mesh_clock_ns, verbatim (c119d3e2) */
-static inline uint64_t mesh_clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
-/* tag pre-return-20261103 rdma/mesh-observe.h mesh_say, verbatim (d556370e) */
-/* design/transport.md section 14: a line of the node's bridge log, the launchd job's stderr (bin/mesh-user.sh
-   StandardErrorPath): the UTC time, `who` and the message, in one write; the losses and failures of the bridge and its
-   heartbeat, nothing on the data path's success.  A log that has reached MESH_LOG_BYTES is emptied first (the processes
-   that share it append: O_APPEND), so it holds at most that and a line */
-__attribute__((format(printf,2,3))) static inline void mesh_say(const char *who,const char *format,...){
-  char line[MESH_DIAGNOSTIC_BYTES];
-  struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
-  struct tm utc;gmtime_r(&t.tv_sec,&utc);
-  int n=snprintf(line,sizeof line,"%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %s: ",utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,
-                 utc.tm_hour,utc.tm_min,utc.tm_sec,t.tv_nsec/1000000,who);
-  va_list arguments;va_start(arguments,format);
-  if(n>0 && (size_t)n<sizeof line)n+=vsnprintf(line+n,sizeof line-(size_t)n,format,arguments);
-  va_end(arguments);
-  if(n<=0)return;
-  if((size_t)n>=sizeof line-1)n=(int)sizeof line-2;
-  line[n++]='\n';
-  struct stat log;
-  const int flags=fcntl(2,F_GETFL);
-  if(!fstat(2,&log) && S_ISREG(log.st_mode) && flags>=0){
-    if(!(flags&O_APPEND))fcntl(2,F_SETFL,flags|O_APPEND);
-    if(log.st_size>=MESH_LOG_BYTES)(void)!ftruncate(2,0);
-  }
-  (void)!write(2,line,(size_t)n);
-}
 
 extern char **environ;
 
@@ -285,7 +255,7 @@ static void bridge_ended(void){
   int status=0;
   const pid_t was=bridge,got=child?waitpid(was,&status,WNOHANG):0;
   if(child && !got){
-    const uint64_t now=mesh_clock_ns();
+    const uint64_t now=clock_ns();
     if(!reap_from)reap_from=now;
     if(now-reap_from>=MESH_PLATFORM_NS && asked==ASKED_END){
       mesh_say("heartbeat","bridge %d not reapable %.0f s after its exit was heard: the heartbeat ends as asked",(int)was,
@@ -303,7 +273,7 @@ static void bridge_ended(void){
     kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
     return;
   }
-  if(reap_named)mesh_say("heartbeat","bridge %d reaped %.0f s after its exit was heard",(int)was,(double)(mesh_clock_ns()-reap_from)/1e9);
+  if(reap_named)mesh_say("heartbeat","bridge %d reaped %.0f s after its exit was heard",(int)was,(double)(clock_ns()-reap_from)/1e9);
   reap_from=0;reap_named=0;
   const int reaped=got==was;
   bridge=0;child=0;

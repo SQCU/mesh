@@ -6,10 +6,53 @@
    bridge"), no "global object representing the literal connection between two physical ... computers" is "ever to be
    exposed to collective or data processing code"; the collective "sees no cable, queue pair or link identity" ("What the
    collective decides").  Each block below was moved here whole from the header its note names (reviews R1, C1 and R2,
-   B2). */
+   B2).  It also holds the one copy of the bridge's log line (mesh_say) and monotonic clock (clock_ns), which the bridge
+   (mesh-bridge.h) and its heartbeat (mesh-heartbeat.c, which holds no device) share: this header includes no verbs
+   header of the mesh's (mesh-verbs.h). */
 #ifndef MESH_MAP_H
 #define MESH_MAP_H
 #include "mesh.h"
+/* mesh_say's and clock_ns's system headers (mesh-bridge.h had them through mesh-verbs.h) */
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+/* moved from mesh-bridge.h (review R2, B2): the one copy of mesh_say, its bounds and the clock, which mesh-bridge.h and
+   mesh-heartbeat.c include from here (the heartbeat's own copies removed) */
+/* tag etc/bridge/layout.h: mesh_say's line, and its log's bound */
+#define MESH_DIAGNOSTIC_BYTES 640
+#define MESH_LOG_BYTES 4194304
+/* tag rdma/mesh-observe.h mesh_say, verbatim */
+/* design/transport.md section 14: a line of the node's bridge log, the launchd job's stderr (bin/mesh-user.sh
+   StandardErrorPath): the UTC time, `who` and the message, in one write; the losses and failures of the bridge and its
+   heartbeat, nothing on the data path's success.  A log that has reached MESH_LOG_BYTES is emptied first (the processes
+   that share it append: O_APPEND), so it holds at most that and a line */
+__attribute__((format(printf,2,3))) static inline void mesh_say(const char *who,const char *format,...){
+  char line[MESH_DIAGNOSTIC_BYTES];
+  struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
+  struct tm utc;gmtime_r(&t.tv_sec,&utc);
+  int n=snprintf(line,sizeof line,"%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %s: ",utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,
+                 utc.tm_hour,utc.tm_min,utc.tm_sec,t.tv_nsec/1000000,who);
+  va_list arguments;va_start(arguments,format);
+  if(n>0 && (size_t)n<sizeof line)n+=vsnprintf(line+n,sizeof line-(size_t)n,format,arguments);
+  va_end(arguments);
+  if(n<=0)return;
+  if((size_t)n>=sizeof line-1)n=(int)sizeof line-2;
+  line[n++]='\n';
+  struct stat log;
+  const int flags=fcntl(2,F_GETFL);
+  if(!fstat(2,&log) && S_ISREG(log.st_mode) && flags>=0){
+    if(!(flags&O_APPEND))fcntl(2,F_SETFL,flags|O_APPEND);
+    if(log.st_size>=MESH_LOG_BYTES)(void)!ftruncate(2,0);
+  }
+  (void)!write(2,line,(size_t)n);
+}
+/* tag rdma/mesh-link.c:48 clock_ns, verbatim but `static inline`, as a header's: the monotonic clock, ns (the tag's
+   mesh.h mesh_clock_ns, c119d3e2, the same clock, which the heartbeat called by that name) */
+static inline uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
 
 /* moved from mesh.h (review R1, C1): a port's link names its peer and device, bridge-side only (the note above) */
 /* a port's link, at `link_off`: the resident bridge's MESH_PORTS of them (MESH_UNKNOWN where it has no such port) */

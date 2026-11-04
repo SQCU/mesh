@@ -24,7 +24,7 @@
 #include "mesh-map.h"
 /* tag rdma/mesh-bridge.h: its system headers.  Its mesh-call.h, mesh-observe.h and mesh-graph.h are left out: the client
    context is named by its tag alone (`bridge`) and the client slots' `owned` does not come over, the observe header's
-   mesh_say is below (main's mesh-map.h holds struct mesh_link_info), and the walks' chains are named by nothing here */
+   mesh_say is mesh-map.h's (main's mesh-map.h holds struct mesh_link_info), and the walks' chains are named by nothing here */
 #include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
@@ -59,9 +59,7 @@
 #define MESH_RETRY_FIRST_SECONDS 60u
 #define MESH_RETRY_MAX_SECONDS 3600u
 #define MESH_RETRY_MAX_SHIFT 6u
-/* tag etc/bridge/layout.h: mesh_say's line, and its log's bound */
-#define MESH_DIAGNOSTIC_BYTES 640
-#define MESH_LOG_BYTES 4194304
+/* MESH_DIAGNOSTIC_BYTES and MESH_LOG_BYTES, mesh_say's bounds, are mesh-map.h's (review R2, B2) */
 /* tag etc/bridge/layout.h: the event loop's tag on a port's child's exit (kevent64 udata TAG_CHILD | the port's index,
    mesh-children.c child_spawn) */
 #define TAG_CHILD (UINT64_C(1)<<58)
@@ -87,33 +85,8 @@
    the value */
 #define MESH_WIRE_MAGIC (0x4d595048u+131u+(1u<<12))
 
-/* tag rdma/mesh-observe.h mesh_say, verbatim */
-/* design/transport.md section 14: a line of the node's bridge log, the launchd job's stderr (bin/mesh-user.sh
-   StandardErrorPath): the UTC time, `who` and the message, in one write; the losses and failures of the bridge and its
-   heartbeat, nothing on the data path's success.  A log that has reached MESH_LOG_BYTES is emptied first (the processes
-   that share it append: O_APPEND), so it holds at most that and a line */
-__attribute__((format(printf,2,3))) static inline void mesh_say(const char *who,const char *format,...){
-  char line[MESH_DIAGNOSTIC_BYTES];
-  struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
-  struct tm utc;gmtime_r(&t.tv_sec,&utc);
-  int n=snprintf(line,sizeof line,"%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %s: ",utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,
-                 utc.tm_hour,utc.tm_min,utc.tm_sec,t.tv_nsec/1000000,who);
-  va_list arguments;va_start(arguments,format);
-  if(n>0 && (size_t)n<sizeof line)n+=vsnprintf(line+n,sizeof line-(size_t)n,format,arguments);
-  va_end(arguments);
-  if(n<=0)return;
-  if((size_t)n>=sizeof line-1)n=(int)sizeof line-2;
-  line[n++]='\n';
-  struct stat log;
-  const int flags=fcntl(2,F_GETFL);
-  if(!fstat(2,&log) && S_ISREG(log.st_mode) && flags>=0){
-    if(!(flags&O_APPEND))fcntl(2,F_SETFL,flags|O_APPEND);
-    if(log.st_size>=MESH_LOG_BYTES)(void)!ftruncate(2,0);
-  }
-  (void)!write(2,line,(size_t)n);
-}
-/* tag rdma/mesh-link.c:48 clock_ns, verbatim but `static inline`, as a header's: the monotonic clock, ns */
-static inline uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+/* mesh_say (tag rdma/mesh-observe.h) and clock_ns (tag rdma/mesh-link.c:48) are mesh-map.h's, their one copy, shared
+   with the heartbeat (review R2, B2) */
 
 /* tag rdma/mesh-bridge.h, the verbs ABI the bridge's requests are laid against; the tag named the values
    MESH_SIZEOF_IBV_* (etc/bridge/thunderbolt.h), here the literals main's mesh-flow.c states */
