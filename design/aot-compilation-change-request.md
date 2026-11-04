@@ -1,9 +1,13 @@
 # Change request: the ahead-of-time compilation
 
-This change request states what the ahead-of-time compilation must do: what it consumes, the passes it runs, its IR, and
-the schedule it serializes. design/plan-to-bridge-change-request.md states what the plan gives the bridge. This document
-states how a program becomes that plan. Each requirement quotes the operator, then names its method: what the method is,
-and where it comes from in the literature. The method is used as its source states it.
+This change request states what the ahead-of-time compilation must do: what it consumes, the passes it runs, the IR it
+carries and the schedule it serializes. design/plan-to-bridge-change-request.md states what the plan gives the bridge.
+This document states how a program becomes that plan. Each requirement quotes the operator, then names its method: what
+the method is, and where it comes from in the literature. The method is used as its source states it.
+
+The compilation consumes operands that choose what it does not choose itself: where each part of a function runs (A2)
+and how much each task and transfer weighs (A3). It contains no chooser for either. A chooser that fills those operands
+is defined later, apart from all of this.
 
 ## A1. The input is each program's captured dataflow graph, with shapes and types
 
@@ -14,39 +18,59 @@ and where it comes from in the literature. The method is used as its source stat
 
 (data-model §6)
 
-- The compilation must take each program as a dataflow graph of operations whose tensors have their shapes and element
-  types, and nothing at run time may change a shape.
+- The compilation must take each function as a dataflow graph of operations whose tensors have their shapes and element
+  types. Nothing at run time changes a shape.
 - **Method:**
-  - For a torch function: TorchDynamo's capture of the function as an FX graph, handed to a `torch.compile` backend (J.
-    Ansel et al., PyTorch 2: faster machine learning through dynamic Python bytecode transformation and graph
-    compilation, ASPLOS 2024).
-  - For a program run through a delegate (e2b on LiteRT): the recorder's capture of its commands, as now
-    (metal_recording.m).
-- **Consumed:** each operation's operands and results, with their element types and shapes.
+  - For a torch function: TorchDynamo's capture as an FX graph, handed to a `torch.compile` backend (J. Ansel et al.,
+    PyTorch 2: faster machine learning through dynamic Python bytecode transformation and graph compilation, ASPLOS
+    2024).
+  - For e2b on LiteRT: as now. tools/prepare_e2b.py reads the model's graph, and the recorder captures the delegate's
+    commands (metal_recording.m).
 
-## A2. Sharding is an annotation on tensors; the compiler partitions the rest
+## A2. The placement operand: which nodes hold which sections
 
-> i want my arbitrary functions running by arbitrary tensor parallelism sharding approaches on arbitrary collectives as
-> fast as possible
+> which nodes are chosen to have which sections of a parallelizable task at all??? this is barely descriebd at all,
+> ebcause the problem of optimizing or choosing this modeling task is *evne more deferred* than the previous topic's
+> urgent deferral of how we choose operands. we simply need to consume operands which choose these placements, letting
+> us define and implement an optimizing chooser function *later* in a manner which is totally decoupled from all
+> implementation details addressd at this time.
 
-> this is one of the only important unimplemented features; we'll need to decide ahead of time how we are going to
-> handle all of the different placement and scheduling reuqirements that appear at higher collective scales and link
-> counts
-
-(of "choosing tensor-parallel placement by topology")
-
-- The compilation must take how the program's tensors are split over the nodes as annotations on a few tensors. It must
-  infer every other operation's split, and insert the collectives the split requires.
+- The compilation must take placement as an operand, and partition the function by it.
+- **The operand's type:**
+  - sharding specs on the function's tensors over a logical device mesh;
+  - the mapping of the mesh's devices onto the map's nodes.
 - **Method:**
-  - GSPMD (Y. Xu et al., GSPMD: general and scalable parallelization for ML computation graphs, arXiv 2105.04663, 2021):
-    a program written for one device, with a few tensor sharding annotations. Sharding is propagated to every operator
-    by compiler passes over a dataflow IR. The output is one SPMD program per device with the collectives inserted.
-  - PyTorch's distributed tensor placements (Shard, Replicate, Partial; PyTorch documentation,
-    `torch.distributed.tensor`) are the same annotation in torch's terms.
-  - The device mesh is the map's nodes: "Placement and topology are data" (metal-microbench AGENTS.md).
-- **Consumed:** the annotations, and the map (its nodes, cables and their rates; mesh-map.h).
+  - GSPMD consumes sharding annotations on a few tensors, propagates them to every operator by compiler passes over a
+    dataflow IR, and emits one SPMD program per device with the collectives inserted (Y. Xu et al., GSPMD: general and
+    scalable parallelization for ML computation graphs, arXiv 2105.04663, 2021).
+  - The logical mesh and its mapping onto physical devices are Alpa's (L. Zheng et al., Alpa: automating inter- and
+    intra-operator parallelism for distributed deep learning, OSDI 2022, §4.1): "For a set of physical devices, there
+    can be multiple logical views", and the mapping is chosen by a pass of its own.
+- **The chooser is a separate pass that emits the same operand, and this compilation contains none:**
+  - Alpa's own chooser works this way. "Alpa compiles each stage against its assigned device mesh, respecting the
+    intra-op parallelism plan output by the ILP solver. The compilation depends on XLA and GSPMD" (Alpa, §6).
+  - A later chooser of the mapping onto the cabling may be topology mapping (T. Hoefler and M. Snir, Generic topology
+    mapping strategies for large-scale parallel architectures, ICS 2011).
 
-## A3. Collectives lower to page transfers, routed jointly over the fabric
+## A3. The weighting operand: what each task and transfer costs
+
+> 1: multiplexing and routing link scheduling must be done with respect to weighting operands which can express any
+> relationship we expect to apepar later (consuming an operand of a certain type lets us defer the design or
+> implementation of an optimizing chooser here).
+
+- The compilation must take every weight its router and its scheduler use as an operand. It computes none.
+- **The operand's type:**
+  - a weight on each task;
+  - a weight on each edge;
+  - the cables' capacities, from the map.
+- **Method:**
+  - The task graph's weights w and c are given inputs of the scheduling problem (O. Sinnen, Task Scheduling for Parallel
+    Systems, Wiley, 2007; Y.-K. Kwok and I. Ahmad, ACM Comput. Surv., 1999).
+  - The router's capacities and demands are the given inputs of concurrent multicommodity flow (N. Garg and J. Könemann,
+    Faster and simpler algorithms for multicommodity flow and other fractional packing problems, FOCS 1998).
+- **The chooser of the weights is defined later, apart, as the chooser of A2 is.**
+
+## A4. Collectives lower to page transfers over packed trees
 
 > the point of having aot schedulign and compilation of schedules is to allow us to interleave any combination of
 > transport requirements concurrently with one another, s.t. we are never underusing the bandiwdth on any cable routing
@@ -58,83 +82,84 @@ and where it comes from in the literature. The method is used as its source stat
 > routing within tb5 linked collectives is supported; attempting to involve nodes with no tb5 dma connection to any node
 > within the collective is not allowed.
 
-- The compilation must lower every collective to sends and receives of pages, and route all of them, of every program,
-  jointly over the Thunderbolt-linked nodes of the map.
+- The compilation must lower every collective A2 inserts to sends and receives of pages. It routes all of them, of every
+  function, jointly over the Thunderbolt-linked nodes of the map.
 - **Method:**
-  - MSCCLang's lowering (M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, §4 and
-    §5): a collective traced as operations on chunks into a chunk DAG, then lowered to an instruction DAG of sends,
-    receives and receive-reduce-copies. A relay's forward is the fused receive-copy-send. Here a chunk is a page.
-  - Routes come from concurrent multicommodity flow over the map's cables (N. Garg and J. Könemann, Faster and simpler
-    algorithms for multicommodity flow and other fractional packing problems, FOCS 1998). It is solved over every
-    transfer of every program at once, as rdma/mesh-graph.h `mesh_graph_pack` does now.
-- **Code:** rdma/mesh-collective.c's demands and trees, as now, fed by A2's collectives in place of ranges the program
-  declares by hand.
+  - **Trees.** Blink (G. Wang et al., Blink: fast and generic collectives for distributed ML, MLSys 2020) builds
+    collectives on packed spanning trees.
+    - §3.1: a broadcast's optimal rate is reached "by finding the maximal packing of a number of directed spanning trees
+      or arborescences in the graph".
+    - §3.2: the packing is a multiplicative-weight update for fractional packing, the method `mesh_graph_pack`
+      implements by Garg and Könemann's rounds.
+    - §3.3: "to do an AllReduce operation on the directed graph, we first run a reduce operation to a chosen root vertex
+      using the undirected graph and then do a broadcast operation from the root vertex using the same tree but with
+      links going in the reverse direction."
+  - **Lowering.** MSCCLang (M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, §4 and
+    §5) lowers operations on chunks into an instruction DAG of sends, receives and receive-reduce-copies. A relay's
+    forward is its fused receive-copy-send. Here a chunk is a page.
+- **Code:** rdma/mesh-collective.c's demands and trees, as now, fed by A2's collectives in place of ranges declared by
+  hand.
 
-## A4. Every page is placed ahead of time
+## A5. Every page is placed ahead of time
 
-- **Method:** design/plan-to-bridge-change-request.md R2, the page table bound statically by C3's allocator. As now.
+- **Method:** design/plan-to-bridge-change-request.md R2, C3's allocator. As now.
 
-## A5. One schedule in one global topological order
+## A6. One schedule per function
 
-> uh, yes, that is the subtext and also the literal textual goal of what we're working on here with this subinterface
+- **Method:** design/plan-to-bridge-change-request.md R3 to R5. List scheduling by bottom level, with edge scheduling
+  under contention, over the weights of A3.
 
-(of "static scheduling with costs")
+## A7. Function executions of programs that run at once are ordered by one scheduler for the island
 
-- **Method:** design/plan-to-bridge-change-request.md R3 to R5. The task graph is list-scheduled by HEFT's upward rank,
-  with edge scheduling under contention.
-- **Its consequence, cited:** each cable's sequence is a subsequence of one global topological order, so the sequences
-  cannot wait on each other in a cycle. MSCCLang states this for its thread blocks: "By assigning instructions to thread
-  blocks in a topological order that respects communication and processing edges, all implicit dependencies introduced
-  by thread block sequential execution cannot produce cycles so that the MSCCL-IR does not have deadlocks" (Cowan et
-  al., 2023, §5.2).
-- **Consumed:** each operation's cost by the roofline, from its shapes and types: the larger of its flops over the
-  node's peak and its bytes over the node's memory bandwidth (S. Williams, A. Waterman and D. Patterson, CACM 2009),
-  with data-model §1's measured rate.
+> nothing happens when a program joins or leaves because a program is a sequence of like, function calls.
 
-## A6. Programs that run at once are ordered by one scheduler for the island
-
-> do programs do nothing but what the allocator lets them, with the shapes and coarse bin packing requierments of
-> allocation known aot?
-
-- The compilation must order the transfers of every program that runs at once on the same nodes in one order, the same
-  at every node.
+- The code must order the function executions of every program that runs on the same nodes in one order, the same at
+  every node.
 - **Method:** Pathways (P. Barham et al., Pathways: asynchronous distributed dataflow for ML, MLSys 2022).
-  - §2: "the system will deadlock if communicating computations are not enqueued in a consistent order", and "the lack
-    of a centralized scheduler in single-controller systems like TF v1 makes it impossible to ensure consistent ordering
-    between computations across programs."
+  - §2: "the system will deadlock if communicating computations are not enqueued in a consistent order".
   - §4.4: "The PATHWAYS runtime includes a centralized scheduler per island that consistently orders all of the
-    computations in the island."
-  - Ahead of time, the island's scheduler composes the programs' task graphs into one DAG (H. Zhao and R. Sakellariou,
-    Scheduling multiple DAGs onto heterogeneous systems, IPDPS 2006) and schedules it once (A5).
-  - The island is the map's Thunderbolt-linked component (A3).
-- **For the operator:** which process is the island's scheduler. Pathways runs it as a service per island, and neither
-  the turns nor the paper say where it runs on this fabric. This answers design/plan-to-bridge-change-request.md R8's
-  open point down to that choice.
+    computations in the island", by "communicating with the scheduler to determine a consistent order of function
+    executions across all programs running on the island". "Our current implementation simply enqueues work in FIFO
+    order."
+  - The island is the map's Thunderbolt-linked component (A4).
+  - Each function execution runs its own compiled schedule (A6).
+- **For the operator:** which process is the island's scheduler. Pathways runs one per island, and neither the turns nor
+  the paper say where it runs on this fabric.
 
-## A7. The IR is the task graph of page instructions
+## A8. The IR operand
 
-- The compilation must carry one IR from partitioning to serialization.
-- **Method:** the instruction DAG of MSCCLang (Cowan et al., 2023, §4) is the task graph of the scheduling literature
-  (O. Sinnen, Task Scheduling for Parallel Systems, Wiley, 2007): computations as tasks, and page sends and receives as
-  communication edges. A2 produces it, A3 lowers its collectives, A4 places its values, and A5 and A6 order it.
+> some operand must clearly carry the ir used to make this kind of optimization / planning choice, and something must
+> serialize this into an operand consumedy by ordinary transport / bridge functions?
 
-## A8. The output is the serialized schedule, in MSCCL-IR's shape
+- The compilation must carry one IR from partitioning to serialization, as an operand of its own.
+- **The operand's type:**
+  - the task graph of design/plan-to-bridge-change-request.md R3 (Sinnen, 2007);
+  - each consumer's kind (R4: a join for function A, a task per page for function B);
+  - the placement operand (A2) and the weighting operand (A3).
+- **Method:** MSCCLang carries its instruction DAG the same way, from lowering to scheduling (Cowan et al., 2023, §4 and
+  §5).
+- A2 partitions, A4 lowers, A5 places and A6 orders it.
+
+## A9. The serialized operand, in MSCCL-IR's shape
+
+> no inlining new numerical backends instead of writing collective and transfer and so on code which schedule the use of
+> existing code, basically.
 
 - **Method:** MSCCL-IR (Cowan et al., 2023, §5.2): "a tree data structure that divides a collective into individual GPU
-  programs that are subdivided into thread blocks containing a list of instructions that are sequentially executed".
-  Instructions that depend on another list carry that dependency explicitly ("a dep modifier").
+  programs that are subdivided into thread blocks containing a list of instructions that are sequentially executed". An
+  instruction that depends on another list carries the dependency explicitly ("a dep modifier").
 - **Here, per node:**
   - for each adjacent node and direction, the ordered list of page instructions, each with its page, its bytes and its
-    dependency: a send's supplied word or a forward's receive phase, or a receive's phase and count. These are struct
-    mesh_hop's lists of the plan (design/plan-to-bridge-change-request.md R5), written into the region;
+    dependency word. A send's word is its supplied word, or for a forward its receive's phase; a receive's are its phase
+    and count. These are the plan's struct mesh_hop lists (design/plan-to-bridge-change-request.md R5);
   - the page table's bindings and the plan's state section (C3);
-  - the GPU's program: the captured program's own kernels, bound to their placed pages. For e2b these are the recorder's
-    command buffers, as now.
-- The bridge consumes the lists and the GPU runs the program. Nothing else is serialized.
+  - the GPU's program: the function's own existing kernels, bound to their placed pages. No kernel is written by the
+    compilation. For e2b these are the recorder's command buffers, as now.
+- The bridge consumes the lists and the GPU runs the existing kernels. Nothing else is serialized.
 
 ## What judges it
 
 - design/plan-to-bridge-change-request.md's judges hold.
-- An annotated torch function and e2b both compile through A1 to A8.
-- Every node's lists come from one schedule.
+- The compilation contains no chooser of placement and no chooser of weights; both arrive as operands.
+- No kernel is written by the compilation.
 - The three builds are clean. Runs come only when the operator authorizes them.
