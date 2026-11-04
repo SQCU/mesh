@@ -426,6 +426,37 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   The C9 hook's remark on 2ecb0f8c, that plan_cancel's walk over the hop list belongs in the graph module: ruled it
   stays (a linear pass over this node's entries raising their counts, no graph traversal; the walk predates this unit,
   which changed only its generation check), as plan_walk and mesh_ports_loaded were ruled before.
+- 9 (the GPU and program side, at metal-microbench 96edc20e; every file compiles alone; the tree level with origin):
+  every Metal 3 hit accounted for (the capture interface alone); allocators reset only after completion, one command
+  buffer at a time; every resource resident; the argument table's snapshot; R7's barrier at every encoder (but
+  primitive_constants.m's, as accepted); events and feedback placed as D.3.3 and D.3.4 say, one writer each, values
+  rising and never repeating across the prefill and the decode; R5's order; MetalReplayWaits and MetalReplayEncode
+  agreeing; no binding at t x stride; every value passed to mesh_plan independent of steps and chunks; R9's
+  classification, single copies before anything runs, nothing naming a delegate buffer after replay:, the compiled
+  models destroyed only after every replay:; found sound. Findings and where they went: 1 (gap: the replays are
+  unrolled by the run's length, repetitions x count commands and the later passes' bindings by repetition, though
+  every per-repetition binding repeats with the period of the copies: the trip-count unrolling C1 and C3.3 rejected)
+  ruled a fix, to 4 (a replay of L repetitions, L the least common multiple of the copies, 4u and u; repetition t at
+  slot t mod L) then 7; 2 (gap: a delegate buffer bound by two captures is two values, copied twice, silently diverging
+  if one capture writes it; none such in e2b, each stage its own model) to 4 (one value across captures; a raise where
+  either writes it); 3 (gap: the host commits steps after a failure it cannot see, against R5's "nothing more is
+  committed") to 7 (the status and the landed event read before each step); 4 (gap: primitive_constants.m's `scoped`
+  probe spins with no bound) to 5 (bounded, a miss refused); 5 (defect, minor: E2B_DUMP of the token wrote the last
+  step's input) to 7; 6 (gap: a lag-k operand bound by copy 0 outside its own phases, a second form; an operand both
+  per-step and per-chunk not refused) to 7 (refused); its third part (a binding with write access takes the write copy,
+  so a reader declared read-write would read the copy ahead): the stride form's own rule (`output` where the command
+  writes), which the runs relied on, kept, open; 7 (note: the host inputs' fill checks fail after the prefill and the
+  start) to 7 (before the preparation); 8 (note: the reflection's read-write access classes most delegate buffers
+  invariant, so scratch is copied once at replay: and never reused by liveness: sound, conservative) open; 9 (note: the
+  step wait's bound shorter than the waiter's) to 7; 10 (note: MetalReplayEncode's command buffers held until main's
+  autorelease pool ends) to 7; 11 (note: the program's own native stages encode into the capture interface's Metal 3
+  command buffer, inside the capture, nothing executed) accepted, the exception being the capture interface; 12 (note:
+  useResource:'s raise unwinds through the delegate's C++ frames) to 4 (raised after encode returns); 13 (notes): no
+  MTL4 header says whether an indirect command's setBarrier orders the commands in an MTL4 encoder
+  (MTLIndirectCommandEncoder.h:102, no MTL4 text; MTL4CommandEncoder.h:57-58 names encoder barriers within a pass); the
+  MTL4 decode before ecb374e0 ran with them, and primitive_constants.m's `drain` measures them: open; R3's ESTALE ends
+  e2b through OK() with status 1, an error value: accepted; the Swift engine's Metal 3 command buffers, outside D.4:
+  open.
 
 ### Integration
 
