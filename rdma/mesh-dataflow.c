@@ -195,7 +195,13 @@ static void mesh_reclaim(struct hdr *m){
    given is a port's `prepared` equal to the retired client's plan (hdr `plan` as it retired); main's header keeps
    no generation of a retired client's plan, and hdr `plan` is the next client's once it plans, by when a port lost
    with requests outstanding may still hold the earlier plan's receives.  So any port holding a plan retains: the
-   rule's every case, and also a later client's plan served while an earlier one's rows are closed */
+   rule's every case, and also a later client's plan served while an earlier one's rows are closed.
+   A port in phase MESH_STOPPED retains too, though the review (R1, round 2) asked to skip it: a refusal (mesh-flow.c
+   link_run) holds no request, but a port lost while it serves is MESH_STOPPED as well (mesh-ports.c port_lost: its
+   child recycled, `open` 0), and its `prepared` stays the plan's while that child lives (mesh-flow.c streams_cancel),
+   its receives posted until the reap; the region tells the two apart by nothing.  A refusal's `prepared` is cleared
+   by link_close on its port's next pass once the client changes, which mesh_retire wakes (hdr `plan`), so a refused
+   port keeps a retired client's rows only until then; what must stay: no STOPPED port skipped while a loss sets it */
 static int mesh_holding_retained(struct hdr *m){
   const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
   for(uint32_t p=0;p<links;p++)if(atomic_load_explicit(&mesh_links(m)[p].port.prepared,memory_order_acquire))return 1;
@@ -372,13 +378,17 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
 /* design/algorithm-sources.md#programcopy */
 /* The configured latch (hdr `configured`'s compare-exchange) and the unbounded spin on each link's `prepared` are gone:
    the plan is the bridge's to find (hdr `plan` its generation, `hops`), and each port whose cable carries it stores
-   that generation in its `prepared` once its data path has loaded it, or sets MESH_STOPPED and `code` where it refuses
-   it; a plan whose entries' serial (struct mesh_hop `serial`) is not the map's is stale (ESTALE).  The ports waited
+   that generation in its `prepared`, last (release), once its data path has loaded it (code 0, phase MESH_PAIRED
+   before it) or refused it (its `code`, phase MESH_STOPPED before it: mesh-flow.c link_run); a plan whose entries'
+   serial (struct mesh_hop `serial`) is not the map's is stale (ESTALE).  The ports waited
    on are every port whose peer a hop names: the cables this node's own record lists (mesh-ports.c record_reach: a
    port whose link is up), in the map at the plan's serial, to the nodes the hops name (map indices, struct mesh_hop
    `node`).  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read
-   and the ports' wait together.  A spin, bounded: `prepared` is stored with no wake.  A port stopped with no code
-   returns ENOTCONN, so that a stop never reads as a start */
+   and the ports' wait together.  A spin, bounded: `prepared` is stored with no wake.  A port is done once its
+   `prepared` is this generation (acquire), and only then are its phase and code read, which are this plan's (review
+   R1, round 2: a phase read before it was an earlier refusal's, which a start after the next mesh_plan returned).  A
+   refusal returns its code, ENOTCONN where that is 0, so that a stop never reads as a start; a port lost before it
+   loads the plan never tells this generation, and the start ends at the bound with ETIMEDOUT */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
   const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
@@ -409,12 +419,11 @@ int mesh_transfers_start(struct mesh_ctx *context){
   for(uint32_t i=0;i<ports;i++){
     if(port[i]>=links)return EINVAL;
     struct mesh_port_info *info=&mesh_links(m)[port[i]].port;
-    while(atomic_load_explicit(&info->prepared,memory_order_acquire)!=plan){
-      if(atomic_load_explicit(&info->phase,memory_order_acquire)==MESH_STOPPED){
-        const int64_t code=atomic_load_explicit(&info->code,memory_order_relaxed);
-        return code?(int)code:ENOTCONN;
-      }
+    while(atomic_load_explicit(&info->prepared,memory_order_acquire)!=plan)
       if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline)return ETIMEDOUT;
+    if(atomic_load_explicit(&info->phase,memory_order_relaxed)==MESH_STOPPED){
+      const int64_t code=atomic_load_explicit(&info->code,memory_order_relaxed);
+      return code?(int)code:ENOTCONN;
     }
   }
   return 0;
