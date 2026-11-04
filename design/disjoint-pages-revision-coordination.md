@@ -917,11 +917,11 @@ work proceeds.)
   authorization of runs (C3.8).
 - e2b_replay.m's adapter wait is bounded between wgpuInstanceProcessEvents calls, not within one (4's 7c5110f1).
 
-- Whether Apple's provider lets a receive record be posted again while an earlier posting of it is outstanding
-  (mesh-flow.c relies on the work request being copied at the post; recorded as encoded into the provider's own queue,
-  design/RDMA-KERNEL-RECOVERY.md 27-29 and design/TELEMETRY-LOSS-20260904.md 73-77, not proven). design/prepared-
-  machine.md#M08, cited by mesh-flow.c, still describes the old receive record. A cancelled receive's field, never
-  written, reads as landed three rounds later; the run has already failed by then (6's findings; review 17's note 4).
+- A cancelled receive's field, never written, reads as landed three rounds later; the run has already failed by then
+  (6's findings; review 17's note 4). (2026-11-04: this item's question whether a receive record may be posted again
+  while an earlier posting of it is outstanding, and its note that design/prepared-machine.md#M08 described the old
+  record, are gone: a record is posted again only once its last posting has landed, and M08 describes the record as it
+  is: design/disjoint-pages-change-request.md D.3.5 and D.4; design/disjoint-pages-rulings-coordination.md R1.)
 - This session's scratchpad holds source-named copies (abd-mesh-link.c, coll-86e.c, flow-head.c and others) dated
   2026-11-03, before this round; this round's implementers wrote only MSL snippets and notes there. They were left for
   the operator, against the rule that no source is copied anywhere.
