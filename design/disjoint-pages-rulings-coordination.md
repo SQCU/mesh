@@ -482,6 +482,25 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   memory, kept until the step ends); capture: without repetitions, every capture released only after every replay:),
   63adb790 (prepare_e2b.py's --publication-ranges help: "ranges"). The C9 hook's remarks on prepare_e2b.py's older
   graph walks (kv_sections, prepare(), at the functions 727b9c2e's comments touched): outside this unit, open.
+- 10 (both repos, at mesh e1060870 and metal-microbench 310ea80b; every changed file compiles alone; both trees clean
+  and level; the lifecycle files, the deployment and launch scripts and everything D.3.1 leaves standing unchanged since
+  the unit's start): the four traces (a host input from the manifest to the step event; a received range from mesh_plan
+  through the bridge, the waiter and the later pass; a map change with a start racing it and a relay; a weight buffer
+  of the delegate's from its capture to its placed copy) agree at every party; rulings 2 and 3 hold; every wait bounded;
+  dated notes at every reversal. Findings and where they went: 1 (gap: the waiter's table is steps x passes x reads,
+  each wait affine in t: the trip-count unrolling C1 rejected, moved from the replay to the waiter) ruled a fix: one
+  repetition's waits, repetition t's computed by the waiter (struct mesh_metal_wait {count, pages, copies, pass}), to 2
+  (mesh-metal.{h,m}), then 4 (MetalWait, MetalReplayWaits), then 7; 2 (gap: the recorder retains every delegate buffer
+  until it is released, so the delegate's buffers stay allocated beside their placed copies for the whole run, against
+  C3.4) to 4 (released once copied; no capture after the first replay:, the map keyed by address); 3 (defect, minor: an
+  EPROTO run exits ETIMEDOUT after the waiter's deadline) to 7; 4 (note: R9's copy is a dead fill where the reflection's
+  read-write access classes a buffer invariant that its kernel writes first) open, as review 9's note 8; 5 (note:
+  mesh-call.h and mesh-dataflow.c name the bridge's re-pairing of links) to 1; 6 (note: this file's text behind the
+  code: plan_cancel's generation, capture: without repetitions, R5's bound, R6, the empty sections; and D.5, added to the
+  change request during this unit (4cdff8b3), not recorded) here; 7 (note: the replay's period counts placements a
+  capture never binds) to 4; 8 (note: the index commands' outputs are lag k though their producer is the GPU in queue
+  order, a second form of the kind) to 7 (one copy) and R6 amended; 9 (note: R7's encoder written twice, MetalEncoder
+  and e2b's encoder_of, against C9) to 4 (exported) and 7 (used).
 
 ### Integration
 
