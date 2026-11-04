@@ -940,7 +940,11 @@ work proceeds.)
   and is not implemented.
 - After an upstream loss a relay's forwards are never released, so the node past it reads ETIMEDOUT at its waiter's
   deadline, not ENOLINK (bounded; review 15's finding 4). A cancellation's final value is computed from `executions` as
-  it reads then (bounded; finding 6).
+  it reads then (bounded; finding 6). (2026-11-04: both closed. A plan stands only while its map does: a loss moves
+  the map serial at every node, and each bridge then cancels the plan's receives not landed, so the node past a relay
+  reads ENOLINK within one flooding; and a start that raises `executions` after such a cancellation returns ESTALE:
+  design/disjoint-pages-change-request.md D.3.6; design/disjoint-pages-rulings-coordination.md R2, R3; mesh 35ce58a5,
+  1a8b10e8.)
 - D8: one client attached at a time stays; a second program gets EADDRINUSE, where C3.4 says any number of programs
   hold disjoint sections at once. Claims per plan and their release support any number of claims; serving several
   programs' plans at once needs a page list a client, which no C3 item or C4 entry names. A re-plan claims its pages
