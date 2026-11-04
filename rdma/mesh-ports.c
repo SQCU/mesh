@@ -444,7 +444,10 @@ void control_heard(struct port *port){
   }
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:1022-1041 link_page, link_reserve and their comments are left out (CONTRACT.md
-   "Link pages": no link block is leased; `ones` and `held_pages` are mesh-bridge.h's externs, defined in mesh-link.c) */
+   "Link pages": no link block is leased; `ones`, mesh-bridge.h's extern defined in mesh-link.c, stays MESH_ABSENT; and,
+   2026-11-03, the bridge holds no arena page, its map being the layout's area, hdr `map_off` and `map_room`:
+   design/disjoint-pages-change-request.md, Appendix A, A3, "Sharing the region between programs", so `held_pages` is
+   gone, mesh-link.c) */
 /* tag pre-return-20261103 rdma/mesh-link.c:1042-1059 ports_find, extern (3f72cbde 0905738c 1835bef4 d9e6d3de; first 6b33cc33) */
 /* design/transport.md: every RDMA device of the node a port, in the order found, read on the finder's queue
    (at the start, behind IOKit's quiet registry, and where an interface attached or its link came on that no port has,
