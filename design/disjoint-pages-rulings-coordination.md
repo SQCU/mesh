@@ -336,6 +336,25 @@ form and its waits arguments, MetalReplayExecute's MTLComputeCommandEncoder form
   completes (MTL4CommandAllocator.h:48-50). Its notes: Makefile:99 and the tool's head comment cite a docs/kernels.md
   section that does not exist; the probes `packet` and `scoped` spin by design (they measure spins), unchanged.
 - 4 (metal_recording.m, second: R9) launched after 3.
+- 6 (the count audit): 2a14d744 (mesh-bridge.h: MESH_LINK_LANES's note stated as a compile-time capacity, which
+  link_plan meets with the smaller of the two ends' reported budgets, not as one OS's count; hello_budget(0) 0, not
+  MESH_LINK_LANES). Its findings: (1) the note reasoned from macOS 26's report as a fact, the code being the tag's (a
+  device reporting more gets the capacity, fewer its own count); (2) the tag's hello_budget(0) (mesh-bridge.h:133,
+  76be3217) took a peer stating no budget as one holding MESH_LINK_LANES, an assumed count; only a bridge before
+  76be3217 sends 0, every current one 1 + its budget (mesh-ports.c:320): ruled a fix, adapted from the tag and marked
+  so (such a peer's LINK now fails EPROTO; no node runs one, the hourly deploying main; a one-line revert restores the
+  tag's form if the operator prefers it verbatim). Judged and left as the tag's: mesh-flow.c's EPROTO for a cable past
+  the capacity (unreachable: every record's count is plan_lanes(link_plan(..)), and mesh_cables takes the smaller);
+  the budget path (mesh-verbs.h max_pairs, CHILD_OPENED, port_heard's minimum, pair_up's ENOSPC), each verbatim; the
+  capacities that take the smaller of report and bound (QD, MESH_GID_ENTRIES, MESH_LANE_UNITS, MESH_PORTS); no branch
+  on an OS or a device model. Lifecycle files, reported unchanged: mesh-children.c:52-56's note reasons from macOS 26's
+  count (the tag's text verbatim; the code takes the report); mesh-lanes.c:19-22's note is stale against link_plan (not
+  a count). Its list of names outside the bridge's own files, routed: mesh.h struct mesh_target `stream` (code) and its
+  uses in mesh-collective.c and mesh-metal.m, and mesh-graph.{h,c}'s text, to 2; e2b_replay.m's two lines and
+  prepare_e2b.py's two uses of the verbs word, to 7; the rest (mesh.h's text, mesh-map.h's records and joins,
+  mesh-dataflow.{h,c} and mesh-call.{h,c}: the ports' `prepared`, the cables' join and capacity sum, the start's wait
+  over ports) describe or are what D.3.1 replaces, open; the deployment scripts' (mesh_graph.py, mesh_preflight.py,
+  mesh_hourly.py, peers.py) are not this unit's to change, open.
 
 ### Reviews and where their findings went
 
