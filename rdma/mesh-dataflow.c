@@ -216,11 +216,33 @@ static void mesh_reclaim(struct hdr *m){
   }
 }
 
+/* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_holding_retained, adapted to the page lists: whether a retired
+   client's pages may still be named by a request a port's child posted (a receive not landed, a SEND not done).  At
+   the tag, a stream's holding while its port child lived; here, a port whose `prepared` holds a plan (struct
+   mesh_port_info): mesh-flow.c stores the plan's serial there once the port's data path loaded it and 0 once it
+   stops serving it cleanly, and a port lost with requests outstanding keeps it until its child is reaped, where the
+   parent clears it and sets `unreleased` (mesh-children.c child_reaped), so the bridge releases again.  The rule as
+   given is a port's `prepared` equal to the retired client's plan serial (hdr `plan` as it retired); main's header
+   keeps no serial of a retired client's plan, and hdr `plan` is the next client's once it plans, by when a port lost
+   on the moved map (a lost cable moves the serial) may still hold the earlier plan's receives.  So any port holding a
+   plan retains: the rule's every case, and also a later client's plan served while an earlier one's rows are closed */
+static int mesh_holding_retained(struct hdr *m){
+  const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
+  for(uint32_t p=0;p<links;p++)if(atomic_load_explicit(&mesh_links(m)[p].port.prepared,memory_order_acquire))return 1;
+  return 0;
+}
+
 /* design/algorithm-sources.md#programtensor */
-void mesh_retired_release(struct hdr *m){
+/* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_retired_release, adapted: a retired client's closed rows
+   released, but none while a port's requests may name their pages (mesh_holding_retained); the count kept, which the
+   tag's clients_turn keeps `unreleased` by.  Main's form released every closed row at once */
+uint32_t mesh_retired_release(struct hdr *m){
+  const int retained=mesh_holding_retained(m);
+  uint32_t kept=0;
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
+    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && retained){kept++;continue;}
     if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
        atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
       atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
@@ -228,7 +250,7 @@ void mesh_retired_release(struct hdr *m){
       atomic_store_explicit(&buffer->owner,owner,memory_order_release);
     }
   }
-
+  return kept;
 }
 
 /* design/algorithm-sources.md#program */
@@ -279,8 +301,38 @@ uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_pub
 /* The map reader and the client's start (mesh-dataflow.h mesh_nodes_read, mesh-call.h mesh_transfers_start).  The
    map's records, a cable's both ends and its ports stay in this file: the collective is given node pairs and summed
    capacity (struct mesh_nodes), and the start a status.  No graph algorithm is here (design/rubrics.md C9; the C9
-   review of 7da3c125 asked these into mesh-graph.h): they read the map's record format, cables matched by their
-   ports, into the node-pair weights mesh-graph.h's functions take as operands, and mesh-graph.h knows no cable. */
+   review of 7da3c125 asked these into mesh-graph.h): they read the map's record format into the node-pair weights
+   mesh-graph.h's functions take as operands, and mesh-graph.h knows no cable.  The join of two records is one copy,
+   the tag's (mesh_join), which the bridge's map (mesh-records.c, mesh_joined) and the reader share. */
+
+/* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_paired, mesh_join, mesh_joined, verbatim but MESH_STREAMS
+   MESH_PORTS (mesh.h struct mesh_reach, an entry a cable) */
+/* the one join of two nodes' records: the cables each one's bridge reaches the other
+   over (its record names the other once a cable, mesh-link.c record_reach), the fewer of the two ends' counts, *slowest
+   the least bandwidth either reports of them (0: neither reports one); 0 where either names the other none */
+static uint32_t mesh_paired(struct mesh_record *record,uint32_t node,uint64_t *slowest){
+  uint32_t cables=0;
+  for(uint32_t i=0;i<record->reached && i<MESH_PORTS;i++)
+    if(record->reach[i].node==node){
+      const uint64_t bandwidth=record->reach[i].bandwidth;
+      if(bandwidth && (!*slowest || bandwidth<*slowest))*slowest=bandwidth;
+      cables++;
+    }
+  return cables;
+}
+static uint32_t mesh_join(struct mesh_record *a,struct mesh_record *b,uint64_t *bandwidth){
+  uint64_t slowest=0;
+  const uint32_t ends[2]={mesh_paired(a,b->node,&slowest),mesh_paired(b,a->node,&slowest)};
+  if(!ends[0] || !ends[1])return 0;
+  *bandwidth=slowest;
+  return ends[0]<ends[1]?ends[0]:ends[1];
+}
+int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
+  uint64_t bandwidth=0;
+  const uint32_t joined=mesh_join(a,b,&bandwidth);
+  if(joined)*beta=bandwidth?8e9/(double)bandwidth:0;
+  return (int)joined;
+}
 
 /* tag pre-return-20261103 rdma/mesh-dataflow.c mesh_records_read, adapted: the map's records as one serial left them,
    the seqlock's reader (mesh.h mesh_map_whole), copied into r (MESH_NODES_MOST of room) with their count and the map's
@@ -319,29 +371,12 @@ static void mesh_map_order(const struct mesh_record *r,uint32_t count,uint32_t *
   }
 }
 
-/* the cables between a's node and b's that both records list (mesh.h struct mesh_reach: each record lists a cable from
-   its own side, so b's entry names a's node with the two ports swapped), each at the lesser of its two entries'
-   bandwidths: their summed bandwidth (bits a second), and a's port of each in port[] where given (a's record lists at
-   most MESH_PORTS).  A cable one record lists alone (the other's record not yet heard) is not counted: both bridges'
-   rule reads a cable from both records, so neither end assigns it a page.  The tag's join (mesh_join) took the fewer
-   of the two ends' counts at the least bandwidth of all; a cable here is matched by its ports, at its own bandwidth */
-static uint64_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,uint32_t *port,uint32_t *cables){
-  uint64_t sum=0;
-  uint32_t n=0;
-  for(uint32_t i=0;i<a->reached && i<MESH_PORTS;i++){
-    const struct mesh_reach *e=&a->reach[i];
-    if(e->node!=b->node)continue;
-    for(uint32_t k=0;k<b->reached && k<MESH_PORTS;k++){
-      const struct mesh_reach *f=&b->reach[k];
-      if(f->node!=a->node || f->port!=e->peer_port || f->peer_port!=e->port)continue;
-      sum+=e->bandwidth<f->bandwidth?e->bandwidth:f->bandwidth;
-      if(port)port[n]=e->port;
-      n++;
-      break;
-    }
-  }
-  if(cables)*cables=n;
-  return sum;
+/* a pair's capacity: its join's parallel links (mesh_join), each at the join's bandwidth, as the tag's whole map
+   made them (mesh_whole_make: `joined` links of a pair, each at the join's bandwidth); 0 where none joins them */
+static uint64_t mesh_capacity(struct mesh_record *a,struct mesh_record *b){
+  uint64_t bandwidth=0;
+  const uint32_t joined=mesh_join(a,b,&bandwidth);
+  return joined*bandwidth;
 }
 
 int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
@@ -355,7 +390,7 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
   for(uint32_t i=0;i<count;i++){
     out->node[i]=r[order[i]].node;
     if(out->node[i]==c->M->node)out->self=i;
-    for(uint32_t j=0;j<i;j++)out->capacity[i][j]=out->capacity[j][i]=mesh_cables(r+order[i],r+order[j],NULL,NULL);
+    for(uint32_t j=0;j<i;j++)out->capacity[i][j]=out->capacity[j][i]=mesh_capacity(r+order[i],r+order[j]);
   }
   return out->self==MESH_ABSENT?ENOENT:0;
 }
@@ -365,8 +400,9 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
 /* The configured latch (hdr `configured`'s compare-exchange) and the unbounded spin on each link's `prepared` are gone:
    the plan is the bridge's to find (hdr `plan`, `hops`), and each port whose cable carries it stores `plan` in its
    `prepared` once its data path has loaded it, or sets MESH_STOPPED and `code` where it refuses it.  The ports waited
-   on are this node's cables, in the map at the plan's serial, to the nodes the hops name (map indices, struct
-   mesh_hop `node`), as mesh_cables matches them.  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read
+   on are every port whose peer a hop names: the cables this node's own record lists (mesh-ports.c record_reach: a
+   port whose link is up), in the map at the plan's serial, to the nodes the hops name (map indices, struct mesh_hop
+   `node`).  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read
    and the ports' wait together.  A spin, bounded: `prepared` is stored with no wake.  A port stopped with no code
    returns ENOTCONN, so that a stop never reads as a start */
 int mesh_transfers_start(struct mesh_ctx *context){
@@ -391,13 +427,10 @@ int mesh_transfers_start(struct mesh_ctx *context){
     if(node>=count)return EINVAL;
     named|=UINT64_C(1)<<node;
   }
-  /* a call names at most MESH_PORTS of this node's cables, so this holds them even where two records named one node */
-  uint32_t port[MESH_PORTS*MESH_NODES_MOST],ports=0;
-  for(uint32_t j=0;j<count;j++)if(named>>j&1){
-    uint32_t cables;
-    mesh_cables(r+self,r+order[j],port+ports,&cables);
-    ports+=cables;
-  }
+  uint32_t port[MESH_PORTS],ports=0;
+  for(uint32_t i=0;i<r[self].reached && i<MESH_PORTS;i++)
+    for(uint32_t j=0;j<count;j++)
+      if(named>>j&1 && r[order[j]].node==r[self].reach[i].node){port[ports++]=r[self].reach[i].port;break;}
   const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
   for(uint32_t i=0;i<ports;i++){
     if(port[i]>=links)return EINVAL;

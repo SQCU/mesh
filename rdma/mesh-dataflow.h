@@ -53,16 +53,16 @@ void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 struct mesh_target *mesh_publish_bind(struct mesh_ctx *,uint32_t row,uint32_t queue);
 /* design/algorithm-sources.md#programkernel_call */
 uint32_t mesh_publication_prepare(struct hdr *,uint32_t row,struct prepared_publication *);
-void mesh_retired_release(struct hdr *);
+/* a retired client's closed rows released, none while a port's requests may name their pages; the count kept */
+uint32_t mesh_retired_release(struct hdr *);
 
 /* The map reader (design/page-queue-change-request.md, "What the collective decides, and what the bridge decides"): the
    collective sees node-level adjacency and each node pair's capacity, nothing else; no cable, port or queue pair.
    `serial` is the map's (hdr `map_serial`, the one a plan is made against: struct mesh_hop `serial`); `count` the map's
    nodes, at most MESH_NODES_MOST; `node[i]` the node id of index i, a node's index its place in ascending node-id order
    among the map's records; `self` this node's index; `capacity[i][j]` == `capacity[j][i]` the bits a second of the
-   cables between i and j, summed, each cable one both nodes' records list (its port at each end, swapped) at the
-   lesser of the two entries' bandwidths, as the bridges' rule reads it (mesh.h struct mesh_reach); 0 where none joins
-   them. */
+   cables between i and j, summed: the pair's join (mesh_joined), the fewer of the two records' cable counts, each at
+   the least bandwidth either reports; 0 where none joins them. */
 #define MESH_NODES_MOST 32
 struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NODES_MOST];
                     uint64_t capacity[MESH_NODES_MOST][MESH_NODES_MOST]; /* bits/s, a pair's cables summed; 0 none */ };
@@ -71,4 +71,9 @@ struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NOD
    outside the region, ENOENT where the map holds no record of this node (hdr `node`); read under the map seqlock
    (mesh.h mesh_map_whole) */
 int mesh_nodes_read(struct mesh_ctx *,struct mesh_nodes *);
+/* tag pre-return-20261103 rdma/mesh-dataflow.h mesh_joined, verbatim (the bridge's map reads it: mesh-records.c; the
+   collective reads mesh_nodes_read, which sums a pair's capacity through the same join) */
+/* the one join of two nodes' records: the cables each one's bridge reaches the other over, the fewer of the two ends'
+   counts (0: none); *beta 8e9 over the least bandwidth either reports of them (0 where neither reports one) */
+int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
 #endif
