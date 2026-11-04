@@ -19,11 +19,7 @@
    mesh_paired and mesh_join, its bound there MESH_STREAMS, here MESH_PORTS) */
 /* declared here until mesh-dataflow.h carries it */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
-/* tag pre-return-20261103 rdma/mesh-graph.h mesh_graph_reach, its signature (6552ecaf, 6379e868): the graph module's
-   breadth-first reach, which map_put's prune calls (design/rubrics.md:422, C9) */
-/* declared here until mesh-graph.h carries it */
-uint32_t mesh_graph_reach(uint32_t vertices,uint32_t edges,uint32_t (*end)(const void *context,uint32_t e,uint32_t side),
-                          const void *context,uint32_t from,uint32_t *order,unsigned char *reached);
+#include "mesh-graph.h"
 
 /* tag pre-return-20261103 rdma/mesh-records.c busy_tell (3f72cbde), adapted: a client's hold is main's client word */
 /* design/transport.md section 14: the streams held, an owner word naming a client (a stream whose holding ended with

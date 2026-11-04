@@ -9,14 +9,6 @@
    a client or the collective */
 #include "mesh-bridge.h"
 
-/* tag etc/bridge/layout.h:61 MESH_KERNEL_EVENT_BYTES, verbatim: an address event's room (addresses_heard).  Defined here
-   until mesh-bridge.h carries it */
-#define MESH_KERNEL_EVENT_BYTES 512
-/* declared here until mesh-bridge.h carries it: tag rdma/mesh-link.c:56-65 port_halt (static there), mesh-flow.c's */
-void port_halt(struct port *port,_Atomic uint32_t *which);
-/* declared here until mesh-bridge.h carries it: windows_end, below, which mesh-link.c's event loop, turn_due and stop
-   read (tag rdma/mesh-link.c:1881, 1990, 2074) */
-uint64_t windows_end(void);
 
 /* `faulted` and `exit_at` (tag rdma/mesh-link.c:26-30, static there: f090d50d 8bbc01a5 d62c879b a8952de9 0e34c13e
    ba674fbe) and `terminated` (1128-1132) are mesh-bridge.h's externs, defined in mesh-link.c */
@@ -257,6 +249,8 @@ void terminations_turn(void){
    interface that is no port has the devices read again (find_wanted) */
 void arrivals_turn(void){
   const uint32_t came=atomic_exchange(&arrived,0);
-  for(uint32_t p=0;p<port_count;p++)if(came>>p&1 && ports[p].control<0){ports[p].opening=1;ports[p].retry_at=0;}
+  /* the coordinator, at integration: the tag's `ports[p].control<0` ("has no peer") is !port_paired, since the control
+     socket now closes after the pairing's exchange (mesh-bridge.h port_paired); what must stay: one "has a peer" test */
+  for(uint32_t p=0;p<port_count;p++)if(came>>p&1 && !port_paired(ports+p)){ports[p].opening=1;ports[p].retry_at=0;}
   if(atomic_exchange(&arrived_elsewhere,0))find_wanted=1;
 }

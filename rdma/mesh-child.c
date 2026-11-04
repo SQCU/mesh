@@ -8,10 +8,6 @@
    `l->plan`). */
 #include "mesh-bridge.h"
 
-/* declared here until mesh-bridge.h carries it: tag pre-return-20261103 rdma/mesh-link.c:270-274 link_lane (c24265e0),
-   there `static __attribute__((always_inline)) inline`, the lane a completion's queue pair number names (MESH_LINK_LANES
-   where none); lanes_flush maps each flushed completion to its lane by it, as the data path does (mesh-flow.c) */
-uint32_t link_lane(const struct link *l,uint32_t qp_num);
 
 /* tag pre-return-20261103 rdma/mesh-link.c:1536-1554, the child's statics and child_tell (c18f7a0e, 437e2c38, 3f72cbde,
    abeffc1b), verbatim; the command line gains REGION, the region's name, as its sixth word (child_main) */

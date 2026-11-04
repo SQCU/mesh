@@ -18,25 +18,6 @@
 #include "mesh-dataflow.h"
 #include <sysexits.h>
 
-/* tag etc/bridge/layout.h MESH_CONFIGURATION_BYTES, MESH_REGION_NAME_BYTES and tag etc/bridge/thunderbolt.h
-   MESH_REQUEST_BYTES, their values; defined here until mesh-bridge.h carries them (under #ifndef so that its stands) */
-#ifndef MESH_CONFIGURATION_BYTES
-#define MESH_CONFIGURATION_BYTES 65536
-#endif
-#ifndef MESH_REGION_NAME_BYTES
-#define MESH_REGION_NAME_BYTES 256
-#endif
-#ifndef MESH_REQUEST_BYTES
-#define MESH_REQUEST_BYTES 16773120u
-#endif
-/* declared here until mesh-bridge.h carries it: tag rdma/mesh-link.c windows_end (static there), defined in
-   mesh-events.c (6), the latest of the exit's window and every port's (B9, B9b) */
-uint64_t windows_end(void);
-/* declared here until mesh-bridge.h carries it: tag rdma/mesh-link.c ports_stalled (static there), defined in
-   mesh-ports.c (5), and the flag it sets each event-loop turn (`stalled`, the tag's static beside it, defined there
-   with it), which the event loop reads before it reads the devices */
-void ports_stalled(void);
-extern _Atomic int stalled;
 
 /* tag pre-return-20261103 rdma/mesh-link.c:9-10 stop, verbatim (3f72cbde 0905738c 1835bef4 5dcb4f69 b71dcb36 7c500c88 f9f2aff0 ad55cbf4 33ca0dab ba674fbe e68bba3e 8e5df675 8df706e2 b346ef2b 7e0a797e 1f9be1d5 a8952de9 c24265e0 6b33cc33) */
 /* mesh-verbs.h: the stop flag every loop reads */
@@ -310,7 +291,9 @@ static uint64_t turn_due(uint64_t liveness){
     const struct port *port=ports+p;
     due_at(&due,atomic_load(&port->quiet_at));due_at(&due,port->hold_to);
     if(port->opening)due_at(&due,port->retry_at);
-    if(port->open && port->control<0)due_at(&due,port->next);
+    /* the coordinator, at integration: the tag's `port->control<0` is !port_paired (mesh-bridge.h; the socket closes
+       after the pairing's exchange) */
+    if(port->open && !port_paired(port))due_at(&due,port->next);
     if(port->job)due_at(&due,port->job_at+MESH_PLATFORM_NS);
     if(port->link.job)due_at(&due,port->link.job_at+MESH_PLATFORM_NS);
   }
@@ -471,7 +454,8 @@ int main(int argc,char **argv){
         struct sockaddr_in6 from;socklen_t size=sizeof from;int accepted;
         while((accepted=accept(listener,(struct sockaddr *)&from,&size))>=0){
           struct port *port=port_at(from.sin6_scope_id);size=sizeof from;
-          if(!port || port->control>=0 || !port->open){close(accepted);continue;}
+          /* the coordinator, at integration: the tag's `port->control>=0` is port_paired (mesh-bridge.h) */
+          if(!port || port_paired(port) || !port->open){close(accepted);continue;}
           port->control=accepted;
           port_greet(port);
         }

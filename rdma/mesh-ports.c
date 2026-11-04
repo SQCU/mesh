@@ -11,15 +11,6 @@
    Every failure is port_lost with a code; nothing here waits. */
 #include "mesh-bridge.h"
 
-/* declared here until mesh-bridge.h carries it: tag rdma/mesh-link.c:780-802 ports_stalled and :23-25 `stalled` (both
-   static there), defined below; mesh-link.c's event loop calls the one each turn and reads the other */
-void ports_stalled(void);
-extern _Atomic int stalled;
-/* tag pre-return-20261103 etc/bridge/layout.h:65 MESH_TOPOLOGY_MESSAGE_BYTES, verbatim, declared here until
-   mesh-bridge.h carries it: the most a control socket's message carries past its header (control_heard) */
-#ifndef MESH_TOPOLOGY_MESSAGE_BYTES
-#define MESH_TOPOLOGY_MESSAGE_BYTES (UINT32_C(64)<<20)
-#endif
 
 /* The coordinator's pairing messages (CONTRACT.md "Pairing messages"), which differ from the tag, where a port's
    control socket stayed open for its link's life: the socket carries one exchange (HELLO, the records the map holds
@@ -30,7 +21,7 @@ extern _Atomic int stalled;
    control_heard), and port_lost clears both together.  What must stay: one test, read wherever the tag read
    `control>=0` for a peer (port_open, port_opened, port_hello; mesh-link.c's accept, turn_due; mesh-events.c
    arrivals_turn) */
-static inline int port_paired(const struct port *port){ return port->control>=0 || port->greeted; }
+/* port_paired is mesh-bridge.h's, where every file's test reads it */
 /* the coordinator's pairing messages: each port's peer at its link-local address and the mesh's port (MESH_PORT, the
    hello socket's, on the port's interface), read from the control socket as it is greeted (port_greet): where
    port_say's datagrams go.  A port's, here until mesh-bridge.h's struct port carries it */

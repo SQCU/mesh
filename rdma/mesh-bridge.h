@@ -231,7 +231,9 @@ struct link {
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
    child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
    its bytes (the operator, 2026-10-21) */
-#define MESH_CHILD_VERSION 2u
+/* 3: the child's command line gained its region's name as a sixth word (mesh-children.c child_spawn, mesh-child.c
+   child_main), a change of the contract this version names, by the tag's own rule above */
+#define MESH_CHILD_VERSION 3u
 /* tag rdma/mesh-bridge.h LINK_STREAMS_ENDED, verbatim; what a stream's end is under the page lists is mesh-flow.c's
    (streams_open, streams_cancel: the cancellation of this node's words) */
 /* the code a link's loss is booked with where no stream of it is live, each holding on it having ended with units
@@ -444,5 +446,43 @@ int port_threads(struct port *port);
 void streams_open(struct port *port,uint32_t node,uint64_t bandwidth);
 void streams_cancel(const struct port *port);
 void streams_let_go(void);
+/* tag rdma/mesh-link.c:56-65 port_halt, static there; mesh-events.c (peer_terminated) and mesh-child.c call it */
+void port_halt(struct port *port,_Atomic uint32_t *which);
+
+/* mesh-events.c: tag rdma/mesh-link.c windows_end (static there), which mesh-link.c's loop, turn_due and stop read */
+uint64_t windows_end(void);
+/* mesh-ports.c: tag rdma/mesh-link.c:780-802 ports_stalled and :23-25 `stalled` (static there) */
+void ports_stalled(void);
+extern _Atomic int stalled;
+/* mesh-ports.c: a port with a peer.  The tag tested `port->control>=0`; the control socket now closes after the pairing's
+   one exchange (the coordinator's instruction), so a paired port is one whose socket is open or whose peer's hello was
+   heard (`greeted`, cleared by port_lost).  Every "has a peer" test of the tag's reads this one */
+static inline int port_paired(const struct port *port){ return port->control>=0 || port->greeted; }
+/* tag rdma/mesh-link.c:268-274 link_lane (c24265e0), verbatim: the lane a completion's queue pair number names: one of
+   the link's lanes, else MESH_LINK_LANES (dropped; a lane its plan leaves out has the number UINT32_MAX, which no queue
+   pair has) */
+static __attribute__((always_inline)) inline uint32_t link_lane(const struct link *l,uint32_t qp_num){
+  uint32_t k=0;
+  while(k<MESH_LINK_LANES && l->qpn[k]!=qp_num)k++;
+  return k;
+}
+/* tag etc/bridge/layout.h, verbatim: the kernel event socket's read (mesh-events.c), a control stream's largest message
+   (mesh-ports.c), the configuration's and the region name's bytes and a request's (mesh-link.c), a health sample's pace
+   (mesh-records.c) */
+#ifndef MESH_KERNEL_EVENT_BYTES
+#define MESH_KERNEL_EVENT_BYTES 512
+#endif
+#ifndef MESH_TOPOLOGY_MESSAGE_BYTES
+#define MESH_TOPOLOGY_MESSAGE_BYTES (UINT32_C(64)<<20)
+#endif
+#ifndef MESH_CONFIGURATION_BYTES
+#define MESH_CONFIGURATION_BYTES 65536
+#endif
+#ifndef MESH_REGION_NAME_BYTES
+#define MESH_REGION_NAME_BYTES 256
+#endif
+#ifndef MESH_REQUEST_BYTES
+#define MESH_REQUEST_BYTES 16773120u
+#endif
 
 #endif
