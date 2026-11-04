@@ -254,10 +254,15 @@ int mesh_metal_waits_end(struct mesh_metal_waiter *waiter){
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1; design/disjoint-pages-revision-coordination.md, "The
    region" (struct mesh_status) */
 /* The GPU's status after the run (struct mesh_status at the state section's `status`, the GPU's alone, read acquire):
-   a later pass that found a field ahead of the allocator's order is EPROTO; one that found a field behind (a receive
-   the bridge cancelled: its count reached its target with the field one phase behind) is `cause` where the caller
-   gives one (the waiter's ETIMEDOUT or ECANCELED), else ENOLINK; none, 0.  *first is the first failed execution, ~first
-   where the status's `first` (the greatest ~t over the failed passes) is not 0, else UINT64_MAX.
+   a later pass that found a field behind (a receive the bridge cancelled: its count reached its target with the field
+   one phase behind) is `cause` where the caller gives one (the waiter's ETIMEDOUT or ECANCELED), else ENOLINK, whatever
+   `ahead` holds; with none behind, one that found a field ahead of the allocator's order is EPROTO; none, 0.  *first is
+   the first failed execution, ~first where the status's `first` (the greatest ~t over the failed passes) is not 0,
+   else UINT64_MAX.
+   2026-11-04, sub-assignment 8, the coordinator's ruling on owner 6's finding (mesh-flow.c 04b5e561): `behind` is read
+   before `ahead`, where EPROTO came first.  Why: a cancelled receive's field is never written, so a reader a round
+   later finds it two behind and counts it `ahead`, and three rounds later reads it as landed; after a cancellation
+   `ahead` is the cancellation's.  What must stay: EPROTO where no pass found a field behind and one found it ahead.
    2026-11-04, sub-assignment 8: in place of the host's read of each execution's cancel word after the run (the GPU
    lane's UINT64_MAX past its bound among its writers).  Why: no lane waits, so none has a bound to reach; the later
    pass writes a failure into the status, a word only the GPU writes (C3.1).  What must stay: a run's failure read after
@@ -271,8 +276,8 @@ int mesh_metal_status(struct mesh_metal_transport *transport,int cause,uint64_t 
   const uint32_t behind=atomic_load_explicit(&status->behind,memory_order_acquire);
   const uint32_t failed=atomic_load_explicit(&status->first,memory_order_acquire);
   if(failed && first)*first=(uint32_t)~failed;
-  if(ahead)return EPROTO;
   if(behind)return cause?cause:ENOLINK;
+  if(ahead)return EPROTO;
   return 0;
 }
 

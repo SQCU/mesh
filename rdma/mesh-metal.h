@@ -41,8 +41,14 @@ int mesh_metal_waits_end(struct mesh_metal_waiter *);    /* joined and freed: 0,
 /* 2026-11-04, sub-assignment 8, where the contract's mesh_metal_waits_end names three causes: also EINVAL, where the
    system's wait refuses a count word (os_sync_wait_on_address.h), so the thread ends at once rather than spin to the
    deadline (mesh-metal.m waits_run) */
-/* the GPU's status after the run (struct mesh_status): 0 where no pass failed; EPROTO where one found a field ahead;
-   else `cause` where it is not 0, else ENOLINK (the bridge cancelled); *first the first failed execution */
+/* the GPU's status after the run (struct mesh_status): 0 where no pass failed; where one found a field behind, `cause`
+   where it is not 0, else ENOLINK (the bridge cancelled), whatever `ahead` holds; EPROTO where one found a field ahead
+   and none behind; *first the first failed execution.
+   2026-11-04, sub-assignment 8, the coordinator's ruling on owner 6's finding (mesh-flow.c 04b5e561): reversing the
+   contract's order, EPROTO first where any pass found a field ahead.  Why: a cancelled receive's field is never
+   written, so a reader a round later finds it two behind and counts it `ahead` (three rounds later it reads as
+   landed): after a cancellation `ahead` is the cancellation's, not a write ahead of the allocator's order.  What must
+   stay: EPROTO where no pass found a field behind and one found it ahead. */
 int mesh_metal_status(struct mesh_metal_transport *,int cause,uint64_t *first);
 _Static_assert(sizeof(struct mesh_metal_transport)==32,"mesh_metal_transport");
 _Static_assert(sizeof(struct mesh_metal_input)==32 && offsetof(struct mesh_metal_input,group)==8 &&
