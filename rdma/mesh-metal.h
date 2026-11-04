@@ -15,7 +15,10 @@
    words wrapped once, by address, with no copy; one input a received range and one supplied word a source range, as
    byte offsets in that one buffer; nothing here creates a section. */
 /* the plan's state section wrapped once for the GPU: `state` an MTLBuffer over its pages (no copy), `words` its struct
-   mesh_state, `offset` its region offset (hdr state), `bytes` its length; EINVAL where no plan is written */
+   mesh_state, `offset` its region offset (the context's `state`, mesh-dataflow.h struct mesh_ctx), `bytes` its
+   length; EINVAL where the context has no standing plan.  2026-11-04, owner L (design/compilation-coordination.md, "The
+   region"): every function here takes the plan from the context's `state`, never from the region's header, where it
+   was hdr `state`, the one plan's.  What must stay: the plan's words wrapped once, by address, with no copy */
 struct mesh_metal_transport { void *state; struct mesh_state *words; uint64_t offset,bytes; };
 int mesh_metal_transport_create(struct mesh_ctx *,void *device,struct mesh_metal_transport *);
 void mesh_metal_transport_destroy(struct mesh_metal_transport *);

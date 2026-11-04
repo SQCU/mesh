@@ -75,7 +75,7 @@ struct mesh_health { uint64_t booted,available; };
    node's port index and `peer_port` the peer's (the index each bridge gave its port), `qps` the queue pairs the
    pairing negotiated, the same at both ends, and `bandwidth` its bandwidth in bits a second.  Each of the two records
    lists the cable from its own side; a cable's id, the same at both ends, is its port at the end of the lower node
-   id.  The bridges' rule reads cables (struct mesh_hop, "Both ends"); the collective reads only node pairs and each
+   id.  The bridges' rule reads cables (mesh-flow.c link_prepare); the collective reads only node pairs and each
    pair's capacity, the sum of its cables' bandwidth, never a port or queue pair. */
 struct mesh_reach { uint32_t node,port,peer_port,qps; uint64_t bandwidth; };
 _Static_assert(sizeof(struct mesh_reach)==24,"mesh_reach");
@@ -116,17 +116,22 @@ uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,str
 /* design/algorithm-sources.md#programkernel_call */
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M08 */
-/* Four independent dimensions, none of them derived from another: arena pages, page-table rows,
-   the page lists' room (`hops`) and the registered window.  rows was welded to pages because the
+/* Three independent dimensions, none of them derived from another: arena pages, page-table rows
+   and the registered window.  rows was welded to pages because the
    arena bitmap lived in a row plane and the order table was rows-strided; both are now their own
-   table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else.  `hops`: the page lists' room
-   (struct mesh_hop); absent (0), `rows`.  `links`: the link table's ports (MESH_PORTS, mesh-link.c).
+   table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else.  `links`: the link table's ports (MESH_PORTS,
+   mesh-link.c).
    The areas, in order, each at a page boundary and owning the rest of its last page: the row planes (MESH_PLANES,
-   MESH_ROW_OWN alone), the arena bitmap, the page table, the buffers, the link table, the publications, the page lists
-   (`hops` entries of struct mesh_hop, 48 bytes each), the bridge's pages (struct mesh_bridge_pages), the map's records
-   (`map_room` = MESH_MAP_ROOM of struct mesh_record at `map_off`), then the arena at a block boundary.  A plan's state
-   (struct mesh_state: its phases, counts, supplied words and status) is no area of the layout: mesh_plan places it in
-   the arena with the plan's other values (hdr `state`). */
+   MESH_ROW_OWN alone), the arena bitmap, the page table, the buffers, the link table, the publications, the bridge's
+   pages (struct mesh_bridge_pages), the map's records (`map_room` = MESH_MAP_ROOM of struct mesh_record at
+   `map_off`), then the arena at a block boundary.  A plan's state (struct mesh_state: its phases, counts, supplied
+   words, status and entries) is no area of the layout: mesh_plan places it in the arena with the plan's other values,
+   in the plan's claim (its claim head's publication `state`). */
+/* 2026-11-04, owner L (design/compilation-coordination.md, "The region"; design/plan-to-bridge-change-request.md R8):
+   the page lists' area (mesh_geometry `hops`, its room, at hdr `hop_off` with `hop_capacity`, `rows` entries where
+   absent) is gone.  Why: each plan's entries are in its own state section, in its claim, and any number of plans
+   stand at once, so no area of the layout holds a plan's entries.  What must stay: no area of the layout holds a
+   plan's words. */
 /* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, Appendix A, A3): the map's records are laid
    out once with the region (`map_off`, `map_room`), where the bridge leased arena pages for them and leased again
    larger as the mesh grew; no page of the map is taken from the arena.  What must stay: the map's room fixed with the
@@ -140,11 +145,10 @@ uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,str
    for one to be erased (C3.4) and nothing is zeroed or reset (C3.7).  What must stay: the plan's state in its own
    section, apart from the data pages it tells of (mesh.h struct mesh_hop's note, "The state section"), placed by
    mesh_plan alone; no area of the layout holds a plan's words. */
-struct mesh_geometry { uint32_t pgsz,block,pages,rows,links,wire_pages,hops; };
+struct mesh_geometry { uint32_t pgsz,block,pages,rows,links,wire_pages; };
 static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   uint32_t blocks=g.pages/g.block,arena=blocks*g.block;
   if(!g.rows)g.rows=arena;
-  if(!g.hops)g.hops=g.rows;
   if(!g.wire_pages || g.wire_pages>arena)g.wire_pages=arena;
   g.wire_pages=(g.wire_pages+g.block-1)/g.block*g.block;
   if(g.wire_pages>arena)g.wire_pages=arena;
@@ -159,7 +163,6 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->link_off=at; at+=(uint64_t)(g.links>MESH_PORTS?g.links:MESH_PORTS)*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
-  h->hop_off=at; h->hop_capacity=g.hops; at+=(uint64_t)g.hops*sizeof(struct mesh_hop); at=(at+pgsz-1)/pgsz*pgsz;
   h->bridge_off=at; at+=sizeof(struct mesh_bridge_pages); at=(at+pgsz-1)/pgsz*pgsz;
   atomic_store_explicit(&h->map_off,at,memory_order_relaxed); h->map_room=MESH_MAP_ROOM;
   at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;
@@ -169,7 +172,7 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
 }
 /* moved from mesh-link.c (be0e1e48), where it was static, to beside mesh_layout (review R2, B2) */
 /* tag pre-return-20261103 rdma/mesh.h:290-302 mesh_layout_within, verbatim but main's mesh_layout (378dbd5f): the
-   configuration's geometry `g` (its rows, window and page lists' room as configured, 0 still mesh_layout's default)
+   configuration's geometry `g` (its rows and window as configured, 0 still mesh_layout's default)
    laid with `pages` the most whole blocks the object's bytes hold beside the metadata, where the tag's took pgsz and
    block alone */
 /* the layout that fits a region object of `bytes` (its size, fixed when it was made): its arena the most pages its
