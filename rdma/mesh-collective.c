@@ -207,11 +207,6 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,struct mesh_section section,
    plan is loaded (mesh.h struct mesh_hop), so one value releases or tells every one */
 #define MESH_PLAN_POSITION 1
 
-/* declared here until mesh-graph.h carries it: tag pre-return-20261103 rdma/mesh-graph.h mesh_graph_rows (d8d861b5),
-   for the graph module's owner (sub-assignment 11g) to bring verbatim */
-void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *context, size_t k), const void *context,
-                     size_t *first, size_t *order);
-
 /* a demand: the declared transfers of one identity from one source, one range to each of their destinations */
 struct plan_demand {
   uint32_t source,identity,order,first;   /* first: its first declared transfer, the tie after `order` */
