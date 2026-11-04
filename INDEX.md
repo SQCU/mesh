@@ -33,7 +33,8 @@ other projects, such as a game bot, and old dated records; they are not listed h
 - [design/disjoint-pages-change-request.md](design/disjoint-pages-change-request.md): the operator's and Claude's
   turns of 2026-11-03, verbatim, on the page readiness word and the plan's ring: pages assigned by liveness so nothing
   live shares a page, read-after-write by masks read from a contiguous landed list, no ring and no per-page cells. With
-  the literature, the state of the code and the functions in scope.
+  the literature, the state of the code and the functions in scope. Appendix C holds the operator's rulings on the first
+  implementation and the revision: masks and a later pass, every value placed, unrolling by lifetime, no claim at attach.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.
