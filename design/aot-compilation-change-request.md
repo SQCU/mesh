@@ -174,3 +174,30 @@ is defined later, apart from all of this.
 - The compilation contains no chooser of placement and no chooser of weights; both arrive as operands.
 - No kernel is written by the compilation.
 - The three builds are clean. Runs come only when the operator authorizes them.
+
+## Appendix: a chooser for edge weights
+
+> nevertheless, you should have found a 'chooser' in the literature for how to weight 'edges' and cited it; do so
+> immediatley as a supplementary appendix as this is not a requirement that blocks the writing of the change request
+> thus described.
+
+This appendix is supplementary. A3 holds as written: the compilation takes the weighting operand and computes no
+weight. This names one canonical function that can fill the operand's edge weights. Using it means passing it in place
+of unit weights; nothing in A1 to A9 changes.
+
+- **The model:** the α–β model of a transfer. A transfer of n bytes over one link takes α + n β, where α is the
+  link's start-up time and β its time per byte. Hockney states it as t(n) = (n + n½) / r∞, with r∞ the asymptotic
+  rate and n½ the length at which half of it is reached (R. W. Hockney, The communication challenge for MPP: Intel
+  Paragon and Meiko CS-2, Parallel Computing 20(3), 1994).
+- **Where it is already used:**
+  - MSCCLang uses it for this same decision: "Assuming an α − β communication cost model, each send has a start up α
+    cost and a per-byte β cost" (M. Cowan et al., ASPLOS 2023, §5.1).
+  - HEFT weighs a communication edge the same way, as a start-up cost plus its data over the link's bandwidth (H.
+    Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002).
+- **The edge weights it gives:** an edge e of n bytes crossing cable k weighs α_k + n β_k.
+  - β_k is 1 over cable k's bandwidth, from the map (mesh-map.h).
+  - α_k is fitted from measured transfer times of at least two sizes on that cable, as Hockney fits r∞ and n½.
+  - Measuring needs runs, which wait for the operator's authorization. Until α_k is measured, it is 0, the model's
+    bandwidth-only form.
+- **Its place in the code:** a function from (bytes, cable) to a weight, passed to the compilation as its edge-weight
+  chooser. Any other chooser can replace it, as A3 requires.
