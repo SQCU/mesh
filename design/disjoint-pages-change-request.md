@@ -379,3 +379,92 @@ This section is Claude's. With it, this document is the unit of work.
    - Parity is shown by the normal program, when the operator authorizes runs.
    - Every wait that remains is bounded, and every failure is an error value.
    - Commits are pushed to main as each piece builds.
+
+## Appendix A: the allocator
+
+This appendix is Claude's. It defines the one allocator this change requires, and cites both the strategy in the code
+now and the strategy that replaces it to their closest literature.
+
+### A1. Where pages are allocated now (mesh 7e9936d5)
+
+- **First fit with compare-and-swap, wherever a caller needs pages.** `rdma/mesh-dataflow.c` `mesh_rows_alloc` and
+  `mesh_arena_alloc` do "one first-fit scan over an explicit pair of bitmaps", and take each row's owner word by
+  compare-and-swap. They are called from `rdma/mesh-call.c` (a client's sections, lines 22, 32 and 62) and from
+  `rdma/mesh-records.c` (the bridge's record pages, line 76).
+- **Ring slots in the plan.** `rdma/mesh-collective.c` `plan_pages` lays each section out as `depth` slots of its
+  pages, and `plan_row` gives slot s's page k as `first + slot × (pages / block) + k`. Execution t uses slot
+  `t mod depth`. Reuse of a slot is gated while the plan runs: `rdma/mesh-flow.c` posts a receive of execution t only
+  once executions up to t − (depth − 1) have landed and, from t = depth, once execution t − depth's forwards are
+  counted.
+
+### A2. The current strategies and their closest literature
+
+- **First fit over a bitmap, at the call that needs memory.** This is run-time dynamic storage allocation: D. E. Knuth,
+  The Art of Computer Programming, vol. 1, §2.5 (1968), and P. R. Wilson, M. S. Johnstone, M. Neely and D. Boles,
+  Dynamic storage allocation: a survey and critical review, IWMM 1995. It optimizes for allocating without knowing the
+  future: each request is served from what is free at that moment. It knows nothing of a value's lifetime, and it
+  needs an atomic claim because other callers allocate concurrently.
+- **Ring slots reused under a run-time window.** This is the bounded buffer: E. W. Dijkstra, Cooperating sequential
+  processes, 1965. Its reuse gate is credit-based flow control: H. T. Kung and R. Morris, Credit-based flow control for
+  ATM networks, IEEE Network 9(2), 1995. In GPU collectives it is NCCL's per-connection FIFO of `NCCL_STEPS` slots with
+  head and tail counters. It optimizes for bounded memory, and it pays with a wait before a slot is reused.
+
+Neither knows the program's dependences, and both decide memory while the program runs.
+
+### A3. The allocator this change requires
+
+**What it is.** One function, called once per plan, inside `mesh_plan`, before the plan's first execution. It is the
+only allocator of a program's pages. Nothing allocates a program page while the program runs: not the bridge, not a
+call site, not a GPU kernel.
+
+**Its inputs.**
+- Every value instance the plan moves or computes, across all of the plan's executions t = 0 … executions − 1, with its
+  size in pages.
+- The plan's dependence graph: each value instance's producer and its consumers, the program's own data edges, and the
+  transport's edges (a SEND before its landing, a landing before its forward).
+
+**Interference, by happens-before, not by time.** Two value instances interfere unless the dependence graph orders
+every read of one before the first write of the other (L. Lamport, Time, clocks, and the ordering of events in a
+distributed system, CACM 21(7), 1978). Only values that don't interfere may share a page. A shared page then needs no
+wait, because the program's own edges already order its last read before its next write. This is how CUDA graph memory
+nodes reuse physical memory: only where the graph's topology guarantees the lifetimes don't overlap (NVIDIA, CUDA C++
+Programming Guide, "Graph Memory Nodes").
+
+**The assignment.**
+- A page is the unit, so every value instance needs whole pages. Ordered along a topological order of the dependence
+  graph, the instances' lifetimes are intervals. Colouring an interval graph greedily by start point, the left-edge
+  algorithm, uses exactly as many colours as the largest set of intervals live at once, which is optimal (T. Hashimoto
+  and J. Stevens, Wire routing by optimizing channel assignment within large apertures, DAC 1971; M. C. Golumbic,
+  Algorithmic Graph Theory and Perfect Graphs, 1980). It is linear scan applied to pages (M. Poletto and V. Sarkar,
+  Linear scan register allocation, ACM TOPLAS 21(5), 1999).
+- A value instance of several pages takes a run of free colours at its start point. Where sizes differ, this is the
+  offline dynamic storage allocation problem (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979;
+  J. Gergov, Algorithms for compile-time memory optimization, SODA 1999; A. L. Buchsbaum et al., OPT versus LOAD in
+  dynamic storage allocation, STOC 2003), solved in the ML compilers by greedy by size: Y. Pisarchyk and J. Lee,
+  Efficient memory management for deep neural net inference, arXiv 2001.03288, 2020 (TensorFlow Lite's arena planner);
+  XLA's buffer assignment and heap simulator; T. Chen et al., TVM, OSDI 2018 (static memory planning).
+- **Repeated executions are unrolled, not ringed.** The same value in executions t and t + 1 are two instances. They
+  share a page only if the dependence graph already orders t's last read before t + 1's first write. Otherwise they
+  get different pages, as compile-time modulo variable expansion gives each overlapping iteration its own copy (M. Lam,
+  Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo scheduling, MICRO 1994, and the Cydra 5 and IA-64
+  rotating register files). The number of copies is decided by the allocator from the graph. Nothing counts or waits
+  for it at run time.
+- **Memory is the abundant resource.** A Studio registers 82 of its 96 GiB. Minimizing peak pages is the allocator's
+  tie-breaker, never a reason to add a wait.
+
+**Its output.** Every value instance's pages, written into the page table and the page lists before the first
+execution. The landed list's section is laid out beside them (proposal item 2).
+
+**Its failure.** If the plan needs more pages than its section holds, `mesh_plan` fails with `ENOMEM` before anything
+runs. There is no fallback allocation at run time.
+
+**Sharing the region between programs.** Each program claims its section of the region once, when it attaches,
+and the allocator assigns pages only inside that section. Two programs never allocate from each other's section. The
+bridge's own pages (its records) are laid out once with the region, not taken from any program's section.
+
+### A4. What goes
+
+- `mesh_rows_alloc` and `mesh_arena_alloc` as call-site allocators: `mesh-call.c`'s three calls and
+  `mesh-records.c`'s call. One claim of a program's section at attach remains.
+- `plan_pages`' `depth` slots and `plan_row`'s slot arithmetic.
+- `mesh-flow.c`'s receive window and its forwards gate, and the hdr fields `depth` and `hop_stride` that serve them.
