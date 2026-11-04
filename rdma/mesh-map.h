@@ -144,4 +144,24 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->data_off=at; at+=(uint64_t)g.pages*pgsz;
   h->length=at; return at;
 }
+/* moved from mesh-link.c (be0e1e48), where it was static, to beside mesh_layout (review R2, B2) */
+/* tag pre-return-20261103 rdma/mesh.h:290-302 mesh_layout_within, verbatim but main's mesh_layout (378dbd5f): the
+   configuration's geometry `g` (its rows, window and page lists' room as configured, 0 still mesh_layout's default)
+   laid with `pages` the most whole blocks the object's bytes hold beside the metadata, where the tag's took pgsz and
+   block alone */
+/* the layout that fits a region object of `bytes` (its size, fixed when it was made): its arena the most pages its
+   metadata leaves, so a layout whose metadata grew or shrank takes the same object's pages (mesh-link.c region_open);
+   0 where none fits */
+static inline uint64_t mesh_layout_within(struct hdr *h,struct mesh_geometry g,uint64_t bytes){
+  /* blocks: lo the most known to fit, hi the most that might (a layout's length grows with its arena) */
+  uint64_t lo=0,hi=bytes/g.pgsz/g.block;
+  if(hi>UINT32_MAX/g.block)hi=UINT32_MAX/g.block;
+  while(lo<hi){
+    const uint64_t mid=lo+(hi-lo+1)/2;
+    g.pages=(uint32_t)(mid*g.block);
+    if(mesh_layout(h,g)<=bytes)lo=mid;else hi=mid-1;
+  }
+  g.pages=(uint32_t)(lo*g.block);
+  return lo && mesh_layout(h,g)<=bytes?h->length:0;
+}
 #endif

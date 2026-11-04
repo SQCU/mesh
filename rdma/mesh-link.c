@@ -155,25 +155,7 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
 /* 2026-11-04, review R2 (L1), reversing this file's first form (d77eec2a), which refused an object smaller than the
    configuration's length: a configuration that grew the region then left the bridge exiting 1 and its heartbeat
    opening it again, forever.  What must stay: the layout fitted to the object, a bridge ending only where none fits */
-/* tag pre-return-20261103 rdma/mesh.h:290-302 mesh_layout_within, verbatim but main's mesh_layout (378dbd5f): the
-   configuration's geometry `g` (its rows, window and page lists' room as configured, 0 still mesh_layout's default)
-   laid with `pages` the most whole blocks the object's bytes hold beside the metadata, where the tag's took pgsz and
-   block alone.  Defined here, mesh.h being sub-assignment 9's; main's mesh.h has none */
-/* the layout that fits a region object of `bytes` (its size, fixed when it was made): its arena the most pages its
-   metadata leaves, so a layout whose metadata grew or shrank takes the same object's pages (mesh-link.c region_open);
-   0 where none fits */
-static inline uint64_t mesh_layout_within(struct hdr *h,struct mesh_geometry g,uint64_t bytes){
-  /* blocks: lo the most known to fit, hi the most that might (a layout's length grows with its arena) */
-  uint64_t lo=0,hi=bytes/g.pgsz/g.block;
-  if(hi>UINT32_MAX/g.block)hi=UINT32_MAX/g.block;
-  while(lo<hi){
-    const uint64_t mid=lo+(hi-lo+1)/2;
-    g.pages=(uint32_t)(mid*g.block);
-    if(mesh_layout(h,g)<=bytes)lo=mid;else hi=mid-1;
-  }
-  g.pages=(uint32_t)(lo*g.block);
-  return lo && mesh_layout(h,g)<=bytes?h->length:0;
-}
+/* mesh_layout_within (be0e1e48) is mesh-map.h's, beside mesh_layout (review R2, B2) */
 static int region_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->wire_pages==b->wire_pages && a->links==b->links &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
