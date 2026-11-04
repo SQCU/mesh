@@ -4,11 +4,13 @@
 
 /* The plan call (design/page-queue-change-request.md, "What the collective decides" and "The functions": the
    collective; design/disjoint-pages-change-request.md, Appendix C, C3.2-C3.7; design/disjoint-pages-revision-
-   coordination.md, "The plan call", "The allocator" and "Writing a plan").  A program's transfers, every collective
-   call and pipeline hand-off of it, and every value it keeps at this node, declared at once and planned together over
-   the map's Thunderbolt-5-connected nodes, for any node count, ahead of time.  Its output is this node's page lists
-   (mesh.h struct mesh_hop), which the bridge alone reads, the plan's state section (mesh.h struct mesh_state), and the
-   rows and pages of every value, placed once by the one allocator.
+   coordination.md, "The plan call", "The allocator" and "Writing a plan"; design/plan-to-bridge-change-request.md, R3
+   to R5 and R8; design/aot-compilation-change-request.md, A3, A6 and A8; design/compilation-coordination.md, "The plan
+   call", T1 to T7 and Q5).  A program's transfers, every collective call and pipeline hand-off of it, and every value
+   it keeps at this node, declared at once and planned together over the map's Thunderbolt-5-connected nodes, for any
+   node count, ahead of time.  Its output is one plan, named (group, epoch), in its own claim: this node's page lists
+   (mesh.h struct mesh_hop), which the bridge alone reads, in the plan's state section (mesh.h struct mesh_state) with
+   the plan's words, and the rows and pages of every value, placed once by the one allocator.
 
    Values (struct mesh_value), this node's own: every value the program keeps here, weights, caches, intermediates,
    exchanges and GPU counters alike, placed by the plan and by nothing else (C3.2).
@@ -40,16 +42,26 @@
 
    Declared transfers (struct mesh_declared): an operand range from rank `source` to rank `destination`, ranks the
    map's indices (mesh_nodes_read: a node's place in ascending node-id order).  Every rank passes the same declared
-   transfers and the same dependences in the same order (every rank's events, so every rank builds the one template);
-   they differ only in `value`.
+   transfers, weights and dependences in the same order (every rank's events, so every rank builds the one template
+   and the one task graph); they differ only in `value`.
    - The transfers of one `identity` from one `source` are one range, sent to each of their destinations (a multicast
-     where there are several); their `bytes` agree, and the range's order is the least of theirs.  A range is the
-     operand's whole value, one declared transfer per destination: no page cut.
-   - `order`: lower first (a transfer that blocks a pipeline stage).  Within a node pair the list is in that order, then
-     the declared order, so the bridge's rule (mesh.h "Both ends") assigns a blocking transfer's pages first.
+     where there are several); their `bytes` agree.  A range is the operand's whole value, one declared transfer per
+     destination: no page cut.  The ranges (demands) are numbered by their first declared transfer.
+   - `kind` (design/plan-to-bridge-change-request.md, R4): the kind of the transfer's consumer at its destination,
+     MESH_JOIN (function A, a blocking operator over its whole operand: one task, with an edge from every page of the
+     range) or MESH_PAGES (function B, a streaming homomorphism over pages: one task a page, each with an edge from its
+     own page); any other EINVAL.  The kind reaches the task graph alone: the bridge's lists carry none (R4, R5).
+     2026-11-04, owner C (design/compilation-coordination.md, "The plan call", T6): `order`, the hand priority (lower
+     first, the range's the least of its transfers'), is gone with plan_demand_order, `kind` in its place.  Why: R5's
+     static schedule orders every node pair's sends; a hand priority is a second order.  What must stay: every rank
+     the same declared transfers in the same order, so every rank numbers the demands alike.
    - `value`: the index in `values` of this node's value of the range where this node is its source or a destination,
      else MESH_ABSENT.  That value is MESH_EXECUTION and wire, its bytes the range's, and one range's alone.
    - `bytes`: the range's bytes, at every rank.
+   Weights (struct mesh_weight; design/aot-compilation-change-request.md, A3: the weighting operand, the program's
+   weighting function's result, which the plan takes and computes none of): weights[i] is declared[i]'s, `count` of
+   them, the task graph's w and c (O. Sinnen, Task Scheduling for Parallel Systems, Wiley, 2007).  The node pairs'
+   capacities are the map's (mesh_nodes_read).
    Dependences (struct mesh_dependence): the program's own data edges at one node, event `from` before event `to`, `to`
    in execution t + lag where `from` is in t.  An event is declared[i]'s production at its source, its consumption at
    declared[i]'s destination, or the source's own read of the range it sends.  With the transport's own edges (a range
@@ -73,25 +85,64 @@
    client's earlier claims, which the bridge releases once it holds them no more (C3.4); nothing is claimed at attach,
    and nothing waits for a release.
 
-   The state section (mesh.h struct mesh_state, at hdr `state`), an invariant item outside the window, apart from every
-   data page: the struct, then the phase list (each received range's 2-bit Gray-coded phase a page, a group a copy),
-   the counts (each received range's arrivals, a word a copy), the supplied words (one a source range) and the GPU's
-   status (mesh-collective.c mesh_plan gives the offsets).  Its words are set to their starting values once, where it
-   is placed (the contract's D3), and none is reset while the plan stands (C3.7).  Each claimed row's publication
+   The task graph and its schedule (design/plan-to-bridge-change-request.md, R3 to R5; design/compilation-coordination.md,
+   T1 to T6).  One execution's task graph G = (V, E, w, c) (Sinnen, 2007): its tasks the template's events, each on the
+   node its event is at (the placement operand: the declared transfers' sources and destinations, which the program's
+   placement function chose).  Each range's production at its source weighs `produced`; each declared transfer's
+   consumption at its destination, one task for MESH_JOIN or one a page for MESH_PAGES, weighs `consumed` (each page's
+   task); each range's source read, where a dependence names it, weighs `read`.  Its edges: page k of declared[i]'s range
+   from the production to the consumption (to page k's task for MESH_PAGES), of cost `page`, over the tree path the fill
+   gave page k; the production to the source read; each dependence of lag 0 (task to task at one node; an end that is a
+   MESH_PAGES consumption is each of its page tasks).  The lags stay the allocator's: the schedule is one execution's.
+   Its topology graph's links are the node graph's edges, each a pair of directed links of the pair's capacity over the
+   greatest (O. Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6) 2005, Definition
+   4).  The schedule is list scheduling with each task on its node, in decreasing bottom level, each edge scheduled on
+   its route's links under the contention model (Sinnen and Sousa, eq. (7), Algorithms 1 and 2; mesh-graph.h
+   mesh_graph_contention_schedule), a page crossing a tree edge once (T4).  Each copy's entries are in the order of their
+   link's scheduled start of their page, ties by the walk's order (T6), so each node pair's sends are in schedule order,
+   both ends' lists agree, and every rank writes the same order from the same inputs (F. B. Schneider, ACM Comput.
+   Surv., 1990).  The bridge spreads a node pair's sequence as its own (R5).
+
+   The plan's name, and the plan in its claim (design/compilation-coordination.md, "The plan call" and Q5; the draft
+   e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", as the operator's ruling 1 allows it).
+   `group`: the launcher's (MESH_GROUP), the same at every rank of a run; 0 is EINVAL.  `epoch`: the context's count of
+   its mesh_plan calls (mesh-dataflow.h struct mesh_ctx `epoch`), raised at the call's entry, every rank of an SPMD
+   program raising its own alike.  The plan is (group, epoch): EEXIST where a plan standing at this node already has
+   that name.  The plan's state section is in its claim, and the claim's head row's publication `state` names it once
+   the plan stands; context->state is that offset, and hdr's one-plan fields (`hops`, `plan`, `state`, `hop_off`,
+   `hop_capacity`) are neither read nor written.
+
+   The state section (mesh.h struct mesh_state, at its claim's head's publication `state`), an invariant item outside
+   the window, apart from every data page: the struct, then the phase list (each received range's 2-bit Gray-coded
+   phase a page, a group a copy), the counts (each received range's arrivals, a word a copy), the supplied words (one a
+   source range), the GPU's status and this node's entries (mesh-collective.c mesh_plan gives the offsets).  Its words
+   are set to their starting values once, where it is placed (the contract's D3), and none is reset while the plan
+   stands (C3.7).  The struct's words beside them: `group` and `epoch` the plan's name, `serial` the map serial it was
+   made on, `hops` its entries' region offset and `entries` u x n, `held` 0 and every `refused` 0 (the ports' alone),
+   `nodes` the plan's nodes (a set of map indices: every source and destination of a declared transfer and every node a
+   tree of it reaches; this node's own where there is none) and `sender` the least of them (Q2), each the same at every
+   rank, and `submitted`, `released` and `served` 0 (the bridge's alone, Q2 and Q4).  Each claimed row's publication
    (mesh.h struct mesh_publication) is written: a received range's first row names its phase groups and count words, a
    source range's first row its supplied word, every other field 0.  No data page is written by the plan.
 
-   This node's entries: u x n (mesh.h struct mesh_hop), copy c's n at [c n, c n + n), every copy's the same hops in
-   the same order, each copy's naming its own pages, phase fields and count words.  Each entry carries the map serial;
-   hdr `plan` is the plan's generation (the last plan's + 1, never 0).
+   This node's entries: u x n (mesh.h struct mesh_hop) at the state section's `hops`, copy c's n at [c n, c n + n),
+   every copy's the same hops in the same order, each copy's naming its own pages, phase fields and count words.  Each
+   entry carries the map serial and its page's bytes, min(Q, B - k Q) for page k of a range of B bytes, Q = block x
+   pgsz (T7).
+   2026-11-04, owner C (design/compilation-coordination.md, "The region" and Q5): reversing the entries in hdr's hop
+   area (`hops` of them at `hop_off`, room `hop_capacity`, ENOSPC past it) and hdr `plan` as the plan's generation.
+   Why: any number of plans stand at once, each its own entries in its own claim (R8, A7).  What must stay: copy c's n
+   at [c n, c n + n), every copy's the same hops in the same order.
 
-   Returns 0; EINVAL (a malformed transfer, value or dependence; a lag-0 cycle); EHOSTUNREACH (a source or destination
-   not in the map, or with no Thunderbolt-5 path within it); ENOSPC (u x n entries past hdr `hop_capacity`); ENOMEM (no
-   free run for the claim; a value with no unroll bound, or whose write does not reach its next instance at lag 1 (the
-   contract's D5), named on stderr by its index and its range's identity; the call's own memory); ESTALE (the map moved
-   while planning: plan again on the map as it is); or the map reader's error.  Every failure but ESTALE and the second
-   map read's is found before anything is written, and leaves the previous plan standing; with those the previous plan
-   no longer stands (hdr `hops` 0) and no new one is written.  There is no ETIMEDOUT: nothing waits.
+   Returns 0; EINVAL (a malformed transfer, weight, value or dependence: a kind other than MESH_JOIN and MESH_PAGES, the
+   transfers of one range giving different `produced` or `read`, a weight not finite or negative, `group` 0; a lag-0
+   cycle); EEXIST (a plan standing at this node is already (group, epoch)); EHOSTUNREACH (a source or destination not in
+   the map, or with no Thunderbolt-5 path within it); ENOMEM (no free run for the claim; a value with no unroll bound,
+   or whose write does not reach its next instance at lag 1 (the contract's D5), named on stderr by its index and its
+   range's identity; the call's own memory); ESTALE (the map moved while planning: plan again on the map as it is); or
+   the map reader's error.  Every failure but ESTALE and the second map read's is found before anything is written, and
+   leaves the context's standing plan standing; with those, this plan's claim and every earlier one of the client are
+   closed, context->state is 0 and no plan of the context stands.  There is no ETIMEDOUT: nothing waits.
    2026-11-04, sub-assignment 3: reversing 2026-11-03's call (sub-assignments 3-5), which took `executions` and unrolled
    every execution into its own instances, took each range's section from mesh_section_create, zeroed every declared
    page and every word it used, and waited for the previous plan's erase (mesh-call.h mesh_plan_erased, ETIMEDOUT).
@@ -109,9 +160,18 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
    design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-coordination.md, R4).  Out: section,
    every field */
 struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag; };
-/* one declared transfer, the same at every rank but `value`: the index in `values` of this node's value of the range
-   where this node is its source or a destination, else MESH_ABSENT; `bytes` the range's bytes at every rank */
-struct mesh_declared { uint32_t source,destination,identity,order,value,padding; size_t bytes; };
+/* plan-to-bridge R4: the kind of a declared transfer's consumer at its destination.  MESH_JOIN: function A, one task
+   with an edge from every page of the range.  MESH_PAGES: function B, one task per page, each with an edge from its
+   own page */
+enum { MESH_JOIN, MESH_PAGES };
+/* `order` (the hand priority, lower first) is gone: R5's schedule orders every cable's sends; `kind` in its place */
+struct mesh_declared { uint32_t source,destination,identity,kind,value,padding; size_t bytes; };
+/* aot-compilation A3: the weighting operand, one entry a declared transfer, the program's weighting function's result.
+   produced: w of the range's production at its source; consumed: w of the consumption at declared[i]'s destination
+   (for MESH_PAGES, of each page's task); read: w of the source's own read of the range (where a dependence names it);
+   page: c of each page's edge to declared[i]'s destination.  The transfers of one range give the same produced and
+   read (EINVAL otherwise).  Every weight finite and >= 0 (EINVAL otherwise).  The cables' capacities are the map's. */
+struct mesh_weight { double produced,consumed,read,page; };
 /* a program's data edge at one node: event `from` happens before event `to`, `to` in execution t + lag where `from`
    is in t.  An event is declared[i]'s production at its source (its kinds bit set: MESH_FROM_PRODUCED for `from`,
    MESH_TO_PRODUCED for `to`) or its consumption at declared[i]'s destination (bit clear); both events at one node.
@@ -125,10 +185,14 @@ struct mesh_declared { uint32_t source,destination,identity,order,value,padding;
 #define MESH_FROM_SOURCE_READ 4u
 #define MESH_TO_SOURCE_READ 8u
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
-int mesh_plan(struct mesh_ctx *,const struct mesh_declared *,uint32_t count,struct mesh_value *,uint32_t values,
-              const struct mesh_dependence *,uint32_t dependences);
+/* group: the launcher's (MESH_GROUP), the same at every rank, 0 EINVAL; the plan is (group, epoch), epoch
+   context->epoch after the call raises it.  ENOSPC for the page lists' room goes (the entries are in the plan's state
+   section) */
+int mesh_plan(struct mesh_ctx *,uint64_t group,const struct mesh_declared *,const struct mesh_weight *,uint32_t count,
+              struct mesh_value *,uint32_t values,const struct mesh_dependence *,uint32_t dependences);
 
-/* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's.
+/* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's.  Each reads the
+   plan by its row's publication `state` (the row's plan's state section), as before.
    2026-11-04, sub-assignment 3: mesh_host_inputs is removed (it did nothing: mesh_plan places and starts every word),
    and `invocation` is `execution`, a uint64_t, since a plan runs any number of executions.  What must stay: a host
    producer releases a range by one store, and a host reader reads a range's state, never a word a page. */
