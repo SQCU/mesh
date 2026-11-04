@@ -37,7 +37,7 @@ struct mesh_wire { char *data; size_t length; };
    against those it can use (`pairs`, `max_pairs`: its max_qp less MESH_PROVIDER_RESERVED_QPS, device_up; 76be3217,
    f35a0447, the rule of bd85613e design/HETEROGENEOUS-LINKS.md), and its port's attributes and own address (`port`,
    `gid`, `gid_index`, `gid_matched`, as device_gid chooses it), which the child's open, make and connect read. `name`
-   is the tag's char[32] (main's was a const char * into the --link argument), which ports_find and child_main fill. */
+   is the tag's char[32], which ports_find and child_main fill. */
 struct mesh_device {
   char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
@@ -46,7 +46,6 @@ struct mesh_device {
   struct ibv_port_attr port;
   union ibv_gid gid;
   uint8_t gid_index,gid_matched;
-  pthread_mutex_t setup;
 };
 /* design/prepared-machine.md#M09 */
 /* design/prepared-machine.md#M07 */
@@ -64,7 +63,7 @@ static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t
 /* `sent` and `send_capacity` from tag pre-return-20261103 rdma/mesh-verbs.h struct mesh_queue: a queue pair pair_up
    makes completes its receives on `completion`, its SENDs on `sent`. The device completes every SEND, IBV_SEND_SIGNALED
    or not (the bridge's census: send completions equal requests), so a SEND's completion is its queue's retirement and
-   lands where the send thread polls it. verbs_up's queue pairs (the --link form) complete both on `completion`. */
+   lands where the send thread polls it. */
 struct mesh_queue {
   _Alignas(64) struct ibv_qp *pair;
   struct ibv_cq *completion,*sent;
@@ -76,25 +75,20 @@ struct mesh_queue {
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
 /* `count`, `sent`, `psn` and `poll` from tag pre-return-20261103 rdma/mesh-verbs.h struct mesh_verbs (76be3217): a
    link's queue pairs on one port (`count` entries of `queues`, by lane, an entry of a lane left out of its plan holding
-   none) and their two completion queues, polled through `poll`. `wire`, `listener`, `peer`, `completion_entries`,
-   `bandwidth`, the addresses, `service` and `deadline` are the --link form's (removed at sub-assignment 16). */
+   none) and their two completion queues, polled through `poll`. */
 struct mesh_verbs {
-  struct mesh_device *device; struct mesh_wire *wire;
-  struct mesh_queue *queues; int qp_count,count,listener;
+  struct mesh_device *device;
+  struct mesh_queue *queues; int qp_count,count;
   struct ibv_cq *completion,*sent;
   uint32_t psn;
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
-  uint32_t peer,completion_entries[2];
-  uint64_t bandwidth;
-  const char *local_address,*remote_address,*service;
-  uint64_t deadline;
 };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
-/* __attribute__((unused)) on this, die and the --link form's functions below, as the tag's wire_map and die: every file
-   of the resident bridge includes this header, and one that calls none of them builds with -Werror */
+/* __attribute__((unused)) on this, die and the functions below, as the tag's wire_map and die: every file of the
+   resident bridge includes this header, and one that calls none of them builds with -Werror */
 static __attribute__((unused)) int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   wire->length=(size_t)m->wire_pages*m->pgsz;
   wire->data=NULL;
@@ -111,7 +105,6 @@ static __attribute__((unused)) int wire_map(struct mesh_wire *wire,struct hdr *m
     (unsigned long long)((uintptr_t)wire->data>>32),(unsigned long long)((uintptr_t)wire->data&(MESH_BANK-1)));
   return 0;
 }
-static const char *shm;
 /* tag pre-return-20261103 rdma/mesh-verbs.h:125-126, verbatim (CONTRACT: one shared stop; the --link form's static went) */
 /* the stop flag, defined once in mesh-link.c (design/transport.md) */
 extern _Atomic sig_atomic_t stop;
@@ -123,125 +116,7 @@ extern _Atomic sig_atomic_t stop;
    pairs with work outstanding moved to the error state, their completions taken until 0.5 s quiet or 5 s, the region's
    registrations released, then the child's exit, at which the kernel releases its queue pairs (pair_up below: made once
    in a child's life). No queue pair is destroyed while a peer may post. */
-/* --link form (removed at sub-assignment 16): main's end of the bridge; replaced by the port child's exit (mesh-child.c) */
-/* design/algorithm-sources.md#programcopy */
-static __attribute__((unused)) int down_device(struct mesh_device *device){
-  while(device->region_count){
-    if(ibv_dereg_mr(device->regions[device->region_count-1]))return 0;
-    device->region_count--;
-  }
-  free(device->regions);device->regions=NULL;
-  if(device->domain){if(ibv_dealloc_pd(device->domain))return 0;device->domain=NULL;}
-  if(device->context){if(ibv_close_device(device->context))return 0;device->context=NULL;}
-  return 1;
-}
-static __attribute__((unused)) void down(void){ if(shm)shm_unlink(shm); }
 static __attribute__((unused)) void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
-static __attribute__((unused)) void onsig(int s){ (void)s; stop++; }
-
-/* design/collective-dependency-ledger.md#d13-connection-metadata-is-setup-work */
-struct qpi { uint32_t xmagic, xsize; uint32_t pgsz; uint16_t lid; uint8_t gid[16]; uint32_t node,count; };
-#define XMAGIC 0x4d595048u
-
-/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-ports.c port_lost, mesh-lanes.c link_lapsed */
-/* design/algorithm-sources.md#programcopy */
-static int pairing_active(struct hdr *m,uint64_t client,uint64_t deadline){
-  if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=client){errno=ECANCELED;return 0;}
-  if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline){errno=ETIMEDOUT;return 0;}
-  return 1;
-}
-
-/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-ports.c hello_heard's dial */
-/* design/algorithm-sources.md#programcopy */
-static int dial(struct addrinfo *a,struct hdr *m,uint64_t client,uint64_t deadline){
-  if(!pairing_active(m,client,deadline))return -1;
-  int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
-  if(fcntl(f,F_SETFL,O_NONBLOCK)<0)goto failed;
-  if(connect(f,a->ai_addr,a->ai_addrlen)==0)return f;
-  if(errno!=EINPROGRESS)goto failed;
-  struct pollfd ready={.fd=f,.events=POLLOUT};
-  while(pairing_active(m,client,deadline)){
-    int status=poll(&ready,1,0);
-    if(status<0 && errno==EINTR)continue;
-    if(status<0)goto failed;
-    if(!status)continue;
-    int error=0;socklen_t length=sizeof error;
-    if(getsockopt(f,SOL_SOCKET,SO_ERROR,&error,&length))error=errno;
-    if(!error)return f;
-    errno=error;goto failed;
-  }
-failed:;
-  int error=errno;close(f);errno=error;return -1;
-}
-
-/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: its one listener, paired by mesh-ports.c */
-/* design/algorithm-sources.md#programcopy */
-static int listener_up(struct mesh_verbs *provider){
-  struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_PASSIVE|AI_NUMERICHOST|AI_NUMERICSERV},*r;
-  if(getaddrinfo(provider->local_address,provider->service,&hint,&r)){errno=EINVAL;return -1;}
-  provider->listener=socket(r->ai_family,SOCK_STREAM,0);
-  if(provider->listener<0){int error=errno;freeaddrinfo(r);errno=error;return -1;}
-  int on=1,off=0;
-  setsockopt(provider->listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
-  if(r->ai_family==AF_INET6)setsockopt(provider->listener,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
-  int error=fcntl(provider->listener,F_SETFL,O_NONBLOCK)<0 || bind(provider->listener,r->ai_addr,r->ai_addrlen) || listen(provider->listener,4),code=errno;
-  freeaddrinfo(r);
-  if(error){ close(provider->listener); provider->listener=-1;errno=code;return -1; }
-  return 0; }
-
-/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-ports.c port_say, control_heard (HELLO, LINK) */
-/* design/algorithm-sources.md#programcopy */
-static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t receive_bytes,struct hdr *m,uint64_t client,uint64_t deadline){
-  size_t sent=0,got=0;
-  while(pairing_active(m,client,deadline)){
-    if(sent==send_bytes && got==receive_bytes)return 0;
-    if(sent<send_bytes){
-      ssize_t n=write(f,(const char*)mine+sent,send_bytes-sent);
-      if(n>0)sent+=(size_t)n;
-      else if(!n){errno=ECONNRESET;return -1;}
-      else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
-    }
-    if(got<receive_bytes){
-      ssize_t n=read(f,(char*)you+got,receive_bytes-got);
-      if(n>0)got+=(size_t)n;
-      else if(!n){errno=ECONNRESET;return -1;}
-      else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
-    }
-  }
-  return -1;
-}
-
-/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-ports.c hello_heard, the listener's accept */
-/* design/algorithm-sources.md#programcopy */
-/* design/prepared-machine.md#M08 */
-static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
-  if(!pairing_active(m,client,provider->deadline))return -1;
-  if(m->node>provider->peer){
-    if(provider->listener<0 && listener_up(provider))return -1;
-    while(pairing_active(m,client,provider->deadline)){
-      int f=accept(provider->listener,NULL,NULL);
-      if(f>=0){
-        if(fcntl(f,F_SETFL,O_NONBLOCK)==0)return f;
-        int error=errno;close(f);errno=error;return -1;
-      }
-      if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
-    }
-    return -1;
-  }
-  struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_NUMERICHOST|AI_NUMERICSERV},*addresses;
-  if(getaddrinfo(provider->remote_address,provider->service,&hint,&addresses)){errno=EINVAL;return -1;}
-  int socket=-1,error=EHOSTUNREACH;
-  for(;;){
-    if(!pairing_active(m,client,provider->deadline)){error=errno;break;}
-    for(struct addrinfo *a=addresses;a;a=a->ai_next){
-      socket=dial(a,m,client,provider->deadline);error=errno;
-      if(socket>=0 || error==ECANCELED || error==ETIMEDOUT)break;
-    }
-    if(socket>=0 || (error!=ECONNREFUSED && error!=ENETUNREACH && error!=EHOSTUNREACH))break;
-    poll(NULL,0,1);
-  }
-  freeaddrinfo(addresses);errno=error;return socket;
-}
 
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M09 */
@@ -250,9 +125,8 @@ static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
    CHILD_OPENED read them), and a registration the device refuses sets *refused to its code (the window past the
    device's max_mr_size or max_mr, ENOMEM; else ibv_reg_mr's errno), so port_opened holds off its next try, each of which
    wires more of the node's memory. The rest is main's: registration stays the window (wire_pages), not the tag's
-   whole-arena extents, and it returns -1 with errno, the tag's codes where the call set none (errno?errno:EIO). The
-   setup lock went to verbs_up, its --link caller, whose links share a device across threads; the tag's device_up holds
-   none, since a port's child opens its one device on its port's serial queue. */
+   whole-arena extents, and it returns -1 with errno, the tag's codes where the call set none (errno?errno:EIO). Like
+   the tag's device_up it holds no lock, since a port's child opens its one device on its port's serial queue. */
 static __attribute__((unused)) int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hdr *m,int *refused){
   int error=0;
   *refused=0;
@@ -311,43 +185,7 @@ done:
   if(error){errno=error;return -1;}
   return 0;
 }
-/* The GID that is this port's own link-local address, as the failport's device_gid chose it (672f6f7f, de96b545).
-   Index 0 is not that entry on every device: macOS 27's M5 Ultra lists [0] 23ff:..., [1] fe80..., [2] its ULA, and the
-   Mini's en4 after its 10-16 restart had its one entry at index 1; pairing on index 0 failed with EIO on both.
-   Else the first link-local entry, else the first non-zero one. */
-static int port_gid(struct ibv_context *context,const struct ibv_port_attr *port,const char *device,
-                    union ibv_gid *gid,uint8_t *index){
-  enum { HELD=8, ENTRIES=256 };
-  const char *interface=strncmp(device,"rdma_",5)?device:device+5;
-  struct in6_addr held[HELD];int helds=0,chosen=-1,linklocal=-1,first=-1;
-  struct ifaddrs *all=NULL;
-  if(!getifaddrs(&all)){
-    for(const struct ifaddrs *a=all;a && helds<HELD;a=a->ifa_next){
-      if(!a->ifa_addr || a->ifa_addr->sa_family!=AF_INET6 || strcmp(a->ifa_name,interface))continue;
-      struct in6_addr x=((const struct sockaddr_in6 *)(const void *)a->ifa_addr)->sin6_addr;
-      if(!IN6_IS_ADDR_LINKLOCAL(&x))continue;
-      x.s6_addr[2]=x.s6_addr[3]=0;   /* the kernel's embedded scope, absent from the GID */
-      held[helds++]=x;
-    }
-    freeifaddrs(all);
-  }
-  const int entries=port->gid_tbl_len<ENTRIES?port->gid_tbl_len:ENTRIES;
-  for(int i=0;i<entries && chosen<0;i++){
-    union ibv_gid entry;int nonzero=0;
-    if(ibv_query_gid(context,1,i,&entry))continue;
-    for(int b=0;b<16;b++)nonzero|=entry.raw[b];
-    if(!nonzero)continue;
-    if(first<0)first=i;
-    if(linklocal<0 && entry.raw[0]==0xfe && (entry.raw[1]&0xc0)==0x80)linklocal=i;
-    for(int h=0;h<helds && chosen<0;h++)if(!memcmp(entry.raw,held[h].s6_addr,16))chosen=i;
-  }
-  if(chosen<0)chosen=linklocal>=0?linklocal:first;
-  if(chosen<0)return ENXIO;
-  if(ibv_query_gid(context,1,chosen,gid))return errno?errno:EIO;
-  *index=(uint8_t)chosen;
-  return 0;
-}
-/* device_gid: verbatim from tag pre-return-20261103 rdma/mesh-verbs.h (de96b545, 672f6f7f, 5eabe91e; port_gid above is its port, for verbs_up) */
+/* device_gid: verbatim from tag pre-return-20261103 rdma/mesh-verbs.h (de96b545, 672f6f7f, 5eabe91e) */
 /* the port's own address (its GID), its index in the port's GID table, and whether it is an address the port's
    interface holds (`gid_matched`), chosen from the whole table (up to 256 entries) against the interface's addresses:
    the entry equal to an IPv6 link-local address `interface` holds (getifaddrs, compared as bytes; BSD embeds the scope
@@ -459,76 +297,3 @@ static __attribute__((unused)) uint64_t port_bandwidth(const struct ibv_port_att
   static const uint8_t widths[UINT8_MAX+1]=MESH_PORT_WIDTHS;
   return speeds[port->active_speed]*widths[port->active_width];
 }
-/* --link form (removed at sub-assignment 16); replaced by the resident bridge's pairing: mesh-lanes.c device_open, link_make, link_connect */
-/* design/algorithm-sources.md#programcopy */
-/* design/prepared-machine.md#M06 */
-/* design/prepared-machine.md#M08 */
-static __attribute__((unused)) int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
-  struct ibv_port_attr pa;
-  /* device_up's setup lock, held by its --link caller (device_up above), its port's attributes read under it */
-  pthread_mutex_lock(&provider->device->setup);
-  int refused=0,up=device_up(provider->device,provider->wire,m,&refused),error=errno;
-  pa=provider->device->port;
-  pthread_mutex_unlock(&provider->device->setup);
-  if(up){errno=error;return -1;}
-  provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
-  int f=oob(provider,m,client);
-  if(f<0)return -1;
-  uint32_t frame_capacity=provider->device->frame_capacity;
-  /* design/prepared-machine.md#M11 */
-  provider->queues=calloc((size_t)qps,sizeof *provider->queues);
-  if(!provider->queues){close(f);return -1;}
-  provider->completion=ibv_create_cq(provider->device->context,
-    (int)(frame_capacity+1),NULL,NULL,0);
-  if(!provider->completion){close(f);return -1;}
-  for(int q=0;q<qps;q++){
-    struct mesh_queue *queue=&provider->queues[q];
-    queue->completion=provider->completion;
-    queue->poll=provider->completion->context->ops.poll_cq;
-    struct ibv_qp_init_attr qi={.send_cq=queue->completion,
-      .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
-      .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
-    queue->pair=ibv_create_qp(provider->device->domain,&qi);
-    if(!queue->pair){close(f);return -1;}
-    queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
-    provider->qp_count=q+1;
-    struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
-    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
-    queue->receive_capacity=actual.cap.max_recv_wr;
-    fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
-      actual.cap.max_send_wr,actual.cap.max_recv_wr,
-      queue->completion->cqe);
-  }
-  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-  for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
-  union ibv_gid gid; uint8_t gid_index=0;
-  int gid_error=port_gid(provider->device->context,&pa,provider->device->name,&gid,&gid_index);
-  if(gid_error){ close(f); errno=gid_error; return -1; }
-  uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
-  memcpy(mine.gid,&gid,16);
-  if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider->deadline)){ int error=errno;close(f);fprintf(stderr,"exchange failed\n");errno=error;return -1; }
-  /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
-  if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || you.node!=provider->peer){
-    fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,provider->peer); close(f);errno=EPROTO;return -1; }
-  for(int q=0;q<qps;q++){
-    uint32_t local[2]={provider->queues[q].pair->qp_num,(psn+(uint32_t)q)&0xffffff},remote[2];
-    if(exchange(f,local,remote,sizeof local,sizeof remote,m,client,provider->deadline)){close(f);return -1;}
-    struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[1],
-      .dest_qp_num=remote[0],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
-        .grh={.hop_limit=1,.sgid_index=gid_index}}};
-    memcpy(&r.ah_attr.grh.dgid,you.gid,16);
-    int rc=ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
-    if(rc){fprintf(stderr,"rtr %d rc %d\n",q,rc);close(f);return -1;}
-  }
-  if(configure(state,f,client)){int error=errno;close(f);errno=error;return -1;}
-  for(int q=0;q<qps;q++){
-    struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(psn+(uint32_t)q)&0xffffff};
-    int rc=ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
-    if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
-  }
-  /* the same tables, one copy: port_bandwidth */
-  provider->bandwidth=port_bandwidth(&pa);
-  fprintf(stderr,"pair up: %s node %d gid %u\n",ibv_get_device_name(provider->device->context->device),m->node,
-    gid_index);
-  return f; }

@@ -80,8 +80,8 @@
 #define MESH_MODEL_BYTES 32
 /* tag etc/bridge/layout.h XMAGIC, its value, renamed: the wire's magic, what marks a datagram or a control stream's
    header as the mesh's (struct message `magic`), the value version 131 sends, fixed.  Named MESH_WIRE_MAGIC because
-   main's --link form keeps its own XMAGIC (mesh-verbs.h struct qpi) until sub-assignment 16 removes it; what must stay
-   is the value */
+   main's --link form had its own XMAGIC (mesh-verbs.h struct qpi, removed at sub-assignment 16); what must stay is
+   the value */
 #define MESH_WIRE_MAGIC (0x4d595048u+131u+(1u<<12))
 
 /* tag rdma/mesh-observe.h mesh_say, verbatim */
