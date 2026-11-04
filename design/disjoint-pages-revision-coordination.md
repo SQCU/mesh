@@ -732,6 +732,10 @@ work proceeds.)
   every repetition's first command takes a barrier, t = 0 included. The C9 hook's remark on MetalPrepareDataflow's
   level assignment (code from before this change; moving it needs libmetal_recording to link libmesh): outside C3's
   scope, open, as the first implementation's coordinator ruled the same remark. 10 launched with its plug-in points.
+- 3 again: 38d780ca (MESH_FROM_SOURCE_READ, MESH_TO_SOURCE_READ; S(d) after the demand's C vertices, with P(d) -> S(d),
+  in the source value's reads; an end with both bits, or bits past the four, EINVAL). A source read needs an outgoing
+  dependence, else no write is ordered after it and the plan fails ENOMEM naming the value: the program's chains give
+  every event one (to the next, the last to the first at lag 1).
 
 ### Reviews and where their findings went
 
