@@ -39,9 +39,15 @@ other projects, such as a game bot, and old dated records; they are not listed h
   and nothing zeroed or reset. Appendix D holds the review of that revision, verbatim, and Claude's proposal (D.3), the
   unit of work now: any number of programs at once, each plan named by its group; the delegate's buffers placed; host
   inputs in copies ordered by events; Metal 4 submission with the queue's event waits; each received page named once
-  per landing; and a plan that stands only while its map does. Its D.5 states what a plan gives the bridge: release
-  events, exchanges, chains (Dilworth), priorities and placement tables, with maps sent ahead where a program decides
-  placement at run time.
+  per landing; and a plan that stands only while its map does. Its D.2 model, D.3.1 and D.5 are superseded by
+  design/transfer-schedule-change-request.md.
+- [design/transfer-schedule-change-request.md](design/transfer-schedule-change-request.md): how a plan decides what the
+  bridge sends and in what order, from the scheduling objective down: the task graph (a join for a function that needs
+  its operand whole, an edge per page for one that takes pages in any order), contention-aware list scheduling by
+  bottom level (Sinnen and Sousa; Adam, Chandy and Dickson), the page table with static binding, each link's sequence of
+  typeless page-to-page sends, the bridge's deal over its lines, several programs by deficit round robin with changes at
+  quiescence, and plans cancelled only by a removal from the map. It supersedes D.2's model, D.3.1 and D.5 of the
+  disjoint-pages change request.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.
@@ -55,7 +61,3 @@ other projects, such as a game bot, and old dated records; they are not listed h
   agent's contract for that change request's Appendix D, items D.3.2 to D.3.6 (D.3.1, and D.5 added during the work,
   outside it): the file split, the names files share, its decisions with their sources, and the record of the work,
   its reviews and what is open.
-- [design/plan-bridge-coordination.md](design/plan-bridge-coordination.md): the implementation contract for that change
-  request's D.5 (what a plan gives the bridge) and D.3.1 (any number of programs), drafted by a planning agent and
-  reviewed by Claude: the file split, the layouts, the chain and priority algorithms, the bridge's carriers and segment
-  headers, each plan in its claim, the GPU's placed pass; the rulings it waits on.
