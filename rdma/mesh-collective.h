@@ -26,11 +26,13 @@
    pairs), routes every declared transfer at once (mesh_graph_flow, the concurrent-flow solve), cuts
    each range's pages over its trees by their shares (mesh_graph_fill), and writes this node's own hops in mesh.h's
    order: its sends, its receives, and as a relay its receives into relay pages it allocates in the registered window
-   and the sends their landed words release.  It allocates the plan's words (outside the window, zeroed; the context's
-   send_off and send_bytes name them, for mesh-metal.m's publication buffer) and records each hop page's words in its
-   row's struct mesh_publication: a landed word as `device_input` with `device_stride` = hop_stride, a source page's
-   release word as `targets[0]` = {word, 1, 1} with `sends` = 1 and `argument` = its position.  The list's entries
-   carry the map serial; hdr `plan` is the plan's generation (the last plan's + 1, never 0).
+   and the sends their landed words release.  It allocates the plan's words, a 256-byte cell each word and execution
+   (outside the window, zeroed; the context's send_off and send_bytes name them, for mesh-metal.m's publication
+   buffer) and records each hop page's words in its row's struct mesh_publication: a landed word as `device_input`
+   with `device_stride` = hop_stride, a source page's release word as `targets[0]` = {word, 1, 1} with `sends` = 1 and
+   `argument` = its position.  Each entry carries the map serial and its `forwards` (a receive's: the sends here that
+   forward its page; a send's: 1 where it forwards a landed page); hdr `plan` is the plan's generation (the last
+   plan's + 1, never 0).
    Returns 0; EINVAL for a malformed transfer or a page outside the registered window; EHOSTUNREACH for a source or
    destination not in the map, or with no Thunderbolt-5 path within it; ENOSPC past hdr `hop_capacity` (or a page's
    publication targets); ESTALE where the map moved while planning (plan again on the map as it is); ENOMEM; or the

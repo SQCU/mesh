@@ -284,17 +284,21 @@ static int plan_pages(struct hdr *m,const struct mesh_section *section,uint64_t 
   }
   return 0;
 }
-/* word w's region offset in execution 0: the words in lines of hop_stride bytes (32 words), each line's executions
-   hop_stride apart, so execution t's word is at it + t x hop_stride and no two words of any executions meet */
+/* word w's region offset in execution 0: each word of each execution its own hop_stride-byte cell (mesh.h struct
+   mesh_hop: the word at offset 0, a landed word's page's sent count at offset 8), word w's cells its executions'
+   in turn, so execution t's word is at it + t x hop_stride and no two words' cells overlap.  Changed from c5bffd0c's
+   32 words to a 256-byte line (which put a neighbouring word at a landed word's offset 8), by mesh.h 90962999's word cells; what
+   must stay: one cell a word and execution */
 static uint64_t plan_word(const struct plan *p,uint64_t w){
-  const uint64_t line=sizeof(struct mesh_send)/sizeof(uint64_t);
-  return p->words+(w/line)*p->executions*sizeof(struct mesh_send)+(w%line)*sizeof(uint64_t);
+  return p->words+w*p->executions*sizeof(struct mesh_send);
 }
 
 /* this node's hop `hop` (of p->hops a slot) in every slot: demand d's page k sent to or received from `node`, its word
-   the plan's word w; the hop page's row records the word: a receive's landed word, a source's release word */
+   the plan's word w, `forwards` as mesh.h gives it (a receive's: this slot's sends naming its landed word; a send's: 1
+   where its word is a landed word here, a forwarding SEND); the hop page's row records the word: a receive's landed
+   word, a source's release word */
 static int plan_hop(struct plan *p,const struct plan_demand *d,uint64_t k,uint32_t direction,uint32_t node,uint64_t w,
-                    uint64_t hop){
+                    uint32_t forwards,uint64_t hop){
   struct hdr *m=p->context->M;
   const struct mesh_section *section=d->mine!=MESH_ABSENT?&p->declared[d->mine].section:&d->relay;
   const uint64_t word=plan_word(p,w);
@@ -303,7 +307,7 @@ static int plan_hop(struct plan *p,const struct plan_demand *d,uint64_t k,uint32
     const uint32_t row=plan_row(m,section,s,k);
     mesh_hops(m)[(size_t)s*p->hops+hop]=(struct mesh_hop){
       .page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row].mapping,memory_order_relaxed),.node=node,
-      .direction=direction,.word=word,.position=MESH_PLAN_POSITION,.serial=p->serial};
+      .direction=direction,.forwards=forwards,.word=word,.position=MESH_PLAN_POSITION,.serial=p->serial};
     struct mesh_publication *publication=mesh_publication_at(m,row);
     if(direction==MESH_RECEIVE){
       /* a landed word has one writer: another receive into this page would be two posted receives on one page */
@@ -350,15 +354,17 @@ static int plan_walk(struct plan *p,int write){
         /* this node's word of page k: the source's release word, else its receive's landed word, which releases the
            sends it forwards (a relay's, or a destination's on the way to another) */
         const uint64_t w=self==d->source?d->release:p->releases+landed++;
+        /* the page's forwards: its sends here, each naming the receive's landed word (none at the source) */
+        const uint32_t forwards=(uint32_t)(first[self+1]-first[self]),forwarding=self!=d->source;
         if(in!=MESH_ABSENT){
           if(write){
-            const int status=plan_hop(p,d,k,MESH_RECEIVE,in,w,hop);
+            const int status=plan_hop(p,d,k,MESH_RECEIVE,in,w,forwards,hop);
             if(status)return status;
           }else if(d->mine==MESH_ABSENT)d->relayed=1;
           hop++;
         }
         for(size_t c=first[self];c<first[self+1];c++,hop++)if(write){
-          const int status=plan_hop(p,d,k,MESH_SEND,(uint32_t)child[c],w,hop);
+          const int status=plan_hop(p,d,k,MESH_SEND,(uint32_t)child[c],w,forwarding,hop);
           if(status)return status;
         }
       }
@@ -497,9 +503,10 @@ int mesh_plan(struct mesh_ctx *context,const struct mesh_declared *declared,uint
     if((status=mesh_section_create(context,d->pages*block,depth,1,&d->relay)))goto done;
     if((status=plan_pages(m,&d->relay,d->pages,depth)))goto done;
   }
-  const uint64_t line=sizeof(struct mesh_send)/sizeof(uint64_t),total=p.releases+p.landed;
+  /* a cell a word and execution (plan_word), at least one word's */
+  const uint64_t total=p.releases+p.landed;
   struct mesh_section words;
-  if((status=mesh_section_create(context,(total?(total+line-1)/line:1)*executions*sizeof(struct mesh_send),1,0,&words)))goto done;
+  if((status=mesh_section_create(context,(total?total:1)*executions*sizeof(struct mesh_send),1,0,&words)))goto done;
   void *address=mesh_section_address(context,words,0);
   memset(address,0,words.bytes);
   p.words=(uintptr_t)address-(uintptr_t)m;
