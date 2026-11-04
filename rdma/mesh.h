@@ -15,6 +15,12 @@
    106: the tag's header fields `boot`, `health`, `busy`, `idle_since`, `stopping` appended */
 #define MESH_VERSION 106u
 #define MESH_ABSENT UINT32_MAX
+/* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives none;
+   the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
+   without something happening on it or its scope concluding */
+#ifndef MESH_PLATFORM_NS
+#define MESH_PLATFORM_NS UINT64_C(5000000000)
+#endif
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
 /* replaced by struct mesh_hop (the page lists); removed at sub-assignment 16 */
@@ -128,7 +134,7 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
    - `word`: the region offset of the hop's word of execution 0, an _Atomic uint64_t (8-aligned, anywhere in the
      region: no SGE names it); `position`: the value that releases a send or that a receive's landing stores,
      0 < position < UINT64_MAX.
-   - `serial`: the map serial the plan was made against, every entry's the same, hdr `plan`.
+   - `serial`: the map serial the plan was made against, every entry's the same.
    Executions (main's invocations and ring depth: mesh-call.c mesh_transfers_prepare, mesh-flow.c link_configure,
    mesh-metal.m).  A plan runs hdr `executions` times, t = 0 .. executions - 1, its pages ringing through hdr `depth`
    slots (depth == executions: no ring).  These and hdr `hop_stride` are the plan's values, beside the list.
@@ -160,9 +166,10 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
    (struct mesh_reach; design/page-queue-change-request.md, "The rule both ends compute"), and each queue pair carries
    its hops in that order: the k-th SEND on a queue pair fills the k-th receive posted on it.
    Writing a plan: the plan call stores `hops` 0 (release), writes the entries, `executions`, `depth`, `hop_stride` and
-   `plan`, then stores `hops` (release), at most `hop_capacity`; the bridge reads none of it while `hops` (acquire) is
-   0.  A plan whose `plan` is not `map_serial` when it is loaded is refused: the call fails by error and its caller
-   plans again on the map as it is. */
+   `plan`, the plan's generation (the last plan's + 1, never 0), then stores `hops` (release), at most `hop_capacity`;
+   the bridge reads none of it while `hops` (acquire) is 0, and stores the generation it loaded in hdr
+   `port.prepared`.  A plan whose entries' `serial` is not `map_serial` when it is loaded is refused: the call fails by
+   error and its caller plans again on the map as it is. */
 struct mesh_hop { uint32_t page,node,direction,padding; uint64_t word,position,serial; };
 _Static_assert(sizeof(struct mesh_hop)==40 && offsetof(struct mesh_hop,word)==16,"mesh_hop");
 
@@ -182,16 +189,16 @@ struct hdr {
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
   /* the page lists (struct mesh_hop, mesh_hops): room for `hop_capacity` entries at `hop_off` (mesh_geometry `hops`),
-     the plan's word stride `hop_stride`, `hops` the entries of the plan written (0 none) and `plan` the map serial it
-     was made against */
+     the plan's word stride `hop_stride`, `hops` the entries of the plan written (0 none) and `plan` its generation (the
+     last plan's + 1, never 0; `port.prepared` the generation the bridge loaded) */
   uint64_t hop_off,hop_capacity,hop_stride;
   _Atomic uint64_t hops,plan;
   /* tag pre-return-20261103 rdma/mesh.h struct hdr `map`, `map_off`, `map_nodes`, verbatim: the map's seqlock
      (mesh_notify, mesh_map_whole) and its `map_nodes` records at `map_off` (mesh_records) */
   _Atomic uint64_t map,map_off,map_nodes;
   /* the map's serial: moved by one (mesh-records.c, while `map` is odd) at every change of the map's nodes or cables
-     (a record added or dropped, any field of a reach entry); a plan is made against it (struct mesh_hop `serial`,
-     `plan`).  A node's index is its place in ascending node-id order among the map's records. */
+     (a record added or dropped, any field of a reach entry); a plan is made against it (struct mesh_hop `serial`).
+     A node's index is its place in ascending node-id order among the map's records. */
   _Atomic uint64_t map_serial;
   /* the bridge's pages (struct mesh_bridge_pages) at `bridge_off`; the attached client's start (mesh-holders.h
      mesh_started), with `client`'s low 32 bits its identity as a holder of the region */
@@ -322,13 +329,14 @@ static inline void *mesh_events(struct hdr *m,uint32_t queue){
    transfer-list entries (orders) and the registered window.  rows was welded to pages because the
    arena bitmap lived in a row plane and the order table was rows-strided; both are now their own
    table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else.  `hops`: the page lists' room
-   (struct mesh_hop), 0 none. */
+   (struct mesh_hop); absent (0), `rows`, as `orders`. */
 /* links x qps: the count of the per-link, per-queue transfer lists, replaced by hops; removed at sub-assignment 16 */
 struct mesh_geometry { uint32_t pgsz,block,pages,rows,orders,links,qps,wire_pages,hops; };
 static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   uint32_t blocks=g.pages/g.block,arena=blocks*g.block;
   if(!g.rows)g.rows=arena;
   if(!g.orders)g.orders=g.rows;
+  if(!g.hops)g.hops=g.rows;
   if(!g.wire_pages || g.wire_pages>arena)g.wire_pages=arena;
   g.wire_pages=(g.wire_pages+g.block-1)/g.block*g.block;
   if(g.wire_pages>arena)g.wire_pages=arena;
