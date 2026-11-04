@@ -266,7 +266,10 @@ map's records (`map_room`), then the arena at a block boundary.
   ```
   A run is taken by setting its bits atomically; a bit already set (the bridge's release and an attaching client run
   at once) undoes what this call set and scans on past it, so the scan ends in at most one pass over the bitmap.
-- `mesh_retire(m, client)`: every claim of the client closed, then the client word cleared (as now).
+- `mesh_retire(m, client)`: after its compare-and-swap of the client word, hdr `hops` stored 0 (release, a release
+  fence, `plan` woken), then every claim of the client closed, then the client word cleared (as now). A retired plan is
+  unpublished before its claim can be released (RCU's order: nothing reaches what is reclaimed), so the bridge
+  parent's cancellations never compute a store from it and no port loads it for the next client (owner 7's finding).
 - `uint32_t mesh_retired_release(struct hdr *)`: a seq_cst fence, then each closed claim whose generation no port's
   `prepared` holds released (its pages' bits, then its rows' bits, by the winner of the head's owner exchange, as now);
   the closed claims kept are counted. Runs in the bridge parent (mesh-records.c clients_turn, mesh-link.c region_adopt).
@@ -603,6 +606,14 @@ work proceeds.)
 - 2 (mesh-graph): 8fa729b1 (mesh_graph_lags). Its findings, routed to 3: a lag-0 cycle through no routed write vertex
   does not show as D(x -> x) == 0, so the lag-0 edges alone go through mesh_graph_order (EDEADLK as EINVAL); the
   interference callback looks D_vw up in a table made once. mesh_graph_happens_before stays until 3 no longer calls it.
+- 7 (mesh-link.c, mesh-records.c): 9d72a118 (region_same without the vacated fields; the header's one zeroing stated;
+  the notes to cancellations on counts; clients_turn runs streams_let_go before mesh_retired_release). Its evidence:
+  every plan_cancel and every mesh_retired_release runs on the bridge parent's one thread (mesh-link.c main's loop:
+  region_adopt :433, clients_turn :493, port_lost and child_reaped via the loop; the parent's other threads call none),
+  once the client-side release in mesh_attach is gone (5). Its finding: a retired client's last plan stayed published
+  while its claim was closed, so the release could free pages a cancellation still wrote, and a port could load the
+  stale plan for the next client. Ruled and routed to 5: mesh_retire unpublishes (`hops` 0) before it closes the claims
+  (the contract's mesh_retire line).
 
 ### Reviews and where their findings went
 
