@@ -128,13 +128,15 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
 /* The longest one wait on a count word lasts: a stop whose wake comes between the thread's reading of `stop` and its
    wait is seen within it. */
 #define MESH_METAL_SLICE_NS UINT64_C(10000000)
-/* the waiter: its waits sorted by value, the state section's words (the transport's `words`), the event retained for
-   the thread's life; `stop` the stop's one store, `waiting` the count word the thread waits on (the stop's wake) */
+/* the waiter: one repetition's waits in nondecreasing pass, `passes` a repetition's, `repetitions` the run's, the state
+   section's words (the transport's `words`), the event retained for the thread's life; `stop` the stop's one store,
+   `waiting` the count word the thread waits on (the stop's wake) */
 struct mesh_metal_waiter {
   pthread_t thread;
   void *event;
   char *words;
-  uint64_t final,start;
+  uint64_t repetitions,start;
+  uint32_t passes;
   _Atomic uint32_t stop;
   int cause;
   _Atomic uint64_t *_Atomic waiting;
@@ -146,10 +148,16 @@ struct mesh_metal_waiter {
    D1 and D7 */
 /* The client's signalling of the queue's event (C3.1: "The client alone signals the event: when the count reaches the
    step's target, or at the step's deadline. Its host thread waits on the count's address with a timeout"), counted
-   completion as Portals 4's counting events and MTLSharedEvent's rising value: for each value in order, every wait of
-   that value is met once its count word (an _Atomic uint64_t that only rises, the bridge's arrivals: a landing adds
-   one, a cancellation raises it to its final value) reads (acquire) at least its target; then the event is set to the
-   value, so every later pass held on it or less goes.  While a count reads below its target, the thread waits on its
+   completion as Portals 4's counting events and MTLSharedEvent's rising value.  The waits are one repetition's
+   (mesh-metal.h struct mesh_metal_wait), each affine in the repetition t: the thread walks t = 0 .. repetitions - 1
+   and, within t, the waits in their order (nondecreasing pass), wait i of t its count word count + 8 (t mod copies),
+   its target (t / copies + 1) x pages and its value t x passes + pass + 1, so the values it meets do not decrease.  A
+   wait is met once its count word (an _Atomic uint64_t that only rises, the bridge's arrivals: a landing adds one, a
+   cancellation raises it to its final value) reads (acquire) at least its target.  Before a wait of value v, every
+   value below v is met (each of its waits, or none has a wait: a pass that reads nothing), and the event is set to
+   v - 1 where it stands lower, so every later pass held on it or less goes; after the last wait of the run, the event
+   is set to the final value, repetitions x passes, the values past it having no wait.  While a count reads below its
+   target, the thread waits on its
    address for the value it read (os_sync_wait_on_address_with_timeout, OS_SYNC_WAIT_ON_ADDRESS_SHARED, 8 bytes, as the
    bridge wakes it with OS_SYNC_WAKE_BY_ADDRESS_SHARED), for the least of MESH_METAL_SLICE_NS and the time left to the
    value's deadline, MESH_PLATFORM_NS after the previous value was set (after the start for the first).  Every return
@@ -158,22 +166,31 @@ struct mesh_metal_waiter {
    the deadline or a stop; EINVAL (a word the system's wait refuses: misaligned, or its kernel state inconsistent with
    the flags or size) ends it at once rather than spin to the deadline.  The slice, 10 ms, is short enough that a stop
    whose wake is lost is seen promptly, and long enough that a deadline costs at most 500 returns.  At the deadline
-   (ETIMEDOUT), a stop seen while a count reads below its target (ECANCELED) or EINVAL, the event is set to `final` at
-   once, so every pass the command buffer holds goes and its later passes find their fields behind
-   (mesh_metal_status), and the thread ends.  No value is set twice and none lowers the event: values do not decrease
-   and `final` is at least the last. */
+   (ETIMEDOUT), a stop seen while a count reads below its target (ECANCELED) or EINVAL, the event is set to the final
+   value at once, so every pass the command buffer holds goes and its later passes find their fields behind
+   (mesh_metal_status), and the thread ends.  No value is set twice and none lowers the event: the values set rise,
+   and the final value is the greatest.  Nothing the thread holds grows with the run: one repetition's waits and t.
+   2026-11-04, sub-assignment 2 (review 10's finding 1, the coordinator's ruling): reversing sub-assignment 8's walk
+   over every repetition's waits as given, sorted by value, each its own count word, target and value.  Why: that
+   table was the run's, steps x passes x reads, though each wait is affine in t (C1, C3.3; design/disjoint-pages-
+   change-request.md, D.3.7).  What must stay: each value set once every wait of that value or less is met, in order;
+   the deadline MESH_PLATFORM_NS after the last value set (after the start for the first); a stop or a deadline setting
+   the final value at once. */
 static void *waits_run(void *argument){
   struct mesh_metal_waiter *waiter=argument;
   @autoreleasepool{
     id<MTLSharedEvent> event=(id<MTLSharedEvent>)waiter->event;
-    uint64_t since=waiter->start;
+    const uint64_t passes=waiter->passes,final=waiter->repetitions*passes;
+    uint64_t since=waiter->start,set=0;
     int cause=0;
-    for(size_t i=0;i<waiter->waits && !cause;){
-      const uint64_t value=waiter->wait[i].value;
-      while(i<waiter->waits && waiter->wait[i].value==value && !cause){
-        _Atomic uint64_t *word=(_Atomic uint64_t *)(waiter->words+waiter->wait[i].count);
+    for(uint64_t t=0;t<waiter->repetitions && waiter->waits && !cause;t++)
+      for(size_t i=0;i<waiter->waits && !cause;){
+        const struct mesh_metal_wait *wait=waiter->wait+i;
+        const uint64_t value=t*passes+wait->pass+1,target=(t/wait->copies+1)*wait->pages;
+        if(value-1>set){[event setSignaledValue:value-1];set=value-1;since=clock_gettime_nsec_np(CLOCK_MONOTONIC);}
+        _Atomic uint64_t *word=(_Atomic uint64_t *)(waiter->words+wait->count+sizeof(uint64_t)*(t%wait->copies));
         const uint64_t seen=atomic_load_explicit(word,memory_order_acquire);
-        if(seen>=waiter->wait[i].target){i++;continue;}
+        if(seen>=target){i++;continue;}
         const uint64_t spent=clock_gettime_nsec_np(CLOCK_MONOTONIC)-since;
         const uint64_t left=spent<MESH_PLATFORM_NS?MESH_PLATFORM_NS-spent:0;
         atomic_store_explicit(&waiter->waiting,word,memory_order_release);
@@ -183,35 +200,42 @@ static void *waits_run(void *argument){
                   OS_CLOCK_MACH_ABSOLUTE_TIME,left<MESH_METAL_SLICE_NS?left:MESH_METAL_SLICE_NS)<0 && errno==EINVAL)
           cause=EINVAL;
       }
-      if(!cause){[event setSignaledValue:value];since=clock_gettime_nsec_np(CLOCK_MONOTONIC);}
-    }
-    if(cause)[event setSignaledValue:waiter->final];
+    if(set<final)[event setSignaledValue:final];
     waiter->cause=cause;
   }
   return NULL;
 }
 
 /* design/disjoint-pages-revision-coordination.md, "The GPU's side of the plan's words" */
-/* The waits copied and one thread started (waits_run).  A wait's count word lies inside the transport's buffer, at 8;
-   the values do not decrease, and `final` is at least the last.  The event, an id<MTLSharedEvent>, stays the caller's:
-   it is retained for the thread's life and released by mesh_metal_waits_end; the transport outlives the waiter.  The
-   first value's deadline counts from this call.  EINVAL where a wait is not of that form, the event is NULL or the
-   transport wraps nothing; ENOMEM; or pthread_create's error. */
+/* One repetition's waits copied, once, and one thread started (waits_run).  Every copy's count word of a wait lies
+   inside the transport's buffer, at 8 (count + 8 c for each c < copies); `copies` and `pages` are not 0; `pass` is
+   below `passes` and does not decrease; the final value repetitions x passes is a uint64_t, and so is the last
+   repetition's target, ((repetitions - 1) / copies + 1) x pages.  The event, an id<MTLSharedEvent>, stays the
+   caller's: it is retained for the thread's life and released by mesh_metal_waits_end; the transport outlives the
+   waiter.  The first value's deadline counts from this call.  EINVAL where a wait is not of that form (`passes` 0
+   with waits given among them), the event is NULL or the transport wraps nothing; ENOMEM; or pthread_create's
+   error. */
 int mesh_metal_waits_start(struct mesh_metal_transport *transport,void *event,const struct mesh_metal_wait *waits,
-  size_t count,uint64_t final,struct mesh_metal_waiter **out){
+  size_t count,uint32_t passes,uint64_t repetitions,struct mesh_metal_waiter **out){
   *out=NULL;
-  if(!transport->state || !event)return EINVAL;
-  for(size_t i=0;i<count;i++)
-    if(waits[i].count%sizeof(uint64_t) || waits[i].count>transport->bytes-sizeof(uint64_t) ||
-       (i && waits[i].value<waits[i-1].value))
+  uint64_t final;
+  if(!transport->state || !event || transport->bytes<sizeof(uint64_t) ||
+     __builtin_mul_overflow(repetitions,(uint64_t)passes,&final))return EINVAL;
+  const uint64_t last=transport->bytes-sizeof(uint64_t);
+  for(size_t i=0;i<count;i++){
+    const struct mesh_metal_wait *wait=waits+i;
+    if(!wait->copies || !wait->pages || wait->pass>=passes || (i && wait->pass<waits[i-1].pass) ||
+       wait->count%sizeof(uint64_t) || wait->count>last || wait->copies-1>(last-wait->count)/sizeof(uint64_t) ||
+       (repetitions && (repetitions-1)/wait->copies+1>UINT64_MAX/wait->pages))
       return EINVAL;
-  if(count && final<waits[count-1].value)return EINVAL;
+  }
   if(count>(SIZE_MAX-sizeof(struct mesh_metal_waiter))/sizeof *waits)return ENOMEM;
   struct mesh_metal_waiter *waiter=malloc(sizeof *waiter+count*sizeof *waits);
   if(!waiter)return ENOMEM;
   waiter->event=[(id)event retain];
   waiter->words=(char *)transport->words;
-  waiter->final=final;
+  waiter->repetitions=repetitions;
+  waiter->passes=passes;
   waiter->cause=0;
   waiter->waits=count;
   atomic_init(&waiter->stop,0);
