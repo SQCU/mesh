@@ -36,9 +36,10 @@ struct mesh_wire { char *data; size_t length; };
 /* A port's device. Added from tag pre-return-20261103 rdma/mesh-verbs.h struct mesh_device: the queue pairs it holds
    against those it can use (`pairs`, `max_pairs`: its max_qp less MESH_PROVIDER_RESERVED_QPS, device_up; 76be3217,
    f35a0447, the rule of bd85613e design/HETEROGENEOUS-LINKS.md), and its port's attributes and own address (`port`,
-   `gid`, `gid_index`, `gid_matched`, as device_gid chooses it), which the child's open, make and connect read. */
+   `gid`, `gid_index`, `gid_matched`, as device_gid chooses it), which the child's open, make and connect read. `name`
+   is the tag's char[32] (main's was a const char * into the --link argument), which ports_find and child_main fill. */
 struct mesh_device {
-  const char *name;
+  char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
   uint32_t region_count,frame_capacity,pairs,max_pairs;
   char *wire; size_t extent,payload;
@@ -110,7 +111,10 @@ static __attribute__((unused)) int wire_map(struct mesh_wire *wire,struct hdr *m
     (unsigned long long)((uintptr_t)wire->data>>32),(unsigned long long)((uintptr_t)wire->data&(MESH_BANK-1)));
   return 0;
 }
-static const char *shm; static _Atomic sig_atomic_t stop;
+static const char *shm;
+/* tag pre-return-20261103 rdma/mesh-verbs.h:125-126, verbatim (CONTRACT: one shared stop; the --link form's static went) */
+/* the stop flag, defined once in mesh-link.c (design/transport.md) */
+extern _Atomic sig_atomic_t stop;
 /* 2026-11-04: down_pair stays deleted, under every name: b89e6362 deleted its header so this bridge fails at compile
    instead of at run time, and its orphaned body is deleted now. It destroyed queue pairs with receives still posted (as
    a failing run leaves them), the action behind the Mini's kernel data aborts of 10-16/17, inside an unbounded retry
@@ -241,22 +245,30 @@ static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
 
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M09 */
-static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hdr *m,struct ibv_port_attr *port){
+/* 2026-11-04, for the resident bridge's device_open (mesh-lanes.c), as tag pre-return-20261103 rdma/mesh-verbs.h
+   device_up does: the port's attributes are kept in the device (`device->port`: device_gid, the make and the child's
+   CHILD_OPENED read them), and a registration the device refuses sets *refused to its code (the window past the
+   device's max_mr_size or max_mr, ENOMEM; else ibv_reg_mr's errno), so port_opened holds off its next try, each of which
+   wires more of the node's memory. The rest is main's: registration stays the window (wire_pages), not the tag's
+   whole-arena extents, and it returns -1 with errno, the tag's codes where the call set none (errno?errno:EIO). The
+   setup lock went to verbs_up, its --link caller, whose links share a device across threads; the tag's device_up holds
+   none, since a port's child opens its one device on its port's serial queue. */
+static __attribute__((unused)) int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hdr *m,int *refused){
   int error=0;
-  pthread_mutex_lock(&device->setup);
+  *refused=0;
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
     for(int i=0;list && list[i];i++)if(!strcmp(device->name,ibv_get_device_name(list[i]))){device->context=ibv_open_device(list[i]);break;}
     if(list)ibv_free_device_list(list);
     if(!device->context){error=errno?errno:ENODEV;goto done;}
   }
-  if(ibv_query_port(device->context,1,port)){error=errno;goto done;}
-  if(port->state!=IBV_PORT_ACTIVE){error=ENETDOWN;goto done;}
+  if(ibv_query_port(device->context,1,&device->port)){error=errno?errno:EIO;goto done;}
+  if(device->port.state!=IBV_PORT_ACTIVE){error=ENETDOWN;goto done;}
   if(device->frame_capacity)goto done;
   struct ibv_device_attr capabilities;
-  if(ibv_query_device(device->context,&capabilities)){error=errno;goto done;}
+  if(ibv_query_device(device->context,&capabilities)){error=errno?errno:EIO;goto done;}
   if(!device->domain)device->domain=ibv_alloc_pd(device->context);
-  if(!device->domain){error=errno;goto done;}
+  if(!device->domain){error=errno?errno:EIO;goto done;}
   /* design/prepared-machine.md#M09 */
   /* Registered memory is the declared window, not the arena: it is what an SGE names, it is wired
      1:1 by the provider, and it is the only thing the MR table has to cover.  The addressable arena
@@ -268,7 +280,7 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
      block and no region crosses a 4 GiB boundary: wire_span's divide is the only addressing form. */
   if(!extent || regions>(size_t)capabilities.max_mr || span>MESH_BANK ||
      ((uintptr_t)wire->data&(MESH_BANK-1))+span>MESH_BANK){
-    error=ENOMEM;
+    error=ENOMEM;*refused=error;
     fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
       device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
     goto done;
@@ -279,7 +291,7 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
     size_t offset=(size_t)device->region_count*extent,end=offset+extent;
     device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
     if(!device->regions[device->region_count]){
-      error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
+      error=errno?errno:EIO;*refused=error;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
         device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));goto done;
     }
     device->region_count++;
@@ -296,7 +308,6 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   if(capabilities.max_cqe<=1 || !capacity){error=EOPNOTSUPP;goto done;}
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
 done:
-  pthread_mutex_unlock(&device->setup);
   if(error){errno=error;return -1;}
   return 0;
 }
@@ -454,7 +465,12 @@ static __attribute__((unused)) uint64_t port_bandwidth(const struct ibv_port_att
 /* design/prepared-machine.md#M08 */
 static __attribute__((unused)) int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   struct ibv_port_attr pa;
-  if(device_up(provider->device,provider->wire,m,&pa))return -1;
+  /* device_up's setup lock, held by its --link caller (device_up above), its port's attributes read under it */
+  pthread_mutex_lock(&provider->device->setup);
+  int refused=0,up=device_up(provider->device,provider->wire,m,&refused),error=errno;
+  pa=provider->device->port;
+  pthread_mutex_unlock(&provider->device->setup);
+  if(up){errno=error;return -1;}
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
   int f=oob(provider,m,client);
   if(f<0)return -1;
