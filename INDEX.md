@@ -40,3 +40,9 @@ other projects, such as a game bot, and old dated records; they are not listed h
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.
+- [design/disjoint-pages-revision-coordination.md](design/disjoint-pages-revision-coordination.md): the coordinating
+  agent's contract for that change request's C3 revision and C4 removals (the four rules, the file split, the state
+  section with its phases and counts, the hop entry of u copies, the plan call over every value, claims per plan, the
+  masked first pass and its later pass held by the command buffer's event wait, and the decisions where C3's text
+  cannot be met as written, with their evidence) and the record of each sub-assignment's commits, each review finding
+  and where it went, and what was left open.
