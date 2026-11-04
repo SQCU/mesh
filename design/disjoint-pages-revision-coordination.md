@@ -836,6 +836,14 @@ work proceeds.)
 - 11 again: 7d752a8c (where a native plan splits and the dispatch reads a received operand, the delegate's kernel is
   kept; MetalMaskReaders raises where a received operand's reader binds a value of state 1, a native split's counters
   or a direct publication's counter alike).
+- After review 17: 11 a062db81 (D13: MetalRelease loads the status's `behind` and `ahead` after its fence and raises
+  the supplied word only where both are 0; every release form, the one-thread mesh_publish, the release folded into a
+  producer's end or a reader's entry (one shared text, MetalEntryRelease, stripped from the later form) and the direct
+  publication's last arrival, goes through it; the loads are device-scope atomics, the status's writers being this
+  GPU's later passes in earlier encoders); 1 ee504048 (hdr `state`'s writers stated: mesh_plan, its ESTALE path and
+  mesh_retire); 4 7c5110f1 (the adapter wait bounded at MESH_PLATFORM_NS between wgpuInstanceProcessEvents calls; the
+  Dawn header gives that call no timeout and does not say whether it blocks; wgpuInstanceWaitAny with a timeout would
+  bound one call and needs another callback mode: not taken, open).
 
 ### Integration
 
@@ -843,6 +851,10 @@ work proceeds.)
   modified): `make -B -C rdma` 0, `make -B -C rdma native-audit` 0, `make .build/e2b_replay` 0 with its two libraries
   and the program rebuilt; no warning. The bridge is signed ad hoc where the "Mesh Bridge" identity is absent, as
   before. Review 17 (the four rules across both repos, and every routed finding against the code) launched.
+
+- After review 17's fixes (mesh 63eca35e, metal-microbench a062db81, both even with origin, no tracked file modified):
+  `make -B -C rdma` 0, `make -B -C rdma native-audit` 0, `make .build/e2b_replay` 0 with its libraries and the program
+  rebuilt; no warning or error.
 
 ### Reviews and where their findings went
 
@@ -897,6 +909,13 @@ work proceeds.)
   this round, and were left untouched.
 
 ### Open at the end
+
+- The kernels the recorder splices (the masked first pass, its compaction and later form, the releases) are compiled
+  by Metal when a program captures, not by the three builds: owners 9 and 10 compiled snippets of them where a Metal
+  compiler was found, owner 11's last forms were checked by reading (none found then). An error there is a capture-time
+  exception, an error value. Nothing has run; parity, the reuse and the transport readings wait for the operator's
+  authorization of runs (C3.8).
+- e2b_replay.m's adapter wait is bounded between wgpuInstanceProcessEvents calls, not within one (4's 7c5110f1).
 
 - Whether Apple's provider lets a receive record be posted again while an earlier posting of it is outstanding
   (mesh-flow.c relies on the work request being copied at the post; recorded as encoded into the provider's own queue,
