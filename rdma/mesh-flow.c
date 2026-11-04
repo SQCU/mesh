@@ -61,7 +61,7 @@ enum { FLOW_NONE, FLOW_REFUSED, FLOW_SERVING, FLOW_DONE, FLOW_ENDED };
 struct flow {
   int state,ledger,refused;
   uint32_t lanes;
-  uint64_t hops,plan,stride,send_count,receive_count,sent,landed;
+  uint64_t hops,plan,client,stride,send_count,receive_count,sent,landed;
   struct prepared_send *sends,*send_at[MESH_LINK_LANES],*send_end[MESH_LINK_LANES];
   struct prepared_receive *receives,*receive_next[MESH_LINK_LANES];
   struct flow_hop *landing;
@@ -182,7 +182,7 @@ static int link_prepare(struct port *port){
   struct flow *f=flows+port->index;
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_relaxed);
-  f->hops=hops;f->plan=plan;f->stride=M->hop_stride;
+  f->hops=hops;f->plan=plan;f->client=atomic_load_explicit(&M->client,memory_order_acquire);f->stride=M->hop_stride;
   uint32_t executions,depth;uint64_t n;
   plan_shape(hops,&executions,&depth,&n);
   const struct mesh_hop *list=mesh_hops(M);
@@ -477,8 +477,8 @@ static int link_send_progress(struct port *port,uint32_t served){
    nothing more is loaded in the child's life, and where the link still serves, it is lost as the tag loses a link whose
    holdings ended with units outstanding (rdma/mesh-link.c stream_end: `lost` LINK_STREAMS_ENDED, every lane `broken`,
    so the child tells CHILD_BROKEN and its parent loses the link): a posted receive is never taken back but by the
-   child's exit (lanes_flush), so no later plan's page is posted beside it.  No verbs call: d6dceac's down_pair and
-   listener close are the child's exit's */
+   child's exit (lanes_flush), so no later plan's page is posted beside it, and `prepared` stays the plan's until the
+   parent reaps the child.  No verbs call: d6dceac's down_pair and listener close are the child's exit's */
 static void link_close(struct port *port,uint32_t served){
   struct link *l=&port->link;
   struct flow *f=flows+port->index;
@@ -504,7 +504,10 @@ static void link_close(struct port *port,uint32_t served){
   f->sends=NULL;f->receives=NULL;f->landing=NULL;f->send_count=f->receive_count=0;f->lanes=0;
   memset(f->send_at,0,sizeof f->send_at);memset(f->send_end,0,sizeof f->send_end);memset(f->receive_next,0,sizeof f->receive_next);
   f->state=outstanding?FLOW_ENDED:FLOW_NONE;
-  atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
+  /* `prepared` 0 at once where nothing is outstanding; else it stays the plan's until the parent reaps the child
+     (mesh-children.c child_reaped, streams_cancel), so a retired client's rows its requests name are kept
+     (mesh-dataflow.c mesh_retired_release reads every port's `prepared`: the coordinator, 2026-11-03) */
+  if(!outstanding)atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
   if(outstanding && served){
     mesh_say("bridge","link %u (%s): its plan ended with work outstanding on lanes %#x: the link toward node %u lost",
              port->index,port->name,outstanding,port->peer);
@@ -515,8 +518,9 @@ static void link_close(struct port *port,uint32_t served){
 }
 
 /* The plan's turn on the port's progress thread, each pass while its link serves: the plan served ended where the
-   region's was written again (link_close: hdr `hops` 0, or another generation `plan`); a plan written and not yet
-   loaded loaded (link_prepare), its generation then stored in the port's `prepared` (release: the client's start
+   region's was written again (link_close: hdr `hops` 0, or another generation `plan`) or the client it was loaded for
+   holds the region no more (hdr `client` another: mesh-dataflow.c mesh_retire); a plan written while a client holds
+   the region and not yet loaded loaded (link_prepare), its generation then stored in the port's `prepared` (release: the client's start
    waits on it at every port whose cable reaches a node a hop names, so it is stored where the rule gave this cable no
    page too), or refused, the port's phase MESH_STOPPED and its `code` the refusal's (CONTRACT "A plan loaded"), until
    the plan call writes again; a plan loaded
@@ -526,14 +530,17 @@ static int link_run(struct port *port,uint32_t served){
   struct flow *f=flows+port->index;
   const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
   const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_relaxed);
-  if(f->state!=FLOW_NONE && f->state!=FLOW_ENDED && (!hops || hops!=f->hops || plan!=f->plan))link_close(port,served);
-  if(f->state==FLOW_NONE && hops){
+  const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
+  if(f->state!=FLOW_NONE && f->state!=FLOW_ENDED && (!hops || hops!=f->hops || plan!=f->plan || client!=f->client))
+    link_close(port,served);
+  if(f->state==FLOW_NONE && hops && client){
     struct mesh_port_info *info=&mesh_links(M)[port->index].port;
     const int error=link_prepare(port);
     if(error){
       f->state=FLOW_REFUSED;f->refused=1;
       mesh_say("bridge","link %u (%s): plan %llu refused (code %d)",port->index,port->name,
                (unsigned long long)f->plan,error);
+      atomic_store_explicit(&info->prepared,0,memory_order_release);
       atomic_store_explicit(&info->code,error,memory_order_relaxed);
       atomic_store_explicit(&info->phase,MESH_STOPPED,memory_order_release);
       return 0;
@@ -574,9 +581,10 @@ static int port_pass(struct port *port,uint64_t *told){
   return busy;
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:387-424 port_progress (3a82ede9), verbatim but the plan: while the link
-   serves and its plan has no work left (none written, or done), the thread waits on the plan's word (hdr `hops`, the
-   plan call's last store, region-shared) as it waits on the guard, looking again every MESH_PAUSE_NS; a link that
-   serves no lane ends the plan it served (link_close: a halt); and the thread's end ends it too */
+   serves and its plan has no work left (none written, or done), the thread waits on the plan's word (hdr `plan`, its
+   generation, region-shared) as it waits on the guard, looking again every MESH_PAUSE_NS (so a client's retirement,
+   which wakes `control` and not `plan`, is seen within it); a link that serves no lane ends the plan it served
+   (link_close: a halt); and the thread's end ends it too */
 /* design/transport.md section 14: a port's progress thread, its SENDs' and its receives': it passes without pause while
    its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the port's
    guard word while it serves none, looking again every MESH_PAUSE_NS (the stop's `closing`) */
@@ -614,10 +622,11 @@ static void *port_progress(void *argument){
                                                 OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
       continue;
     }
-    /* the plan's word read before the pass, so a plan written during it ends the wait below at once */
-    const uint64_t hops=atomic_load_explicit(&M->hops,memory_order_acquire);
+    /* the plan's generation read before the pass, so a plan written during it ends the wait below at once (the plan
+       call wakes it, region-shared, after its last store: mesh-collective.c mesh_plan) */
+    const uint64_t plan=atomic_load_explicit(&M->plan,memory_order_acquire);
     if(port_pass(port,&told))continue;
-    os_sync_wait_on_address_with_timeout(&M->hops,hops,sizeof M->hops,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+    os_sync_wait_on_address_with_timeout(&M->plan,plan,sizeof M->plan,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
                                          OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
   }
   link_close(port,0);
@@ -629,7 +638,7 @@ static void *port_progress(void *argument){
 void guard_wake(struct port *port){
   os_sync_wake_by_address_all(&port->guard,sizeof port->guard,OS_SYNC_WAKE_BY_ADDRESS_NONE);
   os_sync_wake_by_address_all(&port->link.served,sizeof port->link.served,OS_SYNC_WAKE_BY_ADDRESS_NONE);
-  if(M)os_sync_wake_by_address_all(&M->hops,sizeof M->hops,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  if(M)os_sync_wake_by_address_all(&M->plan,sizeof M->plan,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:430-442 port_threads (3a82ede9), verbatim but not static */
 /* design/transport.md: the port's progress thread started, once; 0, or pthread_create's error */
@@ -719,12 +728,15 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    lists: the tag's streams of a port live no more and their words ~0; here, as its link is lost or the bridge stops
    (mesh-ports.c port_lost, mesh-children.c child_reaped, the stop), this node's landed words not landed cancelled for
    the receives from the port's peer (its index in the map; none where the map holds no record of it), every one where
-   `port` is NULL, and the port's (every port's) plan no longer loaded (`prepared` 0).  A receive the port's child lands
-   after it stores its position over the cancellation: the page's bytes did land */
+   `port` is NULL, and the port's (every port's) plan no longer loaded (`prepared` 0) where no child of it lives: a
+   live child's requests may still name the plan's pages, so its `prepared` is its own to clear (link_close) or its
+   reap's (child_reaped, after `port->child` is 0).  A receive the port's child lands after it stores its position over
+   the cancellation: the page's bytes did land */
 void streams_cancel(const struct port *port){
   if(!port){
     plan_cancel(UINT32_MAX);
-    for(uint32_t p=0;p<port_count;p++)atomic_store_explicit(&mesh_links(M)[ports[p].index].port.prepared,0,memory_order_release);
+    for(uint32_t p=0;p<port_count;p++)
+      if(!ports[p].child)atomic_store_explicit(&mesh_links(M)[ports[p].index].port.prepared,0,memory_order_release);
     return;
   }
   struct mesh_record *records=NULL;uint64_t count=0,serial=0;
@@ -733,7 +745,7 @@ void streams_cancel(const struct port *port){
     free(records);
     if(from!=UINT32_MAX)plan_cancel(from);
   } else if(port->peer)plan_cancel(UINT32_MAX);
-  atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
+  if(!port->child)atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:712-722 streams_let_go (60b00774), reduced to what it is under the page
    lists: the tag let a gone client's streams go; here, on the bridge's turn over its clients (mesh-records.c
