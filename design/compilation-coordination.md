@@ -819,6 +819,22 @@ Text extracted with `pdftotext -layout` into the session scratchpad's papers/ fo
 - Not read: Durstenfeld 1964 (S5); Boehm and Adve 2008 (item 4: nothing is built from it); J. W. S. Liu and C. L. Liu
   1974 (the deal is the existing code's).
 
+### Amendments during the work (2026-11-04), each the coordinator's ruling on an implementer's finding
+
+- **S7′** (B3's finding: the deal spreads a pair's positions over every cable of the pair, and each port's child holds
+  records for its own cable's units alone; a receive record's round test and the bit its landing flips count its own
+  `landings`, so a member placed on another cable in a later execution has no record there, or one out of step).
+  The permutation is per cable: on each cable of the pair, the set's members whose positions the deal gave that cable
+  are permuted among those positions (S5, with t their count), each execution, at both ends. This is the appendix's
+  text at the bridge's level ("each execution of a set on a cable is sent and received in a uniformly random
+  permutation of its pages"); how a pair's sequence is spread over its cables stays the bridge's own (R5, R7). Which of
+  a set's pages a cable carries is the deal's, fixed at the load; their order on it is drawn each execution. The
+  counter's fourth word is the cable's place in the pair's key order (mesh-map.h mesh_cables: "cables in key order",
+  the same at both ends), so no (key, counter) is used on two cables (Salmon et al. §5). The no-cycle argument of S2
+  holds for any order within a group: a set's group start on a tree edge is past its group start on the edge above
+  (each page's start below follows its finish above), so a position's order key (its group start, then its place)
+  stays past its page's receive above whichever page the permutation puts there. B3's ENOTSUP refusal goes.
+
 ### Record of this part
 
 (Filled in as the work lands.)
