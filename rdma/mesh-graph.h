@@ -169,18 +169,20 @@ int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *o
 int mesh_graph_bottom_levels(uint32_t tasks, const double *weight, size_t edges, const uint32_t *from, const uint32_t *to,
                              const double *cost, double *level);
 /* O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, Algorithm 1 with Algorithm 2 (list scheduling in the contention
-   model).  Task n on processor[n] (given: the placement operand), weight[n] long.  Edge e from[e] -> to[e] of cost[e]
-   crosses links link[route[e] .. route[e + 1]) in route order (route: edges + 1 entries); a local edge
-   (processor[from] == processor[to]) has an empty route and finishes with its origin (15); a remote edge with an empty
-   route, or a local edge with a route, is EINVAL.  Link l's relative data rate rate[l] > 0, so an edge occupies it cost[e] / rate[l] (§5).  Route
-   entries with the same communication[r] on the same link are one occupation of it: the first scheduled takes its
-   interval and the others its times (design/compilation-coordination.md, T4).  Tasks in decreasing bottom level
-   (eq. 7), a tie by a topological ordinal (mesh_graph_order) then by index; for each, its incoming edges in index
-   order, each remote one scheduled on its links by Condition 6 and (14), nonaligned, by the end technique
-   (design/compilation-coordination.md, T5); then the task at max(its processor's finish, its data-ready time (3)) by
-   the end technique.  start[n] its start; link_start[r] the start of route entry r on its link.  Arithmetic +, -, x,
-   / and comparisons alone, correctly rounded, so every party computes the same schedule from the same operands.
-   0; EINVAL; ENOMEM */
+   model).  Task n on processor[n] (given: the placement operand; a label, design/compilation-coordination.md, G-1),
+   weight[n] > 0 long (Definition 1, "the positive weight w(n)").  Edge e from[e] -> to[e] of cost[e] >= 0
+   (Definition 1, "the nonnegative weight c(eij)") crosses links link[route[e] .. route[e + 1]) in route order (route:
+   edges + 1 entries); a local edge (processor[from] == processor[to]) has an empty route and finishes with its origin
+   (15); a remote edge with an empty route, or a local edge with a route (G-1), is EINVAL.  Link l's relative data rate
+   rate[l] > 0, so an edge occupies it cost[e] / rate[l] (§5).  Route entries with the same communication[r] on the
+   same link are one occupation of it: the first scheduled takes its interval and the others its times
+   (design/compilation-coordination.md, T4, G-1).  Tasks in decreasing bottom level (eq. 7), a tie by a topological
+   ordinal (mesh_graph_order) then by index; for each, its incoming edges in index order, each remote one scheduled on
+   its links by Condition 6 and (14), nonaligned, by the end technique (design/compilation-coordination.md, T5); then
+   the task at max(its processor's finish, its data-ready time (3)) by the end technique.  start[n] its start;
+   link_start[r] the start of route entry r on its link.  Arithmetic +, -, / and comparisons alone, correctly rounded,
+   so every party computes the same schedule from the same operands.  0; EINVAL (a time not finite among them, G-1);
+   ENOMEM */
 int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const uint32_t *processor, size_t edges,
                                    const uint32_t *from, const uint32_t *to, const double *cost, const size_t *route,
                                    const uint32_t *link, const uint32_t *communication, uint32_t links,

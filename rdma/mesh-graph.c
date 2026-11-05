@@ -815,15 +815,15 @@ static void schedule_leaders(size_t count, struct schedule_key *keys, size_t bas
    - Algorithm 1, part 1, "Sort nodes n ∈ V into list L, according to priority scheme and precedence constraints":
      decreasing bottom level, eq. (7) (levels, mesh_graph_bottom_levels' computation; design/compilation-coordination.md,
      T3), a tie by the topological ordinal levels takes them over.  No two tasks share an ordinal, so the contract's
-     further tie by index never arises.  The list meets the precedence constraints: with every weight and cost >= 0 a
-     predecessor's level is no less than its successor's (a correctly rounded + of a term >= 0 is no less than the
-     term), and at an equal level its ordinal is the lower, so every task is free (its predecessors scheduled) at its
-     turn.
+     further tie by index never arises.  The list meets the precedence constraints: with every weight > 0 and every
+     cost >= 0 (Definition 1: "The positive weight w(n)", "the nonnegative weight c(eij)") a predecessor's level is no
+     less than its successor's (a correctly rounded + of a term >= 0 is no less than the term), and at an equal level
+     its ordinal is the lower, so every task is free (its predecessors scheduled) at its turn.
    - Algorithm 1, line 5, "Find processor P ∈ P that allows earliest finish time of n": P is processor[n], given (the
      placement operand: design/aot-compilation-change-request.md, A2; design/plan-to-bridge-change-request.md, R5), so
      §6.1's tentative scheduling on every processor, the incoming edges removed from the links between tries, does not
-     arise.  A processor is a label (the operands name no count of them): tasks of equal processor[] are on one, whose
-     last finish is kept at the least such task (schedule_leaders).
+     arise.  A processor is a label (the operands name no count of them; design/compilation-coordination.md, G-1):
+     tasks of equal processor[] are on one, whose last finish is kept at the least such task (schedule_leaders).
    - Algorithm 2, "for each ni ∈ pred(nj) in a definite order": the edges into nj in the order of their indices (§6.1,
      "the edges might be processed in the order of their indices"; mesh_graph_rows keyed by to[e] keeps their order).
      "if proc(ni) ≠ P then determine route R = <L1, ..., Ll> from proc(ni) to P": R is the operand's
@@ -838,8 +838,9 @@ static void schedule_leaders(size_t count, struct schedule_key *keys, size_t bas
      (one edge on a link at a time, Condition 4, (9)).
    - Where this differs from the paper (design/compilation-coordination.md, T4): route entries of one
      communication[r] on one link are one occupation of it.  The first scheduled takes its interval by (14); every
-     later one takes that start and finish as they stand and occupies nothing more, and the entries after it on its
-     own route follow it by (14), causality from its finish and its route's first start.  Sinnen and Sousa schedule
+     later one takes that start and finish as they stand and occupies nothing more (design/compilation-coordination.md,
+     G-1: sound for T4's common prefixes of routes), and the entries after it on its own route follow it by (14),
+     causality from its finish and its route's first start.  Sinnen and Sousa schedule
      each edge on its own; the consumer's communications cross a link once for all the edges that need them there.
      What must stay: one occupation per (communication, link), held by the first entry scheduled.
    - An edge's finish, Definition 8 (15): tf(ni) where proc(ni) = proc(nj), else tf(e, Ll).  nj's data-ready time (3):
@@ -848,15 +849,17 @@ static void schedule_leaders(size_t count, struct schedule_key *keys, size_t bas
      ts(nj, P) + w(nj), then the processor's last finish.
    start[n] ts(n, proc(n)); link_start[r] ts(e, Lk) of route entry r.  Arithmetic: +, -, / and comparisons alone, each
    correctly rounded (no libm; the file is compiled with -ffp-contract=off), and both sorts' orders total, so every
-   party computes the same schedule from the same operands.  EINVAL: a weight or cost negative or not finite, a rate
-   not > 0, an edge naming no task, a route running backward (route[e] > route[e + 1]) or naming no link, a remote
-   edge with no route or a local edge with one, a cycle, or a time past the doubles' range (operands whose sums
-   overflow).  Every allocation precedes the first output written, so ENOMEM writes none. */
+   party computes the same schedule from the same operands.  EINVAL: a weight not > 0 or not finite (Definition 1's
+   positive weight), a cost negative or not finite (its nonnegative weight; a local edge's 0, Definition 2's free
+   local communication), a rate not > 0, an edge naming no task, a route running backward (route[e] > route[e + 1])
+   or naming no link, a remote edge with no route, a cycle; and, design/compilation-coordination.md, G-1, a local edge
+   with a route or a time past the doubles' range (operands whose sums overflow).  Every allocation precedes the first
+   output written, so ENOMEM writes none. */
 int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const uint32_t *processor, size_t edges,
                                    const uint32_t *from, const uint32_t *to, const double *cost, const size_t *route,
                                    const uint32_t *link, const uint32_t *communication, uint32_t links,
                                    const double *rate, double *start, double *link_start) {
-  for (uint32_t n = 0; n < tasks; n++) if (!(weight[n] >= 0 && weight[n] <= DBL_MAX)) return EINVAL;
+  for (uint32_t n = 0; n < tasks; n++) if (!(weight[n] > 0 && weight[n] <= DBL_MAX)) return EINVAL;
   for (uint32_t l = 0; l < links; l++) if (!(rate[l] > 0)) return EINVAL;
   for (size_t e = 0; e < edges; e++) {
     if (from[e] >= tasks || to[e] >= tasks || !(cost[e] >= 0 && cost[e] <= DBL_MAX) || route[e] > route[e + 1]) return EINVAL;
