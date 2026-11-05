@@ -558,16 +558,21 @@ file, calls streams_cancel).
 - For the operator, V1 #2 and #6: a plan ended at one node while a peer still serves it. Its peer's SENDs the hardware
   holds can fill the next plan's receives on the same queue pairs; and a peer that never completes the plan released
   last holds this node's later ORDERs. The draft's per-carrier end ("CLOSED has been heard on every carrier", §6) rests
-  on the withdrawn §5/D7 construction, so no allowed source gives it.
+  on the withdrawn §5/D7 construction, so no allowed source gives it. (2026-11-04, withdrawn: the appendix, item 4;
+  "The appendix's revisions", H2.)
 - For the operator, V1 #3: Q4''s bound (MESH_PLATFORM_NS from an ORDER's arrival) turns a rank that plans late into an
-  order delivered with nothing released there.
+  order delivered with nothing released there. (2026-11-04, withdrawn with the bound: the appendix, items 2 and 3;
+  "The appendix's revisions", O1, H1.)
 - For the operator, V2 #2: C3's D5 check refuses a lone symmetric exchange (a torch graph whose one collective is an
-  AllGather or AllToAll): its landing's next instance is reached at lag 2. The refusal names it.
+  AllGather or AllToAll): its landing's next instance is reached at lag 2. The refusal names it. (2026-11-04, closed:
+  the refusal is gone, the appendix, item 1; "The appendix's revisions", U1.)
 - For the operator, A-T6: several functions of one program standing at once (the plan's name is per context).
+  (2026-11-04, closed: the appendix, item 6; "The appendix's revisions", N1 to N5.)
 - For the operator, L3: mesh-heartbeat.c replace_turn reads hdr `client` and `client_start`, never written now, so it
   finds no client holder; bin/mesh-bridge.sh still writes a `hops` key the bridge ignores.
 - V1 #9: a wake of `plans` without a raise can be missed, costing up to MESH_PAUSE_NS a hand-off (bounded).
-- The torch path: the MPS binding of placed pages (A-T4); CollectivePermute, ReduceScatter and the operators GSPMD
+- The torch path: the MPS binding of placed pages (A-T4; 2026-11-04, closed by K1, "The appendix's revisions");
+  CollectivePermute, ReduceScatter and the operators GSPMD
   gives no rule for, refused; every execution's operator outputs are torch's own allocations outside the plan's pages.
 - R8's composition and A7's sequencer are built; the α–β chooser (the appendix) is not, by ruling 3.
 - Carried from before: `qps` in mesh-map.h's struct mesh_reach and struct mesh_cable, and older tag text naming
@@ -846,6 +851,124 @@ Text extracted with `pdftotext -layout` into the session scratchpad's papers/ fo
   goes. (Its last sentence here, a no-cycle argument resting on "each page's start below follows its finish above",
   is withdrawn: S2's note, review W3's finding 6.)
 
+- **P3** (review W3's finding 3: no program declared a MESH_PAGES consumer, so item 5 was unreachable; P1's and
+  A-T8's reason, one publish a range, is the producer's, while R4's kind is the consumer's: "function B can work on any
+  pages received in any order"). In the torch lowering, a declared transfer is MESH_PAGES where its consumer at the
+  destination is R4's function B: each AllReduce partial to the root, consumed by the root's combine (R4: "reductions'
+  partial sums"; Gibbons, ⊕ associative and commutative), and a range whose every reader there is an operator of
+  GSPMD's elementwise set (a map over pages, the appendix item 5's "a pointwise nonlinearity after a ffn"); MESH_JOIN
+  otherwise (a Dot, a cat, a slice, a clone). A-T8 is reversed for those. Every consumer still reads a range only once
+  it is complete (R4: "complete but not contiguous before function B is complete"). e2b's kinds stay P1's (open).
+- **K1-a to K1-e** (T2's report, review W2): the DLPack structure is DLManagedTensorVersioned (dlpack.h: the legacy
+  one "deprecated after DLPack v0.8"); torch's own synchronize before each write into a range on the GPU, besides
+  before each publish (Metal orders accesses per buffer object, MTLResource.h `hazardTrackingMode`, MPSAllocator.h
+  `UsageFlags::HAZARD`, and two values over one page are two buffer objects, so C3.3's read before write needs it);
+  a plan whose binding fails after mesh_plan is retired at once (N3, R8); torch's MTLDevice is read from a probe MPS
+  tensor's buffer (OperationUtils.h getMTLBufferStorage; torch has no Python call returning it); every copy, CPU and
+  MPS, bound by torch.from_dlpack, kDLCPU or kDLMetal, and synchronized by its device module
+  (torch.get_device_module(d).synchronize(); torch.cpu.synchronize documented "to facilitate device-agnostic code"),
+  one form (review W3's finding 12, C3.8), torch.frombuffer gone.
+- **E1** (review W2's finding 2): an execution is consumed at its submission. Once mesh_transfers_start has raised
+  `executions` to t + 1, the next call is t + 1 whether or not this call's run fails (`executions` and the supplied
+  words only rise: C3.7; mesh-call.h), so no call rewrites a published execution's pages; a start that fails before its
+  raise submitted nothing.
+- **N3′** (review W2's finding 3): torch retires a compiled function's plan when torch drops its callable, by Python's
+  weakref.finalize on it (at its collection, or at exit before module teardown), after its devices' synchronize.
+- **N2′** (review W1's finding 4): mesh_transfers_start refuses (EINVAL), before any raise, a handle that is not a
+  plan standing in a claim of this client (the transport's tests, then the heads' walk); a second mesh_plan_retire is
+  ENOENT.
+- **O4** (review W3's finding 2): a delivery stores a plan's `released` only upward (C3: no state word written to an
+  earlier value while its plan stands).
+
 ### Record of this part
 
-(Filled in as the work lands.)
+#### Commits by owner
+
+- Coordinator (mesh): 5ba3a080 (this part), 692bb5e7 (INDEX.md), 53c7233e (S7′), f9d8bb2c (the reviews' corrections
+  to O2, S2, S4, S6, S7′ and the sources' lines), and this record.
+- C2 (mesh rdma/mesh-collective.{h,c}, mesh-graph.{h,c}): e97d80ae (the header), dd57daa6 (U1, S1-S3, N1-N5),
+  2a128d58 (mesh-graph's D5 citations to C3.3 and U1), b2e92cc6 and 7ec4df3f (U1's premise stated at struct
+  mesh_dependence; the no-cycle argument withdrawn, with C-weights' reason for `page` > 0).
+- L2 (mesh rdma/mesh.h, mesh-dataflow.{h,c}, mesh-call.h, mesh-metal.{h,m}; metal-microbench tools/e2b_replay.m):
+  10b680a0 (the headers: MESH_VERSION 111, struct mesh_hop `set`, struct mesh_ctx of 32 bytes, mesh_claim_close,
+  mesh_plan_retire, the start and the transport by plan), 77bd59dd (their code), aa112f5b (mesh.h: S3's order),
+  e65f770b (N2′; the set's text; the no-cycle claim withdrawn); metal-microbench 3b996181 (e2b: function 1, the plan
+  by its handle), 062a8474 (the plan call's comment).
+- B3 (mesh rdma/mesh-flow.c, mesh-records.c, mesh-link.c, mesh-bridge.h): 5eb92c69 (O1/H1: Q4′'s bound gone; O2: the
+  hold's comments re-cited), 24c6da33 (S4-S7: threefry4x64_20, set_draw, the sets' tables, the drains by position),
+  e529e2c1 (S7′), 83dbacbb (D5's last citation; the streams' text; O4).
+- T2 (mesh rdma/mesh.py, mesh_compile.py): 28897023 (U1; N1-N5: an ordinal a compiled graph, a handle each,
+  STANDING and A-T6 gone, replans retiring), 16bb2864 (K1: DLPack over placed pages, torch's MPS kernels),
+  091d2d05 (W2 #1-#6, W3 #12 and #3: E1, N3′, K1-e, P3, the float8 codes, citations).
+
+#### Reviews and where their findings went
+
+- W1 (the mesh side): 1 (a head whose plan never stands blocks later deliveries) open, below; 2 (the counter's text)
+  to B3 (83dbacbb) and this part (S4); 3 (U1's premise) to C2 (b2e92cc6); 4 (the handle's checks, a second retire)
+  to L2 (e65f770b, N2′). Threefry and Algorithm P found line by line as Skein §3.3 and S5 state them; S1-S3, S7′,
+  N1-N5, O1 found as written.
+- W2 (the torch and program side): 1, 2, 3, 4, 5, 6 to T2 (091d2d05: the synchronize before retiring, E1, N3′, the
+  float8 codes, Header's citation, the deleter's citation); 7 to L2 (062a8474). ctypes layouts, the DLPack structures
+  and torch v2.14.0's DLPack import of kDLMetal confirmed by W2's own reading at the tag; T2's four differences
+  found sound.
+- W3 (items 1-7 across both repos): 1 and 2 open, below (2's `released` to B3, O4); 3 to T2 (P3); 4 to C2 (U1's
+  premise); 5 to this part (O2's reason amended); 6 to C2, L2 and this part (the no-cycle argument withdrawn), open;
+  7 to B3 and this part (S4), open in part; 8 to B3 (83dbacbb); 9, 11 to this part (f9d8bb2c); 10 this record; 12 to
+  L2 (062a8474, e65f770b) and T2 (K1-e). Found clean: items 3 and 4 (no handler for a slow node or a truncation);
+  no chooser, kernel, ring, timeout skip, second form; transport terms in the bridge's files alone; no command buffer
+  made; the overturned decisions gone from code (but dated notes).
+
+#### What torch v2.14.0 holds (K1, read at the tag by T2 and again by W2)
+
+DLConvertor.cpp: toDLPackImpl's MPS branch exports `data` = `src.storage().mutable_data()` and `byte_offset` =
+`src.storage_offset() * c10::elementSize(src.scalar_type())`; dlDeviceToTorchDevice: `case DLDeviceType::kDLMetal:
+return at::Device(DeviceType::MPS, index);`; fromDLPackImpl passes `dl_tensor.data` to at::from_blob with its strides
+and toStorageOffset(byte_offset). aten/src/ATen/native/mps/OperationUtils.h 128-129: getMTLBufferStorage is
+`__builtin_bit_cast(id<MTLBuffer>, tensor.storage().data())`; 536: MPS storage data is "a pointer to id<MTLBuffer>
+object". MPSAllocator.h 292: the allocator's device is MPSDevice::getInstance()->device(); MPSDevice.mm: the first of
+MTLCopyAllDevices not low-power and supporting Mac2. torch/csrc/utils/tensor_new.cpp tensor_fromDLPack: a
+`dltensor_versioned` capsule of major version at most DLPACK_MAJOR_VERSION.
+
+#### Integration
+
+Once no implementer or reviewer ran (mesh 091d2d05 and this record; metal-microbench 062a8474; both trees clean and
+level with origin): `make -B -C rdma` 0 (mesh-flow, mesh-heartbeat, mesh-stat, libmesh.dylib), `make -B -C rdma
+native-audit` 0, `make .build/e2b_replay` 0 (libmesh_metal.dylib and e2b_replay rebuilt against the new libmesh), no
+warning or error; rdma/mesh.py, rdma/mesh_compile.py and tools/mesh/run_pair.py compile (Python's compile, no
+bytecode written). Nothing was run.
+
+#### Open at the end, for the operator
+
+- **Item 2 not done (O2).** Q4's hold stays: no execution of one plan interleaves with another plan's on a cable. What
+  carries the sequencer's delivery order from the bridge parent to its ports: a queue of delivered ORDERs in the region
+  (bounded or not) or a hand-off on each port's taking a delivery. The brief excluded both.
+- **Delivery's liveness** (W1 #1, W3 #1). With Q4′'s bound gone (items 2 and 3), a pending ORDER whose plan never
+  stands here (its rank exits, or retires the function, before the ORDER comes; a map move with no replan, the ORDERs
+  being kept across this node's serial move by V1 #4's ruling) stays at the head, and every later ORDER at that node
+  waits behind it. Défago's Fig. 5 delivers each message in turn; the "plan stands here" condition is how a delivery
+  reaches its plan (the plan's `released`), and none of the change requests says what a delivery to a plan not
+  standing is.
+- **A plan's identity across a map move** (W3 #2, W1 #2, W3 #7). A replan keeps its name (N1), so an ORDER of the
+  cancelled plan can release its replan (`released` now only rises, O4), and the replan redraws the cancelled plan's
+  permutation streams (Salmon et al. §5's "improperly re-used"). No name both programs give alike at every rank tells
+  two incarnations of one function apart (each node's map serial is its own count, Q3′).
+- **No cycle on a cable** (W3 #6). The contention schedule starts a page on a route's links by Sinnen and Sousa's
+  eq. (14), nonaligned (cut-through), so a page's start on a link can precede its finish on the link before; neither
+  T6's start order nor S3's groups is shown to be a topological order of the bridge's store-and-forward waits (R5's
+  and MSCCLang §5.2's condition). With it, C-weights' refusal of a `page` weight of 0 has lost its stated reason
+  (Definition 1 allows c(e) ≥ 0); the refusal stays.
+- **U1's premise.** The least lags are C3.3's order at every later distance because both programs' edges order each
+  node's events of t before those of t + 1; mesh_plan does not test it (the appendix: ENOMEM refuses only a value with
+  no such L). A program without such edges would get pages shared that its edges do not order.
+- **Item 5's reach.** Torch's P3 kinds give sets (AllReduce partials; sums read only by elementwise operators); e2b's
+  consumers stay MESH_JOIN (P1): which e2b stages take pages in any order is its manifest's to say
+  (tools/prepare_e2b.py), not decided here. Recorded differences: S6 (the deal fixed at the load over positions, the
+  brief's "before the deal" exact only where a set's members have equal bytes), S7′ (the permutation per cable; which
+  pages a cable carries is the deal's), S2 (a cable carrying two trees of one range carries two sets), N4 (e2b's
+  steps launched at once by one start, each step one execution).
+- **The torch MPS path (K1)** is built on torch v2.14.0's DLPack import as read, and nothing was run: whether every MPS
+  operator accepts a buffer its allocator did not make; whether MPS command buffers in flight retain the buffers they
+  use after a failed call; torch.mps.synchronize's wait is torch's own, unbounded by this code (no kernel spins).
+- **Torch retirement at exit** (N3′): a finalizer's failure at exit is printed, not raised (Python's documentation).
+- Carried: L3; V1 #9; the torch path's refused collectives and operators; the α–β chooser not built (ruling 3); `qps`
+  in mesh-map.h; runs wait for the operator's authorization (C3.8).
