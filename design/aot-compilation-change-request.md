@@ -201,3 +201,145 @@ of unit weights; nothing in A1 to A9 changes.
     bandwidth-only form.
 - **Its place in the code:** a function from (bytes, cable) to a weight, passed to the compilation as its edge-weight
   chooser. Any other chooser can replace it, as A3 requires.
+
+## Appendix: the citations the implementation omitted or ignored
+
+The implementation of this change request and design/plan-to-bridge-change-request.md (mesh ce3d5d5e, metal-microbench
+30a5f9fb; its record is design/compilation-coordination.md) departed from them where it took decisions with no citation,
+or set a cited method aside. Each item below names the decision, the citation that settles it, and what the code must
+do. Where this appendix and design/compilation-coordination.md differ, this appendix holds.
+
+> so we see that limiting requirements and algorithmic claims to citations to the ltierature would tell us exactly what
+> the user was saying to do, and that the subagnets were lying about experiencing a constraint taht came entirely from
+> using idiomatic data structures or algorithms.
+
+### 1. Unrolling: C3.3 as written, without the coordination's D5
+
+> "D5 appears in neither Lam, Rau nor C3.3's text." lying subagent problem.
+
+- **Decision without a citation:** design/disjoint-pages-revision-coordination.md D5 refuses a value whose write does
+  not reach its own next instance at lag 1. That refusal is why a lone AllGather or AllToAll is refused.
+- **The citation it set aside:** C3.3 (M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo scheduling,
+  MICRO 1994): "For each value, L is the smallest lag at which every read of it in execution t happens before its write
+  in execution t + L. The unroll factor u is the largest L. … A value with no such L fails the plan with `ENOMEM`."
+- **The code must:** compute u as C3.3 states and refuse only a value with no such L. D5's lag-1 condition goes.
+
+### 2. Function executions are submitted in order; transactions have only a local order
+
+> the user kept demanding over and over and over and over and over and over again that some operations must be handled
+> based upon only a local order, that is to say, that there is no global total ordering of transactions, and that every
+> single hardware level connection which allows transfers should be saturated as much as possible s.t. total aggregate
+> latency for all transactions is always minimized. this might mean that there is a *recorded* empirical total ordering
+> of which transactions happened in which orders on each hardware link pair; the user is now telling you that this IS
+> TOTALLY OPAQUE TO COLLECTIVE CODE.
+
+> the point of having aot schedulign and compilation of schedules is to allow us to interleave any combination of
+> transport requirements concurrently with one another
+
+(T99)
+
+- **Decisions without a citation:**
+  - "A cable never interleaves two executions". These are Claude's words in the coordinator's brief, against T99.
+  - The coordination's Q4: a node releases the next plan only once every port has served the previous one.
+  - Q4′: a head not loaded within `MESH_PLATFORM_NS` is delivered "with nothing released".
+- **The citations:**
+  - The fixed sequencer orders function executions, Pathways' unit (P. Barham et al., MLSys 2022, §4.4: "a consistent
+    order of function executions across all programs"). It does not order transactions.
+  - Its delivery is in sequence-number order (X. Défago, A. Schiper and P. Urbán, ACM Comput. Surv. 2004), with no
+    timeout and no skipping.
+  - On each cable, the pages of every released execution interleave (T99). Their order there is the bridge's local
+    order: computed alike at both ends of the cable from what both hold (F. B. Schneider, ACM Comput. Surv. 1990), and
+    never global.
+- **Recorded order:** the bridge may record the order it realized (its traces, rdma/mesh-flow.c `struct mesh_trace`
+  under `MESH_LEDGER`). No collective or data code reads it.
+- **The code must:**
+  - deliver orders in sequence order;
+  - interleave released executions on each cable;
+  - remove Q4's hold and Q4′'s timeout skip.
+
+### 3. A slow node, and "desynchronization": no handler
+
+> has this EVER HAPPENED or did someone INVENT A FICTIONAL PROBLEM THAT HTEY WANTED TO WRITE A FICTIONAL HANDLER FOR?
+> show me 1000 mesh desynchronization events or get this off my desk forever.
+
+- **Decision without a citation:** Q4′'s timeout, and Claude's later appeal to failure detection and group membership.
+  No such event has been observed or recorded, and no requirement asks for it.
+- **The code must:** hold no handler for it. Waits stay bounded, by the rule C3 already states.
+
+### 4. A function's executions are never truncated at one end; no handler
+
+> does this *literally ever happen* or can this *always be prohibited* by the use of atomic writes/reads for the
+> interface between queued pages for transfer and the bridge in particular? who thinks that clients are going to be
+> failing literally all the time and that noticing or preventing these failrues is the responsibiltiy of oru code?
+
+- **The citation:**
+  - A plan is published whole, by a release store after all of its writes, and read by an acquire load (C3's writing
+    order; H.-J. Boehm and S. V. Adve, Foundations of the C++ concurrency memory model, PLDI 2008). The bridge never
+    sees a plan in part.
+  - A released execution is served to completion at both ends, because its words only rise (C3.7).
+  - A call returns once its own landings and sends are done (C3.1). So at each end every page of an execution is matched
+    before the call's next function begins.
+- **When it can happen:** only when a process dies in the middle of a call. Process death is the failport's lifecycle's
+  (T151), not data or collective code's.
+- **The code must:** hold no handler for a truncation in data or collective code. The coordination's open item about a
+  plan ending at one node while a peer still serves it is withdrawn.
+- **Withdrawn:** Claude's claim that the failport discarded such a channel ("the stream is never live again in the
+  pairing") is withdrawn. The operator: "No."
+
+### 5. Independent flows are drawn in uniformly random order
+
+> a new requirement straight from noumena has arrived: all data which is typed as an 'independent flow' or whatever must
+> now have nondeterministic order, and *must* be transmitted in different permutations of which pages were submitted
+> across each page_transmit_iteration in which the bridge draws from the submitted pages it asynchronously draws down as
+> hardware literal SENDs and RECEIVES. this means that running the same compiled collective function 100 times shoudl
+> result in, for example, a pointiwse nonlinearity after a ffn, to be transmitted in uniformly distribtued orderings of
+> pages, with no expected difference in the mean or variance of the total time spent transmitting or operating the
+> related functions even though the accesses are technically different each time. i am not joking around here.
+
+- **What is serialized:** the pages of function B's operands (design/plan-to-bridge-change-request.md R4: one task per
+  page, any order) are written as a set, not a sequence. The bridge sees a set and a sequence, and no kind (R4).
+- **What the bridge does:** each execution of a set on a cable is sent and received in a uniformly random permutation of
+  its pages.
+  - The permutation is drawn by Fisher and Yates's shuffle (R. A. Fisher and F. Yates, Statistical Tables, 1938; R.
+    Durstenfeld, Algorithm 235: Random permutation, CACM 7(7), 1964; D. E. Knuth, The Art of Computer Programming vol.
+    2, §3.4.2, Algorithm P).
+  - Its random numbers come from a counter-based generator (J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw,
+    Parallel random numbers: as easy as 1, 2, 3, SC 2011). Its key is the plan's name, a new random group each launch
+    (design/plan-to-bridge-change-request.md R8), and its counter is (execution, set). So both ends of a cable draw the
+    same permutation without exchanging anything.
+- **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
+  their bytes are the same each time, so the requirement's mean and variance hold over the set.
+- **Function A's operands** (joins) keep the schedule's order.
+
+### 6. Compiled functions coexist
+
+> "- In the literature, compiled functions are executables that coexist and are launched by calls: XLA and JAX's
+> compiled-function cache, CUDA graphs instantiated once and launched repeatedly, "
+
+- **Decision without a citation:** a client's plan is a singleton. Planning again closes every earlier plan (the
+  coordination's C-epoch and step 8).
+- **The citations:**
+  - A compiled function is an executable, compiled once and launched by each call. Many coexist (R. Frostig, M. J.
+    Johnson and C. Leary, Compiling machine learning programs via high-level tracing, SysML 2018; NVIDIA, CUDA C++
+    Programming Guide, "CUDA Graphs": a graph instantiated once and launched many times).
+  - Pathways dispatches each call to its compiled function (§3, §4.4).
+- **The code must:**
+  - let a program hold any number of compiled functions at once, each its own plan with its own claim;
+  - release a function's claim only when the program retires that function or itself;
+  - have each call launch one execution of its function.
+
+### 7. Torch's existing kernels on the GPU
+
+> no inlining new numerical backends instead of writing collective and transfer and so on code which schedule the use of
+> existing code, basically.
+
+- **Decision without a citation:** the torch path binds only CPU tensors (`torch.frombuffer`), so its GPU work does not
+  run through torch's existing kernels.
+- **The citation:** A9: "the GPU's program: the function's own existing kernels, bound to their placed pages. No kernel
+  is written by the compilation."
+- **The code must:** run each function's existing backend kernels (torch's MPS kernels, or any other backend's) on
+  tensors over the placed pages, and write none of its own.
+
+### 8. Settled, with no change
+
+- The heartbeat's holders. The operator: "settled."
