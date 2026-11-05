@@ -11,6 +11,8 @@
 # graph its own function and plan) and K1 (torch's own MPS kernels on tensors over the placed pages), each at its code.
 # 2026-11-04, owner T2: A-T6 (one standing graph a program) goes (N5).  What must stay: no placement and no weight
 # chosen here
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", TT1 to TT9): A10, a program's calls of
+# compiled functions as a dataflow graph analysed at compile time (program), its output carried in each function's IR
 import collections
 import ctypes as C
 import errno
@@ -45,6 +47,12 @@ Placement = collections.namedtuple('Placement', 'mesh nodes splits')
 # the mesh dimensions its groups lie along, the tensor dimension it gathers or scatters or the two it switches (None for
 # an AllReduce; a CollectivePermute's its (source, target) places, TC2) and its item's place in this node's program
 Collective = collections.namedtuple('Collective', 'kind node dims dim position')
+# design/aot-compilation-change-request.md A10, "Its output", for one compiled function: `mine`, the places of its
+# calls among the program's calls of compiled functions, in the traced block's order; `outstanding`, "the most calls
+# of it the analysis lets be outstanding at once in the program that submits them"; `orders`, "the order constraints
+# between calls", each (a, b) call a before call b; `commuting`, the program's sets of calls "whose effects commute",
+# which "may run in any order" (Rinard and Diniz), each a tuple of places.  "both carried in A8's IR" (IR `calls`)
+Calls = collections.namedtuple('Calls', 'mine outstanding orders commuting')
 
 
 # design/aot-compilation-change-request.md A8: one IR carried from partitioning to serialization, as MSCCLang carries
@@ -54,7 +62,10 @@ Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 # (design/plan-to-bridge-change-request.md R3 and R4; design/compilation-coordination.md, T1): the declared transfers
 # with their kinds, the dependences and this node's values; `weights` is the weighting operand once weights(ir) has
 # given it (A3).  `placed`: the keys of the local values that lie over the plan's pages (an AllReduce's result and its
-# slices); `made`: the keys this node's program has made before the step being added
+# slices); `made`: the keys this node's program has made before the step being added; `calls`: A10's output for this
+# function (Calls), from the traced program under whose call it was compiled, None where no traced program submits it
+# (design/aot-compilation-change-request.md A10: "both carried in A8's IR"; design/compilation-coordination.md, "The
+# revisions of f3f7cf46", TT7)
 class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
@@ -66,7 +77,7 @@ class IR:
         self.device, self.index, self.serial, self.identity = here[0], nodes.self, nodes.serial, 0
         self.sharding, self.program, self.reduced, self.roles, self.events = {}, [], {}, {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
-        self.placed, self.made = set(), set()
+        self.placed, self.made, self.calls = set(), set(), None
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
     def local(self, node, sharding):
@@ -273,10 +284,11 @@ def _reshard(ir, node, have, want):
 # a mesh dimension both operands shard it along, its local results partial sums along it.  Where the output does not
 # use that mesh dimension they are combined by "AllReduce when the layer sums over a partitioned dimension" (section
 # 2.1; section 4.2).  Where the output shards a dimension along it they are reduced onto that dimension by a
-# ReduceScatter: "gradients will be communicated with ReduceScatter instead of AllReduce" (section 3.2, the gradient's
-# contracting batch dimension and the weight's dimension both sharded on mesh dimension 0), and "replace the AllReduce
-# on the output BSM with a ReduceScatter" (section 5.1; Figure 7's finalized "bxShy, hyM -> bxSM, RS-y -> bxSmy"), so
-# the local result has the output's sharding but on that dimension, which it holds whole.  A contracting dimension the
+# ReduceScatter: "gradients will be communicated with ReduceScatter instead of AllReduce" (section 3.2, where bd is
+# split [0, -1] and df [0, 1], so df's gradient contracts B along mesh dimension 0, along which df's D lies), and
+# "replace the AllReduce on the output BSM with a ReduceScatter" (section 5.1; Figure 7's finalized graph, the einsum of
+# bxShy and hyM to bxSM, then RS-y to bxSmy), so the local result has the output's sharding but on that dimension,
+# which it holds whole.  A contracting dimension the
 # two operands shard otherwise is replicated where the output uses its mesh dimension ("unsharded on demand", section
 # 3.2; Figure 6, "AllGather non-matching Bx").  An operator's operands are resharded to its local result's sharding on
 # the dimensions they share with it.  The output's values are resharded to replicated, so the callable returns the
@@ -1098,20 +1110,258 @@ def serialize(build, function):
     return run
 
 
+# design/aot-compilation-change-request.md A10, "The calls' graph": Pathways' program tracer, "a new program tracer
+# (Figure 2) that a user can wrap around a block of Python code that calls many compiled functions.  The tracer
+# generates a single PATHWAYS program where each compiled function is represented by a computation node in a dataflow
+# graph" (P. Barham et al., MLSys 2022, section 3); for torch, torch.fx's symbolic tracer (J. Reed, Z. DeVito, H. He,
+# A. Ussery and J. Ansel, MLSys 2022), each compiled function a leaf, "left as calls in the FX trace rather than traced
+# through" (torch v2.14.0 torch/fx/_symbolic_trace.py, wrap).  A compiled module is a leaf by Tracer.is_leaf_module
+# ("Leaf modules are the atomic units that appear in the IR, referenced by call_module calls"), where the block is a
+# module that holds it (path_of_module); a compiled function by torch.fx.wrap, which the program calls on its name at
+# its module's top level ("This function can be called at module-level scope to register fn_or_name as a 'leaf
+# function'"), Dynamo refusing to be traced through (torch/_dynamo/eval_frame.py: "Detected that you are using FX to
+# symbolically trace a dynamo-optimized function").  A compiled function is what torch.compile returns, a function or
+# an OptimizedModule, each marked by Dynamo with `_torchdynamo_orig_callable` and `_torchdynamo_wrapper_id` its own id
+# (eval_frame.py, innermost_fn's test) (design/compilation-coordination.md, "The revisions of f3f7cf46", TT1)
+def _compiled(target):
+    return getattr(target, '_torchdynamo_orig_callable', None) is not None \
+        and getattr(target, '_torchdynamo_wrapper_id', None) == id(target)
+
+
+class Tracer(torch.fx.Tracer):
+    def is_leaf_module(self, m, module_qualified_name):
+        return _compiled(m) or super().is_leaf_module(m, module_qualified_name)
+
+
+# the compiled function a node of a traced block calls, None where it calls none
+def _callee(gm, node):
+    target = gm.get_submodule(node.target) if node.op == 'call_module' else node.target
+    return target if node.op in ('call_module', 'call_function') and _compiled(target) else None
+
+
+# M. C. Rinard and P. C. Diniz, Commutativity analysis: a new analysis technique for parallelizing compilers, ACM TOPLAS
+# 19(6), 1997, section 4.9.2, the expression simplifier: "simple arithmetic rewrite rules such as ex1-ex2 => ex1+(-ex2),
+# -(-ex) => ex and ex1*(ex2+ex3) => (ex1*ex2)+(ex1*ex3)", and "rules such as (ex1+ex2)+ex3 => (ex1+ex2+ex3) that convert
+# binary applications of commutative and associative operators to n-ary applications.  It then sorts the operands
+# according to an arbitrary order on expressions", here their reprs.  ALGEBRA: torch's elementwise operators these
+# rules read, as FX records them (an operator, a torch function or a Tensor method, with no keyword argument); add,
+# mul, maximum and minimum are commutative and associative, as footnote 4 "ignore[s] here potential anomalies caused by
+# the finite representation of numbers" and A10 sets floating-point non-associativity aside; a subtraction is rewritten
+# to an addition and a negation before (TT4)
+ALGEBRA = {operator.add: 'add', torch.add: 'add', 'add': 'add', operator.mul: 'mul', torch.mul: 'mul', 'mul': 'mul',
+           operator.sub: 'sub', torch.sub: 'sub', 'sub': 'sub', operator.neg: 'neg', torch.neg: 'neg', 'neg': 'neg',
+           torch.maximum: 'maximum', 'maximum': 'maximum', torch.minimum: 'minimum', 'minimum': 'minimum'}
+
+
+def _rewrite(name, operands):
+    def of(e, kind):
+        return isinstance(e, tuple) and e[:1] == (kind,)
+    if name == 'sub':
+        return _rewrite('add', (operands[0], _rewrite('neg', operands[1:])))
+    if name == 'neg':
+        return operands[0][1] if of(operands[0], 'neg') else ('neg', operands[0])
+    for i, e in enumerate(operands):
+        if name == 'mul' and of(e, 'add'):
+            return _rewrite('add', tuple(_rewrite('mul', operands[:i] + operands[i + 1:] + (term,)) for term in e[1:]))
+    flat = [f for e in operands for f in (e[1:] if of(e, name) else (e,))]
+    return (name,) + tuple(sorted(flat, key=repr))
+
+
+# Rinard and Diniz, sections 3.2.1 and 4.9.1: symbolic execution "simply executes the operations, computing with
+# expressions instead of values".  A body graph's result as an expression of `args`, one for each of its placeholders
+# in order: each node of ALGEBRA rewritten by section 4.9.2's rules, any other kept as itself, its operation and its
+# arguments' expressions (a get_attr, a value of the body no call writes, is an extent constant, section 3.4.1, named by
+# itself)
+def _execute(graph, args):
+    env, given = {}, iter(args)
+    for node in graph.nodes:
+        if node.op == 'placeholder':
+            env[node] = next(given)
+        elif node.op == 'output':
+            return map_arg(node.args[0], env.__getitem__)
+        else:
+            operands, kwargs = tuple(map_arg(node.args, env.__getitem__)), map_arg(node.kwargs, env.__getitem__)
+            name = ALGEBRA.get(node.target) if node.op in ('call_function', 'call_method') and not kwargs else None
+            env[node] = _rewrite(name, operands) if name and len(operands) == 1 + (name != 'neg') \
+                else (node.op, node.target, operands, tuple(sorted(kwargs.items())))
+
+
+# Rinard and Diniz, section 4.8 and Figure 15: two operations commute where, executed symbolically "in both execution
+# orders", the simplified expressions "denote the same value"; "If it cannot symbolically execute the methods, the
+# commutativity-testing algorithm conservatively assumes that the methods may not commute".  Here the two are calls of
+# compiled function `callee` whose receiver (section 3.1) is their argument k: its body traced by torch.fx (Tracer, so a
+# compiled function it calls stays one operation) is executed on the receiver with one call's other arguments, then on
+# that result with the other call's, in both orders.  A body FX cannot trace (torch.fx's TraceError, "symbolically
+# traced variables cannot be used as inputs to control flow") is one it cannot execute (TT4)
+def _commutes(callee, k):
+    try:
+        graph = Tracer().trace(callee._orig_mod if isinstance(callee, torch.nn.Module)
+                               else callee._torchdynamo_orig_callable)
+    except torch.fx.proxy.TraceError:
+        return False
+    count = sum(node.op == 'placeholder' for node in graph.nodes)
+
+    def run(first, second):
+        inner = _execute(graph, [('symbol', 'receiver') if i == k else ('symbol', first, i) for i in range(count)])
+        return _execute(graph, [inner if i == k else ('symbol', second, i) for i in range(count)])
+    return k < count and run(1, 2) == run(2, 1)
+
+
+# design/aot-compilation-change-request.md A10, "Its bound": "the most calls of a function outstanding at once is the
+# number of its calls in the block, or fewer where Bernstein's conditions order them": the most of its calls no two of
+# which are ordered, the order's width.  That is the fewest chains covering them (R. P. Dilworth, A decomposition
+# theorem for partially ordered sets, Annals of Mathematics 51, 1950), their number less a maximum matching of the
+# bipartite graph with an edge from a to b for each a ordered before b (D. R. Fulkerson, Note on Dilworth's
+# decomposition theorem for partially ordered sets, Proc. AMS 7, 1956), matched by Hopcroft and Karp's phases: a
+# breadth-first search layers the graph from the unmatched vertices to the length of the shortest augmenting paths,
+# then depth-first searches augment along vertex-disjoint paths of that length, until none is left (J. E. Hopcroft and
+# R. M. Karp, An n^5/2 algorithm for maximum matchings in bipartite graphs, SIAM J. Comput. 2(4), 1973); the three as
+# the turns' D.5 names them for chains (design/plan-to-bridge-change-request.md, "The turns").  after[a]: the b ordered
+# after a (TT3)
+def _width(after):
+    count = len(after)
+    nil, mate, partner, depth = count, [count] * count, [count] * count, [0] * (count + 1)
+
+    def layer():
+        queue = [a for a in range(count) if mate[a] == nil]
+        for a in range(count):
+            depth[a] = 0 if mate[a] == nil else math.inf
+        depth[nil] = math.inf
+        for a in queue:
+            if depth[a] < depth[nil]:
+                for b in after[a]:
+                    if depth[partner[b]] == math.inf:
+                        depth[partner[b]] = depth[a] + 1
+                        if partner[b] != nil:
+                            queue.append(partner[b])
+        return depth[nil] != math.inf
+
+    def augment(a):
+        if a == nil:
+            return True
+        for b in after[a]:
+            if depth[partner[b]] == depth[a] + 1 and augment(partner[b]):
+                mate[a], partner[b] = b, a
+                return True
+        depth[a] = math.inf
+        return False
+    matched = 0
+    while layer():
+        matched += sum(augment(a) for a in range(count) if mate[a] == nil)
+    return count - matched
+
+
+# design/aot-compilation-change-request.md A10 over a traced block.  Its nodes, in the block's order, each read its
+# argument nodes and write its own result ("Its reads and writes are its nodes' tensor arguments and results, which is
+# what Bernstein's conditions take"); FX names every result a node of its own, so of Bernstein's three conditions on an
+# earlier node i and a later j, that W(i) and R(j), R(i) and W(j), and W(i) and W(j) be disjoint (A. J. Bernstein,
+# Analysis of programs for parallel processing, IEEE Trans. Electronic Computers EC-15(5), 1966), only the first can
+# fail, where j reads i (TT2).  A node is ordered after another where a chain of such reads joins them: held[n], the
+# nodes ordered before n.  Commuting calls (Rinard and Diniz): a chain of calls of one compiled function, each passing
+# its result, read by the next call alone and once, as the next call's argument k, the receiver's place in every call
+# of the chain, where _commutes(callee, k); a call follows one call of its chain, its first argument that qualifies.
+# The chain's calls "can execute in any order without affecting the overall behavior" (section 2), each updating the
+# receiver "atomically" (section 2), not at once: in `orders` they are unordered among themselves, the receiver's
+# producer ordered before each and each before the readers of the chain's last result; for the bound they stay ordered
+# (TT5).  `orders` is the order between the program's calls whole (TT6), shared by every
+# entry (TT8).  A pass of the compilation, here as _complete is (TT9).  Each call's entry, its compiled function's
+def _analyse(gm):
+    nodes = list(gm.graph.nodes)
+    callee = {node: _callee(gm, node) for node in nodes}
+    calls = [node for node in nodes if callee[node] is not None]
+    place = {node: i for i, node in enumerate(calls)}
+    link, follower = {}, {}
+    for b in calls:
+        reads = []
+        map_arg((b.args, b.kwargs), reads.append)
+        for k, a in enumerate(b.args):
+            if isinstance(a, Node) and a in place and callee[a] is callee[b] and len(a.users) == 1 \
+                    and reads.count(a) == 1 and link.get(a, (a, k))[1] == k and _commutes(callee[b], k):
+                link[b], follower[a] = (a, k), b
+                break
+    chains = []
+    for a in calls:
+        if a in follower and a not in link:
+            chains.append([a])
+            while chains[-1][-1] in follower:
+                chains[-1].append(follower[chains[-1][-1]])
+    step = {node: chain for chain in chains for node in chain}
+
+    def ancestors(inputs):
+        before = {}
+        for node in nodes:
+            before[node] = set().union(*({i} | before[i] for i in inputs(node)))
+        return before
+
+    def inputs(node):
+        found = set(node.all_input_nodes)
+        if node in link:
+            receiver = step[node][0].args[link[node][1]]
+            found = (found - {link[node][0]}) | ({receiver} if isinstance(receiver, Node) else set())
+        for i in node.all_input_nodes:
+            if i in step and step[i][-1] is i:
+                found |= set(step[i])
+        return found
+    held, ordered = ancestors(lambda node: node.all_input_nodes), ancestors(inputs)
+    orders = frozenset((place[a], place[b]) for b in calls for a in ordered[b] if a in place)
+    commuting = tuple(tuple(place[node] for node in chain) for chain in chains)
+    entries = {}
+    for f in dict.fromkeys(callee[node] for node in calls):
+        mine = [node for node in calls if callee[node] is f]
+        entries[f] = Calls(tuple(place[node] for node in mine),
+                           _width([[j for j, b in enumerate(mine) if a in held[b]] for a in mine]), orders, commuting)
+    return {node: entries[callee[node]] for node in calls}
+
+
+# design/aot-compilation-change-request.md A10: the program a block traces to.  It runs as Pathways' traced program
+# does ("When the user wants to run a traced program, it calls the PATHWAYS client library which first assigns virtual
+# devices to any computations that have not been run before, and registers the computations with the resource
+# manager, triggering the servers to compile the computations", section 4.2), by torch.fx's Interpreter, which
+# "executes an FX graph Node-by-Node" (torch v2.14.0 torch/fx/interpreter.py), in the block's order, which keeps every
+# order constraint.  A call of a compiled function runs with its function's entry current (CALLING), so the backend's
+# compile function, which Dynamo calls within that call where it compiles a graph of the function, carries the entry in
+# that graph's IR (TT7).  CALLING: the current entries, the innermost last
+CALLING = []
+
+
+class _Program(torch.fx.Interpreter):
+    def __init__(self, gm, entries):
+        super().__init__(gm)
+        self.entries = entries
+
+    def run_node(self, n):
+        if n not in self.entries:
+            return super().run_node(n)
+        CALLING.append(self.entries[n])
+        try:
+            return super().run_node(n)
+        finally:
+            CALLING.pop()
+
+
+def program(block):
+    tracer = Tracer()
+    graph = tracer.trace(block)
+    gm = torch.fx.GraphModule(tracer.root, graph)
+    return _Program(gm, _analyse(gm)).run
+
+
 # design/aot-compilation-change-request.md A1 (PyTorch 2 section 3.1: "a custom compile function which takes a
 # torch.fx.Graph and a list of example inputs and returns a Python callable"), the placement-choosing function and the
 # weighting function its parameters (A2, A3; design/compilation-coordination.md, "The torch backend"), neither with a
 # default: torch.compile(f, backend=backend(placement, weights)).  Each call of the compile function takes the next
 # ordinal of the program's compiled functions, the graph's `function` (design/compilation-coordination.md, "The
 # appendix's revisions", N1), kept by every replan of that graph.  The placement operand is chosen once; the IR is built
-# from it on the map as it is, and built again where the callable plans again
+# from it on the map as it is, and built again where the callable plans again.  A10's output is the entry of the traced
+# program's call within which Dynamo compiles the graph (CALLING), carried by every IR built for it (TT7)
 def backend(placement, weights):
     def compiler(gm, example_inputs):
-        function = next(FUNCTIONS)
+        function, calls = next(FUNCTIONS), CALLING[-1] if CALLING else None
         operand = placement(gm, example_inputs)
 
         def build():
             ir = partition(gm, operand)
+            ir.calls = calls
             lower(ir)
             ir.weights = list(weights(ir))
             return ir
