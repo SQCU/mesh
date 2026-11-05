@@ -503,16 +503,73 @@ file, calls streams_cancel).
 
 ### Commits and routing
 
-(filled as the work lands)
+- Contract: 224b617b (this file, INDEX.md); amendments cab7e842, 0404522c, 90269014, ec78d070 (each the coordinator's
+  ruling on a finding, above). The operator's three rulings (A7 and R8 now, placement and weights passed functionally,
+  the α–β appendix supplementary) were relayed after the contract's first draft and recorded in it before dispatch.
+- G (mesh-graph.{h,c}): f2c67dca (the header; mesh_graph_reach's `parent`), dc4e1e1f (mesh_graph_bottom_levels, eq. 7;
+  mesh_graph_contention_schedule, Algorithms 1 and 2, Conditions 5 and 6, (14), (15), nonaligned, the end technique,
+  T4's shared communications), aab5f423 (task weights > 0, Definition 1; G-1 cited; the arithmetic text).
+- C (mesh-collective.{h,c}): 31c7d075 (the header verbatim), 0c29aa8a (the task graph T1, links T2, the schedule's call
+  and the lists in schedule order T6, `bytes` T7, `kind` and the weights, the plan in its claim Q5, `nodes`, `sender`,
+  EEXIST; `order` and plan_demand_order gone), 88f0c823 (C-epoch, C-weights, T1' cited), 3e03f5fb (C-epoch amended).
+- L (mesh.h, mesh-map.h, mesh-dataflow.{h,c}, mesh-call.h, mesh-metal.{h,m}): c0d390e3 (the region of 110), ea9c9d53
+  (attach without the compare-and-swap or EADDRINUSE, claims with heads, retirement, the release, the start), 9460b145
+  (mesh-metal.m by ctx->state), 89dc198d (text), 63b5bcdf (mesh_ports_named, the start's port set in one copy).
+- B1 (mesh-flow.c): fa0472eb (discovery over `plans` and the heads, each standing plan loaded and served, `held`,
+  `refused`, `served`, the `released` gate, `bytes` in SGEs and frames, cancellations over every plan; streams_let_go
+  gone), 94ef090f (B1-1 cited).
+- B2 (mesh-bridge.h, mesh-records.c, mesh-ports.c, mesh-link.c, mesh-stat.c): a8ea1744 (SUBMIT, ORDER, struct
+  mesh_order), 3643de2f (the island and its tree, the sequencer, submission, delivery and release, clients over the
+  heads), 6fe7ec56 (Q3', Q4' bound, C9), 5801cea9 (Q4' over mesh_ports_named), 2cea623b (V1's and V3's findings).
+- E (metal-microbench tools/e2b_replay.m, tools/mesh/run_pair.py): 4474bcea (MESH_GROUP; e2b_ir with the placement and
+  weighting functions as parameters; kinds; mesh_plan), 2d536553 (run_pair.py: one group a run), 30a5f9fb (V2's #6, #11).
+- T (mesh rdma/mesh.py, rdma/mesh_compile.py): ba23f2ee, d9efd96b, 0dde26b6, 577f2843 (A-T3', A-T5, A-T6), 12762441
+  (V2's and V3's findings; positions in thirds of an item: an item's reads and sends, then its waits and reads of
+  arrivals, then the range it writes; a replan rebuilds the IR on the map as it is with the same placement operand and
+  the weighting function run again).
+- Coordinator: e9408807 (Makefile: mesh-stat links mesh-dataflow.c), 2850fafd (design/prepared-machine.md M08).
+- C9 hook remarks ruled: plan_path_step, mesh_ports_named (as mesh_ports_loaded was ruled before), order_relay,
+  mesh_compile.py's _complete and _dependences (the program's own edges from its order, as e2b_ir's chain) stay;
+  island_set's children by mesh_graph_rows.
 
 ### Reviews and where their findings went
 
-(filled as the reviews land)
+- V1 (the mesh side): no defect in G, C or L. 1 (deploy guard) to B2 (2cea623b: mesh-stat prints "client" beside
+  "clients"); 4 (pending ORDERs at a move) to B2 (kept; matched to the plan of the current serial); 5 (the plan's name)
+  to C (C-epoch); 7 (a lost SUBMIT) to B2; 8 (zero weights) to C (C-weights); 10 accepted (B1-1); 11 to B2 (the timed
+  wait); 2, 3, 6 and 9 open (below).
+- V2 (the torch and program side): ctypes layouts, mesh_plan's inputs, the count-0 plan, e2b, run_pair.py and
+  mesh-metal.m found sound. 1, 3, 4, 5, 6, 7, 8, 9 to T (12762441); 6 and 11 to E (30a5f9fb); 2 open (below); 10 noted.
+- V3 (citation practice): 1 (Blink's form varied) recorded as A-T3''s difference and cited; 2 to T (A-T7); 3 to C, G,
+  B1, B2 (citations); 4 recorded (Q6 extended); 5 to C and G (C-weights, Definition 1); 6 recorded (A-T8 to A-T10,
+  sources); 7 to B2; 9 to G; 11 to B2; 8, 10, 12 noted (12 to C). No chooser, kernel, ring, slot table, lease, retry or
+  new header found in either repo.
 
 ### Integration
 
-(filled at the end)
+- Final, once no sub-agent ran (mesh 12762441 and this file's record, metal-microbench 30a5f9fb; both trees clean
+  and level with origin): `make -B -C rdma` 0 (the bridge, mesh-heartbeat, mesh-stat, libmesh.dylib), `make -B -C rdma
+  native-audit` 0, `make .build/e2b_replay` 0, no warning or error; rdma/mesh.py, rdma/mesh_compile.py and
+  tools/mesh/run_pair.py compile (Python's compile, no bytecode written). The torch integration has no build of its
+  own. Nothing was run.
 
 ### Open at the end
 
-(filled at the end)
+- For the operator, V1 #2 and #6: a plan ended at one node while a peer still serves it. Its peer's SENDs the hardware
+  holds can fill the next plan's receives on the same queue pairs; and a peer that never completes the plan released
+  last holds this node's later ORDERs. The draft's per-carrier end ("CLOSED has been heard on every carrier", §6) rests
+  on the withdrawn §5/D7 construction, so no allowed source gives it.
+- For the operator, V1 #3: Q4''s bound (MESH_PLATFORM_NS from an ORDER's arrival) turns a rank that plans late into an
+  order delivered with nothing released there.
+- For the operator, V2 #2: C3's D5 check refuses a lone symmetric exchange (a torch graph whose one collective is an
+  AllGather or AllToAll): its landing's next instance is reached at lag 2. The refusal names it.
+- For the operator, A-T6: several functions of one program standing at once (the plan's name is per context).
+- For the operator, L3: mesh-heartbeat.c replace_turn reads hdr `client` and `client_start`, never written now, so it
+  finds no client holder; bin/mesh-bridge.sh still writes a `hops` key the bridge ignores.
+- V1 #9: a wake of `plans` without a raise can be missed, costing up to MESH_PAUSE_NS a hand-off (bounded).
+- The torch path: the MPS binding of placed pages (A-T4); CollectivePermute, ReduceScatter and the operators GSPMD
+  gives no rule for, refused; every execution's operator outputs are torch's own allocations outside the plan's pages.
+- R8's composition and A7's sequencer are built; the α–β chooser (the appendix) is not, by ruling 3.
+- Carried from before: `qps` in mesh-map.h's struct mesh_reach and struct mesh_cable, and older tag text naming
+  streams in mesh.h (design/disjoint-pages-rulings-coordination.md, "Open at the end").
+- Runs wait for the operator's authorization (C3.8 and both change requests' judges).
