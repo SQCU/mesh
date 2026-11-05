@@ -26,10 +26,11 @@ justified by a cited algorithm or data structure, never by one program.
 
 The operator set this form, and it is followed here:
 
-> write a change request document which covers all of the requirements and staes of affaires described by the user,
-> the narrowness of scope of the affected data structures and functions, and write tshis as a document insdie of the
-> docs or whatever of the corresponding repos, not as some wacky private note-for-subagents. the verbatim notes
-> discusisng this with the user would be fine. no embellishments are needed or allowed.
+> if this is a big deviation from the previous specification of any code we were using, write a change request
+> document which covers all of the requirements and staes of affaires described by the user, the narrowness of scope
+> of the affected data structures and functions, and write tshis as a document insdie of the docs or whatever of the
+> corresponding repos, not as some wacky private note-for-subagents. the verbatim notes discusisng this with the user
+> would be fine. no embellishments are needed or allowed.
 
 (T173)
 
@@ -70,9 +71,10 @@ design/disjoint-pages-change-request.md D.1. They are this document's body.
 
 ## Claude's proposal
 
-This section and the appendices are Claude's (T178). The operator accepted the appendix "the citations the
-implementation omitted or ignored": "\"1->8\" acceptable as written here; launch revisions". Each clause is the
-operator's words, a cited source's own statement, or a fact of the code.
+This section and the appendices are Claude's (T178). The operator accepted an earlier text of the appendix "the
+citations the implementation omitted or ignored": "\"1->8\" acceptable as written here; launch revisions". Its items 2,
+5 and 6 were revised after it, on the operator's later turns. Each clause is the operator's words, a cited source's own
+statement, or a fact of the code.
 
 ### A1. The input is each program's captured dataflow graph, with shapes and types
 
@@ -107,8 +109,8 @@ operator's words, a cited source's own statement, or a fact of the code.
   - the mapping of the mesh's devices onto the map's nodes.
 - **Method:**
   - GSPMD consumes sharding annotations on a few tensors, propagates them to every operator by compiler passes over a
-    dataflow IR, and emits one SPMD program per device with the collectives inserted (Y. Xu et al., GSPMD: general and
-    scalable parallelization for ML computation graphs, arXiv 2105.04663, 2021).
+    dataflow IR, and inserts the collectives (Y. Xu et al., GSPMD: general and scalable parallelization for ML
+    computation graphs, arXiv 2105.04663, 2021). It "produces a single program for all partitions" (§1).
   - The logical mesh and its mapping onto physical devices are Alpa's (L. Zheng et al., Alpa: automating inter- and
     intra-operator parallelism for distributed deep learning, OSDI 2022, §4.1): "For a set of physical devices, there
     can be multiple logical views", and the mapping is chosen by a pass of its own.
@@ -148,8 +150,9 @@ operator's words, a cited source's own statement, or a fact of the code.
 > routing within tb5 linked collectives is supported; attempting to involve nodes with no tb5 dma connection to any node
 > within the collective is not allowed.
 
-- The compilation must lower every collective A2 inserts to sends and receives of pages. It routes all of them, of every
-  function, jointly over the Thunderbolt-linked nodes of the map.
+- The compilation must lower every collective A2 inserts to sends and receives of pages. It routes all of one
+  function's collectives jointly over the Thunderbolt-linked nodes of the map, as `mesh_plan` routes every demand of its
+  plan at once (rdma/mesh-collective.c, `mesh_graph_flow`). Each compiled function is its own plan (appendix item 6).
 - **Method:**
   - **Trees.** Blink (G. Wang et al., Blink: fast and generic collectives for distributed ML, MLSys 2020) builds
     collectives on packed spanning trees.
@@ -160,9 +163,18 @@ operator's words, a cited source's own statement, or a fact of the code.
     - §3.3: "to do an AllReduce operation on the directed graph, we first run a reduce operation to a chosen root vertex
       using the undirected graph and then do a broadcast operation from the root vertex using the same tree but with
       links going in the reverse direction."
-  - **AllGather** is one broadcast from each source over its packed trees (Blink §3.1). **AllToAll** is point-to-point
-    demands, one per ordered pair of ranks, routed jointly as concurrent multicommodity flow, the problem Garg and
-    Könemann's rounds solve (N. Garg and J. Könemann, FOCS 1998).
+  - **AllGather** is one broadcast from each source over its packed trees: §3.1's broadcast, once for each source, as
+    rdma/mesh_compile.py `_all_gather` declares it. That composition is this document's; Blink's own §4.1 states
+    "AllGather is AllReduce without using a reduction function".
+  - **ReduceScatter** "is semantically equivalent to an AllReduce followed by a DynamicSlice where each partition gets
+    one slice of the fully reduced data. An efficient implementation has only half the cost of AllReduce" (GSPMD §4.2).
+    Here each slice is reduced to the member that keeps it, over its packed trees: the first half of Blink §3.3's
+    AllReduce, with that member as the root. That reading of GSPMD's half is this document's.
+  - **CollectivePermute** "exchanges data among a list of source-destination pairs" (GSPMD §4.2): one point-to-point
+    demand a pair, routed as AllToAll's are.
+  - **AllToAll** is point-to-point demands, one per ordered pair of ranks, routed jointly as concurrent multicommodity
+    flow, the problem Garg and Könemann's rounds solve (N. Garg and J. Könemann, FOCS 1998).
+  - rdma/mesh_compile.py refuses CollectivePermute and ReduceScatter now; this requirement covers them.
   - **Lowering.** MSCCLang (M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, §4 and
     §5) lowers operations on chunks into an instruction DAG of sends, receives and receive-reduce-copies. A relay's
     forward is its fused receive-copy-send. Here a chunk is a page.
@@ -175,8 +187,8 @@ operator's words, a cited source's own statement, or a fact of the code.
 
 ### A6. One schedule per function
 
-- **Method:** design/plan-to-bridge-change-request.md R3 to R5. List scheduling by bottom level, with edge scheduling
-  under contention, over the weights of A3.
+- **Method:** design/plan-to-bridge-change-request.md R3 to R5, over the weights of A3: R5's heap order by depth (edge
+  scheduling's earliest start under contention) and reverse depth (the bottom level).
 
 ### A7. Function executions of programs that run at once are ordered by one scheduler for the island
 
@@ -199,12 +211,16 @@ operator's words, a cited source's own statement, or a fact of the code.
     and multicast algorithms: taxonomy and survey, ACM Comput. Surv. 36(4), 2004).
   - One process, the sequencer, gives every function execution submitted on the island its sequence number, in the
     order the submissions reach it. Pathways' scheduler is first-in, first-out in just this way (§4.4).
-  - Every node serves function executions in sequence-number order.
-  - A program submits each of its function executions to its node's bridge, and the bridge forwards it to the
-    sequencer.
-- **The sequencer is the bridge of the island's highest-numbered live node.** That is the bully algorithm's coordinator,
-  the highest-numbered process alive (H. Garcia-Molina, Elections in a distributed computing system, IEEE Trans.
-  Comput. C-31(1), 1982). Which nodes are alive is the map's, which every bridge holds (mesh-records.c).
+  - Every node releases function executions to its ports in sequence-number order. The pages of released executions
+    interleave on each cable (appendix item 2).
+  - Each function execution is submitted once, by its plan's least node (`sender`, rdma/mesh.h: "the fixed sequencer's
+    one sender a message"), to that node's bridge, which forwards it to the sequencer.
+- **The sequencer is unique and stays where it is.** Défago, Schiper and Urbán, §7.1: "The sequencer is unique, and the
+  responsibility is not normally transfered to another processes". It is the bridge of the highest-numbered node the map
+  reaches (rdma/mesh-records.c `island_set`): the code's choice, which the fixed-sequencer class leaves open. A plan
+  stands only while its map does (design/disjoint-pages-change-request.md D.3.6), so no standing plan's sequencer
+  changes. (Corrected 2026-11-05: the text called this the bully algorithm's coordinator (H. Garcia-Molina, IEEE Trans.
+  Comput., 1982). No election runs, so that algorithm is not used.)
 
 ### A8. The IR operand
 
@@ -225,9 +241,9 @@ operator's words, a cited source's own statement, or a fact of the code.
 > no inlining new numerical backends instead of writing collective and transfer and so on code which schedule the use of
 > existing code, basically.
 
-- **Method:** MSCCL-IR (Cowan et al., 2023, §5.2): "a tree data structure that divides a collective into individual GPU
+- **Method:** MSCCL-IR (Cowan et al., 2023, §5): "a tree data structure that divides a collective into individual GPU
   programs that are subdivided into thread blocks containing a list of instructions that are sequentially executed". An
-  instruction that depends on another list carries the dependency explicitly ("a dep modifier").
+  instruction that depends on another list carries the dependency explicitly ("a dep modifier", §5.2).
 - **Here, per node:**
   - for each adjacent node and direction, the ordered list of page instructions, each with its page, its bytes and its
     dependency word. A send's word is its supplied word, or for a forward its receive's phase; a receive's are its phase
@@ -235,7 +251,8 @@ operator's words, a cited source's own statement, or a fact of the code.
   - the page table's bindings and the plan's state section (C3);
   - the GPU's program: the function's own existing kernels, bound to their placed pages. No kernel is written by the
     compilation. For a delegate's program these are the recorder's command buffers, as now.
-- The bridge consumes the lists and the GPU runs the existing kernels. Nothing else is serialized.
+- The bridge consumes the lists and the GPU runs the existing kernels. Nothing else is serialized but each entry's set
+  mark (appendix item 5).
 
 ### A10. A program's calls are a dataflow graph, analysed at compile time
 
@@ -263,9 +280,11 @@ operator's words, a cited source's own statement, or a fact of the code.
   - **At run time:** calls are issued ahead, as futures, in the order the analysis allows, as Pathways dispatches
     asynchronously (Barham et al., 2022, §4.5).
 - **Its output:**
-  - for each compiled function, the most calls of it the analysis lets be outstanding at once, which the delivery words
-    of the appendix's item 2 are placed for;
-  - the order constraints between calls, which the sequencer's numbers respect.
+  - for each compiled function, the most calls of it the analysis lets be outstanding at once in the program that
+    submits them, which the delivery words of the appendix's item 2 are placed for;
+  - the order constraints between calls, which the program keeps when it submits, so the sequencer's first-in, first-out
+    numbers keep them too (A7);
+  - both carried in A8's IR.
 
 
 ### What judges it
@@ -290,15 +309,16 @@ of unit weights; nothing in A1 to A9 changes.
   rate and n½ the length at which half of it is reached (R. W. Hockney, The communication challenge for MPP: Intel
   Paragon and Meiko CS-2, Parallel Computing 20(3), 1994).
 - **Where it is already used:**
-  - MSCCLang uses it for this same decision: "Assuming an α − β communication cost model, each send has a start up α
-    cost and a per-byte β cost" (M. Cowan et al., ASPLOS 2023, §5.1).
+  - MSCCLang states the model where it decides aggregation: "Assuming an α − β communication cost model, each send has a
+    start up α cost and a per-byte β cost" (M. Cowan et al., ASPLOS 2023, §5.1).
   - HEFT weighs a communication edge the same way, as a start-up cost plus its data over the link's bandwidth (H.
     Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002).
-- **The edge weights it gives:** an edge e of n bytes crossing cable k weighs α_k + n β_k.
+- **The edge weights it gives:** an edge e of n bytes weighs α_k + n β_k on each cable k of its route, where each hop
+  is its own instruction (design/plan-to-bridge-change-request.md R5).
   - β_k is 1 over cable k's bandwidth, from the map (mesh-map.h).
   - α_k is fitted from measured transfer times of at least two sizes on that cable, as Hockney fits r∞ and n½.
   - Measuring needs runs, which wait for the operator's authorization. Until α_k is measured, it is 0, the model's
-    bandwidth-only form.
+    bandwidth-only form. That default is this appendix's choice, made because it needs no run.
 - **Its place in the code:** a function from (bytes, cable) to a weight, passed to the compilation as its edge-weight
   chooser. Any other chooser can replace it, as A3 requires.
 
@@ -354,21 +374,31 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
   under `MESH_LEDGER`). No collective or data code reads it.
 - **Delivery at a node.**
   - The sequencer numbers each call (Défago, Schiper and Urbán, 2004). A call is one execution of its compiled function,
-    as in Pathways §4.4 ("function executions") and in JAX, where each call of a compiled function is one dispatch
-    (Frostig, Johnson and Leary, 2018). A program submits one call per execution.
+    as in Pathways §4.4 ("function executions"). A program submits one call per execution.
   - How many calls of one function may be outstanding at once is decided at compile time by A10, never chosen at run
     time. The plan's state holds a delivery word for each, written by the bridge parent alone (C3's rule 2) and placed
-    by the allocator for A10's bound. So no word is reused while its call is outstanding, and nothing waits to write.
-  - Each port serves the delivered calls of every standing plan in sequence-number order, within the order A10 compiles.
-    Both ends of a cable read the same numbers, so they serve alike.
-  - (Corrected 2026-11-05: an earlier text assumed one outstanding call per plan, and before that wrote one word per
-    copy. A10 replaces both.)
+    by the allocator for A10's bound.
+  - Each port takes the delivered calls of every standing plan in sequence-number order. Both ends of a cable read the
+    same numbers, so they take them alike. The pages of the calls a port has taken interleave on its cable (above).
+  - **Open.** A10's bound counts the calls outstanding in the program that submits them. A call returns there once that
+    node's own landings and sends are done (C3.1; item 4), so the call can still be outstanding at another node of its
+    plan. Neither document states what that node does with the order of a later call whose delivery word is still in
+    use there. The implementer stops at this point and reports it. (design/compilation-coordination.md, "The revisions
+    of 67ca86f8", stop 1, found it.)
+  - (Corrected 2026-11-05: an earlier text said that nothing waits to write, which A10's bound does not give at a node
+    other than the submitter's. Before that it assumed one outstanding call per plan, and before that it wrote one word
+    per copy.)
 
 - **The code must:**
   - deliver orders in sequence order;
-  - publish them, and merge them at each port, as above;
+  - publish them to each port, as above;
   - interleave released executions on each cable;
-  - remove Q4's hold and Q4′'s timeout skip.
+  - remove Q4's hold and Q4′'s timeout skip (done: design/compilation-coordination.md DL4, O1);
+  - remove the coordination's Q3′: the sequencer's number never goes back to 0, and no node drops a pending order when
+    its map changes.
+    > "When a node's map changes, its bridge parent drops its pending orders, and the sequencer sets its counter back
+    > to 0. "
+    > fictional problem + nobody asked + no citation + no algorithm + no explanation + idiomatic.
 
 ### 3. A slow node, and "desynchronization": no handler
 
@@ -410,22 +440,30 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 > related functions even though the accesses are technically different each time. i am not joking around here.
 
 - **What is serialized:** the pages of function B's operands (design/plan-to-bridge-change-request.md R4: one task per
-  page, any order) are written as a set, not a sequence. The bridge sees a set and a sequence, and no kind (R4).
+  page, any order) are written as sets, not as a sequence. A set is one demand's pages on one of its trees, as the code
+  numbers them (rdma/mesh-collective.c: tree j's entries have `set` j + 1), so a set's pages have one producer and one
+  route. The bridge sees sets and sequences, and no kind (R4).
 - **What the bridge does:** each execution of a set on a cable is sent and received in a uniformly random permutation of
   its pages.
   - The permutation is drawn by Fisher and Yates's shuffle (R. A. Fisher and F. Yates, Statistical Tables, 1938; R.
     Durstenfeld, Algorithm 235: Random permutation, CACM 7(7), 1964; D. E. Knuth, The Art of Computer Programming vol.
     2, §3.4.2, Algorithm P).
-  - Its random numbers come from a counter-based generator (J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw,
-    Parallel random numbers: as easy as 1, 2, 3, SC 2011). Its key is the plan's name, a new random group each launch
-    (design/plan-to-bridge-change-request.md R8), and its counter is (execution, set). So both ends of a cable draw the
-    same permutation without exchanging anything.
+  - Its random numbers come from Threefry-4×64-20, a counter-based generator (J. K. Salmon, M. A. Moraes, R. O. Dror and
+    D. E. Shaw, Parallel random numbers: as easy as 1, 2, 3, SC 2011, §4.2; rdma/mesh-flow.c `threefry4x64_20`). Its key
+    is the plan's name (item 6), whose group the launcher draws anew at each launch (metal-microbench
+    tools/mesh/run_pair.py: `1 + secrets.randbelow(2**64 - 1)`, passed as `MESH_GROUP`). Its counter is (execution,
+    set). So both ends of a cable draw the same permutation without exchanging anything.
+  - Algorithm P needs a uniform integer in [1, j] at each step. The code takes the high word of j times a random word
+    (rdma/mesh-flow.c `set_draw`), which is Lemire's multiply-and-shift. With Lemire's rejection step, which the code
+    must add, the integer is exactly uniform (D. Lemire, Fast random integer generation in an interval, ACM Trans.
+    Model. Comput. Simul. 29(1), 2019).
 - **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
   their bytes are the same each time, so the requirement's mean and variance hold over the set.
 - **One permutation of the whole set per execution.** The counter is (execution, set), so a set is drawn once per
   execution. Every edge and every cable of the set's tree carries its share of the set's pages in that one permutation's
-  order. Each cable's sequence is then the same renaming of pages that share their predecessors, so MSCCLang §5.2's
-  argument against cycles holds. A draw for each cable departs from the counter.
+  order. A set's pages have one producer and one route (above), so they share their predecessors, and each cable's
+  sequence is the same renaming of them. So MSCCLang §5.2's argument against cycles holds. A draw for each cable departs
+  from the counter.
 
 - **Function A's operands** (joins) keep the schedule's order.
 - **Every program declares each consumer's kind.** A consumer that reduces partial sums, or otherwise takes pages in
@@ -443,9 +481,10 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **Decision without a citation:** a client's plan is a singleton. Planning again closes every earlier plan (the
   coordination's C-epoch and step 8).
 - **The citations:**
-  - A compiled function is an executable, compiled once and launched by each call. Many coexist (R. Frostig, M. J.
-    Johnson and C. Leary, Compiling machine learning programs via high-level tracing, SysML 2018; NVIDIA, CUDA C++
-    Programming Guide, "CUDA Graphs": a graph instantiated once and launched many times).
+  - A compiled function is an executable, compiled once and launched by each call, and many coexist. JAX traces a function
+    anew only "on a trace cache miss" (R. Frostig, M. J. Johnson and C. Leary, Compiling machine
+    learning programs via high-level tracing, SysML 2018). CUDA Graphs: a graph instantiated once and launched many
+    times (NVIDIA, CUDA C++ Programming Guide).
   - Pathways dispatches each call to its compiled function (§3, §4.4).
 - **The code must:**
   - let a program hold any number of compiled functions at once, each its own plan with its own claim;

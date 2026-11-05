@@ -1,9 +1,9 @@
 # Change request: what the plan gives the bridge
 
 This change request states what the code must do after the operator's turns of 2026-11-04, since
-design/disjoint-pages-change-request.md Appendix C, the last change request the operator endorsed in its writing and in
-its results. Each requirement quotes the operator, then names the method the code uses: what it is, and where it comes
-from in the literature. The method is used as its source states it.
+design/disjoint-pages-change-request.md Appendix C, whose C3 revision the operator endorsed. Each requirement quotes the
+operator, then names the method the code uses: what it is, and where it comes from in the literature. The method is used
+as its source states it.
 
 It replaces design/transfer-schedule-change-request.md, which is removed, and design/disjoint-pages-change-request.md
 D.2's model of a transfer, D.3.1 and D.5. Everything else in that change request stands as implemented (mesh 1fd0cca0,
@@ -27,10 +27,11 @@ justified by a cited algorithm or data structure, never by one program.
 
 The operator set this form, and it is followed here:
 
-> write a change request document which covers all of the requirements and staes of affaires described by the user,
-> the narrowness of scope of the affected data structures and functions, and write tshis as a document insdie of the
-> docs or whatever of the corresponding repos, not as some wacky private note-for-subagents. the verbatim notes
-> discusisng this with the user would be fine. no embellishments are needed or allowed.
+> if this is a big deviation from the previous specification of any code we were using, write a change request
+> document which covers all of the requirements and staes of affaires described by the user, the narrowness of scope
+> of the affected data structures and functions, and write tshis as a document insdie of the docs or whatever of the
+> corresponding repos, not as some wacky private note-for-subagents. the verbatim notes discusisng this with the user
+> would be fine. no embellishments are needed or allowed.
 
 (T173)
 
@@ -762,6 +763,14 @@ design/aot-compilation-change-request.md, and are held here once.
 
 **Claude:**
 
+> Reading both documents in full, line by line, before answering.
+
+**The operator (sent during Claude's turn):**
+
+> what about the coflow and independent flow requirements that were in the transcript so far? thusly included? missing?
+
+**Claude:**
+
 > (・_・;) Yes, both documents have synthetic, partly cited and open-ended passages. Several are exactly where a modulo ring could get in. Locations are by requirement number: R in plan-to-bridge, A in aot-compilation.
 >
 > **Synthetic: my construction, with no source**
@@ -934,6 +943,10 @@ design/aot-compilation-change-request.md, and are held here once.
 **The operator:**
 
 > "- e2b's placement operand is its existing hand partition from prepare_e2b.py, as now.' insofar as this placement operand is passed functionally in to our code so it can be replaced by any other placement selecting function this is correct for this implementation phase, as the weighting operand
+
+**The operator (sent during Claude's turn):**
+
+> nevertheless, you should have found a 'chooser' in the literature for how to weight 'edges' and cited it; do so immediatley as a supplementary appendix as this is not a requirement that blocks the writing of the change request thus described.
 
 **Claude:**
 
@@ -1560,7 +1573,7 @@ code, and each method is used as its source states it.
 - **Method:** the task graph G = (V, E, w, c) of the scheduling literature (O. Sinnen, Task Scheduling for Parallel
   Systems, Wiley, 2007; Y.-K. Kwok and I. Ahmad, Static scheduling algorithms for allocating directed task graphs to
   multiprocessors, ACM Comput. Surv., 1999).
-  - V are tasks, each a function's execution at its node.
+  - V are tasks, each one operation of the captured graph (aot-compilation A1) executed at its node.
   - E are the data passed between tasks: here, pages.
   - w and c are the tasks' and edges' weights. They are given, not computed by this code: the weighting operand of
     design/aot-compilation-change-request.md A3.
@@ -1592,11 +1605,14 @@ code, and each method is used as its source states it.
     first (M. Chowdhury, Y. Zhong and I. Stoica, Efficient coflow scheduling with Varys, SIGCOMM 2014). R5 does not
     require it. (Corrected 2026-11-05: the first text said A's operand is scheduled by Varys, which no requirement asked
     the code to do.)
-  - Function B is a streaming homomorphism over pages: f(x ∪ y) = f(x) ⊕ f(y), with ⊕ associative and commutative (J.
-    Gibbons, The third homomorphism theorem, J. Functional Programming, 1996). Its pages are independent flows, each
-    worth having at once. Examples are online softmax (M. Milakov and N. Gimelshein, Online normalizer calculation for
-    softmax, arXiv 1805.02867, 2018), FlashAttention over key and value blocks (T. Dao et al., NeurIPS 2022),
-    PagedAttention over non-contiguous blocks (W. Kwon et al., SOSP 2023), and reductions' partial sums.
+  - Function B is a streaming homomorphism over pages: f(x ∪ y) = f(x) ⊕ f(y). Gibbons states homomorphisms over
+    lists, with ⊕ associative (J. Gibbons, The third homomorphism theorem, J. Functional Programming, 1996). Taking
+    pages in any order also needs ⊕ commutative: the bag homomorphisms of the Bird–Meertens formalism's Boom hierarchy
+    (L. Meertens, Algorithmics: towards programming as a mathematical activity, CWI Monographs 1, 1986), which Claude's
+    turn named as "Bird–Meertens". Its pages are independent flows, each worth having at once. Examples are online
+    softmax (M. Milakov and N. Gimelshein, Online normalizer calculation for softmax, arXiv 1805.02867, 2018),
+    FlashAttention over key and value blocks (T. Dao et al., NeurIPS 2022), PagedAttention over non-contiguous blocks
+    (W. Kwon et al., SOSP 2023), and reductions' partial sums.
   - **In the task graph (R3):**
     - A is one task with an edge from every page of its operand.
     - B is one task per page, each with an edge from its own page, and its outputs are pages that leave as each is
@@ -1605,7 +1621,8 @@ code, and each method is used as its source states it.
     - A's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
       assignment gives each tensor one contiguous range (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020; C3.3;
       rdma/mesh-collective.c).
-- **Code:** the IR carries each consumer's kind (aot-compilation A8). The bridge's lists carry none (R5).
+- **Code:** the IR carries each consumer's kind (aot-compilation A8). The bridge's lists carry no kind, only which
+  entries are a set's (aot-compilation, appendix item 5).
 
 ### R5. The order of transfers is a static schedule with costs
 
@@ -1627,11 +1644,15 @@ code, and each method is used as its source states it.
     dependencies respectively." Its scheduler "attempts to schedule instructions in the order they will be ready"
     (§5.2).
     - Depth, with costs: each instruction's earliest start under link contention, from edge scheduling on the links of
-      each edge's route (O. Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6), 2005).
-      That is when it will be ready, so edge scheduling is used and stays.
-    - Reverse depth, with costs: each instruction's bottom level, which counts each edge's weight over its route's
-      cables, as Sinnen and Sousa's eq. (7) does. This is the level priority of HLFET (T. L. Adam, K. M. Chandy and J.
-      R. Dickson, A comparison of list schedules for parallel processing systems, CACM, 1974).
+      each edge's route (O. Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6), 2005:
+      their Algorithm 1, list scheduling, whose "line 6 ... must be performed as outlined in Algorithm 2" under
+      contention). That is when it will be ready, so edge scheduling is used and stays. Algorithm 2 takes a node's
+      entering edges in a definite order, which the implementer chooses and records.
+    - Reverse depth, with costs: each instruction's bottom level, Sinnen and Sousa's eq. (7), bl(n_i) = w(n_i) +
+      max{c(e_ij) + bl(n_j)} over the successors n_j of n_i. Each hop of an edge's route is its own instruction on its
+      cable, as the code builds them (design/compilation-coordination.md GO2). With every c zero, the bottom level is
+      HLFET's static level (T. L. Adam, K. M. Chandy and J. R. Dickson, A comparison of list schedules for parallel
+      processing systems, CACM, 1974).
     > if edge scheduling is required by some quality of hte problem being solved and there is relevant literature to
     > bricolage together, identifying that literature is just as good of a corrective or better to trying to plainly
     > delete something which occurred to implementing subagents when viewing the previosu change request documents as
@@ -1671,13 +1692,16 @@ code, and each method is used as its source states it.
 - **The order of each cable's list, by the reference algorithm.** Each cable's list is a subsequence of one global
   topological order of the instructions, built as MSCCLang §5.2 states in its step 3: "Sort instructions into a global
   topological order with respect to their dependencies with a heap using the priority to order instructions." The
-  priority is the one above: depth, then reverse depth.
+  priority is the one above. MSCCLang names depth and reverse depth, and not how the two combine. This document takes
+  the least depth first and, among equal depths, the greatest reverse depth (its own reading).
   > what algorithm is cited here, if any? no citations? use the reference algorithm instead.
   - A set's pages (design/aot-compilation-change-request.md, appendix item 5) keep their places in that order. The
     set's random permutation is drawn over those places. (Corrected 2026-11-05: the first text moved a set's pages to
     consecutive places, which nothing requires.)
-- **Executions:** execution t runs copy t mod u, and every address is a constant in the plan (C3.3, R2). Each cable
-  carries execution t's sends in that order, then execution t + 1's.
+- **Executions:** execution t runs copy t mod u, and every address is a constant in the plan (C3.3, R2). Each cable's
+  list holds execution t's sends in that order, then execution t + 1's. The bridge spreads each list over what its
+  devices give it (below), so on the cable the pages of released executions interleave (aot-compilation, appendix item
+  2; T99).
   - That order is a topological order of the unrolled executions, since every lag points forward.
   - So the cables' sequences cannot wait on each other in a cycle. MSCCLang states this for its thread blocks: "By
     assigning instructions to thread blocks in a topological order that respects communication and processing edges, all
@@ -1690,9 +1714,9 @@ code, and each method is used as its source states it.
   rdma/mesh-flow.c `link_prepare`, `mesh_graph_list_schedule` in list order.
 - **Code:**
   - rdma/mesh-graph.{h,c}: bottom levels, edge scheduling's earliest starts, and the heap order by both.
-  - rdma/mesh-collective.c: writes each copy's list with each cable's sends in schedule order, each with its bytes;
-    `struct mesh_hop`'s `padding` becomes `bytes`.
-  - rdma/mesh-flow.c: sends `bytes`.
+  - rdma/mesh-collective.c: writes each copy's list with each cable's sends in schedule order, each with its bytes
+    (`struct mesh_hop` `bytes`, as now).
+  - rdma/mesh-flow.c: sends `bytes`, as now.
 
 ### R6. Who sends what to whom is compiled
 
@@ -1703,7 +1727,7 @@ code, and each method is used as its source states it.
 - **Method:** the metadata problem of dynamic sparse data exchange (T. Hoefler, C. Siebert and A. Lumsdaine, Scalable
   communication protocols for dynamic sparse data exchange, PPoPP 2010). Its run-time protocols learn who sends to whom.
   Here it is answered at compile time: every rank computes every transfer of the plan (R5).
-- **Code:** none in this change. No program decides placement at run time.
+- **Code:** none in this change.
 
 ### R7. Nothing outside the bridge knows the transport
 
@@ -1734,17 +1758,16 @@ code, and each method is used as its source states it.
     and J. D. Slingwine, Read-copy update, PDCS 1998; K. Fraser, Practical lock-freedom, PhD thesis, Cambridge, 2004).
     This is C3.4, as now.
   - Function executions of programs that run at once are ordered consistently by one scheduler for the island, a fixed
-    sequencer in the bridge of the island's highest-numbered live node: design/aot-compilation-change-request.md A7
-    (P. Barham et al., Pathways, MLSys 2022, §4.4; Défago, Schiper and Urbán, 2004; Garcia-Molina, 1982).
+    sequencer: design/aot-compilation-change-request.md A7 (P. Barham et al., Pathways, MLSys 2022, §4.4; Défago,
+    Schiper and Urbán, 2004).
   - Placement and weights reach the plan as operands, passed in by the program from whatever function chooses them
     (aot-compilation A2, A3). The functions passed today are the existing programs' hand partitions and unit
     weights, and any other choosing function can replace them.
-- **Code:** rdma/mesh-dataflow.c: `mesh_attach`'s compare-and-swap and EADDRINUSE go, and attaching only maps the
-  region.
+- **Code:** rdma/mesh-dataflow.c, as now: attaching only maps the region, and claims nothing.
 
 ### What judges it
 
 - C3.8's judges hold.
 - Every cable's sends follow the schedule of R5's method, and every rank writes the same order for the same inputs.
-- The bridge is given pages, bytes and words, and nothing else.
+- The bridge is given pages, bytes, words and which entries are a set's, and nothing else.
 - The three builds are clean. Runs come only when the operator authorizes them.

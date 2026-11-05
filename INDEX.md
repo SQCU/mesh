@@ -47,8 +47,9 @@ other projects, such as a game bot, and old dated records; they are not listed h
   functions that need an operand whole and streaming functions that take pages in any order (Graefe; Gibbons; coflows,
   Chowdhury and Stoica); each cable's list from MSCCLang's heap order, by depth (edge scheduling's earliest start under
   contention, Sinnen and Sousa) and then the bottom level, with coflows and independent flows as edges of that one graph
-  (one linear program in Chen 2022); compiled metadata (Hoefler, Siebert and Lumsdaine); nothing outside the bridge knowing the transport; a program as
-  its function calls. It supersedes D.2's model, D.3.1 and D.5 of the disjoint-pages change request.
+  (one linear program in Chen 2022); compiled metadata (Hoefler, Siebert and Lumsdaine); nothing outside the bridge
+  knowing the transport; a program as its function calls. It supersedes D.2's model, D.3.1 and D.5 of the disjoint-pages
+  change request.
 - [design/aot-compilation-change-request.md](design/aot-compilation-change-request.md): what the ahead-of-time
   compilation must do: captured graphs (PyTorch 2); the placement operand (GSPMD, Alpa) and the weighting operand
   (Sinnen; Garg and Könemann), both chosen elsewhere; collectives over packed trees (Blink) lowered to page
@@ -62,7 +63,8 @@ other projects, such as a game bot, and old dated records; they are not listed h
   sets of a function B operand in Threefry-drawn Fisher-Yates order, compiled functions coexisting, torch's MPS
   kernels), with its record; then its part "The documents' revisions of edd4b583" (each cable's list a subsequence of
   MSCCLang's heap-built global topological order by bottom level; delivery by Lamport's message buffer, one sequence
-  word a copy, merged at each port, Q4's hold gone; e2b's partial sums declared function B), with its record.
+  word a copy, merged at each port (since replaced by design/aot-compilation-change-request.md A10 and appendix item
+  2), Q4's hold gone; e2b's partial sums declared function B), with its record.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.
