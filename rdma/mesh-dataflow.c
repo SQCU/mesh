@@ -537,90 +537,16 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
   return out->self==MESH_ABSENT?ENOENT:0;
 }
 
-/* mesh-map.h mesh_ports_named, the start's port set, one copy (design/compilation-coordination.md, Q4'): the hops'
-   nodes a set of map indices, then each reach entry of this node's record whose peer is the record of a named index
-   (mesh_map_order: a node's index its place in ascending node-id order), its port's bit.  mesh_ports_held calls it on
-   its copy of the map, and the bridge parent's delivery (mesh-records.c) on the bridge's own map.  2026-11-04, owner
-   L, the coordinator's ruling Q4': moved out of mesh_ports_held, where the set was built inside the start's wait.
-   What must stay: one computation of the set for both its readers */
-uint32_t mesh_ports_named(const struct hdr *region,const struct mesh_state *state,const struct mesh_record *records,
-                          uint32_t count,int *error){
-  struct hdr *m=(struct hdr *)region;
-  *error=0;
-  const uint64_t entries=state->entries,at=state->hops;
-  if(!entries)return 0;
-  if(at>m->length || entries>(m->length-at)/sizeof(struct mesh_hop)){*error=EINVAL;return 0;}
-  if(count>MESH_NODES_MOST){*error=E2BIG;return 0;}
-  uint32_t order[MESH_NODES_MOST],self=count;
-  mesh_map_order(records,count,order);
-  for(uint32_t i=0;i<count;i++)if(records[i].node==m->node)self=i;
-  if(self==count){*error=ENOENT;return 0;}
-  const struct mesh_hop *hops=mesh_hops(m,state);
-  uint64_t named=0;
-  for(uint64_t k=0;k<entries;k++){
-    if(hops[k].node>=count){*error=EINVAL;return 0;}
-    named|=UINT64_C(1)<<hops[k].node;
-  }
-  const struct mesh_record *own=records+self;
-  uint32_t ports=0;
-  for(uint32_t i=0;i<own->reached && i<MESH_PORTS;i++)
-    for(uint32_t j=0;j<count;j++)
-      if(named>>j&1 && records[order[j]].node==own->reach[i].node){
-        if(own->reach[i].port>=MESH_PORTS){*error=EINVAL;return 0;}
-        ports|=UINT32_C(1)<<own->reach[i].port;
-        break;
-      }
-  return ports;
-}
-
-/* design/prepared-machine.md#M06 */
-/* design/algorithm-sources.md#programcopy */
-/* The configured latch (hdr `configured`'s compare-exchange) and the unbounded spin on each link's `prepared` are gone:
-   each standing plan is the bridge's to find (its claim head, hdr `plans`), and each port says it holds the plan in
-   the plan's own words, its bit of struct mesh_state `held` (release) once it has loaded it, or its code in
-   `refused[p]` where it refused it (mesh-flow.c); a plan whose `serial` is not the map's is stale (ESTALE).  The ports
-   waited on are every port whose peer a hop names: the cables this node's own record lists (mesh-ports.c
-   record_reach: a port whose link is up), in the map at the plan's serial, to the nodes the hops name (map indices,
-   struct mesh_hop `node`): mesh_ports_named, the set's one copy (Q4'; 2026-11-05, design/compilation-coordination.md, "The revisions of
-   46ae8fdf", CH: the bridge parent's delivery tests it no more).  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read and the ports' wait
-   together.  A spin, bounded: `held` and `refused` are stored with no wake.  A port is done once its `held` bit reads
-   set (acquire), or its `refused` code reads not 0, which is returned; a port lost before it loads the plan sets
-   neither, and the start ends at the bound with ETIMEDOUT.  A plan with no hop here waits on no port.
-   2026-11-04, sub-assignment 5, the coordinator's ruling on owner 6's finding (mesh-flow.c 04b5e561): the raise after
-   the wait.  Why: a port child that pairs again after a loss loads the same plan and would serve executions from 0
-   again over phases and counts that already hold arrivals; so every port loads a plan before any of its executions is
-   served, and a port that carries units of the plan refuses to load it where its `executions` is already above 0
-   (mesh-flow.c), which holds only where the start raises it after every named port has loaded.  A second start on the
-   same plan (its ports holding it) waits as the first did and raises it.
-   2026-11-04, owner L (design/compilation-coordination.md, "The region"; e6bd7db2's section 6, "Discovery"):
-   reversing sub-assignment 5's wait for each port's `prepared` to read hdr `plan` (then its phase and code), on the
-   region's one plan (hdr `hops`, `plan`, its entries at hdr `hop_off`).  Why: any number of plans stand, so a port's
-   holding of a plan is that plan's `held` bit and its refusal that plan's `refused[p]`; `prepared` is only a load's
-   transient announcement (mesh.h struct mesh_port_info).  The plan, its entries and its serial are the context's
-   (`state`; mesh.h mesh_hops).  What must stay: the wait bounded by one deadline; the raise only after every named
-   port holds the plan; EINVAL for entries or ports outside the region.
-   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N2, N5): the plan the
-   caller's `plan` (mesh_transfers_start's), where it was the context's `state`, gone.  What must stay: as above */
-static int mesh_ports_held(struct mesh_ctx *context,struct mesh_state *state){
-  const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
-  if(!state->entries)return 0;
-  struct mesh_record r[MESH_NODES_MOST];
-  uint32_t count;
-  uint64_t serial;
-  int error=mesh_map_copy(context,deadline,r,&count,&serial);
-  if(error)return error;
-  if(state->serial!=serial)return ESTALE;
-  const uint32_t ports=mesh_ports_named(context->M,state,r,count,&error);
-  if(error)return error;
-  for(uint32_t p=0;p<MESH_PORTS;p++)
-    for(;ports>>p&1;){
-      if(atomic_load_explicit(&state->held,memory_order_acquire)>>p&1)break;
-      const int32_t code=atomic_load_explicit(&state->refused[p],memory_order_acquire);
-      if(code)return code;
-      if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline)return ETIMEDOUT;
-    }
-  return 0;
-}
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW): mesh_ports_held (the start's wait,
+   bounded by MESH_PLATFORM_NS, until every port whose peer a hop names held the plan, its `held` bit, or refused it,
+   its `refused[p]` code returned) and mesh_ports_named (that wait's port set, its last caller gone) are removed, with
+   the reason sub-assignment 5 gave the wait (a port that pairs again loading the same plan, refused where its
+   `executions` is above 0, which held only where the start raised it after every named port had loaded).  Why:
+   design/aot-compilation-change-request.md, appendix item 2, "The code must: ... remove the start's wait for every
+   port to load the plan, and the late-loading port's refusal of it (`mesh_ports_held`).  Nothing requires them.  "a
+   send that arrives first is held until its receive is posted (§3), and a loss cancels the plan anyway""; the
+   refusal is mesh-flow.c link_prepare's.  What must stay: the raise, then the fence, then the serial's read
+   (mesh_transfers_start); ESTALE where the plan's serial is not the map's */
 /* 2026-11-04, sub-assignment 1 (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-
    coordination.md, R3): after the raise of the plan's `executions` and the wake, a seq_cst fence, then hdr
    `map_serial` read; where it is not the plan's serial (struct mesh_state `serial`, every entry's, the map the plan
@@ -662,7 +588,14 @@ static int mesh_ports_held(struct mesh_ctx *context,struct mesh_state *state){
    claim's record, mesh-dataflow.h mesh_claim_take; its owner word the client, `closed` 0, its publication `state`
    `plan`; N2), where the first form tested the offset's bounds alone.  Why: a retired handle's pages are released by
    the bridge and may be another claim's, so a raise through it would write a word that is not the plan's.  What must
-   stay: EINVAL before anything is raised */
+   stay: EINVAL before anything is raised.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW): the raise with no wait before it,
+   where it came after mesh_ports_held's (every port named holding the plan, its ESTALE where the plan's serial was not
+   the map's, ETIMEDOUT at its bound, a port's refusal code), and the entries no longer tested by mesh_ports_named
+   (the bridge's load tests them, mesh-flow.c plan_inside).  Why: design/aot-compilation-change-request.md, appendix
+   item 2: "remove the start's wait for every port to load the plan, and the late-loading port's refusal of it
+   (`mesh_ports_held`).  Nothing requires them"; the ESTALE stays, read after the raise as above.  What must stay: the
+   raise before the fence, the serial's read after it; EINVAL before anything is raised */
 int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions){
   struct hdr *m=context->M;
   const uint64_t at=plan,page=m->pgsz,len=context->len;
@@ -670,8 +603,6 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
      mesh_plan_head(context,plan)==UINT32_MAX)
     return EINVAL;
   struct mesh_state *state=mesh_state_at(m,at);
-  const int error=mesh_ports_held(context,state);
-  if(error)return error;
   uint64_t served=atomic_load_explicit(&state->executions,memory_order_relaxed);
   while(served<executions && !atomic_compare_exchange_strong_explicit(&state->executions,&served,executions,
                                                                       memory_order_release,memory_order_relaxed));

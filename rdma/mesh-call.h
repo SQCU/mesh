@@ -48,7 +48,13 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    compiled functions at once, each launched by its own calls (item 6).  What must stay: as above.
    2026-11-04, owner L2, the coordinator's ruling on review W1's finding 4: `plan` tested as above, where it was its
    bounds alone.  Why: a retired handle's pages may be another claim's once the bridge releases them.  What must
-   stay: EINVAL before anything is raised */
+   stay: EINVAL before anything is raised.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW), reversing the notes above where
+   they wait: the start waits on no port.  It raises `executions`, raises and wakes `plans`, fences and reads the map's
+   serial: 0, EINVAL for `plan` as above (before anything is raised), or ESTALE after the raise, with it raised; no
+   port's refusal code, ETIMEDOUT or map reader's error is its now.  Why: design/aot-compilation-change-request.md,
+   appendix item 2, "remove the start's wait for every port to load the plan, and the late-loading port's refusal of
+   it (`mesh_ports_held`).  Nothing requires them."  What must stay: the fence and the serial's read after the raise */
 int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data
