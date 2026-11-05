@@ -1219,3 +1219,42 @@ Text extracted with `pdftotext -layout` into the session scratchpad's papers/ fo
   place precedes that member's, so every group's least place follows the least place of each group it depends on),
   for any weights, where GO4's text said every page above takes its place before the least place of those below,
   which holds only where a tree's pages have equal bottom levels. The conclusion stands. `walk` goes with T6's ties.
+- **DL2′** (reviews X1 #2 and X3 #4: DL2's "the greater of its `first` and the plan's `released`" lets `released` pass
+  executions whose words were never written, where an earlier ORDER of the plan never reached this node, so a port
+  reads them as published with a stale number, and Lamport's ms advances by one message at a time). The head's next
+  execution is the plan's `released`: where `first` <= `released` < `end`, it is published as DL2 states (number
+  `sequence` + `released` - `first`); where `end` <= `released`, the ORDER leaves the head (its executions all
+  published); where `first` > `released`, the head stays, said on the bridge's log once a head (Défago et al., Fig. 5:
+  the message numbered `nextdeliver` has not arrived). So an ORDER dropped here (order_take's ENOMEM, order_relay's
+  port not greeted) leaves its plan's later executions unreleased here, as those drops' notes say, and the head waits
+  (open, "Delivery's liveness").
+- **DL3′** (X3 #3): where the first reading acquires no candidate but the second finds one, the lane takes nothing and
+  its port passes again at once (link_run's 1): a number only the second reading found is not known least. Recorded at
+  lane_take.
+- **DL8′** (X3 #5): mesh-bridge.h declares plan_sequences_inside, the one copy (mesh-flow.c), which mesh-records.c's
+  orders_deliver calls; and since plan_inside includes it, plan_cancel raises no count of such a plan (it names no
+  count a port could serve: every port refuses it). This amends "No ... declaration of mesh-bridge.h changes" above.
+- **DL9** (X1 #7, V1 #9): the delivery's two hand-offs raise hdr `plans` (mesh_notify: add 1, release, then wake),
+  where they woke it without raising: the bridge parent after a turn of orders_deliver that published, and a port
+  where its `taken[p]` rose (taken_tell, plan_end). Why: a wake with no raise that lands between a waiter's read of
+  `plans` and its wait is lost until MESH_PAUSE_NS (3 s; V1 #9), and the delivery now hands off between the parent and
+  its ports once per execution past the u-th, where Q4's came once per ORDER; os_sync_wait_on_address returns at once
+  where the word has moved. The wake without a raise was Q4′'s ("A port wakes `plans` (without raising it) after
+  raising `served[p]`"), overturned with Q4. Its cost, recorded: each raise moves `plans`, so each port walks the heads
+  on its next pass (plans_walk) and DL3's `plans` test lets a lane that read the old value take nothing for one pass.
+- **GO3′** (X3 #2): MSCCLang §5.2 step (1)'s own priority is "the depth (maximum hops from a root node) and reverse
+  depth (maximum hops to a leaf node)", counted in hops; the priority here is R5's, the bottom level by eq. (7) over
+  the weights (GO2). Recorded at the code as the difference from the reference algorithm, which R5 orders.
+- **EB2′** (X2 #3): e2b's placement function carries each route's `kinds` with the route, though A2's placement
+  operand (sharding specs, their mapping onto nodes) names no kind and A8 names "each consumer's kind" as the IR's: in
+  e2b's manifest the hand partition and its consumers are one document, and the kinds follow the destinations it cuts.
+  A placement function that replaces e2b's gives the kinds with its routes. Recorded as a difference.
+- **Numbers across a reset** (X1 #1, open): the sequencer's `seqnum` returns to 0 at its own map move (Q3′), and a new
+  sequencer starts at 0, while each node keeps its pending ORDERs across its own move (V1 #4's ruling); so at a node
+  whose map has not yet moved, an ORDER numbered after the reset can match a plan of the old serial standing there
+  (a replan keeps its name, N1), and the numbers published there go back, which DL3's opposite-order reading does not
+  allow for. Every plan of the old serial is cancelled at that node's own move (D.3.6). No handler is added (the
+  documents' items 3 and 4); lane_take's note qualifies its premise; open for the operator with "A plan's identity
+  across a map move".
+- **Noted, not this unit's:** the C9 hook's remark on tools/prepare_e2b.py:1680 (prepare()'s backward reachability
+  from the logits over the operator graph, 864a0ae4, 2026-11-03) is on code this unit does not change.
