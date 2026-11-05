@@ -341,14 +341,16 @@ def _tree(ir, group):
 # same edges, one range from the root to its children.  A child's forward of the sum to children of its own is
 # stopped: MSCCLang forwards a chunk by a receive and a send of one buffer (section 4.3, rcs), but a received range's
 # value is one range's alone (mesh-collective.h struct mesh_declared `value`), and the contract takes no decision
-# between a copy and another form.  Events (device, declared transfer, kind, first and last FX positions): a leaf's
-# production of its partial and its consumption of the sum; the root's consumption of each partial, its production of
-# the sum and its own read of it
+# between a copy and another form.  The tree as mesh_graph_pack gives it: its root and each vertex's parent, the root
+# its own, over the group's places; its depth the graph module's (mesh-graph.h mesh_graph_tree_depth).  Events (device,
+# declared transfer, kind, first and last FX positions): a leaf's production of its partial and its consumption of the
+# sum; the root's consumption of each partial, its production of the sum and its own read of it
 def _all_reduce(ir, collective, group, root, parent):
-    leaves, node, at = [d for d in group if d != root], collective.node, collective.position
-    if any(parent[d] != root for d in leaves):
-        raise NotImplementedError('AllReduce of %s: a tree deeper than one edge forwards the root\'s sum at a child; '
-                                  'stopped (A-T3)' % node.name)
+    node, at = collective.node, collective.position
+    if mesh.LIB.mesh_graph_tree_depth(len(group), root, (mesh.U * len(group))(*parent)) != 1:
+        raise NotImplementedError('AllReduce of %s: a tree other than one edge deep forwards the root\'s sum at a '
+                                  'child; stopped (A-T3)' % node.name)
+    leaves, root = [d for v, d in enumerate(group) if v != root], group[root]
     if DOT[node.target] is None:
         raise NotImplementedError('AllReduce of %s (%s): torch gives no out= form to write its partial over its '
                                   'range\'s placed pages (A-T4)' % (node.name, node.target))

@@ -69,7 +69,8 @@ for name, result, arguments in (
         ('mesh_host_publish', None, [CONTEXT, Section, Q]),
         ('mesh_host_arrived', Q, [CONTEXT, Section, Q]),
         ('mesh_graph_pack', U, [U, U, C.POINTER(U), C.POINTER(U), C.POINTER(U), C.POINTER(U), U, C.POINTER(D), ROOTED,
-                                C.c_void_p, D, U, C.c_int, C.POINTER(U), C.POINTER(U), C.POINTER(D)])):
+                                C.c_void_p, D, U, C.c_int, C.POINTER(U), C.POINTER(U), C.POINTER(D)]),
+        ('mesh_graph_tree_depth', U, [U, U, C.POINTER(U)])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 
