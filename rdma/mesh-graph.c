@@ -581,35 +581,46 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
    least lags decide C3.3's tests at every larger distance by U1's reason, its consumer's (every walk into a write
    passes its range's production; the programs' dependences order each node's events of t before those of t + 1).
    What must stay: the algorithm as it is.
-   mesh_graph_lags' heap: the vertices whose distance is set but not yet known least, a binary heap by (distance,
-   vertex), heap[0] the first; place[v] v's index in it, UINT32_MAX where v is not in it.  a comes before b where its
-   distance is less, a tie to the lower vertex. */
-static int lags_before(const uint32_t *distance, uint32_t a, uint32_t b) {
-  return distance[a] < distance[b] || (distance[a] == distance[b] && a < b);
-}
+   The binary heap, one copy (design/rubrics.md:422, C9: the graph algorithms one copy each), mesh_graph_lags' and
+   mesh_graph_heap_order's: heap[0 .. count) vertices, heap[0] the first; position[v] v's index in it, UINT32_MAX where
+   v is not in it.  before(context, a, b) != 0 where a comes before b, the consumer's strict total order of the vertices
+   (mesh_graph_lags' lags_before, mesh_graph_heap_order's order_before), so the vertex the heap gives first among those
+   in it is the same whatever order they entered it in.
+   2026-11-04, owner C3 (design/compilation-coordination.md, "The documents' revisions of edd4b583", "The graph
+   module"): lags_up and lags_down are heap_up and heap_down, taking their comparison and its context as operands, where
+   they called lags_before over mesh_graph_lags' distances.  Why: mesh_graph_heap_order's heap is this one, one copy
+   (C9).  What must stay: mesh_graph_lags' behavior, its heap ordered by lags_before as it was. */
 /* heap[i]'s vertex moved toward the root past each parent it comes before */
-static void lags_up(uint32_t *heap, uint32_t *place, const uint32_t *distance, size_t i) {
+static void heap_up(uint32_t *heap, uint32_t *position, int (*before)(const void *context, uint32_t a, uint32_t b),
+                    const void *context, size_t i) {
   const uint32_t v = heap[i];
-  while (i && lags_before(distance, v, heap[(i - 1) / 2])) {
+  while (i && before(context, v, heap[(i - 1) / 2])) {
     heap[i] = heap[(i - 1) / 2];
-    place[heap[i]] = (uint32_t)i;
+    position[heap[i]] = (uint32_t)i;
     i = (i - 1) / 2;
   }
   heap[i] = v;
-  place[v] = (uint32_t)i;
+  position[v] = (uint32_t)i;
 }
 /* heap[i]'s vertex moved away from the root past each child, the first of the two, that comes before it */
-static void lags_down(uint32_t *heap, uint32_t *place, const uint32_t *distance, size_t count, size_t i) {
+static void heap_down(uint32_t *heap, uint32_t *position, int (*before)(const void *context, uint32_t a, uint32_t b),
+                      const void *context, size_t count, size_t i) {
   const uint32_t v = heap[i];
   for (size_t c = 2 * i + 1; c < count; c = 2 * i + 1) {
-    if (c + 1 < count && lags_before(distance, heap[c + 1], heap[c])) c++;
-    if (!lags_before(distance, heap[c], v)) break;
+    if (c + 1 < count && before(context, heap[c + 1], heap[c])) c++;
+    if (!before(context, heap[c], v)) break;
     heap[i] = heap[c];
-    place[heap[i]] = (uint32_t)i;
+    position[heap[i]] = (uint32_t)i;
     i = c;
   }
   heap[i] = v;
-  place[v] = (uint32_t)i;
+  position[v] = (uint32_t)i;
+}
+/* mesh_graph_lags' heap: the vertices whose distance is set but not yet known least, by (distance, vertex) over the
+   distances (`context`).  a comes before b where its distance is less, a tie to the lower vertex. */
+static int lags_before(const void *context, uint32_t a, uint32_t b) {
+  const uint32_t *distance = context;
+  return distance[a] < distance[b] || (distance[a] == distance[b] && a < b);
 }
 /* a walk to v of total lag `through`: v's distance lowered to it where it is less, v put into the heap or moved up in
    it; the heap's count.  distance[v] <= UINT32_MAX, so a sum at or past UINT32_MAX lowers nothing: no walk. */
@@ -619,10 +630,10 @@ static size_t lags_relax(uint32_t *heap, uint32_t *place, uint32_t *distance, si
   distance[v] = (uint32_t)through;
   if (place[v] == UINT32_MAX) {
     heap[count] = v;
-    lags_up(heap, place, distance, count);
+    heap_up(heap, place, lags_before, distance, count);
     return count + 1;
   }
-  lags_up(heap, place, distance, place[v]);
+  heap_up(heap, place, lags_before, distance, place[v]);
   return count;
 }
 /* mesh-graph.h mesh_graph_lags.  From each source, Dijkstra's shortest paths (his second problem, the lags the
@@ -664,7 +675,7 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
     for (uint32_t left = distinct; count;) {
       const uint32_t at = heap[0];
       place[at] = UINT32_MAX;
-      if (--count) { heap[0] = heap[count]; lags_down(heap, place, distance, count, 0); }
+      if (--count) { heap[0] = heap[count]; heap_down(heap, place, lags_before, distance, count, 0); }
       if (wanted[at] && !--left) break;
       for (size_t k = first[at]; k < first[at + 1]; k++)
         count = lags_relax(heap, place, distance, count, heads[k], (uint64_t)distance[at] + weights[k]);
@@ -936,5 +947,67 @@ int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const u
   }
   free(level); free(finish); free(busy); free(free_at); free(end); free(ordinal); free(list); free(keys); free(home);
   free(leader); free(holder); free(in); free(into);
+  return result;
+}
+
+/* New (design/plan-to-bridge-change-request.md, R5, "The order of each cable's list, by the reference algorithm";
+   design/compilation-coordination.md, "The documents' revisions of edd4b583", "The graph module" and GO3): no tag
+   source.
+   mesh_graph_heap_order's comparison over the priorities (`context`): a comes before b where its priority is greater,
+   a tie to the lower vertex (GO3: "the greatest bottom level first ... a tie to the lower instruction"); comparisons
+   alone, a strict total order of the vertices over priorities that compare (none NaN). */
+static int order_before(const void *context, uint32_t a, uint32_t b) {
+  const double *priority = context;
+  return priority[a] > priority[b] || (priority[a] == priority[b] && a < b);
+}
+/* mesh-graph.h mesh_graph_heap_order.  M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS
+   2023, §5.2, step 3: "Sort instructions into a global topological order with respect to their dependencies with a
+   heap using the priority to order instructions."
+   - Each vertex's count of the edges into it (an edge given twice counted twice), and the edges out of each vertex as
+     compressed rows (mesh_graph_rows keyed by from[e]; depth_head reads the e-th word), as levels takes them.
+   - The vertices with no edge in enter the heap (heap_up, ordered by order_before).  While the heap holds any, its
+     first leaves it (heap_down) and takes the next place, and each edge out of it lowers its head's count once (an
+     edge given twice lowers it twice), the head entering the heap where its count reaches 0.  So a vertex is placed
+     only after every vertex an edge into it leaves (the order is topological with respect to the dependencies), and
+     at each place the vertex taken is the first of the ready ones by the priority, the greatest first, a tie to the
+     lower vertex (GO3).  MSCCLang names no tie; the lower index is the one every party computes alike.
+   - The heap's order is total, so the vertex it gives first among those in it does not depend on the order in which
+     they entered: every party computes the same places from the same operands (F. B. Schneider, ACM Comput. Surv.
+     1990, as R5 cites it).  Arithmetic: comparisons alone.
+   - Vertices left unplaced when the heap empties lie on a cycle or after one: EINVAL, their place UINT32_MAX.  An edge
+     naming no vertex is EINVAL before anything is written.  Every allocation precedes the first place written, so
+     ENOMEM writes none.
+   Cost: O((V + E) log V), each vertex entering and leaving the heap once at O(log V) each and each edge lowering one
+   count once; memory O(V + E). */
+int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
+                          const uint32_t *to, uint32_t *place) {
+  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
+  if (edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
+  size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
+  size_t *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
+  uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap);
+  uint32_t *position = malloc(((size_t)vertices + 1) * sizeof *position);
+  int result = !first || !order || !indegree || !heap || !position ? ENOMEM : 0;
+  if (!result) {
+    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
+    for (uint32_t v = 0; v < vertices; v++) { indegree[v] = 0; position[v] = UINT32_MAX; place[v] = UINT32_MAX; }
+    for (size_t e = 0; e < edges; e++) indegree[to[e]]++;
+    size_t count = 0;
+    for (uint32_t v = 0; v < vertices; v++)
+      if (!indegree[v]) { heap[count] = v; heap_up(heap, position, order_before, priority, count); count++; }
+    uint32_t placed = 0;
+    while (count) {
+      const uint32_t v = heap[0];
+      position[v] = UINT32_MAX;
+      if (--count) { heap[0] = heap[count]; heap_down(heap, position, order_before, priority, count, 0); }
+      place[v] = placed++;
+      for (size_t k = first[v]; k < first[v + 1]; k++) {
+        const uint32_t head = to[order[k]];
+        if (!--indegree[head]) { heap[count] = head; heap_up(heap, position, order_before, priority, count); count++; }
+      }
+    }
+    if (placed < vertices) result = EINVAL;
+  }
+  free(first); free(order); free(indegree); free(heap); free(position);
   return result;
 }
