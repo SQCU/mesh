@@ -112,14 +112,19 @@ struct plan_value { uint32_t demand,node,write,read,reads,source; };
    p->here[value]'s page `page`, sent to or received from `node`, of demand `demand`.  `field`: a receive's field in its
    range's group (its demand's receives here in walk order, 0 .. P_g - 1); a forwarding send's, its receive's of the
    same page; MESH_ABSENT for a send from the range's source, which its release's supplied word releases.
-   `communication`: the page's crossing of the tree edge the hop is (plan_communication); `walk`: the hop's place in
-   plan_walk's order; `start`: its link's scheduled start of its page (plan_schedule; design/compilation-
-   coordination.md, T6).  `set` (S1, S2): j + 1 where its demand's range is a set and its page is on tree j (the
-   solve's trees grouped by demand, p->tree's index), else 0.  Its group (S3): the entries of its nonzero `set`, `node`
-   and `direction`, else the entry alone; `earliest` its group's least `start` and `least` its group's least `walk`
-   (plan_schedule). */
-struct plan_entry { uint32_t value,node,direction,demand,field,communication,set; uint64_t page,walk,least;
-                    double start,earliest; };
+   `communication`: the page's crossing of the tree edge the hop is (plan_communication), one instruction of the
+   plan's instruction DAG (plan_schedule; design/compilation-coordination.md, "The documents' revisions of edd4b583",
+   GO1); `place`: that instruction's place in the global topological order (GO3).  `set` (S1, S2): j + 1 where its
+   demand's range is a set and its page is on tree j (the solve's trees grouped by demand, p->tree's index), else 0.
+   Its group (GO4): the entries of its nonzero `set`, `node` and `direction`, else the entry alone; `at` its group's
+   least `place`, the place of the set's first page in that order (plan_schedule).
+   2026-11-04, owner C3 (GO4): `walk` (the hop's place in plan_walk's order, T6's tie), `start` (its link's scheduled
+   start of its page, T6), `earliest` (its group's least start) and `least` (its group's least walk, S3) are gone,
+   `place` and `at` in their place.  Why: each cable's list is a subsequence of one global topological order built as
+   MSCCLang §5.2 states in its step 3, and "Scheduled start times do not order the lists"
+   (design/plan-to-bridge-change-request.md, R5), which overturns T6 and S3.  What must stay: every other field as
+   plan_walk assigns it. */
+struct plan_entry { uint32_t value,node,direction,demand,field,communication,set,place,at; uint64_t page; };
 struct plan {
   struct mesh_ctx *context;
   const struct mesh_declared *declared;
@@ -163,8 +168,9 @@ struct plan {
   uint32_t *head,*lag;                    /* edge k's head vertex, and its execution distance */
   uint32_t *between;                      /* between[a x local + b]: D_ab, the largest least lag from a read of this
                                              node's routed value a to b's write (plan_unroll) */
-  /* the state section (plan_layout), offsets from its start: `hops` its entries', `words` its end */
-  uint64_t phases,counts,supplied,status,hops,words;
+  /* the state section (plan_layout), offsets from its start: `sequences` its sequence words', `hops` its entries',
+     `words` its end */
+  uint64_t phases,counts,supplied,status,sequences,hops,words;
   /* the items (plan_place): routed copies (a, c) at item a x u + c, then this node's other values (others[k] the index
      in `values` of item local x u + k; a value of lag k >= 1 k consecutive items, its copies in order), then the state
      section, item `state` */
@@ -526,11 +532,20 @@ static int plan_unroll(struct plan *p){
      the counts' rows, while the phase list holds a group for every received range, a relay's among them;
    - `supplied`: releases uint64 words, release r's at index r;
    - `status`: one struct mesh_status;
+   - `sequences`: the sequence words, u uint64 words, copy c's at sequences + 8 c (design/compilation-coordination.md,
+     "The documents' revisions of edd4b583", "The region" and DL1: L. Lamport, Concurrent reading and writing, CACM
+     20(11), 1977, "Message Buffer", the buffer B[0], ..., B[P - 1] with P = u; design/aot-compilation-change-
+     request.md, appendix item 2: "one word per copy"), which the bridge parent writes and each port reads; they start
+     at 0 with every byte before the entries (D3);
    - `hops`: this node's entries, u x n struct mesh_hop, copy c's n at [c n, c n + n) (design/compilation-
      coordination.md, "The region", struct mesh_state: "the entries; each 64-aligned"); [0, hops) the bytes mesh_plan
      starts (D3), the entries written whole after them;
    - `words`: the end of the entries, the section's bytes.
    Every offset in struct mesh_state is a region offset: the section's own plus these.
+   2026-11-04, owner C3 (DL1): the sequence words placed after the status and before the entries, where the entries
+   followed the status.  Why: the parent's delivery publishes each released execution's sequence number in its plan's
+   state, one word per copy, each word one writer (appendix item 2, "Delivery at a node").  What must stay: every
+   offset before the sequence words as it was; every part 64-aligned.
    2026-11-04, owner C (design/compilation-coordination.md, "The region" and Q5): the entries in the section, where they
    were hdr's hop area (`hop_off`, room `hop_capacity`).  Why: any number of plans stand at once, each in its own claim
    (design/plan-to-bridge-change-request.md, R8).  What must stay: the words' offsets before the entries as they
@@ -549,7 +564,8 @@ static void plan_layout(struct plan *p){
   p->counts=plan_align(p->phases+at);
   p->supplied=plan_align(p->counts+(uint64_t)p->consumed*p->copies*sizeof(uint64_t));
   p->status=plan_align(p->supplied+p->releases*sizeof(uint64_t));
-  p->hops=plan_align(p->status+sizeof(struct mesh_status));
+  p->sequences=plan_align(p->status+sizeof(struct mesh_status));
+  p->hops=plan_align(p->sequences+(uint64_t)p->copies*sizeof(uint64_t));
   p->words=p->hops+p->entries*p->copies*sizeof(struct mesh_hop);
 }
 
@@ -687,15 +703,16 @@ static uint32_t plan_page(const struct plan *p,uint32_t a,uint32_t c,uint64_t k)
 
 /* -- this node's hops (design/disjoint-pages-change-request.md, C3.3 and C3.7) ------------------------------------ */
 
-/* Each tree's communications (design/compilation-coordination.md, T4: "a (page, link) is one communication"; T6).  A
-   tree carries a page over each of its edges once (mesh.h, "A tree carries a page over a node pair once at most"), so
-   one communication is a (page, tree edge): the tree's page `page` (its place among the demand's pages on that tree,
-   from 0) over the edge into vertex `head`.  They are numbered tree by tree in the solve's order grouped by demand,
-   then page by page, then by the head's place among the tree's vertices but its root (`members`, from its row of the
-   tree's vertices keyed by parent, mesh_graph_rows, as plan_walk reads a tree; no walk over a parent table here, C9),
-   the same at every rank.  Every one lies on some destination's route (plan_schedule): mesh_graph_flow makes a tree
-   of its leaves' paths to its root, and its leaves are the demand's destinations.  0; ENOMEM where they pass 32 bits
-   (mesh-graph.h mesh_graph_contention_schedule's `communication`) or the call's own memory. */
+/* Each tree's communications (design/compilation-coordination.md, T4: "a (page, link) is one communication"; the
+   instructions after the tasks, "The documents' revisions of edd4b583", GO1 and GO3, numbered here for the order's
+   ties).  A tree carries a page over each of its edges once (mesh.h, "A tree carries a page over a node pair once at
+   most"), so one communication is a (page, tree edge): the tree's page `page` (its place among the demand's pages on
+   that tree, from 0) over the edge into vertex `head`.  They are numbered tree by tree in the solve's order grouped by
+   demand, then page by page, then by the head's place among the tree's vertices but its root (`members`, from its row
+   of the tree's vertices keyed by parent, mesh_graph_rows, as plan_walk reads a tree; no walk over a parent table
+   here, C9), the same at every rank.  Every one lies on some destination's route (plan_schedule): mesh_graph_flow
+   makes a tree of its leaves' paths to its root, and its leaves are the demand's destinations.  0; ENOMEM where they
+   pass 32 bits (mesh-graph.h mesh_graph_contention_schedule's `communication`) or the call's own memory. */
 static int plan_trees(struct plan *p){
   const uint32_t n=p->n;
   size_t first[(size_t)n+2],child[(size_t)n+1];
@@ -739,13 +756,17 @@ static uint32_t plan_communication(const struct plan *p,uint32_t j,uint64_t page
    range (`range`, in the plan's demand order; p->ranges of them) and its pages landing here (`received`, P_g);
    filling writes p->entry[0 .. n).  Each receive takes the next field of its range's group, so a range's receives
    here are fields 0 .. P_g - 1 of its group; a send from the range's source names its release, any other send its
-   receive's field (a relay's forward, or a destination's on the way on).  Filling also gives each entry its place in
-   this order (`walk`) and its communication (plan_communication: a receive's the tree edge into this node, a send's
-   the edge into its child), and its `set`: j + 1 for a page on tree j of a demand whose range is a set (its every
-   declared transfer MESH_PAGES), j the index this walk iterates, d->tree .. d->tree + d->trees into p->tree and p->run,
-   the same at every rank; 0 for every other entry (design/compilation-coordination.md, S1 and S2: the set's unit is
-   one tree's pages, every edge of tree j carrying the same run of them).  plan_schedule then orders the entries by
-   their groups' scheduled starts (T6 as S3 amends it), and every field stays as assigned here.
+   receive's field (a relay's forward, or a destination's on the way on).  Filling also gives each entry its
+   communication (plan_communication: a receive's the tree edge into this node, a send's the edge into its child), and
+   its `set`: j + 1 for a page on tree j of a demand whose range is a set (its every declared transfer MESH_PAGES), j
+   the index this walk iterates, d->tree .. d->tree + d->trees into p->tree and p->run, the same at every rank; 0 for
+   every other entry (design/compilation-coordination.md, S1 and S2: the set's unit is one tree's pages, every edge of
+   tree j carrying the same run of them).  plan_schedule then orders the entries by their groups' places in the global
+   topological order of the instructions (design/compilation-coordination.md, "The documents' revisions of edd4b583",
+   GO4), and every field stays as assigned here.
+   2026-11-04, owner C3 (GO4): no entry records its place in this order (`walk`, T6's tie and S3's least walk, gone
+   with them).  What must stay: the order above, in which tree j's entries of one node and direction are one run
+   (plan_schedule's groups).
    2026-11-04, sub-assignment 3: reversing 2026-11-03's (sub-assignment 5's) bit a receive in one landed record an
    execution, counted over all of the execution's receives.  Why: a landing is a phase field of its range's group and
    an arrival on its range's count (C3.7; the contract's D1, counts per received range and copy).  What must stay: the
@@ -776,7 +797,7 @@ static void plan_walk(struct plan *p){
           if(p->entry)p->entry[at]=(struct plan_entry){.value=d->value,.node=in,.direction=MESH_RECEIVE,.demand=i,
                                                        .field=mine,
                                                        .communication=plan_communication(p,j,k-p->lead[j],self),
-                                                       .set=set,.page=k,.walk=at};
+                                                       .set=set,.page=k};
           at++;
         }
         for(size_t c=first[self];c<first[self+1];c++,at++)
@@ -784,7 +805,7 @@ static void plan_walk(struct plan *p){
                                                        .demand=i,.field=mine,
                                                        .communication=plan_communication(p,j,k-p->lead[j],
                                                                                          (uint32_t)child[c]),
-                                                       .set=set,.page=k,.walk=at};
+                                                       .set=set,.page=k};
       }
     }
     if(!p->entry){
@@ -824,30 +845,32 @@ static struct plan_span plan_tasks(const struct plan *p,const struct plan_span *
   if(own)return (struct plan_span){reader[p->of[i]],1};
   return consumer[i];
 }
-/* design/compilation-coordination.md, T6 as S3 amends it: the entries by their group's least scheduled start
-   (`earliest`), then their group's least walk (`least`), then their own walk (a total order, walks being distinct, so
-   every rank's sort ends alike).  An entry alone in its group (`set` 0) is ordered by its own start, then its walk, as
-   T6 ordered every entry.
-   2026-11-04, owner C2 (S3): reversing T6's order by each entry's own start, ties by walk.  Why: a set's entries must
-   be contiguous on their node pair within a copy, so the bridge draws them in a uniformly random order (design/aot-
-   compilation-change-request.md, appendix item 5; S7's EINVAL where they are not).  What must stay: a total order of
-   the entries both ends of a pair agree on. */
+/* design/compilation-coordination.md, "The documents' revisions of edd4b583", GO4: the entries by their group's least
+   place (`at`), then their own place (`place`).  A total order, so every rank's sort ends alike: each communication
+   has one place, and no two of this node's entries are one communication (a receive's is its tree edge into this
+   node, each send's the edge into its own child).  An entry alone in its group (`set` 0) is at its own place.
+   2026-11-04, owner C3 (GO4): reversing T6 as S3 amended it (the group's least scheduled start, then its least walk,
+   then the entry's walk).  Why: each cable's list is a subsequence of MSCCLang §5.2 step 3's global topological order,
+   "Scheduled start times do not order the lists", and a set's pages "take consecutive places at the place of the
+   set's first page in that order" (design/plan-to-bridge-change-request.md, R5).  What must stay: a total order of the
+   entries both ends of a pair agree on; a set's entries contiguous on their node pair and direction within each copy
+   (the bridge's EINVAL where they are not: design/compilation-coordination.md, S7). */
 static int plan_entry_order(const void *a,const void *b){
   const struct plan_entry *x=a,*y=b;
-  if(x->earliest!=y->earliest)return x->earliest<y->earliest?-1:1;
-  if(x->least!=y->least)return x->least<y->least?-1:1;
-  return (x->walk>y->walk)-(x->walk<y->walk);
+  if(x->at!=y->at)return x->at<y->at?-1:1;
+  return (x->place>y->place)-(x->place<y->place);
 }
 /* mesh_graph_rows' keys: an entry's node pair and direction, 2 node + direction (MESH_SEND 0, MESH_RECEIVE 1), so an
-   entry's row holds the entries of its `node` and `direction` in walk order (plan_schedule's groups) */
+   entry's row holds the entries of its `node` and `direction` in plan_walk's order (plan_schedule's groups) */
 static uint32_t plan_entry_side(const void *context,size_t k){
   const struct plan_entry *e=(const struct plan_entry *)context+k;
   return 2*e->node+e->direction;
 }
 
-/* The task graph and its schedule (design/plan-to-bridge-change-request.md, R3 to R5; design/aot-compilation-change-
-   request.md, A6; design/compilation-coordination.md, T1, T2, T4 and T6), one execution's, every rank's the same from
-   the same declared transfers, weights, dependences and map.
+/* The task graph, its schedule and the order of the lists (design/plan-to-bridge-change-request.md, R3 to R5;
+   design/aot-compilation-change-request.md, A6; design/compilation-coordination.md, T1, T2 and T4, and "The
+   documents' revisions of edd4b583", GO1 to GO5), one execution's, every rank's the same from the same declared
+   transfers, weights, dependences and map.
    - The task graph G = (V, E, w, c) (O. Sinnen, Task Scheduling for Parallel Systems, Wiley, 2007; O. Sinnen and L. A.
      Sousa, IEEE TPDS 16(6) 2005, Definition 1), T1: its tasks the template's events (plan_template), each on the node
      its event is at (the placement operand: the declared transfers' sources and destinations).  Task d is demand d's
@@ -868,30 +891,78 @@ static uint32_t plan_entry_side(const void *context,size_t k){
      from[e] -> to[e] and 2e + 1 back, each of relative data rate b(L) the pair's capacity over the greatest pair's.
    - T4: every route entry of one page over one tree edge is one communication (plan_communication), which the
      schedule holds as one occupation of its link.  Every tree edge lies on some destination's route (plan_trees).
-   - The schedule: list scheduling in the contention model (Sinnen and Sousa, Algorithm 1 with Algorithm 2, eq. (7),
-     §5.2; mesh-graph.h mesh_graph_contention_schedule, T3 to T5).
-   - T6 as S3 amends it (design/compilation-coordination.md, S1 to S3; design/aot-compilation-change-request.md,
-     appendix item 5): each of this node's entries (plan_walk) takes its communication's start on its link, so a send at
-     x to y and its receive at y read the same.  Each entry's group is the entries of its nonzero `set`, `node` and
-     `direction` (else the entry alone); each group's least start (`earliest`) and least walk (`least`) are found in
-     one pass, over the entries' rows by node and direction (mesh-graph.h mesh_graph_rows, each row in walk order): a
-     group is a run of one nonzero `set` in its row, since tree j's entries are contiguous in walk order.  The entries
-     are sorted by their group's least start, then their group's least walk, then their own walk (plan_entry_order).
-     So a set's entries are contiguous on their pair within each copy, in walk order (the tree's page order), and every
-     other entry keeps the schedule's order (R5).  A node pair's hops at its two ends are the same hops in the same
-     walk order (mesh.h "Both ends"), read the same starts and fall in the same groups (tree j's pages over that pair),
-     so they stay the same hops in the same order; every rank computes the same schedule from the same inputs (F. B.
-     Schneider, Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).
-     2026-11-04, owner C2 (review W3 #6, the coordinator's ruling): withdrawn, the claim that each per-pair list stays a
-     topological order of the unrolled executions (S2's "a relay forwards in the order it receives": a set's position
-     i following its receive at position i upstream, whose group's start is earlier).  The contention schedule starts a
-     page on a route's links by Sinnen and Sousa's eq. (14), nonaligned (cut-through), so a page's start on a link can
-     precede its finish on the link before, and the start order is not shown to be a topological order of the
-     bridge's store-and-forward waits, for the T6 order itself as for the groups.  Open for the operator
-     (design/compilation-coordination.md, the appendix's revisions, record).
-   2026-11-04, owner C2 (S3): the groups and their least start and walk added before the sort, where T6 sorted each
-   entry by its own start.  Why: appendix item 5's sets, each contiguous on its pair.  What must stay: every entry's
-   fields as plan_walk assigned them; the same order at both ends of each pair.
+   - The schedule (GO5): list scheduling in the contention model (Sinnen and Sousa, Algorithm 1 with Algorithm 2, eq.
+     (7), §5.2; mesh-graph.h mesh_graph_contention_schedule, T3 to T5), called as before (R5's method, and its "Code":
+     "rdma/mesh-graph.{h,c}: bottom levels, and the list schedule with edge scheduling"; A6: "One schedule per
+     function").  Its starts order no list (R5: "Scheduled start times do not order the lists"); what reads them is
+     the operator's to say (GO5, open).
+   - The instructions (GO1): the task graph's tasks as numbered above, 0 .. tasks - 1, then the plan's communications
+     (T4: a page over a tree edge; plan_trees and plan_communication number them), communication c at tasks + c.  A
+     communication is one instruction: its send at the edge's upper node and its receive at its lower node take its
+     one place, so a node pair's sends at one end and its receives at the other are the same hops in the same order
+     (mesh.h, "Both ends"; R1: "the bridge's records name the same pages").  MSCCLang (M. Cowan et al., ASPLOS 2023)
+     §4.2 expands a remote copy "into a send and a receive instruction" joined by "a communication edge"; joining them
+     in one instruction is where this differs from it, so that both ends' lists agree (GO1).  The dependencies: each
+     local edge of the task graph as it is (P(d) -> S(d), a lag-0 dependence); each remote edge a chain, its tail task
+     -> its route's first communication -> each next -> its last -> its head task: MSCCLang §4.2's communication and
+     processing edges, a page sent before it lands and landed before it is forwarded or consumed (plan_template's P ->
+     W(y), W(y) -> F(y, c), L(z) -> C(z)).  Routes sharing a prefix (T4) give a dependency more than once, which
+     changes no bottom level and no order (mesh-graph.h mesh_graph_heap_order: an edge given twice counts twice and is
+     removed twice).  Every rank builds the same instructions and dependencies, in the same order.
+   - The priority (GO2): the bottom level (R5: "The priority is the bottom level"), Sinnen and Sousa's eq. (7) (§2.2.1)
+     over the instructions, bl(n) = w(n) + max over the dependencies e = (n, m) {c(e) + bl(m)} (mesh-graph.h
+     mesh_graph_bottom_levels).  A task weighs its weighting operand's weight (A3), as in the schedule; communication
+     c on link L its link time ς(e, L) = c(e) / b(L) (Sinnen and Sousa, §5; b(L) T2's rate), the greatest over the
+     route entries of the task graph's edges e that carry it (T4: one occupation for every edge that shares it; eq.
+     (7)'s bottom level is "the length of the longest path leaving the node", so the longest); every dependency costs
+     0 (a remote edge's time is in its communications; a local one is free, Definition 2, T1').  Each quotient the one
+     the schedule computes for that route entry, one correctly rounded /, and the max by comparisons, so every rank's
+     levels agree.
+   - The order (GO3): MSCCLang §5.2, step 3: "Sort instructions into a global topological order with respect to their
+     dependencies with a heap using the priority to order instructions" (mesh-graph.h mesh_graph_heap_order): the
+     greatest bottom level first (R5: "Tasks are taken in decreasing bottom level"; HLFET's priority), a tie to the
+     lower instruction, the same at every rank (F. B. Schneider, Implementing fault-tolerant services using the state
+     machine approach, ACM Comput. Surv., 1990).
+   - The lists (GO4): each of this node's entries (plan_walk; every field as it assigns them) takes its communication's
+     place (`place`).  A set's entries on one node pair and direction (S1, S2: its nonzero `set`, `node` and
+     `direction`, tree j's pages over that pair) take consecutive places at the place of the first of them in that
+     order (R5: "They take consecutive places at the place of the set's first page in that order"), each among them by
+     its own place; every other entry is at its own place.  Each group's least place (`at`) is found in one pass over
+     the entries' rows by node and direction (mesh-graph.h mesh_graph_rows, each row in plan_walk's order): a group is
+     a run of one nonzero `set` in its row, since plan_walk visits a demand's pages tree by tree.  The entries are
+     sorted by their group's least place, then their own place (plan_entry_order), a total order.  So each node pair's
+     list at each end is a subsequence of the one global order (a set's at its first page's place), both ends' alike
+     (a send at x to y and its receive at y are one communication, at one place, in one group: tree j's pages over that
+     pair), and every copy's the same (mesh_plan writes this one order for each copy).
+   - Where it is a topological order (GO4).  A communication's one dependency in is its page's communication over the
+     tree edge above, or its demand's production (GO1; an edge given twice is the same one).  So every page of a set
+     over one tree edge depends on its own page over the edge above, a member of one group (that set over the edge
+     above), or on the one production, and two pages of one set over one edge depend on nothing of each other.  The
+     least-placed member's predecessor takes a place before it, so a group's least place follows the least place of
+     the group it depends on (or the production's place); an entry alone, at its own place, follows the least place of
+     every group it depends on, which is at most its predecessor's place.  The groups in order of their least place are
+     thus a topological order of the instructions with each group whole (R5: "A set's pages ... share their
+     predecessors"), and, every lag pointing forward, each cable's sequence of executions is one (R5).  The
+     dependencies are the bridge's store-and-forward waits (a forward released by its receive's landing, a source's
+     send by its production), so the cables' sequences cannot wait on each other in a cycle (MSCCLang §5.2: "By
+     assigning instructions to thread blocks in a topological order that respects communication and processing edges,
+     all implicit dependencies introduced by thread block sequential execution cannot produce cycles").  This needs
+     only the least-placed member's predecessor before it, which the heap order gives for any weights; GO4's "all of
+     which take places before the least place of those below" is not used.
+   2026-11-04, owner C3 (GO1 to GO5; design/plan-to-bridge-change-request.md, R5, "The order of each cable's list, by
+   the reference algorithm"): reversing T6 as S3 amended it, each entry at its link's scheduled start of its page
+   (`start`, through comm_start, each communication's one start on its link), each group's least start (`earliest`)
+   and least walk (`least`), the entries sorted by them and then by their walk.  Why: R5 (the operator: "what
+   algorithm is cited here, if any? no citations? use the reference algorithm instead") orders each cable's list as a
+   subsequence of MSCCLang §5.2 step 3's global topological order by bottom level, and "Scheduled start times do not
+   order the lists"; it overturns T6 and S3 (design/compilation-coordination.md, "The documents' revisions of
+   edd4b583").  What must stay: the schedule's call (GO5); every entry's fields as plan_walk assigns them; both ends'
+   lists of a node pair the same hops in the same order; every copy's the same order; a set's entries contiguous on
+   their node pair and direction within each copy (S7).
+   2026-11-04, owner C3 (GO4; review W3 #6): the claim owner C2 withdrew here (the start order not shown to be a
+   topological order of the bridge's store-and-forward waits, the contention schedule's (14) being nonaligned,
+   cut-through) is answered above: the lists' order is now the instruction DAG's, whose dependencies are those waits,
+   not the schedule's starts (GO4: "This answers the open item 'No cycle on a cable' (W3 #6)").
    0; EINVAL (the schedule's: a time past the doubles' range); ENOMEM. */
 static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const struct mesh_dependence *dependence,
                          uint32_t dependences){
@@ -927,19 +998,28 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
                                         !!(x->kinds&MESH_TO_SOURCE_READ));
     if((edges+=(uint64_t)a.count*b.count)>=UINT32_MAX)status=ENOMEM;
   }
-  double *w=status?NULL:malloc(((size_t)tasks+1)*sizeof *w),*cost=status?NULL:malloc(((size_t)edges+1)*sizeof *cost),
+  /* the instructions (GO1): the tasks, then the communications; their dependencies: each edge's route entries and one
+     more */
+  const uint64_t instructions=tasks+p->comms,dependencies=edges+entries;
+  if(instructions>=UINT32_MAX)status=ENOMEM;
+  double *w=status?NULL:malloc(((size_t)instructions+1)*sizeof *w),
+         *cost=status?NULL:malloc(((size_t)edges+1)*sizeof *cost),
          *rate=malloc((2*(size_t)p->pairs+1)*sizeof *rate),*start=status?NULL:malloc(((size_t)tasks+1)*sizeof *start),
          *link_start=status?NULL:malloc(((size_t)entries+1)*sizeof *link_start),
-         *comm_start=malloc(((size_t)p->comms+1)*sizeof *comm_start);
+         *level=status?NULL:malloc(((size_t)instructions+1)*sizeof *level),
+         *delay=status?NULL:calloc((size_t)dependencies+1,sizeof *delay);
   uint32_t *processor=status?NULL:malloc(((size_t)tasks+1)*sizeof *processor),
            *from=status?NULL:malloc(((size_t)edges+1)*sizeof *from),
            *to=status?NULL:malloc(((size_t)edges+1)*sizeof *to),
            *link=status?NULL:malloc(((size_t)entries+1)*sizeof *link),
-           *communication=status?NULL:malloc(((size_t)entries+1)*sizeof *communication);
+           *communication=status?NULL:malloc(((size_t)entries+1)*sizeof *communication),
+           *before=status?NULL:malloc(((size_t)dependencies+1)*sizeof *before),
+           *after=status?NULL:malloc(((size_t)dependencies+1)*sizeof *after),
+           *place=status?NULL:malloc(((size_t)instructions+1)*sizeof *place);
   size_t *route=status?NULL:malloc(((size_t)edges+1)*sizeof *route),
          *grouped=status?NULL:malloc(((size_t)p->entries+1)*sizeof *grouped);
-  if(!status && (!w || !cost || !rate || !start || !link_start || !comm_start || !processor || !from || !to || !link ||
-                 !communication || !route || !grouped))status=ENOMEM;
+  if(!status && (!w || !cost || !rate || !start || !link_start || !level || !delay || !processor || !from || !to ||
+                 !link || !communication || !before || !after || !place || !route || !grouped))status=ENOMEM;
   if(!status){
     /* the tasks: each on its event's node, weighing the weighting operand's weight of it (A3) */
     for(uint32_t d=0;d<demands;d++){
@@ -997,28 +1077,49 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
       }
     }
     route[e]=r;
+    /* GO5: the schedule as before; its starts order nothing */
     status=mesh_graph_contention_schedule((uint32_t)tasks,w,processor,(size_t)edges,from,to,cost,route,link,
                                           communication,2*p->pairs,rate,start,link_start);
   }
   if(!status){
-    /* T6: a communication's one start on its link (T4), each entry's its own */
-    for(size_t r=0;r<entries;r++)comm_start[communication[r]]=link_start[r];
-    for(uint64_t k=0;k<p->entries;k++)p->entry[k].start=comm_start[p->entry[k].communication];
-    /* S3: each group's least start and least walk, one pass over the rows by node and direction (the entries still in
-       walk order, entry k's walk k, so each row is in walk order and a group's first is its least walk) */
+    /* GO1: each edge of the task graph a chain of dependencies from its tail task through its route's communications,
+       in route order, to its head task (a local edge, of no route, one dependency from its tail to its head) */
+    size_t k=0;
+    for(size_t x=0;x<edges;x++){
+      uint32_t tail=from[x];
+      for(size_t r=route[x];r<route[x+1];r++,k++){before[k]=tail;tail=after[k]=(uint32_t)tasks+communication[r];}
+      before[k]=tail;after[k++]=to[x];
+    }
+    /* GO2: communication c's weight the greatest c(e) / b(L) over the route entries carrying it, from 0 (each such
+       quotient is > 0, every `page` weight and rate being > 0, and every communication lies on a route, plan_trees);
+       every dependency's cost 0 (`delay`) */
+    for(uint64_t c=0;c<p->comms;c++)w[tasks+c]=0;
+    for(size_t x=0;x<edges;x++)for(size_t r=route[x];r<route[x+1];r++){
+      const double occupy=cost[x]/rate[link[r]];
+      if(occupy>w[tasks+communication[r]])w[tasks+communication[r]]=occupy;
+    }
+    status=mesh_graph_bottom_levels((uint32_t)instructions,w,(size_t)dependencies,before,after,delay,level);
+    /* GO3: the global topological order by the heap, the greatest bottom level first, a tie to the lower instruction */
+    if(!status)status=mesh_graph_heap_order((uint32_t)instructions,level,(size_t)dependencies,before,after,place);
+  }
+  if(!status){
+    /* GO4: each entry at its communication's place; each group's least place in one pass over the rows by node and
+       direction (the entries still in plan_walk's order, so a group is a run of one nonzero `set` in its row) */
+    for(uint64_t j=0;j<p->entries;j++)p->entry[j].place=place[tasks+p->entry[j].communication];
     mesh_graph_rows(2*n,(size_t)p->entries,plan_entry_side,p->entry,side,grouped);
     for(uint32_t key=0;key<2*n;key++)
       for(size_t a=side[key],b;a<side[key+1];a=b){
         const struct plan_entry *x=p->entry+grouped[a];
-        double earliest=x->start;
+        uint32_t least=x->place;
         for(b=a+1;b<side[key+1] && x->set && p->entry[grouped[b]].set==x->set;b++)
-          if(p->entry[grouped[b]].start<earliest)earliest=p->entry[grouped[b]].start;
-        for(size_t c=a;c<b;c++){p->entry[grouped[c]].earliest=earliest;p->entry[grouped[c]].least=x->walk;}
+          if(p->entry[grouped[b]].place<least)least=p->entry[grouped[b]].place;
+        for(size_t c=a;c<b;c++)p->entry[grouped[c]].at=least;
       }
     qsort(p->entry,p->entries,sizeof *p->entry,plan_entry_order);
   }
-  free(reader);free(consumer);free(w);free(cost);free(rate);free(start);free(link_start);free(comm_start);
-  free(processor);free(from);free(to);free(link);free(communication);free(route);free(grouped);
+  free(reader);free(consumer);free(w);free(cost);free(rate);free(start);free(link_start);free(level);free(delay);
+  free(processor);free(from);free(to);free(link);free(communication);free(before);free(after);free(place);free(route);
+  free(grouped);
   return status;
 }
 
@@ -1032,9 +1133,11 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
    bytes down from the root: each demand's trees and their shares, a tree's vertices past its source and destinations
    the relays, members all.  The pages: each demand's pages cut over its trees by their shares by earliest finish
    (mesh_graph_fill), a tree's pages one run of them.  The order: one execution's task graph scheduled (plan_schedule;
-   design/plan-to-bridge-change-request.md, R3 to R5), this node's entries in their groups' scheduled order (S3).  The
-   sets: a demand whose every declared transfer is MESH_PAGES is a set on each of its trees (S1, S2; its `set`).  Every
-   rank computes the same demands, trees, pages, template, u and schedule from the same declared transfers, weights,
+   design/plan-to-bridge-change-request.md, R3 to R5), and its instructions, the tasks and the communications, in one
+   global topological order by bottom level (MSCCLang §5.2, step 3), this node's entries in it, a set's at its first
+   page's place (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO1 to GO5).  The sets: a
+   demand whose every declared transfer is MESH_PAGES is a set on each of its trees (S1, S2; its `set`).  Every rank
+   computes the same demands, trees, pages, template, u, schedule and order from the same declared transfers, weights,
    dependences and map, and writes its own hops of them (plan_walk, plan_schedule).
    The plan's name (design/compilation-coordination.md, N1): (group, function), `function` the program's ordinal of
    the compiled function, held in struct mesh_state `epoch`; `*plan` the plan's handle once it stands (N2).
@@ -1044,7 +1147,7 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
       (plan_acyclic), the least lags and u (plan_unroll), this node's entries of one copy counted and every room
       (ENOMEM where the receives, the entries or the rows pass their words), the state section's layout with the
       entries in it (plan_layout), the items and both colourings (plan_place), the entries filled (plan_walk) and in
-      their groups' schedule order (plan_schedule), the plan's nodes and sender; EEXIST where a plan standing at this
+      their groups' order (plan_schedule, GO4), the plan's nodes and sender; EEXIST where a plan standing at this
       node on the same map is already (group, function), the claims' heads walked (mesh-dataflow.h mesh_head_after and
       mesh_head_state);
    2. the claim (mesh-dataflow.h mesh_claim_take), its generation from hdr `serial` (the draft's §6, step 2: one past
@@ -1053,9 +1156,11 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
       x block; local pages, the local one's.  ENOMEM leaves every plan of the program standing;
    3. the state section started once (D3: its bytes before the entries 0, then struct mesh_state's `copies`,
       `receives`, `ranges`, `releases`, region offsets, `group`, `epoch` (the function, N1), `serial`, `hops`,
-      `entries`, `nodes` and `sender`; `held`, every `refused`, `submitted`, `released` and every `served` 0), every
+      `entries`, `sequences`, `nodes` and `sender`; `held`, every `refused`, `submitted`, `released`, every `taken`
+      and every sequence word 0: design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1), every
       `state` 1 value's bytes 0 once (D3), every value's rows named and bound copy by copy (mesh_backing_bind), every
-      value row's publication written, the entries u x n, each with its `set` (S3); no data page is written;
+      value row's publication written, the entries u x n in plan_schedule's order, each with its `set` (S1, S2); no
+      data page is written;
    4. the map read again: where its serial moved, or the reader failed, this claim alone closed
       (mesh_claim_close(context, generation), which the bridge releases once no port holds it, D10), `*plan`
       untouched: ESTALE, or the reader's error (N3);
@@ -1115,6 +1220,10 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
      start on a link can precede its finish on the link before, and the start order is not shown to be a topological
      order of the bridge's store-and-forward waits.  Open for the operator (design/compilation-coordination.md, the
      appendix's revisions, record).  The EINVAL stays.
+     2026-11-04, owner C3 (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO4): no list is
+     ordered by the starts now; the no-cycle argument is GO4's (plan_schedule), over the instruction DAG's
+     store-and-forward dependencies, and it rests on no weight.  So `page` > 0 keeps no reason from it; the EINVAL
+     stays, as C-weights decided it (the open item "No cycle on a cable", where the refusal "stays").
      2026-11-04, owner C: reversing >= 0 for every weight.  Why: C-weights (reviews V1 #8, V3 #5).  What must stay:
      EINVAL before anything is written */
   for(uint32_t i=0;i<count;i++){
@@ -1178,7 +1287,8 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
     struct plan_demand *d=p.demand+p.of[i];
     /* a set where every declared transfer of the range is MESH_PAGES, function B at every destination; any MESH_JOIN
        destination keeps the schedule's order (design/compilation-coordination.md, S1; design/aot-compilation-change-
-       request.md, appendix item 5: "Function A's operands (joins) keep the schedule's order") */
+       request.md, appendix item 5: "Function A's operands (joins) keep the schedule's order"), each of its pages at its
+       own place in R5's one global order (GO4) */
     if(t->kind!=MESH_PAGES)d->set=0;
     /* one range: its bytes alike, each destination once, its production and its source's read weighing alike
        (design/compilation-coordination.md, "The plan call", struct mesh_weight) */
@@ -1268,8 +1378,9 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
     }
   }
   /* 1. the trees' communications, the template, no lag-0 cycle, the least lags and u; this node's entries of one copy
-     counted and its rooms; the state section's layout; the items and both colourings; the entries in schedule order;
-     the plan's nodes and sender; its name unused at this node: all before anything is claimed or written */
+     counted and its rooms; the state section's layout; the items and both colourings; the entries in their groups'
+     order (GO4); the plan's nodes and sender; its name unused at this node: all before anything is claimed or
+     written */
   if((status=plan_trees(&p)) || (status=plan_template(&p,dependence,dependences)) || (status=plan_acyclic(&p)) ||
      (status=plan_unroll(&p)))goto done;
   plan_walk(&p);
@@ -1339,6 +1450,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
   state->serial=p.serial;
   state->hops=base+p.hops;
   state->entries=entries;
+  state->sequences=base+p.sequences;
   state->nodes=spanned;
   state->sender=(uint32_t)__builtin_ctzll(spanned);
   /* every value's rows, from the head's next, copy c's rows first + c x P + k bound to its copy's pages (an item's
@@ -1383,12 +1495,12 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
     }
     row+=copies*P;
   }
-  /* the entries, copy c's n at [c n, c n + n) of the section's `hops`, in schedule order (plan_schedule), each naming
+  /* the entries, copy c's n at [c n, c n + n) of the section's `hops`, in plan_schedule's order (GO4), each naming
      copy c's page and words (mesh.h struct mesh_hop): a receive its field's word and low bit in its range's copy-c
      group, its range's copy-c count word where this node consumes the range (0 at a relay, whose receive the bridge
      counts nothing for: review 15's finding 1) and P_g; a forwarding send its receive's word and field; a send from the
      range's source its release's supplied word; each its page's bytes, page k of a range of B bytes min(Q, B - k Q), Q
-     = block x pgsz (design/compilation-coordination.md, T7); each its entry's `set`, every copy's the same (S3) */
+     = block x pgsz (design/compilation-coordination.md, T7); each its entry's `set`, every copy's the same (S1, S2) */
   struct mesh_hop *hop=mesh_hops(m,state);
   for(uint32_t c=0;c<u;c++)for(uint64_t j=0;j<p.entries;j++){
     const struct plan_entry *e=p.entry+j;
