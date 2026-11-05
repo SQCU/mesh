@@ -204,78 +204,111 @@ statement, or a fact of the code.
 
 > nothing happens when a program joins or leaves because a program is a sequence of like, function calls.
 
-- The code must order the function executions of every program that runs on the same nodes in one order, the same at
-  every node.
-- **Method:** Pathways (P. Barham et al., Pathways: asynchronous distributed dataflow for ML, MLSys 2022).
+> it is rqeuired to choose nad use a scheduler. cite anyhthing do anything but don't use idiomatic citation free claude
+> code anywhere here
+
+> "The real question sits at the sequencer's level. " perhaps this must be said more definitely and more literally and
+> more citationally in the change request documentation s.t. any competing interpretations are completely ablated...
+
+- **What the code must do.** Order the function executions of every program on the island in one order, the same at
+  every node, and keep each program's own order of its calls within it.
+- **Why there is one order.** Pathways (P. Barham et al., Pathways: asynchronous distributed dataflow for ML, MLSys
+  2022):
   - §2: "the system will deadlock if communicating computations are not enqueued in a consistent order".
   - §4.4: "The PATHWAYS runtime includes a centralized scheduler per island that consistently orders all of the
     computations in the island", by "communicating with the scheduler to determine a consistent order of function
     executions across all programs running on the island". "Our current implementation simply enqueues work in FIFO
     order."
-  - The island is the map's Thunderbolt-linked component (A4).
-  - Each function execution runs its own compiled schedule (A6).
-- **The scheduler is a fixed sequencer.**
-  > it is rqeuired to choose nad use a scheduler. cite anyhthing do anything but don't use idiomatic citation free claude
-  > code anywhere here
-  - It is the fixed-sequencer class of total-order broadcast (X. Défago, A. Schiper and P. Urbán, Total order broadcast
-    and multicast algorithms: taxonomy and survey, ACM Comput. Surv. 36(4), 2004).
-  - One process, the sequencer, gives every function execution submitted on the island its sequence number, in the
-    order the submissions reach it. Pathways' scheduler is first-in, first-out in just this way (§4.4).
-  - Every node delivers function executions in sequence-number order (appendix item 2). The pages of delivered
-    executions interleave on each cable (T99).
-  - Each function execution is submitted once, by its program's submitter (below), to that node's bridge, which
-    forwards it to the sequencer. (Corrected 2026-11-05: the text said "by its plan's least node (`sender`,
-    rdma/mesh.h: "the fixed sequencer's one sender a message")". One program's plans have different least nodes, so
-    that sent one program's calls to the sequencer from several nodes.)
-- **The sequencer is unique and stays where it is.** Défago, Schiper and Urbán, §7.1: "The sequencer is unique, and the
-  responsibility is not normally transfered to another processes". It is the bridge of the highest-numbered node the map
-  reaches (rdma/mesh-records.c `island_set`): the code's choice, which the fixed-sequencer class leaves open. A plan
-  stands only while its map does (design/disjoint-pages-change-request.md D.3.6), so no standing plan's sequencer
-  changes. (Corrected 2026-11-05: the text called this the bully algorithm's coordinator (H. Garcia-Molina, IEEE Trans.
-  Comput., 1982). No election runs, so that algorithm is not used.)
-- **One program's calls are broadcast by one sender, in the program's order.**
+  - The island is the map's Thunderbolt-linked component (A4). Each function execution runs its own compiled schedule
+    (A6).
+- **The scheduler is total order multicast by a fixed sequencer**, as X. Défago, A. Schiper and P. Urbán define both
+  (Total order broadcast and multicast algorithms: taxonomy and survey, ACM Comput. Surv. 36(4), 2004). Nothing else
+  orders function executions.
+  - **The primitives** (§3): "total order broadcast is defined in terms of two primitives, which are called
+    TO-broadcast(m) and TO-deliver(m)". Every message "carries the identity of its sender, denoted by sender (m)".
+  - **The properties the code must have**, verbatim:
+    - "(VALIDITY) If a correct process TO-broadcasts a message m, then it eventually TO-delivers m." (§3)
+    - "(UNIFORM AGREEMENT) If a process TO-delivers a message m, then all correct processes eventually TO-deliver m."
+      (§3)
+    - "(UNIFORM INTEGRITY) For any message m, every process TO-delivers m at most once, and only if m was previously
+      TO-broadcast by sender (m)." (§3)
+    - "(UNIFORM TOTAL ORDER) If processes p and q both TO-deliver messages m and m′, then p TO-delivers m before m′ if
+      and only if q TO-delivers m before m′." (§3)
+    - "(FIFO ORDER) If a correct process TO-broadcasts a message m before it TO-broadcasts a message m′, then no
+      correct process delivers m′ unless it has previously delivered m." (§4.3.1)
+    - "(GLOBAL TOTAL ORDER) The relation < is acyclic, where < is defined as follows: m < m′ if and only if any correct
+      process delivers m and m′, in that order." (§5.2.3)
+  - **The algorithm** is their Fig. 5, the "UB" variant of §7.1, as written:
+    - Sender: "procedure TO-broadcast(m): send (m) to sequencer".
+    - Sequencer: "Initialization: seqnum := 1"; "when receive (m): sn(m) := seqnum; send (m, sn(m)) to all; seqnum :=
+      seqnum + 1".
+    - Destinations: "Initialization: nextdeliver := 1; pending := ∅"; "when receive (m, seqnum): pending := pending ∪
+      {(m, seqnum)}; while ∃(m′, seqnum′) ∈ pending : seqnum′ = nextdeliver do deliver (m′); nextdeliver :=
+      nextdeliver + 1".
+  - **Multicast to many groups** is their §5.2.4, as written: "1. form a super-group with the union of all destination
+    groups; 2. whenever a message m is multicast to a group, multicast it to the super-group, and 3. processes not in
+    Dest(m) discard m." The super-group is the island's nodes. One sequence numbers every message and every node
+    delivers in its order, so no two nodes deliver two messages in opposite orders, and Global Total Order holds.
+  - **What each term names here:**
+    - **m** is one submission: its plan's name (`group`, `epoch`), the map serial it was made on, and a range of its
+      executions [`first`, `end`) (rdma/mesh-bridge.h struct mesh_order). One submission is one message however many
+      executions it carries, as Pathways sends "a single message (describing the entire subgraph)" (§4.5). e2b's run is
+      one message.
+    - **sender(m)** is the program's one sender: the least of the program's nodes, the program being its launcher's
+      `group` (rdma/mesh.h). It TO-broadcasts the program's submissions in the order the program makes them.
+    - **The sequencer** is the bridge of the highest-numbered node the map reaches (rdma/mesh-records.c `island_set`),
+      the code's choice, which the class leaves open. "The sequencer is unique, and the responsibility is not normally
+      transfered to another processes" (§7.1).
+    - **sn(m)** is struct mesh_order's `sequence`.
+    - **Dest(m)** is the nodes of m's plan (struct mesh_order's `nodes`).
+    - **deliver(m)** at a node of Dest(m) appends m to its plan's queue there (appendix item 2), which releases its
+      executions at the node. The pages of delivered executions interleave on each cable (T99).
+  - **Failures.** "This algorithm does not tolerate the failure of the sequencer" (§7.1). A plan stands only while its
+    map does (design/disjoint-pages-change-request.md D.3.6), so a loss ends every plan it touches, and no standing
+    plan's sequencer changes.
+- **One sender for each program.** "Total Order alone does not guarantee that messages are delivered in the order in
+  which they are sent" (§4.3.1), and FIFO Order is a property of one sender's messages. Where two nodes broadcast calls
+  of one program, nothing makes one node's broadcast precede the other's (Lamport's "precedes", their Definition 1), so
+  neither FIFO Order nor Causal Order (§4.3.2) need keep the program's order. With one sender, whose messages reach the
+  sequencer first in, first out, Fig. 5's sequencer numbers them in the order they were sent ("when receive (m) sn(m)
+  := seqnum"). So FIFO Order holds, and with it A10's order constraints between the program's calls.
+- **A plan's destinations exist before its first message.** Section 3's specification is "the standard specification
+  of total order broadcast in a static system, that is, a system in which all processes are created at system
+  initialization" (§6).
+  > "What I was describing is that compilation finishes at different nodes at different times. "
+  > this is trivially allowed and if claudes would stop delaying basic logistics for collective propgramming by going
+  > off the rails all the time we could be talking about how to use the collective as a work stealing compute bloc
+  > allowing nodes to cooperatively accelerate remaining compilation work on peers that somehow haven't finished yet.
+  > but fancy use cases require our library code to already work at roughly literature-sota optimality for all tasks
+  > rahter htan special narrow cased imaginary tasks claude hypothesises when writing idiomatic code or idiomatic specs.
+  - Nodes finish compiling a plan at different times, and that is allowed. A plan is created as an NCCL communicator
+    is: "ncclCommInitRank implicitly synchronizes with other ranks" (NCCL 2.32.3, API, Communicator Creation and
+    Management Functions).
+  - The program's sender counts the plan's nodes as each holds the plan, as a centralized barrier counts arrivals:
+    "each processor updates a small amount of shared state to indicate its arrival and then polls that state to
+    determine when all of the processors have arrived" (J. M. Mellor-Crummey and M. L. Scott, Algorithms for scalable
+    synchronization on shared-memory multiprocessors, ACM TOCS 9(1), 1991, §3.1). It TO-broadcasts no submission of
+    the plan before every node of the plan has arrived. A node lost first moves the map, and the plan fails with
+    `ESTALE` (D.3.6).
+- **Corrections** (2026-11-05):
+  - The text before had each call submitted "by its plan's least node (`sender`, rdma/mesh.h: "the fixed sequencer's
+    one sender a message")". A program's plans have different least nodes, so one program had several senders and no
+    FIFO Order between them. That was the deadlock in Claude's turn. The works cited have none: Pathways' one client
+    and FIFO scheduler give the consistent order its §2 requires.
+  - The text before called the sequencer the bully algorithm's coordinator (H. Garcia-Molina, IEEE Trans. Comput.,
+    1982). No election runs, so that algorithm is not used.
+  - The text before reasoned from the bridge's ports and lanes, and from plans made "at run time". Lanes are the
+    bridge's alone (design/plan-to-bridge-change-request.md R7, "Nothing outside the bridge knows the transport"), and
+    a plan is the compilation's output, made before its function runs (A1, A6).
   > 'blah blah blah deadlock' do the works we cite in the literature have deadlocky runtimes or compiletimes or was that
   > a deviation from the work we were developing?
-  - "Total Order alone does not guarantee that messages are delivered in the order in which they are sent". The
-    property that does is FIFO Order: "If a correct process TO-broadcasts a message m before it TO-broadcasts a message
-    m′, then no correct process delivers m′ unless it has previously delivered m" (Défago, Schiper and Urbán, §4.3.1).
-    It relates the messages of one process. Where two nodes running one program each broadcast some of its calls,
-    nothing makes one node's broadcast of a call precede the other's broadcast of a later call (Lamport's "precedes",
-    their Definition 1), so neither FIFO Order nor Causal Order (§4.3.2) need keep the program's order between them.
-  - So every call of one program (its launcher's `group`, rdma/mesh.h) is broadcast by one node, the least of the
-    program's nodes, in the order the program makes the calls. This is Pathways' one client a program, "We adopt a
-    single-controller model" (§2), whose scheduler "simply enqueues work in FIFO order" (§4.4). The sequence numbers
-    then keep the program's order, and with it A10's constraints ("so the sequencer's first-in, first-out numbers keep
-    them too").
-  - **The works cited have no deadlock at run time or at compile time.** Pathways: "the system will deadlock if
-    communicating computations are not enqueued in a consistent order" (§2); its one client and its FIFO scheduler give
-    that order. NCCL: "Thus to remain deadlock free, users must ensure the order of host-side launches matches for all
-    devices" (NCCL 2.32.3 User Guide, "Using multiple NCCL communicators concurrently"). Synchronous dataflow finds a
-    deadlock when the program is compiled: "If no node in L can be scheduled, indicate a deadlock (an error in the
-    graph)" (Lee and Messerschmitt, IEEE Trans. Computers C-36(1), 1987, its scheduler's step 5).
-  - The deadlock in Claude's turn was this document's deviation from them: each call broadcast by its plan's least
-    node, so one program had several senders and no FIFO Order between them.
-- **A plan is created at every node of it before its first call is broadcast**, as an NCCL communicator is:
-  "ncclCommInitRank implicitly synchronizes with other ranks" (NCCL 2.32.3, API, Communicator Creation and Management
-  Functions).
-  - Why: the sequencer relays each call "to the destinations" (Défago, Schiper and Urbán, §7.1), which are the nodes of
-    its plan, and each delivers it into that plan's queue there, laid out with the plan (appendix item 2).
-  - The algorithm: the program's sender counts the plan's nodes as each creates the plan, as a centralized barrier
-    counts arrivals: "each processor updates a small amount of shared state to indicate its arrival and then polls that
-    state to determine when all of the processors have arrived" (J. M. Mellor-Crummey and M. L. Scott, Algorithms for
-    scalable synchronization on shared-memory multiprocessors, ACM TOCS 9(1), 1991, §3.1). Only the sender reads the
-    count, and it broadcasts no call of the plan before every node has arrived. A node lost first moves the map, and
-    the plan fails with `ESTALE` (design/disjoint-pages-change-request.md D.3.6).
-- (Corrected 2026-11-05, later: the text before reasoned from the bridge's ports and lanes and their hold at a call,
-  and from plans made "at run time". Lanes are the bridge's alone (design/plan-to-bridge-change-request.md R7, "Nothing
-  outside the bridge knows the transport"), and a plan is the compilation's output, made before its function runs
-  (A1, A6). Neither belongs in this document.)
+
   > ""Holding a lane," plainly:" did you need to talk about this at all or is it an irrelevant distraction from the levle
   > ofa bstraction and the specific scopes of interfaces involved in the change request?
 
-  > what does making plans at run time mean when you retreat from idiom yet again... it surte sounds to me like a bunch
-  > of idiom has crept in at multiple levels of specification and has floated along without citation or useof canonical
-  > literature, algorithms, data structures...
+  > "That was the whole deadlock: my A7 gave one program several senders."
+  > then this is an undercitation over-idiom issue and has a known remedy (making specification more explicit, more
+  > citational, less idiomatic, removing ad libs that feel zesty and fun and exciting to write.)
 
 ### A8. The IR operand
 
@@ -459,12 +492,12 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 
   > what's an 'order' if you use non-idiomatic terminology?
 
-  - The sequencer numbers each call (Défago, Schiper and Urbán, 2004). A call is one execution of its compiled function,
-    as in Pathways §4.4 ("function executions"). A program submits one call per execution.
+  - The sequencer numbers each message m, A7's submission: a plan's name and a range of its executions (Défago, Schiper
+    and Urbán, 2004). An execution is Pathways' unit, "function executions" (§4.4).
   - **What the code calls an ORDER** is the fixed sequencer's relayed message. Défago, Schiper and Urbán, §7.1: "To
     broadcast a message m, a sender sends m to the sequencer. Upon receiving m, the sequencer assigns it a sequence
     number and relays m with its sequence number to the destinations. The latter then deliver messages according to
-    the sequence numbers." Here m is the submitted call, its plan and its execution.
+    the sequence numbers." Here m is A7's submission.
   - **Each node runs the destinations' code of their Fig. 5, as written:**
     - "when receive (m, seqnum)": pending := pending ∪ {(m, seqnum)};
     - "while ∃(m′, seqnum′) ∈ pending : seqnum′ = nextdeliver do deliver (m′); nextdeliver := nextdeliver + 1".

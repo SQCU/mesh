@@ -1819,6 +1819,32 @@ design/aot-compilation-change-request.md, and are held here once.
 > "Still idiomatic in 9b2c0869:"
 > address in repo documents where not conflicted w/ other problems raised by this user turn...
 
+**Claude:**
+
+> (・_・ ) No, I didn't need to bring up any of it. All three were bridge internals or idioms dragged above the level of the change request. The documents now say it at their own level (mesh `8e403496`, pushed).
+>
+> **"Holding a lane":** an irrelevant distraction. Lanes and queue pairs are the bridge's alone: R7, "Nothing outside the bridge knows the transport." I was reasoning from bridge code (`lane_take`) instead of from the change request's own terms: programs, plans, nodes, calls and pages.
+>
+> **"Making plans at run time":** it means nothing in an ahead-of-time compilation. A plan is the compilation's output, made before its function runs (A1, A6). What I was describing is that compilation finishes at different nodes at different times. The literature handles that the way NCCL creates a communicator: "ncclCommInitRank implicitly synchronizes with other ranks." The change request needs that for one reason, stated in its own terms. The sequencer relays a call "to the destinations," the nodes of its plan, and each delivers it into the plan's queue, which is laid out with the plan. So a plan exists at every node of it before its first call goes out. The program's sender counts arrivals as a centralized barrier does (Mellor-Crummey & Scott §3.1). Last turn I proposed moving this to the program's compile/run boundary. NCCL and MPI create communicators one at a time, so it stays per plan.
+>
+> **Queue pairs:** there was no reason to invoke them. The real question sits at the sequencer's level. Défago §4.3.1: "Total Order alone does not guarantee that messages are delivered in the order in which they are sent." FIFO Order relates only one process's messages. So a program's calls keep the program's order only if one node broadcasts them all, which is Pathways' single controller ("We adopt a single-controller model"). That was the whole deadlock: my A7 gave one program several senders.
+>
+> **Idiom at several levels, now restated:**
+> - **A7:** the deadlock reasoning used ports, lanes and `lane_take`. It now rests on FIFO Order and per-plan creation, with a dated correction quoting you.
+> - **Item 2:** the queue and merge used ports, lanes and cable ends. Now each plan's delivered calls reach the bridge at a node through that plan's own queue, as synchronous dataflow gives each arc its FIFO queue. The bridge takes them by a multiway merge on sequence number, and the room comes from C3.3's reuse of copies.
+> - **Item 5:** the round rule talked about ports' children and posting receives. It now names a page for round j (D.3.5's own term) once its range's rising count allows.
+> - **Item 5:** the deadlock argument had defined Dally & Seitz's channel as a "lane." A channel is now any first-in, first-out sequence the bridge keeps between adjacent nodes, and how many a cable has is the bridge's business.
+>
+> "Lane" now appears only in the correction note that says what was removed. The "ports" left in the fabric listing are hardware Thunderbolt ports, which are topology data. I've regenerated the turns through your message. Nothing has been dispatched.
+
+**The operator:**
+
+> "The real question sits at the sequencer's level. " perhaps this must be said more definitely and more literally and more citationally in the change request documentation s.t. any competing interpretations are completely ablated...
+> "What I was describing is that compilation finishes at different nodes at different times. "
+> this is trivially allowed and if claudes would stop delaying basic logistics for collective propgramming by going off the rails all the time we could be talking about how to use the collective as a work stealing compute bloc allowing nodes to cooperatively accelerate remaining compilation work on peers that somehow haven't finished yet. but fancy use cases require our library code to already work at roughly literature-sota optimality for all tasks rahter htan special narrow cased imaginary tasks claude hypothesises when writing idiomatic code or idiomatic specs.
+> "That was the whole deadlock: my A7 gave one program several senders."
+> then this is an undercitation over-idiom issue and has a known remedy (making specification more explicit, more citational, less idiomatic, removing ad libs that feel zesty and fun and exciting to write.)
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
