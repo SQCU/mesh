@@ -107,12 +107,15 @@
 
    The plan's name, and the plan in its claim (design/compilation-coordination.md, "The plan call" and Q5; the draft
    e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", as the operator's ruling 1 allows it).
-   `group`: the launcher's (MESH_GROUP), the same at every rank of a run; 0 is EINVAL.  `epoch`: the context's count of
-   its mesh_plan calls (mesh-dataflow.h struct mesh_ctx `epoch`), raised at the call's entry, every rank of an SPMD
-   program raising its own alike.  The plan is (group, epoch): EEXIST where a plan standing at this node already has
-   that name.  The plan's state section is in its claim, and the claim's head row's publication `state` names it once
-   the plan stands; context->state is that offset, and hdr's one-plan fields (`hops`, `plan`, `state`, `hop_off`,
-   `hop_capacity`) are neither read nor written.
+   `group`: the launcher's (MESH_GROUP), the same at every rank of a run; 0 is EINVAL.  `epoch` (design/compilation-
+   coordination.md, C-epoch): one past the context's count of its plans that stood (mesh-dataflow.h struct mesh_ctx
+   `epoch`), or, where the context's standing plan is cancelled (its `serial` not this node's map serial, D.3.6), that
+   plan's own, the call its replan, so every rank names the plan alike whichever rank saw the map move first; the count
+   is raised only once the plan stands, so a failed call consumes no epoch.  The plan is (group, epoch): EEXIST where
+   a plan standing at this node on the same map already has that name (a cancelled one is ignored).  The plan's state
+   section is in its claim, and the claim's head row's publication `state` names it once the plan stands;
+   context->state is that offset, and hdr's one-plan fields (`hops`, `plan`, `state`, `hop_off`, `hop_capacity`) are
+   neither read nor written.
 
    The state section (mesh.h struct mesh_state, at its claim's head's publication `state`), an invariant item outside
    the window, apart from every data page: the struct, then the phase list (each received range's 2-bit Gray-coded
@@ -137,14 +140,15 @@
    at [c n, c n + n), every copy's the same hops in the same order.
 
    Returns 0; EINVAL (a malformed transfer, weight, value or dependence: a kind other than MESH_JOIN and MESH_PAGES, the
-   transfers of one range giving different `produced` or `read`, a weight not finite or negative, `group` 0; a lag-0
-   cycle); EEXIST (a plan standing at this node is already (group, epoch)); EHOSTUNREACH (a source or destination not in
-   the map, or with no Thunderbolt-5 path within it); ENOMEM (no free run for the claim; a value with no unroll bound,
-   or whose write does not reach its next instance at lag 1 (the contract's D5), named on stderr by its index and its
-   range's identity; the call's own memory); ESTALE (the map moved while planning: plan again on the map as it is); or
-   the map reader's error.  Every failure but ESTALE and the second map read's is found before anything is written, and
-   leaves the context's standing plan standing; with those, this plan's claim and every earlier one of the client are
-   closed, context->state is 0 and no plan of the context stands.  There is no ETIMEDOUT: nothing waits.
+   transfers of one range giving different `produced` or `read`, a weight not finite or not above 0, `group` 0; a
+   lag-0 cycle); EEXIST (a plan standing at this node on the same map is already (group, epoch)); EHOSTUNREACH (a
+   source or destination not in the map, or with no Thunderbolt-5 path within it); ENOMEM (no free run for the claim;
+   a value with no unroll bound, or whose write does not reach its next instance at lag 1 (the contract's D5), named
+   on stderr by its index and its range's identity; the call's own memory); ESTALE (the map moved while planning:
+   plan again on the map as it is); or the map reader's error.  Every failure but ESTALE and the second map read's is
+   found before anything is written, and leaves the context's standing plan standing; with those, this plan's claim
+   and every earlier one of the client are closed, context->state is 0 and no plan of the context stands.  There is no
+   ETIMEDOUT: nothing waits.
    2026-11-04, sub-assignment 3: reversing 2026-11-03's call (sub-assignments 3-5), which took `executions` and unrolled
    every execution into its own instances, took each range's section from mesh_section_create, zeroed every declared
    page and every word it used, and waited for the previous plan's erase (mesh-call.h mesh_plan_erased, ETIMEDOUT).
@@ -172,7 +176,9 @@ struct mesh_declared { uint32_t source,destination,identity,kind,value,padding; 
    produced: w of the range's production at its source; consumed: w of the consumption at declared[i]'s destination
    (for MESH_PAGES, of each page's task); read: w of the source's own read of the range (where a dependence names it);
    page: c of each page's edge to declared[i]'s destination.  The transfers of one range give the same produced and
-   read (EINVAL otherwise).  Every weight finite and >= 0 (EINVAL otherwise).  The cables' capacities are the map's. */
+   read (EINVAL otherwise).  Every weight finite and > 0 (EINVAL otherwise; design/compilation-coordination.md,
+   C-weights: Sinnen and Sousa's Definition 1, "The positive weight w(n)", and every link occupation > 0, 2026-11-04,
+   where it was >= 0).  The cables' capacities are the map's. */
 struct mesh_weight { double produced,consumed,read,page; };
 /* a program's data edge at one node: event `from` happens before event `to`, `to` in execution t + lag where `from`
    is in t.  An event is declared[i]'s production at its source (its kinds bit set: MESH_FROM_PRODUCED for `from`,
@@ -188,8 +194,9 @@ struct mesh_weight { double produced,consumed,read,page; };
 #define MESH_TO_SOURCE_READ 8u
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
 /* group: the launcher's (MESH_GROUP), the same at every rank, 0 EINVAL; the plan is (group, epoch), epoch
-   context->epoch after the call raises it.  ENOSPC for the page lists' room goes (the entries are in the plan's state
-   section) */
+   context->epoch + 1, or the context's cancelled standing plan's (its replan), context->epoch raised to it once the
+   plan stands (design/compilation-coordination.md, C-epoch, 2026-11-04, where the call raised it at its entry).
+   ENOSPC for the page lists' room goes (the entries are in the plan's state section) */
 int mesh_plan(struct mesh_ctx *,uint64_t group,const struct mesh_declared *,const struct mesh_weight *,uint32_t count,
               struct mesh_value *,uint32_t values,const struct mesh_dependence *,uint32_t dependences);
 

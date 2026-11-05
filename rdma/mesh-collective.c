@@ -758,7 +758,9 @@ static void plan_walk(struct plan *p){
 
 /* mesh_graph_climb's visit, the route of a page down its tree from the root to `below` (plan_schedule): the vertex
    met at step s >= 1 is the parent of the one met at step s - 1, and the tree edge between them is the route's link
-   depth - s, in route order from the root; `head` that link's lower vertex */
+   depth - s, in route order from the root; `head` that link's lower vertex.  A visit of mesh_graph_climb recording the
+   edges it visits, as plan_tree_up does, so it stays here (design/compilation-coordination.md, C9 rulings); the route
+   is the tree path the fill gave the page (T1) */
 struct plan_path { const uint32_t *link_of; uint32_t n,depth,below,*link,*head; };
 static void plan_path_step(void *consumer,uint32_t at,uint32_t step){
   struct plan_path *path=consumer;
@@ -768,8 +770,9 @@ static void plan_path_step(void *consumer,uint32_t at,uint32_t step){
   }
   path->below=at;
 }
-/* an event's tasks (plan_schedule), its first and how many: P(d) and S(d) one each, a consumption one for MESH_JOIN
-   and one a page for MESH_PAGES */
+/* an event's tasks (plan_schedule; design/compilation-coordination.md, T1: the tasks are the template's events, a
+   consumption one task for MESH_JOIN and one a page for MESH_PAGES, design/plan-to-bridge-change-request.md, R4), its
+   first and how many: P(d) and S(d) one each, a consumption one or its range's pages */
 struct plan_span { uint32_t first,count; };
 static struct plan_span plan_tasks(const struct plan *p,const struct plan_span *consumer,const uint32_t *reader,
                                    uint32_t i,int produced,int own){
@@ -799,10 +802,11 @@ static int plan_entry_order(const void *a,const void *b){
      edge from P to the consumption (to page k's task for MESH_PAGES), of cost `page`, its route the tree path the
      fill gave page k, from the source down to the destination (mesh_graph_climb, plan_path_step); each P(d) -> S(d);
      each dependence of lag 0 in the dependences' order, from each task of its `from` event to each of its `to`
-     event's (T1: an edge out of a MESH_PAGES consumption leaves from each of its page tasks; an edge into one enters
-     each of them, since plan_template's consumption takes an edge in before its first read and one out after its
-     last, and a MESH_PAGES consumption reads its pages in any order, R4).  A local edge has no route and costs 0
-     (Sinnen and Sousa, Definition 2, Property 2, which Definition 7 keeps: local communication has zero cost).
+     event's (T1: an edge out of a MESH_PAGES consumption leaves from each of its page tasks; design/compilation-
+     coordination.md, T1': an edge into one enters each of them, each page's task the function's work on that page
+     after its local predecessors).  A local edge (P -> S, a lag-0 dependence) has no route and costs 0 (T1': Sinnen
+     and Sousa's classic model, local communication free, Definition 2, kept by the contention model, Definition 8,
+     (15)).
    - The topology graph (Sinnen and Sousa, Definition 4), T2: the node graph's pairs, pair e two directed links, 2e
      from[e] -> to[e] and 2e + 1 back, each of relative data rate b(L) the pair's capacity over the greatest pair's.
    - T4: every route entry of one page over one tree edge is one communication (plan_communication), which the
@@ -946,14 +950,14 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
    dependences and map, and writes its own hops of them (plan_walk, plan_schedule).
    Then, in the order of the draft e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", steps 1
    to 6, as the operator's ruling 1 allows it (design/compilation-coordination.md, Q5):
-   1. everything computed first: the plan's epoch (context->epoch raised at the call's entry: design/compilation-
-      coordination.md, "The region", struct mesh_ctx), the trees' communications (plan_trees), the template
+   1. everything computed first: the plan's epoch (design/compilation-coordination.md, C-epoch: one past the
+      context's count, or its cancelled standing plan's), the trees' communications (plan_trees), the template
       (plan_template), no lag-0 cycle (plan_acyclic), the least lags and u (plan_unroll), this node's entries of one
       copy counted and every room (ENOMEM where the receives, the entries or the rows pass their words), the state
       section's layout with the entries in it (plan_layout), the items and both colourings (plan_place), the entries
       filled (plan_walk) and in schedule order (plan_schedule), the plan's nodes and sender; EEXIST where a plan
-      standing at this node is already (group, epoch), the claims' heads walked (mesh-dataflow.h mesh_head_after and
-      mesh_head_state);
+      standing at this node on the same map is already (group, epoch), the claims' heads walked (mesh-dataflow.h
+      mesh_head_after and mesh_head_state);
    2. the claim (mesh-dataflow.h mesh_claim_take), its generation from hdr `serial` (the draft's §6, step 2: one past
       its count, never 0), its head's `start` the take's: rows, the head and every value's count x P after it (count u
       for a routed value, k for a value of lag k >= 1, 1 for every other); window pages, the window colouring's blocks
@@ -966,7 +970,8 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
    4. the map read again: where its serial moved, or the reader failed, this claim and every earlier one of the
       client closed and context->state 0: ESTALE, or the reader's error;
    5. the head's publication `state` the section's region offset (release): the plan stands; context->state that
-      offset; hdr `plans` raised and woken (mesh.h mesh_notify: "every publication of a plan (mesh_plan) ... adds 1");
+      offset and context->epoch the plan's epoch (C-epoch); hdr `plans` raised and woken (mesh.h mesh_notify: "every
+      publication of a plan (mesh_plan) ... adds 1");
    6. every earlier claim of this client closed (mesh_claim_close(context, g, 1)), which the bridge releases once no
       port holds it (D10), and `plans` raised and woken again, by the close (mesh-dataflow.h mesh_claim_close: every
       close of a claim adds 1).  Nothing waits for it.
@@ -990,8 +995,6 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
               const struct mesh_weight *weights,uint32_t count,struct mesh_value *values,uint32_t given,
               const struct mesh_dependence *dependence,uint32_t dependences){
   struct hdr *m=context->M;
-  /* the plan's name (group, epoch), the epoch this context's count of its calls, raised at the call's entry */
-  const uint64_t epoch=++context->epoch;
   if(!group || (count && (!declared || !weights)) || (given && !values) || (dependences && !dependence))return EINVAL;
   /* a value: its bytes, its kind, its wire and state flags, and its lag (k >= 1 only on an execution value outside the
      window that is no state: design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-
@@ -1003,13 +1006,18 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
        (v->lag && (v->kind!=MESH_EXECUTION || v->wire || v->state)))return EINVAL;
     if(plan_blocks(m,v->section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
   }
-  /* a declared transfer's kind (design/plan-to-bridge-change-request.md, R4) and its weights, each finite and >= 0
-     (design/aot-compilation-change-request.md, A3; design/compilation-coordination.md, "The plan call") */
+  /* a declared transfer's kind (design/plan-to-bridge-change-request.md, R4) and its weights (design/aot-compilation-
+     change-request.md, A3), each finite and > 0 (design/compilation-coordination.md, C-weights): every task's,
+     `produced`, `consumed` and `read`, as Sinnen and Sousa's Definition 1 states ("The positive weight w(n)"), and
+     every `page`, so every occupation of a link lasts > 0 and each link's order of starts is a topological order
+     (design/plan-to-bridge-change-request.md, R5's no-cycle argument; MSCCLang, ASPLOS 2023, §5.2).
+     2026-11-04, owner C: reversing >= 0 for every weight.  Why: C-weights (reviews V1 #8, V3 #5).  What must stay:
+     EINVAL before anything is written */
   for(uint32_t i=0;i<count;i++){
     const struct mesh_weight *x=weights+i;
-    if(declared[i].kind>MESH_PAGES || !(x->produced>=0 && x->produced<=DBL_MAX) ||
-       !(x->consumed>=0 && x->consumed<=DBL_MAX) || !(x->read>=0 && x->read<=DBL_MAX) ||
-       !(x->page>=0 && x->page<=DBL_MAX))return EINVAL;
+    if(declared[i].kind>MESH_PAGES || !(x->produced>0 && x->produced<=DBL_MAX) ||
+       !(x->consumed>0 && x->consumed<=DBL_MAX) || !(x->read>0 && x->read<=DBL_MAX) ||
+       !(x->page>0 && x->page<=DBL_MAX))return EINVAL;
   }
   /* a program's data edge: its two declared transfers, its kinds (no end both produced and its source's own read),
      both events at one node, a lag a least lag can hold (mesh_graph_lags: UINT32_MAX is no walk) */
@@ -1027,6 +1035,16 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
   if(status)return status;
   const uint32_t n=nodes.count;
   if(nodes.self>=n)return EHOSTUNREACH;
+  /* the plan's name (group, epoch) (design/compilation-coordination.md, C-epoch): `epoch` one past the context's count
+     of its plans that stood (struct mesh_ctx `epoch`), but where the context's standing plan is cancelled (its `serial`
+     not this node's map serial, the one this call plans on: design/disjoint-pages-change-request.md, D.3.6) that plan's
+     own, the call its replan, so every rank names it alike whichever rank saw the move first.  The count is raised
+     only once the plan stands (step 5), so a failed call consumes no epoch.
+     2026-11-04, owner C: reversing the epoch raised at the call's entry.  Why: C-epoch (review V1 #5): a failed call
+     or a replan raised it at one rank and not another, so the ranks' names parted.  What must stay: every rank names
+     one plan alike */
+  const struct mesh_state *mine=mesh_state_at(m,context->state);
+  const uint64_t epoch=mine && mine->serial!=nodes.serial?mine->epoch:context->epoch+1;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   struct plan p={.context=context,.declared=declared,.transfers=count,.given=values,.givens=given,.n=n,
                  .self=nodes.self,.serial=nodes.serial};
@@ -1184,11 +1202,14 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
   uint64_t spanned=0;
   for(uint32_t i=0;i<p.demands;i++)spanned|=UINT64_C(1)<<p.demand[i].source|p.demand[i].leaves|p.demand[i].on;
   if(!spanned)spanned=UINT64_C(1)<<p.self;
-  /* a plan standing at this node already (group, epoch): EEXIST (design/compilation-coordination.md, "The plan
-     call"), every claim's head walked (mesh-dataflow.h mesh_head_after, mesh_head_state) */
+  /* a plan standing at this node already (group, epoch) on the map this call plans on: EEXIST (design/compilation-
+     coordination.md, "The plan call"; one whose `serial` is not that map's is cancelled and ignored, C-epoch), every
+     claim's head walked (mesh-dataflow.h mesh_head_after, mesh_head_state) */
   for(uint32_t head=mesh_head_after(m,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(m,head)){
     const struct mesh_state *standing=mesh_head_state(m,head);
-    if(standing && standing->group==group && standing->epoch==epoch){status=EEXIST;goto done;}
+    if(standing && standing->serial==p.serial && standing->group==group && standing->epoch==epoch){
+      status=EEXIST;goto done;
+    }
   }
 
   /* 2. the claim, its generation from hdr `serial`: exactly the rows and pages this plan places, whole or not at all */
@@ -1297,6 +1318,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
   /* 5. the plan stands: its head's publication `state` (release), after every write above */
   __atomic_store_n(&mesh_publication_at(m,p.claim.rows.first)->state,base,__ATOMIC_RELEASE);
   context->state=base;
+  context->epoch=epoch;
   mesh_notify(&m->plans);
   /* 6. every earlier claim of this client closed, released by the bridge once no port holds it (D10); the close raises
      and wakes `plans` */
