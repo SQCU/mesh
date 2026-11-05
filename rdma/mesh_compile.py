@@ -27,6 +27,7 @@ import torch
 from torch.fx.node import Node, map_arg
 
 import mesh
+import mesh_graph
 
 F = torch.nn.functional
 # Y. Xu et al., GSPMD, arXiv 2105.04663, 2021, section 3.5: elementwise operators, every tensor operand of the output's
@@ -130,26 +131,34 @@ def _value(node):
 
 
 # GSPMD section 3.1, the device mesh: its shape and each device id's coordinates; Alpa section 4.1, the mapping of its
-# devices onto map indices, one device a node
+# devices onto map indices, one device a node.  The nested sequences are a tree whose vertices are the places (index
+# paths) in it, walked by the graph module's breadth-first walk (rdma/mesh_graph.py walk): the shape along the first
+# children, then every place to the shape's depth, each checked in the walk's order, a parent before its children
+# 2026-11-05 (design/aot-compilation-change-request.md A10, "Its graph operations are the graph module's": "The same
+# holds wherever mesh's code walks a graph"; design/compilation-coordination.md, "The revisions of abecd389", T4-3):
+# the recursive walk and the loop down the first children inlined here go, for mesh_graph.walk.  What must stay: the
+# shape, the coordinates and each refusal as before
 def _mesh(placement, count):
-    shape, item, coords = [], placement.mesh, {}
-    while isinstance(item, (list, tuple)):
-        if not item:
-            raise ValueError('the placement operand\'s mesh holds an empty sequence (A2)')
-        shape.append(len(item))
-        item = item[0]
+    def item(at):
+        value = placement.mesh
+        for i in at:
+            value = value[i]
+        return value
 
-    def walk(item, at):
+    def sequence(at):
+        return isinstance(item(at), (list, tuple))
+    first = mesh_graph.walk([()], lambda at: [at + (0,)] if sequence(at) and item(at) else [])
+    if sequence(first[-1]):
+        raise ValueError('the placement operand\'s mesh holds an empty sequence (A2)')
+    shape, coords = [len(item(at)) for at in first[:-1]], {}
+    for at in mesh_graph.walk([()], lambda at: [at + (i,) for i in range(len(item(at)))]
+                              if len(at) < len(shape) and sequence(at) else []):
         if len(at) == len(shape):
-            if not isinstance(item, int) or item in coords:
-                raise ValueError('the placement operand\'s mesh at %s: %r is no new device id (A2)' % (at, item))
-            coords[item] = at
-        elif not isinstance(item, (list, tuple)) or len(item) != shape[len(at)]:
+            if not isinstance(item(at), int) or item(at) in coords:
+                raise ValueError('the placement operand\'s mesh at %s: %r is no new device id (A2)' % (at, item(at)))
+            coords[item(at)] = at
+        elif not sequence(at) or len(item(at)) != shape[len(at)]:
             raise ValueError('the placement operand\'s mesh at %s is not of shape %s (A2)' % (at, shape))
-        else:
-            for i, inner in enumerate(item):
-                walk(inner, at + (i,))
-    walk(placement.mesh, ())
     nodes = list(placement.nodes)
     if sorted(coords) != list(range(len(coords))) or len(nodes) != len(coords) or len(set(nodes)) != len(nodes) \
             or not all(isinstance(n, int) and 0 <= n < count for n in nodes):
@@ -1167,22 +1176,35 @@ def _rewrite(name, operands):
 
 
 # Rinard and Diniz, sections 3.2.1 and 4.9.1: symbolic execution "simply executes the operations, computing with
-# expressions instead of values".  A body graph's result as an expression of `args`, one for each of its placeholders
-# in order: each node of ALGEBRA rewritten by section 4.9.2's rules, any other kept as itself, its operation and its
-# arguments' expressions (a get_attr, a value of the body no call writes, is an extent constant, section 3.4.1, named by
-# itself)
-def _execute(graph, args):
-    env, given = {}, iter(args)
-    for node in graph.nodes:
-        if node.op == 'placeholder':
-            env[node] = next(given)
-        elif node.op == 'output':
-            return map_arg(node.args[0], env.__getitem__)
-        else:
-            operands, kwargs = tuple(map_arg(node.args, env.__getitem__)), map_arg(node.kwargs, env.__getitem__)
-            name = ALGEBRA.get(node.target) if node.op in ('call_function', 'call_method') and not kwargs else None
-            env[node] = _rewrite(name, operands) if name and len(operands) == 1 + (name != 'neg') \
-                else (node.op, node.target, operands, tuple(sorted(kwargs.items())))
+# expressions instead of values".  A body's result as an expression of the arguments run gives it, one for each of its
+# placeholders in order, by torch.fx's Interpreter, which "executes an FX graph Node-by-Node" (torch v2.14.0
+# torch/fx/interpreter.py), each operation computing an expression: an operation of ALGEBRA rewritten by section
+# 4.9.2's rules, any other kept as itself, its operation and its arguments' expressions (a get_attr, a value of the body
+# no call writes, is an extent constant, section 3.4.1, named by itself; a call_module, a leaf module of the body, an
+# operation as any other)
+# 2026-11-05 (design/aot-compilation-change-request.md A10: "A body's symbolic execution runs on torch.fx.Interpreter,
+# as the program's run already does (`_Program`), not on a second loop over a graph's nodes"): _execute's loop over
+# graph.nodes goes, for _Symbolic, an Interpreter whose operations compute the same expressions.  What must stay: the
+# expressions and the rewrite rules as before
+def _expression(op, target, args, kwargs):
+    name = ALGEBRA.get(target) if op in ('call_function', 'call_method') and not kwargs else None
+    if name and len(args) == 1 + (name != 'neg'):
+        return _rewrite(name, tuple(args))
+    return op, target, tuple(args), tuple(sorted(kwargs.items()))
+
+
+class _Symbolic(torch.fx.Interpreter):
+    def call_function(self, target, args, kwargs):
+        return _expression('call_function', target, args, kwargs)
+
+    def call_method(self, target, args, kwargs):
+        return _expression('call_method', target, args, kwargs)
+
+    def call_module(self, target, args, kwargs):
+        return _expression('call_module', target, args, kwargs)
+
+    def get_attr(self, target, args, kwargs):
+        return _expression('get_attr', target, args, kwargs)
 
 
 # Rinard and Diniz, section 4.8 and Figure 15: two operations commute where, executed symbolically "in both execution
@@ -1193,61 +1215,18 @@ def _execute(graph, args):
 # that result with the other call's, in both orders.  A body FX cannot trace (torch.fx's TraceError, "symbolically
 # traced variables cannot be used as inputs to control flow") is one it cannot execute (TT4)
 def _commutes(callee, k):
+    tracer = Tracer()
     try:
-        graph = Tracer().trace(callee._orig_mod if isinstance(callee, torch.nn.Module)
-                               else callee._torchdynamo_orig_callable)
+        graph = tracer.trace(callee._orig_mod if isinstance(callee, torch.nn.Module)
+                             else callee._torchdynamo_orig_callable)
     except torch.fx.proxy.TraceError:
         return False
-    count = sum(node.op == 'placeholder' for node in graph.nodes)
+    body, count = torch.fx.GraphModule(tracer.root, graph), sum(node.op == 'placeholder' for node in graph.nodes)
 
     def run(first, second):
-        inner = _execute(graph, [('symbol', 'receiver') if i == k else ('symbol', first, i) for i in range(count)])
-        return _execute(graph, [inner if i == k else ('symbol', second, i) for i in range(count)])
+        inner = _Symbolic(body).run(*[('symbol', 'receiver') if i == k else ('symbol', first, i) for i in range(count)])
+        return _Symbolic(body).run(*[inner if i == k else ('symbol', second, i) for i in range(count)])
     return k < count and run(1, 2) == run(2, 1)
-
-
-# design/aot-compilation-change-request.md A10, "Its bound": "the most calls of a function outstanding at once is the
-# number of its calls in the block, or fewer where Bernstein's conditions order them": the most of its calls no two of
-# which are ordered, the order's width.  That is the fewest chains covering them (R. P. Dilworth, A decomposition
-# theorem for partially ordered sets, Annals of Mathematics 51, 1950), their number less a maximum matching of the
-# bipartite graph with an edge from a to b for each a ordered before b (D. R. Fulkerson, Note on Dilworth's
-# decomposition theorem for partially ordered sets, Proc. AMS 7, 1956), matched by Hopcroft and Karp's phases: a
-# breadth-first search layers the graph from the unmatched vertices to the length of the shortest augmenting paths,
-# then depth-first searches augment along vertex-disjoint paths of that length, until none is left (J. E. Hopcroft and
-# R. M. Karp, An n^5/2 algorithm for maximum matchings in bipartite graphs, SIAM J. Comput. 2(4), 1973); the three as
-# the turns' D.5 names them for chains (design/plan-to-bridge-change-request.md, "The turns").  after[a]: the b ordered
-# after a (TT3)
-def _width(after):
-    count = len(after)
-    nil, mate, partner, depth = count, [count] * count, [count] * count, [0] * (count + 1)
-
-    def layer():
-        queue = [a for a in range(count) if mate[a] == nil]
-        for a in range(count):
-            depth[a] = 0 if mate[a] == nil else math.inf
-        depth[nil] = math.inf
-        for a in queue:
-            if depth[a] < depth[nil]:
-                for b in after[a]:
-                    if depth[partner[b]] == math.inf:
-                        depth[partner[b]] = depth[a] + 1
-                        if partner[b] != nil:
-                            queue.append(partner[b])
-        return depth[nil] != math.inf
-
-    def augment(a):
-        if a == nil:
-            return True
-        for b in after[a]:
-            if depth[partner[b]] == depth[a] + 1 and augment(partner[b]):
-                mate[a], partner[b] = b, a
-                return True
-        depth[a] = math.inf
-        return False
-    matched = 0
-    while layer():
-        matched += sum(augment(a) for a in range(count) if mate[a] == nil)
-    return count - matched
 
 
 # design/aot-compilation-change-request.md A10 over a traced block.  Its nodes, in the block's order, each read its
@@ -1263,7 +1242,20 @@ def _width(after):
 # receiver "atomically" (section 2), not at once: in `orders` they are unordered among themselves, the receiver's
 # producer ordered before each and each before the readers of the chain's last result; for the bound they stay ordered
 # (TT5).  `orders` is the order between the program's calls whole (TT6), shared by every
-# entry (TT8).  A pass of the compilation, here as _complete is (TT9).  Each call's entry, its compiled function's
+# entry (TT8).  A pass of the compilation, here as _complete is (TT9).  Each call's entry, its compiled function's.
+# Its graph operations are the graph module's (rdma/mesh_graph.py): the chains are the paths of the linear forest each
+# call's follower makes (paths); `held` and the chained order are the transitive closures (closure) of the reads and of
+# the reads with each chain's calls taken unordered; each function's bound, "the most calls of a function outstanding
+# at once is the number of its calls in the block, or fewer where Bernstein's conditions order them" (A10, "Its
+# bound"), is the width of the order on its calls (width: Dilworth's theorem, by Fulkerson's matching in Hopcroft and
+# Karp's phases; the three as the turns' D.5 names them for chains, design/plan-to-bridge-change-request.md, "The
+# turns"; TT3)
+# 2026-11-05 (design/aot-compilation-change-request.md A10, "Its graph operations are the graph module's": "The order's
+# transitive closure, the walk of commuting chains, and the width by Fulkerson's matching in Hopcroft and Karp's phases
+# are functions of rdma/mesh_graph.py ... rdma/mesh_compile.py calls them and keeps no copy"; the operator's ruling on
+# C9a, design/compilation-coordination.md, "The revisions of f3f7cf46"): _analyse's `ancestors` and chain loop, and
+# _width, go, for mesh_graph.closure, mesh_graph.paths and mesh_graph.width (design/compilation-coordination.md, "The
+# revisions of abecd389", T4-1, T4-2).  What must stay: the entries, `orders` and `commuting` as before
 def _analyse(gm):
     nodes = list(gm.graph.nodes)
     callee = {node: _callee(gm, node) for node in nodes}
@@ -1278,19 +1270,8 @@ def _analyse(gm):
                     and reads.count(a) == 1 and link.get(a, (a, k))[1] == k and _commutes(callee[b], k):
                 link[b], follower[a] = (a, k), b
                 break
-    chains = []
-    for a in calls:
-        if a in follower and a not in link:
-            chains.append([a])
-            while chains[-1][-1] in follower:
-                chains[-1].append(follower[chains[-1][-1]])
+    chains = mesh_graph.paths(calls, lambda a: [follower[a]] if a in follower else [])
     step = {node: chain for chain in chains for node in chain}
-
-    def ancestors(inputs):
-        before = {}
-        for node in nodes:
-            before[node] = set().union(*({i} | before[i] for i in inputs(node)))
-        return before
 
     def inputs(node):
         found = set(node.all_input_nodes)
@@ -1301,14 +1282,14 @@ def _analyse(gm):
             if i in step and step[i][-1] is i:
                 found |= set(step[i])
         return found
-    held, ordered = ancestors(lambda node: node.all_input_nodes), ancestors(inputs)
+    held, ordered = mesh_graph.closure(nodes, lambda node: node.all_input_nodes), mesh_graph.closure(nodes, inputs)
     orders = frozenset((place[a], place[b]) for b in calls for a in ordered[b] if a in place)
     commuting = tuple(tuple(place[node] for node in chain) for chain in chains)
     entries = {}
     for f in dict.fromkeys(callee[node] for node in calls):
         mine = [node for node in calls if callee[node] is f]
         entries[f] = Calls(tuple(place[node] for node in mine),
-                           _width([[j for j, b in enumerate(mine) if a in held[b]] for a in mine]), orders, commuting)
+                           mesh_graph.width(mine, lambda a: [b for b in mine if a in held[b]]), orders, commuting)
     return {node: entries[callee[node]] for node in calls}
 
 
