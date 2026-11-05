@@ -103,9 +103,16 @@ static pid_t clients_open(struct hdr *h,uint32_t head){
   return owner && !atomic_load_explicit(&claim->closed,memory_order_acquire)?(pid_t)(uint32_t)owner:0;
 }
 /* "clients": the processes of the region's open claims, each once, in the order of their first claim's head
-   (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed) */
+   (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed).
+   2026-11-04, owner B2, the coordinator's ruling on review V1's finding 1: "client" printed before it, the process of
+   the first open claim's owner, 0 where none, since bin/mesh-bridge.sh (a deployment script this unit may not change)
+   holds a restart while mesh-stat prints "client":[1-9] (its client_attached), and without the field the guard never
+   held and a restart could end a running program.  What must stay: "client" while that script reads it */
 static void clients_print(struct hdr *h){
-  printf("\"clients\":[");
+  pid_t client=0;
+  for(uint32_t head=mesh_head_after(h,UINT32_MAX);!client && head!=UINT32_MAX;head=mesh_head_after(h,head))
+    client=clients_open(h,head);
+  printf("\"client\":%d,\"clients\":[",(int)client);
   int first=1;
   for(uint32_t head=mesh_head_after(h,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(h,head)){
     const pid_t pid=clients_open(h,head);

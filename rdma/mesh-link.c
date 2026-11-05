@@ -90,13 +90,18 @@ void wake(void){
    move of which, and each wake of it, wakes the event loop for a turn, so a start's raise, a publication and a close
    (mesh_retire's among them) are taken at once, not at the loop's next due time.  The stop's notification of `control`
    (main) no longer wakes it; nothing joins it, as before, and the process's exit ends it.  What must stay: one
-   watcher, a wait that a move of the word or a wake ends */
+   watcher, a wait that a move of the word or a wake ends.
+   2026-11-04, owner B2, the coordinator's ruling on reviews V1's and V3's finding 11 ("every wait ends in bounded
+   time"): the wait takes the timed form, bounded by MESH_PAUSE_NS, as each port's progress thread waits on `plans`
+   (mesh-flow.c), so the watcher reads the stop within MESH_PAUSE_NS of it.  What must stay: the word read before the
+   loop's wake is the one waited on */
 static void *control_watch(void *unused){
   (void)unused;
   while(!stop){
     uint64_t seen=atomic_load_explicit(&M->plans,memory_order_acquire);
     wake();
-    os_sync_wait_on_address(&M->plans,seen,sizeof M->plans,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+    os_sync_wait_on_address_with_timeout(&M->plans,seen,sizeof M->plans,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                                         OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
   }
   return NULL;
 }

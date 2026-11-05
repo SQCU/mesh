@@ -116,7 +116,8 @@ void map_adopt(void){
   if(moved)plan_stale();
   /* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q3 and Q4): where the serial moved, the
      island, its sequencer and its tree are this map's (island_set), the sequencer's number starts again and the
-     pending ORDERs of the old serial are dropped */
+     pending ORDERs of the old serial are dropped (2026-11-04, the coordinator's ruling on review V1's finding 4: kept,
+     island_set's note) */
   if(moved)island_set();
 }
 /* tag pre-return-20261103 rdma/mesh-records.c map_put (3f72cbde, abeffc1b), adapted: node-id order and the map serial */
@@ -236,7 +237,7 @@ static struct { uint32_t head; uint64_t generation; struct mesh_state *state; } 
    its reach entries in port order), so a join of the map between this node and `node` has one.  A tree's hop is one
    control socket, the same for every message of a map serial, so each hop carries its messages in order
    (design/compilation-coordination.md, Q3: "each hop on the existing control socket.  One path from the sequencer to
-   each node, each hop in order") */
+   each node, each hop in order"; the first port in port order is the recorded decision Q3-tree) */
 static uint32_t port_toward(uint32_t node){
   uint32_t p=0;
   while(p<port_count && !(ports[p].link.state==LINK_UP && plan_lanes(ports[p].link.plan) && ports[p].peer==node))p++;
@@ -268,9 +269,14 @@ static uint32_t island_parent(const void *context,size_t k){
    compared: each node's map_serial is its own count); and this node's children are those mesh_graph_rows keys to it
    over the parent array (as mesh-collective.c's plan_tree_parent keys a tree), not a scan of the array.  What must
    stay: the greatest identification number reached, Garcia-Molina's rule, picked here */
+/* 2026-11-04, owner B2, the coordinator's ruling on review V1's finding 4 (amending Q3'), reversing the note above's
+   drop of the pending ORDERs at this node's serial move: they are kept, since delivery is by arrival order, and
+   orders_deliver matches a head only to a plan standing here of this node's map serial (a plan of another serial is
+   cancelled, D.3.6), the Q4' bound covering a head that never matches.  What must stay: `seqnum` 0 at this node's own
+   serial move */
 static void island_set(void){
   island=(struct island){.self=UINT32_MAX,.sequencer=UINT32_MAX,.up=MESH_PORTS};
-  seqnum=0;pendings=0;
+  seqnum=0;
   const uint64_t n=atomic_load(&M->map_nodes);
   struct mesh_record *r=mesh_records(M);
   uint64_t self=n;
@@ -323,8 +329,17 @@ static void order_take(const struct mesh_order *order){
 /* Defago et al., Fig. 5, the sequencer's "send (m, sn(m)) to all", over the island's tree: an ORDER to each child, in
    arrival order, on its hop's control socket, and taken here (design/compilation-coordination.md, Q3: "an ORDER down
    to the children, each hop on the existing control socket") */
+/* 2026-11-04, owner B2, the coordinator's ruling on review V1's finding 7: a child's port not greeted, whose ORDER
+   port_say would drop, is said on the bridge's log (that child's ORDER is lost; its plan's head there ends at Q4''s
+   bound).  What must stay: the ORDER relayed to every child before it is taken here */
 static void order_relay(const struct mesh_order *order){
-  for(uint32_t k=0;k<island.downs;k++)port_say(ports+island.down[k],(struct message){.kind=ORDER},order,sizeof *order);
+  for(uint32_t k=0;k<island.downs;k++){
+    struct port *down=ports+island.down[k];
+    if(!down->greeted)
+      mesh_say("bridge","link %u (%s): an ORDER of plan (%llu, %llu) not relayed: the port toward a child of the island's "
+               "tree is not greeted",down->index,down->name,(unsigned long long)order->group,(unsigned long long)order->epoch);
+    else port_say(down,(struct message){.kind=ORDER},order,sizeof *order);
+  }
   order_take(order);
 }
 /* Defago et al., Fig. 5, the sequencer: "when receive (m): sn(m) := seqnum; send (m, sn(m)) to all; seqnum := seqnum +
@@ -338,27 +353,41 @@ static void order_sequence(const struct mesh_order *submission){
 }
 /* Defago et al., Fig. 5, the sender's "send (m) to sequencer", over the island's tree: at the sequencer it is numbered
    here, elsewhere it goes to this node's parent (design/compilation-coordination.md, Q3: "a SUBMIT up to the parent").
-   A submission of no executions is dropped, as is any where the map holds no record of this node.
+   A submission of no executions is dropped (design/compilation-coordination.md, Q3-tree), as is any where the map holds
+   no record of this node.
    2026-11-04, owner B2, the coordinator's ruling Q3' (design/compilation-coordination.md, "Amendments during the
    work"), reversing Q3's drop of a submission whose `serial` is not this node's `map_serial`: no receiver compares a
    message's `serial`.  Why: each node's map_serial is its own count of its map's changes, so two nodes on one map hold
    different serials and the drop refused messages between them.  What must stay: the reset at this node's own serial
-   move (island_set) */
-static void order_submit(const struct mesh_order *order){
-  if(order->end<=order->first || island.self==UINT32_MAX)return;
-  if(island.self==island.sequencer)order_sequence(order);
-  else if(island.up<MESH_PORTS)port_say(ports+island.up,(struct message){.kind=SUBMIT},order,sizeof *order);
+   move (island_set).
+   2026-11-04, owner B2, the coordinator's ruling on review V1's finding 7: 1 where the submission was numbered here or
+   queued on the port toward the parent, that port greeted before the queueing and still after it (port_say loses the
+   link on a failed send, port_lost), else 0, so the caller knows it was not sent.  What must stay: nothing sent
+   twice that was sent once */
+static int order_submit(const struct mesh_order *order){
+  if(order->end<=order->first || island.self==UINT32_MAX)return 0;
+  if(island.self==island.sequencer){order_sequence(order);return 1;}
+  if(island.up>=MESH_PORTS || !ports[island.up].greeted)return 0;
+  port_say(ports+island.up,(struct message){.kind=SUBMIT},order,sizeof *order);
+  return ports[island.up].greeted;
 }
 /* the sequencer's messages heard on a port's control socket (mesh-ports.c message_heard; design/compilation-
    coordination.md, Q3): a SUBMIT is passed on toward the sequencer, or numbered there (order_submit); an ORDER from
    this node's parent in the tree is relayed to its children and taken here (order_relay), and one from any other
-   node is dropped.  A payload that is not one struct mesh_order is let be.  2026-11-04, owner B2, the coordinator's
-   ruling Q3' (order_submit's note): an ORDER's `serial` is compared no more */
+   node is dropped (design/compilation-coordination.md, Q3-tree).  A payload that is not one struct mesh_order is let
+   be.  2026-11-04, owner B2, the coordinator's ruling Q3' (order_submit's note): an ORDER's `serial` is compared no
+   more.  2026-11-04, the ruling on review V1's finding 7: a SUBMIT heard and not passed on (order_submit 0) is said on
+   the bridge's log */
 void order_heard(struct port *from,const struct message *heard,const unsigned char *payload){
   struct mesh_order order;
   if(heard->bytes!=sizeof order)return;
   memcpy(&order,payload,sizeof order);
-  if(heard->kind==SUBMIT)order_submit(&order);
+  if(heard->kind==SUBMIT){
+    if(!order_submit(&order))
+      mesh_say("bridge","link %u (%s): a SUBMIT of plan (%llu, %llu), executions [%llu, %llu), not passed on toward the "
+               "island's sequencer",from->index,from->name,(unsigned long long)order.group,(unsigned long long)order.epoch,
+               (unsigned long long)order.first,(unsigned long long)order.end);
+  }
   else if(island.parent && from->peer==island.parent)order_relay(&order);
 }
 /* design/compilation-coordination.md, Q2 (Defago et al., section 7.1: the sequencer numbers each message its sender
@@ -366,9 +395,14 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
    here (mesh-dataflow.h mesh_head_state) whose `sender` is this node's map index and whose `executions` (acquire, the
    program's start, Q1) exceed its `submitted`, a SUBMIT of [submitted, executions), then `submitted` its executions
    (this bridge its one writer).  2026-11-04, owner B2, the coordinator's ruling Q3': the SUBMIT's `serial` is this
-   node's map_serial, for the record (no receiver compares it: order_submit's note), where it was the plan's */
+   node's map_serial, for the record (no receiver compares it: order_submit's note), where it was the plan's.
+   2026-11-04, the coordinator's ruling on review V1's finding 7, reversing the first form, which raised `submitted`
+   whether or not the SUBMIT left: `submitted` is raised only where order_submit numbered it here or queued it toward
+   the parent; otherwise it stays, and the next turn sends the same submission (no transfer failed: none was sent),
+   said on the bridge's log once until a submission is sent (`unsent`).  What must stay: `submitted` the executions
+   sent, never more */
+static int unsent;
 static void orders_submit(void){
-  if(island.self==UINT32_MAX)return;
   for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
     struct mesh_state *state=mesh_head_state(M,head);
     if(!state || state->sender!=island.self)continue;
@@ -376,8 +410,12 @@ static void orders_submit(void){
     if(executions<=state->submitted)continue;
     const struct mesh_order order={.group=state->group,.epoch=state->epoch,.serial=atomic_load(&M->map_serial),.first=state->submitted,
                                    .end=executions,.nodes=state->nodes,.sender=state->sender};
-    state->submitted=executions;
-    order_submit(&order);
+    if(order_submit(&order)){state->submitted=executions;unsent=0;continue;}
+    if(!unsent)
+      mesh_say("bridge","a SUBMIT of plan (%llu, %llu), executions [%llu, %llu), not sent: no greeted port toward the "
+               "island's sequencer (sent on a later turn)",(unsigned long long)order.group,(unsigned long long)order.epoch,
+               (unsigned long long)order.first,(unsigned long long)order.end);
+    unsent=1;
   }
 }
 /* design/compilation-coordination.md, Q4 as amended (Q4', "Amendments during the work"): whether the plan this
@@ -397,6 +435,7 @@ static int orders_served(void){
      atomic_load_explicit(&mesh_page(M)[last.head].device,memory_order_acquire)!=last.generation)return 1;
   int error=0;
   const uint32_t set=mesh_ports_named(M,last.state,mesh_records(M),(uint32_t)atomic_load(&M->map_nodes),&error);
+  /* design/compilation-coordination.md, B2-1 */
   if(error){
     mesh_say("bridge","the ports of plan (%llu, %llu), released last, not computed (%s): the next ORDER is delivered "
              "without them",(unsigned long long)last.state->group,(unsigned long long)last.state->epoch,strerror(error));
@@ -409,11 +448,14 @@ static int orders_served(void){
        !(held>>p&1 && atomic_load_explicit(&last.state->served[p],memory_order_acquire)>=released))return 0;
   return 1;
 }
-/* Defago et al., Fig. 5, the destinations: "while there is (m', seqnum') in pending with seqnum' = nextdeliver do
-   deliver (m'); nextdeliver := nextdeliver + 1".  Each node receives the ORDERs it takes in sequence order (one path
-   from the sequencer, each hop in order: Q3), so the pending ORDER of the least number is the one that arrived first,
-   the head (design/compilation-coordination.md, Q4).  The head is delivered once its plan stands here (its
-   (group, epoch): mesh-dataflow.h mesh_head_state) and every port holding the plan released last has served it
+/* Defago et al., Fig. 5, the destinations: each delivers the pending messages in sequence-number order, the one
+   numbered `nextdeliver` next.  Here, as recorded (design/compilation-coordination.md, Q3, Q4 and Q3-tree), it differs
+   from Fig. 5: the sequencer's number starts at 0 (Fig. 5: 1); a SUBMIT of [first, end) takes end - first numbers, one
+   an execution; and each node receives the ORDERs it takes in sequence order (one path from the sequencer down the
+   island's tree, each hop in order), so delivery is by arrival order, the pending list's head standing for
+   `nextdeliver`, and an ORDER's `sequence` is not compared.  The head is delivered once its plan stands here (its
+   (group, epoch), of this node's map serial: mesh-dataflow.h mesh_head_state) and every port holding the plan released
+   last has served it
    (orders_served): its plan's `released` its `end` (release), and hdr `plans` woken so the ports see it.  So this
    node's cables carry one plan's batch at a time, each execution whole, in sequence order (the operator's ruling 1: "A
    cable never interleaves two executions; it carries each whole, in sequence order").  Re-read on each turn of the
@@ -421,13 +463,18 @@ static int orders_served(void){
    2026-11-04, owner B2, the coordinator's ruling Q4' (design/compilation-coordination.md, "Amendments during the
    work"): a head whose plan does not stand here is held at most MESH_PLATFORM_NS from its arrival (the rules' bounded
    wait; the loop's turn is due then, orders_due), then delivered with nothing released, said on the bridge's log as
-   order_take's ENOMEM is: its program's peers end by their own bounds.  What must stay: no wait past that bound */
+   order_take's ENOMEM is: its program's peers end by their own bounds.  What must stay: no wait past that bound.
+   2026-11-04, the coordinator's ruling on review V1's finding 4: the head is matched to the standing plan of its
+   (group, epoch) whose `serial` is this node's map_serial; a standing plan of another serial is cancelled (D.3.6) and
+   is not matched (a replan keeps its epoch, so two plans of one name may stand at once briefly after a move) */
 static void orders_deliver(void){
   while(pendings){
     const struct mesh_order *order=&pending->order;
     uint32_t head=mesh_head_after(M,UINT32_MAX);
     struct mesh_state *state=NULL;
-    while(head!=UINT32_MAX && !((state=mesh_head_state(M,head)) && state->group==order->group && state->epoch==order->epoch))
+    const uint64_t serial=atomic_load(&M->map_serial);
+    while(head!=UINT32_MAX && !((state=mesh_head_state(M,head)) && state->group==order->group && state->epoch==order->epoch &&
+                               state->serial==serial))
       head=mesh_head_after(M,head);
     if(head==UINT32_MAX){
       if(now-pending->arrived<MESH_PLATFORM_NS)return;
