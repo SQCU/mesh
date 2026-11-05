@@ -56,7 +56,10 @@ other projects, such as a game bot, and old dated records; they are not listed h
 - [design/compilation-coordination.md](design/compilation-coordination.md): the coordinating agent's contract for
   the two change requests above (the file split, the names files share, the task graph and its contention schedule,
   plans in their claims and the island's fixed sequencer, the provisional operands, the sources read) and the record
-  of the work, its reviews and what is open.
+  of the work, its reviews and what is open; then its part "The appendix's revisions, 2026-11-04" (the change
+  request's last appendix, items 1-7: C3.3 without D5, delivery in order without Q4's skip and the hold that stays,
+  sets of a function B operand in Threefry-drawn Fisher-Yates order, compiled functions coexisting, torch's MPS
+  kernels), with its record.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.
