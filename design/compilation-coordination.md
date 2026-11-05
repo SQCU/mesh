@@ -1266,3 +1266,80 @@ Text extracted with `pdftotext -layout` into the session scratchpad's papers/ fo
   is above 0: a load after this port has taken or been told past numbers that the parent may since have overwritten
   cannot know them, as a load after the run began cannot know which executions landed (the refusal's own reason,
   link_prepare's note). The refusal is the plan's `refused[p]`, which the parent's wait leaves out (DL2).
+
+### Record of this part
+
+#### Commits by owner
+
+- Coordinator (mesh): 932d098d (this part; mesh.h MESH_VERSION 112 and struct mesh_state `taken`, `sequences`,
+  `padding2`), 910c355d (INDEX.md), d56df2e8 (DL7, DL8, GO4′), a6875568 (DL2′, DL3′, DL8′, DL9, GO3′, EB2′, numbers
+  across a reset, the C9 remark noted), 846bb073 (DL10), and this record.
+- C3 (mesh rdma/mesh-graph.{h,c}, mesh-collective.{h,c}, mesh.h's text): e93937d0 (mesh_graph_heap_order declared),
+  a8fd8d5f (mesh_graph_heap_order, MSCCLang §5.2 step 3; the binary heap one copy with mesh_graph_lags), c0d0e06f (the
+  instructions, their bottom levels and the heap order, GO1-GO4; the entries by their group's least place; T6's and
+  S3's order and `start`, `earliest`, `least`, `walk` gone; the sequence words placed, `sequences` written), 0195b9f6
+  (mesh-collective.h's text; its message lost three backticked names to the shell, left as pushed), 3d1c4a4e (mesh.h's
+  text), d22aa7f6 (DL7, GO4′ cited), 42ae8011 (GO3′; X1 #4, #6; X3 #8; DL9 and DL2′ in mesh.h's text).
+- B4 (mesh rdma/mesh-flow.c, mesh-records.c, mesh-link.c, mesh-bridge.h; design/prepared-machine.md's M08 and M29
+  rows for X3 #1): 3f6082c1 (`served` read as `taken`), c649d4bf (orders_deliver as Lamport's sender; orders_served
+  and `last` gone), 2b853ec7 (lane_take, the k-way merge; the drains over every plan; records naming their flow, DL5;
+  taken_tell; plan_sequences_inside; link_run; the notes), db035f40 (DL7, DL8), 6181fbb5 (DL2′, DL9, X1 #1, #3-#6, X3
+  #1, #6, #8), 8428e27f (DL10).
+- E2 (metal-microbench tools/prepare_e2b.py, tools/e2b_replay.m): 9486578d (EB1: `kinds`, "pages" for the pieces each
+  holder's combine sums), 4dc3318c (EB2: kinds to MESH_PAGES and MESH_JOIN, refusals; P1's reversal), bb7f7426 (X2 #2,
+  #4, #5, #6; X3 #7).
+- A network error (ENOTFOUND) ended the coordinator's run partway; C3 and B4 were resumed from their transcripts on
+  their own uncommitted edits (mesh-collective.h, mesh-flow.c), nothing re-dispatched, reset or discarded.
+
+#### Reviews and where their findings went
+
+- X1 (the mesh side): 1 (numbers going back across a sequencer reset) recorded, open ("Numbers across a reset"), and
+  lane_take's premise qualified (B4, 6181fbb5); 2 (a gap published as filled) to B4 (DL2′, 6181fbb5); 3, 4, 5, 6 to B4
+  and C3 (6181fbb5, 42ae8011); 7 (a lost wake per execution) to B4 and C3 (DL9). Found sound: the heap order, the
+  instruction DAG's dependencies, both ends' agreement, contiguous sets, GO4′'s no-cycle argument, Lamport's sender,
+  lane_take's readings, the words' single writers and monotony, no deadlock, the records' layouts, the rules.
+- X2 (the program and torch side): 1 (e2b's partials are one page each in the 1-row decode, so item 5's permutation
+  draws nothing there) open, below; 2, 4, 5, 6 to E2 (bb7f7426); 3 recorded (EB2′). Found sound: `summed` and `kinds`,
+  e2b_ir's mapping and refusals, torch's bindings against mesh.h 112 (State through `entries`), the compiles. X2 also
+  read three files under .build/ and output_data/ and ran a python3 one-liner that loaded a manifest's JSON, which the
+  brief did not allow; nothing was written.
+- X3 (across both): every gap closed; 1 to B4 (prepared-machine.md, 6181fbb5); 2 to C3 and this part (GO3′); 3 this
+  part (DL3′); 4 to B4 (DL2′); 5 this part (DL8′); 6 and 8 to B4 and C3; 7 to E2 (bb7f7426), open beside EB3. Found
+  clean: T6, S3, Q4, O2, Q4′, B2-1, `served` and orders_served only in dated notes and the earlier record; nothing
+  added the documents do not name; the rules.
+- B4's own findings on its work: the plan standing before mesh_plan raises `plans` (DL7) and the reload after
+  plan_end (DL10), each ruled and built.
+
+#### Integration
+
+Once no implementer or reviewer ran (mesh 8428e27f and this record; metal-microbench bb7f7426; both trees clean and
+level with origin): `make -B -C rdma` 0 (mesh-flow, mesh-heartbeat, mesh-stat, libmesh.dylib), `make -B -C rdma
+native-audit` 0, `make .build/e2b_replay` 0 (libmesh_metal.dylib and e2b_replay against the new libmesh), no warning or
+error; rdma/mesh.py, rdma/mesh_compile.py, tools/prepare_e2b.py and tools/mesh/run_pair.py compile (Python's compile,
+no bytecode written). Nothing was run.
+
+#### Open at the end, for the operator
+
+- **DL2's head-of-line wait.** The pending head waits for Lamport's buffer of its own plan (u words), and every later
+  ORDER at that node waits behind it, a port carrying only a later plan included; the reviews found it Lamport's
+  sender's wait composed with Défago's in-order delivery, not Q4's hold, its pace the slowest port of the plan's set.
+  The operator's to judge.
+- **GO5.** The contention schedule is still computed and its starts order nothing; what reads them is the operator's.
+- **Numbers across a reset** (X1 #1): ORDERs numbered after a sequencer's reset can match a plan of the old serial at
+  a node whose map has not moved, and the numbers published there go back; with "A plan's identity across a map move".
+- **Delivery's liveness**, now also: an ORDER dropped at a node (memory, a port not greeted) leaves its plan's head
+  staying there (DL2′), holding every later ORDER behind it.
+- **DL9's cost**: each hand-off raises `plans`, so each port walks the heads on its next pass and a lane may take
+  nothing for one pass; not measured.
+- **Compile time** (C3): mesh_graph_bottom_levels runs mesh_graph_order, O(V²), and V now counts every communication
+  (pages x tree edges).
+- **Item 5's reach in e2b** (X2 #1): in the 1-row decode each partial is one page, so each set is one page on each
+  cable and Algorithm P draws nothing; the permutation shows only where a partial holds two pages or more on a cable.
+- **Function B not declared**: e2b's split-KV merge (kv_merge, EB3) and the vocabulary's maxloc routes (X3 #7) stay
+  function A, the item naming e2b's "reductions of partial sums".
+- **Knuth vol. 3 §5.4.1 not read**: the merge is the item's statement, the least of the k first elements by
+  comparison.
+- Carried from the earlier parts: "A plan's identity across a map move"; U1's premise; the torch MPS path (K1); torch
+  retirement at exit; L3; V1 #9 (its per-ORDER form, now DL9's raise for the delivery's hand-offs); the torch path's
+  refused collectives and operators; the α–β chooser not built (ruling 3); `qps` in mesh-map.h; runs wait for the
+  operator's authorization (C3.8).
