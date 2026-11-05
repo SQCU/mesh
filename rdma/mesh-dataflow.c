@@ -202,19 +202,48 @@ int mesh_claim_take(struct mesh_ctx *c,uint64_t generation,uint32_t rows,uint32_
 }
 
 /* mesh-dataflow.h mesh_claim_close: each head this client owns whose generation (its entry's `device`, read after the
-   owner word) is `generation` (others 0) or is not (others 1) closed (release); then hdr `plans` raised and woken
-   (mesh.h mesh_notify; design/compilation-coordination.md, "The region": every close of a claim adds 1).  2026-11-04,
-   owner L: `plans` in place of hdr `plan`'s wake, vacant from 110, and the walk of the heads alone (mesh_head_after).
-   What must stay: the ports woken after the close */
-void mesh_claim_close(struct mesh_ctx *c,uint64_t generation,int others){
+   owner word) is `generation` closed (release); then hdr `plans` raised and woken (mesh.h mesh_notify;
+   design/compilation-coordination.md, "The region": every close of a claim adds 1).  2026-11-04, owner L: `plans` in
+   place of hdr `plan`'s wake, vacant from 110, and the walk of the heads alone (mesh_head_after).
+   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N3, N5): the `others` form,
+   every head of this client but `generation`'s closed (mesh_plan's step 6), gone.  Why: compiled functions coexist,
+   a function's claim closed only by its retirement (mesh_plan_retire), the program's (mesh_retire) or its own plan
+   call's failure after its writes (design/aot-compilation-change-request.md, appendix item 6).  What must stay: the
+   ports woken after the close */
+void mesh_claim_close(struct mesh_ctx *c,uint64_t generation){
   struct hdr *m=c->M;
   for(uint32_t row=mesh_head_after(m,UINT32_MAX);row!=UINT32_MAX;row=mesh_head_after(m,row)){
     struct mesh_buffer *head=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&head->owner,memory_order_acquire)!=c->client)continue;
-    const int same=atomic_load_explicit(&mesh_page(m)[row].device,memory_order_relaxed)==generation;
-    if(others?!same:same)atomic_store_explicit(&head->closed,1,memory_order_release);
+    if(atomic_load_explicit(&mesh_page(m)[row].device,memory_order_relaxed)==generation)
+      atomic_store_explicit(&head->closed,1,memory_order_release);
   }
   mesh_notify(&m->plans);
+}
+
+/* mesh-dataflow.h mesh_plan_retire: the program's retirement of one compiled function
+   (design/aot-compilation-change-request.md, appendix item 6: "release a function's claim only when the program
+   retires that function or itself"; design/compilation-coordination.md, "The appendix's revisions", N3, as NVIDIA, CUDA
+   Programming Guide §4.2.3.1, cudaGraphExecDestroy(), destroys one instantiated graph).  The head this client owns
+   (its owner word, acquire) whose publication `state` (acquire) is `plan` closed (struct mesh_buffer `closed`,
+   release), then hdr `plans` raised and woken (mesh.h mesh_notify), so the ports end it and the bridge's turn finds
+   it.  A plan's state section lies in its own claim's pages, which no other claim holds until the bridge releases
+   that claim (owner word 0), so at most one head of this client holds `plan`.  Nothing is let go here: the bridge
+   releases the claim once no port holds it (mesh_retired_release; design/disjoint-pages-change-request.md, Appendix C,
+   C3.4: deferred reclamation, and nobody waits for it).  ENOENT where no head of this client holds `plan` (`plan` 0
+   names none: a claim whose plan has not stood has publication `state` 0) */
+int mesh_plan_retire(struct mesh_ctx *c,uint64_t plan){
+  struct hdr *m=c->M;
+  if(!plan)return ENOENT;
+  for(uint32_t row=mesh_head_after(m,UINT32_MAX);row!=UINT32_MAX;row=mesh_head_after(m,row)){
+    struct mesh_buffer *head=&mesh_buffers(m)[row];
+    if(atomic_load_explicit(&head->owner,memory_order_acquire)!=c->client ||
+       __atomic_load_n(&mesh_publication_at(m,row)->state,__ATOMIC_ACQUIRE)!=plan)continue;
+    atomic_store_explicit(&head->closed,1,memory_order_release);
+    mesh_notify(&m->plans);
+    return 0;
+  }
+  return ENOENT;
 }
 
 /* 2026-11-04, sub-assignment 5: the claim at attach (mesh_claim) and the release before it, waited for while a port's
@@ -227,10 +256,12 @@ void mesh_claim_close(struct mesh_ctx *c,uint64_t generation,int others){
    nothing"): reversing sub-assignment 5's form, the compare-and-swap of hdr `client` (EADDRINUSE where another live
    client held it, a gone one retired first) and hdr `client_start` written.  Why: a program holds its plans' claims and
    nothing else, and any number of programs attach at once.  The client word is minted from hdr `serial` as before, bit
-   63 `device_client`'s, and names each of the program's claims (its heads' owner word); `epoch` and `state` start at
-   0.  The version is read again after the mint (tag pre-return-20261103 rdma/mesh-dataflow.c mesh_attach: a client
+   63 `device_client`'s, and names each of the program's claims (its heads' owner word).  The version is read again after the mint (tag pre-return-20261103 rdma/mesh-dataflow.c mesh_attach: a client
    attaching as the heartbeat expires the region reads it expired here, and is let go, nothing of it held).  What must
-   stay: nothing written in the region but hdr `serial`; the version read again */
+   stay: nothing written in the region but hdr `serial`; the version read again.
+   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N5): the context's `epoch` and
+   `state`, which started at 0 here, gone with struct mesh_ctx's fields.  Why: the context holds no plan; a plan's
+   handle is mesh_plan's `*plan` (N2).  What must stay: as above */
 int mesh_attach(struct mesh_ctx *c,const char *name){
   if(c->M) return 0;
   if(!name) name=getenv("MESH_REGION");
@@ -249,7 +280,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   const uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
   if(__atomic_load_n(&memory->version,__ATOMIC_SEQ_CST)!=MESH_VERSION){ munmap(memory,(size_t)info.st_size); close(file); return EINVAL; }
-  *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file,.epoch=0,.state=0};
+  *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file};
   return 0;
 }
 
@@ -555,7 +586,9 @@ uint32_t mesh_ports_named(const struct hdr *region,const struct mesh_state *stat
    holding of a plan is that plan's `held` bit and its refusal that plan's `refused[p]`; `prepared` is only a load's
    transient announcement (mesh.h struct mesh_port_info).  The plan, its entries and its serial are the context's
    (`state`; mesh.h mesh_hops).  What must stay: the wait bounded by one deadline; the raise only after every named
-   port holds the plan; EINVAL for entries or ports outside the region */
+   port holds the plan; EINVAL for entries or ports outside the region.
+   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N2, N5): the plan the
+   caller's `plan` (mesh_transfers_start's), where it was the context's `state`, gone.  What must stay: as above */
 static int mesh_ports_held(struct mesh_ctx *context,struct mesh_state *state){
   const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
   if(!state->entries)return 0;
@@ -603,10 +636,17 @@ static int mesh_ports_held(struct mesh_ctx *context,struct mesh_state *state){
    MLSys 2022, section 4.4); hdr `plans` is raised and woken after it (mesh.h mesh_notify), where hdr `plan` was woken,
    so the bridge sees the submission; the plan is the context's (`state`), and its serial the state section's, where
    they were hdr `state` and the entries' at hdr `hop_off`.  What must stay: the raise before the fence, the serial's
+   read after it.
+   2026-11-04, owner L2 (design/aot-compilation-change-request.md, appendix item 6; design/compilation-coordination.md,
+   "The appendix's revisions", N2, N4, N5): the plan the caller's `plan`, its state section's region offset (mesh_plan's
+   `*plan`, N2: the handle, as an instantiated graph's cudaGraphExec_t), where it was the context's `state`, gone; EINVAL where `plan` is 0 or its section lies outside the region, its entries tested by
+   mesh_ports_named as before.  Each execution raised is one execution of the plan's compiled function (N4: "It may be
+   launched any number of times without repeating the instantiation", §4.2.2).  Why: a program holds any number of
+   compiled functions at once, each its own plan (item 6).  What must stay: the raise before the fence, the serial's
    read after it */
-int mesh_transfers_start(struct mesh_ctx *context,uint64_t executions){
+int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions){
   struct hdr *m=context->M;
-  const uint64_t at=context->state;
+  const uint64_t at=plan;
   if(!at || at>context->len || context->len-at<sizeof(struct mesh_state))return EINVAL;
   struct mesh_state *state=mesh_state_at(m,at);
   const int error=mesh_ports_held(context,state);

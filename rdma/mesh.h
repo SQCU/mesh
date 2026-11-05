@@ -493,8 +493,8 @@ struct hdr {
      read or written: each plan's is its claim head's publication `state` */
   uint64_t vacant21;
   /* 110 (design/compilation-coordination.md, "The region"): a count that only rises.  Every publication of a plan
-     (mesh_plan), every close of a claim (mesh-dataflow.h mesh_claim_close, mesh_retire) and every start
-     (mesh-call.h mesh_transfers_start) adds 1 (release), then wakes it (mesh_notify, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+     (mesh_plan), every close of a claim (mesh-dataflow.h mesh_claim_close, mesh_plan_retire, mesh_retire) and every
+     start (mesh-call.h mesh_transfers_start) adds 1 (release), then wakes it (mesh_notify, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
      the ports read it once a pass and walk the claims' heads where it moved.  Many writers, as a count has; never
      reset */
   _Atomic uint64_t plans;

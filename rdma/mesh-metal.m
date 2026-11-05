@@ -17,7 +17,7 @@ static int state_area(uint64_t from,uint64_t at,uint64_t count,uint64_t size,uin
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7; design/disjoint-pages-revision-coordination.md,
    "The region" and "The GPU's side of the plan's words" */
-/* The plan's state section (mesh.h struct mesh_state at the context's `state`, mesh-dataflow.h struct mesh_ctx)
+/* The plan's state section (mesh.h struct mesh_state at region offset `plan`, mesh-collective.h mesh_plan's `*plan`)
    wrapped once for the GPU, by address, with no copy: mesh_plan places it in the arena with the plan's other values,
    in whole blocks, its first byte block-aligned (mesh-collective.h, "The state section"), so the wrap starts at a page
    of the region and covers the plan's own pages.  No section is created and nothing is written.  Its length is taken
@@ -26,7 +26,7 @@ static int state_area(uint64_t from,uint64_t at,uint64_t count,uint64_t size,uin
    (mesh-collective.h, "The state section": the struct, the phase list, the counts, the supplied words, the status),
    and each received range's groups are checked to lie inside the wrap where the range is prepared
    (mesh_metal_receive_prepare).  An area with no items (no received range, no source range) is not read.  EINVAL
-   where the context has no standing plan (`state` 0), where the section's first byte is not at a page of the arena,
+   where `plan` is 0, where the section's first byte is not at a page of the arena,
    where it holds no copy, or where an area lies before the struct's end, is misaligned for its loads
    (the phases at MESH_LANE_BYTES, the counts and supplied words at 8, the status at 4) or ends past the region (the
    context's `len`); ENOMEM where Metal wraps nothing.
@@ -38,11 +38,15 @@ static int state_area(uint64_t from,uint64_t at,uint64_t count,uint64_t size,uin
    mesh_metal_waits_stop (C3.1).  What must stay: one wrap, by address, with no copy, its length whole pages.
    2026-11-04, owner L (design/compilation-coordination.md, "The region": "every function takes the plan from
    `ctx->state`, never from hdr"): the section the context's standing plan's, where it was hdr `state`, the region's
-   one plan.  What must stay: as above. */
-int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mesh_metal_transport *transport){
+   one plan.  What must stay: as above.
+   2026-11-04, owner L2 (design/aot-compilation-change-request.md, appendix item 6; design/compilation-coordination.md,
+   "The appendix's revisions", N2, N5): the section the caller's `plan`, where it was the context's `state`, gone.
+   Why: a program holds any number of compiled functions at once, each its own plan, and the transport wraps the one
+   it names.  What must stay: as above. */
+int mesh_metal_transport_create(struct mesh_ctx *context,uint64_t plan,void *device,struct mesh_metal_transport *transport){
   *transport=(struct mesh_metal_transport){0};
   struct hdr *m=context->M;
-  const uint64_t at=context->state,page=m->pgsz,len=context->len;
+  const uint64_t at=plan,page=m->pgsz,len=context->len;
   if(!at || at%page || at<m->data_off || at>len || len-at<sizeof(struct mesh_state))return EINVAL;
   struct mesh_state *words=(struct mesh_state *)((char *)m+at);
   const uint64_t from=at+sizeof *words,copies=words->copies,ranges=words->ranges,word=sizeof(uint64_t);
@@ -69,9 +73,13 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
    the plan's state section.  The offsets are made relative to the transport's (its buffer's byte 0), and every copy's
    group and count word must lie inside the buffer, the groups at MESH_LANE_BYTES and the count words at 8, as the first
    pass's lane loads and the waiter's waits take them; `copies` is the plan's u (struct mesh_state).  EINVAL where the
-   row names no receive (`pages` 0), where its `state` is not the transport's or the context's `state` (another plan's
-   row), or where a copy's words lie outside the buffer or are misaligned.  (2026-11-04, owner L: the context's `state`,
-   where it was hdr `state`; design/compilation-coordination.md, "The region".)
+   row names no receive (`pages` 0), where its `state` is not the transport's `offset` (another plan's row), or where a
+   copy's words lie outside the buffer or are misaligned.  (2026-11-04, owner L: the context's `state`, where it was hdr
+   `state`; design/compilation-coordination.md, "The region".)
+   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N5): the row's `state` tested
+   against the transport's `offset` alone, where it was that and the context's `state`, gone.  Why: the transport names
+   its plan (mesh_metal_transport_create's `plan`), so a row of another plan is one whose `state` is not its offset.
+   What must stay: EINVAL for a row no receive of the transport's plan names.
    2026-11-04, sub-assignment 8: reversing sub-assignment 9's 2026-11-03 form, the landed list's buffer retained with
    execution 0's landed record at `offset` and the records at hdr landed_stride, and the range's bits one run [first,
    first + count) of every page's row's publication (`device_input`, `device_stride`, `landed`).  Why: the landed
@@ -87,7 +95,7 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
   const uint64_t at=transport->offset,bytes=transport->bytes;
   const uint32_t pages=head->pages,copies=transport->words->copies;
   const uint64_t group=mesh_group_bytes(pages);
-  if(!pages || head->state!=at || head->state!=context->state || head->phases<at || head->count<at)
+  if(!pages || head->state!=at || head->phases<at || head->count<at)
     return EINVAL;
   const uint64_t phases=head->phases-at,count=head->count-at;
   if(phases%MESH_LANE_BYTES || count%sizeof(uint64_t) || phases>bytes || count>bytes ||
@@ -104,8 +112,11 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
    offset is made relative to the transport's; the word lies inside the buffer, at 8.  Its one writer is the range's
    producer, which raises it by one after its last write of each execution (D9), through the recorder's binding of the
    buffer at this offset.  EINVAL where the row names no source range (`sends` not 1), where its `state` is not the
-   transport's or the context's `state`, or where the word lies outside the buffer or is misaligned.  (2026-11-04,
-   owner L: the context's `state`, where it was hdr `state`; design/compilation-coordination.md, "The region".)
+   transport's `offset`, or where the word lies outside the buffer or is misaligned.  (2026-11-04, owner L: the
+   context's `state`, where it was hdr `state`; design/compilation-coordination.md, "The region".)
+   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N5): the row's `state` tested
+   against the transport's `offset` alone, where it was that and the context's `state`, gone.  What must stay: EINVAL
+   for a row no source range of the transport's plan names.
    2026-11-04, sub-assignment 8: reversing sub-assignment 9's 2026-11-03 form, `ranges` sections' records (struct
    prepared_publication from mesh_publication_prepare, relative to the supplied words' area, at MESH_WORD_STRIDE an
    execution) in a section mesh_section_create laid out at this call and wrapped as `records`, and with `invocations`
@@ -121,7 +132,7 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
   if(!transport->state || operand.first>=mesh_rows(m))return EINVAL;
   const struct mesh_publication *head=mesh_publication_at(m,operand.first);
   const uint64_t at=transport->offset,word=head->targets[0].word;
-  if(head->sends!=1 || head->state!=at || head->state!=context->state || word<at || (word-at)%sizeof(uint64_t) ||
+  if(head->sends!=1 || head->state!=at || word<at || (word-at)%sizeof(uint64_t) ||
      word-at>transport->bytes-sizeof(uint64_t))
     return EINVAL;
   publication->supplied=word-at;
