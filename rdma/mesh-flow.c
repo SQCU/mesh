@@ -854,8 +854,9 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      Nothing requires them.  "a send that arrives first is held until its receive is posted (§3), and a loss cancels
      the plan anyway""; the start no longer waits for this load (mesh-dataflow.c mesh_transfers_start), so a load after
      the run's first submission is a load like any other: this port has posted nothing of the plan before it, and its
-     records and cursors start at execution 0 (`landings` 0, struct cursor), the executions this port serves on its
-     cable.  A child that pairs again after a loss finds the plan's `serial` no longer the map's, the loss having moved
+     cursors start at execution 0 (struct cursor), and each receive's round rule reads its page's phase field (PM,
+     link_receive_drain), so what earlier executions landed is read where it is.  A child that pairs again after a loss
+     finds the plan's `serial` no longer the map's, the loss having moved
      the map's serial (mesh-records.c map_put), and refuses it, ESTALE (above).  What must stay: the ESTALE refusal */
   /* the records, by lane, copy and assignment order: first[q (u + 1) + c] lane q's copy c's first, each lane's units
      counted by copy and summed in that order (copy pick / n; a lane's units come in list order, so in copy order) */
