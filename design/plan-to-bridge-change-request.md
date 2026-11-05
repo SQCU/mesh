@@ -1528,6 +1528,58 @@ design/aot-compilation-change-request.md, and are held here once.
 >
 > "Should I launch the revisions from these documents?" sure unless there's some obvious meta review that hasn't been applied yet or should
 
+**Claude:**
+
+> (๑•̀ㅂ•́)و The coflow question is answered and cited, the meta review is done, and the implementer is running on mesh `46ae8fdf`.
+>
+> **Coflows: one system, not a hierarchy, and nothing extra to solve**
+> - **Already in the graph:** R4 makes a function A operand a coflow: its consumer has an edge from every one of its pages. Function B pages are independent flows, each with an edge to its own task.
+> - **One priority covers both:** MSCCLang's two keys (depth, then reverse depth) are computed over those same edges. No coflow solver runs afterwards, and no weight is layered on top of an existing weighting.
+> - **The literature states it as one linear program:** Chen 2022 (arXiv 2205.02474) treats coflows with precedence in a single LP over completion times. That is your "linear fit in a higher vector-dim system":
+>   - (1a) "ensures that the completion time of coflow k is bounded by all its flows" — these are A's edges.
+>   - (1c) is precedence.
+>   - (1d) and (1e) bound each port's load, adapted from Hall, Schulz, Shmoys and Wein (1997).
+>   - §6's LP (14) minimizes makespan, with an O(µ) approximation ratio (Theorem 6.2).
+>   - Its schedule takes ready flows in order of the LP's completion times, the way MSCCLang's heap takes priorities.
+> - **What R5 now says:** it cites Chen for this one-system form, and the code keeps MSCCLang's priority, which needs no solver.
+> - **If you want Chen's LP order instead:** it replaces only the heap's key, and it needs an LP solver. Chen's ports are a switch's, so applying the bound per cable would be the document's own reading.
+>
+> **Meta review** (a Sonnet audit; I checked each of its 25 findings against the papers and the code, and applied nearly all):
+> - **Missing turns:** two of your mid-turn messages had never made it into "The turns": the coflow question and the edge-weight chooser. I fixed the extractor and regenerated the record.
+> - **I was wrong about "nothing waits to write"** (my e75321cc text). A10's bound counts only the calls outstanding at the submitting node. Another node can still be working on call n when call n+K's order arrives there. It is now marked **Open** in item 2, so the implementer will stop there.
+> - **The sequencer reset you rejected** is still in the code. Item 2 now says to remove it, with your words quoted. I also dropped the bully-algorithm citation, because no election ever runs.
+> - **A set is one demand's pages on one tree**, which is how the code numbers sets. So a set's pages share their predecessors, and one permutation per execution closes the cycle problem the last implementer stopped on (stop 3).
+> - **Citation fixes:**
+>   - GSPMD emits one program for all partitions, not one per device.
+>   - ReduceScatter and CollectivePermute now come from GSPMD §4.2; the code refuses both today.
+>   - The generator is named: Threefry-4×64-20.
+>   - Lemire's rejection step is required so each shuffle draw is exactly uniform.
+>   - Eq. (7) and HLFET are quoted as their sources write them.
+>   - Combining MSCCLang's two keys is marked as the document's own reading.
+> - **A correction to what I told you mid-turn:** R5 does not contradict T99. The bridge deals each cable's list over its devices by Graham's list scheduling, so released executions do interleave on a cable.
+> - **Not applied:** B's output edges, and how Dynamo turns calls into graph nodes. The implementer will either record a minimal decision for each or stop.
+>
+> **The implementer** works from the two documents alone, under the standing rules. It commits as each piece builds, records its work in `design/compilation-coordination.md` under "The revisions of 46ae8fdf", and runs nothing.
+>
+> **I need your ruling on one point:** at a node where call n is still outstanding, what happens to the order for call n+K? It could wait in that node's memory until the slot frees, or a call could count as outstanding until every node of its plan is done. Neither document says, and I haven't found a citation that settles it.
+>
+> Sources:
+> - [Chen 2022, coflows with precedence](https://arxiv.org/pdf/2205.02474)
+> - [Hall, Schulz, Shmoys & Wein 1997](https://depositonce.tu-berlin.de/items/4cb97e87-6de9-440d-b21e-3fe9313bc406)
+> - [Sincronia](https://www.cs.cornell.edu/~saksham/assets/pdf/sincronia.pdf)
+> - [Chowdhury et al. 2019, coflows in networks](https://arxiv.org/pdf/1906.06851)
+> - [Queyranne & Sviridenko](https://www.research.ibm.com/publications/approximation-algorithms-for-shop-scheduling-problems-with-minsum-objective)
+> - [Queyranne 1993](https://unpaywall.org/10.1007%2FBF01581271)
+> - [Graham 1966](https://ia801900.us.archive.org/27/items/bstj45-9-1563/bstj45-9-1563_text.pdf)
+
+**The operator:**
+
+> "- If you want Chen's LP order instead: it replaces only the heap's key, and it needs an LP solver. " then we need a LP solver, citing chen for why, how, and what this means.
+> "Another node can still be working on call n when call n+K's order arrives there."
+> is there any reason why data processing functions shouldn't be locked in and using lots of gpu or cpu or ane resources in some use pattern while also asynchronously receiving and transmitting pages through the distinct namespace (and process space to some extent?) of the bridge? nothing here seems to imply a 'wait' nevertheless... literature time...
+> "at a node where call n is still outstanding, what happens to the order for call n+K? "
+> what's an 'order' if you use non-idiomatic terminology?
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
@@ -1637,53 +1689,69 @@ code, and each method is used as its source states it.
 - The code must order each cable's sends by a static schedule of one execution's task graph, minimizing its makespan.
 - **Method:**
   - List scheduling (R. L. Graham, Bounds on multiprocessing timing anomalies, SIAM J. Appl. Math., 1969), with each
-    task already on its node by the placement operand (aot-compilation A2).
-  - **The priority is MSCCLang's, with costs in place of hops.** MSCCLang §5.2 step 1: "Assign instruction priority by
-    calculating the depth (maximum hops from a root node) and reverse depth (maximum hops to a leaf node) for every
-    instruction in the Instruction DAG. This prioritizes instructions that are enabled earlier and have more downstream
-    dependencies respectively." Its scheduler "attempts to schedule instructions in the order they will be ready"
-    (§5.2).
-    - Depth, with costs: each instruction's earliest start under link contention, from edge scheduling on the links of
-      each edge's route (O. Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6), 2005:
-      their Algorithm 1, list scheduling, whose "line 6 ... must be performed as outlined in Algorithm 2" under
-      contention). That is when it will be ready, so edge scheduling is used and stays. Algorithm 2 takes a node's
-      entering edges in a definite order, which the implementer chooses and records.
-    - Reverse depth, with costs: each instruction's bottom level, Sinnen and Sousa's eq. (7), bl(n_i) = w(n_i) +
-      max{c(e_ij) + bl(n_j)} over the successors n_j of n_i. Each hop of an edge's route is its own instruction on its
-      cable, as the code builds them (design/compilation-coordination.md GO2). With every c zero, the bottom level is
-      HLFET's static level (T. L. Adam, K. M. Chandy and J. R. Dickson, A comparison of list schedules for parallel
-      processing systems, CACM, 1974).
-    > if edge scheduling is required by some quality of hte problem being solved and there is relevant literature to
-    > bricolage together, identifying that literature is just as good of a corrective or better to trying to plainly
-    > delete something which occurred to implementing subagents when viewing the previosu change request documents as
-    > presented.
-    (Corrected 2026-11-05: an earlier correction dropped edge scheduling, and its start times went unread. They are the
-    depth MSCCLang's priority takes.)
-  - **Coflows and independent flows are edges of the same graph, so this one priority orders them.**
+    task already on its node by the placement operand (aot-compilation A2), in order of the completion times of one
+    linear program. Hall, Schulz, Shmoys and Wein: "first, we obtain an optimal solution to the linear program,
+    C̄1, ..., C̄n, and then we schedule the jobs in order of non-decreasing C̄j, where ties are broken by choosing an
+    order that is consistent with the precedence relation. We refer to this algorithm as Schedule-by-C̄j" (L. A. Hall,
+    A. S. Schulz, D. B. Shmoys and J. Wein, Scheduling to minimize average completion time: off-line and on-line
+    approximation algorithms, Math. Oper. Res. 22(3), 1997, §2). Chen schedules coflows the same way, "in
+    non-decreasing order of C̄f, breaking ties arbitrarily" (C.-Y. Chen, Scheduling coflows with precedence
+    constraints for minimizing the total weighted completion time in identical parallel networks, arXiv 2205.02474,
+    2022, Algorithm 1).
+    > then we need a LP solver, citing chen for why, how, and what this means.
+  - **Why: one linear program holds every requirement of the order at once.**
     > is there a heirarchal decomposition of 'mscc solves first, then we use the coflow solver as some weighting upon a
     > weighting already chosen' (seems clumsy) or is this a simple linear fit in a higher vector-dim system of
     > equations? We should be able to find literautre on this problem of the combination of parmaetric-codomain-solvers
     > tbh; the solution is unlikely to be inlining wacky complex code about each other subproblem into the ltieral
     > solver we use for each stage.
-    - R4 gives function A one task with an edge from every page of its operand, and function B one task per page, each
-      with an edge from its own page. Depth and reverse depth are computed over those edges, so a join's pages carry
-      their consumer's bottom level and each of B's pages carries its own task's. No coflow solver runs after this
-      priority, and no weight is laid over a weighting already chosen.
-    - The literature states this problem, coflows with precedence, as one linear program over completion times (C.-Y.
-      Chen, Scheduling coflows with precedence constraints for minimizing the total weighted completion time in
-      identical parallel networks, arXiv 2205.02474, 2022). Its rows are the same edges and the same contention:
-      - (1a) "ensures that the completion time of coflow k is bounded by all its flows". These are A's edges.
-      - (1c) "is the precedence constraint". These are the graph's other edges.
-      - (1d) and (1e) "lower bound the completion time variable in the input port and the output port", "modified from
-        the scheduling literature" (L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Scheduling to minimize average
-        completion time: off-line and on-line approximation algorithms, Math. Oper. Res. 22(3), 1997). Chen's ports
-        are a switch's. Here the same bound falls on each cable, the resource edge scheduling places transfers on.
-      - Its §6 LP (14) minimizes the makespan. Theorem 6.2 gives it "an approximation ratio of O(µ)", where µ is "the
-        coflow number of the longest path in the DAG".
-      - Its schedule takes ready flows "in non-decreasing order of C̄f", the program's completion times, as step 3's
-        heap takes the priority.
-    - The code keeps MSCCLang's priority, which needs no solver. Chen's program is cited because it shows that the
-      coflow element is rows of the one system, not a second stage.
+    - Chen states coflows with precedence as one linear program over completion times, and schedules by its solution.
+      Its §6 LP (14) minimizes the makespan, this requirement's objective. Theorem 6.2: "The proposed algorithm has an
+      approximation ratio of O(µ) for minimizing the makespan of a given set of multi-stage jobs", where µ is "the
+      coflow number of the longest path in the DAG".
+    - Precedence, coflows, independent flows and contention are each rows of that one program (below). No second
+      solver runs, and no weight is laid over a weighting already chosen.
+    - Theorem 6.2 is proven for Chen's network: identical non-blocking switches, with each flow on an input port and an
+      output port. Here the same rows fall on cables and devices. No theorem cited here covers that case; this is the
+      document's reading.
+  - **How: the program.** It has one variable C_j, a completion time, for each instruction j of one execution's task
+    graph (R3): each task at its node, and each hop of each page's route, on its cable
+    (design/compilation-coordination.md GO2). It has one more variable, C_max. Instruction j's length d_j is its weight
+    from the weighting operand (aot-compilation A3): w for a task, and for a hop c(e) over its cable's bandwidth.
+    - Minimize C_max, with C_max ≥ C_j for every j: Chen's (14) and (14a).
+    - C_j ≥ d_j for every j: Chen's (1b), with every release time zero within one execution.
+    - C_j ≥ C_i + d_j for every edge i → j of the graph: Chen's (1c), "the precedence constraint", and Hall et al.'s
+      (3). R4's edges are among them. Function A's task has an edge from every page of its operand, which with (1c) is
+      Chen's (1a): "the completion time of coflow k is bounded by all its flows". Each of function B's tasks has one
+      edge, from its own page, so B's pages are independent flows.
+    - For each resource, and each set S of the instructions on it: Σ_{j∈S} d_j C_j ≥ ½(d(S)² + d²(S)), where d(S) is
+      Σ_{j∈S} d_j and d²(S) is Σ_{j∈S} d_j². A resource is a cable in one direction, or a node's device. This is Hall et
+      al.'s (5), "introduced by Queyranne (1993)". Chen's (1d) and (1e) take it for each input and output port, here
+      with one network core (m = 1).
+    - These last rows are where contention enters. Sinnen and Sousa: "In edge scheduling, communication resources are
+      treated like processors in the sense that only one communication can be active on each resource at a time" (O.
+      Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6), 2005, §5).
+  - **How: solving it.**
+    - The rows of the last kind are one for each set, so there are exponentially many. Hall et al.: "Queyranne (1993)
+      has shown that the linear program given by (1), (3) and (5) is solvable in polynomial time via the ellipsoid
+      algorithm; the key observation is that there is a polynomial-time separation algorithm for the exponentially
+      large class of constraints (5)." Queyranne's separation takes O(n log n) time, and he proposes it for
+      cutting-plane algorithms (M. Queyranne, Structure of a simple scheduling polyhedron, Math. Programming 58,
+      1993).
+    - So the program is solved by cutting planes. Solve it with the rows found so far. Find each resource's violated
+      rows by Queyranne's separation, and add them. Repeat until no row is violated.
+    - Each linear program is solved by HiGHS's dual revised simplex method, through the HiGHS library (Q. Huangfu and
+      J. A. J. Hall, Parallelizing the dual revised simplex method, Math. Program. Comput. 10(1), 2018, the paper HiGHS
+      asks its users to cite). The code builds the rows and calls the library. It writes no solver of its own.
+    - Every rank solves the same program with the same library, on one thread, so every rank finds the same solution
+      and the same order (Schneider, below).
+  - **What it means.**
+    - Each instruction's priority is C̄_j, its completion time in the program's optimal solution, the least first.
+    - C̄_j is a relaxation's value, a lower bound, and not a time any schedule keeps. Only its order is used.
+    - It replaces MSCCLang's depth and reverse depth, and edge scheduling's start times, which are no longer computed
+      for the order. Edge scheduling's part, one communication at a time on each link, is now the resources' rows.
+    - (Corrected 2026-11-05, on the operator's turn above: the text before kept MSCCLang's priority, which needs no
+      solver, and cited Chen's program only for the one-system form.)
 
 - **Routes are the plan's existing ones,** as now:
   - trees packed by Garg and Könemann's rounds (N. Garg and J. Könemann, FOCS 1998; rdma/mesh-graph.h
@@ -1692,8 +1760,9 @@ code, and each method is used as its source states it.
 - **The order of each cable's list, by the reference algorithm.** Each cable's list is a subsequence of one global
   topological order of the instructions, built as MSCCLang §5.2 states in its step 3: "Sort instructions into a global
   topological order with respect to their dependencies with a heap using the priority to order instructions." The
-  priority is the one above. MSCCLang names depth and reverse depth, and not how the two combine. This document takes
-  the least depth first and, among equal depths, the greatest reverse depth (its own reading).
+  priority is the one above: the least C̄_j first. Where two are equal, the heap takes the lower instruction, as the
+  code breaks ties now (design/compilation-coordination.md GO3). That order is consistent with the precedence relation,
+  as Hall et al.'s ties require.
   > what algorithm is cited here, if any? no citations? use the reference algorithm instead.
   - A set's pages (design/aot-compilation-change-request.md, appendix item 5) keep their places in that order. The
     set's random permutation is drawn over those places. (Corrected 2026-11-05: the first text moved a set's pages to
@@ -1713,7 +1782,11 @@ code, and each method is used as its source states it.
 - **How the bridge spreads a cable's sequence over what its devices give it is the bridge's own, as now:**
   rdma/mesh-flow.c `link_prepare`, `mesh_graph_list_schedule` in list order.
 - **Code:**
-  - rdma/mesh-graph.{h,c}: bottom levels, edge scheduling's earliest starts, and the heap order by both.
+  - rdma/mesh-graph.{h,c}: the program's rows, the cutting-plane loop with Queyranne's separation, and the calls to
+    HiGHS; the heap order by C̄ (`mesh_graph_heap_order`, as now).
+  - rdma/Makefile: links the HiGHS library through its C API (highs/interfaces/highs_c_api.h). HiGHS is a new build
+    dependency: Homebrew's `highs`, 1.15.1 on this machine. Installing it on the members is the operator's step, since
+    deployment is not touched.
   - rdma/mesh-collective.c: writes each copy's list with each cable's sends in schedule order, each with its bytes
     (`struct mesh_hop` `bytes`, as now).
   - rdma/mesh-flow.c: sends `bytes`, as now.

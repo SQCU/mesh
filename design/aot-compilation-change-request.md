@@ -187,8 +187,8 @@ statement, or a fact of the code.
 
 ### A6. One schedule per function
 
-- **Method:** design/plan-to-bridge-change-request.md R3 to R5, over the weights of A3: R5's heap order by depth (edge
-  scheduling's earliest start under contention) and reverse depth (the bottom level).
+- **Method:** design/plan-to-bridge-change-request.md R3 to R5, over the weights of A3: R5's heap order by the
+  completion times of one linear program (Chen, 2022; Hall, Schulz, Shmoys and Wein, 1997), solved by HiGHS.
 
 ### A7. Function executions of programs that run at once are ordered by one scheduler for the island
 
@@ -281,7 +281,7 @@ statement, or a fact of the code.
     asynchronously (Barham et al., 2022, §4.5).
 - **Its output:**
   - for each compiled function, the most calls of it the analysis lets be outstanding at once in the program that
-    submits them, which the delivery words of the appendix's item 2 are placed for;
+    submits them, which bounds how many the program issues ahead;
   - the order constraints between calls, which the program keeps when it submits, so the sequencer's first-in, first-out
     numbers keep them too (A7);
   - both carried in A8's IR.
@@ -373,25 +373,53 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **Recorded order:** the bridge may record the order it realized (its traces, rdma/mesh-flow.c `struct mesh_trace`
   under `MESH_LEDGER`). No collective or data code reads it.
 - **Delivery at a node.**
+  > is there any reason why data processing functions shouldn't be locked in and using lots of gpu or cpu or ane
+  > resources in some use pattern while also asynchronously receiving and transmitting pages through the distinct
+  > namespace (and process space to some extent?) of the bridge? nothing here seems to imply a 'wait' nevertheless...
+  > literature time...
+
+  > what's an 'order' if you use non-idiomatic terminology?
+
   - The sequencer numbers each call (Défago, Schiper and Urbán, 2004). A call is one execution of its compiled function,
     as in Pathways §4.4 ("function executions"). A program submits one call per execution.
-  - How many calls of one function may be outstanding at once is decided at compile time by A10, never chosen at run
-    time. The plan's state holds a delivery word for each, written by the bridge parent alone (C3's rule 2) and placed
-    by the allocator for A10's bound.
-  - Each port takes the delivered calls of every standing plan in sequence-number order. Both ends of a cable read the
-    same numbers, so they take them alike. The pages of the calls a port has taken interleave on its cable (above).
-  - **Open.** A10's bound counts the calls outstanding in the program that submits them. A call returns there once that
-    node's own landings and sends are done (C3.1; item 4), so the call can still be outstanding at another node of its
-    plan. Neither document states what that node does with the order of a later call whose delivery word is still in
-    use there. The implementer stops at this point and reports it. (design/compilation-coordination.md, "The revisions
-    of 67ca86f8", stop 1, found it.)
-  - (Corrected 2026-11-05: an earlier text said that nothing waits to write, which A10's bound does not give at a node
-    other than the submitter's. Before that it assumed one outstanding call per plan, and before that it wrote one word
-    per copy.)
+  - **What the code calls an ORDER** is the fixed sequencer's relayed message. Défago, Schiper and Urbán, §7.1: "To
+    broadcast a message m, a sender sends m to the sequencer. Upon receiving m, the sequencer assigns it a sequence
+    number and relays m with its sequence number to the destinations. The latter then deliver messages according to
+    the sequence numbers." Here m is the submitted call, its plan and its execution.
+  - **Each node runs the destinations' code of their Fig. 5, as written:**
+    - "when receive (m, seqnum)": pending := pending ∪ {(m, seqnum)};
+    - "while ∃(m′, seqnum′) ∈ pending : seqnum′ = nextdeliver do deliver (m′); nextdeliver := nextdeliver + 1".
+    - Delivery does not wait for any earlier call to finish, since Fig. 5 has no such condition. A call still running
+      at a node delays no later call's delivery there.
+  - **Delivering a call releases its execution to the node's ports.** Its pages then go as their data allows. Each
+    waits only on its own dependences in the task graph, and those include the lags C3.3 gives each value's copies.
+  - **Work and transfers run at once.** The node's GPU, CPU or ANE work and the bridge's transfers proceed
+    concurrently:
+    - Pathways §4.5: "systems can take advantage of asynchronous APIs to overlap computation with coordination";
+      computations "may still be interleaved with those submitted by other concurrently executing programs".
+    - Active messages integrate communication with computation, so that both proceed at once (T. von Eicken, D. E.
+      Culler, S. C. Goldstein and K. E. Schauser, Active messages: a mechanism for integrated communication and
+      computation, ISCA 1992).
+    - The bridge serves its queues of page descriptors while the program computes, as a user-level network interface
+      does (U-Net; VIA; design/plan-to-bridge-change-request.md R1).
+  - **The delivered calls reach the ports, in delivery order, through a first-in, first-out channel whose writer never
+    waits.** These are Kahn's channels, unbounded FIFO queues between processes (G. Kahn, The semantics of a simple
+    language for parallel programming, IFIP Congress 1974).
+    - Each port reads the channel in order.
+    - An entry is reclaimed once every port has read past it, by deferred reclamation (McKenney and Slingwine, 1998;
+      Fraser, 2004; design/plan-to-bridge-change-request.md R8).
+    - How the bridge holds the channel is the bridge's own (design/plan-to-bridge-change-request.md R7).
+  - Each port takes the delivered calls of every standing plan in sequence-number order. Both ends of a cable deliver
+    the same sequence, so they take the calls alike. The pages of the calls a port has taken interleave on its cable
+    (above).
+  - (Corrected 2026-11-05: the text before this one fixed a number of delivery words a plan, from A10's bound. It then
+    found no word free, at a node still serving an earlier call, for a later call's order, and marked that open. Fig.
+    5's destinations have no such limit, and delivery is not completion.)
 
 - **The code must:**
-  - deliver orders in sequence order;
-  - publish them to each port, as above;
+  - deliver orders as Fig. 5's destinations do;
+  - publish them to each port through the channel above, in place of the sequence words (`sequences`), `taken[p]` and
+    the parent's wait while they are full (Lamport's buffer; the coordination's DL1);
   - interleave released executions on each cable;
   - remove Q4's hold and Q4′'s timeout skip (done: design/compilation-coordination.md DL4, O1);
   - remove the coordination's Q3′: the sequencer's number never goes back to 0, and no node drops a pending order when
@@ -481,10 +509,10 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **Decision without a citation:** a client's plan is a singleton. Planning again closes every earlier plan (the
   coordination's C-epoch and step 8).
 - **The citations:**
-  - A compiled function is an executable, compiled once and launched by each call, and many coexist. JAX traces a function
-    anew only "on a trace cache miss" (R. Frostig, M. J. Johnson and C. Leary, Compiling machine
-    learning programs via high-level tracing, SysML 2018). CUDA Graphs: a graph instantiated once and launched many
-    times (NVIDIA, CUDA C++ Programming Guide).
+  - A compiled function is an executable, compiled once and launched by each call, and many coexist. JAX traces a
+    function anew only "on a trace cache miss" (R. Frostig, M. J. Johnson and C. Leary, Compiling machine learning
+    programs via high-level tracing, SysML 2018). CUDA Graphs: a graph instantiated once and launched many times
+    (NVIDIA, CUDA C++ Programming Guide).
   - Pathways dispatches each call to its compiled function (§3, §4.4).
 - **The code must:**
   - let a program hold any number of compiled functions at once, each its own plan with its own claim;
