@@ -153,6 +153,8 @@ statement, or a fact of the code.
 - The compilation must lower every collective A2 inserts to sends and receives of pages. It routes all of one
   function's collectives jointly over the Thunderbolt-linked nodes of the map, as `mesh_plan` routes every demand of its
   plan at once (rdma/mesh-collective.c, `mesh_graph_flow`). Each compiled function is its own plan (appendix item 6).
+  Every node of the map is a node of the program, since every run is launched on the whole collective, so every relay
+  holds the plan (A7, sender(m)).
 - **Method:**
   - **Trees.** Blink (G. Wang et al., Blink: fast and generic collectives for distributed ML, MLSys 2020) builds
     collectives on packed spanning trees.
@@ -250,31 +252,89 @@ statement, or a fact of the code.
     Dest(m) discard m." The super-group is the island's nodes. One sequence numbers every message and every node
     delivers in its order, so no two nodes deliver two messages in opposite orders, and Global Total Order holds.
   - **What each term names here:**
-    - **m** is one submission: its plan's name (`group`, `epoch`), the map serial it was made on, and a range of its
-      executions [`first`, `end`) (rdma/mesh-bridge.h struct mesh_order). One submission is one message however many
+    - **m** is one submission: its plan's name (`group`, `epoch`), the identifier of the view it is sent in (below),
+      and a range of its executions [`first`, `end`) (rdma/mesh-bridge.h struct mesh_order). One submission is one message however many
       executions it carries, as Pathways sends "a single message (describing the entire subgraph)" (§4.5). e2b's run is
       one message.
-    - **sender(m)** is the program's one sender: the least of the program's nodes, the program being its launcher's
-      `group` (rdma/mesh.h). It TO-broadcasts the program's submissions in the order the program makes them.
+    - **sender(m)** is the program's one sender: the least of the program's nodes. It TO-broadcasts the program's
+      submissions in the order the program makes them. The program's nodes are the nodes its launcher started it at,
+      an operand of the plan call (`program`) that the launcher passes as it passes `group` (MESH_GROUP). Every run is
+      launched on the whole collective ("you may never use less than the entire collective under any circumstances.
+      all is okay, 2 is not okay. all is cheaper than 2."), so the program's nodes are every member of the view, every
+      relay of A4's routes is one of them, and every node of every plan, relays among them, calls `mesh_plan` and holds
+      the plan.
     - **The sequencer** is the bridge of the highest-numbered node the map reaches (rdma/mesh-records.c `island_set`),
       the code's choice, which the class leaves open. "The sequencer is unique, and the responsibility is not normally
-      transfered to another processes" (§7.1).
+      transfered to another processes" (§7.1). It creates the island's views (below).
     - **sn(m)** is struct mesh_order's `sequence`.
     - **Dest(m)** is the nodes of m's plan (struct mesh_order's `nodes`).
     - **deliver(m)** at a node of Dest(m) appends m to its plan's queue there (appendix item 2), which releases its
       executions at the node. The pages of delivered executions interleave on each cable (T99).
   - **Failures.** "This algorithm does not tolerate the failure of the sequencer" (§7.1). A plan stands only while its
     map does (design/disjoint-pages-change-request.md D.3.6), so a loss ends every plan it touches, and no standing
-    plan's sequencer changes.
+    plan's sequencer changes. A plan also stands only within its view (below).
 - **One sender for each program.** "Total Order alone does not guarantee that messages are delivered in the order in
   which they are sent" (§4.3.1), and FIFO Order is a property of one sender's messages. Where two nodes broadcast calls
   of one program, nothing makes one node's broadcast precede the other's (Lamport's "precedes", their Definition 1), so
   neither FIFO Order nor Causal Order (§4.3.2) need keep the program's order. With one sender, whose messages reach the
   sequencer first in, first out, Fig. 5's sequencer numbers them in the order they were sent ("when receive (m) sn(m)
   := seqnum"). So FIFO Order holds, and with it A10's order constraints between the program's calls.
-- **A plan's destinations exist before its first message.** Section 3's specification is "the standard specification
-  of total order broadcast in a static system, that is, a system in which all processes are created at system
-  initialization" (§6).
+- **The island is a dynamic group, and each of its views is a static system.** Section 3's specification is "the
+  standard specification of total order broadcast in a static system, that is, a system in which all processes are
+  created at system initialization" (§6). The island is not one: its bridges start, and start again, at different
+  times. "A dynamic group is a group of processes with a membership that can change during the computation ... the
+  successive memberships of the group are called the views of the group" (§6.1), and "Total order broadcast in a system
+  with dynamic groups can hence be specified as view synchrony plus an additional order property" (§6.1). The
+  membership is "a group membership service ... Whenever the membership changes, the service report changes to all
+  group members, by providing them with the new view" (§8.2).
+  - **The view properties the code must have** are G. V. Chockler, I. Keidar and R. Vitenberg's (Group communication
+    specifications: a comprehensive study, ACM Comput. Surv. 33(4), 2001), verbatim:
+    - "(Self Inclusion) If process p installs view V, then p is a member of V." (Property 3.1)
+    - "(Local Monotonicity) If a process p installs view V after installing view V′ then the identifier of V is
+      greater than that of V′." (Property 3.2)
+    - "(Initial View Event) Every send, recv and safe_prefix event occurs within some view." (Property 3.3), with its
+      note: "one has to restrict the behavior of the application, so that no send events occur before the first
+      view_chng event."
+    - "(Sending View Delivery) If a process p receives message m in view V, and some process q (possibly p = q) sends
+      m in view V′, then V = V′." (Property 4.3)
+  - **A process** is one start of a bridge. A bridge started again is a new process: "In Isis [RB91] a process
+    recovering after a crash is assigned a different identifier (using a new incarnation number)" (Chockler, Keidar and
+    Vitenberg, §3.1.1).
+  - **The membership service is the sequencer.** It decides each view alone, as Amoeba does: "Suspected processes are
+    excluded from the group as the result of the unilateral decision of a single process" (Défago, Schiper and Urbán,
+    §9.1.1). A view's members are the nodes the sequencer's map reaches. The sequencer creates a view at its bridge's
+    start and at each move of its map.
+  - **The view identifier is Transis's**: "a positive integer. This integer is computed based on the values of local
+    counters, maintained by all processes. This local counter is increased by a process upon each installation"
+    (Chockler, Keidar and Vitenberg, §3.1.1). A bridge's counter is the identifier of the last view it installed, 0
+    before its first. Each bridge's announcement of itself to the sequencer carries its counter, and the sequencer gives
+    a view one more than the greatest counter among its members. So Local Monotonicity holds at every member, a bridge
+    started again among them.
+  - **A bridge installs a view** when the view's first message reaches it, if the view names it a member (Self
+    Inclusion) and the view's identifier is greater than its counter (Local Monotonicity). It ignores any other view's
+    messages.
+  - **Fig. 5 runs within each view as written.** Its initializations, "seqnum := 1" and "nextdeliver := 1; pending :=
+    ∅", happen at the view's creation at the sequencer and at its installation at each member. Every message carries
+    its view's identifier. A member holds and delivers only the messages of the view it has installed (Sending View
+    Delivery), and the program's sender TO-broadcasts nothing before its first view (Initial View Event).
+  - **A change of view blocks and flushes**, as Chockler, Keidar and Vitenberg give it: "group communication systems
+    block sending of messages while a view change is taking place. In order to notify the application that it needs to
+    stop sending messages, the GCS sends a block request to the application. The application responds with a flush
+    message which follows all the messages sent by the application in the old view. The application then refrains from
+    sending messages until the new view is delivered" (§4.2.1).
+    - When the sequencer's map moves, it numbers no further message of the old view. Its first message of the new view
+      carries the last sequence number it gave in the old one.
+    - A member that installed the old view from the same process delivers the old view's messages up to that number,
+      then installs the new view.
+    - Where the old view's sequencer is gone (its bridge stopped, or the map moved to another sequencer), the old
+      view's undelivered messages are never delivered: "This algorithm does not tolerate the failure of the sequencer"
+      (§7.1).
+  - **A plan stands only within the view its nodes' arrivals were counted in.** Installing a view ends every plan of
+    the old one with `ESTALE`, as D.3.6 ends a plan at its map's move, and the plan's replan arrives in the new view.
+    Each arrival carries its view's identifier, and the program's sender counts only the arrivals of the view it has
+    installed.
+- **A plan's destinations exist before its first message.** Within a view, Section 3's static system holds for the
+  processes the view names, and a plan's first message must find all of them holding the plan.
   > "What I was describing is that compilation finishes at different nodes at different times. "
   > this is trivially allowed and if claudes would stop delaying basic logistics for collective propgramming by going
   > off the rails all the time we could be talking about how to use the collective as a work stealing compute bloc
@@ -309,6 +369,17 @@ statement, or a fact of the code.
   > "That was the whole deadlock: my A7 gave one program several senders."
   > then this is an undercitation over-idiom issue and has a known remedy (making specification more explicit, more
   > citational, less idiomatic, removing ad libs that feel zesty and fun and exciting to write.)
+  - (Corrected 2026-11-05, later: the text before required Fig. 5's initializations at each bridge's start and cited
+    §6's static system for the island. The island's bridges start at different times, so a bridge started after the
+    sequencer had numbered messages, and every node after the sequencer's bridge started again, delivered nothing
+    (design/compilation-coordination.md, "The revisions of abecd389", stop 1). Défago, Schiper and Urbán leave that to
+    a group membership service (§6.1, §8.2), and the text named none. The text before also had m carry "the map serial
+    it was made on", which no receiver can compare: each node's serial is its own count. And it named the program's
+    nodes by rdma/mesh.h, which holds none.)
+  - This is not the coordination's Q3′, which appendix item 2 removes: Q3′ set the counter back to 0 and dropped
+    pending orders at each node's own map move, with no citation and no algorithm. Here the numbering begins again only
+    at a view's creation, which the sequencer decides for every member, and the old view's messages are flushed first
+    (§4.2.1).
 
 ### A8. The IR operand
 
@@ -534,19 +605,50 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       number" (Défago, Schiper and Urbán, §7.1). The plan's k-th delivery at the node is entry k mod the queue's room.
       One submission is one message however many executions it carries, as Pathways sends "a single message
       (describing the entire subgraph)" (§4.5). e2b's run is one submission.
-    - **Its room is fixed at compile time.** For a schedule synchronous dataflow admits, "the buffers must remain
-      bounded" (Lee and Messerschmitt, the proof of their Theorem 1), and the bound is found before the program runs.
-      An entry stays until the bridge at the node has taken its call. That is at most A10's bound on the plan's
-      submissions outstanding at its sender, plus C3.3's u copies on each hop of the plan's routes: a copy is used again
-      only after the last reads of it (C3.3), so a node's part of a call trails the sender's by at most u copies a hop.
-      This number is this document's derivation. A plan whose bound A10 cannot find fails with `ENOMEM` when it is
-      planned, as a value without a lag does in C3.3.
+    - **Its room is fixed at compile time, by the self-timed buffer bound.** For a schedule synchronous dataflow
+      admits, "the buffers must remain bounded" (Lee and Messerschmitt, the proof of their Theorem 1), and the bound is
+      found before the program runs. The queue is an IPC edge of a self-timed schedule as S. S. Bhattacharyya, S.
+      Sriram and E. A. Lee define one (Optimizing synchronization in multiprocessor DSP systems, IEEE Trans. Signal
+      Processing 45(6), 1997, here BSL). Its source is the sender's TO-broadcast of the plan's calls, and its sink is the
+      bridge's taking of them at the node.
+      - **The graph.** The compilation builds the program's IPC graph from A10's analysis as BSL's §4.1 builds one:
+        "if actors v1, v2, …, vn are assigned to the same processor in that order, then Gipc would have a cycle ((v1,
+        v2), (v2, v3), …, (vn − 1, vn), (vn, v1)), with delay((vn, v1)) = 1". The processors are the program's nodes.
+        The actors are each node's parts of the program's calls, in program order. The IPC edges are the plans'
+        transfers, each with C3.3's u copies as its delay, and these queues. At each node, A10's bound is the delay on
+        the edge from a call's completion to the program's later submission. Execution times t(x) are A3's weighting
+        operand.
+      - **On a cycle**, the queue's room is BSL's self-timed buffer bound: "Bfb(e) = min({Delay(C) | C is a cycle that
+        contains e})" (§4.3, (5)). Its synchronization is their BBS, which "only explicitly ensures" that "an
+        invocation of snk(e) never attempts to read data from the buffer unless the buffer contains at least one token"
+        (§5.1).
+      - **Feedforward**, as where the program's sender holds no page of the plan: "Feedforward edges have no such bound
+        on buffer size", and such an edge "could be unbounded when the execution time of A is less than that of B"
+        (§4.3, Fig. 2(a)). The compilation adds synchronization edges by BSL's Convert-to-SC-graph (§9, Fig. 6) and sets
+        their delays by DetermineDelays (Fig. 8), so that "e becomes encapsulated in an SCC; such a transformation would
+        allow e to be implemented with BBS" and "the estimated throughput is not degraded" (§9). The queue's room is
+        then its bound by (5) in the converted graph.
+      - **An added edge (vj, vi)** holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" (BSL (7)). Its source raises a
+        count that only rises (C3's counted completion: Portals 4 counting events), and its sink reads that count
+        before its k-th start. The bridge carries the count from source to sink, as it carries an arrival.
+      - **Where they live.** The strongly connected components, Convert-to-SC-graph, Bellman–Ford's cycle mean and
+        MinDelay's binary search are functions of rdma/mesh_graph.py. They take the caller's vertices, edges, delays
+        and times as operands (A10: "The same holds wherever mesh's code walks a graph").
+      - A plan whose bound cannot be found fails with `ENOMEM` when it is planned, as a value without a lag does in
+        C3.3. That happens where A10 finds no bound, or where a cycle has no delay (BSL's Lemma 1: deadlock).
     - **The bridge takes its plans' calls by a multiway merge on the sequence number** (D. E. Knuth, The Art of Computer
       Programming, vol. 3, §5.4.1): of the first untaken entries of its standing plans, the least sequence number first.
       Fig. 5 delivers in sequence-number order (its `nextdeliver`), so every entry below the node's delivery count is in
       its queue already, and no smaller one comes later.
-    - **Nothing waits to write, and nothing checks for a full queue.** By the bound, no delivery reaches an entry the
-      bridge at the node has not taken.
+    - **Nothing waits to write, and nothing checks for a full queue.** Every queue is a BBS edge with its bound as its
+      room, so no delivery reaches an entry the bridge at the node has not taken. The only waits are at the sinks of
+      the added synchronization edges, on a count that only rises. Each ends when its source moves on, or when the view
+      ends and the plan with it (`ESTALE`).
+    - (Corrected 2026-11-05, later still: the text before bounded the room by "A10's bound on the plan's submissions
+      outstanding at its sender, plus C3.3's u copies on each hop ... so a node's part of a call trails the sender's by
+      at most u copies a hop", calling the number "this document's derivation". It holds only where the queue lies on
+      a cycle through the sender. A7's program sender may hold no page of a plan, and then the queue is BSL's
+      feedforward edge with no bound (design/compilation-coordination.md, "The revisions of abecd389", stop 2).)
     > consider whether this is a fictional problem or a problem that appears only through idiomatic citation free code
     > before making any further statements
     - (Corrected 2026-11-05: the implementation's M4 kept an ORDER at the channel's head while a port trailed by 4096
@@ -568,7 +670,9 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **The code must:**
   - deliver orders as Fig. 5's destinations do;
   - publish each plan's deliveries to the bridge at each node through the plan's own queue above, read in place and
-    taken by the multiway merge, with no copy, no wait and no check. This replaces the sequence words (`sequences`), `taken[p]` and
+    taken by the multiway merge, with no copy, no wait and no check. Each queue's room is its self-timed buffer bound
+    in the program's IPC graph, and the feedforward queues' synchronization edges come from Convert-to-SC-graph and
+    DetermineDelays, all at compile time (BSL, above). This replaces the sequence words (`sequences`), `taken[p]` and
     the parent's wait while they are full (Lamport's buffer; the coordination's DL1), and then the one channel for
     every plan (the implementation's CH2, with M3's room). M4 and M5 stay gone;
   - remove the start's wait for every port to load the plan, and the late-loading port's refusal of it
@@ -578,7 +682,8 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
   - interleave released executions on each cable;
   - remove Q4's hold and Q4′'s timeout skip (done: design/compilation-coordination.md DL4, O1);
   - remove the coordination's Q3′: the sequencer's number never goes back to 0, and no node drops a pending order when
-    its map changes.
+    its map changes. (2026-11-05, later: the number begins again at 1 only at a view's creation, by A7's views; the
+    old view's orders are flushed before the new view is installed, and no node's own map move drops one.)
     > "When a node's map changes, its bridge parent drops its pending orders, and the sequencer sets its counter back
     > to 0. "
     > fictional problem + nobody asked + no citation + no algorithm + no explanation + idiomatic.
@@ -702,13 +807,16 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       phase word wide enough for the lag, or a cited bound" was idiomatic.
     - For a reader that nothing keeps within one phase, C3 already names the structure: "Counted completion with rising
       thresholds (Portals 4 counting events; `MTLSharedEvent`'s 64-bit value, which only rises). Execution t waits for
-      the count to reach its own target." The plan keeps such a count already: each range's landed count of each copy,
-      which every landing raises, by whichever cable it lands (C3.1, counted completion).
+      the count to reach its own target." Each range's landed count of each copy is such a count, which every landing
+      raises, by whichever cable it lands (C3.1, counted completion). A relay's receive has one too. (Corrected
+      2026-11-05: the text before said "The plan keeps such a count already" and that the test "adds no word". A
+      relay's receive had no count word (rdma/mesh.h at abecd389), and the implementation added one:
+      design/compilation-coordination.md, "The revisions of abecd389", RC-1.)
     - By C3.3, every landing of a copy's round j comes after every landing of its round j − 1. Each landing is a write
       of execution t + u, and every read of execution t, each after its own page's landing, comes before that write.
     - So a page is named for round j where its range's count of its copy reads at least j times the pages this node
       receives of that range in a copy. Then every page of round j − 1 has landed, its own among them. The test holds
-      at any distance and adds no word. It waits for the range's whole round j − 1, not only its own page's.
+      at any distance. It waits for the range's whole round j − 1, not only its own page's.
     - The code must name a page for round j by that count, in place of PM2's test of the phase field. The phase
       fields stay, for C3.7's readers.
   - The counter is (execution, set), so a set is drawn once per execution. A draw for each cable departs from the

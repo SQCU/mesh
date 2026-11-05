@@ -2359,3 +2359,35 @@ cache entry mesh_compile.cpython-314.pyc it made, not there before, removed). No
 - "Replans reuse names": the barrier counts arrivals by the plan's name (PB-3), which a replan keeps (N1); a node that
   tells again the arrival of a plan of the old map, before its own map moves, can be counted toward the sender's
   replan, within one flooding of the map; recorded, no handler.
+
+### Answered in the documents (2026-11-05, the coordinator)
+
+The operator, after this part's report: "mostly i want the work done and i care far less about ceremony or
+ritualization than about the delivery of source which meets several strict qualitative and several strict
+quantitative requirements."
+
+- **Stop 1** (Fig. 5 in an island whose bridges begin at different times): answered by aot-compilation A7, "The island
+  is a dynamic group, and each of its views is a static system". The views are G. V. Chockler, I. Keidar and
+  R. Vitenberg's (ACM Comput. Surv. 33(4), 2001), with their Properties 3.1 (Self Inclusion), 3.2 (Local
+  Monotonicity), 3.3 (Initial View Event) and 4.3 (Sending View Delivery) verbatim. The membership service is the
+  sequencer's unilateral decision (Amoeba, Défago, Schiper and Urbán §9.1.1). A bridge started again is a new process
+  (Isis's incarnation number, Chockler et al. §3.1.1). The view identifier is Transis's integer, computed from the
+  members' counters. Fig. 5 runs as written within each view, initialized at its creation and its installation. A view
+  change blocks and flushes (Chockler et al. §4.2.1), and a plan stands only within the view its arrivals were counted
+  in, which also answers "Replans reuse names" above.
+- **Stop 2** (the room where the program's sender holds no page of the plan): answered by appendix item 2, "Its room is
+  fixed at compile time, by the self-timed buffer bound". Bhattacharyya, Sriram and Lee (IEEE Trans. Signal Processing
+  45(6), 1997) give the bound for an IPC edge on a cycle, Bfb(e) (§4.3, (5)), with BBS. A feedforward edge has none
+  ("could be unbounded when the execution time of A is less than that of B", Fig. 2(a)), and is put on a cycle at
+  compile time by Convert-to-SC-graph (§9, Fig. 6) and DetermineDelays (Fig. 8). The added edges' sinks wait on a
+  rising count. The graph algorithms are rdma/mesh_graph.py's.
+- **The documents' errors listed above:**
+  - Item 5's "adds no word": corrected (RC-1 cited).
+  - A7's static-system premise and item 2's derivation: corrected by the two answers above.
+  - A7's map serial in m: replaced by the view's identifier, which every member compares.
+  - A7's rdma/mesh.h for the program's nodes: replaced by the plan call's `program`, the nodes the launcher started the
+    program at, which the launcher passes as it passes MESH_GROUP. That makes PS-1's "the placement's nodes" wrong for
+    the torch path.
+  - A4 against the barrier: every run is launched on the whole collective, so every node of the map, relays among
+    them, is a node of the program and holds the plan (A4, A7). PS-2's EINVAL then arises only where a launcher passes
+    fewer nodes than the map's.

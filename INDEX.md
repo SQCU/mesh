@@ -56,9 +56,12 @@ other projects, such as a game bot, and old dated records; they are not listed h
   instructions (MSCCLang); one schedule per function; function executions ordered by one scheduler per island
   (Pathways), which is total order multicast by a fixed sequencer (Défago, Schiper and Urbán: their §3 and FIFO Order
   properties, Fig. 5 as written, §5.2.4's super-group) with one sender a program and every plan created at all its
-  nodes before its first message (NCCL's communicator creation); the IR operand; the serialized operand in MSCCL-IR's shape,
-  running only existing kernels. Its appendix gives each plan its own queue of delivered calls at each node
-  (synchronous dataflow's FIFO queue on each arc), merged at each lane by sequence number.
+  nodes before its first message (NCCL's communicator creation), run within each view of the island as a dynamic group
+  (Chockler, Keidar and Vitenberg's view properties; the sequencer as Amoeba's membership service; Transis's view
+  identifier; block and flush at a view change); the IR operand; the serialized operand in MSCCL-IR's shape, running
+  only existing kernels. Its appendix gives each plan its own queue of delivered calls at each node (synchronous
+  dataflow's FIFO queue on each arc), merged by sequence number, its room the self-timed buffer bound and feedforward
+  queues put on cycles at compile time (Bhattacharyya, Sriram and Lee: Bfb, BBS, Convert-to-SC-graph).
 - [design/compilation-coordination.md](design/compilation-coordination.md): the coordinating agent's contract for
   the two change requests above (the file split, the names files share, the task graph and its contention schedule,
   plans in their claims and the island's fixed sequencer, the provisional operands, the sources read) and the record
