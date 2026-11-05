@@ -378,11 +378,17 @@ static void threefry4x64_20(const uint64_t key[4],const uint64_t counter[4],uint
    the same; k is not a remainder modulo j).  The stream (S4; Salmon et al., section 5.1: "concatenate the object
    identifier, i, and time, T, into a p-bit counter"): word s is word s mod 4 of threefry4x64_20 of the key (the plan's
    name zero-padded, struct flow `key`) and the counter (execution, set, s / 4, place), `place` the cable's place in
-   the pair's key order (S7'), so no (key, counter) serves two blocks of a stream or two cables (section 5: "(key,
-   counter) tuples must never be improperly re-used").  After it x[i - 1] is X_i, the member position i carries in that
-   execution (S5).  2026-11-04, owner B3 (S7'): the counter's fourth word the cable's place, where it was 0, and t the
-   set's members on this cable, where it was the set's every position on the pair.  What must stay: both ends drawing
-   from the same key, counter and size */
+   the pair's key order (S7'), so no (key, counter) serves two blocks of a stream, nor two cables of one pair (section
+   5: "(key, counter) tuples must never be improperly re-used").  The counter names no node pair, so every edge of
+   tree j (`set` j + 1) whose cable has the same place in its own pair's key order draws the same stream: one
+   permutation along the tree where those edges' member counts agree (S2).  After it x[i - 1] is X_i, the member
+   position i carries in that execution (S5).  2026-11-04, owner B3 (S7'): the counter's fourth word the cable's place,
+   where it was 0, and t the set's members on this cable, where it was the set's every position on the pair.  What
+   must stay: both ends drawing from the same key, counter and size.
+   2026-11-04, owner B3 (reviews W1's finding 2 and W3's finding 7): this note's first S7' form said no (key, counter)
+   serves two cables; that was false (the paragraph above), and what S7' rules out is two cables of one pair sharing a
+   stream.  And a replan keeps its plan's name (N1: (group, function)) and starts its executions again at 0, so it
+   draws the cancelled plan's streams again: open for the operator.  What must stay: as above */
 static void set_draw(const uint64_t key[4],uint64_t execution,uint32_t set,uint64_t place,const uint64_t *members,
                      uint32_t size,uint64_t *x){
   for(uint32_t i=0;i<size;i++)x[i]=members[i];
@@ -438,7 +444,10 @@ static void flow_sets_free(struct flow *f){
    assigned by mesh_graph_list_schedule (Graham's list scheduling, mesh-graph.h), as R5 leaves it to the bridge ("How
    the bridge spreads a cable's sequence over what its devices give it is the bridge's own, as now"): this node's
    SENDs to the peer are the peer's receives from this node, and
-   u is the collective's (the contract's D5: every rank computes the same), so both ends assign one list alike.  Kept:
+   u is the collective's (design/disjoint-pages-change-request.md, C3.3; design/compilation-coordination.md, "The
+   appendix's revisions", U1: every rank computes the same template, lags and u), so both ends assign one list alike
+   (2026-11-04, owner B3, review W3's finding 8: this cited the coordination's D5, which U1 withdraws; what must stay:
+   one u at every rank).  Kept:
    the units on this port's cable, each on its queue pair (lane q, link_plan), one record each, by lane, copy and
    assignment order (struct flow `first`).  A lane serves the executions in order, execution t's records on it copy
    t mod u's in assignment order (struct cursor), so in every execution the k-th SEND on a queue pair fills the k-th

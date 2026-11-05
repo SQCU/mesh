@@ -507,7 +507,13 @@ static int orders_served(void){
    2026-11-04, owner B3 (O2): the hold's reason in the first paragraph was "the operator's ruling 1: "A cable never
    interleaves two executions; it carries each whole, in sequence order"", Claude's words, which the appendix
    withdraws (item 2); it is O2's evidence now.  No behavior changed.  What must stay: the hold until the operator
-   names what carries the delivery order from the bridge parent to its ports (O2, open) */
+   names what carries the delivery order from the bridge parent to its ports (O2, open).
+   2026-11-04, owner B3 (review W3's finding 2), where `released` was stored the ORDER's `end` whatever it held: it is
+   stored only upward, the greater of its value and the ORDER's `end` (this thread its one writer, so its own read is
+   current).  Why: design/disjoint-pages-change-request.md, C3 ("Each state word has one writer, and no state word is
+   reset while its plan stands") and C3.8 ("No state word is reset while its plan stands, and each has one writer").
+   An ORDER of a cancelled plan can still match its replan, which keeps the plan's name (N1): open for the operator,
+   recorded by the coordinator.  What must stay: `released` never lowered */
 static void orders_deliver(void){
   while(pendings){
     const struct mesh_order *order=&pending->order;
@@ -518,7 +524,8 @@ static void orders_deliver(void){
                                state->serial==serial))
       head=mesh_head_after(M,head);
     if(head==UINT32_MAX || !orders_served())return;
-    atomic_store_explicit(&state->released,order->end,memory_order_release);
+    const uint64_t released=atomic_load_explicit(&state->released,memory_order_relaxed);
+    if(order->end>released)atomic_store_explicit(&state->released,order->end,memory_order_release);
     last.head=head;last.state=state;last.generation=atomic_load_explicit(&mesh_page(M)[head].device,memory_order_acquire);
     os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
     memmove(pending,pending+1,--pendings*sizeof *pending);
