@@ -41,7 +41,8 @@ enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 /* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, Appendix A, A4): the row planes MESH_ROW_HOT
    and MESH_FREE went with the call-site allocators and their reclaim, which alone read and wrote them; the layout sizes
-   the one plane left (MESH_PLANES).  What must stay: MESH_ROW_OWN holds the rows of each program's one claim */
+   the one plane left (MESH_PLANES).  What must stay: MESH_ROW_OWN holds the rows of every claim (each plan's, any number
+   at once: 2026-11-04, owner L, where it said each program's one claim) */
 enum { MESH_ROW_OWN, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M01 */
@@ -274,10 +275,11 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      `released`, so this node's cables carry one plan's batch at a time, each execution whole, in sequence order.
    - `served[p]`: the executions port p has served whole, every record of them done (every send completed and every
      receive landed), and `released` for a plan it carries nothing of (Q4); port p's alone.
-   Every word but `held`, `refused`, `submitted`, `released` and `served` is set to its starting value once, where
-   mesh_plan places the section (D3), as mbarrier.init runs once a kernel: the phases, counts, supplied words, status
-   and `executions` 0.  None is reset, and none written to an earlier value, while the plan stands.  `submitted`,
-   `released` and `served` only rise; they and the sequencer's own number are what A7 adds to C3.3's run time (Q6).
+   Every word is set to its starting value once, where mesh_plan places the section (D3), as mbarrier.init runs once
+   a kernel: the phases, counts, supplied words, status, `executions`, `held`, `refused`, `submitted`, `released` and
+   `served` 0.  None is reset, and none written to an earlier value, while the plan stands, but a port's bit of `held`,
+   which it clears as its last access.  `submitted`, `released` and `served` only rise; they, each bridge parent's
+   ORDERs not yet delivered and the sequencer's own number are what A7 adds to C3.3's run time (Q6).
    Cancellation (C3.1: cancellations arrive on the count, as arrivals do on an mbarrier).  Where a plan ends with
    receives not landed, and where the bridge cancels (mesh-flow.c plan_cancel), each such receive's count word is
    raised (a compare-and-swap loop that never lowers it; release) to its final value, P x the executions t <
