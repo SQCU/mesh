@@ -1479,6 +1479,42 @@ design/aot-compilation-change-request.md, and are held here once.
 > "   - One outstanding call per plan or several. The second gap depends on which you want, and that's yours to choose:"
 > is this really a choice? are the problems being discussed (all linear algebraic programs ever, basically) 'synchronous by implicit assumption', or are all operations of htis kind composeable and rearrangable up to typing limits which are determined by the linear algebraic operations / source we are using in the data processing function side? does the commutativity and associativity of the operations (ignore e.g. floating point associativity for now) form some kind of basic primordial pre-requirement that the user expected someone to ask questions about, pull in literature about, and start describing as yet another AOT precompilation problem of the 'known parser, low empirical computational complexity' class of programs? on some level the use of the fxgraphs capture and pytorch-modifying-headers should foreshadow this and make it less of a surprise
 
+**Claude:**
+
+> (•̀ᴗ•́) All three points are in both change requests (mesh `e75321cc`, pushed), with "The turns" brought up to your last message.
+>
+> **Recorded minimal decisions.** Accepted, and written into "How this document is written and used" with your words. Where a document is silent, an implementer takes the minimal decision that follows from the document and the code, and records it as its own choice with its reason, apart from the requirements. It stops and reports only where no decision follows.
+>
+> **Edge scheduling is needed, and the literature already gives its role.** MSCCLang §5.2 step 1 assigns priority by "the depth (maximum hops from a root node) and reverse depth (maximum hops to a leaf node)… This prioritizes instructions that are enabled earlier and have more downstream dependencies respectively." Its scheduler "attempts to schedule instructions in the order they will be ready." With costs in place of hops:
+> - **Depth** is each instruction's earliest start under link contention, from Sinnen & Sousa's edge scheduling. That is when it will be ready.
+> - **Reverse depth** is the bottom level (Sinnen & Sousa eq. 7, the level priority of HLFET).
+>
+> So R5's heap order uses both, and edge scheduling stays, doing what MSCCLang's priority needs.
+>
+> **One call outstanding or several isn't a choice.**
+> - **The calls are a dataflow graph.** A program's calls are linear-algebra operations, and TorchDynamo already captures their trace (A1).
+> - **Compile-time analysis decides which calls may be outstanding at once and in what orders.** Two calls are independent where neither writes what the other reads or writes, which is Bernstein's conditions (IEEE Trans. Electronic Computers, 1966). Calls whose effects commute, such as associative and commutative reductions into one accumulator, may run in any order, which is commutativity analysis (Rinard & Diniz, ACM TOPLAS 1997). Floating point is set aside, as you said.
+> - **At run time,** calls are issued ahead as futures, as Pathways dispatches asynchronously (§4.5).
+>
+> This is new section A10. Its output is, for each compiled function, the most calls the analysis lets be outstanding at once, plus the order constraints between calls. The delivery words are placed statically for that bound, so nothing waits to write. A call is one execution of its compiled function (Pathways §4.4; JAX), so a program submits one call per execution.
+>
+> **The permutation stop is settled by the documents' own counter.** It is (execution, set), so a set is drawn once per execution, and every edge and cable of the set's tree carries its pages in that one order. The cables' sequences are then the same renaming everywhere, and MSCCLang §5.2's argument against cycles holds. A draw for each cable departs from the counter.
+>
+> Should I launch the revisions from these documents?
+
+**The operator:**
+
+> "Edge scheduling is needed, and the literature already gives its role. " if we have more edge scheduling requirements than the previous literautre, e.g. the co-flow and independent flow problem element, is there a heirarchal decomposition of 'mscc solves first, then we use the coflow solver as some weighting upon a weighting already chosen' (seems clumsy) or is this a simple linear fit in a higher vector-dim system of equations? We should be able to find literautre on this problem of the combination of parmaetric-codomain-solvers tbh; the solution is unlikely to be inlining wacky complex code about each other subproblem into the ltieral solver we use for each stage.
+> "- The calls are a dataflow graph. A program's calls are linear-algebra operations, and TorchDynamo already captures their trace (A1)."
+> yipee a citation
+> "Calls whose effects commute, such as associative and commutative reductions into one accumulator, may run in any order, which is commutativity analysis (Rinard & Diniz, ACM TOPLAS 1997)."
+> yipee a citation
+>
+> "This is new section A10. Its output is, "
+> broadly copacetic...
+>
+> "Should I launch the revisions from these documents?" sure unless there's some obvious meta review that hasn't been applied yet or should
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
@@ -1602,6 +1638,31 @@ code, and each method is used as its source states it.
     > presented.
     (Corrected 2026-11-05: an earlier correction dropped edge scheduling, and its start times went unread. They are the
     depth MSCCLang's priority takes.)
+  - **Coflows and independent flows are edges of the same graph, so this one priority orders them.**
+    > is there a heirarchal decomposition of 'mscc solves first, then we use the coflow solver as some weighting upon a
+    > weighting already chosen' (seems clumsy) or is this a simple linear fit in a higher vector-dim system of
+    > equations? We should be able to find literautre on this problem of the combination of parmaetric-codomain-solvers
+    > tbh; the solution is unlikely to be inlining wacky complex code about each other subproblem into the ltieral
+    > solver we use for each stage.
+    - R4 gives function A one task with an edge from every page of its operand, and function B one task per page, each
+      with an edge from its own page. Depth and reverse depth are computed over those edges, so a join's pages carry
+      their consumer's bottom level and each of B's pages carries its own task's. No coflow solver runs after this
+      priority, and no weight is laid over a weighting already chosen.
+    - The literature states this problem, coflows with precedence, as one linear program over completion times (C.-Y.
+      Chen, Scheduling coflows with precedence constraints for minimizing the total weighted completion time in
+      identical parallel networks, arXiv 2205.02474, 2022). Its rows are the same edges and the same contention:
+      - (1a) "ensures that the completion time of coflow k is bounded by all its flows". These are A's edges.
+      - (1c) "is the precedence constraint". These are the graph's other edges.
+      - (1d) and (1e) "lower bound the completion time variable in the input port and the output port", "modified from
+        the scheduling literature" (L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Scheduling to minimize average
+        completion time: off-line and on-line approximation algorithms, Math. Oper. Res. 22(3), 1997). Chen's ports
+        are a switch's. Here the same bound falls on each cable, the resource edge scheduling places transfers on.
+      - Its §6 LP (14) minimizes the makespan. Theorem 6.2 gives it "an approximation ratio of O(µ)", where µ is "the
+        coflow number of the longest path in the DAG".
+      - Its schedule takes ready flows "in non-decreasing order of C̄f", the program's completion times, as step 3's
+        heap takes the priority.
+    - The code keeps MSCCLang's priority, which needs no solver. Chen's program is cited because it shows that the
+      coflow element is rows of the one system, not a second stage.
 
 - **Routes are the plan's existing ones,** as now:
   - trees packed by Garg and Könemann's rounds (N. Garg and J. Könemann, FOCS 1998; rdma/mesh-graph.h

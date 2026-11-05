@@ -45,8 +45,9 @@ other projects, such as a game bot, and old dated records; they are not listed h
   operator's turns of 2026-11-04, requirement by requirement, each quoting the operator and naming its cited method:
   pages by view (U-Net, VIA); the page table, bound statically as C3.3 states; the task graph G = (V, E, w, c);
   functions that need an operand whole and streaming functions that take pages in any order (Graefe; Gibbons; coflows,
-  Chowdhury and Stoica); list scheduling by bottom level with edge scheduling under contention (Sinnen and Sousa);
-  compiled metadata (Hoefler, Siebert and Lumsdaine); nothing outside the bridge knowing the transport; a program as
+  Chowdhury and Stoica); each cable's list from MSCCLang's heap order, by depth (edge scheduling's earliest start under
+  contention, Sinnen and Sousa) and then the bottom level, with coflows and independent flows as edges of that one graph
+  (one linear program in Chen 2022); compiled metadata (Hoefler, Siebert and Lumsdaine); nothing outside the bridge knowing the transport; a program as
   its function calls. It supersedes D.2's model, D.3.1 and D.5 of the disjoint-pages change request.
 - [design/aot-compilation-change-request.md](design/aot-compilation-change-request.md): what the ahead-of-time
   compilation must do: captured graphs (PyTorch 2); the placement operand (GSPMD, Alpa) and the weighting operand
