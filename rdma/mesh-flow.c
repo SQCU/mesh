@@ -49,7 +49,17 @@
    (mesh_head_after, mesh_head_state), reversing sub-assignment 6's note above.  Why: "nothing happens when a program
    joins or leaves because a program is a sequence of like, function calls" (R8).  What must stay: the k-th SEND on a
    queue pair fills the k-th receive posted on it; a cable carries each execution whole, executions in order; nothing
-   written in or beside a page; no request taken back but by the child's exit */
+   written in or beside a page; no request taken back but by the child's exit.
+   2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O2): "a cable carries each
+   execution whole, executions in order" above, the hold that serves one plan's batch at a time on this port's cable
+   (link_run; the parent's orders_served, mesh-records.c), stays, for O2's reason and not the first contract's ruling 1
+   ("A cable never interleaves two executions", Claude's words, which design/aot-compilation-change-request.md,
+   appendix item 2, withdraws): on each queue pair the k-th SEND fills the k-th receive posted (Hilland et al., RDMA
+   Protocol Verbs Specification, section 8.2.2, design/prepared-machine.md#M08), so both ends of the cable must post the
+   released executions of several plans on each queue pair in one order; this child learns of its parent's deliveries
+   only each plan's `released`, a count, so the order of deliveries across plans does not reach it; and carrying it
+   needs a structure the change requests do not name.  No behavior changed.  What must stay: as above, until the
+   operator names what carries the delivery order to the ports (O2, open) */
 #include "mesh-bridge.h"
 #include "mesh-dataflow.h"
 #include "mesh-graph.h"
@@ -841,7 +851,13 @@ static int link_send_progress(struct port *port,struct flow *f,uint32_t served){
 /* `served[p]` of a plan raised to `executions` (release; port p its one writer, and its values only rise: Q4), then hdr
    `plans` woken and not raised (os_sync_wake_by_address_all, region-shared), so the bridge parent, which waits on
    `plans`, delivers the next ORDER at once (design/compilation-coordination.md, Q4': "A port wakes `plans` (without
-   raising it) after raising `served[p]`"; a wake it misses is its next tick's) */
+   raising it) after raising `served[p]`"; a wake it misses is its next tick's).
+   2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O2): the parent's next
+   delivery waits on this raise because of Q4's hold (mesh-records.c orders_served), which stays for O2's reason: the
+   k-th SEND on a queue pair fills the k-th receive posted, so both ends post the released executions of several plans
+   in one order, and a port learns only each plan's `released`, a count, so the delivery order across plans does not
+   reach it; carrying it needs a structure the change requests do not name.  No behavior changed.  What must stay:
+   `served[p]` raised, then `plans` woken */
 static void served_tell(struct mesh_state *words,uint32_t p,uint64_t executions){
   atomic_store_explicit(&words->served[p],executions,memory_order_release);
   os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
@@ -968,10 +984,12 @@ static void plans_walk(struct port *port,uint32_t served){
    writer); a plan it carries is served to the lesser of the two, execution t only where t < `executions` and t <
    `released` (Q4).  The parent releases one plan's batch at a time, once every port holding the plan released before
    it has served it (Q4; mesh-records.c), so at most one plan has executions released and not served here: that plan
-   is served (the first held plan with work, in the order loaded), each lane's executions in order, so a cable never
-   interleaves two executions and carries each whole, in sequence order (the contract's ruling 1; Défago, Schiper and
-   Urbán, ACM Comput. Surv. 36(4) 2004, Fig. 5: messages delivered in sequence-number order; Pathways, MLSys 2022,
-   section 4.4: work enqueued in FIFO order).  Once every record of it has served every execution to that bound (done),
+   is served (the first held plan with work, in the order loaded), each lane's executions in order, so a cable carries
+   one plan's batch at a time, each execution whole, in sequence order (Défago, Schiper and Urbán, ACM Comput. Surv.
+   36(4) 2004, Fig. 5: messages delivered in sequence-number order; Pathways, MLSys 2022, section 4.4: work enqueued in
+   FIFO order): both ends post the released executions of several plans on each queue pair in one order, since the k-th
+   SEND fills the k-th receive posted, and this port learns of its parent's deliveries only each plan's `released`, a
+   count (design/compilation-coordination.md, "The appendix's revisions", O2).  Once every record of it has served every execution to that bound (done),
    `served[p]` is raised to it (release): the executions this port has served whole, every SEND of them completed and
    every receive landed.  1 while a plan has work left, 0 idle.  What must stay: done only where every execution asked
    is served; no execution of a plan past its `released`.
@@ -988,7 +1006,15 @@ static void plans_walk(struct port *port,uint32_t served){
    2026-11-03): the plan's end's rule (plan_end) applied here, design/compilation-coordination.md, B1-1 ("a plan
    cancelled while it has requests posted stops the port and loses its link, as link_close does for a plan's end").
    `served[p]` for a carried plan rises when the bound it serves is done whole (B1-1).  What must stay: no plan's pages
-   posted beside another's outstanding requests */
+   posted beside another's outstanding requests.
+   2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O2: "Not done: Q4's hold
+   stays"): the reason this note gives for serving one plan's batch at a time was "a cable never interleaves two
+   executions and carries each whole, in sequence order (the contract's ruling 1)", Claude's words, which
+   design/aot-compilation-change-request.md, appendix item 2, withdraws; it is O2's evidence now (the k-th SEND on a
+   queue pair fills the k-th receive posted, so both ends post one order; a port learns only each plan's `released`, a
+   count, so the delivery order across plans does not reach it; carrying it needs a structure the change requests do
+   not name).  No behavior changed.  What must stay: one plan served at a time here, until the operator names what
+   carries the delivery order to the ports (O2, open) */
 static int link_run(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
   const uint32_t p=port->index;

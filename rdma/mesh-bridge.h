@@ -456,10 +456,11 @@ void clients_turn(int liveness);
    messages heard on a port's control socket, a SUBMIT or an ORDER and its struct mesh_order (mesh-ports.c
    message_heard) */
 void order_heard(struct port *from,const struct message *heard,const unsigned char *payload);
-/* not the tag's (2026-11-04, owner B2: the coordinator's ruling Q4'): when the pending ORDER at the head of this node's
-   list reaches its bound, its arrival + MESH_PLATFORM_NS (UINT64_MAX none), which the event loop's turn waits for
-   (mesh-link.c turn_due) */
-uint64_t orders_due(void);
+/* 2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O1 and H1): `uint64_t
+   orders_due(void)` (the pending head's bound, its arrival + MESH_PLATFORM_NS, which mesh-link.c turn_due waited for:
+   the coordinator's ruling Q4') goes with the bound.  Why: the fixed sequencer delivers in sequence-number order with
+   no timeout and no skip (Defago et al., Fig. 5; design/aot-compilation-change-request.md, appendix items 2 and 3).
+   What must stay: order_heard and clients_turn as declared */
 /* not the tag's (2026-11-04, owner B2: e6bd7db2's section 6, "Holders and clients", as the contract's ruling 1 and Q5
    take it): every open claim's owner whose process is `pid` retired, the event loop's EVFILT_PROC of clients_turn's
    watch (mesh-link.c) */

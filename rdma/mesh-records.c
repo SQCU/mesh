@@ -221,10 +221,15 @@ static struct island { uint32_t self,sequencer,parent,up,down[MESH_PORTS],downs;
    serial (Q3: a plan stands only while its map does, D.3.6, so no order outlives its serial; Fig. 5 starts it at 1) */
 static uint64_t seqnum;
 /* Defago et al., Fig. 5, the destination's `pending`: the ORDERs this node has received and not delivered, in arrival
-   order (Q4), `pendings` of them in room for `pending_room`, each with the time it arrived (`arrived`, the loop's clock
-   `now`; design/compilation-coordination.md, Q4': a head held for its plan to stand here is held at most
-   MESH_PLATFORM_NS from its arrival) */
-static struct pending { struct mesh_order order; uint64_t arrived; } *pending;
+   order (Q4), `pendings` of them in room for `pending_room`.
+   2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O1 and H1;
+   design/aot-compilation-change-request.md, appendix items 2 and 3): each entry's arrival time (`arrived`, the loop's
+   clock `now`, Q4''s bound: a head held for its plan to stand here held at most MESH_PLATFORM_NS from its arrival) is
+   gone.  Why: Defago et al.'s delivery is in sequence-number order (Fig. 5: "while exists (m', seqnum') in pending:
+   seqnum' = nextdeliver do deliver (m'); nextdeliver := nextdeliver + 1"), with no timeout and no skip, and the bound
+   was a handler for a slow node, which no requirement asks for (item 3).  What must stay: the pending ORDERs in
+   arrival order, delivered from the head */
+static struct pending { struct mesh_order order; } *pending;
 static size_t pendings,pending_room;
 /* the plan this bridge released last (Q4: "every port holding the previously released plan has served it"): its claim
    head, the claim's generation (the head's struct mesh_page_entry `device`) and its state section; head UINT32_MAX
@@ -273,7 +278,10 @@ static uint32_t island_parent(const void *context,size_t k){
    drop of the pending ORDERs at this node's serial move: they are kept, since delivery is by arrival order, and
    orders_deliver matches a head only to a plan standing here of this node's map serial (a plan of another serial is
    cancelled, D.3.6), the Q4' bound covering a head that never matches.  What must stay: `seqnum` 0 at this node's own
-   serial move */
+   serial move.
+   2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): Q4''s bound is gone, so no bound covers a
+   head that never matches: it stays at the head (Defago et al., Fig. 5: delivery in sequence-number order, no timeout
+   and no skip; design/aot-compilation-change-request.md, appendix items 2 and 3).  What must stay: as above */
 static void island_set(void){
   island=(struct island){.self=UINT32_MAX,.sequencer=UINT32_MAX,.up=MESH_PORTS};
   seqnum=0;
@@ -310,7 +318,9 @@ static void island_set(void){
    whose `nodes` lacks this node's map index is delivered at once, nothing here serving it
    (design/compilation-coordination.md, Q4); `nodes` is a set of map indices below 64 (mesh.h struct mesh_state).  The
    array grows by doubling; ENOMEM drops the ORDER, said: its plan's executions are not released here, and a wait on
-   them ends at its deadline.  Its arrival is the loop's clock `now` (Q4') */
+   them ends at its deadline.
+   2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): its arrival time, the loop's clock `now`, is
+   no longer kept (struct pending's note).  What must stay: the ORDER appended in arrival order */
 static void order_take(const struct mesh_order *order){
   if(island.self>=64 || !(order->nodes>>island.self&1))return;
   if(pendings==pending_room){
@@ -324,14 +334,18 @@ static void order_take(const struct mesh_order *order){
     }
     pending=grown;pending_room=room;
   }
-  pending[pendings++]=(struct pending){*order,now};
+  pending[pendings++]=(struct pending){*order};
 }
 /* Defago et al., Fig. 5, the sequencer's "send (m, sn(m)) to all", over the island's tree: an ORDER to each child, in
    arrival order, on its hop's control socket, and taken here (design/compilation-coordination.md, Q3: "an ORDER down
    to the children, each hop on the existing control socket") */
 /* 2026-11-04, owner B2, the coordinator's ruling on review V1's finding 7: a child's port not greeted, whose ORDER
    port_say would drop, is said on the bridge's log (that child's ORDER is lost; its plan's head there ends at Q4''s
-   bound).  What must stay: the ORDER relayed to every child before it is taken here */
+   bound).  What must stay: the ORDER relayed to every child before it is taken here.
+   2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): Q4''s bound is gone, so the note above's "ends
+   at Q4''s bound" no longer holds: the lost ORDER never reaches that child's pending list, its executions are not
+   released there, and a wait on them ends at its deadline (C3's bounded waits), as order_take's ENOMEM says.  What
+   must stay: as above */
 static void order_relay(const struct mesh_order *order){
   for(uint32_t k=0;k<island.downs;k++){
     struct port *down=ports+island.down[k];
@@ -429,7 +443,18 @@ static void orders_submit(void){
    port whose peer a hop of the plan names: mesh-map.h mesh_ports_named, its one copy, which the start's wait reads
    too (owner L, 63b5bcdf), over the map as this thread, its writer, holds it.  Where that set cannot be computed (its
    error: EINVAL, E2BIG, ENOENT) nothing can be waited for, so the plan reads as served, said on the bridge's log: the
-   wait stays bounded.  What must stay: one copy of the start's port set, L's */
+   wait stays bounded.  What must stay: one copy of the start's port set, L's.
+   2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O2: "Not done: Q4's hold
+   stays"): this test is the hold, and its reason is O2's, in place of "A cable never interleaves two executions"
+   (Claude's words in the first contract's ruling 1, which design/aot-compilation-change-request.md, appendix item 2,
+   withdraws): on each queue pair the k-th SEND fills the k-th receive posted (Hilland et al., RDMA Protocol Verbs
+   Specification, section 8.2.2, design/prepared-machine.md#M08), so both ends must post the released executions of
+   several plans on each queue pair in one order; the ports, this bridge's child processes, share the region alone with
+   it, and what a delivery leaves there is each plan's `released`, a count, so two deliveries of different plans
+   between two passes of a port leave it no record of which came first; and carrying that order needs a structure the
+   change requests do not name (a log of delivered ORDERs in the region, a ring or unbounded, or a hand-off waited on,
+   a hold).  No behavior changed.  What must stay: this test before every release, until the operator names what
+   carries the delivery order to the ports (O2, open) */
 static int orders_served(void){
   if(last.head==UINT32_MAX || mesh_head_state(M,last.head)!=last.state ||
      atomic_load_explicit(&mesh_page(M)[last.head].device,memory_order_acquire)!=last.generation)return 1;
@@ -457,16 +482,32 @@ static int orders_served(void){
    (group, epoch), of this node's map serial: mesh-dataflow.h mesh_head_state) and every port holding the plan released
    last has served it
    (orders_served): its plan's `released` its `end` (release), and hdr `plans` woken so the ports see it.  So this
-   node's cables carry one plan's batch at a time, each execution whole, in sequence order (the operator's ruling 1: "A
-   cable never interleaves two executions; it carries each whole, in sequence order").  Re-read on each turn of the
-   event loop; nobody waits (Q4).
+   node's cables carry one plan's batch at a time, each execution whole, in sequence order: on each queue pair the k-th
+   SEND fills the k-th receive posted (link_prepare's note; Hilland et al., RDMA Protocol Verbs Specification, section
+   8.2.2, design/prepared-machine.md#M08), so both ends of a cable post the released executions of several plans on
+   each queue pair in one order, the sequence order both ends' parents deliver; the ports learn of a delivery only each
+   plan's `released`, a count, so the order of deliveries across plans does not reach them; and carrying it to them
+   needs a structure the change requests do not name (design/compilation-coordination.md, "The appendix's revisions",
+   O2).  Re-read on each turn of the event loop; nobody waits (Q4).
    2026-11-04, owner B2, the coordinator's ruling Q4' (design/compilation-coordination.md, "Amendments during the
    work"): a head whose plan does not stand here is held at most MESH_PLATFORM_NS from its arrival (the rules' bounded
    wait; the loop's turn is due then, orders_due), then delivered with nothing released, said on the bridge's log as
    order_take's ENOMEM is: its program's peers end by their own bounds.  What must stay: no wait past that bound.
    2026-11-04, the coordinator's ruling on review V1's finding 4: the head is matched to the standing plan of its
    (group, epoch) whose `serial` is this node's map_serial; a standing plan of another serial is cancelled (D.3.6) and
-   is not matched (a replan keeps its epoch, so two plans of one name may stand at once briefly after a move) */
+   is not matched (a replan keeps its epoch, so two plans of one name may stand at once briefly after a move).
+   2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O1 and H1;
+   design/aot-compilation-change-request.md, appendix items 2 and 3), reversing Q4''s note above: a head whose plan
+   does not stand here stays at the head, and the delivery returns until a later turn finds it standing; the delivery
+   "with nothing released" after MESH_PLATFORM_NS, its log line and orders_due (the loop's turn due at the bound) are
+   gone.  Why: the fixed sequencer's delivery is in sequence-number order (Defago et al., Fig. 5), with no timeout and
+   no skip (item 2), and the bound was a handler for a slow node, which nothing observed and no requirement asks for
+   (item 3).  What must stay: delivery from the head alone, in arrival order (sequence order); the head matched to a
+   standing plan of this node's map serial; the hold of orders_served (O2).
+   2026-11-04, owner B3 (O2): the hold's reason in the first paragraph was "the operator's ruling 1: "A cable never
+   interleaves two executions; it carries each whole, in sequence order"", Claude's words, which the appendix
+   withdraws (item 2); it is O2's evidence now.  No behavior changed.  What must stay: the hold until the operator
+   names what carries the delivery order from the bridge parent to its ports (O2, open) */
 static void orders_deliver(void){
   while(pendings){
     const struct mesh_order *order=&pending->order;
@@ -476,24 +517,16 @@ static void orders_deliver(void){
     while(head!=UINT32_MAX && !((state=mesh_head_state(M,head)) && state->group==order->group && state->epoch==order->epoch &&
                                state->serial==serial))
       head=mesh_head_after(M,head);
-    if(head==UINT32_MAX){
-      if(now-pending->arrived<MESH_PLATFORM_NS)return;
-      mesh_say("bridge","an ORDER of plan (%llu, %llu), executions [%llu, %llu) numbered from %llu, delivered with nothing "
-               "released: its plan did not stand here within %.1f s of its arrival",(unsigned long long)order->group,
-               (unsigned long long)order->epoch,(unsigned long long)order->first,(unsigned long long)order->end,
-               (unsigned long long)order->sequence,(double)MESH_PLATFORM_NS/1e9);
-    }else{
-      if(!orders_served())return;
-      atomic_store_explicit(&state->released,order->end,memory_order_release);
-      last.head=head;last.state=state;last.generation=atomic_load_explicit(&mesh_page(M)[head].device,memory_order_acquire);
-      os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-    }
+    if(head==UINT32_MAX || !orders_served())return;
+    atomic_store_explicit(&state->released,order->end,memory_order_release);
+    last.head=head;last.state=state;last.generation=atomic_load_explicit(&mesh_page(M)[head].device,memory_order_acquire);
+    os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
     memmove(pending,pending+1,--pendings*sizeof *pending);
   }
 }
-/* when the pending head's bound ends (Q4': its arrival + MESH_PLATFORM_NS), UINT64_MAX where none waits: the event
-   loop's turn waits for it (mesh-link.c turn_due), as for health_due */
-uint64_t orders_due(void){ return pendings?pending->arrived+MESH_PLATFORM_NS:UINT64_MAX; }
+/* 2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): orders_due (the pending head's bound, its
+   arrival + MESH_PLATFORM_NS, which mesh-link.c turn_due waited for) is removed with the bound and its declaration
+   (mesh-bridge.h).  Why: orders_deliver's note.  What must stay: the loop's turn bounded by its own times (turn_due) */
 /* tag pre-return-20261103 rdma/mesh-records.c record_links_same (3f72cbde), adapted: a reach entry compared whole */
 /* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), boot and facts are the
    held one's changes only its health and sequence, written under the region's health serial and never the map's: the
