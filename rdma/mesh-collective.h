@@ -6,9 +6,10 @@
    collective; design/disjoint-pages-change-request.md, Appendix C, C3.2-C3.7; design/disjoint-pages-revision-
    coordination.md, "The plan call", "The allocator" and "Writing a plan"; design/plan-to-bridge-change-request.md, R3
    to R5 and R8; design/aot-compilation-change-request.md, A3, A6 and A8; design/compilation-coordination.md, "The plan
-   call", T1 to T7 and Q5).  A program's transfers, every collective call and pipeline hand-off of it, and every value
-   it keeps at this node, declared at once and planned together over the map's Thunderbolt-5-connected nodes, for any
-   node count, ahead of time.  Its output is one plan, named (group, epoch), in its own claim: this node's page lists
+   call", T1 to T7 and Q5; "The appendix's revisions, 2026-11-04", U1, S1 to S3 and N1 to N5).  A program's transfers,
+   every collective call and pipeline hand-off of it, and every value it keeps at this node, declared at once and
+   planned together over the map's Thunderbolt-5-connected nodes, for any node count, ahead of time.  Its output is one
+   plan, one compiled function's, named (group, function), in its own claim: this node's page lists
    (mesh.h struct mesh_hop), which the bridge alone reads, in the plan's state section (mesh.h struct mesh_state) with
    the plan's words, and the rows and pages of every value, placed once by the one allocator.
 
@@ -82,9 +83,19 @@
    and the rest outside it; a value of `lag` k >= 1 is k items, its copies, outside the window.  Two items share pages
    only where happens-before orders the last read of one before the next write of the other at every distance at which
    their executions meet; a copy of a value of `lag` k >= 1 shares with none, since no edge of the template orders its
-   write.  The plan claims exactly the rows and pages it places (mesh-dataflow.h mesh_claim_take), and closes this
-   client's earlier claims, which the bridge releases once it holds them no more (C3.4); nothing is claimed at attach,
+   write.  The least lags decide those tests at every larger distance (design/compilation-coordination.md, U1): every
+   walk of the template into a write passes its range's production, and the program's dependences order each node's
+   events of execution t before those of t + 1, so a walk at lag L through the production continues at every lag past
+   L.  The plan claims exactly the rows and pages it places (mesh-dataflow.h mesh_claim_take), and closes no other
+   claim: its own is closed only when the program retires the function (mesh-dataflow.h mesh_plan_retire) or itself
+   (mesh_detach, the bridge's retirement of a gone pid), or by the call's own failure after its writes (ESTALE, or the
+   second map read's error), and the bridge releases it once it holds it no more (C3.4); nothing is claimed at attach,
    and nothing waits for a release.
+   2026-11-04, owner C2 (design/compilation-coordination.md, N3 and N5; design/aot-compilation-change-request.md,
+   appendix item 6): reversing the close of this client's earlier claims once the new plan stood.  Why: compiled
+   functions coexist, each its own plan with its own claim, released only when the program retires that function or
+   itself (R. Frostig, M. J. Johnson and C. Leary, SysML 2018; NVIDIA, CUDA Programming Guide §4.2.2; Pathways §3).
+   What must stay: the plan claims exactly the pages it places, and nothing waits for a release.
 
    The task graph and its schedule (design/plan-to-bridge-change-request.md, R3 to R5; design/compilation-
    coordination.md, T1 to T6).  One execution's task graph G = (V, E, w, c) (Sinnen, 2007): its tasks the template's
@@ -100,31 +111,48 @@
    Communication contention in task scheduling, IEEE TPDS 16(6) 2005, Definition 4).  The schedule is list scheduling
    with each task on its node, in decreasing bottom level, each edge scheduled on its route's links under the
    contention model (Sinnen and Sousa, eq. (7), Algorithms 1 and 2; mesh-graph.h mesh_graph_contention_schedule), a
-   page crossing a tree edge once (T4).  Each copy's entries are in the order of their link's scheduled start of their
-   page, ties by the walk's order (T6), so each node pair's sends are in schedule order, both ends' lists agree, and
-   every rank writes the same order from the same inputs (F. B. Schneider, ACM Comput. Surv., 1990).  The bridge
-   spreads a node pair's sequence as its own (R5).
+   page crossing a tree edge once (T4).
+   The sets (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md, S1 to S3):
+   a range every one of whose declared transfers is MESH_PAGES (function B at every destination, R4) is a set on each
+   of its trees: every entry of a page on tree j (j the tree's index in the solve's trees grouped by demand, the same
+   at every rank) has `set` j + 1; every other entry, a range with any MESH_JOIN destination among them, has `set` 0
+   and keeps the schedule's order.  Each copy's entries are in the order of their group's least scheduled start (an
+   entry's group the entries of its nonzero `set`, `node` and `direction`, else the entry alone; an entry's start its
+   link's scheduled start of its page), then their group's least walk, then their own walk (T6 as S3 amends it): so a
+   set's entries are contiguous on their node pair within each copy, in walk order, each node pair's other sends in
+   schedule order, both ends' lists agree, and every rank writes the same order from the same inputs (F. B. Schneider,
+   ACM Comput. Surv., 1990).  The bridge spreads a node pair's sequence as its own (R5), and sees a set or a sequence
+   and no kind (R4).
+   2026-11-04, owner C2 (S3): reversing T6's order by each entry's own start, ties by walk.  Why: a set's pages are
+   drawn in a uniformly random order at the bridge (appendix item 5), which needs them contiguous on their pair; a
+   group's least start keeps each per-pair list a topological order of the unrolled executions (S2; MSCCLang §5.2).
+   What must stay: both ends' lists the same hops in the same order; every entry not in a set in schedule order.
 
-   The plan's name, and the plan in its claim (design/compilation-coordination.md, "The plan call" and Q5; the draft
-   e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", as the operator's ruling 1 allows it).
-   `group`: the launcher's (MESH_GROUP), the same at every rank of a run; 0 is EINVAL.  `epoch` (design/compilation-
-   coordination.md, C-epoch): one past the context's count of its plans that stood (mesh-dataflow.h struct mesh_ctx
-   `epoch`), or, where the context's standing plan is cancelled (its `serial` not this node's map serial, D.3.6), that
-   plan's own, the call its replan, so every rank names the plan alike whichever rank saw the map move first; the count
-   is raised only once the plan stands, so a failed call consumes no epoch, and one that fails after closing the
-   context's earlier claims (ESTALE, or the map reader's error, after its writes) leaves it at the named epoch less 1,
-   so the next call names that epoch again.  The plan is (group, epoch): EEXIST where a plan standing at this node on
-   the same map already has that name (a cancelled one is ignored).  The plan's state section is in its claim, and the
-   claim's head row's publication `state` names it once the plan stands;
-   context->state is that offset, and hdr's one-plan fields (`hops`, `plan`, `state`, `hop_off`, `hop_capacity`) are
-   neither read nor written.
+   The plan's name, and the plan in its claim (design/compilation-coordination.md, "The plan call", Q5 and N1 to N5;
+   the draft e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", as the operator's ruling 1
+   allows it).  `group`: the launcher's (MESH_GROUP), the same at every rank of a run; 0 is EINVAL.  `function` (N1):
+   the program's own ordinal of the compiled function, the same at every rank (every rank runs the same program and
+   compiles its functions in the same order), kept by every replan of that function; held in struct mesh_state
+   `epoch`.  The plan is (group, function): EEXIST where a plan standing at this node on the same map already has that
+   name, until the program retires it (mesh-dataflow.h mesh_plan_retire); a plan of another map serial is cancelled
+   (D.3.6) and ignored.  Any number of plans of one program stand at once, each its own claim (N1, N3).  The plan's
+   state section is in its claim, and the claim's head row's publication `state` names it once the plan stands;
+   `*plan` is that offset, the plan's handle (N2: the start, the GPU's transport and the retirement take it), and hdr's
+   one-plan fields (`hops`, `plan`, `state`, `hop_off`, `hop_capacity`) are neither read nor written.
+   2026-11-04, owner C2 (design/compilation-coordination.md, N1, N2 and N5; design/aot-compilation-change-request.md,
+   appendix item 6): reversing C-epoch's name (group, epoch), epoch one past the context's count of its plans that
+   stood or its cancelled standing plan's, and context->state as the context's one standing plan.  Why: compiled
+   functions coexist, each named by the program's ordinal of it, and the context holds no plan (struct mesh_ctx loses
+   `epoch` and `state`).  What must stay: every rank names one plan alike; EEXIST where a plan of that name stands on
+   the same map.
 
    The state section (mesh.h struct mesh_state, at its claim's head's publication `state`), an invariant item outside
    the window, apart from every data page: the struct, then the phase list (each received range's 2-bit Gray-coded
    phase a page, a group a copy), the counts (each received range's arrivals, a word a copy), the supplied words (one a
    source range), the GPU's status and this node's entries (mesh-collective.c mesh_plan gives the offsets).  Its words
    are set to their starting values once, where it is placed (the contract's D3), and none is reset while the plan
-   stands (C3.7).  The struct's words beside them: `group` and `epoch` the plan's name, `serial` the map serial it was
+   stands (C3.7).  The struct's words beside them: `group` and `epoch` the plan's name (group, function), `epoch`
+   holding the function (N1), `serial` the map serial it was
    made on, `hops` its entries' region offset and `entries` u x n, `held` 0 and every `refused` 0 (the ports' alone),
    `nodes` the plan's nodes (a set of map indices: every source and destination of a declared transfer and every node a
    tree of it reaches; this node's own where there is none) and `sender` the least of them (Q2), each the same at every
@@ -134,23 +162,30 @@
 
    This node's entries: u x n (mesh.h struct mesh_hop) at the state section's `hops`, copy c's n at [c n, c n + n),
    every copy's the same hops in the same order, each copy's naming its own pages, phase fields and count words.  Each
-   entry carries the map serial and its page's bytes, min(Q, B - k Q) for page k of a range of B bytes, Q = block x
-   pgsz (T7).
+   entry carries the map serial, its page's bytes, min(Q, B - k Q) for page k of a range of B bytes, Q = block x pgsz
+   (T7), and its `set` (S3), every copy's the same.
    2026-11-04, owner C (design/compilation-coordination.md, "The region" and Q5): reversing the entries in hdr's hop
    area (`hops` of them at `hop_off`, room `hop_capacity`, ENOSPC past it) and hdr `plan` as the plan's generation.
    Why: any number of plans stand at once, each its own entries in its own claim (R8, A7).  What must stay: copy c's n
    at [c n, c n + n), every copy's the same hops in the same order.
 
    Returns 0; EINVAL (a malformed transfer, weight, value or dependence: a kind other than MESH_JOIN and MESH_PAGES, the
-   transfers of one range giving different `produced` or `read`, a weight not finite or not above 0, `group` 0; a
-   lag-0 cycle); EEXIST (a plan standing at this node on the same map is already (group, epoch)); EHOSTUNREACH (a
-   source or destination not in the map, or with no Thunderbolt-5 path within it); ENOMEM (no free run for the claim;
-   a value with no unroll bound, or whose write does not reach its next instance at lag 1 (the contract's D5), named
-   on stderr by its index and its range's identity; the call's own memory); ESTALE (the map moved while planning:
-   plan again on the map as it is); or the map reader's error.  Every failure but ESTALE and the second map read's is
-   found before anything is written, and leaves the context's standing plan standing; with those, this plan's claim
-   and every earlier one of the client are closed, context->state is 0 and no plan of the context stands.  There is no
-   ETIMEDOUT: nothing waits.
+   transfers of one range giving different `produced` or `read`, a weight not finite or not above 0, `group` 0, `plan`
+   NULL; a lag-0 cycle); EEXIST (a plan standing at this node on the same map is already (group, function));
+   EHOSTUNREACH (a source or destination not in the map, or with no Thunderbolt-5 path within it); ENOMEM (no free run
+   for the claim; a value with no unroll bound, named on stderr by its index and its range's identity; the call's own
+   memory); ESTALE (the map moved while planning: plan again on the map as it is); or the map reader's error.  Every
+   failure but ESTALE and the second map read's is found before anything is written; with those, this plan's claim
+   alone is closed.  Every failure leaves `*plan` untouched and every other plan of the program standing as it stood.
+   There is no ETIMEDOUT: nothing waits.
+   2026-11-04, owner C2 (design/compilation-coordination.md, U1; design/aot-compilation-change-request.md, appendix
+   item 1): ENOMEM for a value whose write does not reach its next instance at lag 1 (design/disjoint-pages-revision-
+   coordination.md, D5) is gone.  Why: C3.3 fails only "A value with no such L" (M. Lam, PLDI 1988; B. R. Rau, MICRO
+   1994), and D5 is in neither; the least lags are exact at every larger distance by U1's reason (above).  What must
+   stay: ENOMEM, named, for a read of a value that reaches no later write of it.
+   2026-11-04, owner C2 (N3, N5): reversing the close of every earlier claim of the client, context->state 0, on a
+   failure after the writes.  Why: compiled functions coexist; a failed plan closes its own claim alone.  What must
+   stay: every failure but ESTALE and the second map read's found before anything is written.
    2026-11-04, sub-assignment 3: reversing 2026-11-03's call (sub-assignments 3-5), which took `executions` and unrolled
    every execution into its own instances, took each range's section from mesh_section_create, zeroed every declared
    page and every word it used, and waited for the previous plan's erase (mesh-call.h mesh_plan_erased, ETIMEDOUT).
@@ -195,12 +230,14 @@ struct mesh_weight { double produced,consumed,read,page; };
 #define MESH_FROM_SOURCE_READ 4u
 #define MESH_TO_SOURCE_READ 8u
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
-/* group: the launcher's (MESH_GROUP), the same at every rank, 0 EINVAL; the plan is (group, epoch), epoch
-   context->epoch + 1, or the context's cancelled standing plan's (its replan), context->epoch raised to it once the
-   plan stands (design/compilation-coordination.md, C-epoch, 2026-11-04, where the call raised it at its entry).
-   ENOSPC for the page lists' room goes (the entries are in the plan's state section) */
-int mesh_plan(struct mesh_ctx *,uint64_t group,const struct mesh_declared *,const struct mesh_weight *,uint32_t count,
-              struct mesh_value *,uint32_t values,const struct mesh_dependence *,uint32_t dependences);
+/* aot-compilation appendix item 6 (design/compilation-coordination.md, "The appendix's revisions", N1 to N5): the plan
+   of one compiled function, named (group, function): `group` the launcher's (MESH_GROUP), 0 EINVAL; `function` the
+   program's own ordinal of the compiled function, the same at every rank, kept by every replan of that function; held
+   in struct mesh_state `epoch`.  EEXIST where a plan of that name stands here on the same map.  *plan out: the region
+   offset of the plan's state section once it stands (untouched on any failure).  No earlier plan is closed */
+int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t function,const struct mesh_declared *,
+              const struct mesh_weight *,uint32_t count,struct mesh_value *,uint32_t values,
+              const struct mesh_dependence *,uint32_t dependences,uint64_t *plan);
 
 /* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's, each by its range's
    first row's publication, as before: mesh_host_publish its supplied word (`targets[0]`), mesh_host_arrived its words
