@@ -139,22 +139,25 @@
    order no list; this overturns T6.  What must stay: the schedule's call (R5's method, A6); both ends' lists of a
    node pair the same hops in the same order; every copy's the same order.
    The sets (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md, S1, S2 and
-   GO4): a range every one of whose declared transfers is MESH_PAGES (function B at every destination, R4) is a set on
+   "The revisions of 67ca86f8", SP): a range every one of whose declared transfers is MESH_PAGES (function B at every destination, R4) is a set on
    each of its trees: every entry of a page on tree j (j the tree's index in the solve's trees grouped by demand, the
    same at every rank) has `set` j + 1; every other entry, a range with any MESH_JOIN destination among them, has `set`
-   0 and is at its own place.  A set's entries on one node pair and direction take consecutive places at the place of
-   the first of them in the order (R5: "They take consecutive places at the place of the set's first page in that
-   order"), each among them by its own place: each copy's entries are sorted by their group's least place (an entry's
-   group the entries of its nonzero `set`, `node` and `direction`, else the entry alone), then by their own place.  So
-   each node pair's list at each end is a subsequence of the one global order (a set's at its first page's place), a
-   set's entries are contiguous on their node pair and direction within each copy, both ends' lists are the same hops
-   in the same order, and every copy's is the same.  A set's pages over a tree edge depend only on their own pages over
-   the edge above, or on the production, and on nothing of each other, so a group's least place follows that of every
-   group it depends on: the groups in order of their least places are a topological order of the instructions with
-   each group whole (R5: "A set's pages ... share their predecessors"), whose dependencies are the bridge's
-   store-and-forward waits; with every lag pointing forward, the cables' sequences cannot wait on each other in a cycle
-   (MSCCLang §5.2: "all implicit dependencies introduced by thread block sequential execution cannot produce cycles";
-   GO4).  The bridge spreads a node pair's sequence as its own (R5), and sees a set or a sequence and no kind (R4).
+   0.  Every entry, a set's among them, is at its own place (R5: "A set's pages ... keep their places in that order.
+   The set's random permutation is drawn over those places"): each copy's entries are sorted by their place.  So each
+   node pair's list at each end is a subsequence of the one global order, both ends' lists are the same hops in the
+   same order, and every copy's is the same.  The global order is a topological order of the instructions, whose
+   dependencies are the bridge's store-and-forward waits; with every lag pointing forward, the cables' sequences in
+   that order cannot wait on each other in a cycle (R5; MSCCLang §5.2: "all implicit dependencies introduced by thread
+   block sequential execution cannot produce cycles").  The bridge draws each execution's permutation of a set's
+   members over their places on each cable (appendix item 5; mesh-flow.c), spreads a node pair's sequence as its own
+   (R5), and sees a set or a sequence and no kind (R4).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): reversing GO4's groups (a set's
+   entries on one node pair and direction at consecutive places at its first page's place, each copy's entries sorted
+   by their group's least place, then their own) and the argument that the groups in that order were a topological
+   order with each group whole.  Why: R5, "(Corrected 2026-11-05: the first text moved a set's pages to consecutive
+   places, which nothing requires.)"  The documents state no argument for the sequences each execution's permutation
+   makes ("The revisions of 67ca86f8", stop 3).  What must stay: both ends' lists the same hops in the same order;
+   every copy's the same order.
    2026-11-04, owner C3 (GO4): reversing S3, each copy's entries in the order of their group's least scheduled start,
    then their group's least walk, then their own walk.  Why: R5's one global order, a set's pages at the place of the
    set's first page in it; scheduled starts order no list.  What must stay: both ends' lists the same hops in the same

@@ -197,14 +197,13 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    - `set`: 0 for a hop of a sequence; else j + 1 for a page of tree j of a set range, a range every declared transfer
      of which is MESH_PAGES, j the tree's index in the solve's trees grouped by demand (the same at every rank), the
      same in both ends' entries of the hop (design/aot-compilation-change-request.md, appendix item 5;
-     design/compilation-coordination.md, "The appendix's revisions", S1 and S2).  A set's entries on its node pair
-     and direction take consecutive places within each copy at the place of the set's first page in the plan's one
-     global order, each among them by its own place, both ends' alike (design/plan-to-bridge-change-request.md R5:
-     "They take consecutive places at the place of the set's first page in that order"; design/compilation-
-     coordination.md, "The documents' revisions of edd4b583", GO4; "Both ends", below): the plan's view, the bridge's
-     cables its own.  The bridge permutes a set's members per cable, each execution, at both ends (S4, S5, S7′: on
-     each cable of the pair, the members whose positions the deal gave that cable, among those positions).  The bridge
-     sees a set or a sequence and no kind (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
+     design/compilation-coordination.md, "The appendix's revisions", S1 and S2).  A set's entries keep their places in
+     the plan's one global order, as every entry does, both ends' alike (design/plan-to-bridge-change-request.md R5:
+     "A set's pages ... keep their places in that order.  The set's random permutation is drawn over those places";
+     "Both ends", below): the plan's view, the bridge's cables its own.  The bridge permutes a set's members per cable,
+     each execution, at both ends (S4, S5, S7′: on each cable of the pair, the members whose positions the deal gave
+     that cable, among those positions, wherever they lie in the list).  The bridge sees a set or a sequence and no
+     kind (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
    2026-11-04, owner L2 (the appendix, item 5): `set` and `padding1` appended, where every hop was one of a sequence in
    the schedule's order.  Why: the pages of function B's operands are written as a set, not a sequence (R4, item 5).
    What must stay: offsets 0-47 as at 110; both ends' entries of a hop the same `set`.
@@ -215,6 +214,11 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    place, where this note said contiguous in walk order (S3, at the group's least scheduled start).  Why: R5 orders
    each cable's list by MSCCLang §5.2 step 3, and "Scheduled start times do not order the lists".  What must stay: a
    set's entries contiguous on its node pair and direction within each copy, both ends' alike.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): a set's entries at their own
+   places, where this note said consecutive at the place of the set's first page (GO4), and the bridge's set its
+   positions on the pair within a copy wherever they lie, where it was a contiguous run.  Why: R5, "(Corrected
+   2026-11-05: the first text moved a set's pages to consecutive places, which nothing requires.)"  What must stay:
+   both ends' entries of a hop the same `set`, at the same place.
    Copies (C3.3: modulo variable expansion, M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
    scheduling, MICRO 1994).  mesh_plan unrolls the plan's one execution, its template, into u copies: L of a routed
    value is the least lag at which every read of it in execution t happens before its write in t + L, and u the
@@ -405,17 +409,25 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    Communication Language, ASPLOS 2023, section 5.2), the priority the bottom level (O. Sinnen and L. A. Sousa,
    Communication contention in task scheduling, IEEE TPDS 16(6), 2005, eq. (7)), a tie to the lower instruction
    (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO1 to GO3; mesh-collective.c
-   plan_schedule).  Each node pair's list at each end is a subsequence of it, a set's entries at its first page's place
-   (GO4), so both ends' lists agree; every rank computes the same order from the same inputs (F. B. Schneider,
-   Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990); and each cable
-   carries execution t's sends in that order, then execution t + 1's (R5), the cables' sequences subsequences of it.
-   Its dependencies are the bridge's store-and-forward waits (a forward released by its receive's landing, a source's
-   send by its supplied word: GO1), the groups in order of their least places are a topological order of them with
-   each set whole, and every lag points forward, so the cables' sequences cannot wait on each other in a cycle
-   (MSCCLang, section 5.2: "all implicit dependencies introduced by thread block sequential execution cannot produce
-   cycles"; GO4, shown at mesh-collective.c plan_schedule).  The list schedule is still computed and orders no list
-   (R5: "Scheduled start times do not order the lists"; GO5).  How a pair's sequence is spread over what its devices
-   give it is the bridge's own (R5, R7).
+   plan_schedule).  Each node pair's list at each end is a subsequence of it, every entry at its own place, a set's
+   among them (R5: "A set's pages ... keep their places in that order"), so both ends' lists agree; every rank
+   computes the same order from the same inputs (F. B. Schneider, Implementing fault-tolerant services using the state
+   machine approach, ACM Comput. Surv., 1990); and each cable carries execution t's sends in that order, then
+   execution t + 1's (R5), the cables' sequences subsequences of it.  Its dependencies are the bridge's
+   store-and-forward waits (a forward released by its receive's landing, a source's send by its supplied word: GO1),
+   the order is a topological order of them, and every lag points forward, so in that order the cables' sequences
+   cannot wait on each other in a cycle (R5; MSCCLang, section 5.2: "all implicit dependencies introduced by thread
+   block sequential execution cannot produce cycles"; mesh-collective.c plan_schedule).  The bridge draws each
+   execution's permutation of a set's members over the set's places on each cable (design/aot-compilation-change-
+   request.md, appendix item 5); the documents state no argument for the sequences it makes
+   (design/compilation-coordination.md, "The revisions of 67ca86f8", stop 3).  The list schedule is still computed and
+   orders no list (R5: "Scheduled start times do not order the lists"; GO5; "The revisions of 67ca86f8", stop 2).  How
+   a pair's sequence is spread over what its devices give it is the bridge's own (R5, R7).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): every entry at its own place,
+   where a set's entries were at its first page's place (GO4), and the topological order R5's own, where it was GO4's
+   groups in order of their least places with each set whole.  Why: R5, "(Corrected 2026-11-05: the first text moved
+   a set's pages to consecutive places, which nothing requires.)"  What must stay: both ends' lists the same hops in the
+   same order; every copy the same order.
    2026-11-04, owner L (design/plan-to-bridge-change-request.md R5; design/compilation-coordination.md, T6, T7): the
    order of the entries is the schedule's, where it was the walk's under a hand priority, and each entry carries its
    `bytes` in place of `padding`, where every hop moved its whole page; the entries are in the plan's state section,
