@@ -13,6 +13,10 @@
 # chosen here
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", TT1 to TT9): A10, a program's calls of
 # compiled functions as a dataflow graph analysed at compile time (program), its output carried in each function's IR
+# 2026-11-05 (design/aot-compilation-change-request.md A4 and A10; design/compilation-coordination.md, "The revisions
+# of abecd389", T4-1 to T4-22): every operator partitioned, the windowed and data formatting operators by GSPMD's halo
+# exchange, so CollectivePermute is reached; A10's graph operations are rdma/mesh_graph.py's and a body's symbolic
+# execution runs on torch.fx.Interpreter
 import collections
 import ctypes as C
 import errno
@@ -30,13 +34,47 @@ import mesh
 import mesh_graph
 
 F = torch.nn.functional
-# Y. Xu et al., GSPMD, arXiv 2105.04663, 2021, section 3.5: elementwise operators, every tensor operand of the output's
-# shape, each dimension preserved from the inputs to the output and back
+# Y. Xu et al., GSPMD, arXiv 2105.04663, 2021, section 3.5: elementwise operators, each dimension preserved from the
+# inputs to the output and back; an operand of fewer dimensions, or of size 1 on one the output's is larger on, is
+# broadcast there (design/compilation-coordination.md, "The revisions of abecd389", T4-15)
 ELEMENTWISE = {operator.add, operator.sub, operator.mul, operator.truediv, operator.neg, torch.add, torch.sub,
                torch.mul, torch.div, torch.neg, torch.relu, torch.tanh, torch.sigmoid, torch.exp, F.relu, F.gelu,
                F.silu, 'add', 'sub', 'mul', 'div', 'neg', 'relu', 'tanh', 'sigmoid', 'exp'}
-# GSPMD sections 3.2 and 3.5: Dot, a generalized matrix multiply (an Einsum)
-DOT = {operator.matmul, torch.matmul, 'matmul', torch.mm, 'mm', F.linear}
+# GSPMD sections 3.2 and 3.5: Dot, a generalized matrix multiply (an Einsum): torch's matrix products, F.linear, and
+# torch.einsum, whose equation is section 3.2's "string equation, e.g., ABC, ACD -> ABD" (T4-21)
+DOT = {operator.matmul, torch.matmul, 'matmul', torch.mm, 'mm', torch.bmm, 'bmm', F.linear}
+# GSPMD section 4.3, "Windowed operators. The most typical use case of halo exchange is for partitinoning window-based
+# operators (e.g., Convolution, ReduceWindow)": torch's convolutions and transposed convolutions by their spatial
+# dimensions, and its max and average pooling, ReduceWindow by max and by sum; section 4.3, "Halo exchange for data
+# formatting ... after a Slice or Pad operator": torch's constant Pad (F.pad, which Dynamo records as torch._C._nn.pad
+# (torch v2.14.0 torch/_dynamo/trace_rules.py), and torch.constant_pad_nd) and its Slice (a tensor's operator.getitem
+# by ints, slices, None and Ellipsis, and narrow).  PARAMETERS: each one's parameters in torch v2.14.0's order
+# (torch/_C/_VariableFunctions.pyi, torch/_C/_nn.pyi; torch/nn/functional.py _max_pool1d to _max_pool3d, the functions
+# F.max_pool1d to F.max_pool3d dispatch to where return_indices is false)
+CONVOLUTION = {torch.conv1d: 1, torch.conv2d: 2, torch.conv3d: 3}
+TRANSPOSED = {torch.conv_transpose1d: 1, torch.conv_transpose2d: 2, torch.conv_transpose3d: 3}
+MAXIMUM = {F.max_pool1d: 1, F.max_pool2d: 2, F.max_pool3d: 3, torch.max_pool1d: 1, torch.max_pool2d: 2,
+           torch.max_pool3d: 3}
+AVERAGE = {F.avg_pool1d: 1, F.avg_pool2d: 2, F.avg_pool3d: 3}
+PAD = {F.pad, torch._C._nn.pad, torch.constant_pad_nd}
+NARROW = {torch.narrow, 'narrow'}
+PARAMETERS = {**dict.fromkeys(CONVOLUTION, ('input', 'weight', 'bias', 'stride', 'padding', 'dilation', 'groups')),
+              **dict.fromkeys(TRANSPOSED, ('input', 'weight', 'bias', 'stride', 'padding', 'output_padding', 'groups',
+                                           'dilation')),
+              **dict.fromkeys(MAXIMUM, ('input', 'kernel_size', 'stride', 'padding', 'dilation', 'ceil_mode',
+                                        'return_indices')),
+              **dict.fromkeys(AVERAGE, ('input', 'kernel_size', 'stride', 'padding', 'ceil_mode', 'count_include_pad',
+                                        'divisor_override')),
+              **dict.fromkeys(PAD, ('input', 'pad', 'mode', 'value')), torch.constant_pad_nd: ('input', 'pad', 'value'),
+              **dict.fromkeys(NARROW, ('input', 'dim', 'start', 'length'))}
+# PyTorch 2 section 3.9: AOTAutograd "makes the graph purely functional by removing operations that perform mutation
+# and replacing them with their functional equivalents": the operator module's in-place operators by their binary forms
+# (Python's `x += y` an `operator.iadd`), the rest by name (T4-16)
+INPLACE = {operator.iadd: operator.add, operator.isub: operator.sub, operator.imul: operator.mul,
+           operator.itruediv: operator.truediv, operator.ifloordiv: operator.floordiv, operator.imod: operator.mod,
+           operator.ipow: operator.pow, operator.imatmul: operator.matmul, operator.iand: operator.and_,
+           operator.ior: operator.or_, operator.ixor: operator.xor, operator.ilshift: operator.lshift,
+           operator.irshift: operator.rshift}
 # design/aot-compilation-change-request.md A2, the placement operand placement(gm, example_inputs) returns.  mesh:
 # GSPMD's device mesh, "a logical multi-dimensional tensor" of device ids (section 3.1), nested sequences holding the
 # ids 0 .. D - 1 once each.  nodes: device d's map index nodes[d] (mesh-dataflow.h mesh_nodes_read), the mapping of the
@@ -54,6 +92,24 @@ Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 # between calls", each (a, b) call a before call b; `commuting`, the program's sets of calls "whose effects commute",
 # which "may run in any order" (Rinard and Diniz), each a tuple of places.  "both carried in A8's IR" (IR `calls`)
 Calls = collections.namedtuple('Calls', 'mine outstanding orders commuting')
+# one operator as this node's program calls it: FX's op, its target, and its arguments with each tensor operand the FX
+# node whose value it takes (the node's own, its functional equivalent's, or its local configuration's, GSPMD section
+# 4.1, "Static operator configurations")
+Local = collections.namedtuple('Local', 'op target args kwargs')
+# an operator's rule for GSPMD's two passes (sections 3.5 and 4): its kind; its propagation level (0 elementwise, 1
+# lower, None no propagation, the general rule); its tensor operands in the order torch.fx's map_arg visits its
+# arguments and their dimensions' labels, and its output's (None for the general rule); the operands propagation goes
+# through; the contracting labels, whose sum a sharding alike in every operand leaves partial (section 3.2); its
+# windows; `fused`, an operand added after the contraction (a bias, T4-13); `merged`, a Pad merged into this Slice
+# (section 4.6, T4-17); `configure`, the local operators given the windowed labels sharded, each with its local output
+# size
+Rule = collections.namedtuple('Rule', 'kind level operands labels out propagate contracting windows fused merged '
+                                      'configure')
+# a windowed dimension (GSPMD section 4.3 and Appendix A.2): its label, the operand and the operand's dimension it
+# windows, the window's extent (its dilated size) and stride, its low padding, for a transposed convolution its
+# padding and its kernel's dilated reach less one (A.2's base dilation, T4-10), and the value outside the operand
+# (section 4.1's masking by "the identity value of the reduction", T4-18)
+Window = collections.namedtuple('Window', 'label operand dim extent stride low transposed fill')
 
 
 # design/aot-compilation-change-request.md A8: one IR carried from partitioning to serialization, as MSCCLang carries
@@ -66,7 +122,10 @@ Calls = collections.namedtuple('Calls', 'mine outstanding orders commuting')
 # slices); `made`: the keys this node's program has made before the step being added; `calls`: A10's output for this
 # function (Calls), from the traced program under whose call it was compiled, None where no traced program submits it
 # (design/aot-compilation-change-request.md A10: "both carried in A8's IR"; design/compilation-coordination.md, "The
-# revisions of f3f7cf46", TT7)
+# revisions of f3f7cf46", TT7).  `locals`: each operator's Local as this node's program calls it; `shapes`: the local
+# shapes of the values a halo exchange makes (its halos, their arrivals, its regions), which no node's sharding gives
+# (design/aot-compilation-change-request.md A4; design/compilation-coordination.md, "The revisions of abecd389");
+# `reduced`: each AllReduce by the key of the partial sums it reduces
 class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
@@ -78,7 +137,7 @@ class IR:
         self.device, self.index, self.serial, self.identity = here[0], nodes.self, nodes.serial, 0
         self.sharding, self.program, self.reduced, self.roles, self.events = {}, [], {}, {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
-        self.placed, self.made, self.calls = set(), set(), None
+        self.placed, self.made, self.calls, self.locals, self.shapes = set(), set(), None, {}, {}
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
     def local(self, node, sharding):
@@ -128,6 +187,12 @@ def _value(node):
         raise NotImplementedError('%s on %s: no binding of its tensors to the placed pages (a DLPack tensor of kDLCPU '
                                   'or kDLMetal alone: K1)' % (node.name, value.device))
     return value
+
+
+# the local shape of the value of a key of this node's program: a halo exchange's own (ir.shapes), else its node's
+# local value in the sharding the key carries (GSPMD section 3.1's tile)
+def _shape(ir, key):
+    return ir.shapes[key] if key in ir.shapes else ir.local(key[0], key[1])
 
 
 # GSPMD section 3.1, the device mesh: its shape and each device id's coordinates; Alpa section 4.1, the mapping of its
@@ -184,33 +249,339 @@ def _carry(sharding, source, target):
     return tuple(sharding[source.index(label)] if label in source else -1 for label in target)
 
 
-# an operator's propagation level, tensor operands, their labels and its output's (GSPMD section 3.5): an elementwise
-# operator's every operand of its output's shape and labels; a Dot's Einsum labels (section 3.2: batch, contracting
-# and non-contracting dimensions).  Any other operator, and these where GSPMD gives no rule here, refused
-# (design/compilation-coordination.md, A-T2)
-def _operator(node):
-    operands, out = [a for a in node.args if isinstance(a, Node)], _value(node).shape
-    if set(operands) != set(node.all_input_nodes) or node.kwargs.get('inplace'):
-        raise NotImplementedError('%s (%s): a tensor operand outside its positional arguments, or in place: refused '
-                                  '(A-T2)' % (node.name, node.target))
-    if node.target in ELEMENTWISE:
-        if any(_value(o).shape != out for o in operands):
-            raise NotImplementedError(
-                '%s (%s): operands of shapes %s broadcast to %s, an XLA Broadcast and an elementwise operator in one '
-                'node; GSPMD section 3.5 gives Broadcast\'s backward propagation a higher priority than its forward, '
-                'and no priority against Dot\'s: refused (A-T2)'
-                % (node.name, node.target, [tuple(_value(o).shape) for o in operands], tuple(out)))
-        labels = tuple(range(len(out)))
-        return 0, operands, [labels] * len(operands), labels
-    if node.target in DOT and len(operands) == 2:
-        (a, b), r = (tuple(_value(o).shape) for o in operands), len(out)
-        if node.target is F.linear and len(a) >= 2 and len(b) == 2:
-            return 1, operands, [tuple(range(r)), (r, r - 1)], tuple(range(r - 1)) + (r,)
-        if node.target is not F.linear and len(a) >= 2 and len(b) == 2:
-            return 1, operands, [tuple(range(r)), (r - 1, r)], tuple(range(r - 1)) + (r,)
-        if node.target is not F.linear and len(a) == len(b) >= 3 and a[:-2] == b[:-2]:
-            return 1, operands, [tuple(range(r)), tuple(range(r - 2)) + (r - 1, r)], tuple(range(r - 1)) + (r,)
-    raise NotImplementedError('%s (%s): GSPMD gives no rule here for it; refused (A-T2)' % (node.name, node.target))
+# a parameter given as one int or a sequence, as k ints; the parameters an operator's call gives, by name (`names` its
+# parameters in order, PARAMETERS); the call with some replaced, each where the call gives it, else by keyword; the
+# names of the parameters its tensor operands are given as, in map_arg's order, None for one inside a sequence
+def _ints(value, k):
+    value = tuple(value) if isinstance(value, (list, tuple)) else (value,)
+    return value * k if len(value) == 1 else value
+
+
+def _given(local, names):
+    return {**dict(zip(names, local.args)), **local.kwargs}
+
+
+def _with(local, names, changes):
+    args, kwargs = list(local.args), dict(local.kwargs)
+    for name, value in changes.items():
+        if names.index(name) < len(args):
+            args[names.index(name)] = value
+        else:
+            kwargs[name] = value
+    return local._replace(args=tuple(args), kwargs=kwargs)
+
+
+def _named(local, names):
+    found = []
+    for name, value in list(zip(names + (None,) * len(local.args), local.args)) + list(local.kwargs.items()):
+        if isinstance(value, Node):
+            found.append(name)
+        else:
+            map_arg(value, lambda n: found.append(None))
+    return found
+
+
+# GSPMD sections 3.2 and 3.5: a Dot's labels, batch, contracting ('k') and non-contracting ('n', 'm') dimensions, as
+# torch.matmul's operands give them (a vector's one dimension contracted; an operand's batch dimensions aligned to the
+# output's from the last, one of size 1 under a larger one broadcast and of a label of its own, T4-21); propagation
+# through an operand with no broadcast dimension (an absent batch dimension is an Einsum operand's absent letter, as a
+# matrix's in A-T2's forms; one of size 1 broadcast is an XLA Broadcast, T4-15)
+def _matmul(operands, shapes, out):
+    batch = len(out) - (len(shapes[0]) > 1) - (len(shapes[1]) > 1)
+
+    def side(s, k, matrix):
+        rank = len(s) - len(matrix)
+        return tuple(batch - rank + i if s[i] == out[batch - rank + i] else ('broadcast', k, i)
+                     for i in range(rank)) + matrix
+    labels = [side(shapes[0], 0, ('n', 'k') if len(shapes[0]) > 1 else ('k',)),
+              side(shapes[1], 1, ('k', 'm') if len(shapes[1]) > 1 else ('k',))]
+    through = tuple(k for k, own in enumerate(labels) if not any(isinstance(x, tuple) for x in own))
+    return Rule('dot', 1, operands, labels, tuple(range(batch)) + ('n',) * (len(shapes[0]) > 1)
+                + ('m',) * (len(shapes[1]) > 1), through, ('k',), (), False, None, lambda sharded: ())
+
+
+# GSPMD section 3.2, the Einstein Summation: "An Einsum can be expressed as a string equation, e.g., ABC, ACD -> ABD,
+# where A is an embarrassingly parallel batch dimension in both operands and the output, C is a contracting dimension
+# that only exist in the operands and will be sum-reduced, while B and D are non-contracting dimensions that exist in
+# one operand and are inherited by the output": each operand's letters its labels, the output's its own (torch.einsum's
+# implicit output, without "->", the letters appearing once, in alphabetical order), a letter in every operand and not
+# in the output contracting; an equation with "...", a letter repeated in an operand or the output, or a letter of two
+# sizes (broadcast) is none of these (None) (T4-21)
+def _einsum(local, operands, shapes, out):
+    equation = local.args[0] if local.args and isinstance(local.args[0], str) else '.'
+    left, arrow, right = equation.replace(' ', '').partition('->')
+    terms = left.split(',')
+    letters = ''.join(terms)
+    right = right if arrow else ''.join(sorted(c for c in set(letters) if letters.count(c) == 1))
+    sizes = {}
+    for term, shape in zip(terms, shapes):
+        for c, size in zip(term, shape):
+            sizes.setdefault(c, set()).add(size)
+    if '.' in equation or len(terms) != len(operands) or len(right) != len(out) or len(set(right)) != len(right) \
+            or not set(right) <= set(letters) or any(len(v) != 1 for v in sizes.values()) \
+            or any(len(t) != len(s) or len(set(t)) != len(t) for t, s in zip(terms, shapes)):
+        return None
+    contracting = tuple(sorted(set.intersection(*map(set, terms)) - set(right))) if len(terms) > 1 else ()
+    return Rule('dot', 1, operands, [tuple(t) for t in terms], tuple(right), tuple(range(len(operands))), contracting,
+                (), False, None, lambda sharded: ())
+
+
+# GSPMD section 4.3, windowed operators, and section 4.4: Convolution "allows the user to combine spatial partitioning
+# and feature partitioning in the same operator".  Labels: the batch ('n', where the input is batched), the input
+# feature ('ci', contracted with the weight's, as a Dot's) and output feature ('co', the weight's and the bias's), and
+# each spatial dimension ('s', i) a window of the input onto the output's; the kernel's dimensions of labels of their
+# own, so a kernel is held whole ("If the RHS is replicated, window dilation only affects the effective window size when
+# the operator is partitioned based on its LHS", Appendix A.2; of a partitioned RHS, "We skip the implementation
+# details").  A window's extent is its dilated size d(k - 1) + 1, its stride and low padding the operator's (padding
+# 'valid' none, 'same' half of d(k - 1)).  A transposed convolution is a convolution of the input dilated by the stride
+# (A.2: "Base dilation is the dilation factor of the LHS"), its window as A.2's base dilation gives it (T4-10).  With
+# groups the feature dimensions are labels of their own, held whole and the output's computed whole and sliced, and so
+# with padding 'same' of an odd d(k - 1) the spatial dimensions (T4-12); a bias, added after the contraction, `fused`
+# (T4-13).  Each sharded spatial dimension's padding (and output padding) 0 in the local operator: its halo region
+# holds the padding (GSPMD section 4.1, "Static operator configurations"; Appendix A.2)
+def _convolution(node, local, operands, shapes):
+    target, transposed = local.target, local.target in TRANSPOSED
+    k, names, named = (TRANSPOSED if transposed else CONVOLUTION)[target], PARAMETERS[target], \
+        _named(local, PARAMETERS[target])
+    if None in named or len(set(named)) != len(named) or not {'input', 'weight'} <= set(named):
+        return None
+    given, x, w = _given(local, names), shapes[named.index('input')], shapes[named.index('weight')]
+    lead, groups = len(x) - k - 1, given.get('groups', 1)
+    if lead not in (0, 1) or len(w) != k + 2:
+        return None
+    stride, dilation = _ints(given.get('stride', 1), k), _ints(given.get('dilation', 1), k)
+    reach = [d * (n - 1) for d, n in zip(dilation, w[2:])]
+    padding = given.get('padding', 0)
+    lows = (0,) * k if padding == 'valid' else tuple(r // 2 for r in reach) if padding == 'same' else _ints(padding, k)
+    windowed = padding != 'same' or all(r % 2 == 0 for r in reach)
+    ci, co = ('ci', 'co') if groups == 1 else (('channel', 'in'), ('channel', 'out'))
+    weight = ((ci, co) if transposed else (co, ci)) if groups == 1 else (('weight', 0), ('weight', 1))
+    labels = {'input': ('n',) * lead + (ci,) + tuple(('s', i) if windowed else ('x', i) for i in range(k)),
+              'weight': weight + tuple(('kernel', i) for i in range(k)), 'bias': (co,) if groups == 1 else ('bias',)}
+    out = ('n',) * lead + (co,) + tuple(('s', i) if windowed else ('y', i) for i in range(k))
+    at = named.index('input')
+    windows = tuple(Window(('s', i), at, lead + 1 + i, reach[i] + 1, stride[i], None if transposed else lows[i],
+                           (lows[i], reach[i]) if transposed else None, 0) for i in range(k)) if windowed else ()
+    extra = _ints(given.get('output_padding', 0), k)
+
+    def configure(sharded):
+        if not sharded:
+            return ()
+        changes = {'padding': tuple(0 if ('s', i) in sharded else lows[i] for i in range(k))}
+        if transposed:
+            changes['output_padding'] = tuple(0 if ('s', i) in sharded else extra[i] for i in range(k))
+        return ((node, _with(local, names, changes)),)
+    return Rule('window', 1, operands, [labels[name] for name in named], out, tuple(range(len(operands))),
+                ('ci',) if groups == 1 else (), windows, 'bias' in named and groups == 1, None, configure)
+
+
+# GSPMD section 4.3, ReduceWindow: torch's max pooling (ReduceWindow by max, masked by its identity, -inf or the
+# integer type's least, section 4.1) and average pooling (by sum, masked by 0); the leading dimensions preserved, each
+# spatial dimension ('s', i) a window, of extent d(k - 1) + 1 (max; avg has no dilation, k), its stride the operator's
+# (the kernel's where None or empty) and its low padding the operator's.  An average's dimension is a window only where
+# its divisor does not depend on the window's place: a divisor_override, or no ceil_mode with count_include_pad or no
+# padding there; another of labels of its own, held whole (T4-11).  return_indices gives a pair, no tensor (None).  Each
+# sharded window's padding 0 in the local operator
+def _pooling(node, local, operands, shapes):
+    target, maximum = local.target, local.target in MAXIMUM
+    k, names = (MAXIMUM if maximum else AVERAGE)[target], PARAMETERS[target]
+    given, lead = _given(local, names), len(shapes[0]) - k
+    if _named(local, names) != ['input'] or given.get('return_indices') or lead not in (1, 2):
+        return None
+    kernel, lows = _ints(given['kernel_size'], k), _ints(given.get('padding', 0), k)
+    stride, dilation = _ints(given.get('stride') or given['kernel_size'], k), _ints(given.get('dilation', 1), k)
+    dtype = _value(node).dtype
+    fill = (-math.inf if dtype.is_floating_point else torch.iinfo(dtype).min) if maximum else 0
+    windowed = [maximum or given.get('divisor_override') is not None
+                or not given.get('ceil_mode', False) and (given.get('count_include_pad', True) or lows[i] == 0)
+                for i in range(k)]
+    windows = tuple(Window(('s', i), 0, lead + i, dilation[i] * (kernel[i] - 1) + 1 if maximum else kernel[i],
+                           stride[i], lows[i], None, fill) for i in range(k) if windowed[i])
+
+    def configure(sharded):
+        changes = {'padding': tuple(0 if ('s', i) in sharded else lows[i] for i in range(k))}
+        return ((node, _with(local, names, changes)),) if sharded else ()
+    return Rule('window', 1, operands, [tuple(range(lead)) + tuple(('s', i) if windowed[i] else ('x', i)
+                                                                   for i in range(k))],
+                tuple(range(lead)) + tuple(('s', i) if windowed[i] else ('y', i) for i in range(k)), (0,), (), windows,
+                False, None, configure)
+
+
+# GSPMD section 4.3, "Halo exchange for data formatting ... after a Slice or Pad operator, the shape of the tensor
+# changes, and so do the boundaries between partitions.  This requires us to realign the data on different partitions,
+# which can be handled as a form of halo exchange (Figure 5b)": a constant Pad's padded dimension d a window of extent
+# 1 and stride 1, its low padding the pad's, outside the operand the pad's value; a Slice's sliced dimension d one of
+# extent 1, its stride the slice's step and its low padding the slice's start negated (Python's slice.indices).  Every
+# other dimension preserved; an int index's dimension, absent from the output, held whole; None's of its own.  A Pad of
+# another mode (reflect, replicate, circular), no XLA Pad, holds its padded dimensions whole.  Each sharded window's
+# pad 0 in the local Pad, its slice the step alone, its narrow from 0 the local length (a narrow's dimension a window
+# even where it keeps the dimension whole, so its local length is its shard's)
+def _pad(node, local, operands, shapes):
+    names = PARAMETERS[local.target]
+    given, r = _given(local, names), len(shapes[0])
+    pads = list(given['pad'])
+    if _named(local, names) != ['input'] or len(pads) % 2 or len(pads) > 2 * r \
+            or not all(type(p) is int for p in pads):
+        return None
+    padded = {r - 1 - j: (pads[2 * j], pads[2 * j + 1]) for j in range(len(pads) // 2)
+              if pads[2 * j: 2 * j + 2] != [0, 0]}
+    constant, value = given.get('mode', 'constant') == 'constant', given.get('value') or 0
+
+    def configure(sharded):
+        changes = {'pad': tuple(0 if r - 1 - j // 2 in sharded else p for j, p in enumerate(pads))}
+        return ((node, _with(local, names, changes)),) if sharded else ()
+    return Rule('pad' if constant else 'format', 1, operands,
+                [tuple(d if constant or d not in padded else ('x', d) for d in range(r))],
+                tuple(d if constant or d not in padded else ('y', d) for d in range(r)), (0,), (),
+                tuple(Window(d, 0, d, 1, 1, low, None, value) for d, (low, _) in padded.items()) if constant else (),
+                False, None, configure)
+
+
+def _slice(node, local, operands, shapes):
+    x = shapes[0]
+    if local.target in NARROW:
+        names = PARAMETERS['narrow']
+        given = _given(local, names)
+        dim, start, length = given.get('dim'), given.get('start'), given.get('length')
+        if _named(local, names) != ['input'] or not all(type(v) is int for v in (dim, start, length)):
+            return None
+        dim %= len(x)
+        start += x[dim] if start < 0 else 0
+
+        def configure(sharded):
+            return ((node, _with(local, names, {'start': 0, 'length': sharded[dim]})),) if dim in sharded else ()
+        return Rule('slice', 1, operands, [tuple(range(len(x)))], tuple(range(len(x))), (0,), (),
+                    (Window(dim, 0, dim, 1, 1, -start, None, 0),), False, None, configure)
+    if len(operands) != 1 or len(local.args) != 2 or local.args[0] is not operands[0]:
+        return None
+    index = local.args[1]
+    entries = index if isinstance(index, tuple) else (index,)
+    if list(entries).count(Ellipsis) > 1 or not all(
+            e is None or e is Ellipsis or type(e) is int
+            or isinstance(e, slice) and all(v is None or type(v) is int for v in (e.start, e.stop, e.step))
+            for e in entries):
+        return None
+    fill = len(x) - sum(e is not None and e is not Ellipsis for e in entries)
+    if fill < 0:
+        return None
+    expanded = [f for e in entries for f in ([slice(None)] * fill if e is Ellipsis else [e])]
+    expanded += [slice(None)] * (fill if Ellipsis not in entries else 0)
+    out, windows, where, d = [], [], {}, 0
+    for j, e in enumerate(expanded):
+        if e is None:
+            out.append(('new', j))
+        elif isinstance(e, slice):
+            start, stop, step = e.indices(x[d])
+            out.append(d)
+            if (start, stop, step) != (0, x[d], 1):
+                windows.append(Window(d, 0, d, 1, step, -start, None, 0))
+                where[d] = j
+            d += 1
+        else:
+            d += 1
+
+    def configure(sharded):
+        changed = tuple(slice(None, None, e.step) if j in {where[d] for d in sharded if d in where} else e
+                        for j, e in enumerate(expanded))
+        return ((node, local._replace(args=(local.args[0], changed))),) if sharded else ()
+    return Rule('slice', 1, operands, [tuple(range(len(x)))], tuple(out), (0,), (), tuple(windows), False, None,
+                configure)
+
+
+# design/aot-compilation-change-request.md A2 and A4: "The partitioner reaches them by partitioning every operator, as
+# A2 states ("propagates them to every operator")".  An operator's rule (Rule), from its Local: GSPMD's for an
+# elementwise operator (section 3.5), a Dot or Einsum (sections 3.2 and 3.5), a windowed operator (sections 4.3 and 4.4,
+# Appendix A.2) and a constant Pad or a Slice (sections 4.3 and 4.6); for any other operator, and these where their
+# operands or arguments are of no form those rules read, the general rule: "GSPMD always produces a valid partitioned
+# graph regardless of what sharding annotations are provided.  If the provided shardings are not the typical supported
+# cases, the partitioner will perform resharding on the inputs and/or outputs" (section 4.5), and every operator
+# supports the replicated sharding, in which "All devices have the same full data" (section 3.1), so its tensor
+# operands are resharded to replicated, it runs whole at every node, and its output is resharded from replicated to its
+# sharding (section 4.5's DynamicSlice); since which of its dimensions it preserves is not known, nothing propagates
+# through it (section 3.5, "Preserved dimensions in operators") (T4-5).  A module the program calls (call_module) and
+# an operator of a value that is no tensor (a tuple a later getitem takes apart) take the general rule (T4-20)
+# 2026-11-05 (design/aot-compilation-change-request.md A4: "The partitioner's refusal of an operator, "GSPMD gives no
+# rule here for it" (rdma/mesh_compile.py `_operator`), is false for these"; design/compilation-coordination.md, "The
+# revisions of f3f7cf46", stop 2): the refusal of every operator but elementwise ones and three Dot forms goes, and so
+# do the refusals of a broadcast elementwise operator and of a tensor operand outside the positional arguments (A-T2):
+# the windowed and data formatting operators take GSPMD's rules, the rest the general rule (design/compilation-
+# coordination.md, "The revisions of abecd389", T4-5, T4-15, T4-21).  What must stay: the elementwise and Dot
+# operators' rules as before (their labels renamed, their partitions the same)
+def _operator(node, local):
+    operands = []
+    map_arg((local.args, local.kwargs), operands.append)
+    general = Rule('general', None, operands, None, None, (), (), (), False, None, lambda sharded: ())
+    if local.op == 'call_module' or not isinstance(node.meta.get('example_value'), torch.Tensor) \
+            or not all(isinstance(o.meta.get('example_value'), torch.Tensor) for o in operands):
+        return general
+    out, shapes, target = tuple(_value(node).shape), [tuple(_value(o).shape) for o in operands], local.target
+    rule = None
+    if target in ELEMENTWISE and all(len(s) <= len(out) for s in shapes):
+        rule = Rule('elementwise', 0, operands,
+                    [tuple(len(out) - len(s) + i if size == out[len(out) - len(s) + i] else ('broadcast', k, i)
+                           for i, size in enumerate(s)) for k, s in enumerate(shapes)],
+                    tuple(range(len(out))), tuple(k for k, s in enumerate(shapes) if s == out), (), (), False, None,
+                    general.configure)
+    elif target is F.linear and len(operands) in (2, 3) and shapes[0] and len(shapes[1]) == 2 \
+            and _named(local, ('input', 'weight', 'bias')) == ['input', 'weight', 'bias'][:len(operands)]:
+        r = len(shapes[0])
+        rule = Rule('dot', 1, operands, [tuple(range(r - 1)) + ('k',), ('m', 'k'), ('m',)][:len(operands)],
+                    tuple(range(r - 1)) + ('m',), tuple(range(len(operands))), ('k',), (), len(operands) == 3, None,
+                    general.configure)
+    elif target in DOT and target is not F.linear and len(operands) == 2 and shapes[0] and shapes[1]:
+        rule = _matmul(operands, shapes, out)
+    elif target is torch.einsum:
+        rule = _einsum(local, operands, shapes, out)
+    elif target in CONVOLUTION or target in TRANSPOSED:
+        rule = _convolution(node, local, operands, shapes)
+    elif target in MAXIMUM or target in AVERAGE:
+        rule = _pooling(node, local, operands, shapes)
+    elif target in PAD:
+        rule = _pad(node, local, operands, shapes)
+    elif target is operator.getitem or target in NARROW:
+        rule = _slice(node, local, operands, shapes)
+    return rule or general
+
+
+# GSPMD section 4.6, "Pre-processing": "Similar optimizations include merging a sequence of Pad and Slice operators,
+# which is important to partition the pipelined program in Section 3.3 where the shifting using Pad and Slice can be
+# done with a single CollectivePermute" (section 3.3's "pad_left(state, 1)[:-1]").  A constant Pad whose one reader is a
+# Slice: the Slice's rule over the Pad's operand, each dimension's window the two composed (the Slice's start in the
+# padded tensor less the Pad's low padding, outside the operand the Pad's value), the Pad's local operator run before
+# the Slice's, its value read by the Slice alone (T4-17)
+def _merged(pad, padding, slicing):
+    pads, fill = {w.label: w for w in padding.windows}, padding.windows[0].fill if padding.windows else 0
+    windows = [w._replace(low=w.low + (pads.pop(w.label).low if w.label in pads else 0), fill=fill)
+               for w in slicing.windows]
+    windows += [w for label, w in pads.items() if label in slicing.out]
+
+    def configure(sharded):
+        return tuple(padding.configure(sharded)) + tuple(slicing.configure(sharded))
+    return slicing._replace(operands=padding.operands, windows=tuple(windows), merged=pad, configure=configure)
+
+
+# PyTorch 2 section 3.9: AOTAutograd "makes the graph purely functional by removing operations that perform mutation
+# and replacing them with their functional equivalents".  A node's Local with its tensor operands as `current` gives
+# them (each read of a value an in-place operator wrote before it reading that operator's result), and the operand it
+# writes, None where it writes none: a Tensor method of a trailing _ by the method without it, an operator module's
+# in-place operator by its binary form (INPLACE), a torch or F function of a trailing _ by the one without it, a call
+# with inplace=True by the call with inplace=False; None for the Local where no functional equivalent is named (T4-16)
+def _functional(node, current):
+    args, kwargs = map_arg((node.args, node.kwargs), current)
+    target = node.target
+    name, written = getattr(target, '__name__', target), node.args[0] if node.args else node.kwargs.get('input')
+    if node.op == 'call_method' and target.endswith('_') and not target.startswith('_'):
+        return (Local(node.op, target[:-1], args, kwargs) if hasattr(torch.Tensor, target[:-1]) else None), written
+    if node.op == 'call_function' and target in INPLACE:
+        return Local(node.op, INPLACE[target], args, kwargs), written
+    if node.op == 'call_function' and isinstance(name, str) and name.endswith('_') and not name.startswith('_') \
+            and any(getattr(module, name, None) is target for module in (torch, F)):
+        functional = next((getattr(m, name[:-1]) for m in (torch, F) if getattr(m, name, None) is target
+                           and hasattr(m, name[:-1])), None)
+        return (Local(node.op, functional, args, kwargs) if functional else None), written
+    if node.op == 'call_function' and kwargs.get('inplace') is True:
+        return Local(node.op, target, args, {**kwargs, 'inplace': False}), written
+    return Local(node.op, target, args, kwargs), None
 
 
 # GSPMD section 3.5, sharding completion: it "runs the propagation pass on the entire graph in multiple iterations, and
@@ -219,10 +590,18 @@ def _operator(node):
 # (possibily by combining with existing compatible sharding)", so it reaches a fixed point.  Priorities: "Elementwise
 # operators are assigned the highest priority to propagate through in both directions" and "Operators like Dot ... are
 # assigned lower priority": level 0 propagates through elementwise operators alone to its fixed point, level 1 through
-# Dot as well (design/compilation-coordination.md, A-T2).  An operator's operands are taken in argument order.  It is
-# the compilation's own pass (A2), here by the coordinator's ruling on C9's remark of d9efd96b
+# Dot as well (design/compilation-coordination.md, A-T2), and through the windowed and data formatting operators, whose
+# consistent shardings still exchange halos (section 4.3), so not of the priority section 3.5 gives because "there is
+# no communication if their inputs/outputs are sharded consistently" (T4-6).  An operator's operands are taken in its
+# rule's order, those it propagates through alone (Rule `propagate`).  A sharding is carried onto no dimension its mesh
+# dimension does not divide: section 4.1 pads such a dimension, which partition refuses (T4-9).  It is the
+# compilation's own pass (A2), here by the coordinator's ruling on C9's remark of d9efd96b; it walks no graph's edges by
+# a neighbours function, each step one operator's rule over its own operands in GSPMD's order, the graph's order and
+# its reverse (design/compilation-coordination.md, "The revisions of abecd389", T4-3)
 def _complete(ir, operators, annotated):
     def refine(node, candidate):
+        candidate = tuple(m if m < 0 or size and size % ir.shape[m] == 0 else -1
+                          for m, size in zip(candidate, _value(node).shape))
         merged = _merge(ir.sharding[node], candidate)
         if node in annotated or merged is None or merged == ir.sharding[node]:
             return False
@@ -234,13 +613,14 @@ def _complete(ir, operators, annotated):
             changed = False
             for forward, nodes in ((True, ir.order), (False, ir.order[::-1])):
                 for node in nodes:
-                    if node in operators and operators[node][0] <= level:
-                        _, operands, labels, out = operators[node]
-                        for operand, own in zip(operands, labels):
+                    rule = operators.get(node)
+                    if rule is not None and rule.level is not None and rule.level <= level:
+                        for k in rule.propagate:
+                            operand, own = rule.operands[k], rule.labels[k]
                             if forward:
-                                changed |= refine(node, _carry(ir.sharding[operand], own, out))
+                                changed |= refine(node, _carry(ir.sharding[operand], own, rule.out))
                             else:
-                                changed |= refine(operand, _carry(ir.sharding[node], out, own))
+                                changed |= refine(operand, _carry(ir.sharding[node], rule.out, own))
 
 
 # GSPMD section 4.5, resharding: it "uses AllGather to replicate data along sharded dimensions, AllToAll to switch
@@ -251,15 +631,15 @@ def _complete(ir, operators, annotated):
 # local slice, no communication; a slice of a value over the plan's pages lies over them too).  One device mesh orders
 # every tensor's devices alike, so no CollectivePermute arises.  A placeholder's whole value is held at every node,
 # since torch passes the whole input, so its reshard starts from it and is slices alone (the coordinator's ruling on
-# review V2's finding 7).  Each step an item of this node's program: (kind, the keys it reads, the key it makes, its
-# operand), none repeated whose key an earlier one made (that value stands through the execution).  The key of
-# `node`'s local value in `want`
+# review V2's finding 7); so is a get_attr's, the module's attribute at every node (T4-20).  Each step an item of this
+# node's program: (kind, the keys it reads, the key it makes, its operand), none repeated whose key an earlier one made
+# (that value stands through the execution).  The key of `node`'s local value in `want`
 def _reshard(ir, node, have, want):
     def step(item):
         if item[2] not in ir.made:
             ir.made.add(item[2])
             ir.program.append(item)
-    if node.op == 'placeholder':
+    if node.op in ('placeholder', 'get_attr'):
         have = (-1,) * len(have)
     for m in range(len(ir.shape)):
         if m in have and m not in want:
@@ -288,6 +668,81 @@ def _reshard(ir, node, have, want):
     return node, have
 
 
+# GSPMD Appendix A.2, the windows of `parts` partitions of a windowed dimension, each n of the operand and o of the
+# output: for partition q, the operand's region it reads, from starts[q] for `length` (in the operand's coordinates, so
+# before 0 or from its size on outside it), where its local output begins in its local operator's (after[q]), and the
+# largest left and right halos ("we calculate the maximum sizes of left and right halos across partitions and perform
+# the halo exchange of the maximum size", Figure 9b's steps 1 and 2).  A window of stride s, extent e and low padding
+# p: output j reads the operand from j s - p for e, so partition q from q o s - p for (o - 1) s + e, and its local
+# operator, of no padding there, gives its o outputs from 0; the halo sizes, linear in q, are A.2's "linear function of
+# the partition ID".  A transposed convolution, A.2's base dilation (window stride 1 over the operand dilated by s, low
+# padding d(k - 1) - p): output j takes operand i where i s + t d = j + p, so partition q reads from
+# floor((q o + p - d(k - 1)) / s), and its local operator, of no padding, gives global output j at j + p - start s;
+# "we can use the maximum low padding on all partitions to ensure that each partition calculates all required windows,
+# then perform a DynamicSlice on the output of the partitioned operator to remove unnecessary data" (A.2, its second
+# case; T4-10): `length` the most any partition reads and the least that holds its o outputs
+def _extent(window, parts, n, o):
+    if window.transposed is None:
+        starts = [q * o * window.stride - window.low for q in range(parts)]
+        length, after = (o - 1) * window.stride + window.extent, [0] * parts
+    else:
+        (padding, reach), s = window.transposed, window.stride
+        starts = [(q * o + padding - reach) // s for q in range(parts)]
+        after = [q * o + padding - a * s for q, a in enumerate(starts)]
+        length = max([((q + 1) * o - 1 + padding) // s - a + 1 for q, a in enumerate(starts)]
+                     + [-(-(f + o - 1 - reach) // s) + 1 for f in after] + [1])
+    return starts, length, after, max([q * n - a for q, a in enumerate(starts)] + [0]), \
+        max([a + length - (q + 1) * n for q, a in enumerate(starts)] + [0])
+
+
+# GSPMD section 4.3, halo exchange with dynamic bounds: "We use the CollectivePermute operator to exchange halo data
+# between partitions", Figure 9b's sequence along one windowed dimension of the value of `key`, for `consumer`, along
+# mesh dimension m: (1) each partition's left halo the right end of its left neighbours' shards and its right halo the
+# left end of its right neighbours', each piece a narrow of the sender's local value sent by one CollectivePermute whose
+# source_target_pairs are every partition and the one j places from it (a halo wider than a shard one CollectivePermute
+# a distance j, its piece within that shard, T4-7), a partition no pair targets holding XLA's zeros; (2) "Concatenate
+# exchanged left and right halos" with the value; (3) "DynamicSlice on the region actually needed" (section 4.3:
+# "GSPMD uses maximum halo size across partitions, then uses DynamicSlice to remove excessive data in the halos"), at
+# the partition's own offset; (4) "Mask out invalid regions with the identity value": "some partitions may include
+# garbage values (e.g., halos from out-of-range input data), so we apply masking as described in Section 4.1", "a
+# Select according to a mask calculated by comparing Iota and an offset based on PartitionId", the masked value the
+# window's (T4-18).  So the operator's padding is the masked region's (Figure 5a: Padding, DynamicSlice,
+# CollectivePermute, Concat, Convolution).  Every operand's halos are exchanged so, a placeholder's after its reshard
+# (T4-8).  Each step an item: ('narrow', (key,), the piece, (dim, start, length)), the CollectivePermute's, and
+# ('window', the pieces and the value in order, the region, (dim, m, offsets by partition, length, starts by
+# partition, the operand's size, the fill or None)).  A piece or region of a value over the plan's pages lies over
+# them as long as it is a view (as _reshard's slices).  The region's key and the partitions' local output offsets
+def _region(ir, consumer, key, window, m, o):
+    node, shape = key[0], _shape(ir, key)
+    dim, parts, size = window.dim, ir.shape[m], _value(key[0]).shape[window.dim]
+    n = shape[dim]
+    starts, length, after, left, right = _extent(window, parts, n, o)
+    reads = []
+    for side, width in (('left', left), ('right', right)):
+        pieces = []
+        for j in range(1, -(-width // n) + 1):
+            part = min(n, width - (j - 1) * n)
+            piece, arrival = (node, key[1], 'halo', consumer, dim, side, j), (node, key[1], 'arrival', consumer, dim,
+                                                                               side, j)
+            ir.shapes[piece] = ir.shapes[arrival] = tuple(part if i == dim else s for i, s in enumerate(shape))
+            ir.program.append(('narrow', (key,), piece, (dim, n - part if side == 'left' else 0, part)))
+            if key in ir.placed:
+                ir.placed.add(piece)
+            pairs = tuple((p, p + j) if side == 'left' else (p + j, p) for p in range(parts - j))
+            ir.program.append(('collective', (piece,), arrival,
+                               Collective('collective-permute', node, (m,), pairs, len(ir.program))))
+            pieces.append(arrival)
+        reads += pieces[::-1] + [key] if side == 'left' else pieces
+    region = (node, key[1], 'region', consumer, dim)
+    fill = window.fill if any(a < 0 or a + length > size for a in starts) else None
+    ir.shapes[region] = tuple(length if i == dim else s for i, s in enumerate(shape))
+    ir.program.append(('window', tuple(reads), region, (dim, m, tuple(a - q * n + left for q, a in enumerate(starts)),
+                                                        length, tuple(starts), size, fill)))
+    if reads == [key] and fill is None and key in ir.placed:
+        ir.placed.add(region)
+    return region, after
+
+
 # GSPMD sections 3 and 4, per-operator partitioning: this node's program, in the FX graph's order.  A placeholder is
 # the function's whole input, sliced to its sharding (section 4.5, DynamicSlice).  A Dot's contracting dimension keeps
 # a mesh dimension both operands shard it along, its local results partial sums along it.  Where the output does not
@@ -311,50 +766,90 @@ def _reshard(ir, node, have, want):
 # collective's input sharding from its key.  What must stay: the AllReduce where the output leaves the mesh dimension
 # unused, the AllGather of a contracting dimension the operands shard unalike, and the refusal of one GSPMD gives no
 # rule for
-def _partition(ir, operators):
+# 2026-11-05 (design/aot-compilation-change-request.md A4: "The partitioner reaches them by partitioning every
+# operator"; design/compilation-coordination.md, "The revisions of abecd389", T4-5, T4-13, T4-14, T4-17, T4-20, T4-21,
+# T4-22): every operator is partitioned by its rule (_operator), the general rule's operands replicated and its output
+# sliced; a windowed dimension a mesh dimension shards takes its halos by CollectivePermute (_region) before the local
+# operator, configured by its rule, and a transposed convolution's output its DynamicSlice after; a contracting
+# dimension the operands shard unalike, where the output leaves its mesh dimension unused, is gathered as Figure 6's
+# (GSPMD section 4.5's AllGather), where it was refused ("no rule here"), and so is one whose operator adds a bias
+# after it, and an Einsum's second contracting dimension sharded alike, so `partial` holds one mesh dimension at most
+# (TA3); an output dimension no operand gives (a label of its own) is computed whole and sliced after (section 4.5's
+# DynamicSlice); a get_attr's value is the module's attribute; ir.reduced is keyed by the partial sums' key, which the
+# AllReduce reads.  What must stay: the AllReduce, the ReduceScatter and the AllGather of a contracting dimension as
+# before
+def _partition(ir, operators, returned):
     inputs = 0
     for node in ir.order:
-        if node.op == 'placeholder':
+        if node.op in ('placeholder', 'get_attr'):
             whole = (-1,) * len(ir.sharding[node])
-            ir.program.append(('input', (), (node, whole), inputs))
+            ir.program.append(('input', (), (node, whole), inputs) if node.op == 'placeholder'
+                              else ('constant', (), (node, whole), node.target))
             ir.made.add((node, whole))
             _reshard(ir, node, whole, ir.sharding[node])
-            inputs += 1
+            inputs += node.op == 'placeholder'
         elif node.op == 'output':
-            keys = {value: _reshard(ir, value, ir.sharding[value], (-1,) * len(ir.sharding[value]))
-                    for value in node.all_input_nodes}
+            keys = {value: (returned[value], None) if ir.sharding[returned[value]] is None
+                    else _reshard(ir, returned[value], ir.sharding[returned[value]],
+                                  (-1,) * len(ir.sharding[returned[value]])) for value in node.all_input_nodes}
             ir.program.append(('output', tuple(keys.values()), None, (node, keys)))
-        else:
-            _, operands, labels, out = operators[node]
-            used, partial, contracted = {m for m in ir.sharding[node] if m >= 0}, [], {}
-            for label in sorted(set(labels[0]).intersection(*labels[1:]) - set(out)):
-                held = [ir.sharding[o][own.index(label)] for o, own in zip(operands, labels)]
-                if held[0] == held[1] >= 0:
-                    partial.append(held[0])
-                elif any(s >= 0 and s not in used for s in held):
-                    raise NotImplementedError(
-                        '%s: its contracting dimension on mesh dimensions %s in its two operands: GSPMD gives the '
-                        'AllReduce or the ReduceScatter where both shard it alike (sections 2.1, 3.2) and the '
-                        'AllGather where the output takes its mesh dimension (section 3.2, Figure 6), and no rule here '
-                        '(A-T2)' % (node.name, held))
-                contracted[label] = held[0] if held[0] == held[1] else -1
-            local = tuple(-1 if s in partial else s for s in ir.sharding[node])
+        elif operators[node] is not None:
+            rule, sharding = operators[node], ir.sharding[node]
+            if rule.labels is None:
+                keys = [(o, None) if ir.sharding[o] is None
+                        else _reshard(ir, o, ir.sharding[o], (-1,) * len(ir.sharding[o])) for o in rule.operands]
+                whole = None if sharding is None else (-1,) * len(sharding)
+                ir.program.append(('call', tuple(keys), (node, whole), node))
+                if sharding is not None:
+                    _reshard(ir, node, whole, sharding)
+                continue
+            out, labels = rule.out, rule.labels
+            free = {label for label in out if not any(label in own for own in labels)}
+            target = tuple(-1 if label in free else s for s, label in zip(sharding, out))
+            used, partial, contracted = {m for m in target if m >= 0}, [], {}
+            for label in rule.contracting:
+                held = {ir.sharding[o][own.index(label)] for o, own in zip(rule.operands, labels) if label in own}
+                (m,) = held if len(held) == 1 and not rule.fused and not partial else (-1,)
+                if m >= 0:
+                    partial.append(m)
+                contracted[label] = m
+            local = tuple(-1 if s in partial else s for s in target)
             wants = [list(_carry(local, out, own)) for own in labels]
             for label, m in contracted.items():
                 for want, own in zip(wants, labels):
-                    want[own.index(label)] = m
-            keys = [_reshard(ir, o, ir.sharding[o], tuple(w)) for o, w in zip(operands, wants)]
-            key = (node, local, 'partial') if partial else (node, ir.sharding[node])
-            ir.program.append(('call', tuple(keys), key, node))
+                    if label in own:
+                        want[own.index(label)] = m
+            keys = [_reshard(ir, o, ir.sharding[o], tuple(w)) for o, w in zip(rule.operands, wants)]
+            sharded, cuts = {}, []
+            for window in rule.windows:
+                at = out.index(window.label)
+                if local[at] >= 0:
+                    sharded[window.label] = ir.local(node, local)[at]
+                    keys[window.operand], after = _region(ir, node, keys[window.operand], window, local[at],
+                                                          sharded[window.label])
+                    if window.transposed is not None:
+                        cuts.append((at, local[at], tuple(after), sharded[window.label]))
+            for n, configured in rule.configure(sharded):
+                ir.locals[n] = configured
+            reads = tuple(keys)
+            if rule.merged is not None:
+                ir.program.append(('call', reads, (rule.merged, 'merged', node), rule.merged))
+                reads = ((rule.merged, 'merged', node),)
+            key = (node, local, 'partial') if partial else (node, local)
+            made = [key + ('cut', j) for j in range(len(cuts))] + [key]
+            ir.program.append(('call', reads, made[0], node))
+            for j, (at, m, after, o) in enumerate(cuts):
+                ir.program.append(('window', (made[j],), made[j + 1], (at, m, after, o, None, None, None)))
             if any(m in used for m in partial):
                 (m,) = partial
-                ir.program.append(('collective', (key,), (node, ir.sharding[node]),
-                                   Collective('reduce-scatter', node, (m,), ir.sharding[node].index(m),
-                                              len(ir.program))))
+                ir.program.append(('collective', (key,), (node, target),
+                                   Collective('reduce-scatter', node, (m,), target.index(m), len(ir.program))))
             elif partial:
-                ir.reduced[node] = Collective('all-reduce', node, tuple(partial), None, len(ir.program))
-                ir.program.append(('collective', (key,), (node, ir.sharding[node]), ir.reduced[node]))
-                ir.placed.add((node, ir.sharding[node]))
+                ir.reduced[key] = Collective('all-reduce', node, tuple(partial), None, len(ir.program))
+                ir.program.append(('collective', (key,), (node, target), ir.reduced[key]))
+                ir.placed.add((node, target))
+            if target != sharding:
+                _reshard(ir, node, target, sharding)
 
 
 # design/aot-compilation-change-request.md A2: GSPMD's two passes by the placement operand, "sharding completion and
@@ -362,20 +857,54 @@ def _partition(ir, operators):
 # propagation gives no sharding stays replicated (section 3.1, "All devices have the same full data"); an annotation
 # on a mesh dimension of one device reads as -1, a dims_mapping naming no mesh dimension of more being replicated
 # (section 3.1; design/compilation-coordination.md, A-T10); a dimension its mesh dimension does not divide is refused
-# (section 4.1 pads it and masks the padding, which the contract does not give)
+# (section 4.1 pads it and masks the padding, which the contract does not give).  Each operator's Local is its
+# functional equivalent's (_functional), each read after an in-place write reading the writer's result, as AOTAutograd's
+# functionalization replaces "operations that perform mutation" (PyTorch 2 section 3.9; T4-16); a Pad its Slice alone
+# reads is merged into it (section 4.6, _merged).  An operator's value that is no tensor (a tuple, a size) has no
+# sharding (None): it is computed whole at every node by the general rule (T4-20)
+# 2026-11-05 (design/aot-compilation-change-request.md A4, "partitioning every operator"; design/compilation-
+# coordination.md, "The revisions of abecd389", T4-16, T4-17, T4-20): the refusal of a get_attr or call_module node
+# (A-T2) goes, and the in-place refusal goes but for a write PyTorch 2 section 3.9's functionalization is not taken for
+# here.  What must stay: the placement operand's checks and the refusal of an undivided dimension
 def partition(gm, placement):
     if not isinstance(placement, Placement):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
     nodes = mesh.Nodes()
     mesh.check(mesh.LIB.mesh_nodes_read(C.byref(_context()), C.byref(nodes)))
-    ir, operators, annotated = IR(gm, placement, nodes), {}, set()
+    ir, operators, annotated, latest, root, returned = IR(gm, placement, nodes), {}, set(), {}, {}, {}
+
+    def current(n):
+        return latest.get(root.get(n, n), n)
     for node in ir.order:
-        if node.op in ('call_function', 'call_method'):
-            operators[node] = _operator(node)
-        elif node.op not in ('placeholder', 'output'):
-            raise NotImplementedError('%s: a %s node; refused (A-T2)' % (node.name, node.op))
+        if node.op in ('call_function', 'call_method', 'call_module'):
+            local, written = _functional(node, current)
+            base = root.get(written, written) if isinstance(written, Node) else None
+            value = base.meta.get('example_value') if base is not None else None
+            if local is None or base is not None and (
+                    base.op in ('placeholder', 'get_attr') or not isinstance(value, torch.Tensor) or value._is_view()
+                    or any(getattr(n.meta.get('example_value'), '_base', None) is value for n in ir.order)):
+                raise NotImplementedError(
+                    '%s (%s): an operator that writes %s in place; GSPMD partitions XLA\'s HLO, "a dataflow graph '
+                    'where nodes are operators and edges are tensors" (section 2.2), and AOTAutograd makes a graph so '
+                    '"by removing operations that perform mutation and replacing them with their functional '
+                    'equivalents" (PyTorch 2, section 3.9), here only where the written value is no input, no module '
+                    'attribute, no view and no view\'s base, and its functional equivalent is named (the method or '
+                    'function without its trailing _, the operator module\'s binary form, inplace=False): refused'
+                    % (node.name, node.target, getattr(written, 'name', written)))
+            if base is not None:
+                root[node], latest[base] = base, node
+            ir.locals[node] = local
+            operators[node] = _operator(node, local)
+        elif node.op == 'output':
+            returned = {value: current(value) for value in node.all_input_nodes}
         if node.op != 'output':
-            ir.sharding[node] = (-1,) * _value(node).dim()
+            value = node.meta.get('example_value')
+            ir.sharding[node] = None if node.op not in ('placeholder', 'get_attr') \
+                and not isinstance(value, torch.Tensor) else (-1,) * _value(node).dim()
+    for node, rule in list(operators.items()):
+        pad = rule.operands[0] if rule is not None and rule.kind == 'slice' else None
+        if pad is not None and operators.get(pad) is not None and operators[pad].kind == 'pad' and len(pad.users) == 1:
+            operators[node], operators[pad] = _merged(pad, operators[pad], rule), None
     names = {node.name: node for node in ir.order if node.op == 'placeholder'}
     for name, mapping in placement.splits.items():
         node, mapping = names.get(name), tuple(mapping)
@@ -388,11 +917,11 @@ def partition(gm, placement):
         annotated.add(node)
     _complete(ir, operators, annotated)
     for node, sharding in ir.sharding.items():
-        for size, m in zip(_value(node).shape, sharding):
+        for size, m in zip(_value(node).shape if sharding is not None else (), sharding or ()):
             if m >= 0 and size % ir.shape[m]:
                 raise NotImplementedError('%s: a dimension of %d over a mesh dimension of %d (GSPMD section 4.1 pads '
                                           'it, which the contract does not give)' % (node.name, size, ir.shape[m]))
-    _partition(ir, operators)
+    _partition(ir, operators, returned)
     return ir
 
 
@@ -429,9 +958,15 @@ def _readers(ir, node, default):
 # 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", TC6): the homomorphism cited
 # as R4 cites it, Gibbons for lists and Meertens's bag homomorphisms for any order, where Gibbons alone was cited.
 # What must stay: the kinds as before
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", T4-19): an elementwise reader is the
+# operator its Local calls, and reads the key over the plan's pages page by page only where that key's local shape is
+# its result's, since a broadcast operand (T4-15) is read whole by every page of the result (R4's function A: "set of
+# pages operand_a to be contiguous and complete").  What must stay: the kinds as before for operands of one shape
 def _consumer(ir, node):
-    readers = [item for item in ir.program if any(k in ir.placed and k[0] is node for k in item[1])]
-    if readers and all(item[0] == 'call' and item[3].target in ELEMENTWISE for item in readers):
+    readers = [(item, k) for item in ir.program for k in item[1] if k in ir.placed and k[0] is node]
+    if readers and all(item[0] == 'call' and ir.locals[item[3]].op != 'call_module'
+                       and ir.locals[item[3]].target in ELEMENTWISE and _shape(ir, k) == _shape(ir, item[2])
+                       for item, k in readers):
         return mesh.PAGES
     return mesh.JOIN
 
@@ -455,9 +990,9 @@ def _consumer(ir, node):
 # transfer, kind, first, last): a member's production of its partial (the Dot's item, at its third step) and its
 # consumption of the sum (its readers); the root's consumption of each partial (the AllReduce's item, after arrival),
 # its production of the sum (its third step) and its own read of the sum (its readers)
-def _all_reduce(ir, c, group, have):
+def _all_reduce(ir, c, group, key):
     node, root, members = c.node, group[0], group[1:]
-    shape, arrive = ir.local(node, ir.sharding[node]), 3 * c.position + 1
+    shape, arrive = _shape(ir, key), 3 * c.position + 1
     readers = _readers(ir, node, arrive + 1)
     up = [ir.transfer(node, shape, d, [root], mesh.PAGES)[root] for d in members]
     down = ir.transfer(node, shape, root, members, _consumer(ir, node))
@@ -479,8 +1014,8 @@ def _all_reduce(ir, c, group, have):
 # shard is torch's own, A-T4); each receiver's result torch.cat of the shards in the group's order, so each transfer is
 # MESH_JOIN (a cat, R4's function A: the coordinator's ruling P3).  Events: each member's production of its range (its
 # item's sends) and each other member's consumption of it (after arrival)
-def _all_gather(ir, c, group, have):
-    shape, sent, received = ir.local(c.node, have), 3 * c.position, 3 * c.position + 1
+def _all_gather(ir, c, group, key):
+    shape, sent, received = _shape(ir, key), 3 * c.position, 3 * c.position + 1
     ranges = [ir.transfer(c.node, shape, d, [e for e in group if e != d], mesh.JOIN) for d in group]
     for d, transfers in zip(group, ranges):
         ir.events.append((d, min(transfers.values()), 'P', sent, sent))
@@ -497,8 +1032,8 @@ def _all_gather(ir, c, group, have):
 # the mesh dimension moves to, one declared transfer p -> q, written by torch's copy_ as an AllGather's shard is; each
 # receiver's result torch.cat of the pieces in sender order along the dimension it leaves, each transfer MESH_JOIN as an
 # AllGather's.  Events as an AllGather's
-def _all_to_all(ir, c, group, have):
-    shape, sent, received = list(ir.local(c.node, have)), 3 * c.position, 3 * c.position + 1
+def _all_to_all(ir, c, group, key):
+    shape, sent, received = list(_shape(ir, key)), 3 * c.position, 3 * c.position + 1
     shape[c.dim[1]] //= len(group)
     pieces = {(p, q): ir.transfer(c.node, tuple(shape), d, [e], mesh.JOIN)[e]
               for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
@@ -520,9 +1055,9 @@ def _all_to_all(ir, c, group, have):
 # is.  Each is MESH_PAGES: its consumer, q's combine, is R4's function B ("reductions' partial sums", their combine the
 # add, as _all_reduce's), MSCCLang's receive-reduce-copy (M. Cowan et al., ASPLOS 2023, section 4.2) by torch.add, q's
 # own slice first and then each landed slice in the group's order (TC5, _all_reduce's root's order); q's result is that
-# sum, a tensor of its own over no page of the plan.  `have` is the dims_mapping of the members' partials (TC1).
-# Events as an AllToAll's: each member's production of its slices (its item's sends), each keeper's consumption (after
-# arrival)
+# sum, a tensor of its own over no page of the plan.  `key` is the members' partials' key, whose sharding their
+# dims_mapping (TC1), its shape theirs (_shape).  Events as an AllToAll's: each member's production of its slices (its
+# item's sends), each keeper's consumption (after arrival)
 # 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", RS): new, where `lower` refused
 # a ReduceScatter.  The partitioner here inserts none (_partition replicates a contracting dimension whose mesh
 # dimension the output uses, where GSPMD section 5 would "replace the AllReduce on the output BSM with a
@@ -531,8 +1066,8 @@ def _all_to_all(ir, c, group, have):
 # Dot's partial sums lie along a mesh dimension the output shards (GSPMD sections 3.2 and 5.1), `dim` the output's
 # dimension along it and `have` the partial's sharding, so it is reached.  Why: A4, "A2's partitioner inserts these two
 # where GSPMD's does".  What must stay: each slice to its keeper
-def _reduce_scatter(ir, c, group, have):
-    shape, sent, received = list(ir.local(c.node, have)), 3 * c.position, 3 * c.position + 1
+def _reduce_scatter(ir, c, group, key):
+    shape, sent, received = list(_shape(ir, key)), 3 * c.position, 3 * c.position + 1
     shape[c.dim] //= len(group)
     slices = {(p, q): ir.transfer(c.node, tuple(shape), d, [e], mesh.PAGES)[e]
               for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
@@ -551,7 +1086,8 @@ def _reduce_scatter(ir, c, group, have):
 # replica"; "Any two pairs should not have the same target replica id, and they should not have the same source replica
 # id" (OpenXLA, Operation semantics, CollectivePermute; GSPMD section 4.2: "We use XLA's operators"), refused otherwise
 # as the placement operand's errors are (ValueError).  Each pair p -> q, p != q, is one declared transfer of the
-# member's whole local value, written by torch's copy_ as an AllToAll's piece is; the destination's result is a tensor
+# member's local value of `key` (a halo's piece, _region; its shape _shape's), written by torch's copy_ as an AllToAll's
+# piece is; the destination's result is a tensor
 # of its own, torch.clone of its arrival, as an AllToAll's is torch.cat's, so it lies over no page of the plan (TC4) and
 # each transfer is MESH_JOIN, its consumer the clone (TC3; the coordinator's ruling P3 names the clone function A).  A
 # pair p -> p keeps the member's own value, no transfer; a member no pair targets holds "a tensor consisting of 0(s)"
@@ -567,14 +1103,22 @@ def _reduce_scatter(ir, c, group, have):
 # whose "shifting using Pad and Slice can be done with a single CollectivePermute" (section 4.6); and in resharding "to
 # change device order" (section 4.5).  _operator partitions elementwise operators and Dot alone, refusing the rest
 # (A-T2), and the placement operand has one device mesh.  What must stay: one transfer a pair
-def _collective_permute(ir, c, group, have):
+# 2026-11-05 (design/aot-compilation-change-request.md A4: "CollectivePermute goes into halo exchange ... and into a
+# pipeline's buffer shifting"; "The partitioner reaches them by partitioning every operator"; design/compilation-
+# coordination.md, "The revisions of f3f7cf46", stop 2, its answer): reached.  _region inserts one for each halo piece
+# of a windowed or data formatting operator's windowed dimension a mesh dimension shards (GSPMD section 4.3, Appendix
+# A.2), and a pipeline's "pad_left(state, 1)[:-1]" is one Slice over its Pad merged (section 4.6, _merged), its shift
+# one CollectivePermute of one piece a partition; the operand is the halo's piece, its shape _shape's.  Resharding "to
+# change device order" (section 4.5) is still not inserted: one device mesh orders every tensor's devices alike.  What
+# must stay: one transfer a pair
+def _collective_permute(ir, c, group, key):
     pairs = tuple(tuple(pair) for pair in c.dim)
     places = [p for pair in pairs for p in pair]
     if not all(isinstance(p, int) and 0 <= p < len(group) for p in places) \
             or len({p for p, _ in pairs}) != len(pairs) or len({q for _, q in pairs}) != len(pairs):
         raise ValueError('%s: a CollectivePermute\'s pairs %s over a group of %d: each a (source, target) place, no two '
                          'with one source or one target (XLA\'s source_target_pairs)' % (c.node.name, pairs, len(group)))
-    shape, sent, received = ir.local(c.node, have), 3 * c.position, 3 * c.position + 1
+    shape, sent, received = _shape(ir, key), 3 * c.position, 3 * c.position + 1
     moved = {(p, q): ir.transfer(c.node, shape, group[p], [group[q]], mesh.JOIN)[group[q]] for p, q in pairs if p != q}
     for (p, q), i in moved.items():
         ir.events += [(group[p], i, 'P', sent, sent), (group[q], i, 'C', received, received)]
@@ -639,6 +1183,9 @@ def _dependences(ir):
 # 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", RS and CP): ReduceScatter and
 # CollectivePermute lowered, where this refused them.  Why: A4, "rdma/mesh_compile.py refuses CollectivePermute and
 # ReduceScatter now; this requirement covers them".  What must stay: every collective A2 inserts lowered
+# 2026-11-05 (design/aot-compilation-change-request.md A4; design/compilation-coordination.md, "The revisions of
+# abecd389"): each lowering is given the key its item reads, where it was given that key's sharding, so its operand's
+# local shape is _shape's (a halo's piece has its own).  What must stay: each collective's lowering as before
 LOWERINGS = {'all-reduce': _all_reduce, 'all-gather': _all_gather, 'all-to-all': _all_to_all,
              'reduce-scatter': _reduce_scatter, 'collective-permute': _collective_permute}
 
@@ -650,7 +1197,7 @@ def lower(ir):
             if collective.kind not in LOWERINGS:
                 raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
             for group in _groups(ir, collective.dims):
-                LOWERINGS[collective.kind](ir, collective, group, item[1][0][1])
+                LOWERINGS[collective.kind](ir, collective, group, item[1][0])
     ir.dependences = _dependences(ir)
 
 
@@ -918,6 +1465,15 @@ def _bind(context, section, dtype, shape, device):
 # in the group's order (torch.add, as the AllReduce's root); a CollectivePermute copies its value over each of its
 # ranges' pages and releases it, then takes its arrival by torch.clone, keeps its own value where its pair is its own,
 # or holds torch.zeros_like (XLA's zeros) where no pair targets it.  What must stay: as above
+# 2026-11-05 (design/aot-compilation-change-request.md A4; design/compilation-coordination.md, "The revisions of
+# abecd389", T4-16, T4-18, T4-20, T4-22): an operator runs as its Local (ir.locals: its functional equivalent, its
+# local configuration), each tensor operand wherever its arguments hold it taking the next key read, in map_arg's
+# order; a module the program calls by its GraphModule's submodule; a get_attr ('constant') is the module's
+# attribute; a halo's piece ('narrow') torch's narrow; a region ('window') torch.cat of its pieces and the value, then
+# narrow at this partition's offset (DynamicSlice; ir.coords as `slice`'s), then masked where outside the operand by
+# masked_fill, torch's Select, of a mask comparing torch.arange (Iota) from this partition's start with the operand's
+# bounds (GSPMD section 4.1); a member's partial is written by the item that makes the AllReduce's partial key (the
+# operator's, or a cut's after it).  No kernel is written (A9): each is torch's own operator.  What must stay: as above
 def _run(ir, context, tensors, item, env, inputs, t):
     kind, reads, key, operand = item
 
@@ -941,20 +1497,34 @@ def _run(ir, context, tensors, item, env, inputs, t):
         return copy(value)
     if kind == 'input':
         env[key] = inputs[operand]
+    elif kind == 'constant':
+        env[key] = operator.attrgetter(operand)(ir.gm)
     elif kind == 'slice':
         (source,), (dim, m) = reads, operand
         size = env[source].shape[dim] // ir.shape[m]
         env[key] = env[source].narrow(dim, ir.coords[ir.device][m] * size, size)
+    elif kind == 'narrow':
+        (source,), (dim, start, length) = reads, operand
+        env[key] = env[source].narrow(dim, start, length)
+    elif kind == 'window':
+        dim, m, offsets, length, starts, size, fill = operand
+        q = ir.coords[ir.device][m]
+        value = torch.cat([env[k] for k in reads], dim) if len(reads) > 1 else env[reads[0]]
+        value = value.narrow(dim, offsets[q], length)
+        if fill is not None:
+            index = torch.arange(starts[q], starts[q] + length, device=value.device)
+            value = value.masked_fill(((index < 0) | (index >= size)).reshape(
+                [length if i == dim else 1 for i in range(value.dim())]), fill)
+        env[key] = value
     elif kind == 'call':
-        given = iter(reads)
-        args = [env[next(given)] if isinstance(a, Node) else a for a in operand.args]
-        if operand.op == 'call_method':
-            env[key] = getattr(args[0], operand.target)(*args[1:], **operand.kwargs)
+        local, given = ir.locals[operand], iter(reads)
+        args, kwargs = map_arg((local.args, local.kwargs), lambda n: env[next(given)])
+        if local.op == 'call_method':
+            env[key] = getattr(args[0], local.target)(*args[1:], **kwargs)
+        elif local.op == 'call_module':
+            env[key] = ir.gm.get_submodule(local.target)(*args, **kwargs)
         else:
-            env[key] = operand.target(*args, **operand.kwargs)
-        role = ir.roles.get(ir.reduced.get(operand))
-        if role and role[0]:
-            write(role[1][0], env[key])
+            env[key] = local.target(*args, **kwargs)
     elif kind == 'collective':
         (source,), (me, sent, received) = reads, ir.roles[operand]
         if operand.kind == 'all-reduce' and me:
@@ -998,6 +1568,9 @@ def _run(ir, context, tensors, item, env, inputs, t):
         node, keys = operand
         env['output'] = map_arg(node.args[0], lambda n: torch.clone(env[keys[n]]) if keys[n] in ir.placed
                                 else env[keys[n]])
+    role = ir.roles.get(ir.reduced.get(key)) if kind in ('call', 'window') else None
+    if role and role[0]:
+        write(role[1][0], env[key])
 
 
 # design/compilation-coordination.md, N3: the program's retirement of one compiled function's plan.  First every
