@@ -595,7 +595,21 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
    (the bridge's load tests them, mesh-flow.c plan_inside).  Why: design/aot-compilation-change-request.md, appendix
    item 2: "remove the start's wait for every port to load the plan, and the late-loading port's refusal of it
    (`mesh_ports_held`).  Nothing requires them"; the ESTALE stays, read after the raise as above.  What must stay: the
-   raise before the fence, the serial's read after it; EINVAL before anything is raised */
+   raise before the fence, the serial's read after it; EINVAL before anything is raised
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS): a raise from a to b is one
+   submission of the plan, appended to its submissions' queue (mesh.h struct mesh_state `submits`, `outstanding`,
+   `submissions`): entry k mod `outstanding` its end b and the program's clock after one increment (L. Lamport, Time,
+   clocks, and the ordering of events in a distributed system, CACM 21(7), 1978, IR1: "Each process Pi increments Ci
+   between any two successive events"), then `submissions` k + 1 (release), before hdr `plans`' raise, with no wait
+   and no check of the room (design/aot-compilation-change-request.md, appendix item 2: "Nothing waits to write, and
+   nothing checks for a full queue"; the room is A10's bound on the calls outstanding at the program, mesh_plan's
+   `outstanding`); EINVAL where the queue does not lie inside the region.  The program the queue's one writer; the
+   bridge parent at the program's sender reads it (mesh-records.c orders_submit) and merges the program's plans' queues
+   by the clock, so it TO-broadcasts the program's submissions in the order the program made them.  Why:
+   design/aot-compilation-change-request.md A7: "It TO-broadcasts the program's submissions in the order the program
+   makes them"; "With one sender, whose messages reach the sequencer first in, first out, Fig. 5's sequencer numbers
+   them in the order they were sent".  What must stay: the raise before the fence, the serial's read after it; EINVAL
+   before anything is raised */
 int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions){
   struct hdr *m=context->M;
   const uint64_t at=plan,page=m->pgsz,len=context->len;
@@ -603,9 +617,17 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
      mesh_plan_head(context,plan)==UINT32_MAX)
     return EINVAL;
   struct mesh_state *state=mesh_state_at(m,at);
+  if(!state->outstanding || state->submits>len || state->outstanding>(len-state->submits)/sizeof(struct mesh_submission))
+    return EINVAL;
   uint64_t served=atomic_load_explicit(&state->executions,memory_order_relaxed);
   while(served<executions && !atomic_compare_exchange_strong_explicit(&state->executions,&served,executions,
                                                                       memory_order_release,memory_order_relaxed));
+  if(served<executions){
+    const uint64_t k=atomic_load_explicit(&state->submissions,memory_order_relaxed);
+    struct mesh_submission *queue=(struct mesh_submission *)(void *)((char *)m+state->submits);
+    queue[k%state->outstanding]=(struct mesh_submission){.end=executions,.clock=++context->clock};
+    atomic_store_explicit(&state->submissions,k+1,memory_order_release);
+  }
   mesh_notify(&m->plans);
   atomic_thread_fence(memory_order_seq_cst);
   return atomic_load_explicit(&m->map_serial,memory_order_relaxed)!=state->serial?ESTALE:0;

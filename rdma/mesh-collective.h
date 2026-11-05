@@ -223,6 +223,12 @@
    mesh 0e56d8da, "publish them to each port through the channel above, in place of the sequence words (`sequences`),
    `taken[p]` and the parent's wait while they are full (Lamport's buffer; the coordination's DL1)".  What must stay:
    every word started once and none reset while the plan stands.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS, PQ and RC): between the status and
+   the entries, the plan's delivered calls' queue (`room` entries at `deliveries`) and its program's submissions'
+   queue (`outstanding` entries at `submits`); `sender` the least of `program`; `delivered`, `submissions`,
+   `broadcast`, `arrived`, `announced` and `submitted` 0; the counts every received range's, a relay's too (mesh.h
+   struct mesh_state's notes).  Why: design/aot-compilation-change-request.md A7 and appendix items 2 and 5.  What must
+   stay: every word started once and none reset while the plan stands.
 
    This node's entries: u x n (mesh.h struct mesh_hop) at the state section's `hops`, copy c's n at [c n, c n + n),
    every copy's the same hops in the same order, each copy's naming its own pages, phase fields and count words.  Each

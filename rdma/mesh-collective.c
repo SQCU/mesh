@@ -98,6 +98,10 @@ struct plan_demand {
   /* its consumed range here: h, among the received ranges this node is a destination of, in the plan's demand order,
      its count words' row (MESH_ABSENT elsewhere: a relay's receives count nothing, review 15's finding 1) */
   uint32_t consumed;
+  /* its count words' row here, among every received range's (plan_layout): `consumed` where this node consumes it,
+     else the consumed ranges' number plus its place among the relayed ones, in the plan's demand order (MESH_ABSENT
+     where none of its pages lands here; design/compilation-coordination.md, "The revisions of abecd389", RC) */
+  uint32_t counted;
   uint64_t group;                         /* range g's copy-0 phase group, its offset in the phase list (plan_layout) */
 };
 /* A routed value (design/disjoint-pages-change-request.md, C3.3; design/disjoint-pages-revision-coordination.md, "The
@@ -177,6 +181,10 @@ struct plan {
   /* the state section (plan_layout), offsets from its start: `hops` its entries', `words` its end (2026-11-05, "The
      revisions of 46ae8fdf", LP9: `sequences`, the sequence words', gone) */
   uint64_t phases,counts,supplied,status,hops,words;
+  /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS and PQ): the plan's two queues in
+     the section, `deliveries` (room `room` struct mesh_delivery) and `submits` (room `outstanding` struct
+     mesh_submission), between the status and the entries */
+  uint64_t deliveries,submits,room,outstanding;
   /* the items (plan_place): routed copies (a, c) at item a x u + c, then this node's other values (others[k] the index
      in `values` of item local x u + k; a value of lag k >= 1 k consecutive items, its copies in order), then the state
      section, item `state` */
@@ -536,8 +544,18 @@ static int plan_unroll(struct plan *p){
      this node is a destination of, none for a relay's receives, which no consumer here waits on and whose forwards
      their phases release (review 15's finding 1, the coordinator's ruling); struct mesh_state `ranges` is `consumed`,
      the counts' rows, while the phase list holds a group for every received range, a relay's among them;
+     2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", RC): ranges x u words, every
+     received range's row its `counted` (the consumed ranges' first, at their `consumed`, then the relayed ones), where
+     a relay's receives had none.  Why: design/aot-compilation-change-request.md, appendix item 5: "The code must name
+     a page for round j by that count, in place of PM2's test of the phase field", the count "each range's landed
+     count of each copy, which every landing raises"; a relay's receive is named for its rounds as a destination's is
+     (mesh-flow.c link_receive_drain).  What must stay: a consumed range's row its `consumed`, `ranges` its number;
    - `supplied`: releases uint64 words, release r's at index r;
    - `status`: one struct mesh_status;
+   - `deliveries`: the plan's delivered calls' queue here, `room` struct mesh_delivery, and `submits`, the program's
+     submissions' queue, `outstanding` struct mesh_submission (mesh.h struct mesh_state's notes; 2026-11-05, "The
+     revisions of abecd389", PQ and PS: design/aot-compilation-change-request.md, appendix item 2, "It is laid out with
+     the plan's pages when the plan is placed, and claimed and released with them (C3.2, C3.4)");
    - `hops`: this node's entries, u x n struct mesh_hop, copy c's n at [c n, c n + n) (design/compilation-
      coordination.md, "The region", struct mesh_state: "the entries; each 64-aligned"); [0, hops) the bytes mesh_plan
      starts (D3), the entries written whole after them;
@@ -563,16 +581,20 @@ static void plan_layout(struct plan *p){
   uint64_t at=sizeof(struct mesh_state);
   p->phases=at;
   at=0;
+  uint32_t relayed=p->consumed;
   for(uint32_t i=0;i<p->demands;i++){
     struct plan_demand *d=p->demand+i;
+    d->counted=d->range==MESH_ABSENT?MESH_ABSENT:d->consumed!=MESH_ABSENT?d->consumed:relayed++;
     if(d->range==MESH_ABSENT)continue;
     d->group=at;
     at+=(uint64_t)p->copies*mesh_group_bytes(d->received);
   }
   p->counts=plan_align(p->phases+at);
-  p->supplied=plan_align(p->counts+(uint64_t)p->consumed*p->copies*sizeof(uint64_t));
+  p->supplied=plan_align(p->counts+(uint64_t)p->ranges*p->copies*sizeof(uint64_t));
   p->status=plan_align(p->supplied+p->releases*sizeof(uint64_t));
-  p->hops=plan_align(p->status+sizeof(struct mesh_status));
+  p->deliveries=plan_align(p->status+sizeof(struct mesh_status));
+  p->submits=plan_align(p->deliveries+p->room*sizeof(struct mesh_delivery));
+  p->hops=plan_align(p->submits+p->outstanding*sizeof(struct mesh_submission));
   p->words=p->hops+p->entries*p->copies*sizeof(struct mesh_hop);
 }
 
@@ -1218,11 +1240,28 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
    in new pages, so nothing is erased or waited for (C3.4).  What must stay: the demands, mesh_graph_reach,
    mesh_graph_flow and mesh_graph_fill as they were, so every rank's trees and template are the same; every failure but
    ESTALE and the second map read's found before anything is written. */
-int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const struct mesh_declared *declared,
-              const struct mesh_weight *weights,uint32_t count,struct mesh_value *values,uint32_t given,
-              const struct mesh_dependence *dependence,uint32_t dependences,uint64_t *plan){
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS, PQ and RC): `program` and
+   `outstanding` (mesh-collective.h): EINVAL where `program` is 0, lacks this node or lacks a node of the plan's (its
+   `nodes`, step 1), ENOMEM where `outstanding` is 0 or a queue's room passes its words, before anything is written;
+   struct mesh_state `sender` the least of `program`, where it was the least of the plan's `nodes`; the state section
+   holds the plan's two queues, the delivered calls' of `room` = `outstanding` + u x the hops of the plan's routes (the
+   distinct tree edges of its demands' trees that carry pages, each demand's `forwards`) and the submissions' of
+   `outstanding`, between the status and the entries (plan_layout), started 0 with every word before the entries (D3);
+   every received range has its count words, a relay's too, so every receive entry names one.  Why:
+   design/aot-compilation-change-request.md A7, "sender(m) is the program's one sender: the least of the program's
+   nodes"; appendix item 2, "a queue of the plan's own.  It is laid out with the plan's pages when the plan is placed,
+   and claimed and released with them (C3.2, C3.4)"; "Its room is fixed at compile time ... That is at most A10's bound
+   on the plan's submissions outstanding at its sender, plus C3.3's u copies on each hop of the plan's routes ... A plan
+   whose bound A10 cannot find fails with `ENOMEM` when it is planned"; item 5, "The code must name a page for round j
+   by that count".  What must stay: every failure but ESTALE and the second map read's found before anything is
+   written */
+int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t program,uint64_t outstanding,
+              const struct mesh_declared *declared,const struct mesh_weight *weights,uint32_t count,
+              struct mesh_value *values,uint32_t given,const struct mesh_dependence *dependence,uint32_t dependences,
+              uint64_t *plan){
   struct hdr *m=context->M;
-  if(!group || !plan || (count && (!declared || !weights)) || (given && !values) || (dependences && !dependence))
+  if(!group || !program || !plan || (count && (!declared || !weights)) || (given && !values) ||
+     (dependences && !dependence))
     return EINVAL;
   /* a value: its bytes, its kind, its wire and state flags, and its lag (k >= 1 only on an execution value outside the
      window that is no state: design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-
@@ -1274,11 +1313,13 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
        x->lag==UINT32_MAX || plan_event_node(declared,x->from,from_produced,from_own)!=
        plan_event_node(declared,x->to,to_produced,to_own))return EINVAL;
   }
+  if(!outstanding || outstanding>=UINT32_MAX)return ENOMEM;
   struct mesh_nodes nodes,after;
   int status=mesh_nodes_read(context,&nodes);
   if(status)return status;
   const uint32_t n=nodes.count;
   if(nodes.self>=n)return EHOSTUNREACH;
+  if(!(program>>nodes.self&1))return EINVAL;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   struct plan p={.context=context,.declared=declared,.transfers=count,.given=values,.givens=given,.n=n,
                  .self=nodes.self,.serial=nodes.serial};
@@ -1425,6 +1466,15 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
      entries>=UINT64_MAX/(2*sizeof(struct mesh_hop))){
     status=ENOMEM;goto done;
   }
+  /* the delivered calls' queue's room: A10's bound plus u copies on each hop of the plan's routes (appendix item 2,
+     "This number is this document's derivation"), every rank's the same from the same trees */
+  uint64_t routed=0;
+  for(uint32_t i=0;i<p.demands;i++)routed+=p.demand[i].forwards;
+  if(__builtin_mul_overflow(routed,(uint64_t)u,&p.room) || __builtin_add_overflow(p.room,outstanding,&p.room) ||
+     p.room>=UINT64_MAX/(4*sizeof(struct mesh_delivery))){
+    status=ENOMEM;goto done;
+  }
+  p.outstanding=outstanding;
   /* every value's rows: count x P, count u for a routed value, k for a value of lag k >= 1 and 1 for every other, after
      the claim's head (each term below 2^64 - 2^32, P below UINT32_MAX / block, so no sum wraps before the test) */
   for(uint32_t j=0;j<given && rows<UINT32_MAX;j++){
@@ -1444,6 +1494,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
   uint64_t spanned=0;
   for(uint32_t i=0;i<p.demands;i++)spanned|=UINT64_C(1)<<p.demand[i].source|p.demand[i].leaves|p.demand[i].on;
   if(!spanned)spanned=UINT64_C(1)<<p.self;
+  if(spanned&~program){status=EINVAL;goto done;}
   /* a plan standing at this node already (group, function) on the map this call plans on: EEXIST until the program
      retires it (design/compilation-coordination.md, N1: "A replan of a function on the same map is EEXIST until the
      program retires the standing one"; one whose `serial` is not that map's is cancelled, D.3.6, and ignored), every
@@ -1482,9 +1533,12 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
   state->serial=p.serial;
   state->hops=base+p.hops;
   state->entries=entries;
-  state->sequences=0;
   state->nodes=spanned;
-  state->sender=(uint32_t)__builtin_ctzll(spanned);
+  state->sender=(uint32_t)__builtin_ctzll(program);
+  state->outstanding=(uint32_t)p.outstanding;
+  state->room=p.room;
+  state->deliveries=base+p.deliveries;
+  state->submits=base+p.submits;
   /* every value's rows, from the head's next, copy c's rows first + c x P + k bound to its copy's pages (an item's
      first page, plan_item_page), named clean as mesh_section_create named them (no device, no owner, no publication:
      every field of a row's publication 0 but its range's words below); a `state` 1 value's bytes 0 once, its one copy
@@ -1545,7 +1599,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
       h.word=base+p.phases+d->group+(uint64_t)c*mesh_group_bytes(d->received)+(uint64_t)e->field/32*sizeof(uint64_t);
       h.field=2*(e->field%32);
       if(e->direction==MESH_RECEIVE){
-        if(d->consumed!=MESH_ABSENT)h.count=base+p.counts+((uint64_t)d->consumed*u+c)*sizeof(uint64_t);
+        h.count=base+p.counts+((uint64_t)d->counted*u+c)*sizeof(uint64_t);
         h.pages=d->received;
       }
     }
