@@ -43,6 +43,16 @@ FROM_PRODUCED, TO_PRODUCED, FROM_SOURCE_READ, TO_SOURCE_READ = 1, 2, 4, 8
 ABSENT = 2 ** 32 - 1
 NAME = b'/mesh0'
 PLATFORM_NS = 5000000000
+
+
+# mesh.h struct mesh_state, its words to `entries` (offsets 0 to 104, as the header asserts): the plan's state section
+# at context.state, whose `serial` is the map serial the plan was made on
+class State(C.Structure):
+    _fields_ = [('copies', U), ('receives', U), ('ranges', U), ('releases', U), ('phases', Q), ('counts', Q),
+                ('supplied', Q), ('status', Q), ('executions', Q), ('padding', Q), ('group', Q), ('epoch', Q),
+                ('serial', Q), ('hops', Q), ('entries', Q)]
+
+
 # mesh-dataflow.h struct mesh_nodes, the map reader's (mesh_nodes_read)
 NODES_MOST = 32
 
