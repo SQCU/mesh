@@ -4,6 +4,12 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+/* HiGHS 1.15.1's C API (design/plan-to-bridge-change-request.md R5, Code: "links the HiGHS library through its C API
+   (highs/interfaces/highs_c_api.h)"), reached from the directory its own pkg-config Cflags name (.../include/highs,
+   where the header's own includes, "lp_data/..." and "util/...", resolve), as a system include (-isystem), since it
+   declares a static function it never defines, Highs_compilationDate (rdma/Makefile HIGHS_CFLAGS; "The revisions of
+   46ae8fdf", LP8) */
+#include <interfaces/highs_c_api.h>
 
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_reach, 6379e868; `parent` added
    (design/compilation-coordination.md, "The graph module", Q3): a vertex's parent is the vertex at the queue's head
@@ -752,201 +758,156 @@ int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *o
   return result;
 }
 
-/* New (design/plan-to-bridge-change-request.md, R5; design/compilation-coordination.md, "The graph module" and T3):
-   no tag source.
-   levels' rows: compressed row entry k is edge order[k], which enters to[order[k]] */
-struct levels_rows { const uint32_t *to; const size_t *order; };
-static uint32_t levels_head(const void *context, size_t k) {
-  const struct levels_rows *rows = context;
-  return rows->to[rows->order[k]];
+/* New (design/plan-to-bridge-change-request.md R5 at mesh 0e56d8da, "How: the program" and "How: solving it";
+   design/compilation-coordination.md, "The revisions of 46ae8fdf", LP): no tag source.
+   2026-11-05 (LP): levels, mesh_graph_bottom_levels (Sinnen and Sousa's eq. (7)) and mesh_graph_contention_schedule
+   (their Algorithm 1 with Algorithm 2), with their helpers (levels_rows, levels_head, schedule_task, schedule_key,
+   schedule_leaders), are removed.  Why: R5, "It replaces MSCCLang's depth and reverse depth, and edge scheduling's
+   start times, which are no longer computed for the order.  Edge scheduling's part, one communication at a time on
+   each link, is now the resources' rows"; their one caller, mesh-collective.c plan_schedule, takes the order from
+   mesh_graph_completion_times.  What must stay: nothing of them.
+   mesh_graph_completion_times' sort keys: a resource's vertices by their value in the current solution, the least
+   first, a tie to the lower vertex (a total order, so every party's sort ends alike: "The revisions of 46ae8fdf",
+   LP5) */
+struct completion_key { double at; uint32_t vertex; };
+static int completion_key_before(const void *a, const void *b) {
+  const struct completion_key *x = a, *y = b;
+  if (x->at != y->at) return x->at < y->at ? -1 : 1;
+  return (x->vertex > y->vertex) - (x->vertex < y->vertex);
 }
-/* O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, §2.2.1 eq. (7): bl(ni) = w(ni) + max over nj ∈ succ(ni)
-   {c(eij) + bl(nj)}, "the length of the longest path leaving the node", each edge out of ni a term.  The edges out of
-   each task as compressed rows (mesh_graph_rows keyed by from[e]; depth_head reads the k-th word), a topological order
-   of them (mesh_graph_order: ordinal[n] n's place, every edge's origin placed before its end; its EDEADLK, a cycle,
-   is EINVAL), then eq. (7) from the last place to the first, so every successor's level stands before a predecessor
-   takes it; a task with no edge out (a sink node) is w alone.  Each term one correctly rounded +, the max by
-   comparisons.  Every allocation precedes the first level written, so ENOMEM writes none. */
-static int levels(uint32_t tasks, const double *weight, size_t edges, const uint32_t *from, const uint32_t *to,
-                  const double *cost, double *level, uint32_t *ordinal) {
-  for (size_t e = 0; e < edges; e++) if (from[e] >= tasks || to[e] >= tasks) return EINVAL;
-  if (edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
-  size_t *first = malloc(((size_t)tasks + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
-  uint32_t *indegree = malloc(((size_t)tasks + 1) * sizeof *indegree), *inverse = malloc(((size_t)tasks + 1) * sizeof *inverse);
-  int result = !first || !order || !indegree || !inverse ? ENOMEM : 0;
+/* an edge i -> j as one word, i in the high half, for its sort (each edge once among the rows: LP4) */
+static int completion_edge_before(const void *a, const void *b) {
+  const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+  return (x > y) - (x < y);
+}
+/* mesh-graph.h mesh_graph_completion_times.  R5 (mesh 0e56d8da), "How: the program" and "How: solving it", built as
+   rows and handed to HiGHS through its C API (highs_c_api.h, HiGHS 1.15.1); no solver is written here (R5: "The code
+   builds the rows and calls the library.  It writes no solver of its own").
+   - Columns: C_j for each vertex j, its lower bound d_j (C.-Y. Chen, Scheduling coflows with precedence constraints
+     for minimizing the total weighted completion time in identical parallel networks, arXiv 2205.02474, 2022, (1b):
+     "Cijk >= rk + dijk", every release time zero within one execution), and C_max, of cost 1, every other cost 0:
+     Chen's (14), "min Cmax".
+   - Rows: C_max - C_j >= 0 for every j, Chen's (14a), "Cmax >= Ck"; C_j - C_i >= d_j for every edge i -> j, Chen's
+     (1c), "the precedence constraint", and L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Scheduling to minimize
+     average completion time, Math. Oper. Res. 22(3), 1997, (3), each edge once (LP4).
+   - The resources' rows, R5: "For each resource, and each set S of the instructions on it: sum over j in S of d_j C_j
+     >= 1/2 (d(S)^2 + d^2(S))", Hall et al.'s (5), "introduced by Queyranne (1993)", Chen's (1d) and (1e) with m = 1.
+     They are exponentially many, so they enter by cutting planes (R5: "Solve it with the rows found so far.  Find each
+     resource's violated rows by Queyranne's separation, and add them.  Repeat until no row is violated").  The
+     separation (M. Queyranne, Structure of a simple scheduling polyhedron, Math. Programming 58, 1993, as R5 cites it,
+     "O(n log n) time"): a resource's vertices sorted by the solution's C_j (completion_key_before), and the nested sets
+     of that order, its prefixes, each tested in one pass with its d(S), d^2(S) and sum of d_j C_j kept as they grow; a
+     vertex of length 0 adds 0 to every side and is left out.  Each round adds, for each resource that has one, the
+     prefix whose right side most exceeds its left (LP2), where it exceeds it by more than HiGHS's own primal
+     feasibility tolerance times 1 + the right side (LP3), and ends where no resource has one.
+   - Each linear program by HiGHS's dual revised simplex (Q. Huangfu and J. A. J. Hall, Parallelizing the dual revised
+     simplex method, Math. Program. Comput. 10(1), 2018): the options "solver" "simplex" and "simplex_strategy" 1 ("1 =>
+     Dual (serial)", HighsOptions.h), on one thread ("parallel" "off", "threads" 1; R5: "Every rank solves the same
+     program with the same library, on one thread"), "output_flag" false; every other option the library's own (LP6).
+     A round's rows are added to the model the last round solved, whose basis HiGHS keeps.
+   - Termination: a row is added only where the solution falls short of it by more than the tolerance times 1 + its
+     right side; HiGHS reports a solution optimal only within that tolerance of every row it holds, so no row is added
+     twice, and a resource has finitely many sets (LP3).
+   completion[j] the last solution's C_j.  Every allocation precedes the first output written, and an error writes
+   none.  Cost: the rows' building O(V + E log E); each round O(V log V) for the separation and HiGHS's own solve. */
+int mesh_graph_completion_times(uint32_t vertices, const double *length, const uint32_t *resource, uint32_t resources,
+                                size_t edges, const uint32_t *from, const uint32_t *to, double *completion) {
+  for (uint32_t j = 0; j < vertices; j++)
+    if (!(length[j] >= 0 && length[j] <= DBL_MAX) || resource[j] >= resources) return EINVAL;
+  for (size_t e = 0; e < edges; e++)
+    if (from[e] >= vertices || to[e] >= vertices || from[e] == to[e]) return EINVAL;
+  if (!vertices) return 0;
+  const uint64_t room = (uint64_t)vertices + edges + resources + 1;
+  if (room >= INT32_MAX / 2) return ENOMEM;
+  const HighsInt columns = (HighsInt)vertices + 1;
+  uint64_t *pair = malloc((edges + 1) * sizeof *pair);
+  size_t *first = malloc(((size_t)resources + 1) * sizeof *first), *member = malloc(((size_t)vertices + 1) * sizeof *member);
+  struct completion_key *key = malloc(((size_t)vertices + 1) * sizeof *key);
+  double *lower = malloc(room * sizeof *lower), *upper = malloc(room * sizeof *upper);
+  double *value = malloc(2 * room * sizeof *value), *column = malloc((size_t)columns * sizeof *column);
+  double *dual = malloc((size_t)columns * sizeof *dual), *row_value = NULL, *row_dual = NULL;
+  HighsInt *start = malloc(room * sizeof *start), *index = malloc(2 * room * sizeof *index);
+  void *highs = pair && first && member && key && lower && upper && value && column && dual && start && index
+                    ? Highs_create() : NULL;
+  int result = highs ? 0 : ENOMEM;
+  double tolerance = 0, infinity = 0;
+  HighsInt total = 0;
   if (!result) {
-    mesh_graph_rows(tasks, edges, depth_head, from, first, order);
-    const struct levels_rows rows = {to, order};
-    if (mesh_graph_order(tasks, first, levels_head, &rows, indegree, ordinal)) result = EINVAL;
+    infinity = Highs_getInfinity(highs);
+    if (Highs_setBoolOptionValue(highs, "output_flag", 0) == kHighsStatusError ||
+        Highs_setStringOptionValue(highs, "solver", "simplex") == kHighsStatusError ||
+        Highs_setIntOptionValue(highs, "simplex_strategy", 1) == kHighsStatusError ||
+        Highs_setStringOptionValue(highs, "parallel", "off") == kHighsStatusError ||
+        Highs_setIntOptionValue(highs, "threads", 1) == kHighsStatusError ||
+        Highs_getDoubleOptionValue(highs, "primal_feasibility_tolerance", &tolerance) == kHighsStatusError ||
+        Highs_changeObjectiveSense(highs, kHighsObjSenseMinimize) == kHighsStatusError)
+      result = EDOM;
   }
-  for (uint32_t n = 0; !result && n < tasks; n++) inverse[ordinal[n]] = n;
-  for (uint32_t p = tasks; !result && p-- > 0;) {
-    const uint32_t n = inverse[p];
-    double most = 0;
-    for (size_t k = first[n]; k < first[n + 1]; k++) {
-      const double through = cost[order[k]] + level[to[order[k]]];
-      if (k == first[n] || through > most) most = through;
-    }
-    level[n] = weight[n] + most;
-  }
-  free(first); free(order); free(indegree); free(inverse);
-  return result;
-}
-/* mesh-graph.h mesh_graph_bottom_levels: eq. (7) as levels takes it, its topological order let go */
-int mesh_graph_bottom_levels(uint32_t tasks, const double *weight, size_t edges, const uint32_t *from, const uint32_t *to,
-                             const double *cost, double *level) {
-  uint32_t *ordinal = malloc(((size_t)tasks + 1) * sizeof *ordinal);
-  const int result = ordinal ? levels(tasks, weight, edges, from, to, cost, level, ordinal) : ENOMEM;
-  free(ordinal);
-  return result;
-}
-
-/* New (design/plan-to-bridge-change-request.md, R5; design/compilation-coordination.md, "The graph module", T3 to
-   T5): no tag source.
-   mesh_graph_contention_schedule's list (Algorithm 1, part 1): a task by decreasing bottom level, then increasing
-   topological ordinal */
-struct schedule_task { double level; uint32_t ordinal, task; };
-static int schedule_task_before(const void *a, const void *b) {
-  const struct schedule_task *x = a, *y = b;
-  if (x->level != y->level) return x->level > y->level ? -1 : 1;
-  return x->ordinal < y->ordinal ? -1 : x->ordinal > y->ordinal;
-}
-/* mesh_graph_contention_schedule's labels: item `item` of key `key`, sorted by (key, item) */
-struct schedule_key { uint64_t key; size_t item; };
-static int schedule_key_before(const void *a, const void *b) {
-  const struct schedule_key *x = a, *y = b;
-  if (x->key != y->key) return x->key < y->key ? -1 : 1;
-  return x->item < y->item ? -1 : x->item > y->item;
-}
-/* keys[0 .. count), each an item (from base on) and its key: leader[item - base] the least item of its key, so the
-   items of one key name one leader.  The order is total (no two items alike), so every party's sort ends alike. */
-static void schedule_leaders(size_t count, struct schedule_key *keys, size_t base, size_t *leader) {
-  qsort(keys, count, sizeof *keys, schedule_key_before);
-  for (size_t i = 0; i < count; i++)
-    leader[keys[i].item - base] = i && keys[i].key == keys[i - 1].key ? leader[keys[i - 1].item - base] : keys[i].item;
-}
-/* mesh-graph.h mesh_graph_contention_schedule.  O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, §6.1: Algorithm 1
-   (list scheduling, §2.2.1) with its line 6 performed as Algorithm 2 (the scheduling of a free node in the contention
-   model), each edge scheduled on its route as §5.2 states it.
-   - Algorithm 1, part 1, "Sort nodes n ∈ V into list L, according to priority scheme and precedence constraints":
-     decreasing bottom level, eq. (7) (levels, mesh_graph_bottom_levels' computation; design/compilation-coordination.md,
-     T3), a tie by the topological ordinal levels takes them over.  No two tasks share an ordinal, so the contract's
-     further tie by index never arises.  The list meets the precedence constraints: with every weight > 0 and every
-     cost >= 0 (Definition 1: "The positive weight w(n)", "the nonnegative weight c(eij)") a predecessor's level is no
-     less than its successor's (a correctly rounded + of a term >= 0 is no less than the term), and at an equal level
-     its ordinal is the lower, so every task is free (its predecessors scheduled) at its turn.
-   - Algorithm 1, line 5, "Find processor P ∈ P that allows earliest finish time of n": P is processor[n], given (the
-     placement operand: design/aot-compilation-change-request.md, A2; design/plan-to-bridge-change-request.md, R5), so
-     §6.1's tentative scheduling on every processor, the incoming edges removed from the links between tries, does not
-     arise.  A processor is a label (the operands name no count of them; design/compilation-coordination.md, G-1):
-     tasks of equal processor[] are on one, whose last finish is kept at the least such task (schedule_leaders).
-   - Algorithm 2, "for each ni ∈ pred(nj) in a definite order": the edges into nj in the order of their indices (§6.1,
-     "the edges might be processed in the order of their indices"; mesh_graph_rows keyed by to[e] keeps their order).
-     "if proc(ni) ≠ P then determine route R = <L1, ..., Ll> from proc(ni) to P": R is the operand's
-     link[route[e] .. route[e + 1]), in route order; "schedule eij on R" (§5.2, below); then "schedule nj on P".
-   - An edge on its route, §5.2, nonaligned (§5.1.1; §5.1.3, "the nonaligned approach appears to better reflect the
-     behavior of communication networks and its utilization in edge scheduling is proposed"): on link Lk,
-     ς(e, Lk) = c(e) / b(Lk) (§5), b(L) the operand rate[]; the idle interval [A, B] the end technique's, A the link's
-     last finish and B = ∞ (Condition 3 and Condition 6 admit the end or the insertion technique;
-     design/compilation-coordination.md, T5), in which Condition 6, (12) B - A >= ς(e, Lk) and (13), always holds; the
-     start (14): ts(e, L1) = max{A, tf(ni)}, and for k > 1 ts(e, Lk) = max{A, tf(e, Lk-1) - ς(e, Lk), ts(e, L1)},
-     which meets Condition 5's causality, (10) and (11); tf(e, Lk) = ts(e, Lk) + ς(e, Lk), then the link's last finish
-     (one edge on a link at a time, Condition 4, (9)).
-   - Where this differs from the paper (design/compilation-coordination.md, T4): route entries of one
-     communication[r] on one link are one occupation of it.  The first scheduled takes its interval by (14); every
-     later one takes that start and finish as they stand and occupies nothing more (design/compilation-coordination.md,
-     G-1: sound for T4's common prefixes of routes), and the entries after it on its own route follow it by (14),
-     causality from its finish and its route's first start.  Sinnen and Sousa schedule
-     each edge on its own; the consumer's communications cross a link once for all the edges that need them there.
-     What must stay: one occupation per (communication, link), held by the first entry scheduled.
-   - An edge's finish, Definition 8 (15): tf(ni) where proc(ni) = proc(nj), else tf(e, Ll).  nj's data-ready time (3):
-     the max of its edges' finishes, 0 for a source node; its start (8): ts(nj, P) = max{A, tdr(nj, P)}, A the
-     processor's last finish (the end technique, [tf(P), ∞), in which Condition 3's (6) always holds); its finish
-     ts(nj, P) + w(nj), then the processor's last finish.
-   start[n] ts(n, proc(n)); link_start[r] ts(e, Lk) of route entry r.  Arithmetic: +, -, / and comparisons alone, each
-   correctly rounded (no libm; the file is compiled with -ffp-contract=off), and both sorts' orders total, so every
-   party computes the same schedule from the same operands.  EINVAL: a weight not > 0 or not finite (Definition 1's
-   positive weight), a cost negative or not finite (its nonnegative weight; a local edge's 0, Definition 2's free
-   local communication), a rate not > 0, an edge naming no task, a route running backward (route[e] > route[e + 1])
-   or naming no link, a remote edge with no route, a cycle; and, design/compilation-coordination.md, G-1, a local edge
-   with a route or a time past the doubles' range (operands whose sums overflow).  Every allocation precedes the first
-   output written, so ENOMEM writes none. */
-int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const uint32_t *processor, size_t edges,
-                                   const uint32_t *from, const uint32_t *to, const double *cost, const size_t *route,
-                                   const uint32_t *link, const uint32_t *communication, uint32_t links,
-                                   const double *rate, double *start, double *link_start) {
-  for (uint32_t n = 0; n < tasks; n++) if (!(weight[n] > 0 && weight[n] <= DBL_MAX)) return EINVAL;
-  for (uint32_t l = 0; l < links; l++) if (!(rate[l] > 0)) return EINVAL;
-  for (size_t e = 0; e < edges; e++) {
-    if (from[e] >= tasks || to[e] >= tasks || !(cost[e] >= 0 && cost[e] <= DBL_MAX) || route[e] > route[e + 1]) return EINVAL;
-    if ((processor[from[e]] == processor[to[e]]) != (route[e] == route[e + 1])) return EINVAL;
-  }
-  const size_t base = route[0], entries = route[edges] - base;
-  for (size_t r = base; r < route[edges]; r++) if (link[r] >= links) return EINVAL;
-  if (edges >= SIZE_MAX / sizeof(struct schedule_key) || entries >= SIZE_MAX / sizeof(struct schedule_key)) return ENOMEM;
-  const size_t keyed = entries > tasks ? entries : tasks;
-  double *level = malloc(((size_t)tasks + 1) * sizeof *level), *finish = malloc(((size_t)tasks + 1) * sizeof *finish);
-  double *busy = malloc(((size_t)tasks + 1) * sizeof *busy), *free_at = malloc(((size_t)links + 1) * sizeof *free_at);
-  double *end = malloc((entries + 1) * sizeof *end);
-  uint32_t *ordinal = malloc(((size_t)tasks + 1) * sizeof *ordinal);
-  struct schedule_task *list = malloc(((size_t)tasks + 1) * sizeof *list);
-  struct schedule_key *keys = malloc((keyed + 1) * sizeof *keys);
-  size_t *home = malloc(((size_t)tasks + 1) * sizeof *home), *leader = malloc((entries + 1) * sizeof *leader);
-  size_t *holder = malloc((entries + 1) * sizeof *holder);
-  size_t *in = malloc(((size_t)tasks + 1) * sizeof *in), *into = malloc((edges + 1) * sizeof *into);
-  int result = !level || !finish || !busy || !free_at || !end || !ordinal || !list || !keys || !home || !leader ||
-               !holder || !in || !into ? ENOMEM : 0;
-  if (!result) result = levels(tasks, weight, edges, from, to, cost, level, ordinal);
   if (!result) {
-    for (uint32_t n = 0; n < tasks; n++) keys[n] = (struct schedule_key){processor[n], n};
-    schedule_leaders(tasks, keys, 0, home);
-    for (size_t r = base; r < route[edges]; r++)
-      keys[r - base] = (struct schedule_key){(uint64_t)communication[r] << 32 | link[r], r};
-    schedule_leaders(entries, keys, base, leader);
-    for (uint32_t n = 0; n < tasks; n++) { list[n] = (struct schedule_task){level[n], ordinal[n], n}; busy[n] = 0; }
-    qsort(list, tasks, sizeof *list, schedule_task_before);
-    mesh_graph_rows(tasks, edges, depth_head, to, in, into);
-    for (uint32_t l = 0; l < links; l++) free_at[l] = 0;
-    for (size_t r = 0; r < entries; r++) holder[r] = SIZE_MAX;
+    for (uint32_t j = 0; j < vertices; j++) { lower[j] = length[j]; upper[j] = infinity; }
+    lower[vertices] = 0; upper[vertices] = infinity;
+    if (Highs_addVars(highs, columns, lower, upper) == kHighsStatusError ||
+        Highs_changeColCost(highs, (HighsInt)vertices, 1) == kHighsStatusError)
+      result = EDOM;
   }
-  for (uint32_t i = 0; !result && i < tasks; i++) {
-    const uint32_t nj = list[i].task, P = processor[nj];
-    double ready = 0;
-    for (size_t k = in[nj]; !result && k < in[nj + 1]; k++) {
-      const size_t e = into[k];
-      const uint32_t ni = from[e];
-      double arrive = finish[ni], first_start = 0;
-      if (processor[ni] != P)
-        for (size_t r = route[e]; r < route[e + 1]; r++) {
-          const double occupy = cost[e] / rate[link[r]];
-          const size_t g = leader[r - base] - base;
-          if (holder[g] == SIZE_MAX) {
-            double s = free_at[link[r]];
-            if (r == route[e]) { if (finish[ni] > s) s = finish[ni]; }
-            else { if (arrive - occupy > s) s = arrive - occupy; if (first_start > s) s = first_start; }
-            link_start[r] = s;
-            end[r - base] = s + occupy;
-            if (!(end[r - base] <= DBL_MAX)) { result = EINVAL; break; }
-            free_at[link[r]] = end[r - base];
-            holder[g] = r;
-          } else {
-            link_start[r] = link_start[holder[g]];
-            end[r - base] = end[holder[g] - base];
-          }
-          if (r == route[e]) first_start = link_start[r];
-          arrive = end[r - base];
-        }
-      if (arrive > ready) ready = arrive;
+  if (!result) {
+    HighsInt nonzeros = 0;
+    for (uint32_t j = 0; j < vertices; j++) {
+      start[total] = nonzeros; lower[total] = 0; upper[total] = infinity; total++;
+      index[nonzeros] = (HighsInt)vertices; value[nonzeros++] = 1;
+      index[nonzeros] = (HighsInt)j; value[nonzeros++] = -1;
     }
-    if (result) break;
-    const double A = busy[home[nj]];
-    start[nj] = A > ready ? A : ready;
-    finish[nj] = start[nj] + weight[nj];
-    if (!(finish[nj] <= DBL_MAX)) { result = EINVAL; break; }
-    busy[home[nj]] = finish[nj];
+    for (size_t e = 0; e < edges; e++) pair[e] = (uint64_t)from[e] << 32 | to[e];
+    qsort(pair, edges, sizeof *pair, completion_edge_before);
+    for (size_t e = 0; e < edges; e++) {
+      if (e && pair[e] == pair[e - 1]) continue;
+      const uint32_t i = (uint32_t)(pair[e] >> 32), j = (uint32_t)pair[e];
+      start[total] = nonzeros; lower[total] = length[j]; upper[total] = infinity; total++;
+      index[nonzeros] = (HighsInt)j; value[nonzeros++] = 1;
+      index[nonzeros] = (HighsInt)i; value[nonzeros++] = -1;
+    }
+    if (Highs_addRows(highs, total, lower, upper, nonzeros, start, index, value) == kHighsStatusError) result = EDOM;
+    mesh_graph_rows(resources, vertices, depth_head, resource, first, member);
   }
-  free(level); free(finish); free(busy); free(free_at); free(end); free(ordinal); free(list); free(keys); free(home);
-  free(leader); free(holder); free(in); free(into);
+  while (!result) {
+    if (Highs_run(highs) == kHighsStatusError) { result = EDOM; break; }
+    const HighsInt model = Highs_getModelStatus(highs);
+    if (model == kHighsModelStatusInfeasible) { result = EINVAL; break; }
+    if (model != kHighsModelStatusOptimal) { result = EDOM; break; }
+    double *grown = realloc(row_value, ((size_t)total + 1) * sizeof *grown);
+    if (grown) row_value = grown;
+    grown = grown ? realloc(row_dual, ((size_t)total + 1) * sizeof *grown) : NULL;
+    if (!grown) { result = ENOMEM; break; }
+    row_dual = grown;
+    if (Highs_getSolution(highs, column, dual, row_value, row_dual) == kHighsStatusError) { result = EDOM; break; }
+    HighsInt cuts = 0, nonzeros = 0;
+    for (uint32_t r = 0; r < resources; r++) {
+      size_t count = 0;
+      for (size_t k = first[r]; k < first[r + 1]; k++) {
+        const uint32_t j = (uint32_t)member[k];
+        if (length[j] > 0) key[count++] = (struct completion_key){column[j], j};
+      }
+      qsort(key, count, sizeof *key, completion_key_before);
+      double sum = 0, squares = 0, left = 0, most = 0, bound = 0;
+      size_t prefix = 0;
+      for (size_t k = 0; k < count; k++) {
+        const double d = length[key[k].vertex];
+        sum += d; squares += d * d; left += d * key[k].at;
+        const double right = (sum * sum + squares) / 2, short_by = right - left;
+        if (short_by > tolerance * (1 + right) && short_by > most) { most = short_by; bound = right; prefix = k + 1; }
+      }
+      if (!prefix) continue;
+      start[cuts] = nonzeros; lower[cuts] = bound; upper[cuts] = infinity; cuts++;
+      for (size_t k = 0; k < prefix; k++) { index[nonzeros] = (HighsInt)key[k].vertex; value[nonzeros++] = length[key[k].vertex]; }
+    }
+    if (!cuts) break;
+    if (Highs_addRows(highs, cuts, lower, upper, nonzeros, start, index, value) == kHighsStatusError) { result = EDOM; break; }
+    total += cuts;
+  }
+  if (!result) for (uint32_t j = 0; j < vertices; j++) completion[j] = column[j];
+  if (highs) Highs_destroy(highs);
+  free(pair); free(first); free(member); free(key); free(lower); free(upper); free(value); free(column); free(dual);
+  free(row_value); free(row_dual); free(start); free(index);
   return result;
 }
 
@@ -954,8 +915,9 @@ int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const u
    design/compilation-coordination.md, "The documents' revisions of edd4b583", "The graph module" and GO3): no tag
    source.
    mesh_graph_heap_order's comparison over the priorities (`context`): a comes before b where its priority is greater,
-   a tie to the lower vertex (GO3: "the greatest bottom level first ... a tie to the lower instruction"); comparisons
-   alone, a strict total order of the vertices over priorities that compare (none NaN). */
+   a tie to the lower vertex (GO3: "the greatest bottom level first ... a tie to the lower instruction"; the priority
+   now -C̄, R5's "least C̄_j first", LP7); comparisons alone, a strict total order of the vertices over priorities that
+   compare (none NaN). */
 static int order_before(const void *context, uint32_t a, uint32_t b) {
   const double *priority = context;
   return priority[a] > priority[b] || (priority[a] == priority[b] && a < b);
@@ -964,7 +926,7 @@ static int order_before(const void *context, uint32_t a, uint32_t b) {
    2023, §5.2, step 3: "Sort instructions into a global topological order with respect to their dependencies with a
    heap using the priority to order instructions."
    - Each vertex's count of the edges into it (an edge given twice counted twice), and the edges out of each vertex as
-     compressed rows (mesh_graph_rows keyed by from[e]; depth_head reads the e-th word), as levels takes them.
+     compressed rows (mesh_graph_rows keyed by from[e]; depth_head reads the e-th word).
    - The vertices with no edge in enter the heap (heap_up, ordered by order_before).  While the heap holds any, its
      first leaves it (heap_down) and takes the next place, and each edge out of it lowers its head's count once (an
      edge given twice lowers it twice), the head entering the heap where its count reaches 0.  So a vertex is placed
@@ -974,8 +936,13 @@ static int order_before(const void *context, uint32_t a, uint32_t b) {
    - The priority is the consumer's operand.  Where this differs from the reference algorithm
      (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO3′): MSCCLang §5.2 step (1)'s own
      priority is "the depth (maximum hops from a root node) and reverse depth (maximum hops to a leaf node)", counted
-     in hops; mesh-collective.c's is R5's, the bottom level by eq. (7) over the weights (GO2).  The heap is step 3's
-     whichever priority it is given.
+     in hops; mesh-collective.c's is R5's, each instruction's completion time C̄ in the linear program's solution, the
+     least first (mesh_graph_completion_times; R5 at mesh 0e56d8da: "It replaces MSCCLang's depth and reverse depth"),
+     given here as -C̄ so the greatest is the least C̄, a tie to the lower vertex as R5 states ("Where two are equal,
+     the heap takes the lower instruction"; design/compilation-coordination.md, "The revisions of 46ae8fdf", LP7).  The
+     heap is step 3's whichever priority it is given.
+     2026-11-05 (LP): the consumer's priority C̄, where it was the bottom level by eq. (7) (GO2), and before that
+     MSCCLang's depth and reverse depth.  Why: R5 at mesh 0e56d8da.  What must stay: the comparison as it is
    - The heap's order is total, so the vertex it gives first among those in it does not depend on the order in which
      they entered: every party computes the same places from the same operands (F. B. Schneider, ACM Comput. Surv.
      1990, as R5 cites it).  Arithmetic: comparisons alone.

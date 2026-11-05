@@ -174,9 +174,9 @@ struct plan {
   uint32_t *head,*lag;                    /* edge k's head vertex, and its execution distance */
   uint32_t *between;                      /* between[a x local + b]: D_ab, the largest least lag from a read of this
                                              node's routed value a to b's write (plan_unroll) */
-  /* the state section (plan_layout), offsets from its start: `sequences` its sequence words', `hops` its entries',
-     `words` its end */
-  uint64_t phases,counts,supplied,status,sequences,hops,words;
+  /* the state section (plan_layout), offsets from its start: `hops` its entries', `words` its end (2026-11-05, "The
+     revisions of 46ae8fdf", LP9: `sequences`, the sequence words', gone) */
+  uint64_t phases,counts,supplied,status,hops,words;
   /* the items (plan_place): routed copies (a, c) at item a x u + c, then this node's other values (others[k] the index
      in `values` of item local x u + k; a value of lag k >= 1 k consecutive items, its copies in order), then the state
      section, item `state` */
@@ -538,16 +538,18 @@ static int plan_unroll(struct plan *p){
      the counts' rows, while the phase list holds a group for every received range, a relay's among them;
    - `supplied`: releases uint64 words, release r's at index r;
    - `status`: one struct mesh_status;
-   - `sequences`: the sequence words, u uint64 words, copy c's at sequences + 8 c (design/compilation-coordination.md,
-     "The documents' revisions of edd4b583", "The region" and DL1: L. Lamport, Concurrent reading and writing, CACM
-     20(11), 1977, "Message Buffer", the buffer B[0], ..., B[P - 1] with P = u; design/aot-compilation-change-
-     request.md, appendix item 2: "one word per copy"), which the bridge parent writes and each port reads; they start
-     at 0 with every byte before the entries (D3);
    - `hops`: this node's entries, u x n struct mesh_hop, copy c's n at [c n, c n + n) (design/compilation-
      coordination.md, "The region", struct mesh_state: "the entries; each 64-aligned"); [0, hops) the bytes mesh_plan
      starts (D3), the entries written whole after them;
    - `words`: the end of the entries, the section's bytes.
    Every offset in struct mesh_state is a region offset: the section's own plus these.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", LP9): reversing DL1's sequence words
+   (u uint64 words after the status, L. Lamport's "Message Buffer" B[0 .. u - 1]): the entries follow the status
+   again, and struct mesh_state `sequences` is 0.  Why: design/aot-compilation-change-request.md, appendix item 2 at
+   mesh 0e56d8da: "publish them to each port through the channel above, in place of the sequence words (`sequences`),
+   `taken[p]` and the parent's wait while they are full (Lamport's buffer; the coordination's DL1)"; "How the bridge
+   holds the channel is the bridge's own".  What must stay: every offset before the status's end as it was; every part
+   64-aligned.
    2026-11-04, owner C3 (DL1): the sequence words placed after the status and before the entries, where the entries
    followed the status.  Why: the parent's delivery publishes each released execution's sequence number in its plan's
    state, one word per copy, each word one writer (appendix item 2, "Delivery at a node").  What must stay: every
@@ -570,8 +572,7 @@ static void plan_layout(struct plan *p){
   p->counts=plan_align(p->phases+at);
   p->supplied=plan_align(p->counts+(uint64_t)p->consumed*p->copies*sizeof(uint64_t));
   p->status=plan_align(p->supplied+p->releases*sizeof(uint64_t));
-  p->sequences=plan_align(p->status+sizeof(struct mesh_status));
-  p->hops=plan_align(p->sequences+(uint64_t)p->copies*sizeof(uint64_t));
+  p->hops=plan_align(p->status+sizeof(struct mesh_status));
   p->words=p->hops+p->entries*p->copies*sizeof(struct mesh_hop);
 }
 
@@ -718,7 +719,8 @@ static uint32_t plan_page(const struct plan *p,uint32_t a,uint32_t c,uint64_t k)
    of the tree's vertices keyed by parent, mesh_graph_rows, as plan_walk reads a tree; no walk over a parent table
    here, C9), the same at every rank.  Every one lies on some destination's route (plan_schedule): mesh_graph_flow
    makes a tree of its leaves' paths to its root, and its leaves are the demand's destinations.  0; ENOMEM where they
-   pass 32 bits (mesh-graph.h mesh_graph_contention_schedule's `communication`) or the call's own memory. */
+   pass 32 bits (each is instruction tasks + c, below 32 bits: plan_schedule; 2026-11-05, "The revisions of 46ae8fdf",
+   LP: where it cited mesh_graph_contention_schedule's `communication`, which is removed) or the call's own memory. */
 static int plan_trees(struct plan *p){
   const uint32_t n=p->n;
   size_t first[(size_t)n+2],child[(size_t)n+1];
@@ -881,8 +883,8 @@ static int plan_entry_order(const void *a,const void *b){
 
 /* The task graph, its schedule and the order of the lists (design/plan-to-bridge-change-request.md, R3 to R5;
    design/aot-compilation-change-request.md, A6; design/compilation-coordination.md, T1, T2 and T4, and "The
-   documents' revisions of edd4b583", GO1 to GO5), one execution's, every rank's the same from the same declared
-   transfers, weights, dependences and map.
+   documents' revisions of edd4b583", GO1 to GO5; "The revisions of 46ae8fdf", LP), one execution's, every rank's the
+   same from the same declared transfers, weights, dependences and map.
    - The task graph G = (V, E, w, c) (O. Sinnen, Task Scheduling for Parallel Systems, Wiley, 2007; O. Sinnen and L. A.
      Sousa, IEEE TPDS 16(6) 2005, Definition 1), T1: its tasks the template's events (plan_template), each on the node
      its event is at (the placement operand: the declared transfers' sources and destinations).  Task d is demand d's
@@ -897,17 +899,11 @@ static int plan_entry_order(const void *a,const void *b){
      event's (T1: an edge out of a MESH_PAGES consumption leaves from each of its page tasks; design/compilation-
      coordination.md, T1': an edge into one enters each of them, each page's task the function's work on that page
      after its local predecessors).  A local edge (P -> S, a lag-0 dependence) has no route and costs 0 (T1': Sinnen
-     and Sousa's classic model, local communication free, Definition 2, kept by the contention model, Definition 8,
-     (15)).
+     and Sousa's classic model, local communication free, Definition 2).
    - The topology graph (Sinnen and Sousa, Definition 4), T2: the node graph's pairs, pair e two directed links, 2e
      from[e] -> to[e] and 2e + 1 back, each of relative data rate b(L) the pair's capacity over the greatest pair's.
-   - T4: every route entry of one page over one tree edge is one communication (plan_communication), which the
-     schedule holds as one occupation of its link.  Every tree edge lies on some destination's route (plan_trees).
-   - The schedule (GO5): list scheduling in the contention model (Sinnen and Sousa, Algorithm 1 with Algorithm 2, eq.
-     (7), §5.2; mesh-graph.h mesh_graph_contention_schedule, T3 to T5), called as before (R5's method, and its "Code":
-     "rdma/mesh-graph.{h,c}: bottom levels, and the list schedule with edge scheduling"; A6: "One schedule per
-     function").  Its starts order no list (R5: "Scheduled start times do not order the lists"); what reads them is
-     the operator's to say (GO5, open).
+   - T4: every route entry of one page over one tree edge is one communication (plan_communication), one instruction
+     on its link.  Every tree edge lies on some destination's route (plan_trees).
    - The instructions (GO1): the task graph's tasks as numbered above, 0 .. tasks - 1, then the plan's communications
      (T4: a page over a tree edge; plan_trees and plan_communication number them), communication c at tasks + c.  A
      communication is one instruction: its send at the edge's upper node and its receive at its lower node take its
@@ -919,25 +915,27 @@ static int plan_entry_order(const void *a,const void *b){
      -> its route's first communication -> each next -> its last -> its head task: MSCCLang §4.2's communication and
      processing edges, a page sent before it lands and landed before it is forwarded or consumed (plan_template's P ->
      W(y), W(y) -> F(y, c), L(z) -> C(z)).  Routes sharing a prefix (T4) give a dependency more than once, which
-     changes no bottom level and no order (mesh-graph.h mesh_graph_heap_order: an edge given twice counts twice and is
-     removed twice).  Every rank builds the same instructions and dependencies, in the same order.
-   - The priority (GO2): the bottom level (R5: "The priority is the bottom level"), Sinnen and Sousa's eq. (7) (§2.2.1)
-     over the instructions, bl(n) = w(n) + max over the dependencies e = (n, m) {c(e) + bl(m)} (mesh-graph.h
-     mesh_graph_bottom_levels).  A task weighs its weighting operand's weight (A3), as in the schedule; communication
-     c on link L its link time ς(e, L) = c(e) / b(L) (Sinnen and Sousa, §5; b(L) T2's rate), the greatest over the
-     route entries of the task graph's edges e that carry it (T4: one occupation for every edge that shares it; eq.
-     (7)'s bottom level is "the length of the longest path leaving the node", so the longest); every dependency costs
-     0 (a remote edge's time is in its communications; a local one is free, Definition 2, T1').  Each quotient the one
-     the schedule computes for that route entry, one correctly rounded /, and the max by comparisons, so every rank's
-     levels agree.  Where this differs from the reference algorithm (design/compilation-coordination.md, "The
-     documents' revisions of edd4b583", GO3′): MSCCLang §5.2 step (1)'s own priority is "the depth (maximum hops from
-     a root node) and reverse depth (maximum hops to a leaf node)", counted in hops; the priority here is R5's, the
-     bottom level by eq. (7) over the weights (GO2), and step 3's heap orders by it.
-   - The order (GO3): MSCCLang §5.2, step 3: "Sort instructions into a global topological order with respect to their
-     dependencies with a heap using the priority to order instructions" (mesh-graph.h mesh_graph_heap_order): the
-     greatest bottom level first (R5: "Tasks are taken in decreasing bottom level"; HLFET's priority, where step (1)'s
-     is the depth and reverse depth in hops: GO3′, above), a tie to the lower instruction, the same at every rank (F.
-     B. Schneider, Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).
+     adds no row (mesh-graph.h mesh_graph_completion_times: each edge once, LP4) and changes no order
+     (mesh_graph_heap_order: an edge given twice counts twice and is removed twice).  Every rank builds the same
+     instructions and dependencies, in the same order.
+   - The priority (R5 at mesh 0e56d8da, "How: the program"): "one variable C_j, a completion time, for each instruction
+     j of one execution's task graph (R3): each task at its node, and each hop of each page's route, on its cable
+     (design/compilation-coordination.md GO2)"; "Instruction j's length d_j is its weight from the weighting operand
+     (aot-compilation A3): w for a task, and for a hop c(e) over its cable's bandwidth".  A task's d_j is its weight
+     (A3); communication c's on link L is c(e) / b(L) (b(L) T2's rate), the greatest over the route entries of the
+     task graph's edges e that carry it (T4: one instruction for every edge that shares it), one correctly rounded /
+     each and the max by comparisons, as GO2 took it.  Its resource (R5: "A resource is a cable in one direction, or
+     a node's device"): a task's its node's device, numbered by the node's map index; a communication's its link L in
+     one direction (T2), numbered n + L.  The rows are R5's, over these instructions and the dependencies above
+     (mesh-graph.h mesh_graph_completion_times: Chen's (14), (14a), (1b), (1c), Hall et al.'s (5) on each resource by
+     cutting planes, each linear program by HiGHS); the priority is each instruction's C̄_j in its solution.
+   - The order (R5, "The order of each cable's list, by the reference algorithm"): MSCCLang §5.2, step 3: "Sort
+     instructions into a global topological order with respect to their dependencies with a heap using the priority to
+     order instructions" (mesh-graph.h mesh_graph_heap_order), "the least C̄_j first.  Where two are equal, the heap
+     takes the lower instruction" (R5; given as -C̄, LP7), the same at every rank (F. B. Schneider, Implementing
+     fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).  That order "is consistent
+     with the precedence relation, as Hall et al.'s ties require" (R5): the heap places a vertex only after every
+     vertex an edge into it leaves.
    - The lists (R5, "The order of each cable's list, by the reference algorithm"): each of this node's entries
      (plan_walk; every field as it assigns them) takes its communication's place (`place`), and the entries are sorted
      by it (plan_entry_order), a total order.  A set's entries (S1, S2: its nonzero `set`, tree j's pages over a node
@@ -961,6 +959,15 @@ static int plan_entry_order(const void *a,const void *b){
      each pair of its tree, and is not shown where the deal splits a set's positions over a pair's cables
      (design/compilation-coordination.md, "The revisions of 46ae8fdf", stop 3; 2026-11-05: this said the documents
      state no argument, "The revisions of 67ca86f8", stop 3).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", LP; design/plan-to-bridge-change-
+   request.md R5 at mesh 0e56d8da): reversing GO2's and GO3's priority (each instruction's bottom level by Sinnen and
+   Sousa's eq. (7), the greatest first) and GO5's call of the contention schedule (Sinnen and Sousa's Algorithm 1 with
+   Algorithm 2, whose starts ordered nothing), with their `start`, `link_start`, `level` and `delay`.  Why: R5, "Each
+   instruction's priority is C̄_j, its completion time in the program's optimal solution, the least first"; "It
+   replaces MSCCLang's depth and reverse depth, and edge scheduling's start times, which are no longer computed for the
+   order.  Edge scheduling's part, one communication at a time on each link, is now the resources' rows."  What must
+   stay: GO1's instructions and dependencies; GO2's lengths; every entry's fields as plan_walk assigns them; both
+   ends' lists of a node pair the same hops in the same order; every copy's the same order.
    2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): reversing GO4's groups, a set's
    entries on one node pair and direction at consecutive places at the place of its first page (its least place,
    found in one pass over the entries' rows by node and direction, mesh_graph_rows), the entries sorted by their
@@ -983,7 +990,8 @@ static int plan_entry_order(const void *a,const void *b){
    topological order of the bridge's store-and-forward waits, the contention schedule's (14) being nonaligned,
    cut-through) is answered above: the lists' order is now the instruction DAG's, whose dependencies are those waits,
    not the schedule's starts (GO4: "This answers the open item 'No cycle on a cable' (W3 #6)").
-   0; EINVAL (the schedule's: a time past the doubles' range); ENOMEM. */
+   0; EINVAL, EDOM or ENOMEM (mesh_graph_completion_times': a program with no solution, HiGHS's failure; and
+   mesh_graph_heap_order's EINVAL, a cycle); ENOMEM. */
 static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const struct mesh_dependence *dependence,
                          uint32_t dependences){
   const uint32_t n=p->n,demands=p->demands,count=p->transfers;
@@ -1023,11 +1031,9 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
   if(instructions>=UINT32_MAX)status=ENOMEM;
   double *w=status?NULL:malloc(((size_t)instructions+1)*sizeof *w),
          *cost=status?NULL:malloc(((size_t)edges+1)*sizeof *cost),
-         *rate=malloc((2*(size_t)p->pairs+1)*sizeof *rate),*start=status?NULL:malloc(((size_t)tasks+1)*sizeof *start),
-         *link_start=status?NULL:malloc(((size_t)entries+1)*sizeof *link_start),
-         *level=status?NULL:malloc(((size_t)instructions+1)*sizeof *level),
-         *delay=status?NULL:calloc((size_t)dependencies+1,sizeof *delay);
-  uint32_t *processor=status?NULL:malloc(((size_t)tasks+1)*sizeof *processor),
+         *rate=malloc((2*(size_t)p->pairs+1)*sizeof *rate),
+         *completion=status?NULL:malloc(((size_t)instructions+1)*sizeof *completion);
+  uint32_t *resource=status?NULL:malloc(((size_t)instructions+1)*sizeof *resource),
            *from=status?NULL:malloc(((size_t)edges+1)*sizeof *from),
            *to=status?NULL:malloc(((size_t)edges+1)*sizeof *to),
            *link=status?NULL:malloc(((size_t)entries+1)*sizeof *link),
@@ -1036,19 +1042,20 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
            *after=status?NULL:malloc(((size_t)dependencies+1)*sizeof *after),
            *place=status?NULL:malloc(((size_t)instructions+1)*sizeof *place);
   size_t *route=status?NULL:malloc(((size_t)edges+1)*sizeof *route);
-  if(!status && (!w || !cost || !rate || !start || !link_start || !level || !delay || !processor || !from || !to ||
-                 !link || !communication || !before || !after || !place || !route))status=ENOMEM;
+  if(!status && (!w || !cost || !rate || !completion || !resource || !from || !to || !link || !communication ||
+                 !before || !after || !place || !route))status=ENOMEM;
   if(!status){
-    /* the tasks: each on its event's node, weighing the weighting operand's weight of it (A3) */
+    /* the tasks: each on its event's node, weighing the weighting operand's weight of it (A3), its resource its node's
+       device, resource index its node's map index (R5: "A resource is a cable in one direction, or a node's device") */
     for(uint32_t d=0;d<demands;d++){
       const struct plan_demand *x=p->demand+d;
       w[d]=weight[x->first].produced;
-      processor[d]=x->source;
-      if(reader[d]!=MESH_ABSENT){w[reader[d]]=weight[x->first].read;processor[reader[d]]=x->source;}
+      resource[d]=x->source;
+      if(reader[d]!=MESH_ABSENT){w[reader[d]]=weight[x->first].read;resource[reader[d]]=x->source;}
     }
     for(uint32_t i=0;i<count;i++)for(uint32_t q=0;q<consumer[i].count;q++){
       w[consumer[i].first+q]=weight[i].consumed;
-      processor[consumer[i].first+q]=declared[i].destination;
+      resource[consumer[i].first+q]=declared[i].destination;
     }
     /* the links (T2) */
     double most=0;
@@ -1095,9 +1102,6 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
       }
     }
     route[e]=r;
-    /* GO5: the schedule as before; its starts order nothing */
-    status=mesh_graph_contention_schedule((uint32_t)tasks,w,processor,(size_t)edges,from,to,cost,route,link,
-                                          communication,2*p->pairs,rate,start,link_start);
   }
   if(!status){
     /* GO1: each edge of the task graph a chain of dependencies from its tail task through its route's communications,
@@ -1108,17 +1112,24 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
       for(size_t r=route[x];r<route[x+1];r++,k++){before[k]=tail;tail=after[k]=(uint32_t)tasks+communication[r];}
       before[k]=tail;after[k++]=to[x];
     }
-    /* GO2: communication c's weight the greatest c(e) / b(L) over the route entries carrying it, from 0 (each such
-       quotient is > 0, every `page` weight and rate being > 0, and every communication lies on a route, plan_trees);
-       every dependency's cost 0 (`delay`) */
-    for(uint64_t c=0;c<p->comms;c++)w[tasks+c]=0;
+    /* GO2: communication c's length the greatest c(e) / b(L) over the route entries carrying it, from 0 (each such
+       quotient is > 0, every `page` weight and rate being > 0, and every communication lies on a route, plan_trees),
+       its resource its route entries' link L in one direction, n + L (R5: "for a hop c(e) over its cable's
+       bandwidth"; every route entry of one communication is on one link, its tree edge's: plan_path_step) */
+    for(uint64_t c=0;c<p->comms;c++){w[tasks+c]=0;resource[tasks+c]=n;}
     for(size_t x=0;x<edges;x++)for(size_t r=route[x];r<route[x+1];r++){
       const double occupy=cost[x]/rate[link[r]];
       if(occupy>w[tasks+communication[r]])w[tasks+communication[r]]=occupy;
+      resource[tasks+communication[r]]=n+link[r];
     }
-    status=mesh_graph_bottom_levels((uint32_t)instructions,w,(size_t)dependencies,before,after,delay,level);
-    /* GO3: the global topological order by the heap, the greatest bottom level first, a tie to the lower instruction */
-    if(!status)status=mesh_graph_heap_order((uint32_t)instructions,level,(size_t)dependencies,before,after,place);
+    /* R5's program over the instructions, its rows the dependencies (mesh-graph.h mesh_graph_completion_times), then
+       the global topological order by the heap, the least C̄ first as -C̄ (LP7), a tie to the lower instruction */
+    status=mesh_graph_completion_times((uint32_t)instructions,w,resource,n+2*p->pairs,(size_t)dependencies,before,after,
+                                       completion);
+    if(!status){
+      for(uint64_t j=0;j<instructions;j++)completion[j]=-completion[j];
+      status=mesh_graph_heap_order((uint32_t)instructions,completion,(size_t)dependencies,before,after,place);
+    }
   }
   if(!status){
     /* R5: each entry at its communication's place, a set's among them, sorted by it (2026-11-05, "The revisions of
@@ -1126,8 +1137,8 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
     for(uint64_t j=0;j<p->entries;j++)p->entry[j].place=place[tasks+p->entry[j].communication];
     qsort(p->entry,p->entries,sizeof *p->entry,plan_entry_order);
   }
-  free(reader);free(consumer);free(w);free(cost);free(rate);free(start);free(link_start);free(level);free(delay);
-  free(processor);free(from);free(to);free(link);free(communication);free(before);free(after);free(place);free(route);
+  free(reader);free(consumer);free(w);free(cost);free(rate);free(completion);
+  free(resource);free(from);free(to);free(link);free(communication);free(before);free(after);free(place);free(route);
   return status;
 }
 
@@ -1144,9 +1155,10 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
    the relays, members all.  The pages: each demand's pages cut over its trees by their shares by earliest finish
    (mesh_graph_fill), a tree's pages one run of them.  The order: one execution's task graph scheduled (plan_schedule;
    design/plan-to-bridge-change-request.md, R3 to R5), and its instructions, the tasks and the communications, in one
-   global topological order by bottom level (MSCCLang §5.2, step 3), this node's entries in it, a set's at their own
-   places (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO1 to GO3 and GO5; "The
-   revisions of 67ca86f8", SP: R5, "keep their places in that order").  The sets: a
+   global topological order by their completion times in R5's linear program, the least first (MSCCLang §5.2, step 3;
+   R5 at mesh 0e56d8da), this node's entries in it, a set's at their own places (design/compilation-coordination.md,
+   "The documents' revisions of edd4b583", GO1; "The revisions of 46ae8fdf", LP; "The revisions of 67ca86f8", SP: R5,
+   "keep their places in that order").  The sets: a
    demand whose every declared transfer is MESH_PAGES is a set on each of its trees (S1, S2; its `set`).  Every rank
    computes the same demands, trees, pages, template, u, schedule and order from the same declared transfers, weights,
    dependences and map, and writes its own hops of them (plan_walk, plan_schedule).
@@ -1167,8 +1179,9 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
       x block; local pages, the local one's.  ENOMEM leaves every plan of the program standing;
    3. the state section started once (D3: its bytes before the entries 0, then struct mesh_state's `copies`,
       `receives`, `ranges`, `releases`, region offsets, `group`, `epoch` (the function, N1), `serial`, `hops`,
-      `entries`, `sequences`, `nodes` and `sender`; `held`, every `refused`, `submitted`, `released`, every `taken`
-      and every sequence word 0: design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1), every
+      `entries`, `nodes` and `sender`; `held`, every `refused`, `submitted`, `released`, every `taken` and `sequences`
+      0 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1; "The revisions of
+      46ae8fdf", LP9: no sequence words, appendix item 2 at mesh 0e56d8da), every
       `state` 1 value's bytes 0 once (D3), every value's rows named and bound copy by copy (mesh_backing_bind), every
       value row's publication written, the entries u x n in plan_schedule's order, each with its `set` (S1, S2); no
       data page is written;
@@ -1239,7 +1252,11 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
      groups; the argument is R5's own for the places' order (plan_schedule), and it rests on no weight either.  The
      EINVAL stays, as above.
      2026-11-04, owner C: reversing >= 0 for every weight.  Why: C-weights (reviews V1 #8, V3 #5).  What must stay:
-     EINVAL before anything is written */
+     EINVAL before anything is written.
+     2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", LP): Sinnen and Sousa's Definition 1
+     is no longer this file's reason, the contention schedule being removed (R5's linear program takes any length d_j
+     >= 0); the EINVAL stays, as C-weights decided it, since R5 asks no change of the operand's test.  What must stay:
+     as above */
   for(uint32_t i=0;i<count;i++){
     const struct mesh_weight *x=weights+i;
     if(declared[i].kind>MESH_PAGES || !(x->produced>0 && x->produced<=DBL_MAX) ||
@@ -1465,7 +1482,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
   state->serial=p.serial;
   state->hops=base+p.hops;
   state->entries=entries;
-  state->sequences=base+p.sequences;
+  state->sequences=0;
   state->nodes=spanned;
   state->sender=(uint32_t)__builtin_ctzll(spanned);
   /* every value's rows, from the head's next, copy c's rows first + c x P + k bound to its copy's pages (an item's

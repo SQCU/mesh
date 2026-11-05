@@ -15,7 +15,14 @@
    cited design/disjoint-pages-revision-coordination.md, D5.  Why: D5 appears in neither Lam, Rau nor C3.3's text
    (design/aot-compilation-change-request.md, appendix item 1); the least lags decide C3.3's tests at every larger
    distance by U1's reason, its consumer's (every walk into a write passes its range's production; the programs'
-   dependences order each node's events of t before those of t + 1).  What must stay: the function as it is. */
+   dependences order each node's events of t before those of t + 1).  What must stay: the function as it is.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", LP; design/plan-to-bridge-change-
+   request.md R5 at mesh 0e56d8da): mesh_graph_bottom_levels and mesh_graph_contention_schedule are removed, and
+   mesh_graph_completion_times is new.  Why: R5's priority is "C̄_j, its completion time in the program's optimal
+   solution, the least first", and "It replaces MSCCLang's depth and reverse depth, and edge scheduling's start times,
+   which are no longer computed for the order"; R5's Code: "rdma/mesh-graph.{h,c}: the program's rows, the
+   cutting-plane loop with Queyranne's separation, and the calls to HiGHS; the heap order by C̄ (`mesh_graph_heap_order`,
+   as now)".  What must stay: mesh_graph_heap_order as it is, the heap one copy */
 #ifndef MESH_GRAPH_H
 #define MESH_GRAPH_H
 #include <stddef.h>
@@ -172,37 +179,31 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
 int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *order,
                          int (*interferes)(const void *context, uint32_t a, uint32_t b), const void *context,
                          uint64_t capacity, uint64_t *colour, uint64_t *used);
-/* O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, eq. (7): bl(n) = w(n) + max over the edges e = (n, m) out of n of
-   {cost[e] + bl(m)}, over a topological order (mesh_graph_order).  Task n weighs weight[n]; edge e runs from[e] ->
-   to[e].  level[n] out.  0; EINVAL where the edges hold a cycle or name no task; ENOMEM */
-int mesh_graph_bottom_levels(uint32_t tasks, const double *weight, size_t edges, const uint32_t *from, const uint32_t *to,
-                             const double *cost, double *level);
-/* O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, Algorithm 1 with Algorithm 2 (list scheduling in the contention
-   model).  Task n on processor[n] (given: the placement operand; a label, design/compilation-coordination.md, G-1),
-   weight[n] > 0 long (Definition 1, "the positive weight w(n)").  Edge e from[e] -> to[e] of cost[e] >= 0
-   (Definition 1, "the nonnegative weight c(eij)") crosses links link[route[e] .. route[e + 1]) in route order (route:
-   edges + 1 entries); a local edge (processor[from] == processor[to]) has an empty route and finishes with its origin
-   (15); a remote edge with an empty route, or a local edge with a route (G-1), is EINVAL.  Link l's relative data rate
-   rate[l] > 0, so an edge occupies it cost[e] / rate[l] (§5).  Route entries with the same communication[r] on the
-   same link are one occupation of it: the first scheduled takes its interval and the others its times
-   (design/compilation-coordination.md, T4, G-1).  Tasks in decreasing bottom level (eq. 7), a tie by a topological
-   ordinal (mesh_graph_order) then by index; for each, its incoming edges in index order, each remote one scheduled on
-   its links by Condition 6 and (14), nonaligned, by the end technique (design/compilation-coordination.md, T5); then
-   the task at max(its processor's finish, its data-ready time (3)) by the end technique.  start[n] its start;
-   link_start[r] the start of route entry r on its link.  Arithmetic +, -, / and comparisons alone, correctly rounded,
-   so every party computes the same schedule from the same operands.  0; EINVAL (a time not finite among them, G-1);
-   ENOMEM */
-int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const uint32_t *processor, size_t edges,
-                                   const uint32_t *from, const uint32_t *to, const double *cost, const size_t *route,
-                                   const uint32_t *link, const uint32_t *communication, uint32_t links,
-                                   const double *rate, double *start, double *link_start);
+/* design/plan-to-bridge-change-request.md R5 (mesh 0e56d8da), "How: the program" and "How: solving it": the completion
+   times C̄ of one linear program over a directed graph, vertex j of length length[j] >= 0 on resource resource[j] (<
+   `resources`), edge e running from[e] -> to[e]: variables C_j and C_max; minimize C_max with C_max >= C_j for every j
+   (C.-Y. Chen, arXiv 2205.02474, 2022, (14) and (14a)); C_j >= d_j (Chen's (1b), every release time zero); C_j >= C_i +
+   d_j for every edge i -> j (Chen's (1c), "the precedence constraint"; L. A. Hall, A. S. Schulz, D. B. Shmoys and J.
+   Wein, Math. Oper. Res. 22(3) 1997, (3)); and for each resource and each set S of its vertices, sum over j in S of d_j
+   C_j >= (d(S)^2 + d^2(S)) / 2 (Hall et al.'s (5), "introduced by Queyranne (1993)"; Chen's (1d) and (1e) with m = 1).
+   Solved by cutting planes: each linear program by HiGHS's dual revised simplex (Q. Huangfu and J. A. J. Hall, Math.
+   Program. Comput. 10(1), 2018), each resource's violated rows found by Queyranne's separation (M. Queyranne, Math.
+   Programming 58, 1993) and added, until none is violated (design/compilation-coordination.md, "The revisions of
+   46ae8fdf", LP2 to LP6 and LP10).  completion[j] out: C̄_j of the last solution.  Every party solving the same
+   operands with the same library computes the same C̄.  0; EINVAL where a length is negative or not finite, a resource or an edge
+   names none, an edge runs from a vertex to itself, or the program has no solution (a cycle of positive length);
+   EDOM where HiGHS reports an error or a status other than optimal or infeasible; ENOMEM, also where the program's
+   rows pass HiGHS's 32-bit indices */
+int mesh_graph_completion_times(uint32_t vertices, const double *length, const uint32_t *resource, uint32_t resources,
+                                size_t edges, const uint32_t *from, const uint32_t *to, double *completion);
 /* M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, section 5.2, step 3: "Sort
    instructions into a global topological order with respect to their dependencies with a heap using the priority to
    order instructions."  Vertex v's priority priority[v]; edge e runs from[e] -> to[e] (an edge given twice counts
    twice and is removed twice, so it changes nothing).  A vertex enters the heap once every edge into it leaves a
    placed vertex; the heap's first is placed next, the greatest priority first and a tie to the lower vertex
-   (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO3).  place[v] out, v's place in the
-   order.  0; EINVAL where an edge names no vertex or the edges hold a cycle (a vertex left unplaced); ENOMEM */
+   (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO3; R5's "the least C̄_j first" is
+   its consumer's priority -C̄: "The revisions of 46ae8fdf", LP7).  place[v] out, v's place in the order.  0; EINVAL
+   where an edge names no vertex or the edges hold a cycle (a vertex left unplaced); ENOMEM */
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place);
 

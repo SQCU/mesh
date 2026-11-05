@@ -113,11 +113,7 @@
    MESH_PAGES consumption is each of its page tasks), a local edge costing 0.  The lags stay the allocator's: the
    schedule is one execution's.  Its topology graph's links are the node graph's edges, each a pair of directed links
    of the pair's capacity over the greatest (O. Sinnen and L. A. Sousa, Communication contention in task scheduling,
-   IEEE TPDS 16(6) 2005, Definition 4).  The schedule is list scheduling with each task on its node, in decreasing
-   bottom level, each edge scheduled on its route's links under the contention model (Sinnen and Sousa, eq. (7),
-   Algorithms 1 and 2; mesh-graph.h mesh_graph_contention_schedule), a page crossing a tree edge once (T4): R5's method
-   and A6's one schedule per function, computed as before; its starts order no list (R5: "Scheduled start times do not
-   order the lists"), and what reads them is the operator's to say (GO5).
+   IEEE TPDS 16(6) 2005, Definition 4), a page crossing a tree edge once (T4).
    The order of the lists is R5's reference algorithm, MSCCLang's (M. Cowan et al., MSCCLang: Microsoft Collective
    Communication Language, ASPLOS 2023) §5.2, step 3: "Sort instructions into a global topological order with respect
    to their dependencies with a heap using the priority to order instructions."  The instructions are the task graph's
@@ -126,18 +122,28 @@
    joined by a communication edge: GO1).  The dependencies are each local edge of the task graph, and each remote edge
    as a chain from its tail task through its route's communications to its head task (§4.2's communication and
    processing edges: a page sent before it lands, landed before it is forwarded or consumed; GO1).  The priority is
-   each instruction's bottom level (R5: "The priority is the bottom level"), Sinnen and Sousa's eq. (7) over the
-   instructions, a task weighing its weight, a communication its link time c(e) / b(L), the greatest over the edges
-   whose routes carry it, and every dependency 0 (GO2; mesh-graph.h mesh_graph_bottom_levels); the greatest is taken
-   first, a tie to the lower instruction (GO3; mesh-graph.h mesh_graph_heap_order).  Each of this node's entries takes
-   its communication's place, and every rank computes the same order from the same inputs (F. B. Schneider,
-   Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).
+   each instruction's completion time C̄_j in the optimal solution of R5's one linear program (design/plan-to-bridge-
+   change-request.md R5 at mesh 0e56d8da; mesh-graph.h mesh_graph_completion_times): its length a task's weight or a
+   communication's c(e) / b(L), the greatest over the edges whose routes carry it (GO2), its resource its node's device
+   or its link in one direction; C.-Y. Chen, arXiv 2205.02474, 2022, (14), (14a), (1b) and (1c), and L. A. Hall, A. S.
+   Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3) 1997, (5) on each resource, solved by cutting planes with
+   Queyranne's separation, each linear program by HiGHS; the least is taken first, a tie to the lower instruction (R5;
+   mesh-graph.h mesh_graph_heap_order).  Each of this node's entries takes its communication's place, and every rank
+   computes the same order from the same inputs (F. B. Schneider, Implementing fault-tolerant services using the state
+   machine approach, ACM Comput. Surv., 1990).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", LP): the priority the linear
+   program's C̄, where it was the bottom level by eq. (7) (GO2, GO3), and the contention schedule (Sinnen and Sousa's
+   Algorithms 1 and 2), whose starts ordered no list (GO5), no longer computed.  Why: R5 at mesh 0e56d8da, "It
+   replaces MSCCLang's depth and reverse depth, and edge scheduling's start times, which are no longer computed for the
+   order".  What must stay: both ends' lists of a node pair the same hops in the same order; every copy's the same
+   order.
    2026-11-04, owner C3 (GO1 to GO5; R5, "The order of each cable's list, by the reference algorithm"): reversing T6,
    each node pair's list in the order of its link's scheduled starts of its pages, ties by walk.  Why: R5 orders each
    cable's list as a subsequence of one global topological order built by the reference algorithm (the operator:
    "what algorithm is cited here, if any? no citations? use the reference algorithm instead"), and scheduled starts
-   order no list; this overturns T6.  What must stay: the schedule's call (R5's method, A6); both ends' lists of a
-   node pair the same hops in the same order; every copy's the same order.
+   order no list; this overturns T6.  What must stay: the schedule's call (R5's method, A6; 2026-11-05, LP: the call
+   gone, R5's linear program the method now); both ends' lists of a node pair the same hops in the same order; every
+   copy's the same order.
    The sets (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md, S1, S2 and
    "The revisions of 67ca86f8", SP): a range every one of whose declared transfers is MESH_PAGES (function B at every destination, R4) is a set on
    each of its trees: every entry of a page on tree j (j the tree's index in the solve's trees grouped by demand, the
@@ -195,17 +201,15 @@
    The state section (mesh.h struct mesh_state, at its claim's head's publication `state`), an invariant item outside
    the window, apart from every data page: the struct, then the phase list (each received range's 2-bit Gray-coded
    phase a page, a group a copy), the counts (each received range's arrivals, a word a copy), the supplied words (one a
-   source range), the GPU's status, the sequence words (one a copy) and this node's entries, each part 64-aligned
+   source range), the GPU's status and this node's entries, each part 64-aligned
    (mesh-collective.c plan_layout gives the offsets).  Its words are set to their starting values once, where it is
    placed (the contract's D3), and none is reset while the plan stands (C3.7).  The struct's words beside them:
    `group` and `epoch` the plan's name (group, function), `epoch` holding the function (N1), `serial` the map serial
-   it was made on, `hops` its entries' region offset and `entries` u x n, `sequences` the sequence words' region
-   offset, `held` 0 and every `refused` 0 (the ports' alone), `nodes` the plan's nodes (a set of map indices: every
-   source and destination of a declared transfer and every node a tree of it reaches; this node's own where there is
-   none) and `sender` the least of them (Q2), each the same at every rank; and `submitted`, `released`, every `taken`
-   and every sequence word 0, the bridge's alone (Q2; design/compilation-coordination.md, "The documents' revisions of
-   edd4b583", DL1: `released` and the sequence words the bridge parent's, L. Lamport's ms and B[0 .. u - 1] of his
-   "Message Buffer", Concurrent reading and writing, CACM 20(11), 1977; `taken[p]` port p's, his mr).  Each claimed
+   it was made on, `hops` its entries' region offset and `entries` u x n, `sequences` 0, `held` 0 and every
+   `refused` 0 (the ports' alone), `nodes` the plan's nodes (a set of map indices: every source and destination of a
+   declared transfer and every node a tree of it reaches; this node's own where there is none) and `sender` the least
+   of them (Q2), each the same at every rank; and `submitted`, `released` and every `taken` 0, the bridge's alone
+   (Q2).  Each claimed
    row's publication (mesh.h struct mesh_publication) is written: a received range's first row names its phase groups
    and count words, a source range's first row its supplied word, every other field 0.  No data page is written by
    the plan.
@@ -214,6 +218,11 @@
    was.  Why: the parent publishes each released execution's sequence number in its plan's state, one word per copy,
    each word one writer, and each port merges them; Q4's hold is gone.  What must stay: every word before the sequence
    words where it was; every word started once and none reset while the plan stands.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", LP9): the sequence words gone, the
+   entries after the status again, `sequences` 0.  Why: design/aot-compilation-change-request.md, appendix item 2 at
+   mesh 0e56d8da, "publish them to each port through the channel above, in place of the sequence words (`sequences`),
+   `taken[p]` and the parent's wait while they are full (Lamport's buffer; the coordination's DL1)".  What must stay:
+   every word started once and none reset while the plan stands.
 
    This node's entries: u x n (mesh.h struct mesh_hop) at the state section's `hops`, copy c's n at [c n, c n + n),
    every copy's the same hops in the same order, each copy's naming its own pages, phase fields and count words.  Each

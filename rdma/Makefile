@@ -11,6 +11,15 @@ CPPFLAGS += -DMESH_PROVIDER_RESERVED_QPS=$(MESH_PROVIDER_RESERVED_QPS)
 # mesh-graph.c's exp, log, flow and pack (review R1, round 2); the tag had the same hole.  Every node builds with its own
 # SDK, so the contraction is refused here for every translation unit, not left to one file's pragma
 CFLAGS_EXACT = -ffp-contract=off
+# HiGHS 1.15.1, Homebrew's `highs` (design/plan-to-bridge-change-request.md R5, Code: "rdma/Makefile: links the HiGHS
+# library through its C API (highs/interfaces/highs_c_api.h)"), wherever mesh-graph.c is compiled and linked: its
+# headers from the directory its pkg-config Cflags name, as a system include, since highs_c_api.h declares a static
+# function it never defines (design/compilation-coordination.md, "The revisions of 46ae8fdf", LP8); its library by
+# its absolute install name (otool -D: /opt/homebrew/opt/highs/lib/libhighs.1.dylib), so no rpath.  Installing it on
+# the members is the operator's step (R5)
+HIGHS ?= /opt/homebrew
+HIGHS_CFLAGS = -isystem $(HIGHS)/include/highs
+HIGHS_LIBS = -L$(HIGHS)/lib -lhighs
 HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h
 # the resident bridge (design/page-queue-change-request.md): its main and event loop (mesh-link.c), its ports' children
 # from the parent's side (mesh-children.c) and their own (mesh-child.c), discovery and pairing (mesh-ports.c), the
@@ -25,7 +34,7 @@ native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
 mesh-flow: $(BRIDGE) $(HEADERS) Makefile
 	mkdir -p .build
-	cc $(CPPFLAGS) $(CFLAGS_EXACT) -fblocks -O2 -Wall -Wextra -Werror -o .build/$@ $(BRIDGE) -lrdma -framework CoreFoundation -framework IOKit
+	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -Wall -Wextra -Werror -o .build/$@ $(BRIDGE) -lrdma $(HIGHS_LIBS) -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
 # the bridge's heartbeat (tag pre-return-20261103 rdma/Makefile): no device, no verbs, its own translation unit
@@ -36,7 +45,7 @@ mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-map.h mesh-holders.h Makefile
 mesh-stat: mesh-stat.c mesh-dataflow.c mesh.h mesh-map.h mesh-holders.h mesh-dataflow.h mesh-call.h
 	cc -O2 -o $@ mesh-stat.c mesh-dataflow.c
 libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) Makefile
-	cc $(CPPFLAGS) $(CFLAGS_EXACT) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc
+	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS)
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit
