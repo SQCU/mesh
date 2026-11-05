@@ -54,7 +54,13 @@ So:
   the operator's words, a cited source's own statement ("what is x and where does x come from in the literature"), or a
   fact of the code.
 - **The document is the whole instruction to an implementer.** A brief adds nothing to it.
-- **Where the document is silent, the implementer stops at that point and reports it.** It takes no decision of its own.
+- **Where the document is silent, the implementer takes the minimal decision that follows from the document and the
+  code, and records it as its own choice, with its reason, apart from the document's requirements.** Where no decision
+  follows, it stops at that point and reports it.
+  > "take the minimal decision … and record it" broadly fine if you really think about it especially if agents are
+  > strongly segmenting 'i made an apparnetly required or apparently free choice... and i'm *documenting* it as my
+  > choice rather than preordained fate': this is more honest and makes revision and acceptance of corresponding code,
+  > measurements, and artifacts simpler in expectation.
 
 
 ## The turns
@@ -231,6 +237,37 @@ operator's words, a cited source's own statement, or a fact of the code.
     compilation. For a delegate's program these are the recorder's command buffers, as now.
 - The bridge consumes the lists and the GPU runs the existing kernels. Nothing else is serialized.
 
+### A10. A program's calls are a dataflow graph, analysed at compile time
+
+> is this really a choice? are the problems being discussed (all linear algebraic programs ever, basically) 'synchronous
+> by implicit assumption', or are all operations of htis kind composeable and rearrangable up to typing limits which are
+> determined by the linear algebraic operations / source we are using in the data processing function side? does the
+> commutativity and associativity of the operations (ignore e.g. floating point associativity for now) form some kind of
+> basic primordial pre-requirement that the user expected someone to ask questions about, pull in literature about, and
+> start describing as yet another AOT precompilation problem of the 'known parser, low empirical computational
+> complexity' class of programs? on some level the use of the fxgraphs capture and pytorch-modifying-headers should
+> foreshadow this and make it less of a surprise
+
+- The compilation must take a program's sequence of calls as a graph, decide at compile time which calls may be
+  outstanding at once and in what orders, and compile that into the plans. Nothing about it is chosen at run time.
+- **Method:**
+  - **The calls' graph.** It is the program's captured trace, as A1 captures one function: TorchDynamo's FX graph of the
+    calls and the tensors passing between them (Ansel et al., 2024).
+  - **Independence:** two calls may run in either order, or at once, where neither writes what the other reads or
+    writes. These are Bernstein's conditions (A. J. Bernstein, Analysis of programs for parallel processing, IEEE Trans.
+    Electronic Computers EC-15(5), 1966).
+  - **Commuting operations:** calls whose effects commute, such as reductions into one accumulator by an associative and
+    commutative operation, may run in any order (M. C. Rinard and P. C. Diniz, Commutativity analysis: a new analysis
+    technique for parallelizing compilers, ACM TOPLAS 19(6), 1997). Floating-point non-associativity is set aside, as
+    the operator does.
+  - **At run time:** calls are issued ahead, as futures, in the order the analysis allows, as Pathways dispatches
+    asynchronously (Barham et al., 2022, §4.5).
+- **Its output:**
+  - for each compiled function, the most calls of it the analysis lets be outstanding at once, which the delivery words
+    of the appendix's item 2 are placed for;
+  - the order constraints between calls, which the sequencer's numbers respect.
+
+
 ### What judges it
 
 - design/plan-to-bridge-change-request.md's judges hold.
@@ -316,16 +353,17 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **Recorded order:** the bridge may record the order it realized (its traces, rdma/mesh-flow.c `struct mesh_trace`
   under `MESH_LEDGER`). No collective or data code reads it.
 - **Delivery at a node.**
-  > nothing happens when a program joins or leaves because a program is a sequence of like, function calls.
-  - A program's calls are a sequence, so each plan has at most one call outstanding. The sequencer numbers each call's
-    submission (Défago, Schiper and Urbán, 2004), and a call returns only once its executions are done (C3.1).
-  - The bridge parent writes, for each plan, its one outstanding call's sequence number and executions into words of
-    that plan's state, each with a single writer (C3's rule 2). No word is reused while its call is outstanding, so
-    nothing waits to write.
-  - Each port serves the outstanding calls of every standing plan in sequence-number order. Both ends of a cable read
-    the same numbers, so they serve alike.
-  - (Corrected 2026-11-05: the first text wrote one word per copy, a ring whose writer waits when it is full. No
-    requirement asks for one, and T210 ruled modulo rings out.)
+  - The sequencer numbers each call (Défago, Schiper and Urbán, 2004). A call is one execution of its compiled function,
+    as in Pathways §4.4 ("function executions") and in JAX, where each call of a compiled function is one dispatch
+    (Frostig, Johnson and Leary, 2018). A program submits one call per execution.
+  - How many calls of one function may be outstanding at once is decided at compile time by A10, never chosen at run
+    time. The plan's state holds a delivery word for each, written by the bridge parent alone (C3's rule 2) and placed
+    by the allocator for A10's bound. So no word is reused while its call is outstanding, and nothing waits to write.
+  - Each port serves the delivered calls of every standing plan in sequence-number order, within the order A10 compiles.
+    Both ends of a cable read the same numbers, so they serve alike.
+  - (Corrected 2026-11-05: an earlier text assumed one outstanding call per plan, and before that wrote one word per
+    copy. A10 replaces both.)
+
 - **The code must:**
   - deliver orders in sequence order;
   - publish them, and merge them at each port, as above;
@@ -384,6 +422,11 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     same permutation without exchanging anything.
 - **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
   their bytes are the same each time, so the requirement's mean and variance hold over the set.
+- **One permutation of the whole set per execution.** The counter is (execution, set), so a set is drawn once per
+  execution. Every edge and every cable of the set's tree carries its share of the set's pages in that one permutation's
+  order. Each cable's sequence is then the same renaming of pages that share their predecessors, so MSCCLang §5.2's
+  argument against cycles holds. A draw for each cable departs from the counter.
+
 - **Function A's operands** (joins) keep the schedule's order.
 - **Every program declares each consumer's kind.** A consumer that reduces partial sums, or otherwise takes pages in
   any order, is function B (R4). A program that declares every consumer function A avoids demonstrating this

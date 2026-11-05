@@ -55,7 +55,13 @@ So:
   the operator's words, a cited source's own statement ("what is x and where does x come from in the literature"), or a
   fact of the code.
 - **The document is the whole instruction to an implementer.** A brief adds nothing to it.
-- **Where the document is silent, the implementer stops at that point and reports it.** It takes no decision of its own.
+- **Where the document is silent, the implementer takes the minimal decision that follows from the document and the
+  code, and records it as its own choice, with its reason, apart from the document's requirements.** Where no decision
+  follows, it stops at that point and reports it.
+  > "take the minimal decision … and record it" broadly fine if you really think about it especially if agents are
+  > strongly segmenting 'i made an apparnetly required or apparently free choice... and i'm *documenting* it as my
+  > choice rather than preordained fate': this is more honest and makes revision and acceptance of corresponding code,
+  > measurements, and artifacts simpler in expectation.
 
 
 ## The turns
@@ -1442,6 +1448,37 @@ design/aot-compilation-change-request.md, and are held here once.
 > "My update, in short: less author, more compiler and verifier. ..."
 > too mopey. there is a change request document template and a way to insturct subagents to use it as an instruction ofw hat to write and how. it is literally present and has been discussed in a meta way at least twice now in the session transcript. identify hwat was literally semantically incorrect or idiomatic about the most recent change request documents that allowed the recent deviations in interpretation and betwene-agent exegesis, ephemeral oversight, and implementation. revise the change request document(s) affected then launch revisions yet again.
 
+**Claude:**
+
+> (•̀ᴗ•́) **This run followed the template.** It built what the documents state, and stopped and reported each point where they were silent or contradicted themselves, quoting the document there. Nothing was run, and all three builds pass. Heads: mesh `f14f2685`, metal-microbench `43e6302f`, both pushed.
+>
+> **Done**
+> - **Sets keep their places.** The rule that moved a set's pages into consecutive places is gone, and the bridge now treats a set as every entry of one copy with the same `set` mark, wherever it sits in the list.
+> - **Function B declarations.** Two more of the current program's consumers are declared function B. One is the split-KV partials and normalizers (the online-softmax example in R4); the other is the vocabulary contributions that `maxloc` reduces. Directories prepared earlier keep their old kinds until they're prepared again.
+>
+> **Where it stopped: three defects in my text**
+> 1. **R5 still requires edge scheduling in two places I didn't correct:** its "Code" line, and A6. So `mesh_graph_contention_schedule` still runs and nothing reads its output. The fix is to delete both mentions so the documents are consistent, and to delete the call.
+> 2. **Deadlock freedom of permuted sets.** The implementer showed that if each cable draws its own permutation, two cables between one node pair can draw differently. Their ordered queues can then wait on each other in a cycle, and its record has a three-node example.
+>    - The document already rules this out: appendix item 5 says the counter is (execution, set), which means one draw per set per execution.
+>    - The code's per-cable draw came from an earlier coordinator's decision, S7′, which departs from that text.
+>    - With one permutation of the whole set, applied on every edge of its tree, each cable carries its subset in that order. Every cable's sequence is then the same renaming of members that share their predecessors, so MSCCLang §5.2's argument holds again.
+>    - The fix is one sentence in item 5 saying so, and the code drops S7′.
+> 3. **Delivery at a node.** Two gaps:
+>    - **What a call is.** Item 6 says "each call launch one execution", while item 2 speaks of a call's "executions", plural. The program the code runs today submits all its steps in one start (an earlier decision, N4). In the literature a call of a compiled function is one execution: Pathways §4.4 orders "function executions", and in JAX each call of a compiled function is one dispatch (Frostig et al., 2018). So item 2 should be singular, and a program submits one call per execution.
+>    - **One outstanding call per plan or several.** The second gap depends on which you want, and that's yours to choose:
+>      - *Synchronous calls* (your "a program is a sequence of function calls"): each plan has one call outstanding. One set of words per plan suffices. A next call's order waits in the parent's pending list until this node has finished the previous call. That pending list is part of Défago's fixed sequencer, so it's no new hold.
+>      - *Asynchronous dispatch*: Pathways §4.5 issues calls ahead as futures, so several calls of one function are outstanding at once. That needs per-plan state for several calls, which is the structure the per-copy words were.
+>
+> **Proposed next step:** I'd correct stops 1 and 2 in the documents with the citations above and relaunch, and settle stop 3 with your answer on synchronous calls versus asynchronous dispatch. Which do you want?
+
+**The operator:**
+
+> ""take the minimal decision … and record it" " broadly fine if you really think about it especially if agents are strongly segmenting 'i made an apparnetly required or apparently free choice... and i'm *documenting* it as my choice rather than preordained fate': this is more honest and makes revision and acceptance of corresponding code, measurements, and artifacts simpler in expectation.
+> "So mesh_graph_contention_schedule still runs and nothing reads its output. The fix is to delete both mentions so the documents are consistent, and to delete the call."
+> if edge scheduling is required by some quality of hte problem being solved and there is relevant literature to bricolage together, identifying that literature is just as good of a corrective or better to trying to plainly delete something which occurred to implementing subagents when viewing the previosu change request documents as presented.
+> "   - One outstanding call per plan or several. The second gap depends on which you want, and that's yours to choose:"
+> is this really a choice? are the problems being discussed (all linear algebraic programs ever, basically) 'synchronous by implicit assumption', or are all operations of htis kind composeable and rearrangable up to typing limits which are determined by the linear algebraic operations / source we are using in the data processing function side? does the commutativity and associativity of the operations (ignore e.g. floating point associativity for now) form some kind of basic primordial pre-requirement that the user expected someone to ask questions about, pull in literature about, and start describing as yet another AOT precompilation problem of the 'known parser, low empirical computational complexity' class of programs? on some level the use of the fxgraphs capture and pytorch-modifying-headers should foreshadow this and make it less of a surprise
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
@@ -1548,12 +1585,24 @@ code, and each method is used as its source states it.
 - **Method:**
   - List scheduling (R. L. Graham, Bounds on multiprocessing timing anomalies, SIAM J. Appl. Math., 1969), with each
     task already on its node by the placement operand (aot-compilation A2).
-  - Tasks are taken in decreasing bottom level (Sinnen, 2007), the priority of HLFET (T. L. Adam, K. M. Chandy and J. R.
-    Dickson, A comparison of list schedules for parallel processing systems, CACM, 1974).
-  - Bottom levels count each edge's weight over its route's cables, as Sinnen and Sousa's eq. (7) does (O. Sinnen and
-    L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6), 2005). (Corrected 2026-11-05: the first
-    text also required their edge scheduling, whose start times order nothing once the lists follow the reference
-    algorithm below.)
+  - **The priority is MSCCLang's, with costs in place of hops.** MSCCLang §5.2 step 1: "Assign instruction priority by
+    calculating the depth (maximum hops from a root node) and reverse depth (maximum hops to a leaf node) for every
+    instruction in the Instruction DAG. This prioritizes instructions that are enabled earlier and have more downstream
+    dependencies respectively." Its scheduler "attempts to schedule instructions in the order they will be ready"
+    (§5.2).
+    - Depth, with costs: each instruction's earliest start under link contention, from edge scheduling on the links of
+      each edge's route (O. Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6), 2005).
+      That is when it will be ready, so edge scheduling is used and stays.
+    - Reverse depth, with costs: each instruction's bottom level, which counts each edge's weight over its route's
+      cables, as Sinnen and Sousa's eq. (7) does. This is the level priority of HLFET (T. L. Adam, K. M. Chandy and J.
+      R. Dickson, A comparison of list schedules for parallel processing systems, CACM, 1974).
+    > if edge scheduling is required by some quality of hte problem being solved and there is relevant literature to
+    > bricolage together, identifying that literature is just as good of a corrective or better to trying to plainly
+    > delete something which occurred to implementing subagents when viewing the previosu change request documents as
+    > presented.
+    (Corrected 2026-11-05: an earlier correction dropped edge scheduling, and its start times went unread. They are the
+    depth MSCCLang's priority takes.)
+
 - **Routes are the plan's existing ones,** as now:
   - trees packed by Garg and Könemann's rounds (N. Garg and J. Könemann, FOCS 1998; rdma/mesh-graph.h
     `mesh_graph_pack`);
@@ -1561,7 +1610,7 @@ code, and each method is used as its source states it.
 - **The order of each cable's list, by the reference algorithm.** Each cable's list is a subsequence of one global
   topological order of the instructions, built as MSCCLang §5.2 states in its step 3: "Sort instructions into a global
   topological order with respect to their dependencies with a heap using the priority to order instructions." The
-  priority is the bottom level. Scheduled start times do not order the lists.
+  priority is the one above: depth, then reverse depth.
   > what algorithm is cited here, if any? no citations? use the reference algorithm instead.
   - A set's pages (design/aot-compilation-change-request.md, appendix item 5) keep their places in that order. The
     set's random permutation is drawn over those places. (Corrected 2026-11-05: the first text moved a set's pages to
@@ -1579,7 +1628,7 @@ code, and each method is used as its source states it.
 - **How the bridge spreads a cable's sequence over what its devices give it is the bridge's own, as now:**
   rdma/mesh-flow.c `link_prepare`, `mesh_graph_list_schedule` in list order.
 - **Code:**
-  - rdma/mesh-graph.{h,c}: bottom levels, and the list schedule with edge scheduling.
+  - rdma/mesh-graph.{h,c}: bottom levels, edge scheduling's earliest starts, and the heap order by both.
   - rdma/mesh-collective.c: writes each copy's list with each cable's sends in schedule order, each with its bytes;
     `struct mesh_hop`'s `padding` becomes `bytes`.
   - rdma/mesh-flow.c: sends `bytes`.
