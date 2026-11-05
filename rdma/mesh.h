@@ -210,6 +210,12 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    2026-11-04, owner L2 (review W3's finding 12, the coordinator's ruling; S7′): a set contiguous on its node pair's
    list and permuted per cable, where this note said contiguous on its cable and permuted whole.  Why: the deal spreads
    a pair's positions over the pair's cables, and each cable's records are its own (S7′).  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", OP): the bridge draws one permutation
+   of a set's every position on the pair each execution, counted by (execution, set), and each cable carries the
+   members the deal gave it in that permutation's order (mesh-flow.c set_draw, position_record), where each cable drew
+   a permutation of its own members (S7′).  Why: design/aot-compilation-change-request.md, appendix item 5, "One
+   permutation of the whole set per execution"; "A draw for each cable departs from the counter."  What must stay:
+   both ends' entries of a hop the same `set`, at the same place.
    2026-11-04, owner C3 (GO4): a set's entries at the place of its first page in R5's global order, each by its own
    place, where this note said contiguous in walk order (S3, at the group's least scheduled start).  Why: R5 orders
    each cable's list by MSCCLang §5.2 step 3, and "Scheduled start times do not order the lists".  What must stay: a
@@ -417,10 +423,13 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    store-and-forward waits (a forward released by its receive's landing, a source's send by its supplied word: GO1),
    the order is a topological order of them, and every lag points forward, so in that order the cables' sequences
    cannot wait on each other in a cycle (R5; MSCCLang, section 5.2: "all implicit dependencies introduced by thread
-   block sequential execution cannot produce cycles"; mesh-collective.c plan_schedule).  The bridge draws each
-   execution's permutation of a set's members over the set's places on each cable (design/aot-compilation-change-
-   request.md, appendix item 5); the documents state no argument for the sequences it makes
-   (design/compilation-coordination.md, "The revisions of 67ca86f8", stop 3).  The list schedule is still computed and
+   block sequential execution cannot produce cycles"; mesh-collective.c plan_schedule).  The bridge draws one
+   permutation of a set's every position on a pair each execution, and each cable carries the members the deal gave it
+   in its order (design/aot-compilation-change-request.md, appendix item 5).  The item's argument for the sequences it
+   makes ("each cable's sequence is the same renaming of them.  So MSCCLang §5.2's argument against cycles holds")
+   holds where one cable carries every position of the set on each pair of its tree, and is not shown where the deal
+   splits a set's positions over a pair's cables (design/compilation-coordination.md, "The revisions of 46ae8fdf",
+   stop 3; "The revisions of 67ca86f8", stop 3, before it).  The list schedule is still computed and
    orders no list (R5: "Scheduled start times do not order the lists"; GO5; "The revisions of 67ca86f8", stop 2).  How
    a pair's sequence is spread over what its devices give it is the bridge's own (R5, R7).
    2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): every entry at its own place,

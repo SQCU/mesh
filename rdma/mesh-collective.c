@@ -953,11 +953,14 @@ static int plan_entry_order(const void *a,const void *b){
      receive's landing, a source's send by its production: GO1), so in that order the cables' sequences cannot wait on
      each other in a cycle (MSCCLang §5.2: "By assigning instructions to thread blocks in a topological order that
      respects communication and processing edges, all implicit dependencies introduced by thread block sequential
-     execution cannot produce cycles").  Each execution's permutation of a set's members over its places, drawn on each
-     cable (design/aot-compilation-change-request.md, appendix item 5: "each execution of a set on a cable is sent and
-     received in a uniformly random permutation of its pages"), changes which page each of those places carries; the
-     documents state no argument for the permuted sequences, and none is made here (design/compilation-coordination.md,
-     "The revisions of 67ca86f8", stop 3).
+     execution cannot produce cycles").  Each execution's one permutation of a set's every position on a pair, each
+     cable carrying its own members in its order (design/aot-compilation-change-request.md, appendix item 5: "Every
+     edge and every cable of the set's tree carries its share of the set's pages in that one permutation's order";
+     mesh-flow.c), changes which page each of those places carries.  The item's argument for the permuted sequences,
+     "each cable's sequence is the same renaming of them", holds where one cable carries every position of the set on
+     each pair of its tree, and is not shown where the deal splits a set's positions over a pair's cables
+     (design/compilation-coordination.md, "The revisions of 46ae8fdf", stop 3; 2026-11-05: this said the documents
+     state no argument, "The revisions of 67ca86f8", stop 3).
    2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): reversing GO4's groups, a set's
    entries on one node pair and direction at consecutive places at the place of its first page (its least place,
    found in one pass over the entries' rows by node and direction, mesh_graph_rows), the entries sorted by their

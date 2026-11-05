@@ -148,9 +148,14 @@
    same order, and every copy's is the same.  The global order is a topological order of the instructions, whose
    dependencies are the bridge's store-and-forward waits; with every lag pointing forward, the cables' sequences in
    that order cannot wait on each other in a cycle (R5; MSCCLang §5.2: "all implicit dependencies introduced by thread
-   block sequential execution cannot produce cycles").  The bridge draws each execution's permutation of a set's
-   members over their places on each cable (appendix item 5; mesh-flow.c), spreads a node pair's sequence as its own
-   (R5), and sees a set or a sequence and no kind (R4).
+   block sequential execution cannot produce cycles").  The bridge draws one permutation of a set's every position on
+   a pair each execution, each cable carrying its own members in that order (appendix item 5; mesh-flow.c), spreads a
+   node pair's sequence as its own (R5), and sees a set or a sequence and no kind (R4).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", OP): one permutation of the whole set
+   per execution, where each cable drew its members' own (S7′).  Item 5's argument for the permuted sequences ("each
+   cable's sequence is the same renaming of them") holds where one cable carries every position of the set on each
+   pair of its tree, and is not shown where the deal splits a set's positions over a pair's cables ("The revisions of
+   46ae8fdf", stop 3).  What must stay: as above.
    2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): reversing GO4's groups (a set's
    entries on one node pair and direction at consecutive places at its first page's place, each copy's entries sorted
    by their group's least place, then their own) and the argument that the groups in that order were a topological
