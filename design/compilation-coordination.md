@@ -369,6 +369,34 @@ file, calls streams_cancel).
   lifecycle file this unit may not change) reads them as its one client holder, so it now finds none; open for the
   operator.
 
+### Amendments during the work (2026-11-04), each the coordinator's ruling on an implementer's finding
+
+- **Q3'** (B2's finding 1: map_serial is each node's own count of its map's changes, so two nodes on one map hold
+  different serials): no receiver compares a SUBMIT's or ORDER's `serial` (the sender's map_serial, for the record).
+  Where a node's own map_serial moves, its parent drops every pending ORDER and, at the sequencer, `seqnum` returns to
+  0: D.3.6 cancels every plan standing there at that move, so no pending order of it is served.
+- **Q4'** (B2's finding 2, a release before the ports had loaded the plan): the next head is delivered only where the
+  previously released plan no longer stands here, or every port whose peer a hop of it names has refused it or holds
+  it with `served[p]` >= its `released` (the start's own port set, one copy). A head held for its plan to stand here is
+  held at most MESH_PLATFORM_NS from its arrival (the rules' bounded wait), then delivered with nothing released. A port
+  wakes `plans` (without raising it) after raising `served[p]`, and raises `served[p]` to `released` for a plan cancelled
+  or ended, before clearing its `held` bit.
+- **Q3-tree:** the tree hop toward a neighbour is the first port in port order whose cable this node's record lists
+  (fixed for a serial, so each hop keeps message order); an ORDER is taken only from the tree parent; a SUBMIT with
+  end <= first is dropped; the pending list's head stands for Défago's `nextdeliver`.
+- **T1'** (C's finding 1): an edge into a MESH_PAGES consumption enters each of its page tasks (each page's task is the
+  function's work on that page, after its local predecessors). Local edges (P -> S, lag-0 dependences) cost 0: Sinnen
+  and Sousa's classic model, local communication free (Definition 2), kept by the contention model (Definition 8, (15)).
+- **G-1** (G's report): processor[] values are labels (no count is passed); a local edge with a route, and a time that
+  is not finite, are EINVAL; shared communications copy the first entry's times, sound for T4's common prefixes.
+- **C-gen:** a claim's generation is atomic_fetch_add(&serial, 1) + 1, unmasked (a 64-bit word, never 0).
+- **C9 rulings:** mesh-collective.c plan_path_step (a visit of mesh_graph_climb recording the edges it visits, as
+  plan_tree_up does) stays; mesh-records.c island_set takes a node's children by mesh_graph_rows over the parent array,
+  and its greatest-id pick (Garcia-Molina's rule) stays; order_relay (forwarding) stays.
+- **E-1** (E's report): e2b's IR builder `e2b_ir(..., E2BPlacement placement, E2BWeighting weighting, ...)` takes the
+  placement and weighting functions as parameters; main passes e2b_placement (the manifest's routes as they are) and
+  e2b_unit_weights. Which stage each rank runs stays the manifest's (prepare_e2b.py's hand partition), read by main.
+
 ### The provisional operand values (recorded as provisional, not as choosers)
 
 - **P1. Placement, e2b:** its existing hand partition (tools/prepare_e2b.py's ranks, as the manifest gives them), read
