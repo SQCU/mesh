@@ -255,12 +255,15 @@ static void link_heard(struct port *port,const struct message *heard){
    messages travel on the bridges' existing control sockets, as new message kinds in mesh-ports.c's handlers"; Q2 and
    Q3): a SUBMIT and an ORDER, the island's fixed sequencer's messages (X. Defago, A. Schiper and P. Urban, ACM Comput.
    Surv. 36(4) 2004, section 7.1, Fig. 5, UB), are taken by mesh-records.c order_heard.  What must stay: a kind not
-   known let be */
+   known let be.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PB): an ARRIVE, a node's arrival at a
+   plan's barrier (mesh-bridge.h struct mesh_arrival; design/aot-compilation-change-request.md A7, "A plan's
+   destinations exist before its first message"), is taken there too.  What must stay: as above */
 static void message_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(heard->kind==RECORD)record_heard(port,payload,heard->bytes);
   else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);}
   else if(heard->kind==LINK)link_heard(port,heard);
-  else if(heard->kind==SUBMIT || heard->kind==ORDER)order_heard(port,heard,payload);
+  else if(heard->kind==SUBMIT || heard->kind==ORDER || heard->kind==ARRIVE)order_heard(port,heard,payload);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:832-856 port_heard, the budget both ends' smaller (MIN, 76be3217; bd85613e), main's struct mesh_link_info (abeffc1b 4bb01da0 3f72cbde 0905738c; first 6b33cc33) */
 /* a message heard on a port's control socket: before its peer's hello, that hello alone (any other let be); the hello

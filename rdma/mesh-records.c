@@ -114,6 +114,10 @@ void map_adopt(void){
      notification, on this thread (region_adopt's, main's before the event loop).  What must stay: the call after the
      serial's move and its closing notification */
   if(moved)plan_stale();
+  /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ2): hdr `delivered` stored 0 at the
+     bridge's start, where this bridge's nextdeliver is 1 (Défago et al., Fig. 5, "Initialization: nextdeliver := 1"),
+     so a port reads no count an earlier bridge left.  What must stay: before the event loop */
+  atomic_store_explicit(&M->delivered,0,memory_order_release);
   /* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q3 and Q4): where the serial moved, the
      island, its sequencer and its tree are this map's (island_set), the sequencer's number starts again and the
      pending ORDERs of the old serial are dropped (2026-11-04, the coordinator's ruling on review V1's finding 4: kept,
@@ -236,8 +240,30 @@ static struct island { uint32_t self,sequencer,parent,up,down[MESH_PORTS],downs;
    never set back (island_set's reset gone).  Why: design/aot-compilation-change-request.md, appendix item 2: "remove
    the coordination's Q3′: the sequencer's number never goes back to 0", the operator: "fictional problem + nobody
    asked + no citation + no algorithm + no explanation + idiomatic."  What must stay: the number only rising, Fig. 5's
-   "seqnum := seqnum + 1" */
-static uint64_t seqnum;
+   "seqnum := seqnum + 1".
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ1): from 1 at the bridge's start, one
+   number a message, where it was from 0, one an execution (a SUBMIT of [first, end) taking end - first numbers).  Why:
+   design/aot-compilation-change-request.md A7: "The algorithm is their Fig. 5, the "UB" variant of §7.1, as written";
+   "Sequencer: "Initialization: seqnum := 1"; "when receive (m): sn(m) := seqnum; send (m, sn(m)) to all; seqnum :=
+   seqnum + 1""; "m is one submission ... One submission is one message however many executions it carries".  What
+   must stay: the number only rising, never set back */
+static uint64_t seqnum=1;
+/* Défago et al., Fig. 5, the destinations' "nextdeliver" (2026-11-05, "The revisions of abecd389", SQ2): the number of
+   the message this node delivers next, from 1 at the bridge's start ("Initialization: nextdeliver := 1"), one more at
+   each message delivered or, for a message whose Dest(m) lacks this node, discarded (§5.2.4: "3. processes not in
+   Dest(m) discard m"), never set back; hdr `delivered` is nextdeliver - 1, for the ports (orders_deliver).  Why: A7,
+   "Destinations: "Initialization: nextdeliver := 1; pending := ∅"; "when receive (m, seqnum): pending := pending ∪
+   {(m, seqnum)}; while ∃(m′, seqnum′) ∈ pending : seqnum′ = nextdeliver do deliver (m′); nextdeliver := nextdeliver +
+   1""; the super-group "is the island's nodes.  One sequence numbers every message and every node delivers in its
+   order".  What must stay: one more for every message, delivered or discarded */
+static uint64_t nextdeliver=1;
+/* the arrivals this node has heard as the program's sender of a plan (mesh-bridge.h struct mesh_arrival), not yet
+   counted into a plan standing here (arrivals_apply), `arrivals_held` of them in room for `arrivals_room`; let go at
+   this node's map move (island_set), each node telling its standing plans again on each liveness turn
+   (orders_announce).  2026-11-05 ("The revisions of abecd389", PB): new (A7, "A plan's destinations exist before its
+   first message") */
+static struct mesh_arrival *arrivals;
+static size_t arrivals_held,arrivals_room;
 /* Defago et al., Fig. 5, the destination's `pending`: the ORDERs this node has received and not delivered, in arrival
    order, which is sequence order (design/compilation-coordination.md, Q3, Q3-tree and DL2), `pendings` of them in room
    for `pending_room`.
@@ -315,8 +341,14 @@ static uint32_t island_parent(const void *context,size_t k){
    serial move (2026-11-05, SN: no longer; `seqnum` is never set back).
    2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): Q4''s bound is gone, so no bound covers a
    head that never matches: it stays at the head (Defago et al., Fig. 5: delivery in sequence-number order, no timeout
-   and no skip; design/aot-compilation-change-request.md, appendix items 2 and 3).  What must stay: as above */
+   and no skip; design/aot-compilation-change-request.md, appendix items 2 and 3).  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PB): the arrivals held and not yet
+   counted are let go here, at this node's map move, which cancels every plan standing here (D.3.6), and the nodes tell
+   their standing plans again on their liveness turns (orders_announce); the pending ORDERs and `nextdeliver` are kept
+   (appendix item 2: "no node drops a pending order when its map changes").  What must stay: no reset of `seqnum`, of
+   `nextdeliver` or of the pending ORDERs */
 static void island_set(void){
+  arrivals_held=0;
   island=(struct island){.self=UINT32_MAX,.sequencer=UINT32_MAX,.up=MESH_PORTS};
   const uint64_t n=atomic_load(&M->map_nodes);
   struct mesh_record *r=mesh_records(M);
@@ -362,9 +394,16 @@ static void island_set(void){
    executions' never-written words; under DL2′ the head stays there.  What must stay: as above.
    2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): a dropped ORDER's executions never
    enter the deliveries' channel here, and a lane that meets the plan's next delivery takes nothing past the gap
-   (mesh-flow.c lane_take), where the parent's head stayed at it.  What must stay: as above */
+   (mesh-flow.c lane_take), where the parent's head stayed at it.  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ2): every ORDER is held, this node's
+   or not, where one whose `nodes` lacked this node's map index was not: delivery compares the sequence numbers
+   (orders_deliver), so this node's nextdeliver passes every message's number, discarding those not its own.  Why:
+   design/aot-compilation-change-request.md A7, "Multicast to many groups is their §5.2.4, as written: "1. form a
+   super-group with the union of all destination groups; 2. whenever a message m is multicast to a group, multicast it
+   to the super-group, and 3. processes not in Dest(m) discard m."  The super-group is the island's nodes."  What must
+   stay: the ORDER appended in arrival order */
 static void order_take(const struct mesh_order *order){
-  if(island.self>=64 || !(order->nodes>>island.self&1))return;
+  if(island.self==UINT32_MAX)return;
   if(pendings==pending_room){
     const size_t room=2*pending_room+1;
     struct pending *grown=realloc(pending,room*sizeof *grown);
@@ -405,12 +444,55 @@ static void order_relay(const struct mesh_order *order){
 }
 /* Defago et al., Fig. 5, the sequencer: "when receive (m): sn(m) := seqnum; send (m, sn(m)) to all; seqnum := seqnum +
    1".  A submission of end - first executions reaches it at once, so they take end - first consecutive numbers, first
-   in, first out (Pathways, section 4.4; design/compilation-coordination.md, Q3) */
+   in, first out (Pathways, section 4.4; design/compilation-coordination.md, Q3).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ1): one number a submission, sn(m)
+   := seqnum, then seqnum + 1, where a submission took one number an execution.  Why: A7, "m is one submission ... One
+   submission is one message however many executions it carries, as Pathways sends "a single message (describing the
+   entire subgraph)" (§4.5)"; Fig. 5 "as written".  What must stay: first in, first out */
 static void order_sequence(const struct mesh_order *submission){
   struct mesh_order order=*submission;
-  order.sequence=seqnum;
-  seqnum+=order.end-order.first;
+  order.sequence=seqnum++;
   order_relay(&order);
+}
+/* The barrier's arrivals (design/aot-compilation-change-request.md A7, "A plan's destinations exist before its first
+   message": "The program's sender counts the plan's nodes as each holds the plan, as a centralized barrier counts
+   arrivals: "each processor updates a small amount of shared state to indicate its arrival and then polls that state
+   to determine when all of the processors have arrived" (J. M. Mellor-Crummey and M. L. Scott, Algorithms for scalable
+   synchronization on shared-memory multiprocessors, ACM TOCS 9(1), 1991, §3.1).  It TO-broadcasts no submission of the
+   plan before every node of the plan has arrived"; design/compilation-coordination.md, "The revisions of abecd389",
+   PB).  The shared state is the sender's plan's `arrived` (mesh.h struct mesh_state), which its bridge parent alone
+   writes, so an arrival travels to it as a message: up the island's tree, as a SUBMIT goes (Q3), to the sender where
+   the path meets it, else to the sequencer, and from there down the tree to every node, as an ORDER goes, kept at the
+   node it names as the sender.  arrival_take holds it there; arrivals_apply counts it into the plan once it stands. */
+static void arrival_take(const struct mesh_arrival *a){
+  if(arrivals_held==arrivals_room){
+    const size_t room=2*arrivals_room+1;
+    struct mesh_arrival *grown=realloc(arrivals,room*sizeof *grown);
+    if(!grown){
+      mesh_say("bridge","an arrival at plan (%llu, %llu) of node %u not held (ENOMEM): it is told again on its next liveness "
+               "turn",(unsigned long long)a->group,(unsigned long long)a->epoch,a->node);
+      return;
+    }
+    arrivals=grown;arrivals_room=room;
+  }
+  arrivals[arrivals_held++]=*a;
+}
+static void arrival_down(const struct mesh_arrival *a){
+  for(uint32_t k=0;k<island.downs;k++){
+    struct port *down=ports+island.down[k];
+    if(down->greeted)port_say(down,(struct message){.kind=ARRIVE},a,sizeof *a);
+  }
+  if(a->sender==M->node)arrival_take(a);
+}
+/* 1 where the arrival was taken here, relayed down from here or queued on the port toward the parent, that port
+   greeted before and after (as order_submit's), else 0 */
+static int arrival_up(const struct mesh_arrival *a){
+  if(a->sender==M->node){arrival_take(a);return 1;}
+  if(island.self==UINT32_MAX)return 0;
+  if(island.self==island.sequencer){arrival_down(a);return 1;}
+  if(island.up>=MESH_PORTS || !ports[island.up].greeted)return 0;
+  port_say(ports+island.up,(struct message){.kind=ARRIVE},a,sizeof *a);
+  return ports[island.up].greeted;
 }
 /* Defago et al., Fig. 5, the sender's "send (m) to sequencer", over the island's tree: at the sequencer it is numbered
    here, elsewhere it goes to this node's parent (design/compilation-coordination.md, Q3: "a SUBMIT up to the parent").
@@ -438,8 +520,21 @@ static int order_submit(const struct mesh_order *order){
    node is dropped (design/compilation-coordination.md, Q3-tree).  A payload that is not one struct mesh_order is let
    be.  2026-11-04, owner B2, the coordinator's ruling Q3' (order_submit's note): an ORDER's `serial` is compared no
    more.  2026-11-04, the ruling on review V1's finding 7: a SUBMIT heard and not passed on (order_submit 0) is said on
-   the bridge's log */
+   the bridge's log.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PB): an ARRIVE from this node's parent
+   goes down (arrival_down), any other up (arrival_up), a payload not one struct mesh_arrival let be.  What must stay:
+   as above */
 void order_heard(struct port *from,const struct message *heard,const unsigned char *payload){
+  if(heard->kind==ARRIVE){
+    struct mesh_arrival a;
+    if(heard->bytes!=sizeof a)return;
+    memcpy(&a,payload,sizeof a);
+    if(island.parent && from->peer==island.parent)arrival_down(&a);
+    else if(!arrival_up(&a))
+      mesh_say("bridge","link %u (%s): an arrival at plan (%llu, %llu) of node %u not passed on toward its sender %u",
+               from->index,from->name,(unsigned long long)a.group,(unsigned long long)a.epoch,a.node,a.sender);
+    return;
+  }
   struct mesh_order order;
   if(heard->bytes!=sizeof order)return;
   memcpy(&order,payload,sizeof order);
@@ -462,21 +557,137 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
    the parent; otherwise it stays, and the next turn sends the same submission (no transfer failed: none was sent),
    said on the bridge's log once until a submission is sent (`unsent`).  What must stay: `submitted` the executions
    sent, never more */
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS and PB), reversing the turn above
+   (each plan whose `sender` was this node submitted [submitted, executions) as the heads' walk met it): this node TO-
+   broadcasts the submissions of each program it is the sender of (struct mesh_state `sender`, the least of the
+   program's nodes) in the order the program made them, one message a submission, each only once its plan's barrier
+   holds every node of the plan:
+   - the program's submissions are its plans' submissions' queues (mesh.h struct mesh_submission: each start's end and
+     the program's Lamport clock), each plan's in its own order, so the program's order is a multiway merge of them on
+     the clock (D. E. Knuth, The Art of Computer Programming vol. 3, §5.4.1: of the first untaken entries, the least
+     first), as appendix item 2 merges a node's plans' delivered calls on the sequence number;
+   - the queues are read in Lamport's opposite order (L. Lamport, Concurrent reading and writing, CACM 20(11), 1977:
+     "writing data elements in one order and reading them in the opposite order"): every plan's `submissions` read
+     (acquire), then each again with its first untaken entry; the program wrote its entries in clock order, each
+     before its `submissions` (release), so an entry acquired in the first reading has every earlier one of the program
+     visible to the second, and where the first reading acquired one of the program the least of the second is the
+     program's next; where it acquired none, nothing of the program is taken this turn;
+   - that entry's plan's barrier (`arrived` holding `nodes`, arrivals_apply) not complete, the program's later
+     submissions wait behind it, the head staying for a later turn (A7: "It TO-broadcasts no submission of the plan
+     before every node of the plan has arrived"; FIFO Order, Défago, Schiper and Urbán §4.3.1, over the program's one
+     sender), nobody blocking;
+   - else the message m = (the plan's name, this node's map serial, [`submitted`, the entry's `end`), `nodes`, `sender`)
+     is sent toward the sequencer (order_submit: "procedure TO-broadcast(m): send (m) to sequencer"), then `submitted`
+     the entry's end and `broadcast` one more (this bridge their one writer); one not sent stays, said once until a
+     message is sent (`unsent`).
+   Only plans standing here on this node's map serial are read (a cancelled plan's submissions go nowhere: D.3.6).
+   Why: design/aot-compilation-change-request.md A7: "sender(m) is the program's one sender ... It TO-broadcasts the
+   program's submissions in the order the program makes them"; "With one sender, whose messages reach the sequencer
+   first in, first out, Fig. 5's sequencer numbers them in the order they were sent ... So FIFO Order holds, and with
+   it A10's order constraints between the program's calls"; "A plan's destinations exist before its first message".
+   What must stay: `submitted` the executions sent, never more; nothing sent twice that was sent once */
 static int unsent;
-static void orders_submit(void){
+/* the plan standing here named (group, epoch) on this node's map serial, NULL where none: the claims' heads walked
+   (mesh-dataflow.h mesh_head_after, mesh_head_state), at most one such plan standing (mesh_plan's EEXIST) */
+static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
+  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
   for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
     struct mesh_state *state=mesh_head_state(M,head);
-    if(!state || state->sender!=island.self)continue;
-    const uint64_t executions=atomic_load_explicit(&state->executions,memory_order_acquire);
-    if(executions<=state->submitted)continue;
-    const struct mesh_order order={.group=state->group,.epoch=state->epoch,.serial=atomic_load(&M->map_serial),.first=state->submitted,
-                                   .end=executions,.nodes=state->nodes,.sender=state->sender};
-    if(order_submit(&order)){state->submitted=executions;unsent=0;continue;}
-    if(!unsent)
-      mesh_say("bridge","a SUBMIT of plan (%llu, %llu), executions [%llu, %llu), not sent: no greeted port toward the "
-               "island's sequencer (sent on a later turn)",(unsigned long long)order.group,(unsigned long long)order.epoch,
-               (unsigned long long)order.first,(unsigned long long)order.end);
-    unsent=1;
+    if(state && state->group==group && state->epoch==epoch && state->serial==serial)return state;
+  }
+  return NULL;
+}
+/* whether a plan's queues lie inside the region, as plan_inside (mesh-flow.c) judges its entries: a store outside it
+   would be a fault, not an error value */
+static int queues_inside(const struct mesh_state *s){
+  return s->room && s->outstanding && s->deliveries<=M->length &&
+    s->room<=(M->length-s->deliveries)/sizeof(struct mesh_delivery) && s->submits<=M->length &&
+    s->outstanding<=(M->length-s->submits)/sizeof(struct mesh_submission);
+}
+/* this node's map index of node id `node` (its place in ascending node-id order among the map's records, mesh.h
+   `map_serial`), UINT32_MAX where the map holds none */
+static uint32_t map_index_of(uint32_t node){
+  const uint64_t n=atomic_load(&M->map_nodes);
+  const struct mesh_record *r=mesh_records(M);
+  for(uint64_t k=0;k<n;k++)if(r[k].node==node)return (uint32_t)k;
+  return UINT32_MAX;
+}
+/* each arrival held counted into its plan where that plan stands here with this node its sender, its node's map index
+   set in `arrived` (A7: "each processor updates a small amount of shared state to indicate its arrival"), and let go;
+   one whose plan does not stand here yet is held */
+static void arrivals_apply(void){
+  for(size_t k=0;k<arrivals_held;){
+    struct mesh_state *s=plan_here(arrivals[k].group,arrivals[k].epoch);
+    const uint32_t at=map_index_of(arrivals[k].node);
+    if(!s || s->sender!=island.self){k++;continue;}
+    if(at<64)s->arrived|=UINT64_C(1)<<at;
+    arrivals[k]=arrivals[--arrivals_held];
+  }
+}
+/* this node's arrival at each plan standing here on its map serial, told to the plan's sender (arrival_up) once the
+   plan stands, `announced` 1 once it went, and again on every liveness turn, as record_retell tells this node's record
+   again (the tag's: "told again at its current sequence on every greeted port, each liveness turn"), since the sender
+   lets go of the arrivals it holds at its map move (island_set) and an arrival lost on the way is told again */
+static void orders_announce(int liveness){
+  const uint64_t n=atomic_load(&M->map_nodes),serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
+  const struct mesh_record *r=mesh_records(M);
+  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
+    struct mesh_state *state=mesh_head_state(M,head);
+    if(!state || state->serial!=serial || (state->announced && !liveness) || state->sender>=n)continue;
+    const struct mesh_arrival a={.group=state->group,.epoch=state->epoch,.node=M->node,.sender=r[state->sender].node};
+    if(arrival_up(&a))state->announced=1;
+  }
+}
+struct program_head { struct mesh_state *state; uint64_t seen; };
+static void orders_submit(void){
+  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
+  for(int sent=1;sent;){
+    sent=0;
+    struct program_head *heads=NULL;
+    size_t count=0,room=0;
+    for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
+      struct mesh_state *state=mesh_head_state(M,head);
+      if(!state || state->sender!=island.self || state->serial!=serial || !queues_inside(state))continue;
+      if(count==room){
+        struct program_head *grown=realloc(heads,(2*room+1)*sizeof *grown);
+        if(!grown){free(heads);mesh_say("bridge","the programs' submissions not read (ENOMEM): read on a later turn");return;}
+        heads=grown;room=2*room+1;
+      }
+      heads[count++]=(struct program_head){state,atomic_load_explicit(&state->submissions,memory_order_acquire)};
+    }
+    for(size_t i=0;i<count;i++){
+      if(!heads[i].state)continue;
+      const uint64_t group=heads[i].state->group;
+      int acquired=0;
+      struct mesh_state *least=NULL;
+      struct mesh_submission next={0};
+      for(size_t j=i;j<count;j++){
+        struct mesh_state *s=heads[j].state;
+        if(!s || s->group!=group)continue;
+        heads[j].state=NULL;
+        acquired|=heads[j].seen>s->broadcast;
+        if(atomic_load_explicit(&s->submissions,memory_order_acquire)<=s->broadcast)continue;
+        const struct mesh_submission e=((const struct mesh_submission *)(const void *)((const char *)M+s->submits))
+          [s->broadcast%s->outstanding];
+        if(!least || e.clock<next.clock){least=s;next=e;}
+      }
+      if(!acquired || !least || (least->arrived&least->nodes)!=least->nodes)continue;
+      if(next.end>least->submitted){
+        const struct mesh_order order={.group=least->group,.epoch=least->epoch,.serial=serial,.first=least->submitted,
+                                       .end=next.end,.nodes=least->nodes,.sender=least->sender};
+        if(!order_submit(&order)){
+          if(!unsent)
+            mesh_say("bridge","a SUBMIT of plan (%llu, %llu), executions [%llu, %llu), not sent: no greeted port toward the "
+                     "island's sequencer (sent on a later turn)",(unsigned long long)order.group,
+                     (unsigned long long)order.epoch,(unsigned long long)order.first,(unsigned long long)order.end);
+          unsent=1;
+          continue;
+        }
+        least->submitted=next.end;unsent=0;
+      }
+      least->broadcast++;sent=1;
+    }
+    free(heads);
   }
 }
 /* 2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL2 and DL4:
@@ -623,19 +834,52 @@ static void orders_submit(void){
    plan the room cannot hold fails with `ENOMEM` when it is planned"), is not built ("The revisions of f3f7cf46", stop
    1).  What must stay: delivery from the head alone, in arrival order (sequence order), with no timeout and no skip;
    the entry's stores before `delivered`'s */
-static void orders_deliver(void){
-  const uint64_t room=M->deliveries_room;
-  struct mesh_delivery *channel=(struct mesh_delivery *)(void *)((char *)M+M->deliveries_off);
-  int delivered=0;
-  while(pendings && room){
-    const uint64_t k=atomic_load_explicit(&M->delivered,memory_order_relaxed);
-    const struct mesh_order *order=&pending->order;
-    channel[k%room]=(struct mesh_delivery){.group=order->group,.epoch=order->epoch,.first=order->first,.end=order->end};
-    atomic_store_explicit(&M->delivered,k+1,memory_order_release);
-    memmove(pending,pending+1,--pendings*sizeof *pending);
-    delivered=1;
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ2 and PQ), reversing CH's delivery
+   above (the head of the pending list, standing for nextdeliver, its sequence not compared, appended to the one
+   channel for every plan): Fig. 5's destinations' code as written, "while ∃(m′, seqnum′) ∈ pending : seqnum′ =
+   nextdeliver do deliver (m′); nextdeliver := nextdeliver + 1", each message's `sequence` compared with `nextdeliver`,
+   wherever it sits in `pending`.  deliver(m′) at a node of Dest(m′) (its `nodes` holding this node's map index) is
+   its entry appended to its plan's queue here (A7: "deliver(m) at a node of Dest(m) appends m to its plan's queue
+   there (appendix item 2)"): entry k mod `room` of the plan standing here of its name on this node's map serial, its
+   sequence number and executions [`first`, `end`), then the plan's `delivered` k + 1 (release), nothing read before
+   the write and nothing checked of the room (item 2: "Nothing waits to write, and nothing checks for a full queue");
+   at a node outside Dest(m′) it is discarded (§5.2.4, step 3).  A message whose plan does not stand here, or whose
+   queues lie outside the region, has nowhere to go: discarded, said on the log (its plan's barrier makes it stand
+   here before its first message: A7).  After a turn that delivered: hdr `plans` raised and woken (mesh.h mesh_notify),
+   then hdr `delivered` stored nextdeliver - 1 (release), then `plans` raised and woken again.  The first raise orders
+   every plan standing here before any number a port acquires from `delivered` (a plan stands, then its arrival goes,
+   then its messages come: a port that acquires `delivered` reads `plans` moved and walks the heads before it merges:
+   mesh-flow.c lane_take); the second wakes a port that read the first and passed before `delivered`'s store.  Why:
+   A7, "The algorithm is their Fig. 5 ... as written"; appendix item 2, "Each plan's delivered calls reach the bridge
+   at a node through a queue of the plan's own"; "Fig. 5 delivers in sequence-number order (its `nextdeliver`), so every
+   entry below the node's delivery count is in its queue already, and no smaller one comes later".  What must stay:
+   delivery in sequence-number order, with no timeout and no skip; the entries' stores before `delivered`'s */
+static void order_deliver(const struct mesh_order *m){
+  struct mesh_state *state=plan_here(m->group,m->epoch);
+  if(!state || !queues_inside(state)){
+    mesh_say("bridge","the message numbered %llu, plan (%llu, %llu) executions [%llu, %llu), discarded: no plan of its name "
+             "stands here with its queue in the region",(unsigned long long)m->sequence,(unsigned long long)m->group,
+             (unsigned long long)m->epoch,(unsigned long long)m->first,(unsigned long long)m->end);
+    return;
   }
-  if(delivered)mesh_notify(&M->plans);
+  const uint64_t k=atomic_load_explicit(&state->delivered,memory_order_relaxed);
+  ((struct mesh_delivery *)(void *)((char *)M+state->deliveries))[k%state->room]=
+    (struct mesh_delivery){.sequence=m->sequence,.first=m->first,.end=m->end};
+  atomic_store_explicit(&state->delivered,k+1,memory_order_release);
+}
+static void orders_deliver(void){
+  int delivered=0;
+  for(size_t i=0;i<pendings;){
+    if(pending[i].order.sequence!=nextdeliver){i++;continue;}
+    const struct mesh_order m=pending[i].order;
+    memmove(pending+i,pending+i+1,(--pendings-i)*sizeof *pending);
+    if(island.self<64 && m.nodes>>island.self&1)order_deliver(&m);
+    nextdeliver++;delivered=1;i=0;
+  }
+  if(!delivered)return;
+  mesh_notify(&M->plans);
+  atomic_store_explicit(&M->delivered,nextdeliver-1,memory_order_release);
+  mesh_notify(&M->plans);
 }
 /* 2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): orders_due (the pending head's bound, its
    arrival + MESH_PLATFORM_NS, which mesh-link.c turn_due waited for) is removed with the bound and its declaration
@@ -784,6 +1028,8 @@ void clients_turn(int liveness){
     if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH)mesh_retire(M,owner);
     else busy=1;
   }
+  orders_announce(liveness);
+  arrivals_apply();
   orders_submit();
   orders_deliver();
   const uint64_t plans=atomic_load_explicit(&M->plans,memory_order_acquire);
