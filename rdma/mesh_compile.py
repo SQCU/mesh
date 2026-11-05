@@ -75,14 +75,17 @@ class IR:
     # each device of `destinations`, a declared transfer each, of one identity.  MESH_JOIN: each range is released whole
     # by one mesh_host_publish, so its consumer takes it whole (design/compilation-coordination.md, A-T8;
     # design/plan-to-bridge-change-request.md R4).  This node's value of it (MESH_EXECUTION, wire) where it is its
-    # source or a destination.  Each destination's declared transfer's index
+    # source or a destination, its layout the element type, the shape and the device of `node`'s tensors (the copies'
+    # tensors are bound on that device, design/compilation-coordination.md, K1).  Each destination's declared transfer's
+    # index
     def transfer(self, node, shape, source, destinations):
-        dtype, value, transfers = _value(node).dtype, mesh.ABSENT, {}
+        example, value, transfers = _value(node), mesh.ABSENT, {}
+        dtype = example.dtype
         size, ends = dtype.itemsize * math.prod(shape), [self.map[d] for d in [source] + destinations]
         if self.index in ends:
             value = len(self.values)
             self.values.append(mesh.Value(section=mesh.Section(bytes=size), kind=mesh.EXECUTION, wire=1))
-            self.layouts.append((dtype, shape))
+            self.layouts.append((dtype, shape, example.device.type))
         self.identity += 1
         for d in destinations:
             transfers[d] = len(self.declared)
@@ -92,8 +95,12 @@ class IR:
 
 
 # J. Ansel et al., PyTorch 2, ASPLOS 2024, sections 3.5 and 5.1: a node's fake tensor, "the metadata of a tensor without
-# its actual data", its sizes propagated by meta functions.  A1: shapes are compiled, so a symbolic size is refused;
-# A-T4: binding a tensor not on the CPU to the region's pages is open, so it is refused
+# its actual data", its sizes propagated by meta functions.  A1: shapes are compiled, so a symbolic size is refused.  A
+# tensor on the CPU or on torch's MPS device is bound to the placed pages (torch.frombuffer; torch.from_dlpack of a
+# kDLMetal tensor, design/compilation-coordination.md, K1); one on any other device is refused, naming it
+# 2026-11-04, owner T2 (K1; design/aot-compilation-change-request.md, appendix item 7): A-T4's refusal of a tensor not
+# on the CPU goes for MPS, whose tensors torch v2.14.0 builds over existing memory by DLPack (_metal_tensor).  What must
+# stay: the refusal of a device with no binding, and of a symbolic size
 def _value(node):
     value = node.meta.get('example_value')
     if not isinstance(value, torch.Tensor):
@@ -101,9 +108,9 @@ def _value(node):
     if not all(isinstance(size, int) for size in value.shape):
         raise ValueError('%s: symbolic sizes %s; A1 compiles shapes, so nothing at run time changes one'
                          % (node.name, tuple(value.shape)))
-    if value.device.type != 'cpu':
-        raise NotImplementedError('%s on %s: binding its tensors to the placed pages is open (A-T4: torch.frombuffer '
-                                  'over mesh_section_address wraps the CPU\'s alone)' % (node.name, value.device))
+    if value.device.type not in ('cpu', 'mps'):
+        raise NotImplementedError('%s on %s: no binding of its tensors to the placed pages (torch.frombuffer wraps the '
+                                  'CPU\'s, a kDLMetal DLPack tensor the MPS device\'s: K1)' % (node.name, value.device))
     return value
 
 
@@ -548,6 +555,163 @@ def _arrived(context, section, t):
             raise OSError(errno.ETIMEDOUT, 'execution %d of a received range: not arrived within MESH_PLATFORM_NS' % t)
 
 
+# DLPack as torch v2.14.0 bundles it (torch's include/ATen/dlpack.h, DLPACK_MAJOR_VERSION 1, DLPACK_MINOR_VERSION 3):
+# DLDevice, DLDataType, DLTensor, DLPackVersion and DLManagedTensorVersioned, each field in the header's order and of
+# its type (DLDeviceType an int32_t enum).  The versioned form, as the header directs: DLManagedTensor "is deprecated
+# after DLPack v0.8 Use DLManagedTensorVersioned instead"
+class DLDevice(C.Structure):
+    _fields_ = [('device_type', C.c_int32), ('device_id', C.c_int32)]
+
+
+class DLDataType(C.Structure):
+    _fields_ = [('code', C.c_uint8), ('bits', C.c_uint8), ('lanes', C.c_uint16)]
+
+
+class DLTensor(C.Structure):
+    _fields_ = [('data', C.c_void_p), ('device', DLDevice), ('ndim', C.c_int32), ('dtype', DLDataType),
+                ('shape', C.POINTER(C.c_int64)), ('strides', C.POINTER(C.c_int64)), ('byte_offset', C.c_uint64)]
+
+
+class DLPackVersion(C.Structure):
+    _fields_ = [('major', C.c_uint32), ('minor', C.c_uint32)]
+
+
+class DLManagedTensorVersioned(C.Structure):
+    pass
+
+
+DELETER = C.CFUNCTYPE(None, C.POINTER(DLManagedTensorVersioned))
+DLManagedTensorVersioned._fields_ = [('version', DLPackVersion), ('manager_ctx', C.c_void_p), ('deleter', DELETER),
+                                     ('flags', C.c_uint64), ('dl_tensor', DLTensor)]
+# dlpack.h DLDeviceType kDLMetal ("Metal for Apple GPU"), and DLDataTypeCode by torch dtype as torch v2.14.0's
+# aten/src/ATen/DLConvertor.cpp toScalarType takes each back (kDLInt 0, kDLUInt 1, kDLFloat 2, kDLBfloat 4, kDLComplex
+# 5, kDLBool 6; bits the element size x 8, as getDLDataType gives them; lanes 1).  The capsule's name for the versioned
+# form (include/ATen/DLConvertor.h DLPackTraits<DLManagedTensorVersioned> `capsule`), made by Python's PyCapsule_New
+METAL, VERSION, CAPSULE = 8, DLPackVersion(1, 3), b'dltensor_versioned'
+CODES = {torch.int8: 0, torch.int16: 0, torch.int32: 0, torch.int64: 0, torch.uint8: 1, torch.uint16: 1,
+         torch.uint32: 1, torch.uint64: 1, torch.float16: 2, torch.float32: 2, torch.float64: 2, torch.bfloat16: 4,
+         torch.complex32: 5, torch.complex64: 5, torch.complex128: 5, torch.bool: 6}
+CAPSULE_NEW = C.PYFUNCTYPE(C.py_object, C.c_void_p, C.c_char_p, C.c_void_p)(('PyCapsule_New', C.pythonapi))
+# the Objective-C runtime's objc_msgSend, called through a pointer of each method's own type (objc/message.h: "These
+# functions must be cast to an appropriate function pointer type before being called"): an object-returning method of
+# no argument (-device, MTLResource.h; -retain, NSObject), a void one (-release, NSObject), and
+# -[MTLDevice newBufferWithBytesNoCopy:length:options:deallocator:] (MTLDevice.h: "Create a buffer by wrapping an
+# existing part of the address space"; NSUInteger length and options, the deallocator a block, nil here)
+OBJC = C.CDLL('/usr/lib/libobjc.A.dylib')
+OBJC.sel_registerName.restype, OBJC.sel_registerName.argtypes = C.c_void_p, [C.c_char_p]
+SEND = C.cast(OBJC.objc_msgSend, C.c_void_p).value
+GET = C.CFUNCTYPE(C.c_void_p, C.c_void_p, C.c_void_p)(SEND)
+PUT = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p)(SEND)
+WRAP = C.CFUNCTYPE(C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_ulong, C.c_void_p)(SEND)
+SELECTOR = {name: OBJC.sel_registerName(name) for name in
+            (b'device', b'retain', b'release', b'newBufferWithBytesNoCopy:length:options:deallocator:')}
+# MTLResource.h MTLResourceStorageModeShared (MTLStorageModeShared 0 << MTLResourceStorageModeShift), the option
+# rdma/mesh-metal.m and metal-microbench tools/e2b_replay.m placed_buffer give theirs
+SHARED = 0
+# torch's MPS device's MTLDevice (DEVICE once read): the `device` of a buffer torch's MPS allocator made (MTLResource.h:
+# "The device this resource was created against.  This resource can only be used with this device"), the allocator's
+# being at::mps::MPSDevice::getInstance()->device() (torch v2.14.0 include/ATen/mps/MPSAllocator.h,
+# MPSHeapAllocatorImpl's `m_device`, on which it makes its heaps).  That buffer is an MPS tensor's storage data
+# (include/ATen/native/mps/OperationUtils.h getMTLBufferStorage: `__builtin_bit_cast(id<MTLBuffer>,
+# tensor.storage().data())`; its iter_tensor_offset: "MPS storage data is not the real GPU pointer, but rather a pointer
+# to id<MTLBuffer> object"), which torch.UntypedStorage.data_ptr returns (torch/csrc/StorageMethods.cpp
+# THPStorage_dataPtr: `self_.mutable_data()`).  ENODEV where it names none
+DEVICE = []
+
+
+def _metal_device():
+    if not DEVICE:
+        probe = torch.empty(1, device='mps')
+        device = GET(probe.untyped_storage().data_ptr(), SELECTOR[b'device'])
+        if not device:
+            raise OSError(errno.ENODEV, 'torch\'s MPS buffer names no MTLDevice (MTLResource.h `device`)')
+        DEVICE.append(device)
+    return DEVICE[0]
+
+
+# dlpack.h DLManagedTensorVersioned `deleter`: "This should be called to destruct manager_ctx which holds the
+# DLManagedTensorVersioned"; "The destructor deletes the argument self as well".  torch v2.14.0 calls it once the
+# tensor's storage is freed (aten/src/ATen/DLConvertor.cpp fromDLPackImpl, the deleter it gives at::from_blob): it
+# releases the tensor's reference to its buffer (-release) and lets go of the structure, its shape and its strides
+# (HELD, by the structure's address), once whoever calls it
+HELD = {}
+
+
+@DELETER
+def _delete(managed):
+    held = HELD.pop(C.addressof(managed.contents), None)
+    if held:
+        PUT(held[0].dl_tensor.data, SELECTOR[b'release'])
+
+
+# design/compilation-coordination.md, K1: a placed value's copies wrapped by one MTLBuffer with no copy, as
+# metal-microbench tools/e2b_replay.m placed_buffer wraps them: over [its lowest copy's first byte, its highest copy's
+# end), each copy `pages` pages of the region's page size (mesh-call.h struct mesh_section; mesh.h struct hdr `pgsz`),
+# so the buffer starts on a page and is whole pages long, as placed_buffer's and rdma/mesh-metal.m's are; on torch's
+# MPS device, shared storage, no deallocator (the pages are the region's).  ENOMEM where Metal makes none, as
+# mesh-metal.m's state buffer.  The buffer (one reference, the caller's) and each copy's byte offset in it
+def _placed_buffer(context, section, addresses):
+    low = min(addresses)
+    length = max(addresses) - low + section.pages * mesh.Header.from_address(context.M).pgsz
+    buffer = WRAP(_metal_device(), SELECTOR[b'newBufferWithBytesNoCopy:length:options:deallocator:'], low, length,
+                  SHARED, None)
+    if not buffer:
+        raise OSError(errno.ENOMEM, 'Metal made no buffer over a placed value\'s %d copies, %d bytes (MTLDevice.h '
+                                    'newBufferWithBytesNoCopy)' % (section.count, length))
+    return buffer, [address - low for address in addresses]
+
+
+# design/compilation-coordination.md, K1: a copy of a placed value as an MPS tensor over its pages, by torch's own
+# interface for a device tensor over existing memory, torch.from_dlpack of a DLPack capsule (torch/utils/dlpack.py:
+# "The returned PyTorch tensor will share the memory with the input tensor"), as torch v2.14.0 reads one
+# (aten/src/ATen/DLConvertor.cpp fromDLPackImpl): its device by dlDeviceToTorchDevice, kDLMetal to
+# `at::Device(DeviceType::MPS, index)`, the index 0 as torchDeviceToDLDevice gives every MPS device's (its device_id
+# that of a CUDA, PrivateUse1 or MTIA device alone, "0" else); `data` passed to at::from_blob unchanged, with the
+# strides and the storage offset toStorageOffset(byte_offset), a multiple of the element size.  `data` and
+# `byte_offset` as torch's own MPS export sets them (toDLPackImpl's MPS branch: `data` the storage's base, the
+# id<MTLBuffer>, and `byte_offset` "src.storage_offset() * c10::elementSize(src.scalar_type())"): the value's buffer
+# and the copy's offset in it.  The strides the shape's contiguous ones (dlpack.h: strides "can not be NULL if ndim !=
+# 0"; fromDLPackImpl's form without them requires byte_offset 0); the version the header's, which torch takes where
+# its major is at most DLPACK_MAJOR_VERSION (torch/csrc/utils/tensor_new.cpp tensor_fromDLPack); flags 0 ("By default
+# the flags should be set to 0").  The tensor holds its own reference to the buffer (-retain), which its deleter
+# releases; where torch makes no tensor, the deleter's work is done here, once whoever calls it
+def _metal_tensor(buffer, offset, dtype, shape):
+    if dtype not in CODES:
+        raise NotImplementedError('%s: no DLPack type code torch takes back (DLConvertor.cpp toScalarType)' % dtype)
+    n = len(shape)
+    sizes = (C.c_int64 * max(n, 1))(*shape)
+    strides = (C.c_int64 * max(n, 1))(*(math.prod(shape[i + 1:]) for i in range(n)))
+    managed = DLManagedTensorVersioned(VERSION, None, _delete, 0,
+                                       DLTensor(buffer, DLDevice(METAL, 0), n, DLDataType(CODES[dtype],
+                                                dtype.itemsize * 8, 1), sizes, strides, offset))
+    GET(buffer, SELECTOR[b'retain'])
+    HELD[C.addressof(managed)] = (managed, sizes, strides)
+    try:
+        return torch.from_dlpack(CAPSULE_NEW(C.addressof(managed), CAPSULE, None))
+    except BaseException:
+        _delete(C.pointer(managed))
+        raise
+
+
+# each copy of a placed value as a tensor of its layout over its pages (every address a constant of the plan,
+# design/disjoint-pages-change-request.md, C3.3): on the CPU by torch.frombuffer over mesh_section_address (A-T4); on
+# MPS by _metal_tensor over the value's _placed_buffer, whose own reference is released once each copy's tensor holds
+# its own (K1).  EFAULT where a copy's row has no page (mesh-call.h mesh_section_address)
+def _bind(context, section, dtype, shape, device):
+    addresses = [mesh.LIB.mesh_section_address(C.byref(context), section, c) for c in range(section.count)]
+    if not all(addresses):
+        raise OSError(errno.EFAULT, 'copy %d of a placed value has no page (mesh-call.h mesh_section_address)'
+                      % addresses.index(None))
+    if device == 'cpu':
+        return [torch.frombuffer((C.c_char * section.bytes).from_address(address), dtype=dtype).view(shape)
+                for address in addresses]
+    buffer, offsets = _placed_buffer(context, section, addresses)
+    try:
+        return [_metal_tensor(buffer, offset, dtype, shape) for offset in offsets]
+    finally:
+        PUT(buffer, SELECTOR[b'release'])
+
+
 # one item of this node's program, (kind, the keys it reads, the key it makes, its operand), at execution t on
 # execution t's copies (mesh-collective.h struct mesh_value: copy t mod count).  An operator computes into its own
 # fresh output; a member's partial is then written over its range's pages by torch's copy_ and released
@@ -557,7 +721,17 @@ def _arrived(context, section, t):
 # AllGather or AllToAll copies each of this node's shards or pieces over its range's pages (torch's copy_) and releases
 # it, then waits for each other member's and concatenates them in the group's order (torch.cat; A-T3').  A returned
 # value over the plan's pages is torch.clone'd: execution t + u writes those pages again (C3.3), and a torch.compile
-# callable's outputs outlive its call (A-T5)
+# callable's outputs outlive its call (A-T5).
+# Every operator is torch's own kernel for its tensors' device, its MPS kernel for MPS tensors
+# (design/compilation-coordination.md, K1; design/aot-compilation-change-request.md A9: "No kernel is written by the
+# compilation").  torch runs MPS kernels asynchronously, so a range on MPS is written (write) between two of torch's own
+# synchronizations, torch.mps.synchronize ("Waits for all kernels in all streams on a MPS device to complete",
+# torch/mps/__init__.py): after it, so the range is published only once the GPU's write to it is complete (K1); before
+# it, so every read the program made earlier, of pages the write may reuse, has completed (C3.3: "every read of it in
+# execution t happens before its write in execution t + L"), since Metal orders accesses by each resource's own hazard
+# tracking (MTLResource.h hazardTrackingMode; torch's buffers tracked, include/ATen/mps/MPSAllocator.h
+# UsageFlags::HAZARD) and two values' buffers over one page are two resources.  A received range is read only after
+# mesh_host_arrived reports it (arrived), so the kernel reading it is issued after (K1)
 def _run(ir, context, tensors, item, env, inputs, t):
     kind, reads, key, operand = item
 
@@ -566,6 +740,17 @@ def _run(ir, context, tensors, item, env, inputs, t):
 
     def publish(value):
         mesh.LIB.mesh_host_publish(C.byref(context), tensors[value][0], t)
+
+    def write(value, source):
+        target = copy(value)
+        gpu = target.device.type == 'mps'
+        if gpu:
+            torch.mps.synchronize()
+        target.copy_(source)
+        if gpu:
+            torch.mps.synchronize()
+        publish(value)
+        return target
 
     def arrived(value):
         _arrived(context, tensors[value][0], t)
@@ -585,8 +770,7 @@ def _run(ir, context, tensors, item, env, inputs, t):
             env[key] = operand.target(*args, **operand.kwargs)
         role = ir.roles.get(ir.reduced.get(operand))
         if role and role[0]:
-            copy(role[1][0]).copy_(env[key])
-            publish(role[1][0])
+            write(role[1][0], env[key])
     elif kind == 'collective':
         (source,), (me, sent, received) = reads, ir.roles[operand]
         if operand.kind == 'all-reduce' and me:
@@ -595,8 +779,7 @@ def _run(ir, context, tensors, item, env, inputs, t):
             total = env[source]
             for p in sorted(received):
                 total = torch.add(total, arrived(received[p]))
-            env[key] = copy(sent[None]).copy_(total)
-            publish(sent[None])
+            env[key] = write(sent[None], total)
         else:
             gather, members = operand.kind == 'all-gather', len(received) + 1
             dim = operand.dim if gather else operand.dim[0]
@@ -605,8 +788,7 @@ def _run(ir, context, tensors, item, env, inputs, t):
             def part(q):
                 return env[source] if gather else env[source].narrow(operand.dim[1], q * size, size)
             for q, value in sent.items():
-                copy(value).copy_(part(q))
-                publish(value)
+                write(value, part(q))
             env[key] = torch.cat([part(me) if p == me else arrived(received[p]) for p in range(members)], dim)
     else:
         node, keys = operand
@@ -617,8 +799,8 @@ def _run(ir, context, tensors, item, env, inputs, t):
 # design/aot-compilation-change-request.md A9; design/compilation-coordination.md, A-T4.  `build` gives the IR on the
 # map as it is; mesh_plan writes the lists from it (each node's page instructions, the page table's bindings and the
 # plan's state section); the GPU's program is the function's own operators, this node's partitioned graph run by torch
-# on tensors over the placed pages, each copy of each value wrapped by torch.frombuffer over mesh_section_address
-# (every address a constant of the plan, design/disjoint-pages-change-request.md, C3.3).
+# on tensors over the placed pages, each copy of each value bound by _bind (torch.frombuffer on the CPU, a kDLMetal
+# DLPack tensor on MPS: design/compilation-coordination.md, K1).
 # - Each compiled graph is its own function and its own plan (design/compilation-coordination.md, "The appendix's
 #   revisions", N1): `function` its ordinal, the plan named (group, function), and `handle` the plan's state section
 #   offset, mesh_plan's `*plan` (N2), as an instantiated graph's handle (NVIDIA, CUDA Programming Guide, section 4.2.2:
@@ -664,17 +846,8 @@ def serialize(build, function):
         try:
             if mesh.State.from_address(context.M + handle.value).serial != ir.serial:
                 raise OSError(errno.ESTALE, 'the plan\'s map serial is not the one its IR was built on: plan again')
-            tensors = []
-            for value, (dtype, shape) in zip(values, ir.layouts):
-                copies = []
-                for c in range(value.section.count):
-                    address = mesh.LIB.mesh_section_address(C.byref(context), value.section, c)
-                    if not address:
-                        raise OSError(errno.EFAULT, 'copy %d of a placed value has no page (mesh-call.h '
-                                                    'mesh_section_address)' % c)
-                    buffer = (C.c_char * value.section.bytes).from_address(address)
-                    copies.append(torch.frombuffer(buffer, dtype=dtype).view(shape))
-                tensors.append((value.section, copies))
+            tensors = [(value.section, _bind(context, value.section, *layout))
+                       for value, layout in zip(values, ir.layouts)]
         except BaseException:
             retire()
             raise
