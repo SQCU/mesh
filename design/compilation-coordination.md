@@ -1867,7 +1867,7 @@ the three integration builds.
   whichever child lands it (mesh.h, "Phases"), and for a page posted by one record alone the test is the old one (its
   round j - 1 posted only after j - 2 landed, so the field reads mesh_phase(j - 1) or mesh_phase(j)). Its reach,
   recorded (2026-11-05, the documents' answer: the field used outside its precondition, PTX's "valid only for" the
-  current and the immediately preceding phase; appendix item 5 now posts round j by the range's rising count): the
+  current and the immediately preceding phase; appendix item 5 now names a page for round j by its range's rising count): the
   field is 2 bits (C3.7, "PTX's mbarrier phase bit, widened to two"), so it tells round j - 1's landing
   exactly while the page's earliest round not landed is at most three rounds before the one being posted; a member
   whose earlier rounds sit on another cable's lane four or more rounds behind would read as landed. The documents name

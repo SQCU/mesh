@@ -221,8 +221,8 @@ statement, or a fact of the code.
     and multicast algorithms: taxonomy and survey, ACM Comput. Surv. 36(4), 2004).
   - One process, the sequencer, gives every function execution submitted on the island its sequence number, in the
     order the submissions reach it. Pathways' scheduler is first-in, first-out in just this way (§4.4).
-  - Every node releases function executions to its ports in sequence-number order. The pages of released executions
-    interleave on each cable (appendix item 2).
+  - Every node delivers function executions in sequence-number order (appendix item 2). The pages of delivered
+    executions interleave on each cable (T99).
   - Each function execution is submitted once, by its program's submitter (below), to that node's bridge, which
     forwards it to the sequencer. (Corrected 2026-11-05: the text said "by its plan's least node (`sender`,
     rdma/mesh.h: "the fixed sequencer's one sender a message")". One program's plans have different least nodes, so
@@ -233,48 +233,49 @@ statement, or a fact of the code.
   stands only while its map does (design/disjoint-pages-change-request.md D.3.6), so no standing plan's sequencer
   changes. (Corrected 2026-11-05: the text called this the bully algorithm's coordinator (H. Garcia-Molina, IEEE Trans.
   Comput., 1982). No election runs, so that algorithm is not used.)
-- **One program's calls reach the sequencer from one node, in the program's order, and only once every node of the
-  call's plan holds the plan.**
+- **One program's calls are broadcast by one sender, in the program's order.**
   > 'blah blah blah deadlock' do the works we cite in the literature have deadlocky runtimes or compiletimes or was that
   > a deviation from the work we were developing?
-  - **The works cited have no such deadlock, at run time or at compile time.** Each fixes the order, and the compiled
-    function at every participant, before any call runs:
-    - Pathways names it: "the system will deadlock if communicating computations are not enqueued in a consistent
-      order" (§2). A program has one client: "We adopt a single-controller model" (§2). The client "registers the
-      computations with the resource manager, triggering the servers to compile the computations in the background",
-      and then constructs and lowers the program it enqueues (§4.2).
-    - NCCL: "ncclCommInitRank implicitly synchronizes with other ranks" (NCCL 2.32.3, API, Communicator Creation and
-      Management Functions). Across communicators: "Thus to remain deadlock free, users must ensure the order of
-      host-side launches matches for all devices" (NCCL 2.32.3 User Guide, "Using multiple NCCL communicators
-      concurrently").
-    - Synchronous dataflow finds a deadlock when the program is compiled. Its scheduler's step 5 is "If no node in L
-      can be scheduled, indicate a deadlock (an error in the graph)", and its Theorem 3 gives that the algorithm does
-      not deadlock where a periodic admissible schedule exists (Lee and Messerschmitt, IEEE Trans. Computers C-36(1),
-      1987).
-  - **The deadlock in Claude's turn came from two deviations, one in this document and one in the code.**
-    - This document had each call submitted by its plan's least node. A program's plans have different least nodes,
-      so two calls of one program can reach the sequencer in the opposite of the program's order. A10 says the program
-      keeps its order constraints "when it submits, so the sequencer's first-in, first-out numbers keep them too".
-      That holds only where one node submits them all. Otherwise a lane can take a call before an earlier call it
-      depends on, and wait on it.
-    - Each node makes a plan when its own program reaches it, and a port holds every lane at a delivered call whose
-      plan does not stand at its node (rdma/mesh-flow.c `lane_take`). Pathways' servers compile when the client
-      registers, whatever any program is doing.
-    - (This document's reading of both. Nothing has run it.)
-  - **The code must:**
-    - submit every call of one program (its launcher's `group`, rdma/mesh.h) from one node, the least of the program's
-      nodes, in the order the program makes the calls, as Pathways' one client does. The sequencer's first-in,
-      first-out numbers then keep the program's order (§4.4, "simply enqueues work in FIFO order"), and A10's
-      constraints with it;
-    - make a plan's creation synchronize its nodes, as ncclCommInitRank does. No call of a plan is submitted before
-      every node of the plan holds it. The submitter counts the nodes' arrivals, as a centralized barrier does: "each
-      processor updates a small amount of shared state to indicate its arrival and then polls that state to determine
-      when all of the processors have arrived" (J. M. Mellor-Crummey and M. L. Scott, Algorithms for scalable
-      synchronization on shared-memory multiprocessors, ACM TOCS 9(1), 1991, §3.1). Only the submitter reads the
-      count. A node lost first moves the map, and the plan fails with `ESTALE` (design/disjoint-pages-change-request.md
-      D.3.6);
-    - so every delivered call's plan stands at its node, and `lane_take`'s hold at a plan that does not stand there
-      goes.
+  - "Total Order alone does not guarantee that messages are delivered in the order in which they are sent". The
+    property that does is FIFO Order: "If a correct process TO-broadcasts a message m before it TO-broadcasts a message
+    m′, then no correct process delivers m′ unless it has previously delivered m" (Défago, Schiper and Urbán, §4.3.1).
+    It relates the messages of one process. Where two nodes running one program each broadcast some of its calls,
+    nothing makes one node's broadcast of a call precede the other's broadcast of a later call (Lamport's "precedes",
+    their Definition 1), so neither FIFO Order nor Causal Order (§4.3.2) need keep the program's order between them.
+  - So every call of one program (its launcher's `group`, rdma/mesh.h) is broadcast by one node, the least of the
+    program's nodes, in the order the program makes the calls. This is Pathways' one client a program, "We adopt a
+    single-controller model" (§2), whose scheduler "simply enqueues work in FIFO order" (§4.4). The sequence numbers
+    then keep the program's order, and with it A10's constraints ("so the sequencer's first-in, first-out numbers keep
+    them too").
+  - **The works cited have no deadlock at run time or at compile time.** Pathways: "the system will deadlock if
+    communicating computations are not enqueued in a consistent order" (§2); its one client and its FIFO scheduler give
+    that order. NCCL: "Thus to remain deadlock free, users must ensure the order of host-side launches matches for all
+    devices" (NCCL 2.32.3 User Guide, "Using multiple NCCL communicators concurrently"). Synchronous dataflow finds a
+    deadlock when the program is compiled: "If no node in L can be scheduled, indicate a deadlock (an error in the
+    graph)" (Lee and Messerschmitt, IEEE Trans. Computers C-36(1), 1987, its scheduler's step 5).
+  - The deadlock in Claude's turn was this document's deviation from them: each call broadcast by its plan's least
+    node, so one program had several senders and no FIFO Order between them.
+- **A plan is created at every node of it before its first call is broadcast**, as an NCCL communicator is:
+  "ncclCommInitRank implicitly synchronizes with other ranks" (NCCL 2.32.3, API, Communicator Creation and Management
+  Functions).
+  - Why: the sequencer relays each call "to the destinations" (Défago, Schiper and Urbán, §7.1), which are the nodes of
+    its plan, and each delivers it into that plan's queue there, laid out with the plan (appendix item 2).
+  - The algorithm: the program's sender counts the plan's nodes as each creates the plan, as a centralized barrier
+    counts arrivals: "each processor updates a small amount of shared state to indicate its arrival and then polls that
+    state to determine when all of the processors have arrived" (J. M. Mellor-Crummey and M. L. Scott, Algorithms for
+    scalable synchronization on shared-memory multiprocessors, ACM TOCS 9(1), 1991, §3.1). Only the sender reads the
+    count, and it broadcasts no call of the plan before every node has arrived. A node lost first moves the map, and
+    the plan fails with `ESTALE` (design/disjoint-pages-change-request.md D.3.6).
+- (Corrected 2026-11-05, later: the text before reasoned from the bridge's ports and lanes and their hold at a call,
+  and from plans made "at run time". Lanes are the bridge's alone (design/plan-to-bridge-change-request.md R7, "Nothing
+  outside the bridge knows the transport"), and a plan is the compilation's output, made before its function runs
+  (A1, A6). Neither belongs in this document.)
+  > ""Holding a lane," plainly:" did you need to talk about this at all or is it an irrelevant distraction from the levle
+  > ofa bstraction and the specific scopes of interfaces involved in the change request?
+
+  > what does making plans at run time mean when you retreat from idiom yet again... it surte sounds to me like a bunch
+  > of idiom has crept in at multiple levels of specification and has floated along without citation or useof canonical
+  > literature, algorithms, data structures...
 
 ### A8. The IR operand
 
@@ -469,7 +470,7 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     - "while ∃(m′, seqnum′) ∈ pending : seqnum′ = nextdeliver do deliver (m′); nextdeliver := nextdeliver + 1".
     - Delivery does not wait for any earlier call to finish, since Fig. 5 has no such condition. A call still running
       at a node delays no later call's delivery there.
-  - **Delivering a call releases its execution to the node's ports.** Its pages then go as their data allows. Each
+  - **Delivering a call releases its execution at the node.** Its pages then go as their data allows. Each
     waits only on its own dependences in the task graph, and those include the lags C3.3 gives each value's copies.
   - **Work and transfers run at once.** The node's GPU, CPU or ANE work and the bridge's transfers proceed
     concurrently:
@@ -480,8 +481,8 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       computation, ISCA 1992).
     - The bridge serves its queues of page descriptors while the program computes, as a user-level network interface
       does (U-Net; VIA; design/plan-to-bridge-change-request.md R1).
-  - **Each plan's delivered calls reach its ports through a queue of the plan's own at each node.** It is laid out with
-    the plan's pages when the plan is placed, and claimed and released with them (C3.2, C3.4). Each port reads it in
+  - **Each plan's delivered calls reach the bridge at a node through a queue of the plan's own.** It is laid out with
+    the plan's pages when the plan is placed, and claimed and released with them (C3.2, C3.4). The bridge reads it in
     place, by view, and nothing copies it. Only the driver moves bytes (design/plan-to-bridge-change-request.md R1).
     > who added this and why is there a transfer by copy rather than a transfer by view? only an extremely specific
     > interface ever does anything copy-like, and that is the final dma driver, which we use, rather than simulate in
@@ -494,49 +495,47 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     - **The data structure is synchronous dataflow's.** "We can replace each arc with a FIFO queue (buffer) to pass data
       from one block to another. The size of the queue will vary at different times in the execution" (E. A. Lee and
       D. G. Messerschmitt, Static scheduling of synchronous data flow programs for digital signal processing, IEEE
-      Trans. Computers C-36(1), 1987). The arc here runs from a node's delivery of a plan's calls to that plan's lanes
-      at the node, so there is one queue for each plan at each node.
+      Trans. Computers C-36(1), 1987). The arc here runs from a node's delivery of a plan's calls to the bridge's taking
+      of them at that node, so there is one queue for each plan at each node of it.
     - **Each entry is one delivered message, with its sequence number**, as the sequencer "relays m with its sequence
       number" (Défago, Schiper and Urbán, §7.1). The plan's k-th delivery at the node is entry k mod the queue's room.
       One submission is one message however many executions it carries, as Pathways sends "a single message
       (describing the entire subgraph)" (§4.5). e2b's run is one submission.
     - **Its room is fixed at compile time.** For a schedule synchronous dataflow admits, "the buffers must remain
       bounded" (Lee and Messerschmitt, the proof of their Theorem 1), and the bound is found before the program runs.
-      An entry stays until every lane of its plan at the node has taken its call. That is at most A10's bound on the
-      plan's submissions outstanding at its submitter, plus C3.3's u copies on each hop of the plan's routes: a send
-      completes only once its receive is posted (data-model §3), and a receive is posted only into a free copy (C3.3).
+      An entry stays until the bridge at the node has taken its call. That is at most A10's bound on the plan's
+      submissions outstanding at its sender, plus C3.3's u copies on each hop of the plan's routes: a copy is used again
+      only after the last reads of it (C3.3), so a node's part of a call trails the sender's by at most u copies a hop.
       This number is this document's derivation. A plan whose bound A10 cannot find fails with `ENOMEM` when it is
       planned, as a value without a lag does in C3.3.
-    - **Each lane takes its plans' calls by a multiway merge on the sequence number** (D. E. Knuth, The Art of Computer
-      Programming, vol. 3, §5.4.1): of the first untaken entries of the plans it carries, the least sequence number
-      first. Fig. 5 delivers in sequence-number order (its `nextdeliver`), so every entry below the node's delivery
-      count is in its queue already, and no smaller one comes later. Both ends of a cable merge the same plans' queues
-      by the same numbers, so they take the same calls in the same order.
-    - **Nothing waits to write, and nothing checks for a full queue.** By the bound, no delivery reaches an entry its
-      plan's lanes at the node have not taken.
+    - **The bridge takes its plans' calls by a multiway merge on the sequence number** (D. E. Knuth, The Art of Computer
+      Programming, vol. 3, §5.4.1): of the first untaken entries of its standing plans, the least sequence number first.
+      Fig. 5 delivers in sequence-number order (its `nextdeliver`), so every entry below the node's delivery count is in
+      its queue already, and no smaller one comes later.
+    - **Nothing waits to write, and nothing checks for a full queue.** By the bound, no delivery reaches an entry the
+      bridge at the node has not taken.
     > consider whether this is a fictional problem or a problem that appears only through idiomatic citation free code
     > before making any further statements
     - (Corrected 2026-11-05: the implementation's M4 kept an ORDER at the channel's head while a port trailed by 4096
       entries, a wait at the writer. Its M5 copied the channel into each port's memory. Neither has a citation, and
       both go. The text before cited Kahn's unbounded channels, which a region laid out once cannot hold.)
-    - (Corrected 2026-11-05, later: the text before laid out one channel for every plan, once with the region. It said
-      "A lane trails its node's deliveries by at most two amounts added together" and "only a stopped process can do
-      that". Both are false. The bound holds for a lane's own plan only. Other plans' calls keep arriving in a shared
-      channel while a lane waits, as it may, for its node to start its plan's call (design/compilation-coordination.md,
-      "The revisions of f3f7cf46", stop 1). The overflow came from the shared channel, which no cited work has:
-      synchronous dataflow has one queue for each arc. Claude's later "a room per plan" and "each entry checked against
-      its index" came with no citation and no algorithm.)
-  - Each port takes the delivered calls of every standing plan in sequence-number order. Both ends of a cable deliver
-    the same sequence, so they take the calls alike. The pages of the calls a port has taken interleave on its cable
-    (above).
+    - (Corrected 2026-11-05, later: the text before laid out one channel for every plan, once with the region, and said
+      "only a stopped process" could fill it. That is false: its bound held for one plan's calls only, and other plans'
+      calls keep arriving in a shared channel while one plan's call waits at the node, as it may, for the node's program
+      to start it (design/compilation-coordination.md, "The revisions of f3f7cf46", stop 1). The overflow came from the
+      shared channel, which no cited work has: synchronous dataflow has one queue for each arc. Claude's later "a room
+      per plan" and "each entry checked against its index" came with no citation and no algorithm.)
+  - The bridge at each node takes the delivered calls of its standing plans in sequence-number order (the merge above).
+    Every node of a plan delivers the same sequence (Défago, Schiper and Urbán, §3, Total Order), so every node of it
+    takes its calls alike. The pages of the calls taken interleave on each cable (above).
   - (Corrected 2026-11-05: the text before this one fixed a number of delivery words a plan, from A10's bound. It then
     found no word free, at a node still serving an earlier call, for a later call's order, and marked that open. Fig.
     5's destinations have no such limit, and delivery is not completion.)
 
 - **The code must:**
   - deliver orders as Fig. 5's destinations do;
-  - publish each plan's deliveries to its ports through the plan's own queue above, read in place and taken by the
-    multiway merge, with no copy, no wait and no check. This replaces the sequence words (`sequences`), `taken[p]` and
+  - publish each plan's deliveries to the bridge at each node through the plan's own queue above, read in place and
+    taken by the multiway merge, with no copy, no wait and no check. This replaces the sequence words (`sequences`), `taken[p]` and
     the parent's wait while they are full (Lamport's buffer; the coordination's DL1), and then the one channel for
     every plan (the implementation's CH2, with M3's room). M4 and M5 stay gone;
   - remove the start's wait for every port to load the plan, and the late-loading port's refusal of it
@@ -610,7 +609,7 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     Model. Comput. Simul. 29(1), 2019).
 - **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
   their bytes are the same each time, so the requirement's mean and variance hold over the set.
-- **One permutation of the whole set per execution, as one renaming on every lane the set crosses.**
+- **One permutation of the whole set per execution, as one renaming on every channel the set crosses.**
   > figure this out for arbitrary graphs which evenutally collect all nodes in a collective by any number of switching
   > nodes. more citations, more literature, fewer guesses, fewer idioms. there are tools in this repo to vomit up what
   > the mesh topology literally is right now. it is not a tree and never looked anything like one.
@@ -632,25 +631,26 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     as the necessary and sufficient condition for deadlock-free routing (W. J. Dally and C. L. Seitz, Deadlock-free
     message routing in multiprocessor interconnection networks, IEEE Trans. Computers C-36(5), 1987). It holds for any
     topology and any number of relaying nodes.
-    - Here a channel is a lane: a first-in, first-out sequence of positions, the same at both ends (data-model §3). A
-      position on one lane depends on another lane where its page must land first.
-  - **MSCCLang's construction gives that graph no cycle.** Every lane's sequence is a subsequence of one global
+    - Here a channel is any first-in, first-out sequence of positions the bridge keeps between two adjacent nodes, the
+      same at both ends (data-model §3). How many a cable has is the bridge's alone
+      (design/plan-to-bridge-change-request.md R7). A position on one channel depends on another channel where its page must land first.
+  - **MSCCLang's construction gives that graph no cycle.** Every channel's sequence is a subsequence of one global
     topological order (design/plan-to-bridge-change-request.md R5; MSCCLang §5.2). This is the rule of ordered
     resources, which prevents a circular wait (J. W. Havender, Avoiding deadlock in multitasking systems, IBM Systems
     Journal 7(2), 1968; E. G. Coffman, M. J. Elphick and A. Shoshani, System deadlocks, ACM Comput. Surv. 3(2), 1971).
   - **The permutation keeps that order when it is one renaming σ of the set's members**, over the set's positions on
-    every lane the set crosses: every hop, every relaying node, every parallel cable. It also covers the set's
+    every channel the set crosses: every hop, every relaying node, every parallel cable. It also covers the set's
     consumer tasks, since function B takes its pages in any order (R4) and the task at the set's i-th place takes the
     member σ puts there. Indexes inside shapes need not be compiled:
     > the use of cudagraphs style 'shapes are compiled but indexes inside of shapes might not need to be'
   - **Why σ keeps a topological order.** A set's members have one producer, one route and a consumer that takes them
     in any order, so σ is an automorphism of the task graph. An automorphism maps every edge u → v to an edge σ(u) →
     σ(v), so it maps each topological order onto a topological order. (Formal argument, this document's.)
-  - **So the deal fixes positions, not members.** Each lane keeps the positions the deal gives it. In each execution,
-    the member at each position is the one σ puts there. Each port holds a record for every member of every set it
-    carries a position of, each record a view of that member's page (R1). So any member can be posted at any of the
-    set's positions on its cables.
-  - **A receive's round rule reads a count that only rises.**
+  - **So the deal fixes positions, not members.** Each channel keeps the positions the deal gives it. In each
+    execution, the member at each position is the one σ puts there. The bridge at each node holds a record for every
+    member of every set whose positions it carries, each record a view of that member's page (R1). So any member can go
+    at any of the set's positions.
+  - **A page's round rule reads a count that only rises.**
     > "implications on lag"
     > idiomatic? explain using only citations, algorithms, and data structures in non-idiomatic form? desire for
     > 'bounds' not explained in terms of literature? fictional problem?
@@ -661,21 +661,22 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       sense is toggled to release the waiting processors" (Mellor-Crummey and Scott, 1991, §3.1).
     - C3.7's readers are kept there by the allocator's order. Every read of a value in execution t happens before its
       write in execution t + L (C3.3), so a reader finds a page's field "equal, landed; one behind, not yet" (C3.7).
-    - Posting a receive is not such a reader once a member's rounds land through several ports' children. Nothing
-      keeps the poster within one phase of the page's last landing. The implementation's PM2 reads the phase field
+    - Naming a page for its next landing (D.3.5: "A page enters the list again only when its last landing lands") is
+      not such a reader once a set's members move among a node's cables (above). Nothing keeps the namer within one
+      phase of the page's last landing. The implementation's PM2 reads the phase field
       there, so its recorded limit ("while the page's earliest round not landed is at most three rounds before the one
       being posted") is the field used outside its precondition. It is not a bound to find or to widen. Claude's "a
       phase word wide enough for the lag, or a cited bound" was idiomatic.
     - For a reader that nothing keeps within one phase, C3 already names the structure: "Counted completion with rising
       thresholds (Portals 4 counting events; `MTLSharedEvent`'s 64-bit value, which only rises). Execution t waits for
       the count to reach its own target." The plan keeps such a count already: each range's landed count of each copy,
-      which every landing raises, whichever port's child lands it (C3.1, counted completion).
+      which every landing raises, by whichever cable it lands (C3.1, counted completion).
     - By C3.3, every landing of a copy's round j comes after every landing of its round j − 1. Each landing is a write
       of execution t + u, and every read of execution t, each after its own page's landing, comes before that write.
-    - So a receive of round j is posted where its range's count of its copy reads at least j times the pages this node
+    - So a page is named for round j where its range's count of its copy reads at least j times the pages this node
       receives of that range in a copy. Then every page of round j − 1 has landed, its own among them. The test holds
       at any distance and adds no word. It waits for the range's whole round j − 1, not only its own page's.
-    - The code must post a receive of round j by that count, in place of PM2's test of the phase field. The phase
+    - The code must name a page for round j by that count, in place of PM2's test of the phase field. The phase
       fields stay, for C3.7's readers.
   - The counter is (execution, set), so a set is drawn once per execution. A draw for each cable departs from the
     counter.

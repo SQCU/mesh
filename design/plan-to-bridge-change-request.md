@@ -1738,6 +1738,87 @@ design/aot-compilation-change-request.md, and are held here once.
 > "implications on lag"
 > idiomatic? explain using only citations, algorithms, and data structures in non-idiomatic form? desire for 'bounds' not explained in terms of literature? fictional problem?
 
+**Claude:**
+
+> (・_・ ) You're right on each point. The deadlock, the "lag" and my "room per plan" all came from departures from the cited works, or from my own wording. The documents now say what the literature says (mesh `9b2c0869`, pushed). No implementer has been started.
+>
+> **Inlined code (C9a).** Ruled as you said. A10 now has three graph operations move into `rdma/mesh_graph.py` beside `walk` and `reach`: the order's transitive closure, the walk of commuting chains, and the width (Hopcroft–Karp matching). The symbolic execution moves onto `torch.fx.Interpreter`, as `_Program` already does. This is rubric C9: "the form with fewer copies of each primitive, offered for others to call rather than spliced into their code."
+>
+> **Deadlock: a deviation, in two places.** None of the cited works has it, at run time or at compile time:
+> - **Pathways** names it: "the system will deadlock if communicating computations are not enqueued in a consistent order" (§2). It avoids it with one client per program ("We adopt a single-controller model"). That client registers the computations, "triggering the servers to compile the computations in the background", before it enqueues the program (§4.2).
+> - **NCCL:** "ncclCommInitRank implicitly synchronizes with other ranks." "Thus to remain deadlock free, users must ensure the order of host-side launches matches for all devices."
+> - **Synchronous dataflow** finds deadlock when the program is compiled: "If no node in L can be scheduled, indicate a deadlock (an error in the graph)" (Lee & Messerschmitt 1987).
+>
+> The two departures:
+> 1. My A7 had each plan's least node submit its calls, so one program's calls reached the sequencer from several nodes, in no fixed order. That contradicts my own A10, whose order constraints rely on "the sequencer's first-in, first-out numbers".
+> 2. The code holds a lane at a call whose plan its node hasn't made yet.
+>
+> The fix:
+> - One node submits every call of a program, in the program's order, as Pathways' single client does.
+> - No call of a plan is submitted until every node of that plan holds it, as ncclCommInitRank synchronizes ranks.
+> - The submitter counts arrivals the way a centralized barrier does (Mellor-Crummey & Scott 1991, §3.1).
+>
+> **The room.** Lee & Messerschmitt: "We can replace each arc with a FIFO queue (buffer)." There is one queue per arc, and "the buffers must remain bounded". So each plan gets its own queue at each node, with its room fixed at compile time. Each lane takes calls from its plans' queues by a multiway merge on sequence number (Knuth vol. 3, §5.4.1). The overflow existed only because I put every plan in one shared channel, which no cited work does. My "room per plan" and "check each entry against its index" had no citation or algorithm behind them.
+>
+> **NCCL:** yes. It's now cited verbatim from the 2.32.3 docs.
+>
+> **"Lag": a problem that doesn't exist, created by using a structure outside its precondition.**
+> - PTX ISA 9.5 §9.7.15.16.19: test_wait and try_wait "are valid only for: the current incomplete phase … the immediately preceding phase."
+> - Mellor-Crummey & Scott: "Consecutive barriers cannot interfere with each other because all operations on count occur before sense is toggled."
+> - So a phase parity is exact only when the structure itself keeps the reader within one phase. C3.7's readers meet that through C3.3's allocator order. A receive being posted from another port does not, and that is exactly where the implementer's PM2 read the phase field.
+> - C3 already lists the structure for an unordered reader: "Counted completion with rising thresholds (Portals 4 counting events …)". So a round-j receive is now posted when its range's landed count is at least j × its pages. That count already exists, the test is exact at any distance, and no bound is involved.
+>
+> **Also written:** A4 now says the partitioner partitions every operator, as A2 already required. GSPMD §4.3's windowed operators are what reach CollectivePermute, so `_operator`'s message "GSPMD gives no rule here" is wrong for them. Your turn is quoted at each clause, and the turns are regenerated.
+>
+> Shall I start the implementer on `9b2c0869`?
+
+**The operator:**
+
+> "The two departures:" what is holding a lane in non-idiomatic language
+> what is 'node submits a call of a program' in non-idiomatic language? are these fictional problems or idiomatic programs? are they callback driven programming (forbidden) or inversion of control to avoid stating a problem plainly and assigning its solution to the simple and clear point in control flow and aot compilation vs runtime execution?
+
+**Claude:**
+
+> (・_・ ) In plain terms, both were run-time machinery that I described as actors, standing in for facts the program already has. Only one real requirement sits underneath them, and it comes from the driver.
+>
+> **The one real requirement.** Data-model §3 (TN3205): "A SEND fills the oldest receive posted on its queue pair." "So the receiver fixes where each frame lands, and in what order, before it comes." So both ends of a queue pair must take the same transfers in the same order, and a SEND can't pass an earlier one on that queue pair. That is the only wait the hardware imposes, and it belongs to the driver.
+>
+> **"Holding a lane," plainly:** a port's child reads its node's list of delivered calls in order. It posts nothing more on a queue pair while the next call is one its node hasn't made a plan for, or hasn't started. That's a run-time wait for two things:
+> - **The plan.** That's a compile-time fact. Pathways compiles before it enqueues (§4.2), and A10's tracer takes the whole block before any of it runs.
+> - **The start.** The region already holds this as rising words. A send of execution t goes once its supplied word reads at least t + 1 (C3.7). A receive of round j is posted once its copy's count reaches j × pages (item 5).
+> - Those words already gate every transfer. Beyond the order of calls, the lane needs nothing else. So "holding" is no mechanism: it's a run-time wait for a compile-time fact, plus a second copy of data that's already in the region.
+>
+> **"A node submits a call," plainly:** a program's start is a rising count in the region. Its bridge sends the call's name to the numbering node, which numbers it and sends it on to every node of the plan. Each node's ports then take calls in number order.
+> - **Within one program, the number adds nothing.** Every node runs the same program and makes its calls in the same order: GSPMD "produces a single program for all partitions," and NCCL's rule is "users must ensure the order of host-side launches matches for all devices." That order is already the same at both ends of every queue pair.
+> - **The number is needed only between programs compiled separately that share a queue pair.** Neither program holds their relative order. Pathways §2: "Single-controller systems for ML therefore require a distributed scheduling mechanism to order the computations enqueued on behalf of different programs." Even there, each program's calls must enter in that program's order, from one of its nodes.
+>
+> **Fictional or idiomatic? Both.** The deadlock belonged to the protocol, not to any program. It came from two things:
+> - numbering one program's calls by the arrival of messages from several nodes, instead of by the program's own order;
+> - making plans at run time.
+>
+> **Callback or inversion of control? Inversion of control, built from handlers.** Fig. 5's destination code is literally a handler: "when receive (m, seqnum)." My text made a lane's next transfer depend on messages arriving and plans appearing. The plain version puts each fact at the one point where it's decided:
+> - **Compile time:** the plans, at every node of the program, before the program runs. That's one point in control flow, the boundary between compiling and running. ncclCommInitRank "implicitly synchronizes with other ranks" once, there, before any collective.
+> - **Run time:** the rising words that producers and landings already store. Between separately compiled programs, also the sequencer's numbers.
+>
+> **Still idiomatic in `9b2c0869`:**
+> - A7 synchronizes each plan's creation at its submitter. It should be one synchronization at the program's boundary between compiling and running (or per traced block).
+> - Item 2 and A7 keep the lane's hold. It should be stated as the queue pair's own order and nothing more.
+> - A7's rule that one node submits each program's calls stays, with its plain reason: it only interleaves programs.
+>
+> Nothing has been dispatched. Shall I correct A7 and item 2 to say exactly this?
+
+**The operator:**
+
+> ""Holding a lane," plainly:" did you need to talk about this at all or is it an irrelevant distraction from the levle ofa bstraction and the specific scopes of interfaces involved in the change request?
+> " It came from two things:
+> - numbering one program's calls by the arrival of messages from several nodes, instead of by the program's own order;
+> - making plans at run time."
+> what does making plans at run time mean when you retreat from idiom yet again... it surte sounds to me like a bunch of idiom has crept in at multiple levels of specification and has floated along without citation or useof canonical literature, algorithms, data structures...
+> "- The number is needed only between programs compiled separately that share a queue pair. "
+> queue pairs are totally abstracted behind the bridge namespace / process boundary... why was this topic invoked at all... idiomaticity? canonicity? citations?
+> "Still idiomatic in 9b2c0869:"
+> address in repo documents where not conflicted w/ other problems raised by this user turn...
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
