@@ -220,8 +220,10 @@ static struct island { uint32_t self,sequencer,parent,up,down[MESH_PORTS],downs;
    serial (Q3: a plan stands only while its map does, D.3.6, so no order outlives its serial; Fig. 5 starts it at 1) */
 static uint64_t seqnum;
 /* Defago et al., Fig. 5, the destination's `pending`: the ORDERs this node has received and not delivered, in arrival
-   order (Q4), `pendings` of them in room for `pending_room` */
-static struct mesh_order *pending;
+   order (Q4), `pendings` of them in room for `pending_room`, each with the time it arrived (`arrived`, the loop's clock
+   `now`; design/compilation-coordination.md, Q4': a head held for its plan to stand here is held at most
+   MESH_PLATFORM_NS from its arrival) */
+static struct pending { struct mesh_order order; uint64_t arrived; } *pending;
 static size_t pendings,pending_room;
 /* the plan this bridge released last (Q4: "every port holding the previously released plan has served it"): its claim
    head, the claim's generation (the head's struct mesh_page_entry `device`) and its state section; head UINT32_MAX
@@ -240,6 +242,14 @@ static uint32_t port_toward(uint32_t node){
   while(p<port_count && !(ports[p].link.state==LINK_UP && plan_lanes(ports[p].link.plan) && ports[p].peer==node))p++;
   return p<port_count?p:MESH_PORTS;
 }
+/* the sequencer's tree as mesh_graph_rows reads it: vertex k keyed by its parent, the root (the sequencer) and a vertex
+   not reached (parent UINT32_MAX) by n, past every vertex, as mesh-collective.c plan_tree_parent keys a tree's
+   vertices (design/compilation-coordination.md, the C9 rulings) */
+struct island_tree { const uint32_t *parent; uint32_t n,root; };
+static uint32_t island_parent(const void *context,size_t k){
+  const struct island_tree *tree=context;
+  return k==tree->root || tree->parent[k]>=tree->n?tree->n:tree->parent[k];
+}
 /* H. Garcia-Molina, Elections in a distributed computing system, IEEE Trans. Comput. C-31(1) 1982, section III-A: "the
    node with the highest priority (i.e., with the highest identification number) out of the nodes that are
    participating in the election will become coordinator"; Appendix I, Theorem A2: "Let node i be the operating node
@@ -251,7 +261,13 @@ static uint32_t port_toward(uint32_t node){
    bridge holding the same map computes alike.  The tree: the breadth-first tree of the reach from the sequencer
    (mesh_graph_reach `parent`), ties as the map orders nodes (the joins in index order), this node's parent and children
    in it (Q3).  On each map serial the sequencer's number starts at 0 and the pending ORDERs are dropped (Q3, Q4).
-   ENOMEM leaves no island, said once a map serial: no function execution is submitted or ordered here on it */
+   ENOMEM leaves no island, said once a map serial: no function execution is submitted or ordered here on it.
+   2026-11-04, owner B2, the coordinator's rulings Q3' and C9 (design/compilation-coordination.md, "Amendments during
+   the work"): this node's own map_serial moving is the one reset of `seqnum` and of the pending ORDERs, since D.3.6
+   cancels every plan standing here at that move, so no pending order of it is served (no message's `serial` is
+   compared: each node's map_serial is its own count); and this node's children are those mesh_graph_rows keys to it
+   over the parent array (as mesh-collective.c's plan_tree_parent keys a tree), not a scan of the array.  What must
+   stay: the greatest identification number reached, Garcia-Molina's rule, picked here */
 static void island_set(void){
   island=(struct island){.self=UINT32_MAX,.sequencer=UINT32_MAX,.up=MESH_PORTS};
   seqnum=0;pendings=0;
@@ -262,8 +278,9 @@ static void island_set(void){
   if(self==n)return;
   unsigned char *reached=malloc(n);
   uint32_t *order=malloc(n*sizeof *order),*parent=malloc(n*sizeof *parent),(*join)[2]=malloc((n*(n-1)/2+1)*sizeof *join);
-  if(!reached || !order || !parent || !join){
-    free(reached);free(order);free(parent);free(join);
+  size_t *first=malloc((n+2)*sizeof *first),*child=malloc(n*sizeof *child);
+  if(!reached || !order || !parent || !join || !first || !child){
+    free(reached);free(order);free(parent);free(join);free(first);free(child);
     mesh_say("bridge","the island of map serial %llu not computed (ENOMEM): no function execution is ordered on it",
              (unsigned long long)atomic_load(&M->map_serial));
     return;
@@ -275,22 +292,24 @@ static void island_set(void){
   mesh_graph_reach((uint32_t)n,joins,map_end,join,(uint32_t)sequencer,order,reached,parent);
   island.self=(uint32_t)self;island.sequencer=(uint32_t)sequencer;
   if(self!=sequencer){island.parent=r[parent[self]].node;island.up=port_toward(island.parent);}
-  for(uint64_t k=0;k<n && island.downs<MESH_PORTS;k++)if(k!=sequencer && parent[k]==self){
-    const uint32_t p=port_toward(r[k].node);
+  const struct island_tree tree={parent,(uint32_t)n,(uint32_t)sequencer};
+  mesh_graph_rows((uint32_t)n+1,(size_t)n,island_parent,&tree,first,child);
+  for(size_t c=first[self];c<first[self+1] && island.downs<MESH_PORTS;c++){
+    const uint32_t p=port_toward(r[child[c]].node);
     if(p<MESH_PORTS)island.down[island.downs++]=p;
   }
-  free(reached);free(order);free(parent);free(join);
+  free(reached);free(order);free(parent);free(join);free(first);free(child);
 }
 /* Defago et al., Fig. 5, the destinations: "when receive (m, seqnum): pending := pending U {(m, seqnum)}".  An ORDER
    whose `nodes` lacks this node's map index is delivered at once, nothing here serving it
    (design/compilation-coordination.md, Q4); `nodes` is a set of map indices below 64 (mesh.h struct mesh_state).  The
    array grows by doubling; ENOMEM drops the ORDER, said: its plan's executions are not released here, and a wait on
-   them ends at its deadline */
+   them ends at its deadline.  Its arrival is the loop's clock `now` (Q4') */
 static void order_take(const struct mesh_order *order){
   if(island.self>=64 || !(order->nodes>>island.self&1))return;
   if(pendings==pending_room){
     const size_t room=2*pending_room+1;
-    struct mesh_order *grown=realloc(pending,room*sizeof *grown);
+    struct pending *grown=realloc(pending,room*sizeof *grown);
     if(!grown){
       mesh_say("bridge","an ORDER of plan (%llu, %llu) not held (ENOMEM): its executions [%llu, %llu) are not released here",
                (unsigned long long)order->group,(unsigned long long)order->epoch,(unsigned long long)order->first,
@@ -299,7 +318,7 @@ static void order_take(const struct mesh_order *order){
     }
     pending=grown;pending_room=room;
   }
-  pending[pendings++]=*order;
+  pending[pendings++]=(struct pending){*order,now};
 }
 /* Defago et al., Fig. 5, the sequencer's "send (m, sn(m)) to all", over the island's tree: an ORDER to each child, in
    arrival order, on its hop's control socket, and taken here (design/compilation-coordination.md, Q3: "an ORDER down
@@ -319,29 +338,35 @@ static void order_sequence(const struct mesh_order *submission){
 }
 /* Defago et al., Fig. 5, the sender's "send (m) to sequencer", over the island's tree: at the sequencer it is numbered
    here, elsewhere it goes to this node's parent (design/compilation-coordination.md, Q3: "a SUBMIT up to the parent").
-   A submission whose `serial` is not this node's `map_serial` is dropped (Q3), as is one of no executions, or where
-   the map holds no record of this node */
+   A submission of no executions is dropped, as is any where the map holds no record of this node.
+   2026-11-04, owner B2, the coordinator's ruling Q3' (design/compilation-coordination.md, "Amendments during the
+   work"), reversing Q3's drop of a submission whose `serial` is not this node's `map_serial`: no receiver compares a
+   message's `serial`.  Why: each node's map_serial is its own count of its map's changes, so two nodes on one map hold
+   different serials and the drop refused messages between them.  What must stay: the reset at this node's own serial
+   move (island_set) */
 static void order_submit(const struct mesh_order *order){
-  if(order->serial!=atomic_load(&M->map_serial) || order->end<=order->first || island.self==UINT32_MAX)return;
+  if(order->end<=order->first || island.self==UINT32_MAX)return;
   if(island.self==island.sequencer)order_sequence(order);
   else if(island.up<MESH_PORTS)port_say(ports+island.up,(struct message){.kind=SUBMIT},order,sizeof *order);
 }
 /* the sequencer's messages heard on a port's control socket (mesh-ports.c message_heard; design/compilation-
    coordination.md, Q3): a SUBMIT is passed on toward the sequencer, or numbered there (order_submit); an ORDER from
    this node's parent in the tree is relayed to its children and taken here (order_relay), and one from any other
-   node, or of another serial, is dropped.  A payload that is not one struct mesh_order is let be */
+   node is dropped.  A payload that is not one struct mesh_order is let be.  2026-11-04, owner B2, the coordinator's
+   ruling Q3' (order_submit's note): an ORDER's `serial` is compared no more */
 void order_heard(struct port *from,const struct message *heard,const unsigned char *payload){
   struct mesh_order order;
   if(heard->bytes!=sizeof order)return;
   memcpy(&order,payload,sizeof order);
   if(heard->kind==SUBMIT)order_submit(&order);
-  else if(order.serial==atomic_load(&M->map_serial) && island.parent && from->peer==island.parent)order_relay(&order);
+  else if(island.parent && from->peer==island.parent)order_relay(&order);
 }
 /* design/compilation-coordination.md, Q2 (Defago et al., section 7.1: the sequencer numbers each message its sender
    sends once, so one bridge submits each plan's executions, the one at the plan's `sender`): for each plan standing
    here (mesh-dataflow.h mesh_head_state) whose `sender` is this node's map index and whose `executions` (acquire, the
    program's start, Q1) exceed its `submitted`, a SUBMIT of [submitted, executions), then `submitted` its executions
-   (this bridge its one writer) */
+   (this bridge its one writer).  2026-11-04, owner B2, the coordinator's ruling Q3': the SUBMIT's `serial` is this
+   node's map_serial, for the record (no receiver compares it: order_submit's note), where it was the plan's */
 static void orders_submit(void){
   if(island.self==UINT32_MAX)return;
   for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
@@ -349,23 +374,31 @@ static void orders_submit(void){
     if(!state || state->sender!=island.self)continue;
     const uint64_t executions=atomic_load_explicit(&state->executions,memory_order_acquire);
     if(executions<=state->submitted)continue;
-    const struct mesh_order order={.group=state->group,.epoch=state->epoch,.serial=state->serial,.first=state->submitted,
+    const struct mesh_order order={.group=state->group,.epoch=state->epoch,.serial=atomic_load(&M->map_serial),.first=state->submitted,
                                    .end=executions,.nodes=state->nodes,.sender=state->sender};
     state->submitted=executions;
     order_submit(&order);
   }
 }
-/* design/compilation-coordination.md, Q4: whether every port holding the plan this bridge released last has served
-   it, `served[p]` (acquire) at least its `released` for each bit p of its `held` (acquire).  Where that plan's claim is
-   released (its head's owner 0, or another claim's generation there) nothing holds it any more: the release keeps a
-   claim while its `held` is not 0 (mesh-dataflow.h mesh_retired_release) */
+/* design/compilation-coordination.md, Q4 as amended (Q4', "Amendments during the work"): whether the plan this
+   bridge released last no longer stands here (mesh-dataflow.h mesh_head_state at its head not its state section, or
+   another claim's generation there), or every port of its set has refused it (`refused[p]` not 0, acquire) or holds it
+   (bit p of `held`, acquire) with `served[p]` (acquire) at least its `released`.  Its words are read only while it
+   stands, on this thread, the releaser's.
+   2026-11-04, owner B2, the coordinator's ruling Q4', reversing this function's first form, in which the set was the
+   plan's `held` bits alone and a claim not yet released stood for the plan: a plan released before its ports had
+   loaded it read as served, and the next could be released beside it.  The set Q4' names is the start's own, every
+   port whose peer a hop of the plan names, computed once (mesh-dataflow.c mesh_ports_held); until owner L exports
+   that computation (the coordinator, routed), the set here is the plan's `held` bits, so the predicate is Q4''s and
+   only its set waits for that export.  What must stay: one copy of the start's port set, L's */
 static int orders_served(void){
-  if(last.head==UINT32_MAX)return 1;
-  if(!atomic_load_explicit(&mesh_buffers(M)[last.head].owner,memory_order_acquire) ||
+  if(last.head==UINT32_MAX || mesh_head_state(M,last.head)!=last.state ||
      atomic_load_explicit(&mesh_page(M)[last.head].device,memory_order_acquire)!=last.generation)return 1;
-  const uint64_t held=atomic_load_explicit(&last.state->held,memory_order_acquire),
+  const uint64_t held=atomic_load_explicit(&last.state->held,memory_order_acquire),set=held,
                  released=atomic_load_explicit(&last.state->released,memory_order_relaxed);
-  for(uint32_t p=0;p<MESH_PORTS;p++)if(held>>p&1 && atomic_load_explicit(&last.state->served[p],memory_order_acquire)<released)return 0;
+  for(uint32_t p=0;p<MESH_PORTS;p++)
+    if(set>>p&1 && !atomic_load_explicit(&last.state->refused[p],memory_order_acquire) &&
+       !(held>>p&1 && atomic_load_explicit(&last.state->served[p],memory_order_acquire)>=released))return 0;
   return 1;
 }
 /* Defago et al., Fig. 5, the destinations: "while there is (m', seqnum') in pending with seqnum' = nextdeliver do
@@ -376,20 +409,36 @@ static int orders_served(void){
    (orders_served): its plan's `released` its `end` (release), and hdr `plans` woken so the ports see it.  So this
    node's cables carry one plan's batch at a time, each execution whole, in sequence order (the operator's ruling 1: "A
    cable never interleaves two executions; it carries each whole, in sequence order").  Re-read on each turn of the
-   event loop; nobody waits (Q4) */
+   event loop; nobody waits (Q4).
+   2026-11-04, owner B2, the coordinator's ruling Q4' (design/compilation-coordination.md, "Amendments during the
+   work"): a head whose plan does not stand here is held at most MESH_PLATFORM_NS from its arrival (the rules' bounded
+   wait; the loop's turn is due then, orders_due), then delivered with nothing released, said on the bridge's log as
+   order_take's ENOMEM is: its program's peers end by their own bounds.  What must stay: no wait past that bound */
 static void orders_deliver(void){
-  while(pendings && orders_served()){
+  while(pendings){
+    const struct mesh_order *order=&pending->order;
     uint32_t head=mesh_head_after(M,UINT32_MAX);
     struct mesh_state *state=NULL;
-    while(head!=UINT32_MAX && !((state=mesh_head_state(M,head)) && state->group==pending->group && state->epoch==pending->epoch))
+    while(head!=UINT32_MAX && !((state=mesh_head_state(M,head)) && state->group==order->group && state->epoch==order->epoch))
       head=mesh_head_after(M,head);
-    if(head==UINT32_MAX)return;
-    atomic_store_explicit(&state->released,pending->end,memory_order_release);
-    last.head=head;last.state=state;last.generation=atomic_load_explicit(&mesh_page(M)[head].device,memory_order_acquire);
+    if(head==UINT32_MAX){
+      if(now-pending->arrived<MESH_PLATFORM_NS)return;
+      mesh_say("bridge","an ORDER of plan (%llu, %llu), executions [%llu, %llu) numbered from %llu, delivered with nothing "
+               "released: its plan did not stand here within %.1f s of its arrival",(unsigned long long)order->group,
+               (unsigned long long)order->epoch,(unsigned long long)order->first,(unsigned long long)order->end,
+               (unsigned long long)order->sequence,(double)MESH_PLATFORM_NS/1e9);
+    }else{
+      if(!orders_served())return;
+      atomic_store_explicit(&state->released,order->end,memory_order_release);
+      last.head=head;last.state=state;last.generation=atomic_load_explicit(&mesh_page(M)[head].device,memory_order_acquire);
+      os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    }
     memmove(pending,pending+1,--pendings*sizeof *pending);
-    os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   }
 }
+/* when the pending head's bound ends (Q4': its arrival + MESH_PLATFORM_NS), UINT64_MAX where none waits: the event
+   loop's turn waits for it (mesh-link.c turn_due), as for health_due */
+uint64_t orders_due(void){ return pendings?pending->arrived+MESH_PLATFORM_NS:UINT64_MAX; }
 /* tag pre-return-20261103 rdma/mesh-records.c record_links_same (3f72cbde), adapted: a reach entry compared whole */
 /* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), boot and facts are the
    held one's changes only its health and sequence, written under the region's health serial and never the map's: the

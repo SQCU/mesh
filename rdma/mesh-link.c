@@ -367,6 +367,9 @@ static inline void due_at(uint64_t *due,uint64_t at){ if(at>now && at<*due)*due=
 static uint64_t turn_due(uint64_t liveness){
   uint64_t due=MIN(liveness,now+MESH_PAUSE_NS);
   due_at(&due,health_due());
+  /* not the tag's (2026-11-04, owner B2: the coordinator's ruling Q4'): the pending ORDER's bound (mesh-records.c
+     orders_due), so a head whose plan does not stand here is delivered at its bound, not up to MESH_PAUSE_NS past it */
+  due_at(&due,orders_due());
   if(find_wanted)due_at(&due,windows_end());
   due_at(&due,atomic_load(&exit_at));
   for(uint32_t p=0;p<port_count;p++){
