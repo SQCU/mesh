@@ -86,6 +86,8 @@ struct plan_demand {
                                              trees the fill gave pages alone: each has its W and L */
   uint32_t forwards;                      /* its distinct tree edges y -> c over those trees, each its F */
   uint32_t own;                           /* 1 where a dependence names its source's own read: it has S(d) */
+  uint32_t set;                           /* 1 where its range is a set: every declared transfer of it MESH_PAGES
+                                             (design/compilation-coordination.md, S1), each tree's pages one set */
   uint32_t vertex;                        /* its first template vertex, P(d); the rest follow (plan_landed) */
   uint32_t value;                         /* its routed value at this node, p->here[value]; MESH_ABSENT where this node
                                              holds none of its pages */
@@ -112,8 +114,12 @@ struct plan_value { uint32_t demand,node,write,read,reads,source; };
    same page; MESH_ABSENT for a send from the range's source, which its release's supplied word releases.
    `communication`: the page's crossing of the tree edge the hop is (plan_communication); `walk`: the hop's place in
    plan_walk's order; `start`: its link's scheduled start of its page (plan_schedule; design/compilation-
-   coordination.md, T6). */
-struct plan_entry { uint32_t value,node,direction,demand,field,communication; uint64_t page,walk; double start; };
+   coordination.md, T6).  `set` (S1, S2): j + 1 where its demand's range is a set and its page is on tree j (the
+   solve's trees grouped by demand, p->tree's index), else 0.  Its group (S3): the entries of its nonzero `set`, `node`
+   and `direction`, else the entry alone; `earliest` its group's least `start` and `least` its group's least `walk`
+   (plan_schedule). */
+struct plan_entry { uint32_t value,node,direction,demand,field,communication,set; uint64_t page,walk,least;
+                    double start,earliest; };
 struct plan {
   struct mesh_ctx *context;
   const struct mesh_declared *declared;
@@ -272,8 +278,15 @@ static uint32_t plan_edge_tail(const void *context,size_t k){ return ((const str
      numbers them alike.
    - The routed values, at every node, demand by demand and a demand's by ascending node: its source's, and each node
      of `on`'s (a destination's or a relay's), each with its write and reads (struct plan_value); this node's among them
-     (`here`, and each demand's `value`).  Every node's, since u is the largest L over the collective's values (the
-     contract's D5), which every rank computes alike.
+     (`here`, and each demand's `value`).  Every node's, since u is the largest L over the collective's values
+     (design/disjoint-pages-change-request.md, C3.3: "The unroll factor u is the largest L"), which every rank computes
+     alike.
+   - Every walk of this template into a write passes the write's range's production P: a landing's write W(y) has one
+     edge in, P -> W(y), and the edges into P are the program's dependences alone.  That is the half of
+     design/compilation-coordination.md, U1, which this template holds (plan_unroll).
+   2026-11-04, owner C2 (design/compilation-coordination.md, U1): u's citation, the contract's D5, is C3.3's.  Why: D5
+     appears in neither Lam, Rau nor C3.3's text (design/aot-compilation-change-request.md, appendix item 1).  What
+     must stay: u every node's routed values', so every rank computes the same u.
    2026-11-04, sub-assignment 3: reversing 2026-11-03's (sub-assignment 3's) program edges, one kind, C(consumed) ->
    P(produced), and its values at this node alone.  Why: the contract's struct mesh_dependence names either event of
    either declared transfer (four kinds), and u needs every node's values.  What must stay: the transport's edges as
@@ -427,18 +440,32 @@ static void plan_name(const struct plan *p,uint32_t v,const char *what,uint32_t 
 }
 
 /* Unrolling by modulo variable expansion (design/disjoint-pages-change-request.md, C3.3: M. Lam, Software pipelining,
-   PLDI 1988; B. R. Rau, Iterative modulo scheduling, MICRO 1994; the contract's D5 and "The allocator").  The least
-   lags D(x -> y) over the template (mesh-graph.h mesh_graph_lags, Dijkstra with the lags as weights), from every routed
-   value's write and reads, at every node, to every routed value's write:
-   - every write w has D(w -> w) == 1, its next instance reached at lag 1, else ENOMEM naming its value (D5: with it, an
-     order at a lag holds at every later lag, so the least lags decide every test below exactly); D(w -> w) == 0, a
-     lag-0 cycle, plan_acyclic has refused;
+   PLDI 1988; B. R. Rau, Iterative modulo scheduling, MICRO 1994; design/compilation-coordination.md, U1, and
+   design/disjoint-pages-revision-coordination.md, "The allocator").  The least lags D(x -> y) over the template
+   (mesh-graph.h mesh_graph_lags, Dijkstra with the lags as weights), from every routed value's write and reads, at
+   every node, to every routed value's write:
    - L(v) = the largest D(r -> write v) over v's reads r, the least lag at which every read of v in execution t happens
-     before its write in t + L; UINT32_MAX (a read nothing orders before a later write) is ENOMEM naming the value;
-   - u = the largest L(v) over every routed value at every node, 1 where there is none.  Every rank computes the same
-     template, lags and u, so both nodes of every adjacent pair hold the same copies;
+     before its write in t + L (C3.3: "For each value, L is the smallest lag at which every read of it in execution t
+     happens before its write in execution t + L"); UINT32_MAX (a read that reaches no later write of it) is ENOMEM
+     naming the value (C3.3: "A value with no such L fails the plan with ENOMEM, naming the value"), and nothing else
+     is;
+   - u = the largest L(v) over every routed value at every node, 1 where there is none (C3.3: "The unroll factor u is
+     the largest L").  Every rank computes the same template, lags and u, so both nodes of every adjacent pair hold the
+     same copies;
    - between[a x local + b] = D_ab, the largest D(r -> write b) over this node's routed value a's reads r, for every
      pair of this node's routed values, so the colouring's tests (plan_interferes) are table reads.
+   The least lags are C3.3's happens-before at every larger distance too (U1): every walk of the template into a write
+   passes its range's production P (plan_template), and the program's dependences order every event of a node in
+   execution t before each of its events in t + 1 (tools/e2b_replay.m e2b_ir, "r's last to its first at lag 1";
+   rdma/mesh_compile.py _dependences, "every event no lag-0 edge leaves to every event none enters (lag 1)"), so a
+   walk at lag L through P continues through P's next instances at every lag past L.  D(w -> w) == 0, a lag-0 cycle,
+   plan_acyclic has refused.
+   2026-11-04, owner C2 (design/compilation-coordination.md, U1; design/aot-compilation-change-request.md, appendix
+   item 1): the refusal of a write whose least cycle D(w -> w) is not 1 (design/disjoint-pages-revision-coordination.md,
+   D5), ENOMEM naming its value, is gone.  Why: C3.3 fails only a value with no such L, and D5 appears in neither Lam,
+   Rau nor C3.3's text; it refused a lone AllGather or AllToAll, whose landing reaches its next instance at lag 2 (u 2
+   now).  What must stay: L(v), u, between and plan_interferes as they were; ENOMEM, named, for a read that reaches no
+   later write.
    0; ENOMEM. */
 static int plan_unroll(struct plan *p){
   const uint32_t values=p->values;
@@ -462,8 +489,6 @@ static int plan_unroll(struct plan *p){
   if(!status)status=mesh_graph_lags(p->vertices,p->first,plan_head,plan_lag,p,sources,source,values,target,lags);
   for(uint32_t v=0;!status && v<values;v++){
     const struct plan_value *x=p->value+v;
-    const uint32_t cycle=lags[(size_t)x->source*values+v];
-    if(cycle!=1){plan_name(p,v,"its write does not reach its next instance at lag 1",cycle);status=ENOMEM;break;}
     uint32_t most=0;
     for(uint32_t j=0;j<x->reads;j++){
       const uint32_t lag=lags[((size_t)x->source+1+j)*values+v];
@@ -546,9 +571,15 @@ static int plan_sized_order(const void *a,const void *b){
    - routed copies (v, c) and (w, c'), D_vw = between[v x local + w], d = (c' - c) mod u: where d > 0 they share only
      if d >= D_vw and u - d >= D_wv; where d == 0 (v != w) only if D_vw <= u, D_wv <= u and D_vw == 0 or D_wv == 0.
      These are the distances at which their executions meet (t and t' with t' - t = d mod u: d, d - u, d + u, ...);
-     by D5 an order at the least such distance holds at every larger one of its class, and a value's every read
-     before the other's write orders its writes too.  Two copies of one value follow the d > 0 rule.
-   Symmetric: swapping the items swaps D_vw and D_wv and takes d to u - d. */
+     an order at the least such distance holds at every larger one of its class (design/compilation-coordination.md,
+     U1: every walk into a write passes its range's production P, and the program's dependences order each node's
+     events of execution t before those of t + 1, so a walk at lag L through P continues at every lag past L;
+     plan_unroll), and a value's every read before the other's write orders its writes too.  Two copies of one value
+     follow the d > 0 rule.
+   Symmetric: swapping the items swaps D_vw and D_wv and takes d to u - d.
+   2026-11-04, owner C2 (U1): this order at every larger distance cited to U1, where it cited the contract's D5.  Why:
+   D5's refusal is gone (design/aot-compilation-change-request.md, appendix item 1).  What must stay: the tests as they
+   are, the least lags' at the distances the copies' executions meet (C3.3). */
 static int plan_interferes(const void *context,uint32_t a,uint32_t b){
   const struct plan *p=context;
   const uint32_t u=p->copies,routed=p->local*u;
@@ -706,8 +737,11 @@ static uint32_t plan_communication(const struct plan *p,uint32_t j,uint64_t page
    here are fields 0 .. P_g - 1 of its group; a send from the range's source names its release, any other send its
    receive's field (a relay's forward, or a destination's on the way on).  Filling also gives each entry its place in
    this order (`walk`) and its communication (plan_communication: a receive's the tree edge into this node, a send's
-   the edge into its child); plan_schedule then orders the entries by their links' scheduled starts, ties by this
-   order, and every field stays as assigned here (design/compilation-coordination.md, T6).
+   the edge into its child), and its `set`: j + 1 for a page on tree j of a demand whose range is a set (its every
+   declared transfer MESH_PAGES), j the index this walk iterates, d->tree .. d->tree + d->trees into p->tree and p->run,
+   the same at every rank; 0 for every other entry (design/compilation-coordination.md, S1 and S2: the set's unit is
+   one tree's pages, every edge of tree j carrying the same run of them).  plan_schedule then orders the entries by
+   their groups' scheduled starts (T6 as S3 amends it), and every field stays as assigned here.
    2026-11-04, sub-assignment 3: reversing 2026-11-03's (sub-assignment 5's) bit a receive in one landed record an
    execution, counted over all of the execution's receives.  Why: a landing is a phase field of its range's group and
    an arrival on its range's count (C3.7; the contract's D1, counts per received range and copy).  What must stay: the
@@ -724,6 +758,7 @@ static void plan_walk(struct plan *p){
     uint64_t k=0;
     for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
       const uint64_t end=k+p->run[j];
+      const uint32_t set=d->set?j+1:0;
       const struct plan_tree tree={p->parent+p->tree[j]*n,n,d->source};
       uint32_t in=MESH_ABSENT;
       mesh_graph_climb(tree.parent,n,d->source,self,plan_tree_up,&in);
@@ -734,13 +769,17 @@ static void plan_walk(struct plan *p){
         uint32_t mine=MESH_ABSENT;
         if(in!=MESH_ABSENT){
           mine=field++;
-          if(p->entry)p->entry[at]=(struct plan_entry){d->value,in,MESH_RECEIVE,i,mine,
-                                                       plan_communication(p,j,k-p->lead[j],self),k,at,0};
+          if(p->entry)p->entry[at]=(struct plan_entry){.value=d->value,.node=in,.direction=MESH_RECEIVE,.demand=i,
+                                                       .field=mine,.communication=plan_communication(p,j,k-p->lead[j],self),
+                                                       .set=set,.page=k,.walk=at};
           at++;
         }
         for(size_t c=first[self];c<first[self+1];c++,at++)
-          if(p->entry)p->entry[at]=(struct plan_entry){d->value,(uint32_t)child[c],MESH_SEND,i,mine,
-                                                       plan_communication(p,j,k-p->lead[j],(uint32_t)child[c]),k,at,0};
+          if(p->entry)p->entry[at]=(struct plan_entry){.value=d->value,.node=(uint32_t)child[c],.direction=MESH_SEND,
+                                                       .demand=i,.field=mine,
+                                                       .communication=plan_communication(p,j,k-p->lead[j],
+                                                                                         (uint32_t)child[c]),
+                                                       .set=set,.page=k,.walk=at};
       }
     }
     if(!p->entry){
@@ -780,12 +819,25 @@ static struct plan_span plan_tasks(const struct plan *p,const struct plan_span *
   if(own)return (struct plan_span){reader[p->of[i]],1};
   return consumer[i];
 }
-/* design/compilation-coordination.md, T6: the entries by their link's scheduled start of their page, ties by
-   plan_walk's order (a total order, so every rank's sort ends alike) */
+/* design/compilation-coordination.md, T6 as S3 amends it: the entries by their group's least scheduled start
+   (`earliest`), then their group's least walk (`least`), then their own walk (a total order, walks being distinct, so
+   every rank's sort ends alike).  An entry alone in its group (`set` 0) is ordered by its own start, then its walk, as
+   T6 ordered every entry.
+   2026-11-04, owner C2 (S3): reversing T6's order by each entry's own start, ties by walk.  Why: a set's entries must
+   be contiguous on their node pair within a copy, so the bridge draws them in a uniformly random order (design/aot-
+   compilation-change-request.md, appendix item 5; S7's EINVAL where they are not).  What must stay: a total order of
+   the entries both ends of a pair agree on. */
 static int plan_entry_order(const void *a,const void *b){
   const struct plan_entry *x=a,*y=b;
-  if(x->start!=y->start)return x->start<y->start?-1:1;
+  if(x->earliest!=y->earliest)return x->earliest<y->earliest?-1:1;
+  if(x->least!=y->least)return x->least<y->least?-1:1;
   return (x->walk>y->walk)-(x->walk<y->walk);
+}
+/* mesh_graph_rows' keys: an entry's node pair and direction, 2 node + direction (MESH_SEND 0, MESH_RECEIVE 1), so an
+   entry's row holds the entries of its `node` and `direction` in walk order (plan_schedule's groups) */
+static uint32_t plan_entry_side(const void *context,size_t k){
+  const struct plan_entry *e=(const struct plan_entry *)context+k;
+  return 2*e->node+e->direction;
 }
 
 /* The task graph and its schedule (design/plan-to-bridge-change-request.md, R3 to R5; design/aot-compilation-change-
@@ -813,17 +865,31 @@ static int plan_entry_order(const void *a,const void *b){
      schedule holds as one occupation of its link.  Every tree edge lies on some destination's route (plan_trees).
    - The schedule: list scheduling in the contention model (Sinnen and Sousa, Algorithm 1 with Algorithm 2, eq. (7),
      §5.2; mesh-graph.h mesh_graph_contention_schedule, T3 to T5).
-   - T6: each of this node's entries (plan_walk) takes its communication's start on its link, so a send at x to y and
-     its receive at y read the same; the entries are sorted by it, ties by plan_walk's order.  A node pair's hops at
-     its two ends are the same hops in the same walk order (mesh.h "Both ends") and read the same starts, so they stay
-     the same hops in the same order; every rank computes the same schedule from the same inputs (F. B. Schneider,
-     Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).
+   - T6 as S3 amends it (design/compilation-coordination.md, S1 to S3; design/aot-compilation-change-request.md,
+     appendix item 5): each of this node's entries (plan_walk) takes its communication's start on its link, so a send at
+     x to y and its receive at y read the same.  Each entry's group is the entries of its nonzero `set`, `node` and
+     `direction` (else the entry alone); each group's least start (`earliest`) and least walk (`least`) are found in
+     one pass, over the entries' rows by node and direction (mesh-graph.h mesh_graph_rows, each row in walk order): a
+     group is a run of one nonzero `set` in its row, since tree j's entries are contiguous in walk order.  The entries
+     are sorted by their group's least start, then their group's least walk, then their own walk (plan_entry_order).
+     So a set's entries are contiguous on their pair within each copy, in walk order (the tree's page order), and every
+     other entry keeps the schedule's order (R5).  A node pair's hops at its two ends are the same hops in the same
+     walk order (mesh.h "Both ends"), read the same starts and fall in the same groups (tree j's pages over that pair),
+     so they stay the same hops in the same order; every rank computes the same schedule from the same inputs (F. B.
+     Schneider, Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).  Each
+     per-pair list stays a topological order of the unrolled executions (S2; R5; MSCCLang, ASPLOS 2023, §5.2): a set's
+     position i follows its receive at position i upstream, whose group's start is earlier, and a source's set is
+     released by one supplied word (C3.7).
+   2026-11-04, owner C2 (S3): the groups and their least start and walk added before the sort, where T6 sorted each
+   entry by its own start.  Why: appendix item 5's sets, each contiguous on its pair.  What must stay: every entry's
+   fields as plan_walk assigned them; the same order at both ends of each pair.
    0; EINVAL (the schedule's: a time past the doubles' range); ENOMEM. */
 static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const struct mesh_dependence *dependence,
                          uint32_t dependences){
   const uint32_t n=p->n,demands=p->demands,count=p->transfers;
   const struct mesh_declared *declared=p->declared;
   uint32_t link_of[(size_t)n*n+1],path_link[(size_t)n+1],path_head[(size_t)n+1];
+  size_t side[2*(size_t)n+1];
   uint32_t *reader=malloc(((size_t)demands+1)*sizeof *reader);
   struct plan_span *consumer=malloc(((size_t)count+1)*sizeof *consumer);
   if(!reader || !consumer){free(reader);free(consumer);return ENOMEM;}
@@ -861,9 +927,10 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
            *to=status?NULL:malloc(((size_t)edges+1)*sizeof *to),
            *link=status?NULL:malloc(((size_t)entries+1)*sizeof *link),
            *communication=status?NULL:malloc(((size_t)entries+1)*sizeof *communication);
-  size_t *route=status?NULL:malloc(((size_t)edges+1)*sizeof *route);
+  size_t *route=status?NULL:malloc(((size_t)edges+1)*sizeof *route),
+         *grouped=status?NULL:malloc(((size_t)p->entries+1)*sizeof *grouped);
   if(!status && (!w || !cost || !rate || !start || !link_start || !comm_start || !processor || !from || !to || !link ||
-                 !communication || !route))status=ENOMEM;
+                 !communication || !route || !grouped))status=ENOMEM;
   if(!status){
     /* the tasks: each on its event's node, weighing the weighting operand's weight of it (A3) */
     for(uint32_t d=0;d<demands;d++){
@@ -925,13 +992,24 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
                                           communication,2*p->pairs,rate,start,link_start);
   }
   if(!status){
-    /* T6: a communication's one start on its link (T4), each entry's its own, the entries in that order */
+    /* T6: a communication's one start on its link (T4), each entry's its own */
     for(size_t r=0;r<entries;r++)comm_start[communication[r]]=link_start[r];
     for(uint64_t k=0;k<p->entries;k++)p->entry[k].start=comm_start[p->entry[k].communication];
+    /* S3: each group's least start and least walk, one pass over the rows by node and direction (the entries still in
+       walk order, entry k's walk k, so each row is in walk order and a group's first is its least walk) */
+    mesh_graph_rows(2*n,(size_t)p->entries,plan_entry_side,p->entry,side,grouped);
+    for(uint32_t key=0;key<2*n;key++)
+      for(size_t a=side[key],b;a<side[key+1];a=b){
+        const struct plan_entry *x=p->entry+grouped[a];
+        double earliest=x->start;
+        for(b=a+1;b<side[key+1] && x->set && p->entry[grouped[b]].set==x->set;b++)
+          if(p->entry[grouped[b]].start<earliest)earliest=p->entry[grouped[b]].start;
+        for(size_t c=a;c<b;c++){p->entry[grouped[c]].earliest=earliest;p->entry[grouped[c]].least=x->walk;}
+      }
     qsort(p->entry,p->entries,sizeof *p->entry,plan_entry_order);
   }
   free(reader);free(consumer);free(w);free(cost);free(rate);free(start);free(link_start);free(comm_start);
-  free(processor);free(from);free(to);free(link);free(communication);free(route);
+  free(processor);free(from);free(to);free(link);free(communication);free(route);free(grouped);
   return status;
 }
 
@@ -945,37 +1023,46 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
    bytes down from the root: each demand's trees and their shares, a tree's vertices past its source and destinations
    the relays, members all.  The pages: each demand's pages cut over its trees by their shares by earliest finish
    (mesh_graph_fill), a tree's pages one run of them.  The order: one execution's task graph scheduled (plan_schedule;
-   design/plan-to-bridge-change-request.md, R3 to R5), this node's entries in their links' scheduled order.  Every rank
-   computes the same demands, trees, pages, template, u and schedule from the same declared transfers, weights,
+   design/plan-to-bridge-change-request.md, R3 to R5), this node's entries in their groups' scheduled order (S3).  The
+   sets: a demand whose every declared transfer is MESH_PAGES is a set on each of its trees (S1, S2; its `set`).  Every
+   rank computes the same demands, trees, pages, template, u and schedule from the same declared transfers, weights,
    dependences and map, and writes its own hops of them (plan_walk, plan_schedule).
+   The plan's name (design/compilation-coordination.md, N1): (group, function), `function` the program's ordinal of
+   the compiled function, held in struct mesh_state `epoch`; `*plan` the plan's handle once it stands (N2).
    Then, in the order of the draft e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", steps 1
-   to 6, as the operator's ruling 1 allows it (design/compilation-coordination.md, Q5):
-   1. everything computed first: the plan's epoch (design/compilation-coordination.md, C-epoch: one past the
-      context's count, or its cancelled standing plan's), the trees' communications (plan_trees), the template
-      (plan_template), no lag-0 cycle (plan_acyclic), the least lags and u (plan_unroll), this node's entries of one
-      copy counted and every room (ENOMEM where the receives, the entries or the rows pass their words), the state
-      section's layout with the entries in it (plan_layout), the items and both colourings (plan_place), the entries
-      filled (plan_walk) and in schedule order (plan_schedule), the plan's nodes and sender; EEXIST where a plan
-      standing at this node on the same map is already (group, epoch), the claims' heads walked (mesh-dataflow.h
-      mesh_head_after and mesh_head_state);
+   to 5, as the operator's ruling 1 allows it (design/compilation-coordination.md, Q5, as N3 and N5 amend it):
+   1. everything computed first: the trees' communications (plan_trees), the template (plan_template), no lag-0 cycle
+      (plan_acyclic), the least lags and u (plan_unroll), this node's entries of one copy counted and every room
+      (ENOMEM where the receives, the entries or the rows pass their words), the state section's layout with the
+      entries in it (plan_layout), the items and both colourings (plan_place), the entries filled (plan_walk) and in
+      their groups' schedule order (plan_schedule), the plan's nodes and sender; EEXIST where a plan standing at this
+      node on the same map is already (group, function), the claims' heads walked (mesh-dataflow.h mesh_head_after and
+      mesh_head_state);
    2. the claim (mesh-dataflow.h mesh_claim_take), its generation from hdr `serial` (the draft's §6, step 2: one past
       its count, never 0), its head's `start` the take's: rows, the head and every value's count x P after it (count u
       for a routed value, k for a value of lag k >= 1, 1 for every other); window pages, the window colouring's blocks
-      x block; local pages, the local one's.  ENOMEM leaves the context's standing plan standing;
+      x block; local pages, the local one's.  ENOMEM leaves every plan of the program standing;
    3. the state section started once (D3: its bytes before the entries 0, then struct mesh_state's `copies`,
-      `receives`, `ranges`, `releases`, region offsets, `group`, `epoch`, `serial`, `hops`, `entries`, `nodes` and
-      `sender`; `held`, every `refused`, `submitted`, `released` and every `served` 0), every `state` 1 value's bytes 0
-      once (D3), every value's rows named and bound copy by copy (mesh_backing_bind), every value row's publication
-      written, the entries u x n; no data page is written;
-   4. the map read again: where its serial moved, or the reader failed, this claim and every earlier one of the
-      client closed, context->state 0 and context->epoch the named epoch less 1 (C-epoch: the next call names it
-      again): ESTALE, or the reader's error;
-   5. the head's publication `state` the section's region offset (release): the plan stands; context->state that
-      offset and context->epoch the plan's epoch (C-epoch); hdr `plans` raised and woken (mesh.h mesh_notify: "every
-      publication of a plan (mesh_plan) ... adds 1");
-   6. every earlier claim of this client closed (mesh_claim_close(context, g, 1)), which the bridge releases once no
-      port holds it (D10), and `plans` raised and woken again, by the close (mesh-dataflow.h mesh_claim_close: every
-      close of a claim adds 1).  Nothing waits for it.
+      `receives`, `ranges`, `releases`, region offsets, `group`, `epoch` (the function, N1), `serial`, `hops`,
+      `entries`, `nodes` and `sender`; `held`, every `refused`, `submitted`, `released` and every `served` 0), every
+      `state` 1 value's bytes 0 once (D3), every value's rows named and bound copy by copy (mesh_backing_bind), every
+      value row's publication written, the entries u x n, each with its `set` (S3); no data page is written;
+   4. the map read again: where its serial moved, or the reader failed, this claim alone closed
+      (mesh_claim_close(context, generation), which the bridge releases once no port holds it, D10), `*plan`
+      untouched: ESTALE, or the reader's error (N3);
+   5. the head's publication `state` the section's region offset (release): the plan stands; `*plan` that offset (N2);
+      hdr `plans` raised and woken (mesh.h mesh_notify: "every publication of a plan (mesh_plan) ... adds 1").  No
+      earlier claim of this client is closed (N3, N5): its other plans stand, each until the program retires it.
+   2026-11-04, owner C2 (design/compilation-coordination.md, N1 to N5; design/aot-compilation-change-request.md,
+   appendix item 6): reversing C-epoch's computation (the epoch one past the context's count, `mine`, the epoch kept
+   from a cancelled standing plan, context->epoch raised once the plan stood and left at the named epoch less 1 on a
+   failure after the writes), context->state, step 4's close of every earlier claim of the client, and step 6 (every
+   earlier claim of this client closed once the plan stood).  Why: compiled functions coexist, each its own plan with
+   its own claim, released only when the program retires that function or itself (R. Frostig, M. J. Johnson and C.
+   Leary, SysML 2018; NVIDIA, CUDA Programming Guide §4.2.2; Pathways §3, §4.4); a plan is named by the program's
+   ordinal of its function, the same at every rank; struct mesh_ctx holds no plan.  What must stay: every failure but
+   ESTALE and the second map read's found before anything is written; the map read again after everything is written
+   and before the plan stands; `plans` raised and woken once the plan stands.
    2026-11-04, owner C (design/compilation-coordination.md, "The region" and Q5): reversing the writing order of
    design/disjoint-pages-revision-coordination.md, "Writing a plan": the generation hdr `plan` + 1; hdr `hops` 0, a
    release fence and `plan` woken before the entries; the entries in hdr's hop area, ENOSPC past `hop_capacity`; hdr
@@ -983,7 +1070,8 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
    plans stand at once, each in its own claim and found by its head (design/plan-to-bridge-change-request.md, R8;
    design/aot-compilation-change-request.md, A7), and hdr's one-plan fields are vacant.  What must stay: every failure
    but ESTALE and the second map read's found before anything is written; the map read again after everything is
-   written and before the plan stands; the earlier claims closed only once the new plan stands.
+   written and before the plan stands; the earlier claims closed only once the new plan stands (that last gone with
+   step 6, 2026-11-04, owner C2: N3, N5, above).
    2026-11-04, sub-assignment 3: reversing 2026-11-03's (sub-assignments 3 and 5's) tail: `executions` as an input and
    its per-execution items; plan_section's check of sections mesh_section_create made (values now come in through
    `values`); the memset of every declared instance's pages before `hops`; the word-by-word zeroing of the supplied
@@ -992,11 +1080,12 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
    in new pages, so nothing is erased or waited for (C3.4).  What must stay: the demands, mesh_graph_reach,
    mesh_graph_flow and mesh_graph_fill as they were, so every rank's trees and template are the same; every failure but
    ESTALE and the second map read's found before anything is written. */
-int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared *declared,
+int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const struct mesh_declared *declared,
               const struct mesh_weight *weights,uint32_t count,struct mesh_value *values,uint32_t given,
-              const struct mesh_dependence *dependence,uint32_t dependences){
+              const struct mesh_dependence *dependence,uint32_t dependences,uint64_t *plan){
   struct hdr *m=context->M;
-  if(!group || (count && (!declared || !weights)) || (given && !values) || (dependences && !dependence))return EINVAL;
+  if(!group || !plan || (count && (!declared || !weights)) || (given && !values) || (dependences && !dependence))
+    return EINVAL;
   /* a value: its bytes, its kind, its wire and state flags, and its lag (k >= 1 only on an execution value outside the
      window that is no state: design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-
      coordination.md, R4; that no declared transfer names it is the declared transfers' test below) */
@@ -1036,17 +1125,6 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
   if(status)return status;
   const uint32_t n=nodes.count;
   if(nodes.self>=n)return EHOSTUNREACH;
-  /* the plan's name (group, epoch) (design/compilation-coordination.md, C-epoch): `epoch` one past the context's count
-     of its plans that stood (struct mesh_ctx `epoch`), but where the context's standing plan is cancelled (its `serial`
-     not this node's map serial, the one this call plans on: design/disjoint-pages-change-request.md, D.3.6) that plan's
-     own, the call its replan, so every rank names it alike whichever rank saw the move first.  The count is raised
-     only once the plan stands (step 5), so a failed call consumes no epoch; one that fails after closing the
-     context's earlier claims (step 4) leaves it at this epoch less 1, so the next call names this epoch again.
-     2026-11-04, owner C: reversing the epoch raised at the call's entry.  Why: C-epoch (review V1 #5): a failed call
-     or a replan raised it at one rank and not another, so the ranks' names parted.  What must stay: every rank names
-     one plan alike */
-  const struct mesh_state *mine=mesh_state_at(m,context->state);
-  const uint64_t epoch=mine && mine->serial!=nodes.serial?mine->epoch:context->epoch+1;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   struct plan p={.context=context,.declared=declared,.transfers=count,.given=values,.givens=given,.n=n,
                  .self=nodes.self,.serial=nodes.serial};
@@ -1080,9 +1158,14 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
     const struct mesh_declared *t=declared+i;
     if(placed[i]==i)
       p.demand[p.demands++]=(struct plan_demand){.source=t->source,.identity=t->identity,.first=i,.mine=MESH_ABSENT,
-                                                 .bytes=t->bytes,.pages=plan_blocks(m,t->bytes),.range=MESH_ABSENT};
+                                                 .set=1,.bytes=t->bytes,.pages=plan_blocks(m,t->bytes),
+                                                 .range=MESH_ABSENT};
     p.of[i]=placed[i]==i?p.demands-1:p.of[placed[i]];
     struct plan_demand *d=p.demand+p.of[i];
+    /* a set where every declared transfer of the range is MESH_PAGES, function B at every destination; any MESH_JOIN
+       destination keeps the schedule's order (design/compilation-coordination.md, S1; design/aot-compilation-change-
+       request.md, appendix item 5: "Function A's operands (joins) keep the schedule's order") */
+    if(t->kind!=MESH_PAGES)d->set=0;
     /* one range: its bytes alike, each destination once, its production and its source's read weighing alike
        (design/compilation-coordination.md, "The plan call", struct mesh_weight) */
     if(t->bytes!=d->bytes || d->leaves>>t->destination&1 || weights[i].produced!=weights[d->first].produced ||
@@ -1204,12 +1287,15 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
   uint64_t spanned=0;
   for(uint32_t i=0;i<p.demands;i++)spanned|=UINT64_C(1)<<p.demand[i].source|p.demand[i].leaves|p.demand[i].on;
   if(!spanned)spanned=UINT64_C(1)<<p.self;
-  /* a plan standing at this node already (group, epoch) on the map this call plans on: EEXIST (design/compilation-
-     coordination.md, "The plan call"; one whose `serial` is not that map's is cancelled and ignored, C-epoch), every
-     claim's head walked (mesh-dataflow.h mesh_head_after, mesh_head_state) */
+  /* a plan standing at this node already (group, function) on the map this call plans on: EEXIST until the program
+     retires it (design/compilation-coordination.md, N1: "A replan of a function on the same map is EEXIST until the
+     program retires the standing one"; one whose `serial` is not that map's is cancelled, D.3.6, and ignored), every
+     claim's head walked (mesh-dataflow.h mesh_head_after, mesh_head_state).
+     2026-11-04, owner C2 (N1): the name's second word the function, where it was C-epoch's epoch.  What must stay:
+     EEXIST where a plan of the name stands on the same map */
   for(uint32_t head=mesh_head_after(m,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(m,head)){
     const struct mesh_state *standing=mesh_head_state(m,head);
-    if(standing && standing->serial==p.serial && standing->group==group && standing->epoch==epoch){
+    if(standing && standing->serial==p.serial && standing->group==group && standing->epoch==function){
       status=EEXIST;goto done;
     }
   }
@@ -1235,7 +1321,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
   state->supplied=base+p.supplied;
   state->status=base+p.status;
   state->group=group;
-  state->epoch=epoch;
+  state->epoch=function;
   state->serial=p.serial;
   state->hops=base+p.hops;
   state->entries=entries;
@@ -1288,14 +1374,14 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
      group, its range's copy-c count word where this node consumes the range (0 at a relay, whose receive the bridge
      counts nothing for: review 15's finding 1) and P_g; a forwarding send its receive's word and field; a send from the
      range's source its release's supplied word; each its page's bytes, page k of a range of B bytes min(Q, B - k Q), Q
-     = block x pgsz (design/compilation-coordination.md, T7) */
+     = block x pgsz (design/compilation-coordination.md, T7); each its entry's `set`, every copy's the same (S3) */
   struct mesh_hop *hop=mesh_hops(m,state);
   for(uint32_t c=0;c<u;c++)for(uint64_t j=0;j<p.entries;j++){
     const struct plan_entry *e=p.entry+j;
     const struct plan_demand *d=p.demand+e->demand;
     const uint64_t left=d->bytes-e->page*block;
     struct mesh_hop h={.page=plan_page(&p,e->value,c,e->page),.node=e->node,.direction=e->direction,
-                       .field=MESH_ABSENT,.bytes=(uint32_t)(left<block?left:block),.serial=p.serial};
+                       .field=MESH_ABSENT,.bytes=(uint32_t)(left<block?left:block),.serial=p.serial,.set=e->set};
     if(e->field==MESH_ABSENT)h.word=base+p.supplied+(uint64_t)d->release*sizeof(uint64_t);
     else{
       h.word=base+p.phases+d->group+(uint64_t)c*mesh_group_bytes(d->received)+(uint64_t)e->field/32*sizeof(uint64_t);
@@ -1307,28 +1393,23 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
     }
     *hop++=h;
   }
-  /* 4. the map read again: where it moved, or the reader failed, this claim and every earlier one of the client are
-     closed, and no plan of the context stands (a bridge refuses a plan whose `serial` is not `map_serial` as it loads
-     it, and cancels one that stands where the serial moves: mesh.h, "Cancellation") */
+  /* 4. the map read again: where it moved, or the reader failed, this claim alone is closed and `*plan` untouched
+     (design/compilation-coordination.md, N3; a bridge refuses a plan whose `serial` is not `map_serial` as it loads
+     it, and cancels one that stands where the serial moves: mesh.h, "Cancellation").
+     2026-11-04, owner C2 (N3, N5): reversing the close of every earlier claim of the client, context->state 0 and
+     context->epoch the named epoch less 1 (C-epoch).  Why: compiled functions coexist; this call's failure is its own
+     claim's alone.  What must stay: ESTALE, or the reader's error, with this claim closed */
   if(!(status=mesh_nodes_read(context,&after)) && after.serial!=p.serial)status=ESTALE;
-  if(status){
-    mesh_claim_close(context,generation,0);
-    mesh_claim_close(context,generation,1);
-    context->state=0;
-    /* design/compilation-coordination.md, C-epoch: the context's earlier claims are closed, so the next call has no
-       cancelled plan to keep the epoch of; the count is left at the named epoch less 1, and that call names this epoch
-       again, a replan of the plan this call was replacing, as a peer whose replan stood names it */
-    context->epoch=epoch-1;
-    goto done;
-  }
-  /* 5. the plan stands: its head's publication `state` (release), after every write above */
+  if(status){mesh_claim_close(context,generation);goto done;}
+  /* 5. the plan stands: its head's publication `state` (release), after every write above; `*plan` that offset, the
+     plan's handle (N2); `plans` raised and woken.
+     2026-11-04, owner C2 (N3, N5): step 6, every earlier claim of this client closed once this plan stood, is gone,
+     and context->state and context->epoch are no longer set.  Why: a program holds any number of compiled functions
+     at once, each released only by its retirement or the program's (design/aot-compilation-change-request.md, appendix
+     item 6).  What must stay: the publication a release after every write, then `plans` raised and woken */
   __atomic_store_n(&mesh_publication_at(m,p.claim.rows.first)->state,base,__ATOMIC_RELEASE);
-  context->state=base;
-  context->epoch=epoch;
+  *plan=base;
   mesh_notify(&m->plans);
-  /* 6. every earlier claim of this client closed, released by the bridge once no port holds it (D10); the close raises
-     and wakes `plans` */
-  mesh_claim_close(context,generation,1);
 done:
   free(key);free(placed);free(named);free(p.demand);free(p.of);
   free(root);free(up);free(down);free(demand);free(p.parent);free(share);
