@@ -531,7 +531,7 @@ static void flow_sets_free(struct flow *f){
    (plan_inside), or an entry's `field`, `pages` or `bytes` is none a plan writes (mesh.h struct mesh_hop: a field's
    low bit even and below 64, the pages of a receive with a count at least 1, 1 to block x pgsz bytes), EALREADY where
    this port carries units of a plan whose run has begun (its `executions` above 0 at the load: the note at the
-   refusal, below), EHOSTUNREACH where the pair has units but no link of rate, EPROTO where the map gives this cable a
+   refusal, below) or whose `taken[p]` is above 0 at the load (DL10, 2026-11-05: the same note), EHOSTUNREACH where the pair has units but no link of rate, EPROTO where the map gives this cable a
    queue pair its link does not hold, EMSGSIZE where a hop is more frames than a lane it is assigned can hold.
    2026-11-04, sub-assignment 6 (design/disjoint-pages-change-request.md, C1, C3.3, C4): reversing 2026-11-03's list of
    every execution's entries (executions x n, hdr `executions`), one record an entry, each posted once, so the records
@@ -720,8 +720,18 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      2026-11-04, owner B1 (design/compilation-coordination.md, Q5: "ESTALE or EALREADY as now"): the refusal is the
      plan's `refused` word (plan_load), where it was the port's `code`, phase and `prepared`, and holds nothing (no
      `held` bit, `prepared` 0 once the load ends), where `prepared` kept the refused generation until the plan moved;
-     the start reads the code from `refused` (mesh-call.h).  What must stay: as above */
-  if(carried_units && atomic_load_explicit(&words->executions,memory_order_acquire)){error=EALREADY;goto failed;}
+     the start reads the code from `refused` (mesh-call.h).  What must stay: as above.
+     2026-11-05, owner B4, the coordinator's ruling DL10 (design/compilation-coordination.md, "The documents' revisions
+     of edd4b583", amendments): a plan this port carries units of is refused (EALREADY, the same refusal, the plan's
+     `refused[p]` by plan_load) also where its `taken[p]` (acquire) is above 0 at the load, beside its `executions`.
+     Why: a load after this port has taken numbers, or been told past them (plan_end raises `taken[p]` to `released`
+     as the port ends a plan, a halt among the causes), cannot know them, since the parent may since have overwritten
+     their words (Lamport's sender reuses a word once every port's `taken[p]` is past it: mesh-records.c
+     orders_deliver), as a load after the run began cannot know which executions landed (the refusal's own reason,
+     above); the parent's wait leaves a refused port out (DL2).  What must stay: no record served from a load after
+     this port's numbers of the plan may have been reused */
+  if(carried_units && (atomic_load_explicit(&words->executions,memory_order_acquire) ||
+                       atomic_load_explicit(&words->taken[port->index],memory_order_acquire))){error=EALREADY;goto failed;}
   /* the records, by lane, copy and assignment order: first[q (u + 1) + c] lane q's copy c's first, each lane's units
      counted by copy and summed in that order (copy pick / n; a lane's units come in list order, so in copy order) */
   f->send_count=f->receive_count=0;
@@ -905,11 +915,11 @@ static int plan_load(struct port *port,uint32_t head,uint64_t owner,uint64_t gen
          EALREADY: a plan this port carries units of whose `executions` is above 0 at the load is refused, so no lane
          of a reload reads a number once its node's run has begun; a plan the port carries nothing of reads no word
          (its `taken[p]` follows `released`); and the same child walks again after link_close (`walk`) where its link
-         serves again.  What is left is a carried plan reloaded before its run began, whose `taken[p]` plan_end raised
-         to `released` while the reload's cursors start at 0: `told` from the word keeps the word only rising, and the
-         reload is refused (ESTALE) where the link's loss moved `map_serial`, as above; where it did not, the parent
-         could store again a word a lane of the reload has still to read (recorded for the coordinator).  What must
-         stay: `taken[p]` never lowered */
+         serves again.  A carried plan reloaded before its run began, whose `taken[p]` plan_end raised to `released`
+         while the reload's cursors would start at 0, is refused too (EALREADY: DL10, link_prepare, where `taken[p]` is
+         above 0 at the load; 2026-11-05, owner B4, in place of this case recorded open here), so a loaded plan this
+         port carries starts with `told` 0, and `told` from the word keeps it only rising for a plan it carries nothing
+         of.  What must stay: `taken[p]` never lowered */
       f->head=head;f->owner=owner;f->generation=generation;
       f->told=atomic_load_explicit(&words->taken[p],memory_order_relaxed);*loaded=f;
       atomic_fetch_or_explicit(&words->held,UINT64_C(1)<<p,memory_order_release);
