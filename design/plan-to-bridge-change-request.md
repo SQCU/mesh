@@ -1580,6 +1580,49 @@ design/aot-compilation-change-request.md, and are held here once.
 > "at a node where call n is still outstanding, what happens to the order for call n+K? "
 > what's an 'order' if you use non-idiomatic terminology?
 
+**Claude:**
+
+> (•̀ᴗ•́)ゝ The implementer finished. Both repos are pushed and clean, the three builds pass with no warnings, and nothing was run. Its record is "The revisions of 46ae8fdf" in `design/compilation-coordination.md`.
+>
+> **What was done**
+> - **R5, the order from one LP:** the order now comes from Chen's LP, solved by cutting planes with Queyranne's separation, each LP by HiGHS, smallest completion time first. Edge scheduling and bottom levels are gone, and the Makefile links HiGHS. (`f4838c9d`)
+> - **Item 5, one permutation per set:** each set gets one permutation per execution, keyed by (execution, set); the per-cable draw is gone. Lemire's rejection step is added, so each draw is exactly uniform. (`c2a226b0`)
+> - **Item 2, delivery:** each node runs Fig. 5's destination code. Deliveries go into a channel that replaces Lamport's buffer. (`71e060ba`)
+> - **Item 2, the reset:** the sequencer's number is never set back to 0. (`71e060ba`)
+> - **A4, new collectives:** ReduceScatter and CollectivePermute are lowered. (`7430505c`)
+>
+> **Where it stopped, and the errors it found in my text**
+> 1. **The channel can still make the writer wait.** Port children are separate processes that share only the region, and disjoint-pages A3 says the bridge's own pages are laid out once with the region. So the channel is a fixed area of 4096 entries. Each child copies the entries into its own memory, which can grow. If a child stops reading for 4096 deliveries, the ORDER stays at the head of the channel. That is a writer wait, which item 2 forbids. The cause is a conflict between Kahn's unbounded channel and A3's fixed region, and it needs your ruling.
+> 2. **My no-cycle argument in item 5 is wrong in one case.** Two Macs can be joined by more than one cable. When the bridge splits a set's pages over two cables between the same pair, each cable carries only its own part of the permutation, not one renaming. The record gives a three-node cycle. Applying one renaming across both cables would need a port to post pages whose records only the other cable's port holds, and the documents name no way to do that. One option: have Graham's list scheduling deal each set as a single unit, so it lands on one cable. That keeps the argument, at some cost to balance.
+> 3. **A10 isn't actionable yet.** The documents don't say how calls of compiled functions become an FX graph. They also give no finite bound once dependent calls are issued ahead as futures.
+> 4. **Function B's outputs.** "Its outputs are pages that leave as each is produced": the code releases a whole range with one word, and nothing states a per-page release. The audit flagged this and I left it.
+> 5. **Smaller mistakes of mine:**
+>    - The HiGHS include path I wrote fails; the implementer worked around it.
+>    - LP (14) minimizes only the makespan, so completion times off the critical path depend on which optimal vertex HiGHS returns. I saw this coming and didn't write it down.
+>    - The same order on every rank requires the same HiGHS build on every member.
+>    - A4's "refuses them now" was wrong: the partitioner never inserts ReduceScatter or CollectivePermute, so the new lowerings can't run until A2's partitioner inserts them.
+>
+> **Before any run:** the bridge now loads `libhighs`, so every member needs `brew install highs`.
+>
+> **One gap:** one of my own earlier turns marked the start's wait for every port to load as "remove", since nothing requires it. No proposal clause carries that, so `mesh_ports_held` and its wait are still there.
+>
+> Which of 1, 2, 4 and the LP-objective question in 5 do you want to rule on? I can bring citations for each one first.
+
+**The operator:**
+
+> "Before any run: the bridge now loads libhighs, so every member needs brew install highs." manual build operations and scriptless unversioned irreproducible builds are broadly forbidden, not that this should ever need concrete mention
+> " Each child copies the entries into its own memory, which can grow. If a child stops" who added this and why is there a transfer by copy rather than a transfer by view? only an extremely specific interface ever does anything copy-like, and that is the final dma driver, which we use, rather than simulate in effigy in a wrapper that pretends to be the dma driver by doing fake work then submitting the literals to the ltieral driver deep inside.
+> "2. My no-cycle argument in item 5 is wrong in one case. Two Macs can be joined by more than one cable. "
+> figure this out for arbitrary graphs which evenutally collect all nodes in a collective by any number of switching nodes. more citations, more literature, fewer guesses, fewer idioms. there are tools in this repo to vomit up what the mesh topology literally is right now. it is not a tree and never looked anything like one.
+> "3. A10 isn't actionable yet. The documents don't say how calls of compiled functions become an FX graph. "
+> get real. citation, citation, citation. don't invent idiomatic reasons why you can't do things either.
+> address the other petty mistakes unmentioned.
+
+**The operator:**
+
+> "If a child stops reading for 4096 deliveries, "
+> consider whether this is a fictional problem or a problem that appears only through idiomatic citation free code before making any further statements
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
@@ -1718,7 +1761,12 @@ code, and each method is used as its source states it.
     graph (R3): each task at its node, and each hop of each page's route, on its cable
     (design/compilation-coordination.md GO2). It has one more variable, C_max. Instruction j's length d_j is its weight
     from the weighting operand (aot-compilation A3): w for a task, and for a hop c(e) over its cable's bandwidth.
-    - Minimize C_max, with C_max ≥ C_j for every j: Chen's (14) and (14a).
+    - Minimize C_max, with C_max ≥ C_j for every j: Chen's (14) and (14a). Then, over (14)'s optimal solutions,
+      minimize Σ_j C_j: Chen's (1) and Hall et al.'s (1) with unit weights. The two are one lexicographic linear
+      program (H. Isermann, Linear lexicographic optimization, OR Spektrum 4, 1982). They are solved in sequence, the
+      second with C_max held at the first's optimum. Theorem 6.2's bound holds for any optimal solution of (14). The
+      second objective fixes C̄_j off the critical path, which (14) alone leaves to whichever optimal vertex the
+      solver returns. (Corrected 2026-11-05: the text before minimized C_max alone.)
     - C_j ≥ d_j for every j: Chen's (1b), with every release time zero within one execution.
     - C_j ≥ C_i + d_j for every edge i → j of the graph: Chen's (1c), "the precedence constraint", and Hall et al.'s
       (3). R4's edges are among them. Function A's task has an edge from every page of its operand, which with (1c) is
@@ -1743,8 +1791,8 @@ code, and each method is used as its source states it.
     - Each linear program is solved by HiGHS's dual revised simplex method, through the HiGHS library (Q. Huangfu and
       J. A. J. Hall, Parallelizing the dual revised simplex method, Math. Program. Comput. 10(1), 2018, the paper HiGHS
       asks its users to cite). The code builds the rows and calls the library. It writes no solver of its own.
-    - Every rank solves the same program with the same library, on one thread, so every rank finds the same solution
-      and the same order (Schneider, below).
+    - Every rank solves the same program with the same library, built from the same source with the same flags, on
+      one thread. So every rank finds the same solution and the same order (Schneider, below).
   - **What it means.**
     - Each instruction's priority is C̄_j, its completion time in the program's optimal solution, the least first.
     - C̄_j is a relaxation's value, a lower bound, and not a time any schedule keeps. Only its order is used.
@@ -1784,9 +1832,19 @@ code, and each method is used as its source states it.
 - **Code:**
   - rdma/mesh-graph.{h,c}: the program's rows, the cutting-plane loop with Queyranne's separation, and the calls to
     HiGHS; the heap order by C̄ (`mesh_graph_heap_order`, as now).
-  - rdma/Makefile: links the HiGHS library through its C API (highs/interfaces/highs_c_api.h). HiGHS is a new build
-    dependency: Homebrew's `highs`, 1.15.1 on this machine. Installing it on the members is the operator's step, since
-    deployment is not touched.
+  - rdma/Makefile builds HiGHS from its source at a pinned release and links it statically. The release is tag v1.15.1,
+    commit 04024d701f79feb8e2f18bc3df0dffc04ef05088, fetched as
+    https://github.com/ERGO-Code/HiGHS/archive/refs/tags/v1.15.1.tar.gz and checked against SHA-256
+    a840d269dff2fafb371dd247df13ad5e026d7ce3b35ad3dc1eedd59bf0c2fb16. metal-microbench's Makefile fetches its pinned
+    sources the same way (`E2B_REFERENCE_REVISION` with `E2B_REFERENCE_SHA256`, and Dawn's tag).
+    - It is built with the tools every member has, cc and c++. cmake is not on the members (m5ult2, 2026-11-05). It
+      takes the same `-ffp-contract=off` as mesh-graph.c and no fast-math.
+    - The C API is highs/interfaces/highs_c_api.h of that source.
+    - Nothing is installed by hand, and nothing comes from Homebrew.
+    > manual build operations and scriptless unversioned irreproducible builds are broadly forbidden, not that this
+    > should ever need concrete mention
+    - (Corrected 2026-11-05: the text before named Homebrew's `highs`, installed by hand on this machine and left to
+      the operator on the members.)
   - rdma/mesh-collective.c: writes each copy's list with each cable's sends in schedule order, each with its bytes
     (`struct mesh_hop` `bytes`, as now).
   - rdma/mesh-flow.c: sends `bytes`, as now.

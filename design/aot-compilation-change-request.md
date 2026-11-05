@@ -174,7 +174,12 @@ statement, or a fact of the code.
     demand a pair, routed as AllToAll's are.
   - **AllToAll** is point-to-point demands, one per ordered pair of ranks, routed jointly as concurrent multicommodity
     flow, the problem Garg and Könemann's rounds solve (N. Garg and J. Könemann, FOCS 1998).
-  - rdma/mesh_compile.py refuses CollectivePermute and ReduceScatter now; this requirement covers them.
+  - A2's partitioner inserts these two where GSPMD's does. ReduceScatter goes where a reduction's result is sharded:
+    "gradients will be communicated with ReduceScatter instead of AllReduce" (GSPMD §3.2). CollectivePermute goes into
+    halo exchange, "We use the CollectivePermute operator to exchange halo data between partitions" (§4.3), and into a
+    pipeline's buffer shifting, "GSPMD will turn the buffer shifting into cross-device communication via
+    CollectivePermute" (§3.3). (Corrected 2026-11-05: the text said the code refused them. No partitioner inserted
+    them, so the refusal never ran and the new lowerings were unreachable.)
   - **Lowering.** MSCCLang (M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, §4 and
     §5) lowers operations on chunks into an instruction DAG of sends, receives and receive-reduce-copies. A relay's
     forward is its fused receive-copy-send. Here a chunk is a page.
@@ -268,8 +273,19 @@ statement, or a fact of the code.
 - The compilation must take a program's sequence of calls as a graph, decide at compile time which calls may be
   outstanding at once and in what orders, and compile that into the plans. Nothing about it is chosen at run time.
 - **Method:**
-  - **The calls' graph.** It is the program's captured trace, as A1 captures one function: TorchDynamo's FX graph of the
-    calls and the tensors passing between them (Ansel et al., 2024).
+  - **The calls' graph.** It is Pathways' program tracer: "a new program tracer (Figure 2) that a user can wrap around a
+    block of Python code that calls many compiled functions. The tracer generates a single PATHWAYS program where each
+    compiled function is represented by a computation node in a dataflow graph" (Barham et al., 2022, §3).
+    - For torch, the tracer is torch.fx's symbolic tracer (J. Reed, Z. DeVito, H. He, A. Ussery and J. Ansel,
+      torch.fx: practical program capture and transformation for deep learning in Python, MLSys 2022). Each compiled
+      function is a leaf, so a call of it is one node of the graph and is not traced into (`Tracer.is_leaf_module`,
+      `torch.fx.wrap`). Each function itself is captured as A1 states.
+    - Its reads and writes are its nodes' tensor arguments and results, which is what Bernstein's conditions take.
+  - **Its bound.** The traced block is finite, so each function has finitely many calls in it. Pathways sends a traced
+    block whole: "the program sends a single message (describing the entire subgraph) to the scheduler" (§4.5). So the
+    most calls of a function outstanding at once is the number of its calls in the block, or fewer where Bernstein's
+    conditions order them.
+  > get real. citation, citation, citation. don't invent idiomatic reasons why you can't do things either.
   - **Independence:** two calls may run in either order, or at once, where neither writes what the other reads or
     writes. These are Bernstein's conditions (A. J. Bernstein, Analysis of programs for parallel processing, IEEE Trans.
     Electronic Computers EC-15(5), 1966).
@@ -402,13 +418,30 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       computation, ISCA 1992).
     - The bridge serves its queues of page descriptors while the program computes, as a user-level network interface
       does (U-Net; VIA; design/plan-to-bridge-change-request.md R1).
-  - **The delivered calls reach the ports, in delivery order, through a first-in, first-out channel whose writer never
-    waits.** These are Kahn's channels, unbounded FIFO queues between processes (G. Kahn, The semantics of a simple
-    language for parallel programming, IFIP Congress 1974).
-    - Each port reads the channel in order.
-    - An entry is reclaimed once every port has read past it, by deferred reclamation (McKenney and Slingwine, 1998;
-      Fraser, 2004; design/plan-to-bridge-change-request.md R8).
-    - How the bridge holds the channel is the bridge's own (design/plan-to-bridge-change-request.md R7).
+  - **The delivered calls reach the ports, in delivery order, through a channel laid out once with the region**
+    (disjoint-pages Appendix A, A3: the bridge's own pages "are laid out once with the region"). Each port reads it in
+    place, by view, and nothing copies it. Only the driver moves bytes (design/plan-to-bridge-change-request.md R1).
+    > who added this and why is there a transfer by copy rather than a transfer by view? only an extremely specific
+    > interface ever does anything copy-like, and that is the final dma driver, which we use, rather than simulate in
+    > effigy in a wrapper that pretends to be the dma driver by doing fake work then submitting the literals to the
+    > ltieral driver deep inside.
+    - **Its room is fixed at compile time**, as synchronous dataflow fixes its buffers before the program runs, from
+      the program's static schedule (E. A. Lee and D. G. Messerschmitt, Static scheduling of synchronous data flow
+      programs for digital signal processing, IEEE Trans. Computers C-36(1), 1987).
+    - An entry stays until every lane that carries its plan has taken its call. A lane trails its node's deliveries by
+      at most two amounts added together. The first is A10's bound on the plan's calls outstanding at its submitter.
+      The second is C3.3's u copies on each hop of the plan's routes. A send completes only once its receive is posted
+      (data-model §3), and a receive is posted only into a free copy (C3.3). This bound is this document's derivation.
+    - So a plan claims room for that many entries, as it claims its pages (C3.4). A plan the room cannot hold fails
+      with `ENOMEM` when it is planned, as a value without a lag does in C3.3.
+    - **The writer never waits and never checks for a full channel.** A full channel needs a lane to trail by more
+      than its plan's claim, and only a stopped process can do that. Process death belongs to the failport's lifecycle
+      (item 4), and a slow node gets no handler (item 3).
+    > consider whether this is a fictional problem or a problem that appears only through idiomatic citation free code
+    > before making any further statements
+    - (Corrected 2026-11-05: the implementation's M4 kept an ORDER at the channel's head while a port trailed by 4096
+      entries, a wait at the writer. Its M5 copied the channel into each port's memory. Neither has a citation, and
+      both go. The text before cited Kahn's unbounded channels, which a region laid out once cannot hold.)
   - Each port takes the delivered calls of every standing plan in sequence-number order. Both ends of a cable deliver
     the same sequence, so they take the calls alike. The pages of the calls a port has taken interleave on its cable
     (above).
@@ -418,8 +451,13 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 
 - **The code must:**
   - deliver orders as Fig. 5's destinations do;
-  - publish them to each port through the channel above, in place of the sequence words (`sequences`), `taken[p]` and
-    the parent's wait while they are full (Lamport's buffer; the coordination's DL1);
+  - publish them to each port through the channel above, read in place, in place of the sequence words
+    (`sequences`), `taken[p]` and the parent's wait while they are full (Lamport's buffer; the coordination's DL1), with
+    no copy and no wait (M4 and M5 go);
+  - remove the start's wait for every port to load the plan, and the late-loading port's refusal of it
+    (`mesh_ports_held`). Nothing requires them. "a send that arrives first is held until its receive is posted (§3),
+    and a loss cancels the plan anyway" (Claude's turn in "The turns" that lists "Every wait, and whether anything
+    requires it", whose verdict on this one was "remove");
   - interleave released executions on each cable;
   - remove Q4's hold and Q4′'s timeout skip (done: design/compilation-coordination.md DL4, O1);
   - remove the coordination's Q3′: the sequencer's number never goes back to 0, and no node drops a pending order when
@@ -487,11 +525,51 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     Model. Comput. Simul. 29(1), 2019).
 - **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
   their bytes are the same each time, so the requirement's mean and variance hold over the set.
-- **One permutation of the whole set per execution.** The counter is (execution, set), so a set is drawn once per
-  execution. Every edge and every cable of the set's tree carries its share of the set's pages in that one permutation's
-  order. A set's pages have one producer and one route (above), so they share their predecessors, and each cable's
-  sequence is the same renaming of them. So MSCCLang §5.2's argument against cycles holds. A draw for each cable departs
-  from the counter.
+- **One permutation of the whole set per execution, as one renaming on every lane the set crosses.**
+  > figure this out for arbitrary graphs which evenutally collect all nodes in a collective by any number of switching
+  > nodes. more citations, more literature, fewer guesses, fewer idioms. there are tools in this repo to vomit up what
+  > the mesh topology literally is right now. it is not a tree and never looked anything like one.
+  - **The fabric now.** It was read on 2026-11-05 by bin/mesh-nodeinfo.sh on each member, matching each port's
+    neighbour to the node that owns it. It has five Macs and thirteen Thunderbolt cables, and it is a multigraph with
+    cycles:
+    - mdots-Mac-Studio to m5ult2: three cables;
+    - mdots-Mac-Studio-2 to mdots-Mac-Studio-3: four;
+    - mdots-Mac-Studio to mdots-Mac-Studio-3: two;
+    - one each for mdots-Mac-Studio to Ms-Mac-mini, mdots-Mac-Studio-2 to Ms-Mac-mini, mdots-Mac-Studio-2 to m5ult2,
+      and Ms-Mac-mini to m5ult2.
+    - One cable of each of the first two pairs is inferred from the nodes' routes, because each of its ports listed its
+      own address as its neighbour.
+    - No cable joins mdots-Mac-Studio and mdots-Mac-Studio-2, mdots-Mac-Studio-3 and m5ult2, or mdots-Mac-Studio-3
+      and Ms-Mac-mini. Their transfers relay through other nodes.
+  - Routes are packed trees over this graph (A4; Blink §3.1). A pair with several cables carries a tree's edge over
+    all of them, and the bridge deals its positions among them (design/plan-to-bridge-change-request.md R5).
+  - **What rules out deadlock on any graph.** Dally and Seitz give the absence of cycles in the channel dependency graph
+    as the necessary and sufficient condition for deadlock-free routing (W. J. Dally and C. L. Seitz, Deadlock-free
+    message routing in multiprocessor interconnection networks, IEEE Trans. Computers C-36(5), 1987). It holds for any
+    topology and any number of relaying nodes.
+    - Here a channel is a lane: a first-in, first-out sequence of positions, the same at both ends (data-model §3). A
+      position on one lane depends on another lane where its page must land first.
+  - **MSCCLang's construction gives that graph no cycle.** Every lane's sequence is a subsequence of one global
+    topological order (design/plan-to-bridge-change-request.md R5; MSCCLang §5.2). This is the rule of ordered
+    resources, which prevents a circular wait (J. W. Havender, Avoiding deadlock in multitasking systems, IBM Systems
+    Journal 7(2), 1968; E. G. Coffman, M. J. Elphick and A. Shoshani, System deadlocks, ACM Comput. Surv. 3(2), 1971).
+  - **The permutation keeps that order when it is one renaming σ of the set's members**, over the set's positions on
+    every lane the set crosses: every hop, every relaying node, every parallel cable. It also covers the set's
+    consumer tasks, since function B takes its pages in any order (R4) and the task at the set's i-th place takes the
+    member σ puts there. Indexes inside shapes need not be compiled:
+    > the use of cudagraphs style 'shapes are compiled but indexes inside of shapes might not need to be'
+  - **Why σ keeps a topological order.** A set's members have one producer, one route and a consumer that takes them
+    in any order, so σ is an automorphism of the task graph. An automorphism maps every edge u → v to an edge σ(u) →
+    σ(v), so it maps each topological order onto a topological order. (Formal argument, this document's.)
+  - **So the deal fixes positions, not members.** Each lane keeps the positions the deal gives it. In each execution,
+    the member at each position is the one σ puts there. Each port holds a record for every member of every set it
+    carries a position of, each record a view of that member's page (R1). So any member can be posted at any of the
+    set's positions on its cables.
+  - The counter is (execution, set), so a set is drawn once per execution. A draw for each cable departs from the
+    counter.
+  - (Corrected 2026-11-05: the text before said each cable's sequence is the same renaming. That fails where the deal
+    gives a set's positions to several cables of one pair and each cable keeps only its own members (the
+    implementation's M1). The coordination's record, "The revisions of 46ae8fdf", stop 3, gives the cycle.)
 
 - **Function A's operands** (joins) keep the schedule's order.
 - **Every program declares each consumer's kind.** A consumer that reduces partial sums, or otherwise takes pages in
