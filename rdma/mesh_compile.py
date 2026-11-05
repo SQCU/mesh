@@ -5,11 +5,16 @@
 # mesh_plan and run by torch's own operators on tensors over the placed pages (A9).  It chooses no placement and no
 # weight: both are the results of functions the program passes (the operator's ruling 2 of 2026-11-04).  The
 # coordinator's rulings on its first form's stops and on the reviews' findings: A-T3' (the collectives as declared
-# transfers mesh_plan routes), A-T5 (a returned result over the plan's pages cloned), A-T6 (one standing graph a
-# program), A-T7 (a range written after the reads that make it) and A-T8 to A-T10, each at its code.
+# transfers mesh_plan routes), A-T5 (a returned result over the plan's pages cloned), A-T7 (a range written after the
+# reads that make it) and A-T8 to A-T10, each at its code.  The appendix's revisions
+# (design/compilation-coordination.md, "The appendix's revisions, 2026-11-04"): U1 (no D5), N1 to N5 (each compiled
+# graph its own function and plan) and K1 (torch's own MPS kernels on tensors over the placed pages), each at its code.
+# 2026-11-04, owner T2: A-T6 (one standing graph a program) goes (N5).  What must stay: no placement and no weight
+# chosen here
 import collections
 import ctypes as C
 import errno
+import itertools
 import math
 import operator
 import os
@@ -496,10 +501,15 @@ def unit(ir):
     return [mesh.Weight(1.0, 1.0, 1.0, 1.0) for _ in ir.declared]
 
 
-# one context a program, attached to the node's one region (mesh.h MESH_NAME): its `epoch` counts its mesh_plan calls,
-# so every rank's k-th plan is (group, k) (mesh-dataflow.h struct mesh_ctx; mesh-collective.h mesh_plan).  STANDING:
-# the record of the graph whose plan the context made last (design/compilation-coordination.md, A-T6)
-CONTEXT, STANDING = [], []
+# one context a program, attached to the node's one region (mesh.h MESH_NAME; mesh-dataflow.h struct mesh_ctx), which
+# holds no plan.  FUNCTIONS: the program's ordinals of its compiled functions, 1, 2, ... in compile order, one taken at
+# each call of the backend's compile function (design/compilation-coordination.md, "The appendix's revisions", N1;
+# J. Ansel et al., PyTorch 2, ASPLOS 2024, section 3.1: the custom compile function is called with each captured
+# graph), the same at every rank since every rank runs the same program
+# 2026-11-04, owner T2 (N1, N5; design/aot-compilation-change-request.md, appendix item 6): STANDING, the record of
+# the one graph whose plan stood (A-T6), goes with A-T6, and a plan's name is (group, function) in place of (group, the
+# context's count of its plans): compiled functions coexist, each its own plan.  What must stay: one context a program
+CONTEXT, FUNCTIONS = [], itertools.count(1)
 
 
 def _context():
@@ -609,52 +619,66 @@ def _run(ir, context, tensors, item, env, inputs, t):
 # plan's state section); the GPU's program is the function's own operators, this node's partitioned graph run by torch
 # on tensors over the placed pages, each copy of each value wrapped by torch.frombuffer over mesh_section_address
 # (every address a constant of the plan, design/disjoint-pages-change-request.md, C3.3).
+# - Each compiled graph is its own function and its own plan (design/compilation-coordination.md, "The appendix's
+#   revisions", N1): `function` its ordinal, the plan named (group, function), and `handle` the plan's state section
+#   offset, mesh_plan's `*plan` (N2), as an instantiated graph's handle (NVIDIA, CUDA Programming Guide, section 4.2.2:
+#   "It may be launched any number of times without repeating the instantiation").  Other functions' plans stand
+#   beside it (R. Frostig, M. J. Johnson and C. Leary, SysML 2018; P. Barham et al., Pathways, MLSys 2022, section 3).
 # - The plan is ESTALE where its map serial (struct mesh_state `serial`) is not the IR's map read's (the coordinator's
-#   ruling on review V2's finding 6).  An ENOMEM where the IR holds an AllGather or AllToAll names the open case (V2's
-#   finding 2).
-# - One compiled graph stands a program at a time: the plan's name (group, epoch) is per context, so a graph planned
-#   while another's plan stands is refused (A-T6, open for the operator).
-# - The callable submits each function execution to this node's bridge by mesh_transfers_start (A7; Q1) before it
-#   runs it.  After an ESTALE or a cancelled range, it plans again at its next call, its IR built anew on the map as it
-#   is (mesh-call.h mesh_transfers_start: "plan again"; docs/principles.md section 4: recover across calls; V2's
-#   finding 5)
-def serialize(build):
-    context, plan = _context(), {'stale': True}
+#   ruling on review V2's finding 6).  A plan that stood when the planning fails after it (that test, or a copy's
+#   binding) is retired at once, as mesh_plan closes its own claim on its own failure after its writes (N3;
+#   design/plan-to-bridge-change-request.md R8: nothing is held for a program but its plans' claims).
+# - Each call launches one execution of its function: call t raises the plan's executions to t + 1, the program's
+#   submission of that function execution to this node's bridge (N4; A7, Q1), before it runs it.
+# - After an ESTALE or a cancelled range, the next call plans again: the stale plan retired (mesh_plan_retire, the
+#   program's retirement of that plan, N3), then the IR built anew on the map as it is and planned with the same
+#   function (N1; mesh-call.h mesh_transfers_start: "plan again"; docs/principles.md section 4: recover across calls;
+#   V2's finding 5)
+# 2026-11-04, owner T2 (U1; design/aot-compilation-change-request.md, appendix item 1): the ENOMEM message citing D5 and
+# a lone AllGather or AllToAll goes, since C3.3 refuses only a value with no least lag; mesh_plan's failure is
+# mesh.check's as any other.  (N5; appendix item 6): A-T6's refusal of a graph planned while another's plan stands goes,
+# and the plan is found by its handle, not by context.state.  What must stay: the serial test, and a replan's IR built
+# anew with the same placement operand
+def serialize(build, function):
+    context, plan = _context(), {'stale': True, 'handle': 0}
+
+    def retire():
+        status = mesh.LIB.mesh_plan_retire(C.byref(context), plan['handle'])
+        plan.update(handle=0, ir=None, tensors=None)
+        mesh.check(status)
 
     def make():
-        if context.state and STANDING and STANDING[0] is not plan:
-            raise RuntimeError('several functions of one program each standing as its own plan: the plan\'s name is '
-                               'per context, and another graph\'s plan stands (design/compilation-coordination.md, '
-                               'A-T6)')
+        if plan['handle']:
+            retire()
         ir = build()
         count = len(ir.declared)
         if len(ir.weights) != count or not all(isinstance(w, mesh.Weight) for w in ir.weights):
             raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight each '
                              '(A3)' % (len(ir.weights), count))
-        values = (mesh.Value * len(ir.values))(*ir.values)
-        status = mesh.LIB.mesh_plan(C.byref(context), _group(), (mesh.Declared * count)(*ir.declared),
-                                    (mesh.Weight * count)(*ir.weights), count, values, len(values),
-                                    (mesh.Dependence * len(ir.dependences))(*ir.dependences), len(ir.dependences))
-        if status == errno.ENOMEM and any(i[0] == 'collective' and i[3].kind != 'all-reduce' for i in ir.program):
-            raise OSError(status, 'mesh_plan: ENOMEM; this graph holds an AllGather or AllToAll, whose landing\'s next '
-                                  'instance its exchange reaches at lag 2 where no other edge orders it, a value with '
-                                  'no unroll bound at lag 1 (mesh-collective.h mesh_plan, D5): recorded open')
-        mesh.check(status)
-        if mesh.State.from_address(context.M + context.state).serial != ir.serial:
-            raise OSError(errno.ESTALE, 'the plan\'s map serial is not the one its IR was built on: plan again')
-        tensors = []
-        for value, (dtype, shape) in zip(values, ir.layouts):
-            copies = []
-            for c in range(value.section.count):
-                address = mesh.LIB.mesh_section_address(C.byref(context), value.section, c)
-                if not address:
-                    raise OSError(errno.EFAULT, 'copy %d of a placed value has no page (mesh-call.h '
-                                                'mesh_section_address)' % c)
-                buffer = (C.c_char * value.section.bytes).from_address(address)
-                copies.append(torch.frombuffer(buffer, dtype=dtype).view(shape))
-            tensors.append((value.section, copies))
+        values, handle = (mesh.Value * len(ir.values))(*ir.values), mesh.Q()
+        mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), function, (mesh.Declared * count)(*ir.declared),
+                                      (mesh.Weight * count)(*ir.weights), count, values, len(values),
+                                      (mesh.Dependence * len(ir.dependences))(*ir.dependences), len(ir.dependences),
+                                      C.byref(handle)))
+        plan['handle'] = handle.value
+        try:
+            if mesh.State.from_address(context.M + handle.value).serial != ir.serial:
+                raise OSError(errno.ESTALE, 'the plan\'s map serial is not the one its IR was built on: plan again')
+            tensors = []
+            for value, (dtype, shape) in zip(values, ir.layouts):
+                copies = []
+                for c in range(value.section.count):
+                    address = mesh.LIB.mesh_section_address(C.byref(context), value.section, c)
+                    if not address:
+                        raise OSError(errno.EFAULT, 'copy %d of a placed value has no page (mesh-call.h '
+                                                    'mesh_section_address)' % c)
+                    buffer = (C.c_char * value.section.bytes).from_address(address)
+                    copies.append(torch.frombuffer(buffer, dtype=dtype).view(shape))
+                tensors.append((value.section, copies))
+        except BaseException:
+            retire()
+            raise
         plan.update(ir=ir, tensors=tensors, executions=0, stale=False)
-        STANDING[:] = [plan]
     make()
 
     def run(*inputs):
@@ -662,7 +686,7 @@ def serialize(build):
             make()
         ir, tensors, t = plan['ir'], plan['tensors'], plan['executions']
         try:
-            mesh.check(mesh.LIB.mesh_transfers_start(C.byref(context), t + 1))
+            mesh.check(mesh.LIB.mesh_transfers_start(C.byref(context), plan['handle'], t + 1))
             env = {}
             for item in ir.program:
                 _run(ir, context, tensors, item, env, inputs, t)
@@ -678,10 +702,13 @@ def serialize(build):
 # design/aot-compilation-change-request.md A1 (PyTorch 2 section 3.1: "a custom compile function which takes a
 # torch.fx.Graph and a list of example inputs and returns a Python callable"), the placement-choosing function and the
 # weighting function its parameters (A2, A3; design/compilation-coordination.md, "The torch backend"), neither with a
-# default: torch.compile(f, backend=backend(placement, weights)).  The placement operand is chosen once; the IR is built
+# default: torch.compile(f, backend=backend(placement, weights)).  Each call of the compile function takes the next
+# ordinal of the program's compiled functions, the graph's `function` (design/compilation-coordination.md, "The
+# appendix's revisions", N1), kept by every replan of that graph.  The placement operand is chosen once; the IR is built
 # from it on the map as it is, and built again where the callable plans again
 def backend(placement, weights):
     def compiler(gm, example_inputs):
+        function = next(FUNCTIONS)
         operand = placement(gm, example_inputs)
 
         def build():
@@ -689,5 +716,5 @@ def backend(placement, weights):
             lower(ir)
             ir.weights = list(weights(ir))
             return ir
-        return serialize(build)
+        return serialize(build, function)
     return compiler
