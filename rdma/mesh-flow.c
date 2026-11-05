@@ -358,7 +358,7 @@ static void count_raise(_Atomic uint64_t *count,uint64_t final){
    (mesh-records.c orders_deliver) and each port reads them (lane_take), atomically, so a word outside the region or
    off its alignment would be a fault, not an error value (design/disjoint-pages-revision-coordination.md, "Rules":
    "Every failure is an error value, never a hang or a hardware fault"); tested as plan_inside tests the entries.
-   2026-11-04, owner B4: new, the coordinator's question on review of c649d4bf, and his ruling DL8
+   2026-11-05, owner B4: new, the coordinator's question on review of c649d4bf, and his ruling DL8
    (design/compilation-coordination.md, "The documents' revisions of edd4b583", "Amendments during the work
    (2026-11-05)": such a plan, or one of `copies` 0, EINVAL); one copy for both readers (mesh-bridge.h declares it) */
 int plan_sequences_inside(const struct mesh_state *words){
@@ -900,7 +900,16 @@ static int plan_load(struct port *port,uint32_t head,uint64_t owner,uint64_t gen
          this port held, mesh_plan's starting value; an earlier child's last otherwise), so taken_tell only raises it.
          An earlier child of this port ends a plan it carries only as its link is lost (link_close), which changes the
          map's cables and so moves `map_serial` (mesh-records.c map_put), so a later load of that plan is refused
-         (ESTALE, link_prepare) and no lane reads again a number its `taken[p]` let the parent overwrite */
+         (ESTALE, link_prepare) and no lane reads again a number its `taken[p]` let the parent overwrite.
+         2026-11-05, owner B4 (review X1 #4), the note above made exact: what guards a reload is, first, link_prepare's
+         EALREADY: a plan this port carries units of whose `executions` is above 0 at the load is refused, so no lane
+         of a reload reads a number once its node's run has begun; a plan the port carries nothing of reads no word
+         (its `taken[p]` follows `released`); and the same child walks again after link_close (`walk`) where its link
+         serves again.  What is left is a carried plan reloaded before its run began, whose `taken[p]` plan_end raised
+         to `released` while the reload's cursors start at 0: `told` from the word keeps the word only rising, and the
+         reload is refused (ESTALE) where the link's loss moved `map_serial`, as above; where it did not, the parent
+         could store again a word a lane of the reload has still to read (recorded for the coordinator).  What must
+         stay: `taken[p]` never lowered */
       f->head=head;f->owner=owner;f->generation=generation;
       f->told=atomic_load_explicit(&words->taken[p],memory_order_relaxed);*loaded=f;
       atomic_fetch_or_explicit(&words->held,UINT64_C(1)<<p,memory_order_release);
@@ -921,15 +930,20 @@ static int plan_load(struct port *port,uint32_t head,uint64_t owner,uint64_t gen
    element is its cursor's execution n there (struct cursor), a candidate where n < its `released` (acquire, Lamport's
    ms), its number its sequence word n mod u (B[mr mod P]; mesh.h struct mesh_state `sequences`).  The readings are in
    Lamport's order, "writing data elements in one order and reading them in the opposite order" (the conclusion): the
-   bridge parent publishes in sequence order, each word before its `released` (release) and ORDER after ORDER
-   (mesh-records.c orders_deliver), so the lane reads every candidate's `released` (first reading), then every
-   candidate's `released` again, the number of each it finds published, and hdr `plans` (second reading).
+   bridge parent publishes in sequence order within one numbering, each word before its `released` (release) and ORDER
+   after ORDER (mesh-records.c orders_deliver), so the lane reads every candidate's `released` (first reading), then
+   every candidate's `released` again, the number of each it finds published, and hdr `plans` (second reading).
    A number m acquired in the first reading was published after every smaller number this node publishes, so the
    second reading, after that acquire, sees each of them, and its least, at most m, is next: every later publication's
    number exceeds m.  Where the first reading acquired none, nothing is taken this pass, since a number the second
    reading alone found published is not known least (a smaller one may be published between two of its reads), and
    `again` is set so the thread passes again at once (link_run's 1) rather than wait for a wake of `plans` that came
-   already.  A number read stays as read: the parent stores word n mod u again (for n + u) only once every port's
+   already (DL3′).  The premise holds within one numbering: the sequencer's `seqnum` returns to 0 at its own map move
+   (Q3′) and a node keeps its pending ORDERs across its own, so at a node whose map has not yet moved an ORDER
+   numbered after the reset can match a plan of the old serial and the numbers published there go back, which this
+   reading does not allow for; every plan of the old serial is cancelled at that node's own move (D.3.6), and no
+   handler is added (design/compilation-coordination.md, "Numbers across a reset", open; 2026-11-05, owner B4, review
+   X1 #1).  A number read stays as read: the parent stores word n mod u again (for n + u) only once every port's
    `taken[p]` exceeds n (Lamport's "wait until ms < mr + P"), and this port's does not while this lane has not taken n
    (taken_tell).  Nothing is taken where hdr `plans` moved since the port's last walk (a plan standing, and so maybe
    published, that the port has not loaded would be missed): the parent raises `plans` before it publishes a plan's
@@ -1243,9 +1257,11 @@ static int link_send_progress(struct port *port,uint32_t served,int traced,int *
    still holds the plan (cleared below, after them, release), so the bridge's release of the plan's closed claim
    (mesh-dataflow.c mesh_retired_release, its fence, then `held` read with acquire) comes after them.  Its traces told
    (d6dceac link_close's lines); its records freed; its `taken[p]` raised to its `released` (taken_store, hdr `plans`
-   woken where it rose), so the parent's sender waits on no execution this port will never read (design/compilation-
-   coordination.md, "The documents' revisions of edd4b583", DL4: "A port ends ... a plan as now, its `taken[p]` then
-   following `released`"; Q4': "before clearing its `held` bit"); and its `held` bit p cleared (atomic_fetch_and, release), the port's last access to the plan (e6bd7db2's section 6, "Retirement and the deferred release", as
+   raised and woken where it rose: DL9, 2026-11-05), so the parent's sender waits on no execution this port will never
+   read (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL4: "A port ends ... a plan as
+   now, its `taken[p]` then following `released`"; Q4': "before clearing its `held` bit"); and its `held` bit p cleared
+   (atomic_fetch_and, release), the port's last access to the plan (e6bd7db2's section 6, "Retirement and the deferred
+   release", as
    design/compilation-coordination.md, Q5 takes it; deferred reclamation, P. E. McKenney and J. D. Slingwine,
    Read-copy update, PDCS 1998; K. Fraser, Practical lock-freedom, 2004).
    2026-11-04, sub-assignment 6: reversing 2026-11-03's cancellation, UINT64_MAX stored into the cancel word of the
@@ -1270,7 +1286,8 @@ static int link_send_progress(struct port *port,uint32_t served,int traced,int *
    port ends, cancels or carries nothing of a plan as now, its `taken[p]` then following `released`"), reversing the
    notes above where they say the port serves one plan at a time (link_run) and raises `served[p]` so that the
    parent's release of the next batch is not held: the plan's `taken[p]` is raised to its `released` (taken_store,
-   only upward), hdr `plans` woken where it rose, so the parent's sender (mesh-records.c orders_deliver) waits on no
+   only upward), hdr `plans` woken where it rose (raised and woken from 2026-11-05: DL9, link_run's note), so the
+   parent's sender (mesh-records.c orders_deliver) waits on no
    execution this port will never read; and no lane of the port keeps the plan as the one it has taken
    (lanes_drop).  Why: the item's delivery (L. Lamport's Message Buffer; DL1: a port's mr), with no hold.  What must
    stay: the cancellation's counts, the traces, `taken[p]` raised before the `held` bit is cleared */
@@ -1280,7 +1297,8 @@ static int link_send_progress(struct port *port,uint32_t served,int traced,int *
    wait on it, came at once): taken_store and taken_tell.  Why: the hold is gone (DL4); what the parent's sender waits
    on is each port's mr (L. Lamport, Concurrent reading and writing, CACM 20(11), 1977, "Message Buffer": "sender:
    wait until ms < mr + P").  What must stay: port p its one writer of `taken[p]`, its values only rising (release);
-   `plans` woken, not raised, where it rose */
+   `plans` woken, not raised, where it rose (2026-11-05, owner B4: raised and woken, DL9, link_run's note; what must
+   stay: the raise where it rose) */
 /* port p's `taken[p]` of plan f raised to `taken` (release), where that is above what the port last stored (`told`),
    so the word only rises (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1: "Port p's
    alone; only rises"); 1 where it rose */
@@ -1299,7 +1317,7 @@ static int taken_store(struct flow *f,uint32_t p,uint64_t taken){
    the port carries nothing of, or has cancelled: its `released` (acquire), DL4: "its `taken[p]` then following
    `released`".  Stored by taken_store, once a pass, after the pass's reads of the plan's sequence words (release), so
    the parent's acquire of it precedes any store into a word a lane of this port read (Lamport's "wait until ms < mr +
-   P", mesh-records.c orders_deliver).  1 where it rose (link_run then wakes hdr `plans`) */
+   P", mesh-records.c orders_deliver).  1 where it rose (link_run then raises and wakes hdr `plans`, DL9) */
 static int taken_tell(const struct port_plans *own,struct flow *f,uint32_t p){
   uint64_t least=UINT64_MAX;
   if(f->state!=FLOW_CANCELLED)
@@ -1360,8 +1378,7 @@ static void plan_end(struct port *port,struct flow *f,uint32_t served){
   free(f->sends);free(f->receives);
   for(int d=0;d<2;d++)free(f->first[d]);
   flow_sets_free(f);
-  if(taken_store(f,p,atomic_load_explicit(&f->words->released,memory_order_acquire)))
-    os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  if(taken_store(f,p,atomic_load_explicit(&f->words->released,memory_order_acquire)))mesh_notify(&M->plans);
   if(outstanding)plan_outstanding(port,f,outstanding,served);
   else atomic_fetch_and_explicit(&f->words->held,~(UINT64_C(1)<<p),memory_order_release);
   free(f);
@@ -1484,7 +1501,8 @@ static void plans_walk(struct port *port,uint32_t served){
    sequence number (lane_take: the parent's published numbers, read in Lamport's opposite order), each execution it
    takes posted on it in order as before, then the next (link_receive_drain, link_send_drain); then for each plan held,
    its `taken[p]` (taken_tell: the least execution a lane carrying it may still read; `released` for a plan the port
-   carries nothing of or has cancelled), and hdr `plans` woken (no raise) where any rose, so the parent's sender sees
+   carries nothing of or has cancelled), and hdr `plans` woken (no raise; raised from 2026-11-05, DL9, below) where
+   any rose, so the parent's sender sees
    its buffer emptied.  Busy (1) while any plan has requests posted and not completed, any lane has taken an execution
    with records left to post (waiting on a word's release, a landing or room), or a lane could take a published,
    submitted execution it did not (its budget spent, or a number the second reading alone found: lane_take's
@@ -1494,7 +1512,19 @@ static void plans_walk(struct port *port,uint32_t served){
    k-way merge"; "Both ends of a cable read the same sequence numbers, so they merge alike.  Nothing holds."  What must
    stay: the walk before serving; a cancelled plan served no more; each plan's executions on a lane in order; the k-th
    SEND on a queue pair filling the k-th receive (both ends' one merge); no lane posting past a plan's `released` or
-   its node's `executions` */
+   its node's `executions`.
+   2026-11-05, owner B4 (review X1 #5): this reversal includes B1's "What must stay: no plan's pages posted beside
+   another's outstanding requests" above, which the interleaving (DL3) contradicts: several plans' requests are
+   outstanding on one queue pair at once.  What stays of it: a plan cancelled with requests outstanding ends the link
+   (plan_outstanding), as before.
+   2026-11-05, owner B4, the coordinator's ruling DL9 (reviews X1 #7 and V1 #9): where a `taken[p]` rose, hdr `plans`
+   is raised and woken (mesh.h mesh_notify), where it was woken without a raise (Q4′'s form, overturned with Q4).  Why:
+   a wake with no raise that lands between the parent's watcher's read of `plans` and its wait (mesh-link.c
+   control_watch) is lost until MESH_PAUSE_NS, and the delivery hands off between the parent and its ports once per
+   execution past the u-th; os_sync_wait_on_address returns at once where the word has moved.  Its cost, recorded:
+   each raise moves `plans`, so each port walks the heads on its next pass (plans_walk), DL3's `plans` test lets a lane
+   that read the old value take nothing for one pass, and the parent's release turn runs again (mesh-records.c
+   clients_turn).  What must stay: the raise once a pass, after every `taken[p]` store of it */
 static int link_run(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
   const uint32_t p=port->index;
@@ -1514,7 +1544,7 @@ static int link_run(struct port *port,uint32_t served){
   if(!link_receive_progress(port,served,traced,&busy) || !link_send_progress(port,served,traced,&busy))return 0;
   for(struct flow *f=at->loaded;f;f=f->next){busy|=f->posted!=f->sent+f->landed;rose|=taken_tell(at,f,p);}
   for(int d=0;d<2;d++)for(uint32_t q=0;q<MESH_LINK_LANES;q++)busy|=served>>q&1 && at->current[d][q];
-  if(rose)os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  if(rose)mesh_notify(&M->plans);
   return busy;
 }
 
@@ -1550,7 +1580,8 @@ static int port_pass(struct port *port,uint64_t *told){
    records left, and no lane could take a published, submitted execution; then the thread waits on hdr `plans`, which
    the parent wakes after each turn that published (mesh-records.c orders_deliver), each start raises and every port
    wakes where its `taken[p]` rose, bounded by MESH_PAUSE_NS.  What must stay: the value read before the pass is the
-   one waited on */
+   one waited on.  2026-11-05, owner B4 (DL9): the parent and the ports raise `plans` there, where they woke it, so a
+   hand-off that lands between this read and the wait ends the wait at once.  What must stay: as above */
 /* design/transport.md section 14: a port's progress thread, its SENDs' and its receives': it passes without pause while
    its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the port's
    guard word while it serves none, looking again every MESH_PAUSE_NS (the stop's `closing`) */

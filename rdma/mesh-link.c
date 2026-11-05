@@ -101,7 +101,10 @@ void wake(void){
    head's executions as L. Lamport's Message Buffer sender may (Concurrent reading and writing, CACM 20(11), 1977:
    "wait until ms < mr + P"; mesh-records.c orders_deliver), and a port wakes `plans` (no raise) where its `taken[p]`,
    the sender's mr, rose (mesh-flow.c taken_tell), so this watcher wakes the loop for the turn that publishes on.  No
-   behavior changed.  What must stay: as above */
+   behavior changed.  What must stay: as above.
+   2026-11-05, owner B4 (the coordinator's ruling DL9): the port raises `plans` there (mesh.h mesh_notify), as the
+   parent does after a turn that published, where each woke it without a raise, so a hand-off that lands between this
+   watcher's read and its wait ends the wait at once.  No behavior changed here.  What must stay: as above */
 static void *control_watch(void *unused){
   (void)unused;
   while(!stop){
