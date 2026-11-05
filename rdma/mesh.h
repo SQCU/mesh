@@ -28,8 +28,10 @@
    "The region").  110: plans in their claims, any number standing (R8, A7); hdr's one-plan fields vacant; `plans`
    appended; struct mesh_hop `bytes`; struct mesh_state's name, entries, holders and sequence words; struct mesh_buffer
    `start` (design/plan-to-bridge-change-request.md R5 and R8; design/aot-compilation-change-request.md A7;
-   design/compilation-coordination.md, "The region") */
-#define MESH_VERSION 110u
+   design/compilation-coordination.md, "The region").  111: struct mesh_hop `set` and `padding1` appended (56 bytes): a
+   hop's set, 0 a sequence (design/aot-compilation-change-request.md, appendix item 5); struct mesh_state `epoch` the
+   plan's function (item 6) */
+#define MESH_VERSION 111u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -189,18 +191,33 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      hop's, a send's and a receive's alike (design/plan-to-bridge-change-request.md R5; design/aot-compilation-change-
      request.md A9; design/compilation-coordination.md, T7).
    - `serial`: the map serial the plan was made against, every entry's the same and the state section's `serial`.
+   - `set`: 0 for a hop of a sequence; else j + 1 for a page of tree j of a set range, a range every declared transfer
+     of which is MESH_PAGES, j the tree's index in the solve's trees, the same in both ends' entries of the hop
+     (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md, "The appendix's
+     revisions", S1 to S3).  A set's entries are contiguous on their cable within each copy, in walk order, both ends'
+     alike (S3); each execution of a set is carried in a uniformly random permutation of its members (S4, S5).  The
+     bridge sees a set or a sequence and no kind (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
+   2026-11-04, owner L2 (the appendix, item 5): `set` and `padding1` appended, where every hop was one of a sequence in
+   the schedule's order.  Why: the pages of function B's operands are written as a set, not a sequence (R4, item 5).
+   What must stay: offsets 0-47 as at 110; both ends' entries of a hop the same `set`.
    Copies (C3.3: modulo variable expansion, M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
    scheduling, MICRO 1994).  mesh_plan unrolls the plan's one execution, its template, into u copies: L of a routed
    value is the least lag at which every read of it in execution t happens before its write in t + L, and u the
-   largest L over the collective's routed values at every node (the coordination's D5), so every rank computes the
-   same u.  The list is struct mesh_state `entries` = u x n entries at its `hops`, copy c's n at [c n, c n + n).  Every
-   copy's entries are the same hops in the same order, with the same `node`, `direction`, `pages`, `bytes` and
-   `serial`; `page`, `word`, `field` and `count` are copy c's own.  Execution t runs copy t mod u.  A plan runs any
-   number of executions: the run's length is no input of mesh_plan, and the bridge serves the executions t < struct
-   mesh_state `executions` (D2) and t < its `released` (below).  The plan's one allocator places every copy's pages
-   before the first execution, two copies sharing a page only where the plan's happens-before orders every read of the
-   one before the other's write at the distances at which their executions meet, so nothing live at once shares a page
-   and no execution waits on another's pages.
+   largest L over the collective's routed values at every node (C3.3; design/compilation-coordination.md, U1), so
+   every rank computes the same u; a value with no such L fails the plan with ENOMEM (C3.3).  The list is struct
+   mesh_state `entries` = u x n entries at its `hops`, copy c's n at [c n, c n + n).  Every copy's entries are the same
+   hops in the same order, with the same `node`, `direction`, `pages`, `bytes`, `serial` and `set`; `page`, `word`,
+   `field` and `count` are copy c's own.  Execution t runs copy t mod u.  A plan runs any number of executions: the
+   run's length is no input of mesh_plan, and the bridge serves the executions t < struct mesh_state `executions` (D2)
+   and t < its `released` (below).  The plan's one allocator places every copy's pages before the first execution, two
+   copies sharing a page only where the plan's happens-before orders every read of the one before the other's write at
+   the distances at which their executions meet, so nothing live at once shares a page and no execution waits on
+   another's pages.
+   2026-11-04, owner L2 (design/aot-compilation-change-request.md, appendix item 1; design/compilation-coordination.md,
+   "The appendix's revisions", U1): u as C3.3 states it, cited to C3.3 where it cited the coordination's D5, whose
+   refusal of a write that does not reach its own next instance at lag 1 is gone.  Why: D5 is in neither Lam, Rau nor
+   C3.3's text (item 1).  What must stay: u the largest least lag, the same at every rank; ENOMEM only for a value with
+   no such L.
    - A send from its range's source: `word` the region offset of the range's supplied word; `field` MESH_ABSENT;
      `count` 0; `pages` 0.  Execution t's send is released once the word reads (acquire) at least t + 1.
    - A forwarding send (a relay's, or a destination's that sends the page on): `word` and `field` those of its node's
@@ -222,7 +239,8 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    a write ran ahead of the allocator's order: an error.  A field is reused only with its page, so the allocator's
    order for the page covers it.
    The state section (C3.2, C3.7; struct mesh_state at its claim head's publication `state`, mesh_head_state, and at
-   the planning context's `state`, mesh_state_at): the plan's state, the landed list's own section, which mesh_plan
+   mesh_plan's `*plan`, the plan's handle, mesh_state_at; design/compilation-coordination.md, "The appendix's
+   revisions", N2): the plan's state, the landed list's own section, which mesh_plan
    places with the plan's values in its claim (an invariant of the plan, no page-table row naming it), in new pages for
    every plan, apart from the data pages it tells of.  Its layout: the struct; the phases, counts, supplied words and
    status; the entries; each 64-aligned.  Each word has one writer:
@@ -254,8 +272,14 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      the receives its peers send and compile time never sees the run's length.
    - `copies` u; `receives` this node's receives a copy (the sum of the pages of every range it receives); `ranges`
      and `releases` as above.
-   - `group` and `epoch`: the plan's name, (group, epoch), the same at every rank: `group` the launcher's (MESH_GROUP),
-     `epoch` the planning context's count of its mesh_plan calls (mesh-collective.h mesh_plan).  mesh_plan's alone.
+   - `group` and `epoch`: the plan's name, (group, function), the same at every rank: `group` the launcher's
+     (MESH_GROUP), `epoch` the program's ordinal of the compiled function, mesh_plan's `function`, kept by every replan
+     of that function (mesh-collective.h mesh_plan; design/compilation-coordination.md, "The appendix's revisions",
+     N1).  mesh_plan's alone.
+     2026-11-04, owner L2 (design/aot-compilation-change-request.md, appendix item 6; N1, N5): `epoch` the function's
+     ordinal, where it was the planning context's count of its mesh_plan calls (C-epoch, gone).  Why: compiled
+     functions coexist, each its own plan (item 6), so a plan is named by its function, not by the order of the calls.
+     What must stay: the name the same at every rank; no field moves.
    - `serial`: the map serial the plan was made on, every entry's `serial`.  mesh_plan's alone.
    - `hops`: the region offset of the plan's entries, `entries` (u x n) struct mesh_hop of them (above).  mesh_plan's.
    - `held`: a bit a port, bit p "port p holds the plan" (set by port p once it has loaded the plan, cleared by it as
@@ -272,7 +296,14 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      an ORDER of the plan once the plan stands here and every port holding the previously released plan has served it,
      then stores `released` its `end` (release; Q4: Défago et al., Fig. 5, the destinations' `pending` delivered in
      sequence order); the bridge parent's alone.  A port serves execution t only where t < `executions` and t <
-     `released`, so this node's cables carry one plan's batch at a time, each execution whole, in sequence order.
+     `released`, so this node's cables carry one plan's batch at a time, in sequence order.  The hold stays
+     (design/compilation-coordination.md, "The appendix's revisions", O2): both ends of a cable must post the released
+     executions of several plans in one order, the sequence order both ends' parents deliver, and what a delivery
+     leaves in the region for the ports, the parent's child processes, is each plan's `released`, a count, which
+     records no order between two plans' deliveries; what would carry that order is open for the operator (O2).
+     2026-11-04, owner L2 (O2): the hold's reason O2's, where it was that a cable never interleaves two executions
+     (Claude's words, which design/aot-compilation-change-request.md, appendix item 2, withdraws).  What must stay: a
+     port serves t only below `executions` and `released`.
    - `served[p]`: the executions port p has served whole, every record of them done (every send completed and every
      receive landed), and `released` for a plan it carries nothing of (Q4); port p's alone.
    Every word is set to its starting value once, where mesh_plan places the section (D3), as mbarrier.init runs once
@@ -320,11 +351,18 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    3. The state section written to its starting values and every state value's bytes to 0, once (D3), its entries
       and its name, `serial`, `hops`, `entries`, `nodes` and `sender` written; every value's rows bound to its copies'
       pages; every claimed row's publication (struct mesh_publication) written.  No data page is written.
-   4. The map read again: where it moved, or on the map reader's own error, this claim and every earlier one of the
-      client closed, the context's `state` 0, ESTALE.
-   5. The head's publication `state` stored (release), the context's `state` set, `plans` raised and woken: the plan
-      stands.
-   6. Every earlier claim of the client closed (mesh_claim_close), `plans` raised and woken again.
+   4. The map read again: where it moved, or on the map reader's own error, this claim closed, its own alone
+      (mesh_claim_close), ESTALE, `*plan` untouched.
+   5. The head's publication `state` stored (release), `*plan` set to it, `plans` raised and woken: the plan stands.
+   No earlier plan is closed: a program holds any number of compiled functions at once, and a function's claim is
+   closed only by mesh_plan_retire, by mesh_detach or the bridge's retirement of a gone pid, or by step 4
+   (design/aot-compilation-change-request.md, appendix item 6; design/compilation-coordination.md, "The appendix's
+   revisions", N3).
+   2026-11-04, owner L2 (item 6; N5): step 4 closes this claim alone, where it closed every earlier claim of the
+   client too, and step 6 (every earlier claim of the client closed once the plan stood) is gone, with the context's
+   `state`.  Why: compiled functions coexist, each launched by its calls until it is retired (item 6: JAX's
+   compiled-function cache, CUDA Graphs instantiated once and launched many times, Pathways §3, §4.4).  What must
+   stay: a plan's words written before it stands, its claim closed on its own failure after its writes.
    Nothing is erased and nothing waits: a plan's state and pages are new pages, never another plan's (C3.4).  The
    bridge reads none of it before its head's publication `state` (acquire) is stored.  Each port reads `plans` once a
    pass and, where it moved, walks the heads (mesh-dataflow.h mesh_head_after, mesh_head_state): it loads each
@@ -346,9 +384,11 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    or leaves because a program is a sequence of like, function calls" (R8); several programs' plans stand at once,
    each in its claim, ordered by the island's sequencer (A7).  What must stay: a plan's words written before it stands
    and never rewritten while it stands; the announcement and its re-read before the release. */
-struct mesh_hop { uint32_t page,node,direction,field; uint64_t word,count; uint32_t pages,bytes; uint64_t serial; };
-_Static_assert(sizeof(struct mesh_hop)==48 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,count)==24 &&
-  offsetof(struct mesh_hop,pages)==32 && offsetof(struct mesh_hop,bytes)==36 && offsetof(struct mesh_hop,serial)==40,"mesh_hop");
+struct mesh_hop { uint32_t page,node,direction,field; uint64_t word,count; uint32_t pages,bytes; uint64_t serial;
+  uint32_t set,padding1; };
+_Static_assert(sizeof(struct mesh_hop)==56 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,count)==24 &&
+  offsetof(struct mesh_hop,pages)==32 && offsetof(struct mesh_hop,bytes)==36 && offsetof(struct mesh_hop,serial)==40 &&
+  offsetof(struct mesh_hop,set)==48 && offsetof(struct mesh_hop,padding1)==52,"mesh_hop");
 /* the bytes one lane loads of the phase list: 64 receives' phases (struct mesh_state `phases`) */
 #define MESH_LANE_BYTES 16u
 /* the phase code, Gray 00 01 11 10 (struct mesh_hop's note, "Phases") */
@@ -517,9 +557,10 @@ static inline struct mesh_hop *mesh_hops(struct hdr *m,const struct mesh_state *
   return (struct mesh_hop *)((char *)m+state->hops);
 }
 /* a plan's state section at region offset `at` (a claim head's publication `state`, mesh-dataflow.h mesh_head_state;
-   a planning context's `state`), NULL where `at` is 0.  2026-11-04, owner L (design/compilation-coordination.md, "The
-   region"): in place of mesh_plan_state, which read hdr `state`, the one plan's.  What must stay: a state section
-   read at the offset its plan published */
+   mesh_plan's `*plan`, design/compilation-coordination.md, "The appendix's revisions", N2), NULL where `at` is 0.
+   2026-11-04, owner L (design/compilation-coordination.md, "The region"): in place of mesh_plan_state, which read hdr
+   `state`, the one plan's.  2026-11-04, owner L2 (N2, N5): the program's handle `*plan`, where it was the planning
+   context's `state`, gone.  What must stay: a state section read at the offset its plan published */
 static inline struct mesh_state *mesh_state_at(struct hdr *m,uint64_t at){
   return at?(struct mesh_state *)((char *)m+at):NULL;
 }

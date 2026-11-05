@@ -4,8 +4,9 @@
 
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 
-/* the client's start, by the context's standing plan (`state`, mesh-dataflow.h struct mesh_ctx; design/compilation-
-   coordination.md, "The region"; defined in mesh-dataflow.c beside the map reader it reads): for each adjacent node
+/* the client's start, by the plan `plan` (its state section's region offset, mesh-collective.h mesh_plan's `*plan`;
+   design/compilation-coordination.md, "The region" and "The appendix's revisions", N2; defined in mesh-dataflow.c
+   beside the map reader it reads): for each adjacent node
    some hop of the plan names (mesh.h mesh_hops), at the plan's map serial, a wait, bounded by MESH_PLATFORM_NS from its
    start, until the port toward it has its bit of the plan's `held` or a `refused` code (that code returned); then
    the plan's struct mesh_state `executions` raised to `executions` (a compare-and-swap loop that never lowers it,
@@ -27,8 +28,10 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    the plan's end (its claim's close) cancels every receive of it not landed.  It does not end without effect: the
    bridge has already set the raised executions' receives, which end with the plan as any cancelled run's do, by the
    bridge's own means (review 8's finding 1; review 10's finding 5).  A second start on the same plan waits as the
-   first and raises it.  0 (also where the plan has no hop here), EINVAL where the context has no standing plan
-   (`state` 0) or its state section or entries lie outside the region, the bridge's code where a port refused the plan
+   first and raises it.  One execution is one execution of the plan's compiled function: torch's call t raises it to
+   t + 1, e2b's run to its steps at once (design/aot-compilation-change-request.md, appendix item 6: "have each call
+   launch one execution of its function"; N4).  0 (also where the plan has no hop here), EINVAL where `plan` is 0 or
+   its state section or entries lie outside the region, the bridge's code where a port refused the plan
    (`refused`), ETIMEDOUT past the bound, ESTALE where the map moved since the plan was made (plan again), or the map
    reader's error value (mesh-dataflow.h mesh_nodes_read): each with `executions` not raised, but the ESTALE after the
    raise, with it raised.
@@ -36,8 +39,11 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    region's one plan (hdr `state`, `hops`, `plan`), and the wait for each port's `held` bit or `refused` code, where it
    was for its `prepared` to read hdr `plan` and its phase and code after; `plans` raised and woken, where hdr `plan`
    was woken.  What must stay: the wait bounded by one deadline; the raise only after every named port holds the plan;
-   the fence and the serial's read after the raise */
-int mesh_transfers_start(struct mesh_ctx *,uint64_t executions);
+   the fence and the serial's read after the raise.
+   2026-11-04, owner L2 (the appendix, item 6; design/compilation-coordination.md, "The appendix's revisions", N2, N5):
+   the plan the caller's `plan`, where it was the context's `state`, gone.  Why: a program holds any number of
+   compiled functions at once, each launched by its own calls (item 6).  What must stay: as above */
+int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data
    path (design/disjoint-pages-change-request.md, Appendix C, C4): a new plan's state is in new pages, never the

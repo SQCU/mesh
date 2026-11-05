@@ -10,21 +10,24 @@ struct mesh_range { uint32_t first,count; };
    claims' head owner).  It holds no rows and no pages: a program's rows and pages are its plans' claims (struct
    mesh_claim, mesh_claim_take), each taken by mesh_plan for exactly what that plan places
    (design/disjoint-pages-change-request.md, Appendix C, C3.4; design/disjoint-pages-revision-coordination.md, "The
-   program's claim and its sections").  `epoch`: this context's count of its mesh_plan calls, raised at each call's
-   entry (the plan's name is (group, epoch), mesh-collective.h mesh_plan).  `state`: the region offset of this
-   context's standing plan's state section (struct mesh_state), 0 none; mesh_plan sets it once the plan stands, and
-   mesh_transfers_start and mesh-metal.h take the plan from it (design/compilation-coordination.md, "The region").
+   program's claim and its sections").  It holds no plan: a plan's handle is its state section's region offset,
+   mesh_plan's `*plan`, which mesh_transfers_start, mesh-metal.h and mesh_plan_retire take
+   (design/compilation-coordination.md, "The appendix's revisions", N2, N5).
    2026-11-04, owner L (design/plan-to-bridge-change-request.md R8): `padding`, `epoch` and `state` appended, where the
    region's one plan was hdr `state` and the client word hdr `client`.  What must stay: no rows or pages in the
    context.
+   2026-11-04, owner L2 (design/aot-compilation-change-request.md, appendix item 6; N5): `epoch` and `state` gone
+   (32 bytes).  Why: compiled functions coexist, each its own plan (item 6), so the context holds no standing plan and
+   no count of plans; a plan is named by its function (mesh-collective.h mesh_plan, N1).  What must stay: no rows,
+   pages or plans in the context.
    2026-11-04, sub-assignment 5: reversing sub-assignment 7's 2026-11-03 form, where the context held the program's one
    claim, taken at attach (`rows`, `window`, `local`: every free row and the widest free run of pages in the window and
    outside it) and laid out by cursors (`row_cursor`, `local_cursor`).  Why: C3.4, "Nothing is claimed at attach", and
    C4 (mesh_claim's claim at attach of everything free; the claim's local run, where values were laid out when
    created).  What must stay: no call site but mesh_plan's claim takes rows or pages from the region */
-struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; uint32_t padding; uint64_t epoch,state; };
-_Static_assert(sizeof(struct mesh_ctx)==48 && offsetof(struct mesh_ctx,fd)==24 && offsetof(struct mesh_ctx,padding)==28 &&
-  offsetof(struct mesh_ctx,epoch)==32 && offsetof(struct mesh_ctx,state)==40,"mesh_ctx: rdma/mesh.py Context");
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; uint32_t padding; };
+_Static_assert(sizeof(struct mesh_ctx)==32 && offsetof(struct mesh_ctx,fd)==24 && offsetof(struct mesh_ctx,padding)==28,
+  "mesh_ctx: rdma/mesh.py Context");
 /* design/prepared-machine.md#M09 */
 /* The two arena ranges.  [0,wire_pages) is the registered window and the only memory an SGE may
    name; [wire_pages,arena) is addressable and never registered.  An undeclared window is the whole
@@ -38,14 +41,15 @@ static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 /* the region attached (design/plan-to-bridge-change-request.md R8; design/compilation-coordination.md, "The region"):
    the region mapped and its magic, version and length checked; the client word minted, ((hdr `serial` + 1) &
-   0x7fffffff) << 32 | pid, bit 63 set where hdr `device_client`'s is clear, as before; `epoch` 0 and `state` 0; the
-   version read again.  It holds nothing and writes nothing in the region but hdr `serial`: no client word, no row, no
-   page.  0, EINVAL where the region is not of this layout or expired as it was attached (it is let go), else the
-   errno.
+   0x7fffffff) << 32 | pid, bit 63 set where hdr `device_client`'s is clear, as before; the version read again.  It
+   holds nothing and writes nothing in the region but hdr `serial`: no client word, no row, no page.  0, EINVAL where
+   the region is not of this layout or expired as it was attached (it is let go), else the errno.
    2026-11-04, owner L (R8): reversing the 109 form, the compare-and-swap of hdr `client` (EADDRINUSE where another live
    client held it, an earlier gone client retired first) and hdr `client_start` written.  Why: "nothing happens when a
    program joins or leaves because a program is a sequence of like, function calls"; a program holds its plans'
-   claims and nothing else.  What must stay: the version read again after the client word is minted */
+   claims and nothing else.  What must stay: the version read again after the client word is minted.
+   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N5): no `epoch` or `state`
+   set, the context holding neither.  What must stay: nothing held at attach */
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 /* design/algorithm-sources.md#programtensor */
@@ -57,6 +61,14 @@ int mesh_detach(struct mesh_ctx *);
    stored 0 before the claims closed, and `client` cleared after.  Why: those words are vacant (mesh.h 110); a plan's
    unpublishing is its claim's close, which the ports read through `plans`.  What must stay: nothing let go here */
 void mesh_retire(struct hdr *,uint64_t client);
+/* the program's retirement of one compiled function (design/aot-compilation-change-request.md, appendix item 6: a
+   function's claim released only when the program retires that function or itself; design/compilation-
+   coordination.md, "The appendix's revisions", N3, as NVIDIA, CUDA Programming Guide §4.2.3.1, cudaGraphExecDestroy(),
+   destroys one instantiated graph): the claim of this client whose head's publication `state` (acquire) is `plan`
+   closed (struct mesh_buffer `closed`, release), then hdr `plans` raised and woken (mesh.h mesh_notify); nothing is let
+   go here, the bridge releasing the claim once no port holds it (mesh_retired_release; C3.4).  0, or ENOENT where no
+   claim of this client holds that plan */
+int mesh_plan_retire(struct mesh_ctx *,uint64_t plan);
 /* the first claim head row after `row` (row UINT32_MAX: the first in the region), UINT32_MAX where none: a row of
    MESH_ROW_OWN whose struct mesh_buffer `owner` reads (acquire) not 0, past `row`'s own claim where `row` is a head (its
    `pages`, stored before its owner word).  A walk of the heads (e6bd7db2's section 6, "Discovery"; design/compilation-
@@ -83,10 +95,14 @@ struct mesh_claim { struct mesh_range rows,window,local; };
    values' rows are [rows.first + 1, rows.first + rows.count) */
 int mesh_claim_take(struct mesh_ctx *,uint64_t generation,uint32_t rows,uint32_t window,uint32_t local,
                     struct mesh_claim *);
-/* this client's claim of `generation` closed (others 0), or every claim of this client but that one (others 1); hdr
-   `plans` raised and woken (mesh.h mesh_notify), so the bridge's ports look again (2026-11-04, owner L: where hdr
-   `plan` was woken, vacant from 110) */
-void mesh_claim_close(struct mesh_ctx *,uint64_t generation,int others);
+/* this client's claim of `generation` closed (release); hdr `plans` raised and woken (mesh.h mesh_notify), so the
+   bridge's ports look again (2026-11-04, owner L: where hdr `plan` was woken, vacant from 110).
+   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N3, N5): the `others` form
+   (every claim of this client but `generation`'s closed) gone, with mesh_plan's step 6.  Why: compiled functions
+   coexist (design/aot-compilation-change-request.md, appendix item 6), a function's claim closed only by its
+   retirement, the program's, or its own plan call's failure.  What must stay: the close a release, `plans` raised and
+   woken after it */
+void mesh_claim_close(struct mesh_ctx *,uint64_t generation);
 
 /* rows [first, first + pages / block) of a claim bound to arena pages [page, page + pages), block by block, with
    `index` the copy (an entry's `mapping` high half): mesh_plan's binding of the rows and pages it placed; nothing is
