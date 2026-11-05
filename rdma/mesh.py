@@ -15,7 +15,9 @@ class Context(C.Structure):
 
 
 # mesh.h struct hdr, its first words (magic, version, pgsz, block, in the header's order): the region's page size, the
-# length unit of a placed value's copies (mesh-call.h struct mesh_section `pages`)
+# length unit of a placed value's copies (mesh-call.h struct mesh_section `pages`), which the MPS binding's buffer
+# over a value's copies needs, whole pages long as metal-microbench tools/e2b_replay.m placed_buffer makes it
+# (design/compilation-coordination.md, "The appendix's revisions", K1; rdma/mesh_compile.py _placed_buffer)
 class Header(C.Structure):
     _fields_ = [('magic', U), ('version', U), ('pgsz', U), ('block', U)]
 

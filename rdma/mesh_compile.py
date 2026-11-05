@@ -19,6 +19,7 @@ import math
 import operator
 import os
 import time
+import weakref
 
 import torch
 from torch.fx.node import Node, map_arg
@@ -72,13 +73,16 @@ class IR:
         return tuple(s // self.shape[m] if m >= 0 else s for s, m in zip(_value(node).shape, sharding))
 
     # one range (mesh-collective.h struct mesh_declared): a local value of `node` of `shape` from device `source` to
-    # each device of `destinations`, a declared transfer each, of one identity.  MESH_JOIN: each range is released whole
-    # by one mesh_host_publish, so its consumer takes it whole (design/compilation-coordination.md, A-T8;
-    # design/plan-to-bridge-change-request.md R4).  This node's value of it (MESH_EXECUTION, wire) where it is its
-    # source or a destination, its layout the element type, the shape and the device of `node`'s tensors (the copies'
-    # tensors are bound on that device, design/compilation-coordination.md, K1).  Each destination's declared transfer's
-    # index
-    def transfer(self, node, shape, source, destinations):
+    # each device of `destinations`, a declared transfer each, of one identity, each of `kind`, its consumer's at the
+    # destination (design/plan-to-bridge-change-request.md R4; the coordinator's ruling P3, at _consumer).  This node's
+    # value of it (MESH_EXECUTION, wire) where it is its source or a destination, its layout the element type, the shape
+    # and the device of `node`'s tensors (the copies' tensors are bound on that device,
+    # design/compilation-coordination.md, K1).  Each destination's declared transfer's index
+    # 2026-11-04, owner T2 (the coordinator's ruling P3 on review W3's finding 3): every transfer MESH_JOIN (A-T8,
+    # the producer's one mesh_host_publish as the reason) goes: the kind is R4's test of the consumer, so a range of
+    # function B is a set at the bridge (design/aot-compilation-change-request.md, appendix item 5).  What must stay:
+    # each range released whole by one mesh_host_publish, and read only once it is complete
+    def transfer(self, node, shape, source, destinations, kind):
         example, value, transfers = _value(node), mesh.ABSENT, {}
         dtype = example.dtype
         size, ends = dtype.itemsize * math.prod(shape), [self.map[d] for d in [source] + destinations]
@@ -90,17 +94,17 @@ class IR:
         for d in destinations:
             transfers[d] = len(self.declared)
             mine = value if self.index in (ends[0], self.map[d]) else mesh.ABSENT
-            self.declared.append(mesh.Declared(ends[0], self.map[d], self.identity, mesh.JOIN, mine, 0, size))
+            self.declared.append(mesh.Declared(ends[0], self.map[d], self.identity, kind, mine, 0, size))
         return transfers
 
 
 # J. Ansel et al., PyTorch 2, ASPLOS 2024, sections 3.5 and 5.1: a node's fake tensor, "the metadata of a tensor without
 # its actual data", its sizes propagated by meta functions.  A1: shapes are compiled, so a symbolic size is refused.  A
-# tensor on the CPU or on torch's MPS device is bound to the placed pages (torch.frombuffer; torch.from_dlpack of a
-# kDLMetal tensor, design/compilation-coordination.md, K1); one on any other device is refused, naming it
+# tensor on the CPU or on torch's MPS device is bound to the placed pages (torch.from_dlpack of a kDLCPU or kDLMetal
+# tensor, design/compilation-coordination.md, K1); one on any other device is refused, naming it
 # 2026-11-04, owner T2 (K1; design/aot-compilation-change-request.md, appendix item 7): A-T4's refusal of a tensor not
-# on the CPU goes for MPS, whose tensors torch v2.14.0 builds over existing memory by DLPack (_metal_tensor).  What must
-# stay: the refusal of a device with no binding, and of a symbolic size
+# on the CPU goes for MPS, whose tensors torch v2.14.0 builds over existing memory by DLPack (_dlpack_tensor).  What
+# must stay: the refusal of a device with no binding, and of a symbolic size
 def _value(node):
     value = node.meta.get('example_value')
     if not isinstance(value, torch.Tensor):
@@ -109,8 +113,8 @@ def _value(node):
         raise ValueError('%s: symbolic sizes %s; A1 compiles shapes, so nothing at run time changes one'
                          % (node.name, tuple(value.shape)))
     if value.device.type not in ('cpu', 'mps'):
-        raise NotImplementedError('%s on %s: no binding of its tensors to the placed pages (torch.frombuffer wraps the '
-                                  'CPU\'s, a kDLMetal DLPack tensor the MPS device\'s: K1)' % (node.name, value.device))
+        raise NotImplementedError('%s on %s: no binding of its tensors to the placed pages (a DLPack tensor of kDLCPU '
+                                  'or kDLMetal alone: K1)' % (node.name, value.device))
     return value
 
 
@@ -370,6 +374,20 @@ def _readers(ir, node, default):
     return (min(s for s, _ in spans), max(e for _, e in spans)) if spans else (default, default)
 
 
+# the coordinator's ruling P3 on review W3's finding 3: the kind of the declared transfers of `node`'s range by R4's
+# test of its consumer at each destination (design/plan-to-bridge-change-request.md R4): MESH_PAGES, function B, where
+# every reader there of a key of `node` over the plan's pages is an operator of GSPMD's elementwise set (ELEMENTWISE: a
+# map over the range's pages, f of a union of pages the union of f of each, J. Gibbons, J. Functional Programming
+# 1996; the appendix item 5's "a pointwise nonlinearity after a ffn"); MESH_JOIN, function A, otherwise (a Dot, a
+# slice, a cat, a collective, the output's clone).  Every node runs the same program items, so every rank computes the
+# same kinds (R6)
+def _consumer(ir, node):
+    readers = [item for item in ir.program if any(k in ir.placed and k[0] is node for k in item[1])]
+    if readers and all(item[0] == 'call' and item[3].target in ELEMENTWISE for item in readers):
+        return mesh.PAGES
+    return mesh.JOIN
+
+
 # design/compilation-coordination.md, A-T3': AllReduce as a reduce to a chosen root, then a broadcast from it (G. Wang
 # et al., Blink, MLSys 2020, section 3.3: "to do an AllReduce operation on the directed graph, we first run a reduce
 # operation to a chosen root vertex using the undirected graph and then do a broadcast operation from the root vertex
@@ -380,16 +398,19 @@ def _readers(ir, node, default):
 # device_mesh", so the placement operand's chooser decides it).  Each other member's partial is one declared transfer
 # to the root; the root's combine of each landed partial with its own is MSCCLang's receive-reduce-copy (M. Cowan et
 # al., ASPLOS 2023, section 4.2: it "receives a chunk, reduces it with a source chunk, and locally copies it to the
-# destination") by the function's own add; its sum is one range to every other member.  A partial and the sum are
-# each written over their range's pages after the reads that make them (A-T7).  Events (device, declared transfer,
-# kind, first, last): a member's production of its partial (the Dot's item, at its third step) and its consumption of
-# the sum (its readers); the root's consumption of each partial (the AllReduce's item, after arrival), its production
-# of the sum (its third step) and its own read of the sum (its readers)
+# destination") by the function's own add; its sum is one range to every other member.  Each partial's transfer is
+# MESH_PAGES: its consumer, the root's combine, is R4's function B ("reductions' partial sums", their combine the add,
+# associative and commutative); the sum's kind is its readers' (_consumer; the coordinator's ruling P3).  A partial and
+# the sum are each written over their range's pages after the reads that make them (A-T7).  Events (device, declared
+# transfer, kind, first, last): a member's production of its partial (the Dot's item, at its third step) and its
+# consumption of the sum (its readers); the root's consumption of each partial (the AllReduce's item, after arrival),
+# its production of the sum (its third step) and its own read of the sum (its readers)
 def _all_reduce(ir, c, group, have):
     node, root, members = c.node, group[0], group[1:]
     shape, arrive = ir.local(node, ir.sharding[node]), 3 * c.position + 1
     readers = _readers(ir, node, arrive + 1)
-    up, down = [ir.transfer(node, shape, d, [root])[root] for d in members], ir.transfer(node, shape, root, members)
+    up = [ir.transfer(node, shape, d, [root], mesh.PAGES)[root] for d in members]
+    down = ir.transfer(node, shape, root, members, _consumer(ir, node))
     for d, partial in zip(members, up):
         ir.events += [(d, partial, 'P', arrive - 2, arrive - 2), (d, down[d], 'C') + readers,
                       (root, partial, 'C', arrive, arrive)]
@@ -405,11 +426,12 @@ def _all_reduce(ir, c, group, have):
 # design/compilation-coordination.md, A-T3': AllGather (GSPMD section 4.2: it "concatenates tensors from all
 # participants following a specified order"): each member's shard one range to every other member, written over its
 # range's pages by torch's copy_ (a range lies on its placed pages, design/disjoint-pages-change-request.md C3.2; the
-# shard is torch's own, A-T4); each receiver's result torch.cat of the shards in the group's order.  Events: each
-# member's production of its range (its item's sends) and each other member's consumption of it (after arrival)
+# shard is torch's own, A-T4); each receiver's result torch.cat of the shards in the group's order, so each transfer is
+# MESH_JOIN (a cat, R4's function A: the coordinator's ruling P3).  Events: each member's production of its range (its
+# item's sends) and each other member's consumption of it (after arrival)
 def _all_gather(ir, c, group, have):
     shape, sent, received = ir.local(c.node, have), 3 * c.position, 3 * c.position + 1
-    ranges = [ir.transfer(c.node, shape, d, [e for e in group if e != d]) for d in group]
+    ranges = [ir.transfer(c.node, shape, d, [e for e in group if e != d], mesh.JOIN) for d in group]
     for d, transfers in zip(group, ranges):
         ir.events.append((d, min(transfers.values()), 'P', sent, sent))
         ir.events += [(e, i, 'C', received, received) for e, i in transfers.items()]
@@ -423,11 +445,12 @@ def _all_gather(ir, c, group, have):
 # participant along one dimension, then sends each piece to a different participant.  On receiving data pieces from
 # others, each participant concatenates the pieces to produce its result"): piece q of member p, along the dimension
 # the mesh dimension moves to, one declared transfer p -> q, written by torch's copy_ as an AllGather's shard is; each
-# receiver's result torch.cat of the pieces in sender order along the dimension it leaves.  Events as an AllGather's
+# receiver's result torch.cat of the pieces in sender order along the dimension it leaves, each transfer MESH_JOIN as an
+# AllGather's.  Events as an AllGather's
 def _all_to_all(ir, c, group, have):
     shape, sent, received = list(ir.local(c.node, have)), 3 * c.position, 3 * c.position + 1
     shape[c.dim[1]] //= len(group)
-    pieces = {(p, q): ir.transfer(c.node, tuple(shape), d, [e])[e]
+    pieces = {(p, q): ir.transfer(c.node, tuple(shape), d, [e], mesh.JOIN)[e]
               for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
     for (p, q), i in pieces.items():
         ir.events += [(group[p], i, 'P', sent, sent), (group[q], i, 'C', received, received)]
@@ -583,14 +606,25 @@ class DLManagedTensorVersioned(C.Structure):
 DELETER = C.CFUNCTYPE(None, C.POINTER(DLManagedTensorVersioned))
 DLManagedTensorVersioned._fields_ = [('version', DLPackVersion), ('manager_ctx', C.c_void_p), ('deleter', DELETER),
                                      ('flags', C.c_uint64), ('dl_tensor', DLTensor)]
-# dlpack.h DLDeviceType kDLMetal ("Metal for Apple GPU"), and DLDataTypeCode by torch dtype as torch v2.14.0's
-# aten/src/ATen/DLConvertor.cpp toScalarType takes each back (kDLInt 0, kDLUInt 1, kDLFloat 2, kDLBfloat 4, kDLComplex
-# 5, kDLBool 6; bits the element size x 8, as getDLDataType gives them; lanes 1).  The capsule's name for the versioned
-# form (include/ATen/DLConvertor.h DLPackTraits<DLManagedTensorVersioned> `capsule`), made by Python's PyCapsule_New
-METAL, VERSION, CAPSULE = 8, DLPackVersion(1, 3), b'dltensor_versioned'
+# dlpack.h DLDeviceType by torch device type: kDLCPU ("CPU device") and kDLMetal ("Metal for Apple GPU"), the two
+# devices whose tensors are bound to the placed pages (_value).  DLDataType (code, bits, lanes) by torch dtype as torch
+# v2.14.0's aten/src/ATen/DLConvertor.cpp getDLDataType gives it (bits the element size x 8, lanes 1, but
+# Float4_e2m1fn_x2's "dtype.lanes = 2" and "dtype.bits = 4"), for every dtype its toScalarType takes back as itself;
+# the codes dlpack.h's DLDataTypeCode (kDLInt 0, kDLUInt 1, kDLFloat 2, kDLBfloat 4, kDLComplex 5, kDLBool 6,
+# kDLFloat8_e4m3fn 10, kDLFloat8_e4m3fnuz 11, kDLFloat8_e5m2 12, kDLFloat8_e5m2fnuz 13, kDLFloat8_e8m0fnu 14,
+# kDLFloat4_e2m1fn 17).  The capsule's name for the versioned form (include/ATen/DLConvertor.h
+# DLPackTraits<DLManagedTensorVersioned> `capsule`), made by Python's PyCapsule_New
+# 2026-11-04, owner T2 (the coordinator's ruling on review W2's finding 4): the float8 and float4 types are added; a
+# dtype is refused only where getDLDataType gives no type that toScalarType takes back as that dtype (the quantized and
+# bit types, which getDLDataType refuses; UInt1 to UInt7 and Int1 to Int7, which come back as Byte and Char).  What
+# must stay: each entry the pair those two functions give
+DEVICES, VERSION, CAPSULE = {'cpu': 1, 'mps': 8}, DLPackVersion(1, 3), b'dltensor_versioned'
 CODES = {torch.int8: 0, torch.int16: 0, torch.int32: 0, torch.int64: 0, torch.uint8: 1, torch.uint16: 1,
          torch.uint32: 1, torch.uint64: 1, torch.float16: 2, torch.float32: 2, torch.float64: 2, torch.bfloat16: 4,
-         torch.complex32: 5, torch.complex64: 5, torch.complex128: 5, torch.bool: 6}
+         torch.complex32: 5, torch.complex64: 5, torch.complex128: 5, torch.bool: 6, torch.float8_e4m3fn: 10,
+         torch.float8_e4m3fnuz: 11, torch.float8_e5m2: 12, torch.float8_e5m2fnuz: 13, torch.float8_e8m0fnu: 14}
+TYPES = {dtype: (code, dtype.itemsize * 8, 1) for dtype, code in CODES.items()}
+TYPES[torch.float4_e2m1fn_x2] = (17, 4, 2)
 CAPSULE_NEW = C.PYFUNCTYPE(C.py_object, C.c_void_p, C.c_char_p, C.c_void_p)(('PyCapsule_New', C.pythonapi))
 # the Objective-C runtime's objc_msgSend, called through a pointer of each method's own type (objc/message.h: "These
 # functions must be cast to an appropriate function pointer type before being called"): an object-returning method of
@@ -631,17 +665,23 @@ def _metal_device():
 
 # dlpack.h DLManagedTensorVersioned `deleter`: "This should be called to destruct manager_ctx which holds the
 # DLManagedTensorVersioned"; "The destructor deletes the argument self as well".  torch v2.14.0 calls it once the
-# tensor's storage is freed (aten/src/ATen/DLConvertor.cpp fromDLPackImpl, the deleter it gives at::from_blob): it
-# releases the tensor's reference to its buffer (-release) and lets go of the structure, its shape and its strides
-# (HELD, by the structure's address), once whoever calls it
+# tensor's storage is freed: torch/csrc/utils/tensor_new.cpp tensor_fromDLPackImpl's deleter_maybe_gil
+# (`tensor->deleter(tensor)` where it is not NULL), which it passes through at::DLPackTraits<T>::fromDLPack to
+# aten/src/ATen/DLConvertor.cpp fromDLPackImpl, which gives it at::from_blob.  It releases `manager_ctx`, the object
+# backing the tensor where there is one (the MPS copy's buffer, -release; none for a CPU copy, whose pages are the
+# region's), and lets go of the structure, its shape and its strides (HELD, by the structure's address), once whoever
+# calls it
+# 2026-11-04, owner T2 (the coordinator's ruling on review W2's finding 6): the deleter's caller cited as torch's
+# tensor_fromDLPackImpl, not fromDLPackImpl's own default; and (W3's finding 12) the buffer is `manager_ctx`, so CPU
+# and MPS copies share the form.  What must stay: one release a tensor
 HELD = {}
 
 
 @DELETER
 def _delete(managed):
     held = HELD.pop(C.addressof(managed.contents), None)
-    if held:
-        PUT(held[0].dl_tensor.data, SELECTOR[b'release'])
+    if held and held[0].manager_ctx:
+        PUT(held[0].manager_ctx, SELECTOR[b'release'])
 
 
 # design/compilation-coordination.md, K1: a placed value's copies wrapped by one MTLBuffer with no copy, as
@@ -661,30 +701,34 @@ def _placed_buffer(context, section, addresses):
     return buffer, [address - low for address in addresses]
 
 
-# design/compilation-coordination.md, K1: a copy of a placed value as an MPS tensor over its pages, by torch's own
-# interface for a device tensor over existing memory, torch.from_dlpack of a DLPack capsule (torch/utils/dlpack.py:
-# "The returned PyTorch tensor will share the memory with the input tensor"), as torch v2.14.0 reads one
-# (aten/src/ATen/DLConvertor.cpp fromDLPackImpl): its device by dlDeviceToTorchDevice, kDLMetal to
-# `at::Device(DeviceType::MPS, index)`, the index 0 as torchDeviceToDLDevice gives every MPS device's (its device_id
-# that of a CUDA, PrivateUse1 or MTIA device alone, "0" else); `data` passed to at::from_blob unchanged, with the
-# strides and the storage offset toStorageOffset(byte_offset), a multiple of the element size.  `data` and
-# `byte_offset` as torch's own MPS export sets them (toDLPackImpl's MPS branch: `data` the storage's base, the
-# id<MTLBuffer>, and `byte_offset` "src.storage_offset() * c10::elementSize(src.scalar_type())"): the value's buffer
-# and the copy's offset in it.  The strides the shape's contiguous ones (dlpack.h: strides "can not be NULL if ndim !=
-# 0"; fromDLPackImpl's form without them requires byte_offset 0); the version the header's, which torch takes where
-# its major is at most DLPACK_MAJOR_VERSION (torch/csrc/utils/tensor_new.cpp tensor_fromDLPack); flags 0 ("By default
-# the flags should be set to 0").  The tensor holds its own reference to the buffer (-retain), which its deleter
-# releases; where torch makes no tensor, the deleter's work is done here, once whoever calls it
-def _metal_tensor(buffer, offset, dtype, shape):
-    if dtype not in CODES:
-        raise NotImplementedError('%s: no DLPack type code torch takes back (DLConvertor.cpp toScalarType)' % dtype)
+# design/compilation-coordination.md, K1: a copy of a placed value as a tensor of `device` over its pages, by torch's
+# own interface for a tensor over existing memory, torch.from_dlpack of a DLPack capsule (torch/utils/dlpack.py: "The
+# returned PyTorch tensor will share the memory with the input tensor"), as torch v2.14.0 reads one
+# (aten/src/ATen/DLConvertor.cpp fromDLPackImpl): its device by dlDeviceToTorchDevice (kDLCPU to the CPU, kDLMetal to
+# `at::Device(DeviceType::MPS, index)`), the index 0 as torchDeviceToDLDevice gives both (its device_id that of a CUDA,
+# PrivateUse1 or MTIA device alone, "0" else; dlpack.h: "For vanilla CPU memory ... this is set to 0"); `data` passed
+# to at::from_blob unchanged, with the strides and the storage offset toStorageOffset(byte_offset), a multiple of the
+# element size.  `data` and `byte_offset` are given as torch's own export sets them for that device (toDLPackImpl): on
+# MPS `data` the storage's base, the id<MTLBuffer>, and `byte_offset` "src.storage_offset() *
+# c10::elementSize(src.scalar_type())"; on any other device `data` the tensor's data pointer and `byte_offset` 0.
+# `owner`, the object backing the tensor (the MPS copy's buffer; None for a CPU copy), is `manager_ctx`, of which the
+# tensor holds its own reference (-retain), released by its deleter.  The strides the shape's contiguous ones
+# (dlpack.h: strides "can not be NULL if ndim != 0"; fromDLPackImpl's form without them requires byte_offset 0); the
+# version the header's, which torch takes where its major is at most DLPACK_MAJOR_VERSION
+# (torch/csrc/utils/tensor_new.cpp tensor_fromDLPack); flags 0 ("By default the flags should be set to 0").  Where
+# torch makes no tensor, the deleter's work is done here, once whoever calls it
+def _dlpack_tensor(device, data, offset, owner, dtype, shape):
+    if dtype not in TYPES:
+        raise NotImplementedError('%s: no DLPack type torch v2.14.0 gives it and takes back as itself (DLConvertor.cpp '
+                                  'getDLDataType, toScalarType)' % dtype)
     n = len(shape)
     sizes = (C.c_int64 * max(n, 1))(*shape)
     strides = (C.c_int64 * max(n, 1))(*(math.prod(shape[i + 1:]) for i in range(n)))
-    managed = DLManagedTensorVersioned(VERSION, None, _delete, 0,
-                                       DLTensor(buffer, DLDevice(METAL, 0), n, DLDataType(CODES[dtype],
-                                                dtype.itemsize * 8, 1), sizes, strides, offset))
-    GET(buffer, SELECTOR[b'retain'])
+    managed = DLManagedTensorVersioned(VERSION, owner, _delete, 0,
+                                       DLTensor(data, DLDevice(DEVICES[device], 0), n, DLDataType(*TYPES[dtype]),
+                                                sizes, strides, offset))
+    if owner:
+        GET(owner, SELECTOR[b'retain'])
     HELD[C.addressof(managed)] = (managed, sizes, strides)
     try:
         return torch.from_dlpack(CAPSULE_NEW(C.addressof(managed), CAPSULE, None))
@@ -694,20 +738,23 @@ def _metal_tensor(buffer, offset, dtype, shape):
 
 
 # each copy of a placed value as a tensor of its layout over its pages (every address a constant of the plan,
-# design/disjoint-pages-change-request.md, C3.3): on the CPU by torch.frombuffer over mesh_section_address (A-T4); on
-# MPS by _metal_tensor over the value's _placed_buffer, whose own reference is released once each copy's tensor holds
-# its own (K1).  EFAULT where a copy's row has no page (mesh-call.h mesh_section_address)
+# design/disjoint-pages-change-request.md, C3.3), every copy by _dlpack_tensor: a CPU copy's `data` its address, its
+# offset 0, no owner; an MPS copy's `data` the value's _placed_buffer, its offset the copy's in it, the buffer its
+# owner, whose own reference is released once each copy's tensor holds its own (K1).  EFAULT where a copy's row has no
+# page (mesh-call.h mesh_section_address)
+# 2026-11-04, owner T2 (the coordinator's ruling on review W3's finding 12; design/disjoint-pages-change-request.md,
+# C3.8: "no call site handles two forms"): torch.frombuffer for CPU copies goes, and every copy is bound by
+# torch.from_dlpack.  What must stay: each device's `data` and `byte_offset` as torch's own export sets them
 def _bind(context, section, dtype, shape, device):
     addresses = [mesh.LIB.mesh_section_address(C.byref(context), section, c) for c in range(section.count)]
     if not all(addresses):
         raise OSError(errno.EFAULT, 'copy %d of a placed value has no page (mesh-call.h mesh_section_address)'
                       % addresses.index(None))
     if device == 'cpu':
-        return [torch.frombuffer((C.c_char * section.bytes).from_address(address), dtype=dtype).view(shape)
-                for address in addresses]
+        return [_dlpack_tensor(device, address, 0, None, dtype, shape) for address in addresses]
     buffer, offsets = _placed_buffer(context, section, addresses)
     try:
-        return [_metal_tensor(buffer, offset, dtype, shape) for offset in offsets]
+        return [_dlpack_tensor(device, buffer, offset, buffer, dtype, shape) for offset in offsets]
     finally:
         PUT(buffer, SELECTOR[b'release'])
 
@@ -724,14 +771,19 @@ def _bind(context, section, dtype, shape, device):
 # callable's outputs outlive its call (A-T5).
 # Every operator is torch's own kernel for its tensors' device, its MPS kernel for MPS tensors
 # (design/compilation-coordination.md, K1; design/aot-compilation-change-request.md A9: "No kernel is written by the
-# compilation").  torch runs MPS kernels asynchronously, so a range on MPS is written (write) between two of torch's own
-# synchronizations, torch.mps.synchronize ("Waits for all kernels in all streams on a MPS device to complete",
-# torch/mps/__init__.py): after it, so the range is published only once the GPU's write to it is complete (K1); before
-# it, so every read the program made earlier, of pages the write may reuse, has completed (C3.3: "every read of it in
-# execution t happens before its write in execution t + L"), since Metal orders accesses by each resource's own hazard
-# tracking (MTLResource.h hazardTrackingMode; torch's buffers tracked, include/ATen/mps/MPSAllocator.h
-# UsageFlags::HAZARD) and two values' buffers over one page are two resources.  A received range is read only after
-# mesh_host_arrived reports it (arrived), so the kernel reading it is issued after (K1)
+# compilation").  torch runs MPS kernels asynchronously, so a range is written (write) between two of torch's own
+# synchronizations of its device, its device module's synchronize (torch/__init__.py get_device_module: "Returns the
+# module associated with a given device"; torch.mps.synchronize: "Waits for all kernels in all streams on a MPS device
+# to complete"; torch.cpu.synchronize: "This function only exists to facilitate device-agnostic code"): after it, so
+# the range is published only once the GPU's write to it is complete (K1); before it, so every read the program made
+# earlier, of pages the write may reuse, has completed (C3.3: "every read of it in execution t happens before its write
+# in execution t + L"), since Metal orders accesses by each resource's own hazard tracking (MTLResource.h
+# hazardTrackingMode; torch's buffers tracked, include/ATen/mps/MPSAllocator.h UsageFlags::HAZARD) and two values'
+# buffers over one page are two resources.  A received range is read only after mesh_host_arrived reports it
+# (arrived), so the kernel reading it is issued after (K1)
+# 2026-11-04, owner T2 (the coordinator's ruling on review W3's finding 12; C3.8: "no call site handles two forms"):
+# torch.mps.synchronize for an MPS range alone becomes the range's device module's synchronize for every range.  What
+# must stay: both synchronizations around every write of a range
 def _run(ir, context, tensors, item, env, inputs, t):
     kind, reads, key, operand = item
 
@@ -743,12 +795,10 @@ def _run(ir, context, tensors, item, env, inputs, t):
 
     def write(value, source):
         target = copy(value)
-        gpu = target.device.type == 'mps'
-        if gpu:
-            torch.mps.synchronize()
+        synchronize = torch.get_device_module(target.device).synchronize
+        synchronize()
         target.copy_(source)
-        if gpu:
-            torch.mps.synchronize()
+        synchronize()
         publish(value)
         return target
 
@@ -796,11 +846,44 @@ def _run(ir, context, tensors, item, env, inputs, t):
                                 else env[keys[n]])
 
 
+# design/compilation-coordination.md, N3: the program's retirement of one compiled function's plan.  First every
+# device its copies are on is synchronized by torch (its device module's synchronize, as `write` in _run), so no work
+# queued on its pages runs after: the bridge releases a closed claim once no port holds it
+# (design/disjoint-pages-change-request.md C3.4) and knows nothing of the GPU, as metal-microbench tools/e2b_replay.m
+# (`retired:`) keeps its client while its GPU may still write the placed pages.  Then its claim is closed
+# (mesh_plan_retire) and its tensors let go.  The retirement's error value, after its tensors are let go
+# 2026-11-04, owner T2 (the coordinator's ruling on review W2's finding 1): a plan was retired, and its tensors let go,
+# with the GPU's work on its pages possibly queued.  What must stay: the synchronization before the claim is closed
+def _retire(context, plan):
+    for device in plan['devices']:
+        torch.get_device_module(device).synchronize()
+    status = mesh.LIB.mesh_plan_retire(C.byref(context), plan['handle'])
+    plan.update(handle=0, devices=(), ir=None, tensors=None)
+    mesh.check(status)
+
+
+# the coordinator's ruling on review W2's finding 3: a compiled function is retired when the program drops it, by
+# weakref.finalize on the callable returned to torch (the Python documentation, weakref.finalize: "Return a callable
+# finalizer object which will be called when obj is garbage collected"; "When the program exits, each remaining live
+# finalizer is called unless its atexit attribute has been set to false.  They are called in reverse order of
+# creation"; "A finalizer will never invoke its callback during the later part of the interpreter shutdown when module
+# globals are liable to have been replaced by None").  Its arguments, the context and the plan, hold no reference to
+# the callable (the documentation's note: func, args and kwargs must "not own any references to obj").  At the
+# program's exit it runs from the atexit hook weakref registers at its first finalizer (Lib/weakref.py, finalize
+# `_registered_with_atexit`), while the context, attached for the program's life (_context), still maps the region.
+# A failure here is "shown on the standard error output, but cannot be propagated" (the same documentation); the
+# program's own retirement, the bridge's of a gone pid (N3), follows at its exit as before.  A plan already retired (a
+# replan that failed before it stood) is nothing to retire
+def _dropped(context, plan):
+    if plan['handle']:
+        _retire(context, plan)
+
+
 # design/aot-compilation-change-request.md A9; design/compilation-coordination.md, A-T4.  `build` gives the IR on the
 # map as it is; mesh_plan writes the lists from it (each node's page instructions, the page table's bindings and the
 # plan's state section); the GPU's program is the function's own operators, this node's partitioned graph run by torch
-# on tensors over the placed pages, each copy of each value bound by _bind (torch.frombuffer on the CPU, a kDLMetal
-# DLPack tensor on MPS: design/compilation-coordination.md, K1).
+# on tensors over the placed pages, each copy of each value bound by _bind (torch.from_dlpack, a kDLCPU or kDLMetal
+# tensor: design/compilation-coordination.md, K1).
 # - Each compiled graph is its own function and its own plan (design/compilation-coordination.md, "The appendix's
 #   revisions", N1): `function` its ordinal, the plan named (group, function), and `handle` the plan's state section
 #   offset, mesh_plan's `*plan` (N2), as an instantiated graph's handle (NVIDIA, CUDA Programming Guide, section 4.2.2:
@@ -808,30 +891,36 @@ def _run(ir, context, tensors, item, env, inputs, t):
 #   beside it (R. Frostig, M. J. Johnson and C. Leary, SysML 2018; P. Barham et al., Pathways, MLSys 2022, section 3).
 # - The plan is ESTALE where its map serial (struct mesh_state `serial`) is not the IR's map read's (the coordinator's
 #   ruling on review V2's finding 6).  A plan that stood when the planning fails after it (that test, or a copy's
-#   binding) is retired at once, as mesh_plan closes its own claim on its own failure after its writes (N3;
+#   binding) is retired at once (_retire), as mesh_plan closes its own claim on its own failure after its writes (N3;
 #   design/plan-to-bridge-change-request.md R8: nothing is held for a program but its plans' claims).
 # - Each call launches one execution of its function: call t raises the plan's executions to t + 1, the program's
-#   submission of that function execution to this node's bridge (N4; A7, Q1), before it runs it.
-# - After an ESTALE or a cancelled range, the next call plans again: the stale plan retired (mesh_plan_retire, the
-#   program's retirement of that plan, N3), then the IR built anew on the map as it is and planned with the same
-#   function (N1; mesh-call.h mesh_transfers_start: "plan again"; docs/principles.md section 4: recover across calls;
-#   V2's finding 5)
+#   submission of that function execution to this node's bridge (N4; A7, Q1), before it runs it.  An execution is
+#   consumed at its submission: once the plan's `executions` word has reached t + 1, the next call is t + 1 whether
+#   this call's run then completes or fails, since `executions` and the supplied words only rise
+#   (design/disjoint-pages-change-request.md C3.7; mesh-call.h mesh_transfers_start;
+#   design/disjoint-pages-revision-coordination.md, D2), so no later call writes the published pages of t again;
+#   nothing is retried (the coordinator's ruling on review W2's finding 2).  A start that fails before its raise (a
+#   port's refusal, its bounded wait) submitted nothing, and the next call is t again.
+# - After an ESTALE or a cancelled range, the next call plans again: the stale plan retired (_retire), then the IR
+#   built anew on the map as it is and planned with the same function (N1; mesh-call.h mesh_transfers_start: "plan
+#   again"; docs/principles.md section 4: recover across calls; V2's finding 5)
+# - The function is retired when the program drops it: its plan retired (_retire) once the callable returned to torch
+#   is collected, or at the program's exit, by Python's weakref.finalize (_dropped; the coordinator's ruling on review
+#   W2's finding 3)
+# 2026-11-04, owner T2 (W2's finding 2): `executions` set to t + 1 only after the run completed, so a call failing after
+#   its submission had the next call run execution t again over pages already published, goes.  What must stay: one
+#   execution a call
 # 2026-11-04, owner T2 (U1; design/aot-compilation-change-request.md, appendix item 1): the ENOMEM message citing D5 and
 # a lone AllGather or AllToAll goes, since C3.3 refuses only a value with no least lag; mesh_plan's failure is
 # mesh.check's as any other.  (N5; appendix item 6): A-T6's refusal of a graph planned while another's plan stands goes,
 # and the plan is found by its handle, not by context.state.  What must stay: the serial test, and a replan's IR built
 # anew with the same placement operand
 def serialize(build, function):
-    context, plan = _context(), {'stale': True, 'handle': 0}
-
-    def retire():
-        status = mesh.LIB.mesh_plan_retire(C.byref(context), plan['handle'])
-        plan.update(handle=0, ir=None, tensors=None)
-        mesh.check(status)
+    context, plan = _context(), {'stale': True, 'handle': 0, 'devices': ()}
 
     def make():
         if plan['handle']:
-            retire()
+            _retire(context, plan)
         ir = build()
         count = len(ir.declared)
         if len(ir.weights) != count or not all(isinstance(w, mesh.Weight) for w in ir.weights):
@@ -842,14 +931,14 @@ def serialize(build, function):
                                       (mesh.Weight * count)(*ir.weights), count, values, len(values),
                                       (mesh.Dependence * len(ir.dependences))(*ir.dependences), len(ir.dependences),
                                       C.byref(handle)))
-        plan['handle'] = handle.value
+        plan.update(handle=handle.value, devices={layout[2] for layout in ir.layouts})
         try:
             if mesh.State.from_address(context.M + handle.value).serial != ir.serial:
                 raise OSError(errno.ESTALE, 'the plan\'s map serial is not the one its IR was built on: plan again')
             tensors = [(value.section, _bind(context, value.section, *layout))
                        for value, layout in zip(values, ir.layouts)]
         except BaseException:
-            retire()
+            _retire(context, plan)
             raise
         plan.update(ir=ir, tensors=tensors, executions=0, stale=False)
     make()
@@ -858,8 +947,11 @@ def serialize(build, function):
         if plan['stale']:
             make()
         ir, tensors, t = plan['ir'], plan['tensors'], plan['executions']
+        status = mesh.LIB.mesh_transfers_start(C.byref(context), plan['handle'], t + 1)
+        if mesh.State.from_address(context.M + plan['handle']).executions > t:
+            plan['executions'] = t + 1
         try:
-            mesh.check(mesh.LIB.mesh_transfers_start(C.byref(context), plan['handle'], t + 1))
+            mesh.check(status)
             env = {}
             for item in ir.program:
                 _run(ir, context, tensors, item, env, inputs, t)
@@ -867,8 +959,8 @@ def serialize(build, function):
             if failure.errno in (errno.ESTALE, errno.ECANCELED):
                 plan['stale'] = True
             raise
-        plan['executions'] = t + 1
         return env['output']
+    weakref.finalize(run, _dropped, context, plan)
     return run
 
 
