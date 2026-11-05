@@ -490,7 +490,8 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    pass and, where it moved, walks the heads (mesh-dataflow.h mesh_head_after, mesh_head_state): it loads each
    standing plan it has neither loaded nor refused, announcing the claim's generation in its `prepared`, then a
    seq_cst fence, then the head read again and the load withdrawn where it changed (D3: the hazard pointer's
-   announce-and-recheck, M. M. Michael, IEEE TPDS 15(6), 2004), ESTALE or EALREADY as before, then its `held` bit or
+   announce-and-recheck, M. M. Michael, IEEE TPDS 15(6), 2004), ESTALE as before (EALREADY no longer: "The revisions
+   of f3f7cf46", SW), then its `held` bit or
    its `refused` code, then `prepared` 0; and it ends each loaded plan whose claim closed, clearing its `held` bit as
    its last access.  The bridge's own turn (mesh_retired_release) reads a claim closed, fences (seq_cst), then
    releases it only where no port's `prepared` is its generation and its plan's `held` is 0, so a port that read a
@@ -574,7 +575,17 @@ _Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64
    once every port that reads (its link up with a queue pair in its plan, as mesh-ports.c record_reach lists a cable)
    has read past delivery k - `deliveries_room`, by deferred reclamation ("An entry is reclaimed once every port has read
    past it"; P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004): the
-   readers' announcements read before the reuse (mesh-records.c orders_deliver; mesh-flow.c deliveries_copy) */
+   readers' announcements read before the reuse (mesh-records.c orders_deliver; mesh-flow.c deliveries_copy).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", CH2), reversing the copy and the reuse's
+   test above (the implementation's M5 and M4): each lane of a port reads the channel in place, by view, entry k mod
+   `deliveries_room` for delivery k below `delivered` (mesh-flow.c lane_take), and the bridge parent writes entry k mod
+   `deliveries_room` for delivery k with nothing read before it (mesh-records.c orders_deliver); `delivery_read[p]` is
+   read and written no more, kept by name.  Why: design/aot-compilation-change-request.md, appendix item 2: "The
+   delivered calls reach the ports, in delivery order, through a channel laid out once with the region ... Each port
+   reads it in place, by view, and nothing copies it.  Only the driver moves bytes"; "The writer never waits and never
+   checks for a full channel"; "(M4 and M5 go)".  The item's room, "fixed at compile time" by each plan's claim of
+   "that many entries", is not built ("The revisions of f3f7cf46", stop 1): the room is MESH_DELIVERY_ROOM, as M3 laid it
+   out.  What must stay: the area laid out once with the region; delivery k in entry k mod `deliveries_room` */
 #define MESH_DELIVERY_ROOM 4096u
 struct mesh_delivery { uint64_t group,epoch,first,end; };
 _Static_assert(sizeof(struct mesh_delivery)==32,"mesh_delivery");
@@ -675,7 +686,9 @@ struct hdr {
   /* 113 (struct mesh_delivery's note; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): the
      deliveries' channel, `deliveries_room` entries at `deliveries_off` (mesh-map.h mesh_layout); `delivered` the calls
      the bridge parent has delivered into it, only rising (release after the entry's stores); `delivery_read[p]` the
-     deliveries port p's child has read, only rising (release after its copies) */
+     deliveries port p's child has read, only rising (release after its copies).  2026-11-05 ("The revisions of
+     f3f7cf46", CH2): `delivery_read[p]` read and written no more, kept by name, every field in its place (struct
+     mesh_delivery's note) */
   uint64_t deliveries_off,deliveries_room;
   _Atomic uint64_t delivered;
   _Atomic uint64_t delivery_read[MESH_PORTS];

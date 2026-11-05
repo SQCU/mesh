@@ -611,32 +611,29 @@ static void orders_submit(void){
    "whose writer never waits" does not allow and a channel of fixed room cannot avoid ("The revisions of 46ae8fdf",
    M4).  hdr `plans` raised and woken after a turn that delivered (mesh.h mesh_notify), so the ports read the channel.
    What must stay: delivery from the head alone, in arrival order (sequence order), with no timeout and no skip; the
-   entry's stores before `delivered`'s; no entry reused before every reading port has read past it */
-static int full;
+   entry's stores before `delivered`'s; no entry reused before every reading port has read past it.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", CH2), reversing M4: entry k mod
+   `deliveries_room` is written for delivery k with nothing read before it; the test of every reading port's
+   `delivery_read[p]`, the head staying where one trailed by the room, and its log line (`full`) are gone.  Why:
+   design/aot-compilation-change-request.md, appendix item 2: "The writer never waits and never checks for a full
+   channel"; "(M4 and M5 go)"; "(Corrected 2026-11-05: the implementation's M4 kept an ORDER at the channel's head
+   while a port trailed by 4096 entries, a wait at the writer.  ...  Neither has a citation, and both go.)"; the
+   ports read the entries in place and tell nothing (mesh-flow.c lane_take, deliveries_join).  What the item derives
+   for the room, a plan's claim of it ("So a plan claims room for that many entries, as it claims its pages (C3.4).  A
+   plan the room cannot hold fails with `ENOMEM` when it is planned"), is not built ("The revisions of f3f7cf46", stop
+   1).  What must stay: delivery from the head alone, in arrival order (sequence order), with no timeout and no skip;
+   the entry's stores before `delivered`'s */
 static void orders_deliver(void){
   const uint64_t room=M->deliveries_room;
   struct mesh_delivery *channel=(struct mesh_delivery *)(void *)((char *)M+M->deliveries_off);
   int delivered=0;
   while(pendings && room){
     const uint64_t k=atomic_load_explicit(&M->delivered,memory_order_relaxed);
-    int stays=0;
-    for(uint32_t p=0;k>=room && p<port_count && !stays;p++)
-      stays=ports[p].link.state==LINK_UP && plan_lanes(ports[p].link.plan) &&
-        atomic_load_explicit(&M->delivery_read[ports[p].index],memory_order_acquire)<k-room+1;
-    if(stays){
-      if(!full)
-        mesh_say("bridge","the deliveries' channel is full (%llu entries a port has not read): the ORDER of plan (%llu, "
-                 "%llu), executions [%llu, %llu), stays at the head",(unsigned long long)room,
-                 (unsigned long long)pending->order.group,(unsigned long long)pending->order.epoch,
-                 (unsigned long long)pending->order.first,(unsigned long long)pending->order.end);
-      full=1;
-      break;
-    }
     const struct mesh_order *order=&pending->order;
     channel[k%room]=(struct mesh_delivery){.group=order->group,.epoch=order->epoch,.first=order->first,.end=order->end};
     atomic_store_explicit(&M->delivered,k+1,memory_order_release);
     memmove(pending,pending+1,--pendings*sizeof *pending);
-    delivered=1;full=0;
+    delivered=1;
   }
   if(delivered)mesh_notify(&M->plans);
 }

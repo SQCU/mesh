@@ -270,9 +270,14 @@ struct flow {
    every served lane's place let go (deliveries_copy); `joined` once the child has read hdr `delivered` at its first
    pass; and `at`, for each direction d and lane q, the delivery its lane reads next (lane_take).  Why:
    design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "Each port reads the channel in order".
-   What must stay: the progress thread's alone */
+   What must stay: the progress thread's alone.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", CH2), reversing M5: the copy (`orders`,
+   `base`, `copied`, `room`) is gone; `at[d][q]` is the index of the delivery lane q reads next way d, read in place in
+   the region's channel, entry `at` mod hdr `deliveries_room` (lane_take).  Why: design/aot-compilation-change-
+   request.md, appendix item 2: "Each port reads it in place, by view, and nothing copies it.  Only the driver moves
+   bytes"; "(M4 and M5 go)".  What must stay: the progress thread's alone */
 static struct port_plans { struct flow *loaded; uint64_t plans,walked; int walk,ended; struct flow *current[2][MESH_LINK_LANES];
-  struct mesh_delivery *orders; uint64_t base,copied,room,at[2][MESH_LINK_LANES]; int joined; }
+  uint64_t at[2][MESH_LINK_LANES]; int joined; }
   port_plans[MESH_PORTS];
 
 /* tag pre-return-20261103 rdma/mesh-link.c:56-65 port_halt (3f72cbde, 306b22be), verbatim but not static */
@@ -646,7 +651,9 @@ static void flow_sets_free(struct flow *f){
    over its every position on the pair, drawn per (execution, set), each cable posting its own members in that
    permutation's order (set_draw, position_record), where it was a permutation of this cable's members on a stream of
    this cable's own (S7′).  Why: design/aot-compilation-change-request.md, appendix item 5, "One permutation of the
-   whole set per execution"; "A draw for each cable departs from the counter."  What must stay: as above */
+   whole set per execution"; "A draw for each cable departs from the counter."  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW): no EALREADY; the refusal of a
+   load after the run began is gone (its note, below).  What must stay: the other refusals */
 static int link_prepare(struct port *port,struct flow *f,struct mesh_state *words){
   struct link *l=&port->link;
   /* the plan's state, written before it stands and never again (mesh.h, "Several plans", steps 3 and 5): its copies
@@ -784,8 +791,6 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
     }
     if(local[d] && !(slot[d]=malloc(units[d]*sizeof *slot[d]))){error=ENOMEM;goto failed;}
   }
-  uint64_t carried_units=0;
-  for(uint32_t q=0;q<MESH_LINK_LANES;q++)carried_units+=lane_units[MESH_SEND][q]+lane_units[MESH_RECEIVE][q];
   /* 2026-11-04, the coordinator's ruling on sub-assignment 6's finding 2 (a re-paired child loading the plan again):
      a plan whose run has begun, its state's `executions` (acquire) above 0 at this load, is refused (EALREADY, by
      link_run's refusal: `code`, phase MESH_STOPPED, `prepared` the refused generation), where this port carries units
@@ -814,8 +819,17 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      above); the parent's wait leaves a refused port out (DL2).  What must stay: no record served from a load after
      this port's numbers of the plan may have been reused */
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): DL10's test of `taken[p]` gone
-     with the word (appendix item 2 at mesh 0e56d8da); the refusal where the run has begun stays */
-  if(carried_units && atomic_load_explicit(&words->executions,memory_order_acquire)){error=EALREADY;goto failed;}
+     with the word (appendix item 2 at mesh 0e56d8da); the refusal where the run has begun stays.
+     2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW): that refusal is gone too (a plan
+     this port carries units of refused, EALREADY, where its `executions` read above 0 at the load), with the count of
+     the units it read.  Why: design/aot-compilation-change-request.md, appendix item 2, "The code must: ... remove the
+     start's wait for every port to load the plan, and the late-loading port's refusal of it (`mesh_ports_held`).
+     Nothing requires them.  "a send that arrives first is held until its receive is posted (§3), and a loss cancels
+     the plan anyway""; the start no longer waits for this load (mesh-dataflow.c mesh_transfers_start), so a load after
+     the run's first submission is a load like any other: this port has posted nothing of the plan before it, and its
+     records and cursors start at execution 0 (`landings` 0, struct cursor), the executions this port serves on its
+     cable.  A child that pairs again after a loss finds the plan's `serial` no longer the map's, the loss having moved
+     the map's serial (mesh-records.c map_put), and refuses it, ESTALE (above).  What must stay: the ESTALE refusal */
   /* the records, by lane, copy and assignment order: first[q (u + 1) + c] lane q's copy c's first, each lane's units
      counted by copy and summed in that order (copy pick / n; a lane's units come in list order, so in copy order) */
   f->send_count=f->receive_count=0;
@@ -994,7 +1008,10 @@ failed:
       bit after it (mesh-dataflow.c: `prepared` read first, then `held`, both acquire), and keeps the claim until the
       port ends the plan (plan_end).
    0 and the flow in *loaded; EAGAIN, the plan no longer standing at that head; or the refusal's code.  The
-   announcement is transient, set and cleared within this call (mesh.h struct mesh_port_info) */
+   announcement is transient, set and cleared within this call (mesh.h struct mesh_port_info).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW): step 3's EALREADY is gone
+   (link_prepare); the start reads no `held` bit (mesh-dataflow.c mesh_transfers_start), which the bridge's release
+   still reads (mesh-dataflow.c mesh_retired_release).  What must stay: steps 1, 2, 4 and 5 */
 static int plan_load(struct port *port,uint32_t head,uint64_t owner,uint64_t generation,struct mesh_state *words,
                      struct flow **loaded){
   struct mesh_port_info *info=&mesh_links(M)[port->index].port;
@@ -1096,7 +1113,12 @@ static int plan_load(struct port *port,uint32_t head,uint64_t owner,uint64_t gen
    SEND on its queue pair fills the k-th receive.  Why: item 2 at mesh 0e56d8da: "The delivered calls reach the ports,
    in delivery order, through a first-in, first-out channel"; "Each port reads the channel in order"; "Each port takes
    the delivered calls of every standing plan in sequence-number order", delivery order being sequence order.  What
-   must stay: each plan's executions on a lane in order; no execution taken past its node's `executions` */
+   must stay: each plan's executions on a lane in order; no execution taken past its node's `executions`.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", CH2): the lane reads each delivery in
+   place, entry `at` mod hdr `deliveries_room` of the region's channel, below hdr `delivered` (acquire, read once a
+   call: the parent's release follows the entry's stores, mesh-records.c orders_deliver), where it read the port's
+   copy.  Why: appendix item 2: "Each port reads it in place, by view, and nothing copies it"; "An entry stays until
+   every lane that carries its plan has taken its call".  What must stay: as above */
 /* whether a plan named (`group`, `epoch`) stands here on this node's map serial with port p's refusal (`refused[p]`,
    acquire): a walk of the claims' heads (mesh-dataflow.h mesh_head_after, mesh_head_state), as plans_walk reads them */
 static int plan_refused_here(uint64_t group,uint64_t epoch,uint32_t p){
@@ -1111,9 +1133,10 @@ static int plan_refused_here(uint64_t group,uint64_t epoch,uint32_t p){
 static struct flow *lane_take(struct port_plans *own,int d,uint32_t q,uint32_t p,int *again){
   const uint32_t lane=UINT32_C(1)<<q;
   uint64_t *at=&own->at[d][q];
-  if(*at<own->base)*at=own->base;
-  for(;*at<own->copied;++*at){
-    const struct mesh_delivery *e=own->orders+(*at-own->base);
+  const uint64_t delivered=atomic_load_explicit(&M->delivered,memory_order_acquire),room=M->deliveries_room;
+  const struct mesh_delivery *channel=(const struct mesh_delivery *)(const void *)((const char *)M+M->deliveries_off);
+  for(;*at<delivered;++*at){
+    const struct mesh_delivery *e=channel+*at%room;
     struct flow *f=NULL;
     int cancelled=0;
     for(struct flow *g=own->loaded;g && !f;g=g->next)
@@ -1238,7 +1261,8 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
   }
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): every served lane reads the
      deliveries' channel (lane_take), where only a lane some plan carries this way merged, so each served lane's place
-     passes the deliveries of plans it does not carry and the port lets them go (deliveries_copy) */
+     passes the deliveries of plans it does not carry and the port lets them go (deliveries_copy).  2026-11-05 ("The
+     revisions of f3f7cf46", CH2): read in place in the region's channel, nothing copied and nothing let go */
   for(uint32_t lanes=served;lanes;lanes&=lanes-1){
     const uint32_t k=(uint32_t)__builtin_ctz(lanes);
     struct lane_state *state=l->lane+k;
@@ -1344,7 +1368,8 @@ static __attribute__((always_inline)) inline int link_send_drain(struct port *po
   }
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): every served lane reads the
      deliveries' channel (lane_take), where only a lane some plan carries this way merged, so each served lane's place
-     passes the deliveries of plans it does not carry and the port lets them go (deliveries_copy) */
+     passes the deliveries of plans it does not carry and the port lets them go (deliveries_copy).  2026-11-05 ("The
+     revisions of f3f7cf46", CH2): read in place in the region's channel, nothing copied and nothing let go */
   for(uint32_t lanes=served;lanes;lanes&=lanes-1){
     const uint32_t k=(uint32_t)__builtin_ctz(lanes);
     struct lane_state *state=l->lane+k;
@@ -1510,7 +1535,8 @@ static void plan_end(struct port *port,struct flow *f,uint32_t served){
    progress thread ends, and the next pass that serves walks the heads again whatever hdr `plans` reads (`walk`), so a
    link that serves again loads each standing plan anew (EALREADY where its run has begun and the port carries units
    of it: link_prepare).  2026-11-04, owner B1 (Q5): every plan the port holds, where it was the port's one plan; what
-   must stay: no plan served on a link that serves no lane */
+   must stay: no plan served on a link that serves no lane.  2026-11-05 ("The revisions of f3f7cf46", SW): no
+   EALREADY; a load of a plan whose serial the loss moved is refused ESTALE (link_prepare) */
 static void link_close(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
   while(at->loaded){
@@ -1554,47 +1580,20 @@ static void plans_walk(struct port *port,uint32_t served){
 }
 
 /* The port's reading of the deliveries' channel (mesh.h struct mesh_delivery; design/aot-compilation-change-request.md
-   at mesh 0e56d8da, appendix item 2, "Delivery at a node": "Each port reads the channel in order.  An entry is
-   reclaimed once every port has read past it, by deferred reclamation"; design/compilation-coordination.md, "The
-   revisions of 46ae8fdf", CH, M3 and M5), once a pass: every delivery hdr `delivered` (acquire) counts past what this
-   child has read is copied, in order, into its own memory (struct port_plans `orders`), then `delivery_read[p]` stored
-   (release), so the parent's acquire of it follows every read of the entries it covers (the readers' announcement of
-   McKenney and Slingwine's and Fraser's deferred reclamation).  The copy's room grows by doubling (realloc), after its
-   entries before every served lane's place (`at`) are let go (no lane of the link reads them again); where realloc
-   gives none, nothing is copied this pass, and the pass is busy (1), so the next comes at once.  At the child's first
-   pass (`joined` 0) it begins at `delivered` as it reads it, every lane's place there (M3: a plan this child serves
-   stands on a map serial its own pairing moved, so every delivery of it comes after).  0, or 1 as above */
-static int deliveries_copy(struct port_plans *own,uint32_t p,uint32_t served){
+   at mesh 0e56d8da, appendix item 2, "Delivery at a node"; design/compilation-coordination.md, "The revisions of
+   46ae8fdf", CH, M3 and M5): at the child's first pass (`joined` 0) every lane's place is hdr `delivered` as it reads
+   it (M3: a plan this child serves stands on a map serial its own pairing moved, so every delivery of it comes after).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", CH2), reversing M5: deliveries_copy (the
+   channel copied into the child's own memory each pass, the copy grown by doubling, and `delivery_read[p]` told after
+   it) is this join alone; each lane reads the channel in place (lane_take) and nothing is told.  Why:
+   design/aot-compilation-change-request.md, appendix item 2: "Each port reads it in place, by view, and nothing copies
+   it.  Only the driver moves bytes"; "The writer never waits and never checks for a full channel"; "(M4 and M5 go)".
+   What must stay: every lane's place at `delivered` at the child's first pass */
+static void deliveries_join(struct port_plans *own){
+  if(own->joined)return;
+  own->joined=1;
   const uint64_t delivered=atomic_load_explicit(&M->delivered,memory_order_acquire);
-  if(!own->joined){
-    own->joined=1;own->base=own->copied=delivered;
-    for(int d=0;d<2;d++)for(uint32_t q=0;q<MESH_LINK_LANES;q++)own->at[d][q]=delivered;
-    atomic_store_explicit(&M->delivery_read[p],delivered,memory_order_release);
-    return 0;
-  }
-  if(own->copied==delivered)return 0;
-  uint64_t least=own->copied;
-  for(int d=0;d<2;d++)
-    for(uint32_t lanes=served;lanes;lanes&=lanes-1){
-      const uint32_t q=(uint32_t)__builtin_ctz(lanes);
-      if(own->at[d][q]<least)least=own->at[d][q];
-    }
-  if(least>own->base){
-    memmove(own->orders,own->orders+(least-own->base),(size_t)(own->copied-least)*sizeof *own->orders);
-    own->base=least;
-  }
-  const uint64_t need=delivered-own->base;
-  if(need>own->room){
-    const uint64_t room=need>2*own->room?need:2*own->room;
-    struct mesh_delivery *grown=realloc(own->orders,(size_t)room*sizeof *grown);
-    if(!grown)return 1;
-    own->orders=grown;own->room=room;
-  }
-  const struct mesh_delivery *channel=(const struct mesh_delivery *)(const void *)((const char *)M+M->deliveries_off);
-  for(uint64_t k=own->copied;k<delivered;k++)own->orders[k-own->base]=channel[k%M->deliveries_room];
-  own->copied=delivered;
-  atomic_store_explicit(&M->delivery_read[p],delivered,memory_order_release);
-  return 0;
+  for(int d=0;d<2;d++)for(uint32_t q=0;q<MESH_LINK_LANES;q++)own->at[d][q]=delivered;
 }
 
 /* The plans' turn on the port's progress thread, each pass while its link serves (its 2026-11-04 form, owner B1, at
@@ -1694,7 +1693,6 @@ static int deliveries_copy(struct port_plans *own,uint32_t p,uint32_t served){
    clients_turn).  What must stay: the raise once a pass, after every `taken[p]` store of it */
 static int link_run(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
-  const uint32_t p=port->index;
   if(!at->ended && (at->walk || at->plans!=at->walked)){at->walk=0;at->walked=at->plans;plans_walk(port,served);}
   if(at->ended)return 0;
   const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
@@ -1707,7 +1705,8 @@ static int link_run(struct port *port,uint32_t served){
     traced|=f->trace[MESH_SEND] || f->trace[MESH_RECEIVE];
   }
   if(at->ended)return 0;
-  int busy=deliveries_copy(at,p,served);
+  deliveries_join(at);
+  int busy=0;
   if(!link_receive_progress(port,served,traced,&busy) || !link_send_progress(port,served,traced,&busy))return 0;
   for(struct flow *f=at->loaded;f;f=f->next)busy|=f->posted!=f->sent+f->landed;
   for(int d=0;d<2;d++)for(uint32_t q=0;q<MESH_LINK_LANES;q++)busy|=served>>q&1 && at->current[d][q];
