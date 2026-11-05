@@ -197,17 +197,24 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    - `set`: 0 for a hop of a sequence; else j + 1 for a page of tree j of a set range, a range every declared transfer
      of which is MESH_PAGES, j the tree's index in the solve's trees grouped by demand (the same at every rank), the
      same in both ends' entries of the hop (design/aot-compilation-change-request.md, appendix item 5;
-     design/compilation-coordination.md, "The appendix's revisions", S1 to S3).  A set's entries are contiguous on its
-     node pair's list within each copy, in walk order, both ends' alike (S3): the plan's view, the bridge's cables its
-     own.  The bridge permutes a set's members per cable, each execution, at both ends (S4, S5, S7′: on each cable of
-     the pair, the members whose positions the deal gave that cable, among those positions).  The bridge sees a set or
-     a sequence and no kind (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
+     design/compilation-coordination.md, "The appendix's revisions", S1 and S2).  A set's entries on its node pair
+     and direction take consecutive places within each copy at the place of the set's first page in the plan's one
+     global order, each among them by its own place, both ends' alike (design/plan-to-bridge-change-request.md R5:
+     "They take consecutive places at the place of the set's first page in that order"; design/compilation-
+     coordination.md, "The documents' revisions of edd4b583", GO4; "Both ends", below): the plan's view, the bridge's
+     cables its own.  The bridge permutes a set's members per cable, each execution, at both ends (S4, S5, S7′: on
+     each cable of the pair, the members whose positions the deal gave that cable, among those positions).  The bridge
+     sees a set or a sequence and no kind (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
    2026-11-04, owner L2 (the appendix, item 5): `set` and `padding1` appended, where every hop was one of a sequence in
    the schedule's order.  Why: the pages of function B's operands are written as a set, not a sequence (R4, item 5).
    What must stay: offsets 0-47 as at 110; both ends' entries of a hop the same `set`.
    2026-11-04, owner L2 (review W3's finding 12, the coordinator's ruling; S7′): a set contiguous on its node pair's
    list and permuted per cable, where this note said contiguous on its cable and permuted whole.  Why: the deal spreads
    a pair's positions over the pair's cables, and each cable's records are its own (S7′).  What must stay: as above.
+   2026-11-04, owner C3 (GO4): a set's entries at the place of its first page in R5's global order, each by its own
+   place, where this note said contiguous in walk order (S3, at the group's least scheduled start).  Why: R5 orders
+   each cable's list by MSCCLang §5.2 step 3, and "Scheduled start times do not order the lists".  What must stay: a
+   set's entries contiguous on its node pair and direction within each copy, both ends' alike.
    Copies (C3.3: modulo variable expansion, M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
    scheduling, MICRO 1994).  mesh_plan unrolls the plan's one execution, its template, into u copies: L of a routed
    value is the least lag at which every read of it in execution t happens before its write in t + L, and u the
@@ -251,7 +258,9 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    revisions", N2): the plan's state, the landed list's own section, which mesh_plan
    places with the plan's values in its claim (an invariant of the plan, no page-table row naming it), in new pages for
    every plan, apart from the data pages it tells of.  Its layout: the struct; the phases, counts, supplied words and
-   status; the entries; each 64-aligned.  Each word has one writer:
+   status; the sequence words, `copies` uint64 words at `sequences`, copy c's at `sequences` + 8 c; the entries; each
+   64-aligned (mesh-collective.c plan_layout; design/compilation-coordination.md, "The documents' revisions of
+   edd4b583", "The region").  Each word has one writer:
    - `phases`: the phase list, a dense array of 2-bit fields.  For each range this node receives (one it consumes,
      or a relay's own, whose forwards its phases release), in the plan's demand order, and copy c, a group of
      mesh_group_bytes(P) bytes, groups in (range, c) order, range major; page k of the range (k < P) has its field at
@@ -300,25 +309,61 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      algorithms: taxonomy and survey, ACM Comput. Surv. 36(4), 2004, section 7.1).  mesh_plan's alone.
    - `submitted`: the executions the bridge at `sender` has submitted to the sequencer, [submitted, executions) the
      next submission (Q2); the bridge parent's alone, at that node.
-   - `released`: the executions this node's bridge parent has released to its ports, in sequence order: it delivers
-     an ORDER of the plan once the plan stands here and every port holding the previously released plan has served it,
-     then stores `released` its `end` (release; Q4: Défago et al., Fig. 5, the destinations' `pending` delivered in
-     sequence order); the bridge parent's alone.  A port serves execution t only where t < `executions` and t <
-     `released`, so this node's cables carry one plan's batch at a time, in sequence order.  The hold stays
-     (design/compilation-coordination.md, "The appendix's revisions", O2): both ends of a cable must post the released
-     executions of several plans in one order, the sequence order both ends' parents deliver, and what a delivery
-     leaves in the region for the ports, the parent's child processes, is each plan's `released`, a count, which
-     records no order between two plans' deliveries; what would carry that order is open for the operator (O2).
-     2026-11-04, owner L2 (O2): the hold's reason O2's, where it was that a cable never interleaves two executions
-     (Claude's words, which design/aot-compilation-change-request.md, appendix item 2, withdraws).  What must stay: a
-     port serves t only below `executions` and `released`.
-   - `served[p]`: the executions port p has served whole, every record of them done (every send completed and every
-     receive landed), and `released` for a plan it carries nothing of (Q4); port p's alone.
+   - `released`: the executions of the plan whose sequence numbers this node's bridge parent has published, each in
+     its copy's sequence word, in sequence order: L. Lamport's ms, "the total number of messages sent" (Concurrent
+     reading and writing, CACM 20(11), 1977, "Message Buffer"; design/compilation-coordination.md, "The documents'
+     revisions of edd4b583", DL1).  The bridge parent's alone; it only rises.  The parent delivers its pending ORDERs
+     in arrival order, which is sequence order (Défago et al., Fig. 5), the head first, with no timeout and no skip,
+     the head matched to a standing plan of its (group, epoch) on this node's map serial (DL2).  For the plan's next
+     execution t, the greater of the ORDER's `first` and `released`, numbered `sequence` + t - `first`: where t >= u
+     and some port of the plan's port set that has not refused the plan has `taken[p]` < t - u + 1, Lamport's sender
+     waits ("wait until ms < mr + P"), the head staying until a later turn of the parent's event loop, nobody
+     blocking; else the number is stored in sequence word t mod u, then `released` t + 1 (release): "put message in
+     B[ms mod P]; ms := ms + 1".  hdr `plans` is woken after each turn that published.  The head's wait holds every
+     later ORDER behind it, since the deliveries are in sequence order: it is Lamport's sender's wait for the buffer
+     the appendix item names, not a hold of a plan's batch (DL2).  A port takes execution t of the plan only where t <
+     `executions` (D2) and its number is published (t < `released`, acquire).
+     2026-11-04, owner C3 (DL2 to DL4; design/aot-compilation-change-request.md, appendix item 2, "Delivery at a
+     node"): reversing Q4's hold and O2's reason for it (an ORDER delivered only once every port holding the plan
+     released before had served it, `released` then its `end`, so this node's cables carried one plan's batch at a
+     time; what carried the delivery order to the ports was open).  Why: the parent publishes each released
+     execution's sequence number in one word per copy, each word one writer (Lamport 1977), and each port merges the
+     plans' sequences (D. E. Knuth, The Art of Computer Programming vol. 3, §5.4.1), so released executions of every
+     plan interleave on each cable and nothing holds.  What must stay: a port takes t only below `executions` and
+     `released`; `released` only rises.
+   - `taken[p]`: Lamport's mr, port p's (DL1): the least execution of the plan whose number port p may still read,
+     port p reading no number below it again; for a plan port p carries nothing of, or has cancelled or ended,
+     `released` as it rises.  Port p's alone; it only rises (release), and the port wakes hdr `plans` (without raising
+     it) where it rose.  Port p serves the executions of every plan it carries in sequence-number order, a k-way merge
+     (Knuth vol. 3, §5.4.1, as the appendix item states it: of each plan its next execution there, the least number
+     among them next; each of the port's own readers, each direction, merging on its own, the bridge's: DL3):
+     execution n of a plan a candidate where n < its `released` (acquire), its number its copy's word n mod u ("wait
+     until mr < ms; read message in B[mr mod P]"), every candidate read, then every plan's `released` and hdr `plans`
+     again (Lamport's "writing data elements in one order and reading them in the opposite order"), so the least number
+     over the second reading is next.  Both ends of a cable hold the same plans and the same records and read the same
+     numbers, so they post the same order (the item: "they merge alike"; DL3).
+     2026-11-04, owner C3 (DL1, DL4): `taken[p]` where `served[p]` was (the executions port p had served whole, every
+     record of them done, which Q4's hold read).  Why: the hold is gone; a port's word is now the receiver's count of
+     the buffer it no longer reads.  What must stay: port p its one writer; the word only rises; `released` for a plan
+     the port carries nothing of.
+   - The sequence words (`sequences`, copy c's at `sequences` + 8 c): Lamport's B[c], P = u (DL1; R2, C3.3: "execution t
+     runs copy t mod u"): word c the sequence number of the execution t, t mod u = c, the parent published last in
+     copy c, struct mesh_order `sequence` + t - `first` of the ORDER that holds t.  The bridge parent's alone.  Where
+     this differs from the paper (DL1): every port is a receiver of every message (each port serves every standing
+     plan), so the sender's wait is over every receiver's mr; and a port's mr is the least of its own readers' next
+     reads (the bridge's), each reading the messages in order on its own.
    Every word is set to its starting value once, where mesh_plan places the section (D3), as mbarrier.init runs once
-   a kernel: the phases, counts, supplied words, status, `executions`, `held`, `refused`, `submitted`, `released` and
-   `served` 0.  None is reset, and none written to an earlier value, while the plan stands, but a port's bit of `held`,
-   which it clears as its last access.  `submitted`, `released` and `served` only rise; they, each bridge parent's
-   ORDERs not yet delivered and the sequencer's own number are what A7 adds to C3.3's run time (Q6).
+   a kernel: the phases, counts, supplied words, status, `executions`, `held`, `refused`, `submitted`, `released`,
+   every `taken` and every sequence word 0.  None is reset, and none written to an earlier value, while the plan
+   stands, but a port's bit of `held`, which it clears as its last access; a sequence word holds the number its
+   copy's last publication stored (Lamport's B[ms mod P]).  `submitted`, `released` and every `taken` only rise.  What
+   A7 adds to C3.3's run time is the sequencer's `seqnum`, each bridge parent's pending ORDERs (the head's `first` and
+   `sequence` advanced as its executions are published), and each plan's `submitted`, `released`, `taken` and
+   sequence words (Q6, as design/compilation-coordination.md, "The documents' revisions of edd4b583", DL6 leaves it).
+   2026-11-04, owner C3 (DL1, DL6): the sequence words and `taken` in this list and in Q6's, where `served` was, and
+   each parent's pending ORDERs with their heads advanced as they are published, where it named the ORDERs not yet
+   delivered.  Why: delivery publishes each execution's number (appendix item 2).  What must stay: every word set
+   once where placed, none reset while the plan stands.
    Cancellation (C3.1: cancellations arrive on the count, as arrivals do on an mbarrier).  Where a plan ends with
    receives not landed, and where the bridge cancels (mesh-flow.c plan_cancel), each such receive's count word is
    raised (a compare-and-swap loop that never lowers it; release) to its final value, P x the executions t <
@@ -334,41 +379,46 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    it in `status`.  No other word is a cancellation's.
    Both ends: for adjacent nodes a and b, copy c's entries at a naming b with MESH_SEND and those at b naming a with
    MESH_RECEIVE are the same hops in the same order, and u is the collective's, so both ends hold the same copies.  The
-   order is each cable's sends in the schedule's order (design/plan-to-bridge-change-request.md R5: list scheduling by
-   decreasing bottom level with edge scheduling under the contention model, O. Sinnen and L. A. Sousa, Communication
-   contention in task scheduling, IEEE TPDS 16(6), 2005; design/compilation-coordination.md, T6): every rank computes
-   the same schedule from the same inputs (F. B. Schneider, Implementing fault-tolerant services using the state
-   machine approach, ACM Comput. Surv., 1990), and each cable carries execution t's sends in that order, then
-   execution t + 1's.  R5 states that order is a topological order of the unrolled executions, so the cables'
-   sequences cannot wait on each other in a cycle (M. Cowan et al., MSCCLang, ASPLOS 2023, section 5.2); for the
-   bridge's store-and-forward waits it is not shown (below).  How a pair's sequence is spread over what its devices
+   order is R5's one global topological order of the plan's instructions (design/plan-to-bridge-change-request.md R5,
+   "The order of each cable's list, by the reference algorithm"): its tasks and its communications, a communication a
+   page over a tree edge, whose send at one end and receive at the other are one instruction at one place, sorted as
+   MSCCLang's step 3 states it, "Sort instructions into a global topological order with respect to their dependencies
+   with a heap using the priority to order instructions" (M. Cowan et al., MSCCLang: Microsoft Collective
+   Communication Language, ASPLOS 2023, section 5.2), the priority the bottom level (O. Sinnen and L. A. Sousa,
+   Communication contention in task scheduling, IEEE TPDS 16(6), 2005, eq. (7)), a tie to the lower instruction
+   (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO1 to GO3; mesh-collective.c
+   plan_schedule).  Each node pair's list at each end is a subsequence of it, a set's entries at its first page's place
+   (GO4), so both ends' lists agree; every rank computes the same order from the same inputs (F. B. Schneider,
+   Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990); and each cable
+   carries execution t's sends in that order, then execution t + 1's (R5), the cables' sequences subsequences of it.
+   Its dependencies are the bridge's store-and-forward waits (a forward released by its receive's landing, a source's
+   send by its supplied word: GO1), the groups in order of their least places are a topological order of them with
+   each set whole, and every lag points forward, so the cables' sequences cannot wait on each other in a cycle
+   (MSCCLang, section 5.2: "all implicit dependencies introduced by thread block sequential execution cannot produce
+   cycles"; GO4, shown at mesh-collective.c plan_schedule).  The list schedule is still computed and orders no list
+   (R5: "Scheduled start times do not order the lists"; GO5).  How a pair's sequence is spread over what its devices
    give it is the bridge's own (R5, R7).
    2026-11-04, owner L (design/plan-to-bridge-change-request.md R5; design/compilation-coordination.md, T6, T7): the
    order of the entries is the schedule's, where it was the walk's under a hand priority, and each entry carries its
    `bytes` in place of `padding`, where every hop moved its whole page; the entries are in the plan's state section,
    where they were the layout's area at hdr `hop_off` (`hops` of them, at most `hop_capacity`).  What must stay: both
    ends' lists the same hops in the same order; every copy the same order.
-   2026-11-04, owner L2 (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md,
-   "The appendix's revisions", S2, S3: T6 amended): each entry's group is its set's entries of the same `node` and
-   `direction` where `set` is not 0, else the entry alone, and the entries are sorted by their group's least start in
-   the schedule, then their group's least walk, then their own walk; so a set's entries are contiguous on their node
-   pair's list within each copy, in walk order, both ends' alike, and every other entry keeps the schedule's order.
-   What must stay: both ends' lists the same hops in the same order; every copy the same order.
-   2026-11-04, owner L2 (review W3's finding 6, the coordinator's ruling): withdrawn, the claim of aa112f5b that S2's
-   grouping keeps the per-pair order a topological order of the unrolled executions (a set's position i following its
-   receive at position i upstream, whose group start is earlier).  The contention schedule starts a page on a route's
-   links by Sinnen and Sousa's eq. (14), nonaligned (cut-through; mesh-graph.c: ts(e, Lk) = max{A, tf(e, Lk-1) -
-   ς(e, Lk), ts(e, L1)}), so a page's start on a link can precede its finish on the link before, and the start order
-   is not shown to be a topological order of the bridge's store-and-forward waits (a forward released by its receive's
-   landing), for the T6 order itself as for the groups.  Open for the operator (design/compilation-coordination.md,
-   the appendix's revisions, record).  What must stay: both ends' lists the same hops in the same order.
+   2026-11-04, owner C3 (GO1 to GO5; R5, "The order of each cable's list, by the reference algorithm"): reversing the
+   schedule's order (T6: each list in its link's scheduled starts) and S3's groups at their least scheduled start, then
+   their least walk, then each entry's walk (owner L2's notes of aa112f5b).  Why: R5 orders each cable's list as a
+   subsequence of MSCCLang section 5.2 step 3's global topological order by bottom level, a set's pages at the place
+   of its first page, and "Scheduled start times do not order the lists"; this overturns T6 and S3.  The claim owner L2
+   withdrew (review W3's finding 6: that the start order is a topological order of the bridge's store-and-forward
+   waits, unshown since Sinnen and Sousa's eq. (14) starts are cut-through) is now GO4's, over the instruction DAG,
+   whose dependencies are those waits.  What must stay: both ends' lists the same hops in the same order; every copy
+   the same order; a set's entries contiguous on their node pair and direction within each copy.
    Several plans (design/plan-to-bridge-change-request.md R8; design/compilation-coordination.md, Q5): each plan is in
    its own claim, and any number stand at once; a program holds nothing but its plans' claims (C3.4).  Writing a plan
    (mesh-collective.c mesh_plan; e6bd7db2's section 6):
-   1. mesh_plan computes everything first: its demands, routes, the task graph and its schedule, the template with the
-      program's data edges, the least lags and u, the items and both colourings, this node's entries of one copy and
-      every room; EINVAL, EEXIST (a plan of the same (group, function) standing here on the same map; N1) or ENOMEM
-      found here leave every standing plan standing.
+   1. mesh_plan computes everything first: its demands, routes, the task graph, its schedule and the order of its
+      lists (GO1 to GO5), the template with the program's data edges, the least lags and u, the items and both
+      colourings, this node's entries of one copy and every room; EINVAL, EEXIST (a plan of the same (group,
+      function) standing here on the same map; N1) or ENOMEM found here leave every standing plan standing.
    2. The plan's claim of exactly the rows and pages it uses, with its generation from hdr `serial`, taken whole or not
       at all (mesh-dataflow.h mesh_claim_take: the head's `start`, its owner word last; ENOMEM leaves every standing
       plan standing).  Nothing is claimed at attach (C3.4).
