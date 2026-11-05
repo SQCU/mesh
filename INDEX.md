@@ -59,7 +59,9 @@ other projects, such as a game bot, and old dated records; they are not listed h
   of the work, its reviews and what is open; then its part "The appendix's revisions, 2026-11-04" (the change
   request's last appendix, items 1-7: C3.3 without D5, delivery in order without Q4's skip and the hold that stays,
   sets of a function B operand in Threefry-drawn Fisher-Yates order, compiled functions coexisting, torch's MPS
-  kernels), with its record.
+  kernels), with its record; then its part "The documents' revisions of edd4b583" (each cable's list a subsequence of
+  MSCCLang's heap-built global topological order by bottom level; delivery by Lamport's message buffer, one sequence
+  word a copy, merged at each port, Q4's hold gone; e2b's partial sums declared function B), with its record.
 - [design/disjoint-pages-coordination.md](design/disjoint-pages-coordination.md): the coordinating agent's contract
   for that change (the file split, the region's new areas, the plan's write order, the GPU's mask read) and the record
   of each sub-assignment's commits, each review finding and where it went, and what was left open.
