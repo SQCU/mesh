@@ -1866,7 +1866,9 @@ the three integration builds.
   landings no longer count its page's landings; the phase field is the page's one record of its landings, written by
   whichever child lands it (mesh.h, "Phases"), and for a page posted by one record alone the test is the old one (its
   round j - 1 posted only after j - 2 landed, so the field reads mesh_phase(j - 1) or mesh_phase(j)). Its reach,
-  recorded: the field is 2 bits (C3.7, "PTX's mbarrier phase bit, widened to two"), so it tells round j - 1's landing
+  recorded (2026-11-05, the documents' answer: the field used outside its precondition, PTX's "valid only for" the
+  current and the immediately preceding phase; appendix item 5 now posts round j by the range's rising count): the
+  field is 2 bits (C3.7, "PTX's mbarrier phase bit, widened to two"), so it tells round j - 1's landing
   exactly while the page's earliest round not landed is at most three rounds before the one being posted; a member
   whose earlier rounds sit on another cable's lane four or more rounds behind would read as landed. The documents name
   no wider word, and nothing has been run.
@@ -1904,6 +1906,10 @@ the three integration builds.
   for A10's pass ("The compilation must take a program's sequence of calls as a graph, decide at compile time ..."); the
   C graph module has no closure, matching or width, so no second copy of one exists (rubric C9's concern); and Python's
   graph module, rdma/mesh_graph.py, is a file the rules bar from change. Open for the operator.
+  Ruled 2026-11-05 by the operator: "inlined code is unilaterally bad and to be deduplicated and uninlined where
+  possible and appropriate wrt graph operations module query." C9a is reversed: the closure, the chains' walk and the
+  width move into rdma/mesh_graph.py, and the symbolic execution runs on torch.fx.Interpreter
+  (design/aot-compilation-change-request.md A10, "Its graph operations are the graph module's").
 
 ### Where the work stopped
 
@@ -1938,6 +1944,13 @@ the three integration builds.
 
   What was built of the item's channel is CH2; what was not: the claim, its ENOMEM, and a room from the program's
   schedule.
+  2026-11-05, the documents' answer: the stop's second reason holds, and the item's derivation was wrong for a channel
+  shared by every plan. The item now gives each plan its own queue at each node, as synchronous dataflow gives each
+  arc its FIFO queue, taken by a multiway merge on the sequence number; and A7 has every call of one program submitted
+  by one node in the program's order, with no call of a plan submitted before every node of the plan holds it (as
+  ncclCommInitRank synchronizes ranks), so a delivered call's plan always stands at its node. The first reason: a
+  submission is one entry however many executions it carries (Pathways §4.5's "single message"), so e2b's run is one
+  entry, and its length stays out of the plan.
 - **Stop 2. CollectivePermute's insertion** (aot-compilation A4): "A2's partitioner inserts these two where GSPMD's
   does. ... CollectivePermute goes into halo exchange, "We use the CollectivePermute operator to exchange halo data
   between partitions" (§4.3), and into a pipeline's buffer shifting, "GSPMD will turn the buffer shifting into
@@ -1948,6 +1961,8 @@ the three integration builds.
   (_operator, A-T2), and the placement operand names one device mesh, so none of those places arises among the
   operators it partitions, and _collective_permute is still reached by nothing. Reaching it needs the partitioner to
   partition one of those operators by GSPMD's rules, which A4 does not ask in words (sub-agent T3's stop).
+  2026-11-05, the documents' answer: A2 asks it, "propagates them to every operator", and A4 now says so in words,
+  with GSPMD §4.3's windowed operators; `_operator`'s "GSPMD gives no rule here for it" is false for them.
 
 ### Commits
 

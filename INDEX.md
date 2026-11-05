@@ -54,7 +54,10 @@ other projects, such as a game bot, and old dated records; they are not listed h
   compilation must do: captured graphs (PyTorch 2); the placement operand (GSPMD, Alpa) and the weighting operand
   (Sinnen; Garg and Könemann), both chosen elsewhere; collectives over packed trees (Blink) lowered to page
   instructions (MSCCLang); one schedule per function; function executions ordered by one scheduler per island
-  (Pathways); the IR operand; the serialized operand in MSCCL-IR's shape, running only existing kernels.
+  (Pathways), each program's calls submitted by one node in its order, and no call of a plan submitted before every
+  node of the plan holds it (NCCL's communicator creation); the IR operand; the serialized operand in MSCCL-IR's shape,
+  running only existing kernels. Its appendix gives each plan its own queue of delivered calls at each node
+  (synchronous dataflow's FIFO queue on each arc), merged at each lane by sequence number.
 - [design/compilation-coordination.md](design/compilation-coordination.md): the coordinating agent's contract for
   the two change requests above (the file split, the names files share, the task graph and its contention schedule,
   plans in their claims and the island's fixed sequencer, the provisional operands, the sources read) and the record

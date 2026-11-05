@@ -1688,6 +1688,56 @@ design/aot-compilation-change-request.md, and are held here once.
 > "function B releasing its output pages one at a time on the GPU side."
 > one at a time? who says any part of this code is synchronized s.t. there is a global sync point which interrupts numeric backends each and every time any page has been received from dma? synchronizaiton s.t. only one page at a time is ever made available to the dma bridge after any numeric backend function concludes? citation? literature? idiomaticity?
 
+**Claude:**
+
+> (・_・ ) Implementer #2 has finished and I've checked its work. Most of the revisions are built and pushed, and two items stopped. The stops come from mistakes in my own documents.
+>
+> **Built, and checked by me**
+> - **HiGHS (R5):** I ran `make -B -C rdma`.
+>   - It fetches the v1.15.1 tarball, the SHA-256 matches, and the tarball's header names commit 04024d70. The list of source files is the same as BUILD.bazel's.
+>   - The build took 1:51 with no warnings. libmesh links no HiGHS library, and nothing comes from Homebrew.
+> - **R5's second objective:** C_max is held at its best value, then the sum of completion times is minimized (fe14e70a).
+> - **Item 2:** removed the wait at start and the refusal of a plan that loads late. Lanes now read the channel in place, so M4 and M5 are gone (e1525cc7, c027460b).
+> - **Item 5:** a set's positions are fixed, not its members. Each port keeps a view of every member of its sets, which reverses M1 (8fd88d86).
+> - **A4:** ReduceScatter is inserted where GSPMD §3.2 and §5.1 put it (7b429aa6).
+> - **A10:** the torch.fx tracer, Bernstein's order, and the bound on outstanding calls (Dilworth, Hopcroft–Karp) (210f6cfe). It compiles, but it has never been run.
+> - `make .build/e2b_replay` passes. Both repos are clean and pushed.
+>
+> **Where my documents were wrong**
+> 1. **Item 2, the channel's room.** I wrote "A lane trails its node's deliveries by at most two amounts" and "only a stopped process can do that." Both are false.
+>    - The bound holds only for a lane's own plan. The channel is one shared ring, so other plans' calls keep arriving while a lane waits, quite normally, for its node to start its call.
+>    - I cited synchronous dataflow but didn't follow it. In synchronous dataflow each edge of the graph has its own buffer, not one shared buffer.
+>    - **The code now has a hole.** M4's wait is gone and no room claim was built. `lane_take` reads entry `at mod 4096` without checking that it is still the delivery it expects. If that entry has been overwritten, the two ends of a cable take different calls.
+>    - e2b can't hit this, because it makes one delivery per run. A program with thousands of calls between two calls of the same plan could.
+> 2. **Item 5 says nothing about the round rule once members move between ports.** The implementer used the page's 2-bit phase field instead. Two bits can give a wrong answer when a member's earlier rounds are four rounds behind on another cable. No document handles this limit, and it comes from my item 5.
+>
+> **Stop 2: CollectivePermute is never inserted.** The partitioner handles only elementwise operators and Dot, so no halo exchange or pipeline shift ever comes up. Its refusal message says "GSPMD gives no rule here," which is untrue for Convolution and ReduceWindow: GSPMD §4.3 gives one. To run arbitrary DNNs, A2 has to partition the operators GSPMD §4 covers, and those are where CollectivePermute gets inserted.
+>
+> **A possible deadlock I found while checking.** This is from reading the code; nothing was run, and it existed before this round.
+> - `lane_take` stops every lane of a port at any entry whose plan this node hasn't planned yet (`if(!f) … return NULL`).
+> - Suppose node L plans P at its first call and submits it, while node X is still waiting on the result of a call R that L isn't part of.
+> - If P's entry is ahead of R's in X's channel, X's lanes stop at P. Then R never finishes at X, and X never reaches the point where it plans P.
+>
+> **Open for you (C9a):** should A10's analysis stay in `mesh_compile.py`, or move into the graph module? The rules bar changes to `mesh_graph.py`.
+>
+> **What I'd propose writing into the documents next (no implementer until you say):**
+> - **Item 2:** a room per plan, sized by that plan's claim, which is how synchronous dataflow buffers edges. Each lane merges its plans' rooms in sequence-number order, and each entry is checked against its index.
+> - **Plans are created collectively:** a plan exists at all of its nodes before its first call is sent, the way NCCL's communicator creation synchronizes ranks. I'd fetch and quote NCCL's own text before citing it. This closes the deadlock, and also the implementer's objection that a call can arrive for a plan that doesn't exist yet.
+> - **A2:** the partitioning rules for GSPMD §4's operators.
+> - **Item 5:** a phase word wide enough for the lag, or a cited bound on how far behind a member's rounds can be.
+>
+> Shall I write these up?
+
+**The operator:**
+
+> inlined code is unilaterally bad and to be deduplicated and uninlined where possible and appropriate wrt graph operations module query. 'blah blah blah deadlock' do the works we cite in the literature have deadlocky runtimes or compiletimes or was that a deviation from the work we were developing?
+> "i would suggest a room per plan which blah blah blah"
+> citation, algorithms, literature. idiomatic code will never be accepted here because it will ultimately never be memory safe, performant, and kernel safe here.
+> "should we cite nccl"
+> probably? nccl better than idiomatic code or fictional problems?
+> "implications on lag"
+> idiomatic? explain using only citations, algorithms, and data structures in non-idiomatic form? desire for 'bounds' not explained in terms of literature? fictional problem?
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the

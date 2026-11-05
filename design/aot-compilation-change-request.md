@@ -180,6 +180,11 @@ statement, or a fact of the code.
     pipeline's buffer shifting, "GSPMD will turn the buffer shifting into cross-device communication via
     CollectivePermute" (§3.3). (Corrected 2026-11-05: the text said the code refused them. No partitioner inserted
     them, so the refusal never ran and the new lowerings were unreachable.)
+  - The partitioner reaches them by partitioning every operator, as A2 states ("propagates them to every operator").
+    GSPMD gives the rule for the operators that need CollectivePermute: "The most typical use case of halo exchange is
+    for partitinoning window-based operators (e.g., Convolution, ReduceWindow)" (§4.3). The partitioner's refusal of
+    an operator, "GSPMD gives no rule here for it" (rdma/mesh_compile.py `_operator`), is false for these.
+    (2026-11-05: design/compilation-coordination.md, "The revisions of f3f7cf46", stop 2.)
   - **Lowering.** MSCCLang (M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, §4 and
     §5) lowers operations on chunks into an instruction DAG of sends, receives and receive-reduce-copies. A relay's
     forward is its fused receive-copy-send. Here a chunk is a page.
@@ -218,14 +223,58 @@ statement, or a fact of the code.
     order the submissions reach it. Pathways' scheduler is first-in, first-out in just this way (§4.4).
   - Every node releases function executions to its ports in sequence-number order. The pages of released executions
     interleave on each cable (appendix item 2).
-  - Each function execution is submitted once, by its plan's least node (`sender`, rdma/mesh.h: "the fixed sequencer's
-    one sender a message"), to that node's bridge, which forwards it to the sequencer.
+  - Each function execution is submitted once, by its program's submitter (below), to that node's bridge, which
+    forwards it to the sequencer. (Corrected 2026-11-05: the text said "by its plan's least node (`sender`,
+    rdma/mesh.h: "the fixed sequencer's one sender a message")". One program's plans have different least nodes, so
+    that sent one program's calls to the sequencer from several nodes.)
 - **The sequencer is unique and stays where it is.** Défago, Schiper and Urbán, §7.1: "The sequencer is unique, and the
   responsibility is not normally transfered to another processes". It is the bridge of the highest-numbered node the map
   reaches (rdma/mesh-records.c `island_set`): the code's choice, which the fixed-sequencer class leaves open. A plan
   stands only while its map does (design/disjoint-pages-change-request.md D.3.6), so no standing plan's sequencer
   changes. (Corrected 2026-11-05: the text called this the bully algorithm's coordinator (H. Garcia-Molina, IEEE Trans.
   Comput., 1982). No election runs, so that algorithm is not used.)
+- **One program's calls reach the sequencer from one node, in the program's order, and only once every node of the
+  call's plan holds the plan.**
+  > 'blah blah blah deadlock' do the works we cite in the literature have deadlocky runtimes or compiletimes or was that
+  > a deviation from the work we were developing?
+  - **The works cited have no such deadlock, at run time or at compile time.** Each fixes the order, and the compiled
+    function at every participant, before any call runs:
+    - Pathways names it: "the system will deadlock if communicating computations are not enqueued in a consistent
+      order" (§2). A program has one client: "We adopt a single-controller model" (§2). The client "registers the
+      computations with the resource manager, triggering the servers to compile the computations in the background",
+      and then constructs and lowers the program it enqueues (§4.2).
+    - NCCL: "ncclCommInitRank implicitly synchronizes with other ranks" (NCCL 2.32.3, API, Communicator Creation and
+      Management Functions). Across communicators: "Thus to remain deadlock free, users must ensure the order of
+      host-side launches matches for all devices" (NCCL 2.32.3 User Guide, "Using multiple NCCL communicators
+      concurrently").
+    - Synchronous dataflow finds a deadlock when the program is compiled. Its scheduler's step 5 is "If no node in L
+      can be scheduled, indicate a deadlock (an error in the graph)", and its Theorem 3 gives that the algorithm does
+      not deadlock where a periodic admissible schedule exists (Lee and Messerschmitt, IEEE Trans. Computers C-36(1),
+      1987).
+  - **The deadlock in Claude's turn came from two deviations, one in this document and one in the code.**
+    - This document had each call submitted by its plan's least node. A program's plans have different least nodes,
+      so two calls of one program can reach the sequencer in the opposite of the program's order. A10 says the program
+      keeps its order constraints "when it submits, so the sequencer's first-in, first-out numbers keep them too".
+      That holds only where one node submits them all. Otherwise a lane can take a call before an earlier call it
+      depends on, and wait on it.
+    - Each node makes a plan when its own program reaches it, and a port holds every lane at a delivered call whose
+      plan does not stand at its node (rdma/mesh-flow.c `lane_take`). Pathways' servers compile when the client
+      registers, whatever any program is doing.
+    - (This document's reading of both. Nothing has run it.)
+  - **The code must:**
+    - submit every call of one program (its launcher's `group`, rdma/mesh.h) from one node, the least of the program's
+      nodes, in the order the program makes the calls, as Pathways' one client does. The sequencer's first-in,
+      first-out numbers then keep the program's order (§4.4, "simply enqueues work in FIFO order"), and A10's
+      constraints with it;
+    - make a plan's creation synchronize its nodes, as ncclCommInitRank does. No call of a plan is submitted before
+      every node of the plan holds it. The submitter counts the nodes' arrivals, as a centralized barrier does: "each
+      processor updates a small amount of shared state to indicate its arrival and then polls that state to determine
+      when all of the processors have arrived" (J. M. Mellor-Crummey and M. L. Scott, Algorithms for scalable
+      synchronization on shared-memory multiprocessors, ACM TOCS 9(1), 1991, §3.1). Only the submitter reads the
+      count. A node lost first moves the map, and the plan fails with `ESTALE` (design/disjoint-pages-change-request.md
+      D.3.6);
+    - so every delivered call's plan stands at its node, and `lane_take`'s hold at a plan that does not stand there
+      goes.
 
 ### A8. The IR operand
 
@@ -295,6 +344,19 @@ statement, or a fact of the code.
     the operator does.
   - **At run time:** calls are issued ahead, as futures, in the order the analysis allows, as Pathways dispatches
     asynchronously (Barham et al., 2022, §4.5).
+- **Its graph operations are the graph module's.**
+  > inlined code is unilaterally bad and to be deduplicated and uninlined where possible and appropriate wrt graph
+  > operations module query.
+  - Rubric C9: "the form with fewer copies of each primitive, offered for others to call rather than spliced into their
+    code" (design/rubric-actionable.md).
+  - The order's transitive closure, the walk of commuting chains, and the width by Fulkerson's matching in Hopcroft and
+    Karp's phases are functions of rdma/mesh_graph.py, beside `walk` and `reach`. As that module states, "A caller
+    supplies its vertices and a neighbours function." rdma/mesh_compile.py calls them and keeps no copy.
+  - A body's symbolic execution runs on torch.fx.Interpreter, as the program's run already does (`_Program`), not on a
+    second loop over a graph's nodes.
+  - The same holds wherever mesh's code walks a graph. (2026-11-05: the operator's ruling on the implementer's C9a,
+    design/compilation-coordination.md, "The revisions of f3f7cf46". The rules' bar on rdma/mesh_graph.py does not
+    stand against it.)
 - **Its output:**
   - for each compiled function, the most calls of it the analysis lets be outstanding at once in the program that
     submits them, which bounds how many the program issues ahead;
@@ -418,30 +480,52 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       computation, ISCA 1992).
     - The bridge serves its queues of page descriptors while the program computes, as a user-level network interface
       does (U-Net; VIA; design/plan-to-bridge-change-request.md R1).
-  - **The delivered calls reach the ports, in delivery order, through a channel laid out once with the region**
-    (disjoint-pages Appendix A, A3: the bridge's own pages "are laid out once with the region"). Each port reads it in
+  - **Each plan's delivered calls reach its ports through a queue of the plan's own at each node.** It is laid out with
+    the plan's pages when the plan is placed, and claimed and released with them (C3.2, C3.4). Each port reads it in
     place, by view, and nothing copies it. Only the driver moves bytes (design/plan-to-bridge-change-request.md R1).
     > who added this and why is there a transfer by copy rather than a transfer by view? only an extremely specific
     > interface ever does anything copy-like, and that is the final dma driver, which we use, rather than simulate in
     > effigy in a wrapper that pretends to be the dma driver by doing fake work then submitting the literals to the
     > ltieral driver deep inside.
-    - **Its room is fixed at compile time**, as synchronous dataflow fixes its buffers before the program runs, from
-      the program's static schedule (E. A. Lee and D. G. Messerschmitt, Static scheduling of synchronous data flow
-      programs for digital signal processing, IEEE Trans. Computers C-36(1), 1987).
-    - An entry stays until every lane that carries its plan has taken its call. A lane trails its node's deliveries by
-      at most two amounts added together. The first is A10's bound on the plan's calls outstanding at its submitter.
-      The second is C3.3's u copies on each hop of the plan's routes. A send completes only once its receive is posted
-      (data-model §3), and a receive is posted only into a free copy (C3.3). This bound is this document's derivation.
-    - So a plan claims room for that many entries, as it claims its pages (C3.4). A plan the room cannot hold fails
-      with `ENOMEM` when it is planned, as a value without a lag does in C3.3.
-    - **The writer never waits and never checks for a full channel.** A full channel needs a lane to trail by more
-      than its plan's claim, and only a stopped process can do that. Process death belongs to the failport's lifecycle
-      (item 4), and a slow node gets no handler (item 3).
+
+    > "i would suggest a room per plan which blah blah blah"
+    > citation, algorithms, literature. idiomatic code will never be accepted here because it will ultimately never be
+    > memory safe, performant, and kernel safe here.
+    - **The data structure is synchronous dataflow's.** "We can replace each arc with a FIFO queue (buffer) to pass data
+      from one block to another. The size of the queue will vary at different times in the execution" (E. A. Lee and
+      D. G. Messerschmitt, Static scheduling of synchronous data flow programs for digital signal processing, IEEE
+      Trans. Computers C-36(1), 1987). The arc here runs from a node's delivery of a plan's calls to that plan's lanes
+      at the node, so there is one queue for each plan at each node.
+    - **Each entry is one delivered message, with its sequence number**, as the sequencer "relays m with its sequence
+      number" (Défago, Schiper and Urbán, §7.1). The plan's k-th delivery at the node is entry k mod the queue's room.
+      One submission is one message however many executions it carries, as Pathways sends "a single message
+      (describing the entire subgraph)" (§4.5). e2b's run is one submission.
+    - **Its room is fixed at compile time.** For a schedule synchronous dataflow admits, "the buffers must remain
+      bounded" (Lee and Messerschmitt, the proof of their Theorem 1), and the bound is found before the program runs.
+      An entry stays until every lane of its plan at the node has taken its call. That is at most A10's bound on the
+      plan's submissions outstanding at its submitter, plus C3.3's u copies on each hop of the plan's routes: a send
+      completes only once its receive is posted (data-model §3), and a receive is posted only into a free copy (C3.3).
+      This number is this document's derivation. A plan whose bound A10 cannot find fails with `ENOMEM` when it is
+      planned, as a value without a lag does in C3.3.
+    - **Each lane takes its plans' calls by a multiway merge on the sequence number** (D. E. Knuth, The Art of Computer
+      Programming, vol. 3, §5.4.1): of the first untaken entries of the plans it carries, the least sequence number
+      first. Fig. 5 delivers in sequence-number order (its `nextdeliver`), so every entry below the node's delivery
+      count is in its queue already, and no smaller one comes later. Both ends of a cable merge the same plans' queues
+      by the same numbers, so they take the same calls in the same order.
+    - **Nothing waits to write, and nothing checks for a full queue.** By the bound, no delivery reaches an entry its
+      plan's lanes at the node have not taken.
     > consider whether this is a fictional problem or a problem that appears only through idiomatic citation free code
     > before making any further statements
     - (Corrected 2026-11-05: the implementation's M4 kept an ORDER at the channel's head while a port trailed by 4096
       entries, a wait at the writer. Its M5 copied the channel into each port's memory. Neither has a citation, and
       both go. The text before cited Kahn's unbounded channels, which a region laid out once cannot hold.)
+    - (Corrected 2026-11-05, later: the text before laid out one channel for every plan, once with the region. It said
+      "A lane trails its node's deliveries by at most two amounts added together" and "only a stopped process can do
+      that". Both are false. The bound holds for a lane's own plan only. Other plans' calls keep arriving in a shared
+      channel while a lane waits, as it may, for its node to start its plan's call (design/compilation-coordination.md,
+      "The revisions of f3f7cf46", stop 1). The overflow came from the shared channel, which no cited work has:
+      synchronous dataflow has one queue for each arc. Claude's later "a room per plan" and "each entry checked against
+      its index" came with no citation and no algorithm.)
   - Each port takes the delivered calls of every standing plan in sequence-number order. Both ends of a cable deliver
     the same sequence, so they take the calls alike. The pages of the calls a port has taken interleave on its cable
     (above).
@@ -451,9 +535,10 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 
 - **The code must:**
   - deliver orders as Fig. 5's destinations do;
-  - publish them to each port through the channel above, read in place, in place of the sequence words
-    (`sequences`), `taken[p]` and the parent's wait while they are full (Lamport's buffer; the coordination's DL1), with
-    no copy and no wait (M4 and M5 go);
+  - publish each plan's deliveries to its ports through the plan's own queue above, read in place and taken by the
+    multiway merge, with no copy, no wait and no check. This replaces the sequence words (`sequences`), `taken[p]` and
+    the parent's wait while they are full (Lamport's buffer; the coordination's DL1), and then the one channel for
+    every plan (the implementation's CH2, with M3's room). M4 and M5 stay gone;
   - remove the start's wait for every port to load the plan, and the late-loading port's refusal of it
     (`mesh_ports_held`). Nothing requires them. "a send that arrives first is held until its receive is posted (§3),
     and a loss cancels the plan anyway" (Claude's turn in "The turns" that lists "Every wait, and whether anything
@@ -565,6 +650,33 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     the member at each position is the one σ puts there. Each port holds a record for every member of every set it
     carries a position of, each record a view of that member's page (R1). So any member can be posted at any of the
     set's positions on its cables.
+  - **A receive's round rule reads a count that only rises.**
+    > "implications on lag"
+    > idiomatic? explain using only citations, algorithms, and data structures in non-idiomatic form? desire for
+    > 'bounds' not explained in terms of literature? fictional problem?
+    - A phase parity is valid only for a reader at most one phase away: "The test_wait and try_wait operations are
+      valid only for: the current incomplete phase, for which waitComplete returns False. the immediately preceding
+      phase, for which waitComplete returns True" (NVIDIA, PTX ISA 9.5, §9.7.15.16.19). The structure itself keeps each
+      reader there: "Consecutive barriers cannot interfere with each other because all operations on count occur before
+      sense is toggled to release the waiting processors" (Mellor-Crummey and Scott, 1991, §3.1).
+    - C3.7's readers are kept there by the allocator's order. Every read of a value in execution t happens before its
+      write in execution t + L (C3.3), so a reader finds a page's field "equal, landed; one behind, not yet" (C3.7).
+    - Posting a receive is not such a reader once a member's rounds land through several ports' children. Nothing
+      keeps the poster within one phase of the page's last landing. The implementation's PM2 reads the phase field
+      there, so its recorded limit ("while the page's earliest round not landed is at most three rounds before the one
+      being posted") is the field used outside its precondition. It is not a bound to find or to widen. Claude's "a
+      phase word wide enough for the lag, or a cited bound" was idiomatic.
+    - For a reader that nothing keeps within one phase, C3 already names the structure: "Counted completion with rising
+      thresholds (Portals 4 counting events; `MTLSharedEvent`'s 64-bit value, which only rises). Execution t waits for
+      the count to reach its own target." The plan keeps such a count already: each range's landed count of each copy,
+      which every landing raises, whichever port's child lands it (C3.1, counted completion).
+    - By C3.3, every landing of a copy's round j comes after every landing of its round j − 1. Each landing is a write
+      of execution t + u, and every read of execution t, each after its own page's landing, comes before that write.
+    - So a receive of round j is posted where its range's count of its copy reads at least j times the pages this node
+      receives of that range in a copy. Then every page of round j − 1 has landed, its own among them. The test holds
+      at any distance and adds no word. It waits for the range's whole round j − 1, not only its own page's.
+    - The code must post a receive of round j by that count, in place of PM2's test of the phase field. The phase
+      fields stay, for C3.7's readers.
   - The counter is (execution, set), so a set is drawn once per execution. A draw for each cable departs from the
     counter.
   - (Corrected 2026-11-05: the text before said each cable's sequence is the same renaming. That fails where the deal
