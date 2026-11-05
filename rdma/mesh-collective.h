@@ -84,9 +84,11 @@
    only where happens-before orders the last read of one before the next write of the other at every distance at which
    their executions meet; a copy of a value of `lag` k >= 1 shares with none, since no edge of the template orders its
    write.  The least lags decide those tests at every larger distance (design/compilation-coordination.md, U1): every
-   walk of the template into a write passes its range's production, and the program's dependences order each node's
-   events of execution t before those of t + 1, so a walk at lag L through the production continues at every lag past
-   L.  The plan claims exactly the rows and pages it places (mesh-dataflow.h mesh_claim_take), and closes no other
+   walk of the template into a write passes its range's production, the plan's own; and, the premise the least lags
+   rest on, a property of the program's dependences and not of the plan (struct mesh_dependence below), each node's
+   events of execution t precede those of t + 1 by the program's own edges, so a production reaches its next instance
+   at lag 1 and a walk at lag L through it continues at every lag past L.  mesh_plan does not test the premise
+   (design/aot-compilation-change-request.md, appendix item 1: ENOMEM refuses only a value with no such L).  The plan claims exactly the rows and pages it places (mesh-dataflow.h mesh_claim_take), and closes no other
    claim: its own is closed only when the program retires the function (mesh-dataflow.h mesh_plan_retire) or itself
    (mesh_detach, the bridge's retirement of a gone pid), or by the call's own failure after its writes (ESTALE, or the
    second map read's error), and the bridge releases it once it holds it no more (C3.4); nothing is claimed at attach,
@@ -124,9 +126,15 @@
    ACM Comput. Surv., 1990).  The bridge spreads a node pair's sequence as its own (R5), and sees a set or a sequence
    and no kind (R4).
    2026-11-04, owner C2 (S3): reversing T6's order by each entry's own start, ties by walk.  Why: a set's pages are
-   drawn in a uniformly random order at the bridge (appendix item 5), which needs them contiguous on their pair; a
-   group's least start keeps each per-pair list a topological order of the unrolled executions (S2; MSCCLang §5.2).
-   What must stay: both ends' lists the same hops in the same order; every entry not in a set in schedule order.
+   drawn in a uniformly random order at the bridge (appendix item 5), which needs them contiguous on their pair.  What
+   must stay: both ends' lists the same hops in the same order; every entry not in a set in schedule order.
+   2026-11-04, owner C2 (review W3 #6, the coordinator's ruling): withdrawn, the claim that the groups' order (or T6's
+   own) keeps each per-pair list a topological order of the unrolled executions (S2's "a relay forwards in the order it
+   receives", and any no-cycle argument resting on each page's start below following its finish above).  The
+   contention schedule starts a page on a route's links by Sinnen and Sousa's eq. (14), nonaligned (cut-through), so a
+   page's start on a link can precede its finish on the link before, and the start order is not shown to be a
+   topological order of the bridge's store-and-forward waits, for the T6 order itself as for the groups.  Open for the
+   operator (design/compilation-coordination.md, the appendix's revisions, record).
 
    The plan's name, and the plan in its claim (design/compilation-coordination.md, "The plan call", Q5 and N1 to N5;
    the draft e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", as the operator's ruling 1
@@ -181,8 +189,9 @@
    2026-11-04, owner C2 (design/compilation-coordination.md, U1; design/aot-compilation-change-request.md, appendix
    item 1): ENOMEM for a value whose write does not reach its next instance at lag 1 (design/disjoint-pages-revision-
    coordination.md, D5) is gone.  Why: C3.3 fails only "A value with no such L" (M. Lam, PLDI 1988; B. R. Rau, MICRO
-   1994), and D5 is in neither; the least lags are exact at every larger distance by U1's reason (above).  What must
-   stay: ENOMEM, named, for a read of a value that reaches no later write of it.
+   1994), and D5 is in neither; the least lags are exact at every larger distance by U1's reason (above), whose
+   premise is the program's dependences' (struct mesh_dependence) and is not tested.  What must stay: ENOMEM, named,
+   for a read of a value that reaches no later write of it.
    2026-11-04, owner C2 (N3, N5): reversing the close of every earlier claim of the client, context->state 0, on a
    failure after the writes.  Why: compiled functions coexist; a failed plan closes its own claim alone.  What must
    stay: every failure but ESTALE and the second map read's found before anything is written.
@@ -224,7 +233,14 @@ struct mesh_weight { double produced,consumed,read,page; };
    "The plan call") With its source-read bit set (MESH_FROM_SOURCE_READ for `from`, MESH_TO_SOURCE_READ for `to`), the
    event is declared[i]'s consumption at its SOURCE: the source's own read of the range it sends (a holder's combine
    reading its own partial, a broadcast source or a single owner reading what it publishes); the source's value's reads
-   then include it.  An end with both its produced and its source-read bit is EINVAL */
+   then include it.  An end with both its produced and its source-read bit is EINVAL.
+   The premise the plan's least lags rest on (design/compilation-coordination.md, U1; added 2026-11-04, reviews W1 #3
+   and W3 #4, the coordinator's ruling), a property of the program's dependences and not of the plan: every event of a
+   node in execution t precedes each of its events in t + 1 by the program's own edges, as both programs give them
+   (tools/e2b_replay.m e2b_ir's rank chains, "r's last to its first at lag 1"; rdma/mesh_compile.py _dependences,
+   "every event no lag-0 edge leaves to every event none enters (lag 1)"), so a production reaches its next instance
+   at lag 1, and the least lags are C3.3's happens-before at every larger distance.  mesh_plan does not test it
+   (design/aot-compilation-change-request.md, appendix item 1: ENOMEM refuses only a value with no such L) */
 #define MESH_FROM_PRODUCED 1u
 #define MESH_TO_PRODUCED 2u
 #define MESH_FROM_SOURCE_READ 4u

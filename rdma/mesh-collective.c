@@ -455,11 +455,14 @@ static void plan_name(const struct plan *p,uint32_t v,const char *what,uint32_t 
    - between[a x local + b] = D_ab, the largest D(r -> write b) over this node's routed value a's reads r, for every
      pair of this node's routed values, so the colouring's tests (plan_interferes) are table reads.
    The least lags are C3.3's happens-before at every larger distance too (U1): every walk of the template into a write
-   passes its range's production P (plan_template), and the program's dependences order every event of a node in
-   execution t before each of its events in t + 1 (tools/e2b_replay.m e2b_ir, "r's last to its first at lag 1";
-   rdma/mesh_compile.py _dependences, "every event no lag-0 edge leaves to every event none enters (lag 1)"), so a
-   walk at lag L through P continues through P's next instances at every lag past L.  D(w -> w) == 0, a lag-0 cycle,
-   plan_acyclic has refused.
+   passes its range's production P (plan_template, the plan's own); and, the premise the least lags rest on, a property
+   of the program's dependences and not of the plan (mesh-collective.h struct mesh_dependence), every event of a node
+   in execution t precedes each of its events in t + 1 by the program's own edges, as both programs give them
+   (tools/e2b_replay.m e2b_ir's rank chains, "r's last to its first at lag 1"; rdma/mesh_compile.py _dependences,
+   "every event no lag-0 edge leaves to every event none enters (lag 1)"), so a production reaches its next instance
+   at lag 1 and a walk at lag L through P continues through P's next instances at every lag past L.  This function
+   does not test the premise (design/aot-compilation-change-request.md, appendix item 1: ENOMEM refuses only a value
+   with no such L).  D(w -> w) == 0, a lag-0 cycle, plan_acyclic has refused.
    2026-11-04, owner C2 (design/compilation-coordination.md, U1; design/aot-compilation-change-request.md, appendix
    item 1): the refusal of a write whose least cycle D(w -> w) is not 1 (design/disjoint-pages-revision-coordination.md,
    D5), ENOMEM naming its value, is gone.  Why: C3.3 fails only a value with no such L, and D5 appears in neither Lam,
@@ -572,9 +575,10 @@ static int plan_sized_order(const void *a,const void *b){
      if d >= D_vw and u - d >= D_wv; where d == 0 (v != w) only if D_vw <= u, D_wv <= u and D_vw == 0 or D_wv == 0.
      These are the distances at which their executions meet (t and t' with t' - t = d mod u: d, d - u, d + u, ...);
      an order at the least such distance holds at every larger one of its class (design/compilation-coordination.md,
-     U1: every walk into a write passes its range's production P, and the program's dependences order each node's
-     events of execution t before those of t + 1, so a walk at lag L through P continues at every lag past L;
-     plan_unroll), and a value's every read before the other's write orders its writes too.  Two copies of one value
+     U1: every walk into a write passes its range's production P; and, the premise the least lags rest on, the
+     program's dependences' and untested (mesh-collective.h struct mesh_dependence), each node's events of execution t
+     precede those of t + 1, so a walk at lag L through P continues at every lag past L; plan_unroll), and a value's
+     every read before the other's write orders its writes too.  Two copies of one value
      follow the d > 0 rule.
    Symmetric: swapping the items swaps D_vw and D_wv and takes d to u - d.
    2026-11-04, owner C2 (U1): this order at every larger distance cited to U1, where it cited the contract's D5.  Why:
@@ -876,10 +880,14 @@ static uint32_t plan_entry_side(const void *context,size_t k){
      other entry keeps the schedule's order (R5).  A node pair's hops at its two ends are the same hops in the same
      walk order (mesh.h "Both ends"), read the same starts and fall in the same groups (tree j's pages over that pair),
      so they stay the same hops in the same order; every rank computes the same schedule from the same inputs (F. B.
-     Schneider, Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).  Each
-     per-pair list stays a topological order of the unrolled executions (S2; R5; MSCCLang, ASPLOS 2023, §5.2): a set's
-     position i follows its receive at position i upstream, whose group's start is earlier, and a source's set is
-     released by one supplied word (C3.7).
+     Schneider, Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).
+     2026-11-04, owner C2 (review W3 #6, the coordinator's ruling): withdrawn, the claim that each per-pair list stays a
+     topological order of the unrolled executions (S2's "a relay forwards in the order it receives": a set's position
+     i following its receive at position i upstream, whose group's start is earlier).  The contention schedule starts a
+     page on a route's links by Sinnen and Sousa's eq. (14), nonaligned (cut-through), so a page's start on a link can
+     precede its finish on the link before, and the start order is not shown to be a topological order of the
+     bridge's store-and-forward waits, for the T6 order itself as for the groups.  Open for the operator
+     (design/compilation-coordination.md, the appendix's revisions, record).
    2026-11-04, owner C2 (S3): the groups and their least start and walk added before the sort, where T6 sorted each
    entry by its own start.  Why: appendix item 5's sets, each contiguous on its pair.  What must stay: every entry's
    fields as plan_walk assigned them; the same order at both ends of each pair.
@@ -1099,8 +1107,13 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
   /* a declared transfer's kind (design/plan-to-bridge-change-request.md, R4) and its weights (design/aot-compilation-
      change-request.md, A3), each finite and > 0 (design/compilation-coordination.md, C-weights): every task's,
      `produced`, `consumed` and `read`, as Sinnen and Sousa's Definition 1 states ("The positive weight w(n)"), and
-     every `page`, so every occupation of a link lasts > 0 and each link's order of starts is a topological order
-     (design/plan-to-bridge-change-request.md, R5's no-cycle argument; MSCCLang, ASPLOS 2023, §5.2).
+     every `page`, so every occupation of a link lasts > 0.
+     2026-11-04, owner C2 (review W3 #6, the coordinator's ruling): withdrawn, the reason that with it each link's
+     order of starts is a topological order (R5's no-cycle argument; MSCCLang, ASPLOS 2023, §5.2): the contention
+     schedule starts a page on a route's links by Sinnen and Sousa's eq. (14), nonaligned (cut-through), so a page's
+     start on a link can precede its finish on the link before, and the start order is not shown to be a topological
+     order of the bridge's store-and-forward waits.  Open for the operator (design/compilation-coordination.md, the
+     appendix's revisions, record).  The EINVAL stays.
      2026-11-04, owner C: reversing >= 0 for every weight.  Why: C-weights (reviews V1 #8, V3 #5).  What must stay:
      EINVAL before anything is written */
   for(uint32_t i=0;i<count;i++){
