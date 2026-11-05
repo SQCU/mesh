@@ -319,10 +319,11 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      and some port of the plan's port set that has not refused the plan has `taken[p]` < t - u + 1, Lamport's sender
      waits ("wait until ms < mr + P"), the head staying until a later turn of the parent's event loop, nobody
      blocking; else the number is stored in sequence word t mod u, then `released` t + 1 (release): "put message in
-     B[ms mod P]; ms := ms + 1".  hdr `plans` is woken after each turn that published.  The head's wait holds every
-     later ORDER behind it, since the deliveries are in sequence order: it is Lamport's sender's wait for the buffer
-     the appendix item names, not a hold of a plan's batch (DL2).  A port takes execution t of the plan only where t <
-     `executions` (D2) and its number is published (t < `released`, acquire).
+     B[ms mod P]; ms := ms + 1".  Before a plan's first number (its `released` 0) the parent adds 1 to hdr `plans`
+     (release, then wakes it: DL7, hdr `plans`' note), and hdr `plans` is woken after each turn that published.  The
+     head's wait holds every later ORDER behind it, since the deliveries are in sequence order: it is Lamport's
+     sender's wait for the buffer the appendix item names, not a hold of a plan's batch (DL2).  A port takes execution
+     t of the plan only where t < `executions` (D2) and its number is published (t < `released`, acquire).
      2026-11-04, owner C3 (DL2 to DL4; design/aot-compilation-change-request.md, appendix item 2, "Delivery at a
      node"): reversing Q4's hold and O2's reason for it (an ORDER delivered only once every port holding the plan
      released before had served it, `released` then its `end`, so this node's cables carried one plan's batch at a
@@ -574,10 +575,18 @@ struct hdr {
      read or written: each plan's is its claim head's publication `state` */
   uint64_t vacant21;
   /* 110 (design/compilation-coordination.md, "The region"): a count that only rises.  Every publication of a plan
-     (mesh_plan), every close of a claim (mesh-dataflow.h mesh_claim_close, mesh_plan_retire, mesh_retire) and every
-     start (mesh-call.h mesh_transfers_start) adds 1 (release), then wakes it (mesh_notify, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-     the ports read it once a pass and walk the claims' heads where it moved.  Many writers, as a count has; never
-     reset */
+     (mesh_plan), every close of a claim (mesh-dataflow.h mesh_claim_close, mesh_plan_retire, mesh_retire), every
+     start (mesh-call.h mesh_transfers_start) and the bridge parent's first publication of a plan's sequence numbers
+     (mesh-records.c orders_deliver, before it stores the plan's first number, its `released` 0) adds 1 (release), then
+     wakes it (mesh_notify, OS_SYNC_WAKE_BY_ADDRESS_SHARED); the ports read it once a pass and walk the claims' heads
+     where it moved.  Many writers, as a count has; never reset.
+     2026-11-05, owner C3 (design/compilation-coordination.md, "The documents' revisions of edd4b583", "Amendments
+     during the work (2026-11-05)", DL7): the bridge parent's first publication of a plan's sequence numbers named
+     among the raisers.  Why: a plan stands at mesh_plan's store of its head's publication `state`, before mesh_plan
+     raises this count, so a parent can publish the plan's first number, and a later plan's, before that raise; a
+     port's merge (DL3: every candidate read, then every plan's `released` and this count again, in Lamport's opposite
+     order) must see every plan that can hold a smaller number before it takes a later one, and a walk that reads the
+     parent's raise reads the plan standing.  What must stay: a count that only rises, many writers, never reset */
   _Atomic uint64_t plans;
 };
 /* every field at its 106 offset, the 108 fields after them, the 109 field after those, the 110 field after that (the

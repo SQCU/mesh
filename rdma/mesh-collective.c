@@ -118,12 +118,12 @@ struct plan_value { uint32_t demand,node,write,read,reads,source; };
    demand's range is a set and its page is on tree j (the solve's trees grouped by demand, p->tree's index), else 0.
    Its group (GO4): the entries of its nonzero `set`, `node` and `direction`, else the entry alone; `at` its group's
    least `place`, the place of the set's first page in that order (plan_schedule).
-   2026-11-04, owner C3 (GO4): `walk` (the hop's place in plan_walk's order, T6's tie), `start` (its link's scheduled
-   start of its page, T6), `earliest` (its group's least start) and `least` (its group's least walk, S3) are gone,
-   `place` and `at` in their place.  Why: each cable's list is a subsequence of one global topological order built as
-   MSCCLang §5.2 states in its step 3, and "Scheduled start times do not order the lists"
-   (design/plan-to-bridge-change-request.md, R5), which overturns T6 and S3.  What must stay: every other field as
-   plan_walk assigns it. */
+   2026-11-04, owner C3 (GO4; GO4′: "`walk` goes with T6's ties"): `walk` (the hop's place in plan_walk's order, T6's
+   tie), `start` (its link's scheduled start of its page, T6), `earliest` (its group's least start) and `least` (its
+   group's least walk, S3) are gone, `place` and `at` in their place.  Why: each cable's list is a subsequence of one
+   global topological order built as MSCCLang §5.2 states in its step 3, and "Scheduled start times do not order the
+   lists" (design/plan-to-bridge-change-request.md, R5), which overturns T6 and S3.  What must stay: every other field
+   as plan_walk assigns it. */
 struct plan_entry { uint32_t value,node,direction,demand,field,communication,set,place,at; uint64_t page; };
 struct plan {
   struct mesh_ctx *context;
@@ -948,7 +948,9 @@ static uint32_t plan_entry_side(const void *context,size_t k){
      assigning instructions to thread blocks in a topological order that respects communication and processing edges,
      all implicit dependencies introduced by thread block sequential execution cannot produce cycles").  This needs
      only the least-placed member's predecessor before it, which the heap order gives for any weights; GO4's "all of
-     which take places before the least place of those below" is not used.
+     which take places before the least place of those below" is not used (design/compilation-coordination.md, "The
+     documents' revisions of edd4b583", "Amendments during the work (2026-11-05)", GO4′: it holds only where a tree's
+     pages have equal bottom levels; the conclusion stands).
    2026-11-04, owner C3 (GO1 to GO5; design/plan-to-bridge-change-request.md, R5, "The order of each cable's list, by
    the reference algorithm"): reversing T6 as S3 amended it, each entry at its link's scheduled start of its page
    (`start`, through comm_start, each communication's one start on its link), each group's least start (`earliest`)
