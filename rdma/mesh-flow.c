@@ -62,10 +62,11 @@
    operator names what carries the delivery order to the ports (O2, open).
    2026-11-04, owner B3 (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md,
    "The appendix's revisions", S4 to S7): a hop's `set` (mesh.h struct mesh_hop) is read, where every hop was one of a
-   sequence: each execution of a set is posted on the cable in a permutation of its members drawn by Knuth's Algorithm
-   P (set_draw) from Threefry-4x64-20 (threefry4x64_20) keyed by the plan's name and counted by (execution, set), so
-   both ends draw the same one with nothing exchanged (link_prepare, position_record).  What must stay: as above; a
-   sequence served as before */
+   sequence: each execution of a set is posted on the cable in a permutation of its members on that cable (the
+   positions the deal gave it: S7') drawn by Knuth's Algorithm P (set_draw) from Threefry-4x64-20 (threefry4x64_20)
+   keyed by the plan's name and counted by (execution, set, block, the cable's place in key order), so both ends draw
+   the same one with nothing exchanged (link_prepare, position_record).  What must stay: as above; a sequence served
+   as before */
 #include "mesh-bridge.h"
 #include "mesh-dataflow.h"
 #include "mesh-graph.h"
@@ -158,9 +159,11 @@ struct cursor { uint64_t execution,round,at,end; uint32_t copy,padding; };
    2026-11-04, owner B3 (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md,
    "The appendix's revisions", S4 to S7): beside the records, each direction's sets as link_prepare finds them (a set a
    maximal run of the direction's picks within one copy with the same nonzero `set`, S3, S7), in parallel arrays, the
-   records' layout (M29, M08) unchanged: `key` the plan's name zero-padded, the generator's key (S4); `sets[d]` each
-   set's `set`, its size m and the index in `members[d]` of its first member (struct flow_set);
-   `members[d]` each set's members' records in list order, X_1 .. X_m (S5); `slot_set[d][r]` the set whose position
+   records' layout (M29, M08) unchanged: `key` the plan's name zero-padded, the generator's key (S4), and `place` this
+   cable's place in the pair's key order, the counter's fourth word (S7'); `sets[d]` each set's `set`, its size m on
+   this cable and the index in `members[d]` of its first member (struct flow_set); `members[d]` each set's members on
+   this cable, their records in list order, X_1 .. X_m (S5, S7': the members whose positions the deal gave this
+   cable); `slot_set[d][r]` the set whose position
    record r is (UINT32_MAX: a sequence's position) and `slot_position[d][r]` its index in that set, from 0 (NULL both
    where the direction has no set); and per lane, `drawn[d][q]` the permutation of (`drawn_execution`, `drawn_set`)
    its cursor last met, room for the largest set the lane carries a position of, taken at the load (S7: nothing
@@ -180,7 +183,7 @@ struct flow {
   struct cursor cursor[2][MESH_LINK_LANES];
   struct mesh_trace *trace[2];
   size_t traced[2],trace_capacity[2];
-  uint64_t key[4];
+  uint64_t key[4],place;
   struct flow_set *sets[2];
   uint32_t *slot_set[2],*slot_position[2];
   uint64_t *members[2];
@@ -367,21 +370,26 @@ static void threefry4x64_20(const uint64_t key[4],const uint64_t counter[4],uint
 /* D. E. Knuth, The Art of Computer Programming vol. 2, section 3.4.2, Algorithm P, as design/compilation-
    coordination.md, "The appendix's revisions", S5 takes it ("P1. [Initialize.] Set j <- t.  P2. [Generate U.] Generate
    a random number U, uniformly distributed between zero and one.  P3. [Exchange.] Set k <- floor(jU) + 1. ... Exchange
-   X_k <-> X_j.  P4. [Decrease j.] Decrease j by 1.  If j > 1, return to step P2."): t the set's size m, X_1 .. X_m its
-   members in list order (`members`, copied into `x`, x[i - 1] holding X_i); the s-th U (s = 0, 1, ... as j runs m,
-   m - 1, ..., 2) the (execution, set) stream's word s read as r / 2^64, so k = floor(j r / 2^64) + 1, the high word of
-   the 128-bit product j r, plus 1 (integer arithmetic, so both ends compute the same; k is not a remainder modulo j).
-   The stream (S4; Salmon et al., section 5.1: "concatenate the object identifier, i, and time, T, into a p-bit
-   counter"): word s is word s mod 4 of threefry4x64_20 of the key (the plan's name zero-padded, struct flow `key`) and
-   the counter (execution, set, s / 4, 0), so no (key, counter) serves two blocks of a stream (section 5: "(key,
+   X_k <-> X_j.  P4. [Decrease j.] Decrease j by 1.  If j > 1, return to step P2."): t the set's size m on this cable
+   (S7': "the set's members whose positions the deal gave that cable are permuted among those positions (S5, with t
+   their count)"), X_1 .. X_m those members in list order (`members`, copied into `x`, x[i - 1] holding X_i); the s-th
+   U (s = 0, 1, ... as j runs m, m - 1, ..., 2) the (execution, set, cable) stream's word s read as r / 2^64, so k =
+   floor(j r / 2^64) + 1, the high word of the 128-bit product j r, plus 1 (integer arithmetic, so both ends compute
+   the same; k is not a remainder modulo j).  The stream (S4; Salmon et al., section 5.1: "concatenate the object
+   identifier, i, and time, T, into a p-bit counter"): word s is word s mod 4 of threefry4x64_20 of the key (the plan's
+   name zero-padded, struct flow `key`) and the counter (execution, set, s / 4, place), `place` the cable's place in
+   the pair's key order (S7'), so no (key, counter) serves two blocks of a stream or two cables (section 5: "(key,
    counter) tuples must never be improperly re-used").  After it x[i - 1] is X_i, the member position i carries in that
-   execution (S5) */
-static void set_draw(const uint64_t key[4],uint64_t execution,uint32_t set,const uint64_t *members,uint32_t size,uint64_t *x){
+   execution (S5).  2026-11-04, owner B3 (S7'): the counter's fourth word the cable's place, where it was 0, and t the
+   set's members on this cable, where it was the set's every position on the pair.  What must stay: both ends drawing
+   from the same key, counter and size */
+static void set_draw(const uint64_t key[4],uint64_t execution,uint32_t set,uint64_t place,const uint64_t *members,
+                     uint32_t size,uint64_t *x){
   for(uint32_t i=0;i<size;i++)x[i]=members[i];
   uint64_t block[4]={0,0,0,0};
   uint64_t s=0;
   for(uint64_t j=size;j>1;j--,s++){
-    if(s%4==0){const uint64_t counter[4]={execution,set,s/4,0};threefry4x64_20(key,counter,block);}
+    if(s%4==0){const uint64_t counter[4]={execution,set,s/4,place};threefry4x64_20(key,counter,block);}
     const uint64_t k=(uint64_t)(((unsigned __int128)j*block[s%4])>>64)+1;
     const uint64_t held=x[k-1];x[k-1]=x[j-1];x[j-1]=held;
   }
@@ -399,7 +407,7 @@ static inline uint64_t position_record(struct flow *f,int d,uint32_t q,const str
   if(s==UINT32_MAX)return at->at;
   if(f->drawn_set[d][q]!=s || f->drawn_execution[d][q]!=at->execution){
     const struct flow_set *set=f->sets[d]+s;
-    set_draw(f->key,at->execution,set->set,f->members[d]+set->first,set->size,f->drawn[d][q]);
+    set_draw(f->key,at->execution,set->set,f->place,f->members[d]+set->first,set->size,f->drawn[d][q]);
     f->drawn_set[d][q]=s;f->drawn_execution[d][q]=at->execution;
   }
   return f->drawn[d][q][f->slot_position[d][at->at]];
@@ -490,14 +498,18 @@ static void flow_sets_free(struct flow *f){
    "The appendix's revisions", S3 to S7), where every unit was one of a sequence posted at its own position: each
    direction's sets found among its picks (a maximal run of consecutive picks within one copy with the same nonzero
    `set`), refused EINVAL where a nonzero `set` appears in two runs of one copy and direction, EMSGSIZE where a member
-   is more frames than a line of one of its set's positions holds, and ENOTSUP where a set's positions lie on this
-   cable and another of the pair (not the contract's: the note at the test); the deal as it stands, over the positions
-   in list order, each its own hop's bytes (S6, O3); and the tables each execution's permutation needs, with each
-   lane's room for it, built once (struct flow; S7).  A set's position i then posts member X_i of its execution's
-   permutation, at both ends alike: the same key (the plan's name), counter (execution, `set`) and size (S4, S5), the
-   same positions on the same lines (the one deal), so the k-th SEND on a queue pair still fills the k-th receive.
-   Why: each execution of a set is carried in a uniformly random permutation of its pages (item 5).  What must stay: as
-   above; a sequence's units prepared and posted as before */
+   is more frames than a line of one of its set's positions holds; the deal as it stands, over the positions in list
+   order, each its own hop's bytes (S6, O3); and the tables each execution's permutation needs, with each lane's room
+   for it, built once (struct flow; S7).  A set's position i on this cable then posts member X_i of its execution's
+   permutation of the set's members on this cable (S7'), at both ends alike: the same key (the plan's name), counter
+   (execution, `set`, block, the cable's place in key order) and size (S4, S5, S7'), the same positions on the same
+   lines (the one deal), so the k-th SEND on a queue pair still fills the k-th receive.  Why: each execution of a set
+   is carried in a uniformly random permutation of its pages (item 5).  What must stay: as above; a sequence's units
+   prepared and posted as before.
+   2026-11-04, owner B3 (design/compilation-coordination.md, S7', the coordinator's ruling on B3's finding): the
+   permutation per cable, among the positions the deal gave it, and the ENOTSUP refusal of a set with positions on
+   this cable and another of the pair gone (the note at the sets' test).  What must stay: each record's `landings`,
+   round test and phase flip its own */
 static int link_prepare(struct port *port,struct flow *f,struct mesh_state *words){
   struct link *l=&port->link;
   /* the plan's state, written before it stands and never again (mesh.h, "Several plans", steps 3 and 5): its copies
@@ -569,24 +581,22 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
       assigned[d][k]=q;lane_units[d][q]++;
     }
   }
-  /* design/compilation-coordination.md, "The appendix's revisions", S3, S6 and S7: each direction's sets, a set a
-     maximal run of consecutive picks within one copy with the same nonzero `set` (struct mesh_hop; S3: "the maximal run
-     of a direction's entries naming one peer within one copy with the same nonzero `set`"), its positions the run's
-     picks in list order, each dealt above by its own hop's bytes (S6, O3: the deal as it stands); EINVAL where a
-     nonzero `set` appears in two runs of one copy and direction (S7: "EINVAL where a set's entries are not contiguous
-     on the pair within a copy"); EMSGSIZE where a member of a set is more frames than the line of one of its set's
-     positions on this cable holds (S7), the member any of the set's hops (each position carries each member in some
-     execution) and the line's room the per-hop test's above.
-     Not the contract's (2026-11-04, owner B3; a decision S7 does not take, reported to the coordinator): ENOTSUP where
-     a set has positions on this cable and on another cable of the pair.  Why: a member's record is the one link_prepare
-     prepares (S7), and it prepares this cable's units alone; a receive record's round test and the phase bit its
-     landing flips count its own landings (struct prepared_receive `landings`: its j-th since the load is execution
-     copy + j u); and a port's records are its child's alone (this file's header: "in a port's child"; O2: the ports
-     share the region alone with the parent).  So a member that a permutation places on another cable of the pair in
-     one execution and on this one in the next would have no record here, or one whose `landings` no longer counts its
-     executions, and its phase would be flipped by the wrong bit.  Where every position of a set is on this cable, its
-     members are its positions' own records, each posted once an execution of its copy, so `landings` counts as
-     before.  What must stay: no set served past what its records count */
+  /* design/compilation-coordination.md, "The appendix's revisions", S3, S6 and S7 with S7' ("Amendments during the
+     work"): each direction's sets, a set a maximal run of consecutive picks within one copy with the same nonzero `set`
+     (struct mesh_hop; S3: "the maximal run of a direction's entries naming one peer within one copy with the same
+     nonzero `set`"), its positions the run's picks in list order, each dealt above by its own hop's bytes (S6, O3: the
+     deal as it stands); EINVAL where a nonzero `set` appears in two runs of one copy and direction (S7: "EINVAL where a
+     set's entries are not contiguous on the pair within a copy").  The permutation is per cable (S7': "on each cable of
+     the pair, the set's members whose positions the deal gave that cable are permuted among those positions (S5, with
+     t their count), each execution, at both ends"): this cable's members of a set are its positions here, the deal's,
+     fixed at the load; EMSGSIZE where one of them is more frames than the line of one of those positions holds (S7),
+     the line's room the per-hop test's above.
+     2026-11-04, owner B3 (S7', the coordinator's ruling on B3's finding), reversing this note's first form, in which a
+     set with positions on this cable and on another cable of the pair was refused (ENOTSUP, not the contract's), since
+     a member a permutation over the whole pair placed on another cable had no record there, or one whose `landings`
+     no longer counted its executions.  Now each port's child holds records for its own cable's members only, as
+     before, each posted once an execution of its copy, so each record's `landings`, round test and phase flip stay its
+     own.  What must stay: no member permuted onto a cable that holds no record of it */
   for(int d=0;d<2;d++){
     if(!units[d])continue;
     if(!(run[d]=malloc(2*units[d]*sizeof *run[d]))){error=ENOMEM;goto failed;}
@@ -604,14 +614,15 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
       const uint64_t a=run[d][2*r],e=run[d][2*r+1];
       uint64_t here=0,frames=0;
       for(uint64_t k=a;k<e;k++){
-        here+=assigned[d][k]!=UINT32_MAX;
+        if(assigned[d][k]==UINT32_MAX)continue;
+        here++;
         const uint64_t each=frames_of(list[pick[d][k]].bytes).n;
         if(each>frames)frames=each;
       }
       if(!here)continue;
-      if(here!=e-a){error=ENOTSUP;goto failed;}
       for(uint64_t k=a;k<e;k++){
         const uint32_t q=assigned[d][k];
+        if(q==UINT32_MAX)continue;
         if(d==MESH_RECEIVE?frames>l->lane[q].frame_capacity:frames>l->gate[q].capacity.n){error=EMSGSIZE;goto failed;}
       }
       local[d]++;
@@ -686,34 +697,42 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
     }
   }
-  /* the sets' tables (struct flow; design/compilation-coordination.md, "The appendix's revisions", S4, S5 and S7),
-     built once here: for each direction's sets whose positions are on this cable, in list order, its `set`, its size m
-     and its first member; its members X_1 .. X_m, its positions' own records in list order (each position's record its
-     own hop's: page, words, bytes); each position record's set and index; each lane's room for one permutation of the
-     largest set it carries a position of (S7: "nothing is allocated at run time"); and the generator's key, the plan's
-     name (struct mesh_state `group`, `epoch`) zero-padded (S4; Salmon et al., section 5: "zero-pad a smaller input if
-     the full period length or key space is not needed") */
+  /* the sets' tables (struct flow; design/compilation-coordination.md, "The appendix's revisions", S4, S5 and S7, with
+     S7' of its "Amendments during the work"), built once here: for each direction's sets with positions on this cable,
+     in list order, its `set`, its size m on this cable (the positions the deal gave it, S7') and its first member; its
+     members X_1 .. X_m, those positions' own records in list order (each position's record its own hop's: page, words,
+     bytes); each position record's set and index among them; each lane's room for one permutation of the largest set
+     it carries a position of (S7: "nothing is allocated at run time"); the generator's key, the plan's name (struct
+     mesh_state `group`, `epoch`) zero-padded (S4; Salmon et al., section 5: "zero-pad a smaller input if the full
+     period length or key space is not needed"); and this cable's place in the pair's key order (mesh-map.h
+     mesh_cables: "cables in key order", the same at both ends), the counter's fourth word (S7').
+     2026-11-04, owner B3 (S7'): a set's members on this cable alone, where they were the set's every position on the
+     pair (the ENOTSUP refusal's note above), and the cable's place kept.  What must stay: the members' records this
+     port's own */
   f->key[0]=words->group;f->key[1]=words->epoch;f->key[2]=f->key[3]=0;
+  f->place=0;
+  for(uint32_t c=0;c<cable_count;c++)if(cables[c].key[end]==port->index){f->place=c;break;}
   for(int d=0;d<2;d++){
     for(uint32_t q=0;q<MESH_LINK_LANES;q++){f->drawn_set[d][q]=UINT32_MAX;f->drawn_execution[d][q]=0;}
     if(!slot[d])continue;
     const uint64_t records=d==MESH_SEND?f->send_count:f->receive_count;
     uint64_t members=0,room[MESH_LINK_LANES]={0};
-    for(uint64_t r=0;r<runs[d];r++)if(assigned[d][run[d][2*r]]!=UINT32_MAX)members+=run[d][2*r+1]-run[d][2*r];
+    for(uint64_t r=0;r<runs[d];r++)for(uint64_t k=run[d][2*r];k<run[d][2*r+1];k++)members+=assigned[d][k]!=UINT32_MAX;
     f->sets[d]=malloc(local[d]*sizeof *f->sets[d]);f->members[d]=malloc(members*sizeof *f->members[d]);
     f->slot_set[d]=malloc(records*sizeof *f->slot_set[d]);f->slot_position[d]=malloc(records*sizeof *f->slot_position[d]);
     if(!f->sets[d] || !f->members[d] || !f->slot_set[d] || !f->slot_position[d]){error=ENOMEM;goto failed;}
     for(uint64_t r=0;r<records;r++){f->slot_set[d][r]=UINT32_MAX;f->slot_position[d][r]=0;}
     uint32_t s=0;uint64_t m=0;
     for(uint64_t r=0;r<runs[d];r++){
-      const uint64_t a=run[d][2*r],e=run[d][2*r+1];
-      if(assigned[d][a]==UINT32_MAX)continue;
-      f->sets[d][s]=(struct flow_set){.set=list[pick[d][a]].set,.size=(uint32_t)(e-a),.first=m};
+      const uint64_t a=run[d][2*r],e=run[d][2*r+1],first=m;
       for(uint64_t k=a;k<e;k++){
+        if(assigned[d][k]==UINT32_MAX)continue;
         const uint64_t at=slot[d][k];
-        f->members[d][m++]=at;f->slot_set[d][at]=s;f->slot_position[d][at]=(uint32_t)(k-a);
-        if(e-a>room[assigned[d][k]])room[assigned[d][k]]=e-a;
+        f->members[d][m]=at;f->slot_set[d][at]=s;f->slot_position[d][at]=(uint32_t)(m-first);m++;
       }
+      if(m==first)continue;
+      f->sets[d][s]=(struct flow_set){.set=list[pick[d][a]].set,.size=(uint32_t)(m-first),.first=first};
+      for(uint64_t k=a;k<e;k++)if(assigned[d][k]!=UINT32_MAX && m-first>room[assigned[d][k]])room[assigned[d][k]]=m-first;
       s++;
     }
     for(uint32_t q=0;q<MESH_LINK_LANES;q++)
