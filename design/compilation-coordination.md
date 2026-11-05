@@ -972,3 +972,230 @@ bytecode written). Nothing was run.
 - **Torch retirement at exit** (N3′): a finalizer's failure at exit is printed, not raised (Python's documentation).
 - Carried: L3; V1 #9; the torch path's refused collectives and operators; the α–β chooser not built (ruling 3); `qps`
   in mesh-map.h; runs wait for the operator's authorization (C3.8).
+
+## The documents' revisions of edd4b583
+
+The coordinating agent's contract for the three places design/plan-to-bridge-change-request.md and
+design/aot-compilation-change-request.md changed at mesh edd4b583, from mesh edd4b583 and metal-microbench 062a8474:
+R5's "The order of each cable's list, by the reference algorithm"; the aot appendix item 2's "Delivery at a node"; and
+its item 5's "e2b declares its function B consumers". The documents are the requirement; where they and anything above
+in this file differ, they hold. They overturn T6 and S3 (each node pair's list in the order of its link's scheduled
+starts, a set's entries grouped at their least start) and Q4 with Q4′'s remainder, O2 and B2-1 (the hold: a node
+releases the next plan only once every port has served the previous one; mesh-records.c orders_served). This file's
+"Rules" and design/disjoint-pages-rulings-coordination.md, "Rules for this unit", apply verbatim, and: no chooser,
+kernel, timeout skip, hold or second form is added; no handler for a slow node, a "desynchronization" or a truncation;
+nothing the documents do not name; every function added names its source and section and is that source's method as
+the source states it; where the documents are silent, the decision below, and where an implementer needs another, it
+stops that piece and reports.
+
+### The file split, one owner a file
+
+| files | owner |
+|---|---|
+| mesh rdma/mesh-graph.h, mesh-graph.c, mesh-collective.h, mesh-collective.c, mesh.h (but the lines below the coordinator lands) | C3 |
+| mesh rdma/mesh-flow.c, mesh-records.c, mesh-link.c, mesh-bridge.h | B4 |
+| metal-microbench tools/prepare_e2b.py, tools/e2b_replay.m | E2 |
+| reviews, written findings only | X1 (the mesh side), X2 (the program and torch side), X3 (across both: each gap closed as the documents and their sources state; T6, S3 and Q4 gone; nothing added) |
+| this file, INDEX.md, mesh.h's MESH_VERSION and struct mesh_state (this part's commit), the builds | coordinator |
+
+Torch (rdma/mesh.py, rdma/mesh_compile.py) changes nothing: mesh.py binds struct mesh_state through `entries`
+(offsets 0 to 104), which nothing here moves, and the torch lowering's kinds are P3's.
+
+### The names files share
+
+#### The region (mesh.h; the coordinator lands these lines, C3 writes the notes around them)
+
+- MESH_VERSION 112. Its note: "112: struct mesh_state `served` read as `taken` and `sequences` appended in the
+  struct's tail (bytes 240-255; still 256 bytes): the plan's sequence words, one a copy, which the bridge parent writes
+  and each port merges (design/aot-compilation-change-request.md, appendix item 2, "Delivery at a node";
+  design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1)".
+- ```c
+  struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
+    uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
+    uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
+    uint64_t nodes; uint32_t sender,padding1; uint64_t submitted; _Atomic uint64_t released;
+    _Atomic uint64_t taken[MESH_PORTS]; uint64_t sequences,padding2; };
+  ```
+  `taken` at 176 (where `served` was), `sequences` at 240, `padding2` at 248; no other field moves.
+- The state section's layout: the struct; the phases, counts, supplied words and status (as now); the sequence words,
+  `copies` uint64 words at `sequences`, copy c's at `sequences` + 8 c; the entries; each 64-aligned. mesh_plan places
+  and names them (plan_layout), and they start at 0 with every byte before the entries (D3).
+- `released` (DL1): the executions of the plan whose sequence numbers the bridge parent has published, each in its
+  copy's word, in sequence order: L. Lamport's ms, "the total number of messages sent" (Concurrent reading and writing,
+  CACM 20(11), 1977, "Message Buffer"). The bridge parent's alone; only rises.
+- `taken[p]` (DL1): Lamport's mr, port p's: no lane of port p reads the number of an execution of the plan below it
+  again (the least execution a lane of port p carrying the plan may still read); for a plan port p carries nothing of,
+  or has cancelled or ended, `released` as it rises. Port p's alone; only rises.
+- Sequence word c (DL1): Lamport's B[c], P = u: the sequence number of the execution t (t mod u = c) the parent
+  published last in copy c, struct mesh_order `sequence` + t - `first` of the ORDER that holds t. The bridge parent's
+  alone.
+
+#### The graph module (mesh-graph.h, C3)
+
+```c
+/* M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, section 5.2, step 3: "Sort
+   instructions into a global topological order with respect to their dependencies with a heap using the priority to
+   order instructions."  Vertex v's priority priority[v]; edge e runs from[e] -> to[e] (an edge given twice counts
+   twice and is removed twice, so it changes nothing).  A vertex enters the heap once every edge into it leaves a
+   placed vertex; the heap's first is placed next, the greatest priority first and a tie to the lower vertex
+   (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO3).  place[v] out, v's place in the
+   order.  0; EINVAL where an edge names no vertex or the edges hold a cycle (a vertex left unplaced); ENOMEM */
+int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
+                          const uint32_t *to, uint32_t *place);
+```
+
+Its heap is the binary heap mesh-graph.c already keeps for mesh_graph_lags (lags_up, lags_down), one copy (C9): those
+take their comparison as an operand, mesh_graph_lags' behavior unchanged.
+
+#### The bridge (mesh-flow.c, mesh-records.c, B4)
+
+No message, wire form or declaration of mesh-bridge.h changes: struct mesh_order as it is. mesh-records.c's
+orders_served and `last` go; served_tell is the port's tell of `taken[p]` (its name B4's).
+
+#### e2b's manifest (tools/prepare_e2b.py, tools/e2b_replay.m, E2)
+
+Each kept send route of a rank stage gains `"kinds"`: a list of strings, one an entry of its `"destinations"`, in that
+order, each `"pages"` or `"join"` (EB1). e2b_replay.m's placement function carries it with the route, and e2b_ir gives
+declared transfer (route, destination d) the kind MESH_PAGES for `"pages"` and MESH_JOIN for `"join"` (EB2).
+
+### Decisions and their sources
+
+#### R5, the order of each cable's list (C3)
+
+- **GO1. The instructions and their dependencies.** The instructions are the task graph's tasks (T1, T1′, as
+  plan_schedule builds them) and the plan's communications (T4: a page over a tree edge, plan_communication). A
+  communication is one instruction: its send at the edge's upper node and its receive at its lower node take its one
+  place, so a node pair's sends at one end and its receives at the other are the same hops in the same order (mesh.h,
+  "Both ends"; R1: "the bridge's records name the same pages"). MSCCLang §4.2 expands a remote copy "into a send and a
+  receive instruction" joined by "a communication edge"; joining them in one instruction is where this differs, so
+  both ends' lists agree, recorded at the code. The dependencies: each local edge of the task graph (P(d) -> S(d), a
+  lag-0 dependence), as it is; each remote edge, its tail task -> its route's first communication -> each next ->
+  its last -> its head task: MSCCLang's communication and processing edges, a page sent before it lands and landed
+  before it is forwarded or consumed (plan_template's P -> W(y), W(y) -> F(y, c), L(z) -> C(z)). Shared prefixes
+  (T4) give an edge more than once, which changes no bottom level and no order.
+- **GO2. The priority** is the bottom level (R5: "The priority is the bottom level"), eq. (7) of O. Sinnen and L. A.
+  Sousa (IEEE TPDS 16(6) 2005, §2.2.1) over the instructions: bl(n) = w(n) + max over the dependencies e = (n, m)
+  {c(e) + bl(m)} (mesh_graph_bottom_levels). A task weighs its weighting operand's weight (A3), as now; a
+  communication on link L weighs its link time ς(e, L) = c(e) / b(L) (Sinnen and Sousa, §5; b(L) T2's rate), the
+  greatest over the task graph's edges e whose routes cross it (T4: one occupation for every edge that shares it;
+  eq. (7)'s bottom level is "the length of the longest path leaving the node", so the longest), and every dependency
+  costs 0 (a remote edge's time is in its communications; a local one is free, Definition 2, T1′).
+- **GO3. The heap.** MSCCLang §5.2, step 3 (mesh_graph_heap_order): the instructions with no dependency left unplaced
+  in a heap, the greatest bottom level first (R5: "Tasks are taken in decreasing bottom level"; HLFET's priority), a tie
+  to the lower instruction: the tasks as plan_schedule numbers them, then the communications as plan_trees numbers
+  them, the same at every rank (F. B. Schneider, ACM Comput. Surv. 1990). MSCCLang names no tie; the lower index is
+  the one every rank computes alike.
+- **GO4. The lists.** Each of this node's entries (plan_walk; every field as assigned now) takes its communication's
+  place. A set's entries on one node pair and direction (S1, S2: its nonzero `set`, `node` and `direction`, tree j's
+  pages on that edge) take consecutive places at the place of the first of them in that order (R5: "They take
+  consecutive places at the place of the set's first page in that order"), each among them by its own place; every
+  other entry is at its own place. The entries are sorted by (their group's least place, their own place), a total
+  order (each communication has one place). So each node pair's list at each end is a subsequence of the one global
+  order (a set's at its first page's place), both ends' alike, every copy's the same; T6's and S3's order by
+  scheduled starts goes, with the entries' `start`, `earliest` and `least`. Where it is a topological order: a set's
+  pages on an edge depend only on its pages on the edge above (or the production), all of which take places before
+  the least place of those below, so the order of the groups is a topological order of the instructions with each
+  group whole (R5: "A set's pages ... share their predecessors"), and with every lag pointing forward each cable's
+  sequence of executions is one (R5, MSCCLang §5.2: "By assigning instructions to thread blocks in a topological order
+  that respects communication and processing edges, all implicit dependencies introduced by thread block sequential
+  execution cannot produce cycles"). This answers the open item "No cycle on a cable" (W3 #6), now that the
+  dependencies are store-and-forward ones (GO1).
+- **GO5. The schedule stays, ordering nothing.** mesh_graph_contention_schedule is still called as now (R5's method
+  and "Code: rdma/mesh-graph.{h,c}: ... the list schedule with edge scheduling"; A6: "One schedule per function"), and
+  its starts order no list (R5: "Scheduled start times do not order the lists"). What reads them is the operator's to
+  say (open). The demands stay numbered by their first declared transfer (T6's other half, not an order of the lists).
+
+#### Item 2, delivery at a node (coordinator's lines in mesh.h; C3's layout; B4)
+
+- **DL1. The words** (above): Lamport 1977, "Message Buffer": "Assume a buffer B which can hold P messages in
+  locations B[0], ..., B[P - 1]"; "multidigit variables ms and mr to hold the total number of messages sent and
+  received"; "sender: wait until ms < mr + P; put message in B[ms mod P]; ms := ms + 1"; "receiver: wait until mr < ms;
+  read message in B[mr mod P]; mr := mr + 1"; each variable one writer (C3's rule 2; the item: "Each word has a single
+  writer"). P is u (the item: "one word per copy"; R2, C3.3: "execution t runs copy t mod u"), the message of
+  execution t its sequence number, ms `released`, mr port p's `taken[p]`. Where it differs from the paper, recorded at
+  the code: every port is a receiver of every message (each port serves every standing plan), so the sender's wait is
+  over every receiver's mr; and a port's mr is the least of its lanes' next reads, each lane reading the messages in
+  order on its own.
+- **DL2. The sender: delivery in sequence order, publication by the buffer** (mesh-records.c orders_deliver). The
+  pending ORDERs in arrival order, which is sequence order (Défago et al., Fig. 5; Q3, Q3-tree), the head first, no
+  timeout and no skip (O1). The head is matched to a standing plan of its (group, epoch) on this node's map serial, as
+  now; not matched, it stays. For its next execution t = the greater of its `first` and the plan's `released`, number
+  `sequence` + t - `first`: where t >= u and some port of the plan's port set (mesh-map.h mesh_ports_named, the start's
+  set, one copy) that has not refused the plan (`refused[p]` 0) has `taken[p]` < t - u + 1, Lamport's sender waits
+  ("wait until ms < mr + P"): the head stays, read again on a later turn of the parent's event loop, nobody blocking
+  (as O1's head that does not stand here); else the number stored in word t mod u (an atomic store), then `released`
+  t + 1 (release), "put message in B[ms mod P]; ms := ms + 1"; then on to t + 1. An ORDER done (its `end` reached, or
+  every execution of it below `released` already) leaves the head; hdr `plans` is woken after each turn that published
+  (region-shared), so the ports see it. A port set that cannot be computed (mesh_ports_named's error) leaves the head
+  staying, said on the bridge's log once a head (B2-1's read-as-served goes: it would let the sender overwrite a word
+  a port still reads). The head's wait holds every later ORDER behind it: the deliveries are in sequence order, and no
+  port could serve a later number before it where it carries both; it is Lamport's sender's wait for the buffer the
+  item names, not Q4's hold of a plan's whole batch (recorded; the operator's to judge, below).
+- **DL3. The receivers: the k-way merge at each port** (mesh-flow.c). Each lane of a port, each direction, serves the
+  executions of every plan it carries in sequence-number order: of each such plan (each loaded flow, not cancelled,
+  whose records this lane carries that way), its next execution n there (the lane's cursor for it) is a sequence of
+  that plan's, and the lane takes the one of least number among them (the item: "a k-way merge (D. E. Knuth, The Art
+  of Computer Programming vol. 3, §5.4.1)", not read: the book, no reproduction found; built as the item states it,
+  the least of the k sequences' first elements next, by comparing them, no tree of losers). Execution n of a plan is a
+  candidate where n < its `released` (acquire), its number then its copy's word n mod u (Lamport's receiver: "wait
+  until mr < ms; read message in B[mr mod P]"). Lamport's "writing data elements in one order and reading them in the
+  opposite order": the parent publishes in sequence order, so the lane reads every candidate (first reading), then
+  every plan's `released` and hdr `plans` again (second reading); the least number over the second reading is next
+  (every number below one acquired in the first reading was published before it). Where hdr `plans` moved since the
+  port's last walk, the lane takes nothing this pass (a plan standing, and so maybe published, that the port has not
+  loaded would be missed); where the least is of an execution its node's program has not submitted (n at or past the
+  plan's `executions`, D2, as now), the lane takes nothing (it cannot serve it, and nothing after it comes first).
+  Once taken, the lane posts that execution's records on it in order, as now (each SEND once released by its word,
+  each receive record's round once its last posting landed: D.3.5), then takes the next; an execution with no record
+  on the lane is taken and passed alike. Each pass the port stores `taken[p]` for each plan it carries (release, only
+  rising), the least execution any of its lanes carrying the plan may still read, and wakes hdr `plans` (no raise)
+  where it rose. Both ends of a cable hold the same plans and the same records on each lane (link_prepare, one deal),
+  and read the same numbers, so they post the same order on each queue pair (the item: "they merge alike"), the k-th
+  SEND filling the k-th receive (Hilland et al. §8.2.2, design/prepared-machine.md#M08).
+- **DL4. What goes**: Q4's hold, its test (mesh-records.c orders_served) and `last`; link_run's serving of one plan at
+  a time and its batch bound per plan (`released` as a count of a batch; served_tell's hold note); the ports' `served`
+  as "served whole"; O2's open item (what carries the delivery order to the ports: the sequence words, merged). A port
+  ends, cancels or carries nothing of a plan as now, its `taken[p]` then following `released`.
+- **DL5. Completions name their records** (as now), and each record names its plan (struct flow), so a pass's
+  completions are counted to their own plans while several interleave on one queue pair (B4: room in the records'
+  lines, M08, M29, without moving a field the post reads).
+- **DL6. Q6, as this part leaves it:** what A7 adds to C3.3's run time is the sequencer's `seqnum`, each parent's
+  pending ORDERs (the head's `first` and `sequence` advanced as its executions are published), and each plan's
+  `submitted`, `released`, `taken` and sequence words.
+
+#### Item 5, e2b's function B consumers (E2)
+
+- **EB1. The kinds** (tools/prepare_e2b.py). A kept send route's consumer at each destination is function B,
+  `"pages"`, where the route is a piece of a section cut over several contributors and its destinations' consumer is
+  the sum of the pieces (prepare_e2b.py combine: the FFN row split's contributions and the head split's attention
+  partials, added by ADD at each rank holding the stream): R4, "reductions' partial sums", ⊕ associative and
+  commutative (Gibbons 1996); the item: "e2b's reductions of partial sums are function B". Every other route's
+  consumers are `"join"` (function A): a whole operand broadcast, a single owner's activation, the split-KV partials
+  and normalizers (kv_merge), the vocabulary's routes. The kinds are given once the routes' destinations are cut (the
+  publication's readers), one a destination.
+- **EB2. e2b's IR** (tools/e2b_replay.m): e2b_placement carries `kinds` with each route; e2b_ir gives each declared
+  transfer its destination's kind. A route without `kinds`, one a destination, or with another word, is refused (exit
+  2, naming it: prepare the directory again), as a stage without its dataflow list is. P1's "every e2b consumer
+  MESH_JOIN" is reversed, with a dated note: the kind is the consumer's (R4; P3's reason), not the producer's one
+  publish.
+- **EB3. Not declared function B:** the split-KV merge (kv_merge) reads each rank's partial with its normalizer's
+  rescale, a combine R4's FlashAttention example would make function B; the item names e2b's reductions of partial
+  sums, so it stays function A (open for the operator).
+
+### What each source said, where it was read
+
+Text extracted with `pdftotext -layout` into the session scratchpad's papers/ folder:
+- **MSCCLang** (b.txt): §4.2 (279-292): "A remote copy expands into a send and a receive instruction", "a
+  communication edge that indicates that the receiving side synchronizes with the sender", "processing edges, which
+  represent the execution-order dependencies within ranks"; §5.2 (390-417): steps (1) to (4), step (3) as R5 quotes
+  it, and "An Instruction DAG is guaranteed to have a global topological order ... cannot produce cycles so that the
+  MSCCL-IR does not have deadlocks".
+- **Sinnen and Sousa 2005** (sinnen-sousa.txt): eq. (7) and "the length of the longest path leaving the node"
+  (204-211); ς(e, L) = c(e)/b(L) (§5, as above); §7.1.2 (673-690): the bottom level as the contention model's priority.
+- **Lamport 1977** (lamport-rdwr.txt, from lamport.azurewebsites.net/pubs/rd-wr.pdf): "Message Buffer" (214-261, the
+  right column): the buffer, ms and mr, the sender's and receiver's algorithms quoted in DL1, "If the buffer is full,
+  then the sender must wait until the receiver empties a buffer position by reading the message in it"; the
+  conclusion (386-392): "writing data elements in one order and reading them in the opposite order".
+- **Défago et al.** (defago.txt): Fig. 5, as above.
+- **Not read:** Knuth vol. 3 §5.4.1 (the book; searched, no reproduction of its text found): the merge is the item's
+  own statement, the least first; the tree of losers that section is cited for elsewhere is not built.

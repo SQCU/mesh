@@ -30,8 +30,11 @@
    `start` (design/plan-to-bridge-change-request.md R5 and R8; design/aot-compilation-change-request.md A7;
    design/compilation-coordination.md, "The region").  111: struct mesh_hop `set` and `padding1` appended (56 bytes): a
    hop's set, 0 a sequence (design/aot-compilation-change-request.md, appendix item 5); struct mesh_state `epoch` the
-   plan's function (item 6) */
-#define MESH_VERSION 111u
+   plan's function (item 6).  112: struct mesh_state `served` read as `taken` and `sequences` appended in the struct's
+   tail (bytes 240-255; still 256 bytes): the plan's sequence words, one a copy, which the bridge parent writes and each
+   port merges (design/aot-compilation-change-request.md, appendix item 2, "Delivery at a node";
+   design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1) */
+#define MESH_VERSION 112u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -425,12 +428,18 @@ _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahe
    section"); `phases`, `counts`, `supplied`, `status` and `hops` region offsets; `nodes` a set of map indices.
    2026-11-04, owner L (design/compilation-coordination.md, "The region"): bytes 64-255 appended, the plan's name,
    entries, holders and sequence words, where the region held one plan's in hdr `hops`, `plan` and `state`.  What must
-   stay: bytes 0-63 as at 109 */
+   stay: bytes 0-63 as at 109.
+   2026-11-04, the coordinator (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1;
+   design/aot-compilation-change-request.md, appendix item 2, "Delivery at a node"): `served` (the executions port p
+   had served whole, which Q4's hold read) is `taken`, port p's count of the plan's executions whose sequence numbers it
+   reads no more (L. Lamport, Concurrent reading and writing, CACM 20(11), 1977, "Message Buffer": the receiver's mr),
+   and `sequences`, the region offset of the plan's sequence words (Lamport's B[0 .. P - 1], P = u), is appended in the
+   struct's tail.  What must stay: bytes 0-239 where they were, the struct 256 bytes */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
   uint64_t nodes; uint32_t sender,padding1; uint64_t submitted; _Atomic uint64_t released;
-  _Atomic uint64_t served[MESH_PORTS]; };
+  _Atomic uint64_t taken[MESH_PORTS]; uint64_t sequences,padding2; };
 _Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
@@ -440,7 +449,8 @@ _Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,hops)==88 && offsetof(struct mesh_state,entries)==96 && offsetof(struct mesh_state,held)==104 &&
   offsetof(struct mesh_state,refused)==112 && offsetof(struct mesh_state,nodes)==144 && offsetof(struct mesh_state,sender)==152 &&
   offsetof(struct mesh_state,padding1)==156 && offsetof(struct mesh_state,submitted)==160 &&
-  offsetof(struct mesh_state,released)==168 && offsetof(struct mesh_state,served)==176,"mesh_state");
+  offsetof(struct mesh_state,released)==168 && offsetof(struct mesh_state,taken)==176 &&
+  offsetof(struct mesh_state,sequences)==240 && offsetof(struct mesh_state,padding2)==248,"mesh_state");
 
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
