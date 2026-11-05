@@ -388,13 +388,21 @@ static void orders_submit(void){
    2026-11-04, owner B2, the coordinator's ruling Q4', reversing this function's first form, in which the set was the
    plan's `held` bits alone and a claim not yet released stood for the plan: a plan released before its ports had
    loaded it read as served, and the next could be released beside it.  The set Q4' names is the start's own, every
-   port whose peer a hop of the plan names, computed once (mesh-dataflow.c mesh_ports_held); until owner L exports
-   that computation (the coordinator, routed), the set here is the plan's `held` bits, so the predicate is Q4''s and
-   only its set waits for that export.  What must stay: one copy of the start's port set, L's */
+   port whose peer a hop of the plan names: mesh-map.h mesh_ports_named, its one copy, which the start's wait reads
+   too (owner L, 63b5bcdf), over the map as this thread, its writer, holds it.  Where that set cannot be computed (its
+   error: EINVAL, E2BIG, ENOENT) nothing can be waited for, so the plan reads as served, said on the bridge's log: the
+   wait stays bounded.  What must stay: one copy of the start's port set, L's */
 static int orders_served(void){
   if(last.head==UINT32_MAX || mesh_head_state(M,last.head)!=last.state ||
      atomic_load_explicit(&mesh_page(M)[last.head].device,memory_order_acquire)!=last.generation)return 1;
-  const uint64_t held=atomic_load_explicit(&last.state->held,memory_order_acquire),set=held,
+  int error=0;
+  const uint32_t set=mesh_ports_named(M,last.state,mesh_records(M),(uint32_t)atomic_load(&M->map_nodes),&error);
+  if(error){
+    mesh_say("bridge","the ports of plan (%llu, %llu), released last, not computed (%s): the next ORDER is delivered "
+             "without them",(unsigned long long)last.state->group,(unsigned long long)last.state->epoch,strerror(error));
+    return 1;
+  }
+  const uint64_t held=atomic_load_explicit(&last.state->held,memory_order_acquire),
                  released=atomic_load_explicit(&last.state->released,memory_order_relaxed);
   for(uint32_t p=0;p<MESH_PORTS;p++)
     if(set>>p&1 && !atomic_load_explicit(&last.state->refused[p],memory_order_acquire) &&
