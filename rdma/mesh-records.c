@@ -454,7 +454,10 @@ static void orders_submit(void){
    between two passes of a port leave it no record of which came first; and carrying that order needs a structure the
    change requests do not name (a log of delivered ORDERs in the region, a ring or unbounded, or a hand-off waited on,
    a hold).  No behavior changed.  What must stay: this test before every release, until the operator names what
-   carries the delivery order to the ports (O2, open) */
+   carries the delivery order to the ports (O2, open).
+   2026-11-04, owner B4 (mesh.h MESH_VERSION 112, the coordinator's mesh 932d098d): the port's word is `taken[p]`,
+   where it was `served[p]`, the name alone in this commit; design/compilation-coordination.md, "The documents'
+   revisions of edd4b583", DL2 and DL4 follow.  What must stay: as above until then */
 static int orders_served(void){
   if(last.head==UINT32_MAX || mesh_head_state(M,last.head)!=last.state ||
      atomic_load_explicit(&mesh_page(M)[last.head].device,memory_order_acquire)!=last.generation)return 1;
@@ -470,7 +473,7 @@ static int orders_served(void){
                  released=atomic_load_explicit(&last.state->released,memory_order_relaxed);
   for(uint32_t p=0;p<MESH_PORTS;p++)
     if(set>>p&1 && !atomic_load_explicit(&last.state->refused[p],memory_order_acquire) &&
-       !(held>>p&1 && atomic_load_explicit(&last.state->served[p],memory_order_acquire)>=released))return 0;
+       !(held>>p&1 && atomic_load_explicit(&last.state->taken[p],memory_order_acquire)>=released))return 0;
   return 1;
 }
 /* Defago et al., Fig. 5, the destinations: each delivers the pending messages in sequence-number order, the one

@@ -1102,9 +1102,12 @@ static int link_send_progress(struct port *port,struct flow *f,uint32_t served){
    k-th SEND on a queue pair fills the k-th receive posted, so both ends post the released executions of several plans
    in one order, and a port learns only each plan's `released`, a count, so the delivery order across plans does not
    reach it; carrying it needs a structure the change requests do not name.  No behavior changed.  What must stay:
-   `served[p]` raised, then `plans` woken */
+   `served[p]` raised, then `plans` woken.
+   2026-11-04, owner B4 (mesh.h MESH_VERSION 112, the coordinator's mesh 932d098d): the word is `taken[p]`, where it
+   was `served[p]`, the name alone in this commit; design/compilation-coordination.md, "The documents' revisions of
+   edd4b583", DL3 and DL4 follow.  What must stay: port p its one writer, its values only rising */
 static void served_tell(struct mesh_state *words,uint32_t p,uint64_t executions){
-  atomic_store_explicit(&words->served[p],executions,memory_order_release);
+  atomic_store_explicit(&words->taken[p],executions,memory_order_release);
   os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
 /* a plan ending or cancelled with `outstanding` of its requests posted on the link's queue pairs and not completed:
@@ -1150,7 +1153,7 @@ static void plan_end(struct port *port,struct flow *f,uint32_t served){
   for(int d=0;d<2;d++)free(f->first[d]);
   flow_sets_free(f);
   const uint64_t released=atomic_load_explicit(&f->words->released,memory_order_acquire);
-  if(released>atomic_load_explicit(&f->words->served[p],memory_order_relaxed))served_tell(f->words,p,released);
+  if(released>atomic_load_explicit(&f->words->taken[p],memory_order_relaxed))served_tell(f->words,p,released);
   if(outstanding)plan_outstanding(port,f,outstanding,served);
   else atomic_fetch_and_explicit(&f->words->held,~(UINT64_C(1)<<p),memory_order_release);
   free(f);
@@ -1270,7 +1273,7 @@ static int link_run(struct port *port,uint32_t served){
   struct flow *serving=NULL;
   for(struct flow *f=at->loaded;f;f=f->next){
     if(f->state!=FLOW_CANCELLED && f->words->serial!=serial){
-      f->state=FLOW_CANCELLED;f->executions=atomic_load_explicit(&f->words->served[p],memory_order_relaxed);
+      f->state=FLOW_CANCELLED;f->executions=atomic_load_explicit(&f->words->taken[p],memory_order_relaxed);
       if(f->posted!=f->sent+f->landed)plan_outstanding(port,f,f->posted-f->sent-f->landed,served);
     }
     const uint64_t released=atomic_load_explicit(&f->words->released,memory_order_acquire);
