@@ -24,10 +24,17 @@ struct mesh_range { uint32_t first,count; };
    claim, taken at attach (`rows`, `window`, `local`: every free row and the widest free run of pages in the window and
    outside it) and laid out by cursors (`row_cursor`, `local_cursor`).  Why: C3.4, "Nothing is claimed at attach", and
    C4 (mesh_claim's claim at attach of everything free; the claim's local run, where values were laid out when
-   created).  What must stay: no call site but mesh_plan's claim takes rows or pages from the region */
-struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; uint32_t padding; };
-_Static_assert(sizeof(struct mesh_ctx)==32 && offsetof(struct mesh_ctx,fd)==24 && offsetof(struct mesh_ctx,padding)==28,
-  "mesh_ctx: rdma/mesh.py Context");
+   created).  What must stay: no call site but mesh_plan's claim takes rows or pages from the region.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS): `clock` appended (40 bytes), the
+   program's logical clock, which each of its starts that raises a plan's `executions` increments and stamps on the
+   submission (mesh-call.h mesh_transfers_start): L. Lamport, Time, clocks, and the ordering of events in a distributed
+   system, CACM 21(7), 1978, IR1, "Each process Pi increments Ci between any two successive events"; 0 at attach.  Why:
+   design/aot-compilation-change-request.md A7: sender(m) "TO-broadcasts the program's submissions in the order the
+   program makes them", and the order among one program's plans reaches its sender's bridge only so (mesh-records.c
+   orders_submit).  What must stay: no rows, pages or plans in the context */
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; uint32_t padding; uint64_t clock; };
+_Static_assert(sizeof(struct mesh_ctx)==40 && offsetof(struct mesh_ctx,fd)==24 && offsetof(struct mesh_ctx,padding)==28 &&
+  offsetof(struct mesh_ctx,clock)==32,"mesh_ctx: rdma/mesh.py Context");
 /* design/prepared-machine.md#M09 */
 /* The two arena ranges.  [0,wire_pages) is the registered window and the only memory an SGE may
    name; [wire_pages,arena) is addressable and never registered.  An undeclared window is the whole

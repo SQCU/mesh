@@ -10,8 +10,11 @@ U, Q, Z, D = C.c_uint32, C.c_uint64, C.c_size_t, C.c_double
 # `epoch` and `state` go, as the header's 32 bytes: the context holds no plan, since a program holds any number of
 # compiled functions at once (design/aot-compilation-change-request.md, appendix item 6).  What must stay: the fields
 # in the header's order
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS): `clock` appended, the program's
+# Lamport clock (mesh-dataflow.h struct mesh_ctx), which mesh_transfers_start increments.  What must stay: the fields
+# in the header's order
 class Context(C.Structure):
-    _fields_ = [('M', C.c_void_p), ('len', Z), ('client', Q), ('fd', C.c_int), ('padding', U)]
+    _fields_ = [('M', C.c_void_p), ('len', Z), ('client', Q), ('fd', C.c_int), ('padding', U), ('clock', Q)]
 
 
 # mesh.h struct hdr, its first words (magic, version, pgsz, block, in the header's order): the region's page size, the
@@ -87,11 +90,14 @@ CONTEXT = C.POINTER(Context)
 # the start", N1 to N4): mesh_plan takes the plan's `function` after `group` and gives the plan's handle in `*plan` (its
 # state section's region offset); mesh_transfers_start takes that handle; mesh_plan_retire, the program's retirement of
 # one compiled function, is bound.  What must stay: each binding the header's declaration
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS and PQ): mesh_plan takes the
+# program's nodes `program` and A10's bound `outstanding` after `function` (mesh-collective.h).  What must stay: as
+# above
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_nodes_read', C.c_int, [CONTEXT, C.POINTER(Nodes)]),
-        ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Declared), C.POINTER(Weight), U, C.POINTER(Value), U,
+        ('mesh_plan', C.c_int, [CONTEXT, Q, Q, Q, Q, C.POINTER(Declared), C.POINTER(Weight), U, C.POINTER(Value), U,
                                 C.POINTER(Dependence), U, C.POINTER(Q)]),
         ('mesh_plan_retire', C.c_int, [CONTEXT, Q]),
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),

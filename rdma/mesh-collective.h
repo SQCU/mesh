@@ -306,9 +306,21 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    of one compiled function, named (group, function): `group` the launcher's (MESH_GROUP), 0 EINVAL; `function` the
    program's own ordinal of the compiled function, the same at every rank, kept by every replan of that function; held
    in struct mesh_state `epoch`.  EEXIST where a plan of that name stands here on the same map.  *plan out: the region
-   offset of the plan's state section once it stands (untouched on any failure).  No earlier plan is closed */
-int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t function,const struct mesh_declared *,
-              const struct mesh_weight *,uint32_t count,struct mesh_value *,uint32_t values,
+   offset of the plan's state section once it stands (untouched on any failure).  No earlier plan is closed.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS and PQ): `program` and
+   `outstanding` added after `function`.  `program`: the program's nodes, a set of map indices (bit i, map index i),
+   the same at every rank and in every plan call of one program (`group`); its least is the program's one sender
+   (design/aot-compilation-change-request.md A7: "sender(m) is the program's one sender: the least of the program's
+   nodes, the program being its launcher's `group`"), held in struct mesh_state `sender`; EINVAL where it is 0, lacks
+   this node, or lacks a node of the plan's (a relay outside the program would never hold the plan, so the barrier
+   would never count it: A7, "A plan's destinations exist before its first message").  `outstanding`: A10's bound for
+   this function, "the most calls of it the analysis lets be outstanding at once in the program that submits them"
+   (A10, "Its output"), the room of the plan's submissions' queue and the first term of its delivered calls' queue's
+   room (appendix item 2, "Its room is fixed at compile time"); 0 where A10 found none, which fails ENOMEM (item 2: "A
+   plan whose bound A10 cannot find fails with `ENOMEM` when it is planned").  What must stay: every operand the same
+   at every rank */
+int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t function,uint64_t program,uint64_t outstanding,
+              const struct mesh_declared *,const struct mesh_weight *,uint32_t count,struct mesh_value *,uint32_t values,
               const struct mesh_dependence *,uint32_t dependences,uint64_t *plan);
 
 /* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's, each by its range's

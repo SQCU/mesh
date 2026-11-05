@@ -134,6 +134,11 @@ uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,str
    bridge's own pages laid out once with the region, as the map's are), then the arena at a block boundary.  A plan's state (struct mesh_state: its phases, counts, supplied
    words, status and entries) is no area of the layout: mesh_plan places it in the arena with the plan's other values,
    in the plan's claim (its claim head's publication `state`). */
+/* 2026-11-05 (114; design/compilation-coordination.md, "The revisions of abecd389", PQ): the deliveries' channel's area
+   is gone (hdr `deliveries_off` and `deliveries_room` no longer set, kept by name), each plan's delivered calls being a
+   queue of its own in its state section (mesh.h struct mesh_delivery).  Why: design/aot-compilation-change-request.md,
+   appendix item 2: "there is one queue for each plan at each node of it"; "This replaces ... the one channel for every
+   plan (the implementation's CH2, with M3's room)".  What must stay: no area of the layout holds a plan's words. */
 /* 2026-11-04, owner L (design/compilation-coordination.md, "The region"; design/plan-to-bridge-change-request.md R8):
    the page lists' area (mesh_geometry `hops`, its room, at hdr `hop_off` with `hop_capacity`, `rows` entries where
    absent) is gone.  Why: each plan's entries are in its own state section, in its claim, and any number of plans
@@ -173,8 +178,6 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->bridge_off=at; at+=sizeof(struct mesh_bridge_pages); at=(at+pgsz-1)/pgsz*pgsz;
   atomic_store_explicit(&h->map_off,at,memory_order_relaxed); h->map_room=MESH_MAP_ROOM;
   at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;
-  h->deliveries_off=at; h->deliveries_room=MESH_DELIVERY_ROOM;
-  at+=(uint64_t)MESH_DELIVERY_ROOM*sizeof(struct mesh_delivery); at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)g.pages*pgsz;
   h->length=at; return at;

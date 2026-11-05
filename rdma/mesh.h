@@ -39,8 +39,16 @@
    mesh_state `released`, `taken` and `sequences` read and written no more (design/aot-compilation-change-request.md at
    mesh 0e56d8da, appendix item 2, "Delivery at a node": "publish them to each port through the channel above, in
    place of the sequence words (`sequences`), `taken[p]` and the parent's wait while they are full";
-   design/compilation-coordination.md, "The revisions of 46ae8fdf", CH) */
-#define MESH_VERSION 113u
+   design/compilation-coordination.md, "The revisions of 46ae8fdf", CH).  114: each plan's own queues in its state
+   section, its delivered calls' (struct mesh_delivery, room `room` at `deliveries`, `delivered` of them) and its
+   program's submissions' (struct mesh_submission, room `outstanding` at `submits`, `submissions` of them); struct
+   mesh_state's words from byte 156 renamed in place (`outstanding`, `delivered`, `submissions`, `broadcast`,
+   `arrived`, `room`, `deliveries`, `submits`, `announced`), `sender` the program's; the deliveries' channel's area gone
+   from the layout, hdr `deliveries_off`, `deliveries_room` and `delivery_read` kept by name, hdr `delivered` this
+   node's delivered count (Fig. 5's nextdeliver - 1); every received range a count word, a relay's among them; the
+   wire's ARRIVE (mesh-bridge.h) (design/aot-compilation-change-request.md at mesh abecd389, A7 and appendix items 2
+   and 5; design/compilation-coordination.md, "The revisions of abecd389") */
+#define MESH_VERSION 114u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -270,6 +278,11 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      multiple of `pages`, the count word's waiters woken (os_sync_wake_by_address_all, OS_SYNC_WAKE_BY_ADDRESS_SHARED).
      Nothing else is written for it, and nothing in or beside its page; for a receive whose `count` is 0 the bridge
      adds, wakes and raises nothing.
+     2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", RC): `count` is never 0 from 114: a
+     relay's own receive names its range's count word too (`counts`, below), which nobody but the bridge reads.  Why:
+     design/aot-compilation-change-request.md, appendix item 5, "A page's round rule reads a count that only rises": a
+     page is named for round j where its range's count of its copy reads at least j x `pages` (mesh-flow.c
+     link_receive_drain), at a relay as at a destination.  What must stay: the XOR before the add.
    Phases (C3.7: PTX's mbarrier phase bit, widened to two).  A receive of copy c lands in executions c, c + u, c + 2u,
    ...; its field starts at 00, and after execution t's landing holds mesh_phase(t / u + 1), Gray 00 01 11 10: a
    landing flips one bit, which never carries into the next field.  A reader of execution t compares the field with
@@ -281,8 +294,9 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    revisions", N2): the plan's state, the landed list's own section, which mesh_plan
    places with the plan's values in its claim (an invariant of the plan, no page-table row naming it), in new pages for
    every plan, apart from the data pages it tells of.  Its layout: the struct; the phases, counts, supplied words and
-   status; the sequence words, `copies` uint64 words at `sequences`, copy c's at `sequences` + 8 c; the entries; each
-   64-aligned (mesh-collective.c plan_layout; design/compilation-coordination.md, "The documents' revisions of
+   status; the delivered calls' queue, `room` struct mesh_delivery at `deliveries`; the submissions' queue,
+   `outstanding` struct mesh_submission at `submits`; the entries; each 64-aligned (2026-11-05, "The revisions of
+   abecd389", PQ: the two queues where the sequence words were before 113) (mesh-collective.c plan_layout; design/compilation-coordination.md, "The documents' revisions of
    edd4b583", "The region").  Each word has one writer:
    - `phases`: the phase list, a dense array of 2-bit fields.  For each range this node receives (one it consumes,
      or a relay's own, whose forwards its phases release), in the plan's demand order, and copy c, a group of
@@ -290,8 +304,14 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      bits [2 (k % 32), 2 (k % 32) + 2) of uint64 word k / 32 of its group.  A group is whole GPU lane loads
      (MESH_LANE_BYTES, a compile-time 16: 64 fields), so a lane's load never spans two groups and a reader takes a
      range's copy with ceil(P / 64) loads.  A field's one writer is the bridge's data path that takes its receive.
-   - `counts`: `ranges` x `copies` uint64 words, `ranges` the received ranges this node consumes (a relay's own
-     receives have none), range g (in the plan's demand order) copy c's at index g x copies + c.  A count takes
+   - `counts`: R x `copies` uint64 words, R every range this node receives, `ranges` (the struct's word) of them those
+     it consumes, first, in the plan's demand order, then a relay's own, in that order; range g's copy c at index
+     g x copies + c.  2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", RC): a relay's own
+     received ranges have their counts too, where they had none (review 15's finding 1), so every receive's `count` is
+     its range's count word.  Why: design/aot-compilation-change-request.md, appendix item 5: "The code must name a page
+     for round j by that count, in place of PM2's test of the phase field"; "The plan keeps such a count already: each
+     range's landed count of each copy, which every landing raises", which a relay's receive lacked.  What must stay: a
+     consumed range's count where its publication names it; one writer, the landings, and the cancellation's raise.  A count takes
      arrivals (+1 a landing; a cancellation raises it to its final value, below) and only rises; execution t of range
      g is complete at (t / u + 1) x P_g on the count of copy t mod u.  Per received range and copy, where C3.1 counts
      once a node (D1, a departure): a decode's exchanges are read in sequence, each computed from the read of the one
@@ -393,6 +413,41 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      this differs from the paper (DL1): every port is a receiver of every message (each port serves every standing
      plan), so the sender's wait is over every receiver's mr; and a port's mr is the least of its own readers' next
      reads (the bridge's), each reading the messages in order on its own.
+   2026-11-05 (114; design/aot-compilation-change-request.md at mesh abecd389, A7 and appendix item 2;
+   design/compilation-coordination.md, "The revisions of abecd389", SQ2, PS, PB and PQ): the words from byte 156, each
+   in the place of a word gone (the 112 and 113 forms' notes above on `released`, `taken` and the sequence words are
+   history), the struct still 256 bytes:
+   - `sender`: the program's one sender, "the least of the program's nodes, the program being its launcher's `group`"
+     (A7, "What each term names here", sender(m)): the least of mesh_plan's `program`, the program's nodes, so every
+     plan of one program names one sender, where it was the least of this plan's `nodes` (Q2; A7's "Corrections").
+     mesh_plan's alone.  `nodes` stays the plan's own, Dest(m) (A7).
+   - `outstanding` (where `padding1` was): A10's bound on the program's calls of this function outstanding at once,
+     mesh_plan's operand, the room of the submissions' queue.  mesh_plan's alone.
+   - `submitted`: the executions of the plan the sender has TO-broadcast, [submitted, end) its next message; the
+     bridge parent's alone, at the sender.
+   - `delivered` (where `released` was): the messages Fig. 5 has delivered into this plan's queue at this node (A7,
+     deliver(m): "appends m to its plan's queue there"); the bridge parent's alone, only rising (release after the
+     entry's stores).  The queue: `room` struct mesh_delivery at `deliveries` (region offsets), the k-th delivery in
+     entry k mod `room`, each one message with its sequence number (appendix item 2: "Each entry is one delivered
+     message, with its sequence number"; "The plan's k-th delivery at the node is entry k mod the queue's room"), laid
+     out in the plan's own state section, claimed and released with its pages (C3.2, C3.4), read in place by every port
+     (mesh-flow.c lane_take) and copied by nothing.  `room` is fixed at compile time: `outstanding` plus u times the
+     hops of the plan's routes (appendix item 2: "That is at most A10's bound on the plan's submissions outstanding at
+     its sender, plus C3.3's u copies on each hop of the plan's routes"; mesh-collective.c mesh_plan).  Nothing waits to
+     write and nothing checks for a full queue (item 2).
+   - `submissions` (where `taken[0]` was): the program's submissions of the plan, each one start that raised
+     `executions` (mesh-call.h mesh_transfers_start), in its queue `outstanding` struct mesh_submission at `submits`,
+     the k-th in entry k mod `outstanding`: the raise's `executions` and the program's Lamport clock at it (L. Lamport,
+     Time, clocks, and the ordering of events in a distributed system, CACM 21(7), 1978, IR1: "Each process Pi
+     increments Ci between any two successive events"; mesh-dataflow.h struct mesh_ctx `clock`).  The program its one
+     writer (release after the entry's stores); read by the bridge parent at `sender` alone.  `broadcast` (where
+     `taken[1]` was): the submissions that bridge has TO-broadcast, its alone.
+   - `arrived` (where `taken[2]` was): at the sender, the plan's nodes counted as holding the plan (A7, "A plan's
+     destinations exist before its first message": "The program's sender counts the plan's nodes as each holds the
+     plan, as a centralized barrier counts arrivals"; J. M. Mellor-Crummey and M. L. Scott, ACM TOCS 9(1), 1991, §3.1),
+     a set of map indices; the bridge parent's alone at the sender; no submission of the plan is TO-broadcast before it
+     holds `nodes`.  `announced` (where `taken[6]` was): 1 once this node's bridge parent has told the sender that this
+     node holds the plan (mesh-records.c orders_announce), its alone.
    Every word is set to its starting value once, where mesh_plan places the section (D3), as mbarrier.init runs once
    a kernel: the phases, counts, supplied words, status, `executions`, `held`, `refused`, `submitted`, `released`,
    every `taken` and every sequence word 0.  None is reset, and none written to an earlier value, while the plan
@@ -551,12 +606,17 @@ _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahe
    (Lamport's Message Buffer).  Why: design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "The
    delivered calls reach the ports, in delivery order, through a first-in, first-out channel whose writer never
    waits"; "in place of the sequence words (`sequences`), `taken[p]` and the parent's wait while they are full".  The
-   notes above on those three words are the 112 form's.  What must stay: bytes 0-255 where they are */
+   notes above on those three words are the 112 form's.  What must stay: bytes 0-255 where they are.
+   2026-11-05 (114; design/compilation-coordination.md, "The revisions of abecd389", PQ): `padding1`, `released`,
+   `taken` and `sequences` gone, their bytes the plan's queues' and the barrier's words (the note "2026-11-05 (114"
+   above).  Why: design/aot-compilation-change-request.md, appendix item 2: "This replaces the sequence words
+   (`sequences`), `taken[p]` and the parent's wait while they are full ..., and then the one channel for every plan".
+   What must stay: bytes 0-155 where they are, the struct 256 bytes */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
-  uint64_t nodes; uint32_t sender,padding1; uint64_t submitted; _Atomic uint64_t released;
-  _Atomic uint64_t taken[MESH_PORTS]; uint64_t sequences,padding2; };
+  uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
+  _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced,padding3,padding4,padding2; };
 _Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
@@ -565,9 +625,12 @@ _Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,group)==64 && offsetof(struct mesh_state,epoch)==72 && offsetof(struct mesh_state,serial)==80 &&
   offsetof(struct mesh_state,hops)==88 && offsetof(struct mesh_state,entries)==96 && offsetof(struct mesh_state,held)==104 &&
   offsetof(struct mesh_state,refused)==112 && offsetof(struct mesh_state,nodes)==144 && offsetof(struct mesh_state,sender)==152 &&
-  offsetof(struct mesh_state,padding1)==156 && offsetof(struct mesh_state,submitted)==160 &&
-  offsetof(struct mesh_state,released)==168 && offsetof(struct mesh_state,taken)==176 &&
-  offsetof(struct mesh_state,sequences)==240 && offsetof(struct mesh_state,padding2)==248,"mesh_state");
+  offsetof(struct mesh_state,outstanding)==156 && offsetof(struct mesh_state,submitted)==160 &&
+  offsetof(struct mesh_state,delivered)==168 && offsetof(struct mesh_state,submissions)==176 &&
+  offsetof(struct mesh_state,broadcast)==184 && offsetof(struct mesh_state,arrived)==192 &&
+  offsetof(struct mesh_state,room)==200 && offsetof(struct mesh_state,deliveries)==208 &&
+  offsetof(struct mesh_state,submits)==216 && offsetof(struct mesh_state,announced)==224 &&
+  offsetof(struct mesh_state,padding2)==248,"mesh_state");
 
 /* The deliveries' channel (design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "Delivery at a
    node"; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH and M3 to M6): the calls this node's bridge
@@ -594,10 +657,27 @@ _Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64
    reads it in place, by view, and nothing copies it.  Only the driver moves bytes"; "The writer never waits and never
    checks for a full channel"; "(M4 and M5 go)".  The item's room, "fixed at compile time" by each plan's claim of
    "that many entries", is not built ("The revisions of f3f7cf46", stop 1): the room is MESH_DELIVERY_ROOM, as M3 laid it
-   out.  What must stay: the area laid out once with the region; delivery k in entry k mod `deliveries_room` */
-#define MESH_DELIVERY_ROOM 4096u
-struct mesh_delivery { uint64_t group,epoch,first,end; };
+   out.  What must stay: the area laid out once with the region; delivery k in entry k mod `deliveries_room`.
+   2026-11-05 (114; design/compilation-coordination.md, "The revisions of abecd389", PQ), reversing the one channel for
+   every plan and MESH_DELIVERY_ROOM (CH2-2, M3's room): each plan's delivered calls are its own queue in its state
+   section (struct mesh_state `deliveries`, `room`, `delivered`), an entry one delivered message, its sequence number
+   (`sequence`, the sequencer's sn(m)) and its executions [`first`, `end`), `padding` 0; hdr `deliveries_off`,
+   `deliveries_room` and `delivery_read` are read and written no more, kept by name.  Why:
+   design/aot-compilation-change-request.md, appendix item 2: "The data structure is synchronous dataflow's. "We can
+   replace each arc with a FIFO queue (buffer) to pass data from one block to another ..." (E. A. Lee and D. G.
+   Messerschmitt, Static scheduling of synchronous data flow programs for digital signal processing, IEEE Trans.
+   Computers C-36(1), 1987).  The arc here runs from a node's delivery of a plan's calls to the bridge's taking of them
+   at that node, so there is one queue for each plan at each node of it"; "The overflow came from the shared channel,
+   which no cited work has".  What must stay: each entry one message with its sequence number, read in place.
+   The submissions' queue (struct mesh_state `submits`, `outstanding`, `submissions`): one entry a start that raised
+   the plan's `executions`, `end` the executions after the raise and `clock` the program's Lamport clock at it, the
+   arc from the program's submission to its sender's TO-broadcast (Lee and Messerschmitt, as above); its room
+   A10's bound on the calls of the function outstanding at the program (design/compilation-coordination.md, "The
+   revisions of abecd389", PS) */
+struct mesh_delivery { uint64_t sequence,first,end,padding; };
 _Static_assert(sizeof(struct mesh_delivery)==32,"mesh_delivery");
+struct mesh_submission { uint64_t end,clock; };
+_Static_assert(sizeof(struct mesh_submission)==16,"mesh_submission");
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
 /* 2026-11-04, sub-assignment 16 (design/page-queue-change-request.md, "Order, and what judges it"): the header fields
@@ -697,7 +777,17 @@ struct hdr {
      the bridge parent has delivered into it, only rising (release after the entry's stores); `delivery_read[p]` the
      deliveries port p's child has read, only rising (release after its copies).  2026-11-05 ("The revisions of
      f3f7cf46", CH2): `delivery_read[p]` read and written no more, kept by name, every field in its place (struct
-     mesh_delivery's note) */
+     mesh_delivery's note).
+     2026-11-05 (114; design/compilation-coordination.md, "The revisions of abecd389", SQ2 and PQ): `deliveries_off`,
+     `deliveries_room` and `delivery_read` read and written no more, kept by name, the channel's area gone from the
+     layout; `delivered` is this node's count of the sequencer's messages delivered or discarded here, Fig. 5's
+     nextdeliver - 1 (X. Défago, A. Schiper and P. Urbán, ACM Comput. Surv. 36(4), 2004, Fig. 5: "while ∃(m′, seqnum′)
+     ∈ pending : seqnum′ = nextdeliver do deliver (m′); nextdeliver := nextdeliver + 1"), so every message numbered at
+     most `delivered` is in its plan's queue here or was not this node's (§5.2.4, "processes not in Dest(m) discard
+     m"); the bridge parent its one writer, stored 0 at its start (mesh-records.c map_adopt) and only rising after,
+     release after the entries and hdr `plans`' raise (mesh-records.c orders_deliver).  The ports' merge reads it first
+     (mesh-flow.c lane_take: appendix item 2, "every entry below the node's delivery count is in its queue already, and
+     no smaller one comes later").  What must stay: every field in its place */
   uint64_t deliveries_off,deliveries_room;
   _Atomic uint64_t delivered;
   _Atomic uint64_t delivery_read[MESH_PORTS];

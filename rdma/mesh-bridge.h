@@ -189,14 +189,30 @@ struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,f
    longer holds.  A SUBMIT and an ORDER carry a struct mesh_order (`bytes` its sizeof): the island's fixed sequencer's
    messages (X. Defago, A. Schiper and P. Urban, ACM Comput. Surv. 36(4) 2004, section 7.1, Fig. 5, UB;
    design/aot-compilation-change-request.md A7; the contract's Q2-Q4).  `version` carries mesh.h MESH_VERSION.  What
-   must stay: the four kinds' values and struct message's layout */
-enum { HELLO=1, FAREWELL, RECORD, LINK, SUBMIT, ORDER };
+   must stay: the four kinds' values and struct message's layout.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PB): ARRIVE joins them, a node's
+   arrival at a plan's barrier (struct mesh_arrival), sent up the island's tree as a SUBMIT is and relayed down from
+   the sequencer as an ORDER is, kept at the node it names as the program's sender (mesh-records.c order_heard).  Why:
+   design/aot-compilation-change-request.md A7, "A plan's destinations exist before its first message": "The program's
+   sender counts the plan's nodes as each holds the plan, as a centralized barrier counts arrivals: "each processor
+   updates a small amount of shared state to indicate its arrival"" (J. M. Mellor-Crummey and M. L. Scott, ACM TOCS
+   9(1), 1991, §3.1); the bridges share no memory but the control sockets.  What must stay: the kinds' values */
+enum { HELLO=1, FAREWELL, RECORD, LINK, SUBMIT, ORDER, ARRIVE };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 /* the payload of a SUBMIT and an ORDER (`bytes` sizeof): plan (group, epoch) made on map serial `serial`, its nodes
    (a set of map indices) and sender; its function executions [first, end); in an ORDER, `sequence` the number the
    sequencer gave `first` (first + k numbered sequence + k), 0 in a SUBMIT */
 struct mesh_order { uint64_t group,epoch,serial,first,end,sequence,nodes; uint32_t sender,padding; };
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ1): an ORDER's `sequence` is sn(m),
+   one number a message however many executions [first, end) it carries, from 1 (X. Défago, A. Schiper and P. Urbán,
+   ACM Comput. Surv. 36(4), 2004, Fig. 5: "Initialization: seqnum := 1"; "sn(m) := seqnum ... seqnum := seqnum + 1";
+   design/aot-compilation-change-request.md A7: "One submission is one message however many executions it carries"),
+   where it was the number of `first`, first + k numbered sequence + k; `sender` the program's sender (mesh.h struct
+   mesh_state `sender`).  What must stay: the layout */
+/* the payload of an ARRIVE (`bytes` sizeof): plan (group, epoch) stands at the node whose id is `node`; `sender` the
+   node id of the program's sender, the one that counts it (mesh-records.c arrival_take) */
+struct mesh_arrival { uint64_t group,epoch; uint32_t node,sender; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:0; }
 
 /* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: each stream's
