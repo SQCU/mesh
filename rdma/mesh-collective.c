@@ -968,7 +968,8 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
       once (D3), every value's rows named and bound copy by copy (mesh_backing_bind), every value row's publication
       written, the entries u x n; no data page is written;
    4. the map read again: where its serial moved, or the reader failed, this claim and every earlier one of the
-      client closed and context->state 0: ESTALE, or the reader's error;
+      client closed, context->state 0 and context->epoch the named epoch less 1 (C-epoch: the next call names it
+      again): ESTALE, or the reader's error;
    5. the head's publication `state` the section's region offset (release): the plan stands; context->state that
       offset and context->epoch the plan's epoch (C-epoch); hdr `plans` raised and woken (mesh.h mesh_notify: "every
       publication of a plan (mesh_plan) ... adds 1");
@@ -1039,7 +1040,8 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
      of its plans that stood (struct mesh_ctx `epoch`), but where the context's standing plan is cancelled (its `serial`
      not this node's map serial, the one this call plans on: design/disjoint-pages-change-request.md, D.3.6) that plan's
      own, the call its replan, so every rank names it alike whichever rank saw the move first.  The count is raised
-     only once the plan stands (step 5), so a failed call consumes no epoch.
+     only once the plan stands (step 5), so a failed call consumes no epoch; one that fails after closing the
+     context's earlier claims (step 4) leaves it at this epoch less 1, so the next call names this epoch again.
      2026-11-04, owner C: reversing the epoch raised at the call's entry.  Why: C-epoch (review V1 #5): a failed call
      or a replan raised it at one rank and not another, so the ranks' names parted.  What must stay: every rank names
      one plan alike */
@@ -1313,6 +1315,10 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,const struct mesh_declared
     mesh_claim_close(context,generation,0);
     mesh_claim_close(context,generation,1);
     context->state=0;
+    /* design/compilation-coordination.md, C-epoch: the context's earlier claims are closed, so the next call has no
+       cancelled plan to keep the epoch of; the count is left at the named epoch less 1, and that call names this epoch
+       again, a replan of the plan this call was replacing, as a peer whose replan stood names it */
+    context->epoch=epoch-1;
     goto done;
   }
   /* 5. the plan stands: its head's publication `state` (release), after every write above */

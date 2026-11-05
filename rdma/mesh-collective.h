@@ -111,9 +111,11 @@
    coordination.md, C-epoch): one past the context's count of its plans that stood (mesh-dataflow.h struct mesh_ctx
    `epoch`), or, where the context's standing plan is cancelled (its `serial` not this node's map serial, D.3.6), that
    plan's own, the call its replan, so every rank names the plan alike whichever rank saw the map move first; the count
-   is raised only once the plan stands, so a failed call consumes no epoch.  The plan is (group, epoch): EEXIST where
-   a plan standing at this node on the same map already has that name (a cancelled one is ignored).  The plan's state
-   section is in its claim, and the claim's head row's publication `state` names it once the plan stands;
+   is raised only once the plan stands, so a failed call consumes no epoch, and one that fails after closing the
+   context's earlier claims (ESTALE, or the map reader's error, after its writes) leaves it at the named epoch less 1,
+   so the next call names that epoch again.  The plan is (group, epoch): EEXIST where a plan standing at this node on
+   the same map already has that name (a cancelled one is ignored).  The plan's state section is in its claim, and the
+   claim's head row's publication `state` names it once the plan stands;
    context->state is that offset, and hdr's one-plan fields (`hops`, `plan`, `state`, `hop_off`, `hop_capacity`) are
    neither read nor written.
 
