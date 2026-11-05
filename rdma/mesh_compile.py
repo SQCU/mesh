@@ -377,10 +377,15 @@ def _readers(ir, node, default):
 # the coordinator's ruling P3 on review W3's finding 3: the kind of the declared transfers of `node`'s range by R4's
 # test of its consumer at each destination (design/plan-to-bridge-change-request.md R4): MESH_PAGES, function B, where
 # every reader there of a key of `node` over the plan's pages is an operator of GSPMD's elementwise set (ELEMENTWISE: a
-# map over the range's pages, f of a union of pages the union of f of each, J. Gibbons, J. Functional Programming
-# 1996; the appendix item 5's "a pointwise nonlinearity after a ffn"); MESH_JOIN, function A, otherwise (a Dot, a
-# slice, a cat, a collective, the output's clone).  Every node runs the same program items, so every rank computes the
-# same kinds (R6)
+# map over the range's pages, f of a union of pages the union of f of each, a homomorphism as R4 states it: over lists
+# with its combine associative, J. Gibbons, J. Functional Programming 1996, and over pages in any order a bag
+# homomorphism of the Boom hierarchy, its combine commutative too, L. Meertens, Algorithmics, CWI Monographs 1, 1986;
+# the appendix item 5's "a pointwise nonlinearity after a ffn"); MESH_JOIN, function A, otherwise (a Dot, a slice, a
+# cat, a collective, the output's clone).  Every node runs the same program items, so every rank computes the same
+# kinds (R6)
+# 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", TC6): the homomorphism cited
+# as R4 cites it, Gibbons for lists and Meertens's bag homomorphisms for any order, where Gibbons alone was cited.
+# What must stay: the kinds as before
 def _consumer(ir, node):
     readers = [item for item in ir.program if any(k in ir.placed and k[0] is node for k in item[1])]
     if readers and all(item[0] == 'call' and item[3].target in ELEMENTWISE for item in readers):
@@ -400,7 +405,9 @@ def _consumer(ir, node):
 # al., ASPLOS 2023, section 4.2: it "receives a chunk, reduces it with a source chunk, and locally copies it to the
 # destination") by the function's own add; its sum is one range to every other member.  Each partial's transfer is
 # MESH_PAGES: its consumer, the root's combine, is R4's function B ("reductions' partial sums", their combine the add,
-# associative and commutative); the sum's kind is its readers' (_consumer; the coordinator's ruling P3).  A partial and
+# associative, Gibbons 1996, and commutative, Meertens's bag homomorphisms, CWI Monographs 1, 1986, as R4 cites them;
+# 2026-11-05, owner T, TC6: where this said "associative and commutative" uncited); the sum's kind is its readers'
+# (_consumer; the coordinator's ruling P3).  A partial and
 # the sum are each written over their range's pages after the reads that make them (A-T7).  Events (device, declared
 # transfer, kind, first, last): a member's production of its partial (the Dot's item, at its third step) and its
 # consumption of the sum (its readers); the root's consumption of each partial (the AllReduce's item, after arrival),
@@ -460,6 +467,69 @@ def _all_to_all(ir, c, group, have):
                        {p: ir.declared[i].value for (p, q), i in pieces.items() if q == me})
 
 
+# design/aot-compilation-change-request.md A4: ReduceScatter (GSPMD section 4.2: it "is semantically equivalent to an
+# AllReduce followed by a DynamicSlice where each partition gets one slice of the fully reduced data.  An efficient
+# implementation has only half the cost of AllReduce"), each slice reduced to the member that keeps it, over its packed
+# trees: the first half of Blink's AllReduce (G. Wang et al., MLSys 2020, section 3.3: "we first run a reduce operation
+# to a chosen root vertex"), with that member as the root.  Slice q of each member's partial, along tensor dimension
+# `dim` (the record's, TC1), is the slice member q of the group keeps (its place in the device mesh's order, GSPMD
+# section 3.1), one declared transfer p -> q for each other member p, written by torch's copy_ as an AllToAll's piece
+# is.  Each is MESH_PAGES: its consumer, q's combine, is R4's function B ("reductions' partial sums", their combine the
+# add, as _all_reduce's), MSCCLang's receive-reduce-copy (M. Cowan et al., ASPLOS 2023, section 4.2) by torch.add, q's
+# own slice first and then each landed slice in the group's order (TC5, _all_reduce's root's order); q's result is that
+# sum, a tensor of its own over no page of the plan.  `have` is the dims_mapping of the members' partials (TC1).
+# Events as an AllToAll's: each member's production of its slices (its item's sends), each keeper's consumption (after
+# arrival)
+# 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", RS): new, where `lower` refused
+# a ReduceScatter.  The partitioner here inserts none (_partition replicates a contracting dimension whose mesh
+# dimension the output uses, where GSPMD section 5 would "replace the AllReduce on the output BSM with a
+# ReduceScatter"), so this is reached once A2's partitioner inserts one.  What must stay: each slice to its keeper
+def _reduce_scatter(ir, c, group, have):
+    shape, sent, received = list(ir.local(c.node, have)), 3 * c.position, 3 * c.position + 1
+    shape[c.dim] //= len(group)
+    slices = {(p, q): ir.transfer(c.node, tuple(shape), d, [e], mesh.PAGES)[e]
+              for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
+    for (p, q), i in slices.items():
+        ir.events += [(group[p], i, 'P', sent, sent), (group[q], i, 'C', received, received)]
+    if ir.device in group:
+        me = group.index(ir.device)
+        ir.roles[c] = (me, {q: ir.declared[i].value for (p, q), i in slices.items() if p == me},
+                       {p: ir.declared[i].value for (p, q), i in slices.items() if q == me})
+
+
+# design/aot-compilation-change-request.md A4: CollectivePermute (GSPMD section 4.2: it "exchanges data among a list of
+# source-destination pairs"), one point-to-point demand a pair, routed as AllToAll's are (mesh_plan's demands, routed
+# jointly by Garg and Koenemann's rounds).  Its pairs are XLA's source_target_pairs over the group's places in the
+# device mesh's order (the record's `dim`, TC2): "For each pair, the operand is sent from source replica to target
+# replica"; "Any two pairs should not have the same target replica id, and they should not have the same source replica
+# id" (OpenXLA, Operation semantics, CollectivePermute; GSPMD section 4.2: "We use XLA's operators"), refused otherwise
+# as the placement operand's errors are (ValueError).  Each pair p -> q, p != q, is one declared transfer of the
+# member's whole local value, written by torch's copy_ as an AllToAll's piece is; the destination's result is a tensor
+# of its own, torch.clone of its arrival, as an AllToAll's is torch.cat's, so it lies over no page of the plan (TC4) and
+# each transfer is MESH_JOIN, its consumer the clone (TC3; the coordinator's ruling P3 names the clone function A).  A
+# pair p -> p keeps the member's own value, no transfer; a member no pair targets holds "a tensor consisting of 0(s)"
+# of the input's shape (OpenXLA, as above; TC5).  Events as an AllToAll's
+# 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", CP): new, where `lower`
+# refused a CollectivePermute.  The partitioner here inserts none (_reshard: one device mesh orders every tensor's
+# devices alike, "so no CollectivePermute arises"), so this is reached once A2's partitioner inserts one.  What must
+# stay: one transfer a pair
+def _collective_permute(ir, c, group, have):
+    pairs = tuple(tuple(pair) for pair in c.dim)
+    places = [p for pair in pairs for p in pair]
+    if not all(isinstance(p, int) and 0 <= p < len(group) for p in places) \
+            or len({p for p, _ in pairs}) != len(pairs) or len({q for _, q in pairs}) != len(pairs):
+        raise ValueError('%s: a CollectivePermute\'s pairs %s over a group of %d: each a (source, target) place, no two '
+                         'with one source or one target (XLA\'s source_target_pairs)' % (c.node.name, pairs, len(group)))
+    shape, sent, received = ir.local(c.node, have), 3 * c.position, 3 * c.position + 1
+    moved = {(p, q): ir.transfer(c.node, shape, group[p], [group[q]], mesh.JOIN)[group[q]] for p, q in pairs if p != q}
+    for (p, q), i in moved.items():
+        ir.events += [(group[p], i, 'P', sent, sent), (group[q], i, 'C', received, received)]
+    if ir.device in group:
+        me = group.index(ir.device)
+        ir.roles[c] = (me, {q: ir.declared[i].value for (p, q), i in moved.items() if p == me},
+                       {p: ir.declared[i].value for (p, q), i in moved.items() if q == me})
+
+
 # the program's own data edges at each node (mesh-collective.h struct mesh_dependence: event `from` before event `to`,
 # `to` in execution t + lag where `from` is in t; design/disjoint-pages-change-request.md, C3.5: a stage's reads and
 # writes "in the order its command buffer runs them"), every rank's, by the program's order on that rank, whose
@@ -509,9 +579,14 @@ def _dependences(ir):
 
 # design/aot-compilation-change-request.md A4 and design/compilation-coordination.md, A-T3': each inserted collective,
 # over each of its device groups, lowered to declared transfers and dependences, which mesh_plan's demands and trees
-# route jointly ("rdma/mesh-collective.c's demands and trees, as now, fed by A2's collectives"); any other collective
-# (CollectivePermute, ReduceScatter and the rest) refused, naming it
-LOWERINGS = {'all-reduce': _all_reduce, 'all-gather': _all_gather, 'all-to-all': _all_to_all}
+# route jointly ("rdma/mesh-collective.c's demands and trees, as now, fed by A2's collectives"): AllReduce, AllGather,
+# AllToAll, ReduceScatter and CollectivePermute, GSPMD section 4.2's communication primitives; a collective of another
+# kind refused, naming it
+# 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", RS and CP): ReduceScatter and
+# CollectivePermute lowered, where this refused them.  Why: A4, "rdma/mesh_compile.py refuses CollectivePermute and
+# ReduceScatter now; this requirement covers them".  What must stay: every collective A2 inserts lowered
+LOWERINGS = {'all-reduce': _all_reduce, 'all-gather': _all_gather, 'all-to-all': _all_to_all,
+             'reduce-scatter': _reduce_scatter, 'collective-permute': _collective_permute}
 
 
 def lower(ir):
@@ -784,6 +859,11 @@ def _bind(context, section, dtype, shape, device):
 # 2026-11-04, owner T2 (the coordinator's ruling on review W3's finding 12; C3.8: "no call site handles two forms"):
 # torch.mps.synchronize for an MPS range alone becomes the range's device module's synchronize for every range.  What
 # must stay: both synchronizations around every write of a range
+# 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", RS and CP): a ReduceScatter
+# copies each slice of its partial over its range's pages and releases it, then adds each landed slice into its own,
+# in the group's order (torch.add, as the AllReduce's root); a CollectivePermute copies its value over each of its
+# ranges' pages and releases it, then takes its arrival by torch.clone, keeps its own value where its pair is its own,
+# or holds torch.zeros_like (XLA's zeros) where no pair targets it.  What must stay: as above
 def _run(ir, context, tensors, item, env, inputs, t):
     kind, reads, key, operand = item
 
@@ -830,6 +910,26 @@ def _run(ir, context, tensors, item, env, inputs, t):
             for p in sorted(received):
                 total = torch.add(total, arrived(received[p]))
             env[key] = write(sent[None], total)
+        elif operand.kind == 'reduce-scatter':
+            size = env[source].shape[operand.dim] // (len(received) + 1)
+
+            def piece(q):
+                return env[source].narrow(operand.dim, q * size, size)
+            for q, value in sent.items():
+                write(value, piece(q))
+            total = piece(me)
+            for p in sorted(received):
+                total = torch.add(total, arrived(received[p]))
+            env[key] = total
+        elif operand.kind == 'collective-permute':
+            for value in sent.values():
+                write(value, env[source])
+            if received:
+                env[key] = torch.clone(arrived(*received.values()))
+            elif any(tuple(pair) == (me, me) for pair in operand.dim):
+                env[key] = env[source]
+            else:
+                env[key] = torch.zeros_like(env[source])
         else:
             gather, members = operand.kind == 'all-gather', len(received) + 1
             dim = operand.dim if gather else operand.dim[0]
