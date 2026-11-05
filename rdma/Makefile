@@ -31,8 +31,10 @@ mesh-flow: $(BRIDGE) $(HEADERS) Makefile
 # the bridge's heartbeat (tag pre-return-20261103 rdma/Makefile): no device, no verbs, its own translation unit
 mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-map.h mesh-holders.h Makefile
 	cc $(CPPFLAGS) -O2 -Wall -Wextra -Werror -o $@ mesh-heartbeat.c
-mesh-stat: mesh-stat.c mesh.h mesh-map.h mesh-holders.h
-	cc -O2 -o $@ mesh-stat.c
+# 2026-11-04 (design/compilation-coordination.md, B2's report): mesh-stat walks the claim heads (mesh-dataflow.h
+# mesh_head_after), so it links mesh-dataflow.c, as the bridge and libmesh do
+mesh-stat: mesh-stat.c mesh-dataflow.c mesh.h mesh-map.h mesh-holders.h mesh-dataflow.h mesh-call.h
+	cc -O2 -o $@ mesh-stat.c mesh-dataflow.c
 libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) Makefile
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc
 clean:
