@@ -2000,3 +2000,362 @@ unchanged and compiling against the new mesh.h; tools/e2b_replay.m compiled alon
   objective fixes them (LX).
 - "Before any run: the bridge now loads libhighs": no longer; HiGHS is in the bridge and libmesh, built from its pinned
   source by the Makefile (HB).
+
+## The revisions of abecd389
+
+The record of the unit whose instruction is design/plan-to-bridge-change-request.md and
+design/aot-compilation-change-request.md as mesh abecd389 holds them, from mesh abecd389 and metal-microbench a7642449.
+Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every sub-agent)", verbatim, but its reading order
+(the two documents in full, then mesh AGENTS.md, design/rubric-actionable.md, metal-microbench AGENTS.md,
+docs/principles.md, docs/measurement.md) and its file table: where a document names a file to change, the document
+stands over the table (A10 of rdma/mesh_graph.py: "The rules' bar on rdma/mesh_graph.py does not stand against it").
+What the code did not yet do was found by reading both documents in full against the code, beginning with what mesh
+9b2c0869, 8e403496 and abecd389 revised: A4 (the partitioner partitions every operator, so CollectivePermute is
+reached), A7 whole (total order multicast by a fixed sequencer as Défago, Schiper and Urbán define it, one sender for
+each program, a plan at every node of it before its first message), A10 (its graph operations the graph module's, the
+symbolic execution on torch.fx.Interpreter, "The same holds wherever mesh's code walks a graph", which reverses C9a),
+appendix item 2 (each plan's own queue of delivered calls at each node, its room, the multiway merge, nothing waiting
+to write and nothing checking; this replaces CH2's one channel for every plan) and item 5 (a page's round rule by its
+range's rising count; this replaces PM2). Each decision taken where the documents are silent is marked as the
+implementer's (SQ, PS, PB, PQ, RC, PM5 and C9b the coordinating implementer's; T4-n sub-agent T4's) and is not a
+requirement of the documents. Sub-agent T4 was the one owner of rdma/mesh_compile.py and rdma/mesh_graph.py; the
+rest is the coordinating implementer's. Nothing was run but the compilers, `python3 -m py_compile`, the Makefile's own
+fetch of the pinned HiGHS source and the three integration builds.
+
+### Done
+
+- **SQ1. The sequencer as Fig. 5 states it** (aot-compilation A7: "The algorithm is their Fig. 5, the "UB" variant of
+  §7.1, as written"; "Sequencer: "Initialization: seqnum := 1"; "when receive (m): sn(m) := seqnum; send (m, sn(m)) to
+  all; seqnum := seqnum + 1""; "m is one submission ... One submission is one message however many executions it
+  carries"). rdma/mesh-records.c: `seqnum` from 1 at the bridge's start, one number a message (order_sequence), where
+  it was from 0, one number an execution; mesh-bridge.h's note on struct mesh_order `sequence`. Commits 7eb93c51,
+  c38ee188.
+- **SQ2. The destinations as Fig. 5 states them, over §5.2.4's super-group** (A7: "Destinations: "Initialization:
+  nextdeliver := 1; pending := ∅"; "when receive (m, seqnum): pending := pending ∪ {(m, seqnum)}; while ∃(m′, seqnum′)
+  ∈ pending : seqnum′ = nextdeliver do deliver (m′); nextdeliver := nextdeliver + 1""; "Multicast to many groups is
+  their §5.2.4, as written ... 3. processes not in Dest(m) discard m."  The super-group is the island's nodes";
+  "deliver(m) at a node of Dest(m) appends m to its plan's queue there"). rdma/mesh-records.c: `nextdeliver` from 1;
+  every ORDER held (order_take), where one whose `nodes` lacked this node was not; orders_deliver delivers the pending
+  message whose `sequence` equals `nextdeliver`, wherever it sits, then the next, each at a node of Dest(m) appended to
+  its plan's queue (order_deliver: entry k mod `room`, then the plan's `delivered`, release), elsewhere discarded; hdr
+  `delivered` nextdeliver − 1 between two raises of hdr `plans` (SQ2-1, SQ2-2); stored 0 at the bridge's start
+  (map_adopt). The delivery by arrival order, the pending head standing for nextdeliver and the sequence not compared
+  (the recorded difference of Q3, Q3-tree and DL2), is gone. Commits 7eb93c51, c38ee188.
+- **PS. One sender for each program, its submissions TO-broadcast in the order the program made them** (A7: "sender(m)
+  is the program's one sender: the least of the program's nodes, the program being its launcher's `group`
+  (rdma/mesh.h).  It TO-broadcasts the program's submissions in the order the program makes them"; "With one sender,
+  whose messages reach the sequencer first in, first out, Fig. 5's sequencer numbers them in the order they were sent
+  ... So FIFO Order holds, and with it A10's order constraints between the program's calls").
+  - rdma/mesh-collective.{h,c} mesh_plan: `program` (the program's nodes, a set of map indices) after `function`;
+    struct mesh_state `sender` the least of it, where it was the least of the plan's `nodes`; EINVAL where `program`
+    is 0, lacks this node or lacks a node of the plan's (PS-1, PS-2).
+  - rdma/mesh-dataflow.{h,c}: struct mesh_ctx `clock`, the program's Lamport clock (L. Lamport, CACM 21(7), 1978, IR1:
+    "Each process Pi increments Ci between any two successive events"); mesh_transfers_start appends each raise of a
+    plan's `executions` to the plan's submissions' queue (struct mesh_submission: the raise's end and the clock after
+    one increment, then `submissions`, release), with no wait and no check of its room (PS-3, PS-4).
+  - rdma/mesh-records.c orders_submit: at the program's sender, its plans' submissions' queues merged on the clock
+    (D. E. Knuth, TAOCP vol. 3, §5.4.1, as item 2 states the merge), read in L. Lamport's opposite order (CACM 20(11),
+    1977), one message a submission, [`submitted`, the entry's end), sent toward the sequencer only once the plan's
+    barrier is complete (PB); `broadcast` counts the entries taken.
+  - rdma/mesh.py: Context `clock`, mesh_plan's binding; metal-microbench tools/e2b_replay.m: `program` its ranks' map
+    indices (a solo run's this node) and `outstanding` 1 (PS-5). Commits 7eb93c51, 8641a3e6, c38ee188, metal-microbench
+    27093ce3.
+- **PB. A plan at every node of it before its first message** (A7: "The program's sender counts the plan's nodes as
+  each holds the plan, as a centralized barrier counts arrivals: "each processor updates a small amount of shared state
+  to indicate its arrival and then polls that state to determine when all of the processors have arrived" (J. M.
+  Mellor-Crummey and M. L. Scott ... §3.1).  It TO-broadcasts no submission of the plan before every node of the plan
+  has arrived"). rdma/mesh-bridge.h: ARRIVE and struct mesh_arrival (MESH_VERSION 114); rdma/mesh-records.c: each node
+  tells the sender that it holds each plan standing there (orders_announce), up the island's tree as a SUBMIT goes, to
+  the sender where the path meets it, else to the sequencer and from there down the tree as an ORDER goes
+  (arrival_up, arrival_down, order_heard); the sender holds what it hears (arrival_take) and counts it into its plan's
+  `arrived` once that plan stands (arrivals_apply); orders_submit takes no submission of a plan whose `arrived` does
+  not hold its `nodes`, and the program's later submissions wait behind it (PB-1 to PB-3); rdma/mesh-ports.c takes
+  ARRIVE to order_heard. Commits 7eb93c51, c38ee188.
+- **PQ. Each plan's own queue of delivered calls at each node, taken by a multiway merge** (appendix item 2: "Each
+  plan's delivered calls reach the bridge at a node through a queue of the plan's own.  It is laid out with the plan's
+  pages when the plan is placed, and claimed and released with them (C3.2, C3.4).  The bridge reads it in place, by
+  view, and nothing copies it"; "Each entry is one delivered message, with its sequence number ... The plan's k-th
+  delivery at the node is entry k mod the queue's room"; "Its room is fixed at compile time ... at most A10's bound on
+  the plan's submissions outstanding at its sender, plus C3.3's u copies on each hop of the plan's routes ... A plan
+  whose bound A10 cannot find fails with `ENOMEM` when it is planned"; "The bridge takes its plans' calls by a multiway
+  merge on the sequence number (D. E. Knuth ... §5.4.1): of the first untaken entries of its standing plans, the least
+  sequence number first"; "Nothing waits to write, and nothing checks for a full queue"; "This replaces ... the one
+  channel for every plan (the implementation's CH2, with M3's room)").
+  - rdma/mesh.h: struct mesh_delivery (sequence, first, end) an entry of a plan's queue; struct mesh_state's words
+    from byte 156 renamed in place (`outstanding`, `delivered`, `submissions`, `broadcast`, `arrived`, `room`,
+    `deliveries`, `submits`, `announced`), `released`, `taken` and `sequences` gone; hdr `deliveries_off`,
+    `deliveries_room` and `delivery_read` kept by name; MESH_DELIVERY_ROOM gone; rdma/mesh-map.h: the channel's area
+    gone from the layout.
+  - rdma/mesh-collective.c mesh_plan: `outstanding`, A10's bound, after `program` (0 ENOMEM); the delivered calls'
+    queue of `room` = `outstanding` + u × the hops of the plan's routes (PQ-1) and the submissions' queue of
+    `outstanding` laid out in the state section between the status and the entries (plan_layout), started 0 with the
+    section (D3).
+  - rdma/mesh-flow.c: struct flow's view of the queue (`deliveries`, `room`) and each lane's place in it (`at`, 0 at
+    the load; PQ-2), EINVAL at the load where the queue lies outside the region; lane_take the merge: hdr `delivered`
+    first, then each carried plan's first untaken entry, the least numbered at most hdr `delivered` taken, nothing
+    where hdr `plans` moved since the walk (PQ-3); struct port_plans `at` and `joined`, deliveries_join and
+    plan_refused_here gone. Commits 7eb93c51, 8641a3e6, 930861b0.
+- **RC and PM5. The round rule by the range's rising count** (appendix item 5: "So a page is named for round j where
+  its range's count of its copy reads at least j times the pages this node receives of that range in a copy ... The
+  code must name a page for round j by that count, in place of PM2's test of the phase field.  The phase fields stay,
+  for C3.7's readers"). rdma/mesh-flow.c link_receive_drain: a record of round j posted only where its `count` reads
+  (acquire) at least j × `pages`, where PM2 read the page's phase field; the landing's XOR stays. rdma/mesh-collective.c
+  plan_layout and mesh_plan: every received range has its count words, a relay's own too (`counted`), so every receive
+  entry names one (RC-1); link_prepare refuses a receive with none (EINVAL). Commits 7eb93c51, 8641a3e6, 930861b0.
+- **T4-A10. A10's graph operations the graph module's** (aot-compilation A10: "The order's transitive closure, the walk
+  of commuting chains, and the width by Fulkerson's matching in Hopcroft and Karp's phases are functions of
+  rdma/mesh_graph.py, beside `walk` and `reach` ... rdma/mesh_compile.py calls them and keeps no copy"; "A body's
+  symbolic execution runs on torch.fx.Interpreter, as the program's run already does (`_Program`), not on a second
+  loop over a graph's nodes"; "The same holds wherever mesh's code walks a graph"; C9a reversed), sub-agent T4.
+  rdma/mesh_graph.py: `closure` (A. Goralčíková and V. Koubek's reduct-and-closure over a topological order, MFCS 1979),
+  `paths` (a linear forest's paths, read by `walk`), `matching` (Hopcroft and Karp's phases), `width` (Dilworth by
+  Fulkerson's matching) and `propagate` (rounds to a fixed point alternating forward and backward passes, as GSPMD §3.5
+  runs its completion; round-robin iteration, Kildall 1973, Kam and Ullman 1976), each over the caller's vertices and
+  neighbours (and, for `propagate`, visit) functions. rdma/mesh_compile.py: `_analyse` calls `paths`, `closure` and
+  `width`, its ancestors' and chains' loops and `_width` gone; `_execute`'s loop over a graph's nodes replaced by
+  `_Symbolic`, a torch.fx.Interpreter computing Rinard and Diniz's expressions with the same rewrite rules; `_mesh`'s
+  recursive walk of the nested device mesh by `walk`; `_complete`'s rounds by `propagate` (after the C9 hook's remark
+  on cc4a3e12). Commits 624ecd6f, 92336795.
+- **T4-A4. CollectivePermute reached by partitioning every operator** (aot-compilation A4: "The partitioner reaches them
+  by partitioning every operator, as A2 states ("propagates them to every operator").  GSPMD gives the rule for the
+  operators that need CollectivePermute: "The most typical use case of halo exchange is for partitinoning window-based
+  operators (e.g., Convolution, ReduceWindow)" (§4.3).  The partitioner's refusal of an operator, "GSPMD gives no rule
+  here for it" (rdma/mesh_compile.py `_operator`), is false for these"; "CollectivePermute goes into halo exchange ...
+  and into a pipeline's buffer shifting ... (§3.3)"), sub-agent T4. rdma/mesh_compile.py: `_operator` builds each
+  operator's rule: elementwise (broadcast operands now taken), Dot (torch's matrix products by matmul's labels,
+  `F.linear` with a bias, `bmm`, `torch.einsum` by its equation; GSPMD §3.2), Convolution and transposed convolution
+  (`_convolution`) and ReduceWindow (`_pooling`) with the halo exchange of GSPMD Figure 9b, §4.3 and A.2 (`_region`,
+  `_extent`: each halo piece a narrow sent by one CollectivePermute, XLA's source_target_pairs, concatenated, a
+  DynamicSlice at the partition's offset, positions outside the operand masked by a Select against an Iota, §4.1; a
+  transposed convolution by A.2's base-dilation method and a DynamicSlice of its output), constant Pad (`_pad`) and
+  Slice (`_slice`, getitem and narrow; §4.3), a Pad that its one Slice reads merged into it (`_merged`, §4.6), so the
+  pipeline's "pad_left(state, 1)[:-1]" (§3.3) is one CollectivePermute; every other operator by the general rule
+  (§4.5's resharding to §3.1's replicated sharding: operands gathered, run whole, output sliced; T4-5); "GSPMD gives no
+  rule here" gone from the code; `_run` runs the new items with torch's own operators (A9). Commit cc4a3e12.
+- **T4-P. The plan call** (the coordinating implementer's PS-1 and PQ): `serialize` passes `program`, the set of the
+  placement operand's map indices (`ir.map`), and `outstanding`, A10's bound `ir.calls.outstanding`, 0 where the
+  function was compiled under no traced program (so mesh_plan's ENOMEM, item 2). Commit 41cf06d6.
+
+### Found already done (the code at abecd389 and a7642449 does what the document states)
+
+- A7: "The island is the map's Thunderbolt-linked component" and "The sequencer is the bridge of the highest-numbered
+  node the map reaches (rdma/mesh-records.c `island_set`)" (SQ); "Dest(m) is the nodes of m's plan (struct
+  mesh_order's `nodes`)"; "sn(m) is struct mesh_order's `sequence`"; "Failures ... no standing plan's sequencer
+  changes" (D.3.6's cancellation, plan_stale), with no handler added (items 3 and 4).
+- Item 2: "remove the start's wait for every port to load the plan, and the late-loading port's refusal of it" (SW);
+  "remove Q4's hold and Q4′'s timeout skip" (DL4, O1); "remove the coordination's Q3′" (SN, kept: no reset of `seqnum`,
+  of `nextdeliver` or of the pending ORDERs at a map move); "M4 and M5 stay gone" (CH2); "interleave released executions
+  on each cable" (the merge, now PQ's); "Recorded order: ... No collective or data code reads it" (MESH_LEDGER's
+  traces, unchanged).
+- Item 5: "So the deal fixes positions, not members" (PM); "The counter is (execution, set), so a set is drawn once per
+  execution" (OP); Lemire's rejection step (LR); "Every program declares each consumer's kind" (EK).
+- A10's tracer, Bernstein's order, the width bound and Rinard and Diniz's commuting calls (TT), now with its graph
+  operations moved (T4, above).
+
+### Decisions taken where the documents are silent (each the implementer's, with its reason)
+
+- **SQ2-1 (A7).** The destinations' delivered count is published to the ports as hdr `delivered` = nextdeliver − 1,
+  stored 0 at the bridge's start (map_adopt). Reason: item 2's merge needs "the node's delivery count" ("every entry
+  below the node's delivery count is in its queue already"), which only the bridge parent holds; the field was the
+  channel's count, kept by name; 0 at the start because Fig. 5's nextdeliver is 1 there and a region outlives a bridge.
+- **SQ2-2 (A7, item 2).** hdr `plans` is raised before and after hdr `delivered`'s store. Reason: a port that acquires
+  `delivered` must see `plans` moved where a plan stood since its last walk (the first raise follows the delivery into
+  a plan the parent saw standing, so a lane that acquires the count reads it), and a port that read the first raise
+  and passed before the count's store must be woken (the second); this is DL7 and DL9's pairing, kept.
+- **SQ2-3 (A7).** A message whose plan does not stand at a node of its Dest(m) is discarded there, said on the bridge's
+  log. Reason: deliver(m) appends m to its plan's queue, which exists only while the plan stands; the barrier (PB) makes
+  the plan stand at every node of it before its first message, so this is a plan retired or cancelled meanwhile.
+- **PS-1 (A7).** "The program's nodes" are an operand of the plan call, `program`, the same in every plan call of one
+  program. Reason: A7 names the program by its launcher's `group` and its sender as the least of its nodes, but neither
+  document gives a computation of those nodes, and mesh_plan sees one function's transfers; only the program knows all
+  its nodes at its first plan, and every plan of one program must name one sender for FIFO Order to hold across its
+  plans. tools/e2b_replay.m passes its ranks' map indices 0 .. R − 1 (rank i runs on map index i) and a solo run this
+  node; rdma/mesh_compile.py passes the placement operand's nodes (A2's mapping of the logical mesh onto the map's
+  nodes; T4's code, my choice).
+- **PS-2 (A7).** mesh_plan is EINVAL where `program` lacks this node or a node of the plan's `nodes` (a relay outside
+  the program). Reason: such a node runs no call of the program and never holds the plan, so the sender's barrier would
+  never count it; an error value at planning, not a wait (the rules: "Every failure is an error value, never a hang").
+- **PS-3 (A7).** The program's order reaches its sender's bridge through a queue of each plan's own submissions (each
+  raise of `executions` and the program's Lamport clock at it), merged at the sender on the clock and read in Lamport's
+  opposite order. Reason: A7 requires the sender to TO-broadcast "in the order the program makes them" and says nothing
+  of how that order reaches the bridge; each plan's rising `executions` alone loses the order of two plans' starts that
+  fall between two of the bridge's reads. The structures are the documents' and their sources': Lee and
+  Messerschmitt's FIFO queue on the arc (here from the program's submission to its sender's TO-broadcast), Lamport's
+  logical clock (1978, IR1) as the merge key, Knuth's multiway merge (§5.4.1) and Lamport's opposite-order reading
+  (1977), as item 2 merges delivered calls.
+- **PS-4 (A7, item 2).** The submissions' queue's room is `outstanding`, A10's bound. Reason: an entry stays until the
+  sender's bridge TO-broadcasts it, and a call cannot complete before its submission is broadcast, delivered and
+  served, so the untaken entries are at most the program's calls of the function outstanding, A10's bound; no writer
+  waits and nothing checks (item 2's rule for its queue). At a node not the sender the queue is written and read by
+  nobody.
+- **PS-5 (item 2).** e2b's `outstanding` is 1. Reason: the documents' own: "e2b's run is one submission" (item 2), "e2b's
+  run is one message" (A7); its program makes one start.
+- **PB-1 (A7).** An arrival travels as a message, ARRIVE, up the island's tree to the sender where the path meets it,
+  else to the sequencer, then down the tree to every node, kept at the node it names as the sender. Reason: the
+  barrier's shared state is the sender's plan's word, written by its bridge parent alone, and the bridges share no
+  memory but the control sockets; these are Q3's paths (a SUBMIT up, an ORDER down), so no routing of its own is added.
+- **PB-2 (A7).** "Holds the plan" is the plan standing at the node (its claim head's publication `state`). Reason:
+  delivery needs the plan's queue, which exists once the plan stands; a port's load is not needed, the queue keeping
+  every entry until each lane carrying it has taken it.
+- **PB-3 (A7).** The sender holds an arrival it hears before its own plan stands and counts it once that plan stands; it
+  lets go of arrivals held and not counted at its own map move; every node tells each standing plan's arrival again on
+  each liveness turn (MESH_PAUSE_NS), as record_retell tells a record again. Reason: a plan's nodes finish compiling
+  at different times (A7: "this is trivially allowed"), so arrivals precede the sender's plan; at a map move every plan
+  there is cancelled (D.3.6) and a replan's barrier must count the replans' arrivals, which may come before or after
+  the sender's own move; the arrival told again recovers one let go or lost, by the tag's practice for its records.
+- **PQ-1 (item 2).** "C3.3's u copies on each hop of the plan's routes" is u × the hops of the plan's routes, a hop a
+  distinct tree edge carrying pages of one of its demands (each demand's `forwards`, summed). Reason: the literal
+  reading, u for each hop; the sum over every hop is at least u × any path's hops, so it also bounds the item's
+  per-node trail ("a node's part of a call trails the sender's by at most u copies a hop").
+- **PQ-2 (item 2).** A lane's place in a plan's queue starts at 0 at the plan's load. Reason: by the barrier, the queue
+  holds the plan's every message from its first, and by the room no entry is reused before every lane carrying it
+  has taken it.
+- **PQ-3 (item 2).** The merge takes nothing where hdr `plans` moved since the port's last walk, and sets `again`.
+  Reason: a plan standing here and not yet loaded at the port would be missing from the merge, so a later number of a
+  loaded plan could be taken first while the cable's other end takes the earlier; SQ2-2's first raise makes such a
+  plan visible as a moved `plans` (DL3's `plans` test, kept).
+- **RC-1 (item 5).** A relay's own received ranges get count words, where review 15's finding 1's ruling gave them none.
+  Reason: the item's method needs the count at every receive it names ("a page is named for round j where its range's
+  count of its copy reads at least j times the pages this node receives of that range in a copy"), and a relay's
+  receives are named for rounds as a destination's are; C3.1's counted completion is the structure, one more word per
+  relayed range and copy, raised by its landings. The item's "The plan keeps such a count already" and "adds no word"
+  are false at a relay (below, "Where the documents are wrong").
+- **PM5 (item 5).** The count test reads `count` with acquire and compares with the record's round j × `pages`; the
+  record's `round` is still stored as it is posted, for the landing's phase flip. Reason: the item's statement; the
+  phase fields stay for C3.7's readers.
+- **C9b (the C9 hook's remark on c38ee188).** The hook read arrival_up and arrival_down as walks of the island's tree
+  that belong in the graph module. They stay in rdma/mesh-records.c. Reason: each sends one message one hop, to this
+  node's parent or children, as order_submit and order_relay do; no graph is walked in memory, the tree being
+  island_set's, computed by mesh_graph_reach and mesh_graph_rows of the graph module; A10's "The same holds wherever
+  mesh's code walks a graph" is met there.
+- **T4-1 to T4-22 (A10, A4; sub-agent T4; each at its code, citing this part).** T4-1: `closure` by Goralčíková and
+  Koubek, and `matching` a function of its own that `width` calls, so the primitive is one. T4-2: the commuting chains
+  are a linear forest's `paths`. T4-3: the graph walks moved (`_mesh`'s, `_complete`'s rounds) and those kept as one
+  pass or one step of adjacency (`_dependences`, `_groups`, `_readers`, `_consumer`, `partition`, `_partition`,
+  `lower`). T4-4: graph walks in other rdma/*.py files reported, not edited (rdma/peers.py `observe_mesh` and
+  `realize`, breadth-first; rdma/mesh_disk.py `free`, a parent chain; mesh_hourly.py and mesh_preflight.py already call
+  `walk` and `reach`). T4-5: the general rule for an operator GSPMD gives no special rule (§4.5 with §3.1), nothing
+  propagated through it, its preserved dimensions unknown. T4-6: windowed and data formatting operators propagate at
+  level 1, since §3.5 gives the highest priority only where "there is no communication". T4-7: a halo wider than one
+  shard takes one CollectivePermute per neighbour distance. T4-8: every operand's halos exchanged after its reshard.
+  T4-9: no sharding carried onto a dimension its mesh dimension does not divide, or of size 0. T4-10: transposed
+  convolution by A.2's superset-then-DynamicSlice method at every partition count. T4-11: an average pooling dimension
+  whose divisor depends on the window's place held whole. T4-12: groups other than 1, or padding 'same' with an odd
+  total, held whole. T4-13: a fused bias gathers its contracting dimension rather than reducing it, so the bias is not
+  summed once a partition. T4-14: a contracting dimension sharded unalike whose mesh dimension the output leaves unused
+  gathered, where it was refused. T4-15: broadcast labels aligned from the right. T4-16: in-place operators by their
+  functional equivalents (PyTorch 2 §3.9), writes to inputs, attributes or views refused. T4-17: a Pad merged only
+  where its Slice is its one reader. T4-18: the mask's fill 0 for convolution and average pooling, −inf (or the
+  integer minimum) for max pooling, the pad's value for Pad. T4-19: `_consumer` gives function B only where the read
+  value's local shape is its reader's. T4-20: a get_attr held whole as a placeholder; call_module and non-tensor values
+  by the general rule. T4-21: matmul's labels in general, `bmm`, einsum by its equation, at most one mesh dimension a
+  partial. T4-22: `ir.reduced` keyed by the partial's key.
+
+### Where the work stopped
+
+- **Stop 1. Fig. 5 "as written" in an island whose bridges begin at different times** (aot-compilation A7):
+  > The algorithm is their Fig. 5, the "UB" variant of §7.1, as written: ... Sequencer: "Initialization: seqnum := 1"
+  > ... Destinations: "Initialization: nextdeliver := 1; pending := ∅"
+
+  > A plan's destinations exist before its first message.  Section 3's specification is "the standard specification
+  > of total order broadcast in a static system, that is, a system in which all processes are created at system
+  > initialization" (§6).
+
+  > The sequencer is the bridge of the highest-numbered node the map reaches (rdma/mesh-records.c `island_set`), the
+  > code's choice, which the class leaves open.
+
+  and item 2: "the sequencer's number never goes back to 0, and no node drops a pending order when its map changes."
+  The facts of the code: each bridge is a process whose Fig. 5 initialization is its own start; bridges start and
+  start again at different times; island_set computes the sequencer anew at every map move, so a node with a greater
+  id joining moves it. The documents do not say what a destination's nextdeliver is when its bridge begins after the
+  island's sequencer has numbered messages, nor what a destination does when the sequencer it hears from is a process
+  begun after it (a bridge started again, or a new highest node). Défago, Schiper and Urbán leave both to a group
+  membership service: "The recovery of processes and the dynamic join of new processes are discussed in Section 8.2"
+  (§4.1, note 10); "Blocking can also be prevented by relying on a higher level mechanism, namely a group membership
+  service" (§8.2); "A dynamic group is a group of processes with a membership that can change during the computation"
+  (§6.1). Neither document names one, and the operator ruled the earlier stand-in (Q3′, the reset at a map move) out.
+  What is built is Fig. 5 as written, initialized at each bridge's start (SQ1, SQ2). Its consequence, read from the
+  code (nothing was run): only where every bridge of an island has started before the island's first message does
+  every nextdeliver meet the sequencer's numbers; a bridge started after the sequencer has numbered messages, and every
+  destination after the sequencer's bridge starts again or the sequencer moves to a bridge whose count is behind
+  theirs, holds the ORDERs it receives pending and delivers none.
+- **Stop 2. The delivered calls' queue's room where the program's sender holds no page of the plan** (appendix item 2):
+  > An entry stays until the bridge at the node has taken its call.  That is at most A10's bound on the plan's
+  > submissions outstanding at its sender, plus C3.3's u copies on each hop of the plan's routes: a copy is used again
+  > only after the last reads of it (C3.3), so a node's part of a call trails the sender's by at most u copies a hop.
+
+  against A7's revised sender: "sender(m) is the program's one sender: the least of the program's nodes". The
+  derivation was written when the sender was the plan's least node. Now the sender is the program's, and a plan's nodes
+  may be any of the program's (a collective among a subgroup that leaves the least device out). Where the sender holds
+  no page of the plan, its part of each call of the plan is done at once (rdma/mesh_compile.py `run`: the start, then
+  items with nothing to wait on), so its program issues the next call as soon as A10's bound lets it and nothing in the
+  derivation bounds how far its submissions lead the plan's nodes; a node of the plan whose program is behind then
+  receives deliveries past `room` before its lanes take the earlier, and item 2 forbids a check ("Nothing waits to
+  write, and nothing checks for a full queue"). The room is built as the item states (PQ, PQ-1); no check and no
+  refusal is added, and nothing was run. The documents do not say which bound holds there.
+
+### Where the documents are wrong, or contradict the code's facts
+
+- Appendix item 5: "The plan keeps such a count already: each range's landed count of each copy, which every landing
+  raises, by whichever cable it lands (C3.1, counted completion)" and "The test holds at any distance and adds no word."
+  At a relay it did not: rdma/mesh.h at abecd389, a receive's "`count` the region offset of its range's count word for
+  this copy, or 0 where this node does not consume the range (a relay's own receive: its forwards are released by its
+  phase, nobody waits on a count, and the state section has no count word for it)". RC-1 adds the relay's words.
+- A7 cites §6's static system for "A plan's destinations exist before its first message", and requires Fig. 5's
+  initializations as written, but the island's bridges are not "created at system initialization" (stop 1).
+- Appendix item 2's room derivation assumes the sender's part of each call trails like any node's, which A7's
+  program's sender need not (stop 2).
+- A7's m carries "the map serial it was made on": each node's map serial is its own count (Q3′: "two nodes on one map
+  hold different serials"), so the serial m carries is the sender's, and no receiver compares it (as before).
+- A7: "the least of the program's nodes, the program being its launcher's `group` (rdma/mesh.h)": rdma/mesh.h names
+  `group` as the launcher's but holds no program's nodes, and the plan call took none (PS-1).
+- A4 routes "all of one function's collectives jointly over the Thunderbolt-linked nodes of the map", so a tree may
+  relay through any node of the map, while a node holds a plan only where its program calls mesh_plan, and A7's barrier
+  waits for every node of the plan (sub-agent T4's finding). With `program` the placement's nodes (PS-1), a plan whose
+  route relays through a node outside the placement is EINVAL at planning (PS-2), where before it stood and its relay
+  held no plan. The documents do not say what program runs at a relay outside the placement.
+- Not done of A4, recorded by T4: GSPMD's own handling of Reverse, Reshape, Concatenate and rotation (§4.3, §4.6), of a
+  reduction's masking (§4.1) and of Broadcast's priority (§3.5) is not built (those operators take the general rule,
+  T4-5); `partition`'s refusal of a dimension its mesh dimension does not divide ("GSPMD section 4.1 pads it, which
+  the contract does not give") stays, though GSPMD §4.1 gives that rule; CollectivePermute "to change device order"
+  (§4.5) still arises nowhere, the placement naming one device mesh; a partitioned convolution kernel is held whole (A.2:
+  "We skip the implementation details").
+
+### Commits
+
+- mesh 7eb93c51 (rdma/mesh.h, mesh-map.h, mesh-dataflow.h, mesh-bridge.h, mesh-collective.h, mesh.py: the headers and
+  bindings), 8641a3e6 (rdma/mesh-collective.{c,h}, mesh-dataflow.c: PS, PQ, RC), c38ee188 (rdma/mesh-records.c,
+  mesh-ports.c: SQ1, SQ2, PS, PB), 930861b0 (rdma/mesh-flow.c: PQ, PM5, RC), 624ecd6f, cc4a3e12, 92336795 and 41cf06d6
+  (rdma/mesh_graph.py, mesh_compile.py: T4-A10, T4-A4, T4-P; sub-agent T4), and this record.
+- metal-microbench 27093ce3 (tools/e2b_replay.m: the plan call's `program` and `outstanding`, PS-1, PS-5).
+- The C9 hook (bin/mesh-c9-review.py on a mesh commit) gave remarks on c38ee188 (C9b, above) and on cc4a3e12 (T4 moved
+  `_complete`'s rounds into rdma/mesh_graph.py, 92336795).
+
+### Integration
+
+At mesh 41cf06d6 and metal-microbench 27093ce3, both level with origin, the trees clean but for this record and
+untracked build artifacts: `make -B -C rdma` 0 (the pinned HiGHS tarball fetched and its SHA-256 checked OK, its 216
+objects built, mesh-flow, mesh-heartbeat, mesh-stat and libmesh.dylib), `make -B -C rdma native-audit` 0, `make
+.build/e2b_replay` 0 in metal-microbench, no warning or error in any. Each changed C and Objective-C file compiled
+alone first, the lifecycle files (mesh-heartbeat.c, mesh-children.c, mesh-child.c, mesh-lanes.c) unchanged and
+compiling against the changed headers; rdma/mesh.py, mesh_compile.py and mesh_graph.py compile (py_compile; the
+cache entry mesh_compile.cpython-314.pyc it made, not there before, removed). Nothing was run.
+
+### What this changes among the earlier parts' open items
+
+- "The revisions of f3f7cf46", stop 1 (the room a plan claims in the channel): answered by item 2's revised text and
+  built (PQ): each plan's own queue, its room `outstanding` + u × its routes' hops, ENOMEM where A10's bound is not
+  found; its derivation's premise fails where the program's sender holds no page of the plan (stop 2 above).
+- That part's stop 2 (CollectivePermute's insertion): built (T4-A4) for windowed operators' halos and the pipeline's
+  shift; not for device order (above).
+- That part's C9a: reversed (T4-A10), as the operator ruled.
+- That part's CH2, CH2-1 and CH2-2: the one channel and MESH_DELIVERY_ROOM gone (PQ); hdr `delivery_read` and the
+  channel's offsets kept by name; hdr `delivered` is now the node's delivered count (SQ2-1).
+- That part's PM2 and its recorded reach: gone (PM5); every received range has its count (RC-1).
+- "Delivery's liveness" (an ORDER lost on the way to a node): under Fig. 5 as written, a node that misses a number
+  holds every later ORDER pending and delivers none, where the arrival-order delivery passed over it; no handler
+  (items 3 and 4).
+- "Numbers across a reset" (46ae8fdf's): no number is reset (SN, SQ1); its successor is stop 1 above.
+- "Replans reuse names": the barrier counts arrivals by the plan's name (PB-3), which a replan keeps (N1); a node that
+  tells again the arrival of a plan of the old map, before its own map moves, can be counted toward the sender's
+  replan, within one flooding of the map; recorded, no handler.
