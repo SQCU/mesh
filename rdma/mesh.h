@@ -231,6 +231,12 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    positions on the pair within a copy wherever they lie, where it was a contiguous run.  Why: R5, "(Corrected
    2026-11-05: the first text moved a set's pages to consecutive places, which nothing requires.)"  What must stay:
    both ends' entries of a hop the same `set`, at the same place.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): position j of a set's M positions
+   on a pair carries member σ(j) of that execution's one permutation, on whichever cable the deal gave position j,
+   each port holding a record of every member of each set it carries a position of (mesh-flow.c link_prepare,
+   position_record), where each cable carried the members the deal gave it (M1).  Why:
+   design/aot-compilation-change-request.md, appendix item 5, "So the deal fixes positions, not members."  What must
+   stay: both ends' entries of a hop the same `set`, at the same place.
    Copies (C3.3: modulo variable expansion, M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
    scheduling, MICRO 1994).  mesh_plan unrolls the plan's one execution, its template, into u copies: L of a routed
    value is the least lag at which every read of it in execution t happens before its write in t + L, and u the
@@ -438,7 +444,10 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    makes ("each cable's sequence is the same renaming of them.  So MSCCLang §5.2's argument against cycles holds")
    holds where one cable carries every position of the set on each pair of its tree, and is not shown where the deal
    splits a set's positions over a pair's cables (design/compilation-coordination.md, "The revisions of 46ae8fdf",
-   stop 3; "The revisions of 67ca86f8", stop 3, before it).  Edge scheduling's start times are no longer
+   stop 3; "The revisions of 67ca86f8", stop 3, before it).  2026-11-05 ("The revisions of f3f7cf46", PM): each
+   position now carries σ's member on whichever cable the deal gave it, so σ is one renaming over the set's positions
+   on every lane it crosses, the item's revised argument ("Why σ keeps a topological order", "So the deal fixes
+   positions, not members").  Edge scheduling's start times are no longer
    computed for the order (R5 at 0e56d8da; "The revisions of 46ae8fdf", LP; 2026-11-05: they were computed and read by
    nothing, GO5).  How a pair's sequence is spread over what its devices give it is the bridge's own (R5, R7).
    2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): every entry at its own place,

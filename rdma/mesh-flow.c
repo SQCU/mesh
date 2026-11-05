@@ -153,19 +153,27 @@ _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_sen
    plan whose record it is, in the line's room after `padding` (offset 104), so a landing, which names its record
    (`wr_id`), counts its own plan's `landed` and writes its own plan's trace while several plans' receives interleave
    on one queue pair; no field the post or the landing reads moves, and the record stays one 128-byte line.  What must
-   stay: as above */
+   stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): `round` where `landings` was, the
+   same 8 bytes: the round j = t / u of the record's posting, stored as it is posted and read by its landing, which
+   flips bit field + (j & 1) and wakes where the count it made is (j + 1) x `pages`; a record of round j is posted only
+   once its page's phase field reads mesh_phase(j), its round j - 1 landed (link_receive_drain).  Why:
+   design/aot-compilation-change-request.md, appendix item 5: a set's member is posted at any of the set's positions
+   on the pair's cables, each port's record of it a view of its page, so a record's own completions no longer count its
+   page's landings; the phase field is the page's own (mesh.h, "Phases"), one for every port's child.  What must stay:
+   at most one posting of a page outstanding; the record one line, its request never changed once written */
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
   _Alignas(64) _Atomic uint64_t *word;
   _Atomic uint64_t *count;
-  uint64_t landings;
+  uint64_t round;
   uint32_t field,pages,copy,padding;
   struct flow *flow;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,word)==64 &&
-  offsetof(struct prepared_receive,count)==72 && offsetof(struct prepared_receive,landings)==80 &&
+  offsetof(struct prepared_receive,count)==72 && offsetof(struct prepared_receive,round)==80 &&
   offsetof(struct prepared_receive,field)==88 && offsetof(struct prepared_receive,pages)==92 &&
   offsetof(struct prepared_receive,copy)==96 && offsetof(struct prepared_receive,flow)==104,"M08 M09");
 /* design/prepared-machine.md#M27 */
@@ -231,9 +239,15 @@ struct cursor { uint64_t execution,round,at,end; uint32_t copy,padding; };
    appendix item 5: "The counter is (execution, set), so a set is drawn once per execution.  Every edge and every cable
    of the set's tree carries its share of the set's pages in that one permutation's order"; "A draw for each cable
    departs from the counter."  What must stay: every member's records this port's own; both ends drawing from the same
-   key, counter and size */
+   key, counter and size.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): `members[d]` each set's every
+   member on the pair, M records from its `first`, a record of each whose own position the deal gave another cable
+   among them (after every lane's records), and `slot_position` a position's index among the set's M positions;
+   struct flow_set's `local` and `ranks`, and `ranks[d]`, gone.  Why: appendix item 5, "Each port holds a record for
+   every member of every set it carries a position of".  What must stay: both ends drawing from the same key, counter
+   and size */
 enum { FLOW_SERVING, FLOW_CANCELLED };
-struct flow_set { uint32_t set,size,local,padding; uint64_t first,ranks; };
+struct flow_set { uint32_t set,size; uint64_t first; };
 struct flow {
   struct flow *next;
   int state,ledger;
@@ -248,7 +262,7 @@ struct flow {
   size_t traced[2],trace_capacity[2];
   uint64_t key[4];
   struct flow_set *sets[2];
-  uint32_t *slot_set[2],*slot_position[2],*ranks[2];
+  uint32_t *slot_set[2],*slot_position[2];
   uint64_t *members[2];
   uint64_t *drawn[2][MESH_LINK_LANES],drawn_execution[2][MESH_LINK_LANES];
   uint32_t drawn_set[2][MESH_LINK_LANES];
@@ -485,6 +499,11 @@ static void threefry4x64_20(const uint64_t key[4],const uint64_t counter[4],uint
    word w (w = 0, 1, ... over the whole draw), so a rejection takes words the next j's would have taken, alike at both
    ends; (2^64 - j) mod j is (0 - j) % j in uint64_t.  After it x[i - 1] is the index of the position whose member is
    the i-th of the permutation; position_record gives each cable its own members in that order.  What must stay: both
+   ends drawing from the same key, counter and size.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): x after the draw is σ, x[j] the
+   index among the set's M members on the pair, in list order, of the member at its position j (the j-th of its M
+   positions, in list order), where it was read the other way and restricted to this cable's members (M1).  Why:
+   appendix item 5, "In each execution, the member at each position is the one σ puts there".  What must stay: both
    ends drawing from the same key, counter and size */
 struct set_stream { const uint64_t *key; uint64_t execution,word,block[4]; uint32_t set; };
 static uint64_t set_word(struct set_stream *s){
@@ -527,27 +546,27 @@ static void set_draw(const uint64_t key[4],uint64_t execution,uint32_t set,uint3
    permutation of this cable's members alone, drawn on a stream of its own.  Why: appendix item 5, "Every edge and
    every cable of the set's tree carries its share of the set's pages in that one permutation's order"; the share is
    the members the deal gave the cable, whose records this port's child holds (design/compilation-coordination.md,
-   "The revisions of 46ae8fdf", M1).  What must stay: as above */
+   "The revisions of 46ae8fdf", M1).  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM), reversing M1's share: position j
+   of the set on the pair (this cable's position record's `slot_position`) posts member x[j] of σ, its record among
+   the set's every member (`members`), whichever cable the deal gave that member's own position.  Why: appendix item 5,
+   "So the deal fixes positions, not members ... So any member can be posted at any of the set's positions on its
+   cables."  What must stay: the member each position carries in an execution the same at every draw, at both ends */
 static inline uint64_t position_record(struct flow *f,int d,uint32_t q,const struct cursor *at){
   const uint32_t s=f->slot_set[d][at->at];
   if(s==UINT32_MAX)return at->at;
+  const struct flow_set *set=f->sets[d]+s;
   if(f->drawn_set[d][q]!=s || f->drawn_execution[d][q]!=at->execution){
-    const struct flow_set *set=f->sets[d]+s;
-    uint64_t *x=f->drawn[d][q],r=0;
-    set_draw(f->key,at->execution,set->set,set->size,x);
-    for(uint32_t i=0;i<set->size;i++){
-      const uint32_t mine=f->ranks[d][set->ranks+x[i]];
-      if(mine!=UINT32_MAX)x[r++]=f->members[d][set->first+mine];
-    }
+    set_draw(f->key,at->execution,set->set,set->size,f->drawn[d][q]);
     f->drawn_set[d][q]=s;f->drawn_execution[d][q]=at->execution;
   }
-  return f->drawn[d][q][f->slot_position[d][at->at]];
+  return f->members[d][set->first+f->drawn[d][q][f->slot_position[d][at->at]]];
 }
 /* every table of a flow's sets freed (link_prepare's failure, plan_end) */
 static void flow_sets_free(struct flow *f){
   for(int d=0;d<2;d++){
-    free(f->sets[d]);free(f->slot_set[d]);free(f->slot_position[d]);free(f->members[d]);free(f->ranks[d]);
-    f->sets[d]=NULL;f->slot_set[d]=f->slot_position[d]=f->ranks[d]=NULL;f->members[d]=NULL;
+    free(f->sets[d]);free(f->slot_set[d]);free(f->slot_position[d]);free(f->members[d]);
+    f->sets[d]=NULL;f->slot_set[d]=f->slot_position[d]=NULL;f->members[d]=NULL;
     for(uint32_t q=0;q<MESH_LINK_LANES;q++){free(f->drawn[d][q]);f->drawn[d][q]=NULL;}
   }
 }
@@ -692,7 +711,7 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      cable; each pick's set (`set_of`, UINT64_MAX for a sequence's), each set's first pick while they are found
      (`lead`); and each pick's record (`slot`), where the direction has such a set */
   uint64_t *member[2]={NULL,NULL},*bound[2]={NULL,NULL},*set_of[2]={NULL,NULL},*lead[2]={NULL,NULL},runs[2]={0,0},
-           local[2]={0,0},*slot[2]={NULL,NULL};
+           local[2]={0,0},*slot[2]={NULL,NULL},*kept[2]={NULL,NULL},extra[2]={0,0};
   for(int d=0;d<2 && index!=UINT32_MAX;d++){
     if(!(pick[d]=malloc((entries?entries:1)*sizeof *pick[d]))){error=ENOMEM;goto failed;}
     for(uint64_t j=0;j<entries;j++)
@@ -772,22 +791,30 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
     }
     for(uint64_t r=0;r<runs[d];r++){bound[d][r+1]+=bound[d][r];lead[d][r]=bound[d][r];}
     for(uint64_t k=0;k<units[d];k++)if(set_of[d][k]!=UINT64_MAX)member[d][lead[d][set_of[d][k]]++]=k;
+    /* 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): the frames over the set's
+       every member on the pair, where they were over its members on this cable, and `kept` each set's positions on this
+       cable, `extra` the members whose positions the deal gave another cable of a set with a position here.  Why:
+       design/aot-compilation-change-request.md, appendix item 5, "Each port holds a record for every member of every
+       set it carries a position of ... So any member can be posted at any of the set's positions on its cables"; a
+       member posted at a position of this cable goes on that position's line.  What must stay: no member assigned to a
+       line that cannot hold it (EMSGSIZE) */
+    if(!(kept[d]=calloc(runs[d]+1,sizeof *kept[d]))){error=ENOMEM;goto failed;}
     for(uint64_t r=0;r<runs[d];r++){
-      uint64_t here=0,frames=0;
+      uint64_t frames=0;
       for(uint64_t i=bound[d][r];i<bound[d][r+1];i++){
         const uint64_t k=member[d][i];
-        if(assigned[d][k]==UINT32_MAX)continue;
-        here++;
+        kept[d][r]+=assigned[d][k]!=UINT32_MAX;
         const uint64_t each=frames_of(list[pick[d][k]].bytes).n;
         if(each>frames)frames=each;
       }
-      if(!here)continue;
+      if(!kept[d][r])continue;
       for(uint64_t i=bound[d][r];i<bound[d][r+1];i++){
         const uint32_t q=assigned[d][member[d][i]];
         if(q==UINT32_MAX)continue;
         if(d==MESH_RECEIVE?frames>l->lane[q].frame_capacity:frames>l->gate[q].capacity.n){error=EMSGSIZE;goto failed;}
       }
       local[d]++;
+      extra[d]+=bound[d][r+1]-bound[d][r]-kept[d][r];
     }
     if(local[d] && !(slot[d]=malloc(units[d]*sizeof *slot[d]))){error=ENOMEM;goto failed;}
   }
@@ -832,13 +859,15 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      the map's serial (mesh-records.c map_put), and refuses it, ESTALE (above).  What must stay: the ESTALE refusal */
   /* the records, by lane, copy and assignment order: first[q (u + 1) + c] lane q's copy c's first, each lane's units
      counted by copy and summed in that order (copy pick / n; a lane's units come in list order, so in copy order) */
-  f->send_count=f->receive_count=0;
+  /* 2026-11-05 ("The revisions of f3f7cf46", PM): beside them, after every lane's, the records of `extra` (above), one
+     a member, in list order (`next`) */
+  f->send_count=extra[MESH_SEND];f->receive_count=extra[MESH_RECEIVE];
   for(uint32_t q=0;q<MESH_LINK_LANES;q++){f->send_count+=lane_units[MESH_SEND][q];f->receive_count+=lane_units[MESH_RECEIVE][q];}
   f->sends=f->send_count?aligned_alloc(128,f->send_count*sizeof *f->sends):NULL;
   f->receives=f->receive_count?aligned_alloc(128,f->receive_count*sizeof *f->receives):NULL;
   for(int d=0;d<2;d++)f->first[d]=calloc(MESH_LINK_LANES*width,sizeof *f->first[d]);
   if((f->send_count && !f->sends) || (f->receive_count && !f->receives) || !f->first[0] || !f->first[1]){error=ENOMEM;goto failed;}
-  uint64_t fill[2][MESH_LINK_LANES];
+  uint64_t fill[2][MESH_LINK_LANES],next[2]={0,0};
   f->carrying[0]=f->carrying[1]=0;
   for(int d=0;d<2;d++){
     uint64_t *first=f->first[d],at=0;
@@ -850,11 +879,12 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
       f->cursor[d][q]=(struct cursor){.at=first[q*width],.end=first[q*width+1]};
       if(lane_units[d][q])f->carrying[d]|=UINT32_C(1)<<q;
     }
+    next[d]=at;
   }
   f->lanes=f->carrying[MESH_SEND]|f->carrying[MESH_RECEIVE];
   for(int d=0;d<2;d++)for(uint64_t k=0;k<units[d];k++){
     const uint32_t q=assigned[d][k];
-    if(q==UINT32_MAX)continue;
+    if(q==UINT32_MAX && (set_of[d][k]==UINT64_MAX || !kept[d][set_of[d][k]]))continue;
     const struct mesh_hop *hop=list+pick[d][k];
     /* a field the shifts below cannot hold, or a receive of no pages, is none a plan writes: refused (EINVAL) */
     if(((d==MESH_RECEIVE || hop->field!=MESH_ABSENT) && (hop->field>62 || hop->field&1)) ||
@@ -864,14 +894,15 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
     /* the span its hop's `bytes` from the start of its page (T7; mesh.h struct mesh_hop: "A hop moves its `bytes` from
        the start of that page or into it") */
     const struct ibv_sge span=wire_span(&port->device,(uint64_t)hop->page*M->pgsz,hop->bytes);
-    if(slot[d])slot[d][k]=fill[d][q];
+    const uint64_t at=q!=UINT32_MAX?fill[d][q]++:next[d]++;
+    if(slot[d])slot[d][k]=at;
     if(d==MESH_SEND){
-      struct prepared_send *record=f->sends+fill[d][q]++;
+      struct prepared_send *record=f->sends+at;
       *record=(struct prepared_send){.word=region_word(hop->word),.field=hop->field,.span=span,.flow=f};
       record->request=(struct ibv_send_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND,
         .send_flags=IBV_SEND_SIGNALED};
     } else {
-      struct prepared_receive *record=f->receives+fill[d][q]++;
+      struct prepared_receive *record=f->receives+at;
       *record=(struct prepared_receive){.span=span,.word=region_word(hop->word),.count=hop->count?region_word(hop->count):NULL,
         .field=hop->field,.pages=hop->pages,.copy=(uint32_t)(pick[d][k]/n),.flow=f};
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
@@ -895,43 +926,41 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      permutation of the whole set per execution (set_draw, position_record).  What must stay: the members' records this
      port's own */
   f->key[0]=words->group;f->key[1]=words->epoch;f->key[2]=f->key[3]=0;
+  /* 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM), reversing M1 ("The revisions of
+     46ae8fdf": a cable's share of a set the members whose positions the deal gave it, so its records were its own
+     members' alone): each set with a position on this cable has its every member on the pair, X_0 .. X_{M-1} in list
+     order, at `members` from its `first`, each member's record the one built above (a position's own where the deal
+     gave it this cable, else one of `extra`), each a view of that member's page (R1); each position record of this
+     cable its set (`slot_set`) and its index j among the set's M positions on the pair (`slot_position`); `ranks`
+     gone.  Why: design/aot-compilation-change-request.md, appendix item 5: "So the deal fixes positions, not members.
+     Each lane keeps the positions the deal gives it.  In each execution, the member at each position is the one σ
+     puts there.  Each port holds a record for every member of every set it carries a position of, each record a view
+     of that member's page (R1)"; "(Corrected 2026-11-05: ... the implementation's M1 ...)".  What must stay: the
+     positions the deal's; each lane's room for one permutation of the largest set it carries a position of */
   for(int d=0;d<2;d++){
     for(uint32_t q=0;q<MESH_LINK_LANES;q++){f->drawn_set[d][q]=UINT32_MAX;f->drawn_execution[d][q]=0;}
     if(!slot[d])continue;
     const uint64_t records=d==MESH_SEND?f->send_count:f->receive_count;
-    uint64_t members=0,whole=0,room[MESH_LINK_LANES]={0};
-    for(uint64_t r=0;r<runs[d];r++){
-      uint64_t here=0;
-      for(uint64_t i=bound[d][r];i<bound[d][r+1];i++)here+=assigned[d][member[d][i]]!=UINT32_MAX;
-      members+=here;
-      if(here)whole+=bound[d][r+1]-bound[d][r];
-    }
-    f->sets[d]=malloc(local[d]*sizeof *f->sets[d]);f->members[d]=malloc(members*sizeof *f->members[d]);
+    uint64_t whole=0,room[MESH_LINK_LANES]={0};
+    for(uint64_t r=0;r<runs[d];r++)if(kept[d][r])whole+=bound[d][r+1]-bound[d][r];
+    f->sets[d]=malloc(local[d]*sizeof *f->sets[d]);f->members[d]=malloc(whole*sizeof *f->members[d]);
     f->slot_set[d]=malloc(records*sizeof *f->slot_set[d]);f->slot_position[d]=malloc(records*sizeof *f->slot_position[d]);
-    f->ranks[d]=malloc(whole*sizeof *f->ranks[d]);
-    if(!f->sets[d] || !f->members[d] || !f->slot_set[d] || !f->slot_position[d] || !f->ranks[d]){error=ENOMEM;goto failed;}
+    if(!f->sets[d] || !f->members[d] || !f->slot_set[d] || !f->slot_position[d]){error=ENOMEM;goto failed;}
     for(uint64_t r=0;r<records;r++){f->slot_set[d][r]=UINT32_MAX;f->slot_position[d][r]=0;}
-    uint32_t s=0;uint64_t m=0,w=0;
+    uint32_t sets=0;uint64_t m=0;
     for(uint64_t r=0;r<runs[d];r++){
-      const uint64_t a=bound[d][r],e=bound[d][r+1],first=m;
-      uint64_t here=0;
-      for(uint64_t i=a;i<e;i++)here+=assigned[d][member[d][i]]!=UINT32_MAX;
-      if(!here)continue;
+      const uint64_t a=bound[d][r],e=bound[d][r+1];
+      if(!kept[d][r])continue;
       for(uint64_t i=a;i<e;i++){
-        const uint64_t k=member[d][i];
-        f->ranks[d][w+i-a]=UINT32_MAX;
-        if(assigned[d][k]==UINT32_MAX)continue;
-        const uint64_t at=slot[d][k];
-        f->ranks[d][w+i-a]=(uint32_t)(m-first);
-        f->members[d][m]=at;f->slot_set[d][at]=s;f->slot_position[d][at]=(uint32_t)(m-first);m++;
+        const uint64_t k=member[d][i],at=slot[d][k];
+        const uint32_t q=assigned[d][k];
+        f->members[d][m+i-a]=at;
+        if(q==UINT32_MAX)continue;
+        f->slot_set[d][at]=sets;f->slot_position[d][at]=(uint32_t)(i-a);
+        if(e-a>room[q])room[q]=e-a;
       }
-      f->sets[d][s]=(struct flow_set){.set=list[pick[d][member[d][a]]].set,.size=(uint32_t)(e-a),
-                                      .local=(uint32_t)(m-first),.first=first,.ranks=w};
-      for(uint64_t i=a;i<e;i++){
-        const uint32_t q=assigned[d][member[d][i]];
-        if(q!=UINT32_MAX && e-a>room[q])room[q]=e-a;
-      }
-      w+=e-a;s++;
+      f->sets[d][sets]=(struct flow_set){.set=list[pick[d][member[d][a]]].set,.size=(uint32_t)(e-a),.first=m};
+      m+=e-a;sets++;
     }
     for(uint32_t q=0;q<MESH_LINK_LANES;q++)
       if(room[q] && !(f->drawn[d][q]=malloc(room[q]*sizeof *f->drawn[d][q]))){error=ENOMEM;goto failed;}
@@ -969,12 +998,12 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      a batch; the batch's bound and totals gone; `told` is plan_load's */
   f->words=words;f->copies=copies;f->state=FLOW_SERVING;
   f->sent=f->landed=f->posted=0;
-  for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);free(member[d]);free(bound[d]);free(set_of[d]);free(lead[d]);free(slot[d]);}
+  for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);free(member[d]);free(bound[d]);free(set_of[d]);free(lead[d]);free(slot[d]);free(kept[d]);}
   free(bytes);free(carried);
   return 0;
 failed:
   for(int d=0;d<2;d++){
-    free(pick[d]);free(assigned[d]);free(member[d]);free(bound[d]);free(set_of[d]);free(lead[d]);free(slot[d]);
+    free(pick[d]);free(assigned[d]);free(member[d]);free(bound[d]);free(set_of[d]);free(lead[d]);free(slot[d]);free(kept[d]);
     free(f->trace[d]);f->trace[d]=NULL;free(f->first[d]);f->first[d]=NULL;
   }
   flow_sets_free(f);
@@ -1222,7 +1251,16 @@ static struct flow *lane_take(struct port_plans *own,int d,uint32_t q,uint32_t p
    alike (its cursor stepped, cursor_step).  The post's budget, MESH_POST_QUANTUM a lane, spent, `again` is set.  Why:
    the item, "On each cable, the pages of every released execution interleave"; "Each port serves the released
    executions of every standing plan in sequence-number order".  What must stay: the completions before the posting;
-   each plan's executions on a lane in order, its records in assignment order, none skipped; the round rule */
+   each plan's executions on a lane in order, its records in assignment order, none skipped; the round rule.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): the round rule reads the record's
+   page's phase field (acquire): a record of round j is posted only where it reads mesh_phase(j), its round j - 1
+   landed, whichever port's child landed it, and its round j is stored in it as it is posted, its landing flipping bit
+   field + (j & 1), where the rule read the record's own `landings` and the landing took its round from them.  Why:
+   design/aot-compilation-change-request.md, appendix item 5: "Each port holds a record for every member of every set
+   it carries a position of ... So any member can be posted at any of the set's positions on its cables", so a page's
+   rounds may land through several ports' children, and D.3.5's rule ("each received page is named again only after its
+   last landing has landed") needs the landing every child sees.  What must stay: the round rule; the XOR before the
+   add, both after the poll's acquire */
 static __attribute__((always_inline)) inline int link_receive_drain(struct port *port,uint32_t served,int traced,int *again){
   struct link *l=&port->link;
   struct port_plans *own=port_plans+port->index;
@@ -1246,7 +1284,7 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
       if(done[i].byte_len!=record->span.length){link_failed(port,EMSGSIZE);return 0;}
       struct flow *f=record->flow;
       const uint64_t polled=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
-      const uint64_t round=record->landings++;
+      const uint64_t round=record->round;
       atomic_fetch_xor_explicit(record->word,UINT64_C(1)<<(record->field+(round&1)),memory_order_release);
       if(record->count && atomic_fetch_add_explicit(record->count,1,memory_order_release)+1==(round+1)*record->pages)
         os_sync_wake_by_address_all(record->count,sizeof *record->count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
@@ -1281,10 +1319,11 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
         continue;
       }
       struct prepared_receive *record=f->receives+(f->slot_set[MESH_RECEIVE]?position_record(f,MESH_RECEIVE,k,&at):at.at);
-      if(record->landings<at.round)break;
+      if(((atomic_load_explicit(record->word,memory_order_acquire)>>record->field)&3)!=mesh_phase(at.round))break;
       const uint64_t each=frames_of(record->span.length).n;
       if(state->posted-state->got>=MESH_LANE_UNITS || state->frames_posted-state->frames_retired+each>state->frame_capacity)break;
       struct ibv_recv_wr *bad;
+      record->round=at.round;
       const int error=queue->receive(queue->pair,&record->request,&bad);
       if(error){lane_lost(port,k,error<0?-error:error);break;}
       state->frames_posted+=each;state->posted++;f->posted++;
@@ -1507,12 +1546,17 @@ static void plan_outstanding(struct port *port,const struct flow *f,uint64_t out
 static void plan_end(struct port *port,struct flow *f,uint32_t served){
   const uint32_t p=port->index;
   lanes_drop(port_plans+p,f);
-  /* a record's `landings` is this thread's alone (its landings, link_receive_drain) */
+  /* 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): each receive's count raised to
+     its final value where it reads below it (count_raise, which leaves a count at or past its final as it is), where it
+     was raised where the record's own landings were below the executions of its copy.  Why: a set's member is posted at
+     whichever position its execution's permutation gives it, on any cable of the pair (appendix item 5), so no record
+     counts its page's landings; the count is the range's own, every port's arrivals on it.  What must stay: a count
+     only raised, never a phase written for a cancellation */
   const uint64_t executions=atomic_load_explicit(&f->words->executions,memory_order_acquire);
   for(uint64_t r=0;r<f->receive_count;r++){
     const struct prepared_receive *record=f->receives+r;
     const uint64_t serves=copy_executions(executions,f->copies,record->copy);
-    if(record->count && record->landings<serves)count_raise(record->count,(uint64_t)record->pages*serves);
+    if(record->count)count_raise(record->count,(uint64_t)record->pages*serves);
   }
   /* design/prepared-machine.md#M27 */
   for(int d=0;d<2;d++){
