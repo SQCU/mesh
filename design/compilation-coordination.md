@@ -1689,3 +1689,299 @@ compiles (py_compile). After metal-microbench 4b0d2da2 (a comment), `make .build
   name (M5), so a delivery made for a cancelled plan's executions that a lane meets after the cancelled plan has ended
   and its replan is loaded is read as the replan's. It arises only after a map move cancels a call in flight; no
   handler is added.
+
+## The revisions of f3f7cf46
+
+The record of the unit whose instruction is design/plan-to-bridge-change-request.md and
+design/aot-compilation-change-request.md as mesh f3f7cf46 holds them, from mesh f3f7cf46 and metal-microbench 4b0d2da2.
+Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every sub-agent)", verbatim, but its reading order
+(the two documents in full, then mesh AGENTS.md, design/rubric-actionable.md, metal-microbench AGENTS.md,
+docs/principles.md, docs/measurement.md) and its file table. What the code did not yet do was found by reading both
+documents in full against the code, beginning with the clauses revised after "The revisions of 46ae8fdf": plan-to-bridge
+R4 (function B's outputs) and R5 (the second objective; HiGHS from its pinned source), and the AOT document's A4, A10
+and appendix items 2 and 5. That part's M1 (a cable's share of a set), M4 (the writer's wait) and M5 (each port's copy
+of the channel) are overturned by name in the documents and are reversed below. Each decision taken where the documents
+are silent is marked as the implementer's (HB, LX, SW, CH2, PM the coordinating implementer's; TA and TT sub-agent T3's)
+and is not a requirement of the documents. One sub-agent, T3, was the one owner of rdma/mesh_compile.py; the rest is the
+coordinating implementer's. Nothing was run but the compilers, the Makefile's own fetch of the pinned HiGHS source and
+the three integration builds.
+
+### Done
+
+- **HB. HiGHS from its pinned source, linked statically** (plan-to-bridge R5, Code: "rdma/Makefile builds HiGHS from its
+  source at a pinned release and links it statically. The release is tag v1.15.1, commit
+  04024d701f79feb8e2f18bc3df0dffc04ef05088, fetched as https://github.com/ERGO-Code/HiGHS/archive/refs/tags/v1.15.1.tar.gz
+  and checked against SHA-256 a840d269dff2fafb371dd247df13ad5e026d7ce3b35ad3dc1eedd59bf0c2fb16"; "It is built with the
+  tools every member has, cc and c++"; "It takes the same `-ffp-contract=off` as mesh-graph.c and no fast-math"; "The C
+  API is highs/interfaces/highs_c_api.h of that source"; "Nothing is installed by hand, and nothing comes from
+  Homebrew").
+  - rdma/Makefile: `$(HIGHS_TARBALL)` fetched by curl --fail from that URL to a .part file, checked by `shasum -a 256
+    --check` against HIGHS_SHA256, then moved, as metal-microbench's Makefile fetches `$(E2B_REFERENCE_MODEL)`
+    (E2B_REFERENCE_REVISION with E2B_REFERENCE_SHA256). The tarball's pax header names commit
+    04024d701f79feb8e2f18bc3df0dffc04ef05088 (read once from the downloaded copy, `comment=` in its global header); the
+    SHA-256 is the check.
+  - `$(HIGHS_BUILT)`: the tarball extracted under rdma/.build/highs, highs/HConfig.h.bazel.in copied to the source's
+    root as HConfig.h, and every source of the BUILD.bazel target "highs" (its srcs globs, HIGHS_SOURCES) compiled by
+    cc (.c) or c++ (the rest) with that target's copts (-fexceptions -Wno-unused-variable
+    -Wno-unused-but-set-variable), its default define (CUPDLP_CPU), its includes (extern, extern/catch, highs, and the
+    root where HConfig.h is), -O2 and -ffp-contract=off as mesh-graph.c (HB1, HB3); 216 objects, no warning.
+  - mesh-flow and libmesh.dylib depend on it and link the objects with -lc++ and BUILD.bazel's linkopts -lpthread (HB2);
+    mesh-graph.c includes <interfaces/highs_c_api.h> under -isystem of the source's highs directory and its root (LP8's
+    reason stands: the header declares a static function it never defines). The Homebrew paths (HIGHS ?= /opt/homebrew,
+    -lhighs) are gone; otool -L of libmesh.dylib names no HiGHS library.
+  - A first form put the two rules before `all`, which made the tarball the default goal (`make -B -C rdma` fetched it
+    and built nothing else); the rules now follow `all`.
+- **LX. R5's second objective** (plan-to-bridge R5, "How: the program": "Then, over (14)'s optimal solutions, minimize
+  Σ_j C_j: Chen's (1) and Hall et al.'s (1) with unit weights. The two are one lexicographic linear program (H. Isermann,
+  Linear lexicographic optimization, OR Spektrum 4, 1982). They are solved in sequence, the second with C_max held at the
+  first's optimum"). rdma/mesh-graph.c mesh_graph_completion_times: where the first objective's cutting-plane rounds end
+  (no row violated), C_max's lower and upper bounds are both its value in that optimal solution
+  (Highs_changeColBounds), its cost 0 and every C_j's cost 1 (Highs_changeColCost, Highs_changeColsCostByRange), and the
+  rounds go on with the same rows, the same separation and the same termination test (LP2, LP3) until no row is violated
+  again; completion[j] is the second objective's last solution (LX1). mesh-graph.h's declaration says so.
+- **SW. The start's wait and the late-loading port's refusal removed** (aot-compilation, appendix item 2, "The code
+  must: ... remove the start's wait for every port to load the plan, and the late-loading port's refusal of it
+  (`mesh_ports_held`). Nothing requires them. "a send that arrives first is held until its receive is posted (§3), and a
+  loss cancels the plan anyway""). rdma/mesh-dataflow.c: mesh_ports_held gone, and mesh_ports_named, its last caller's
+  port set (SW1); mesh_transfers_start raises `executions`, raises and wakes `plans`, fences and reads the map's serial,
+  ESTALE after the raise as before, with no wait before it. rdma/mesh-flow.c link_prepare: the EALREADY refusal of a
+  plan this port carries units of whose `executions` read above 0 at the load is gone (SW2). rdma/mesh-map.h,
+  rdma/mesh-call.h, rdma/mesh.h: dated notes; the start's error set is now 0, EINVAL or ESTALE.
+- **CH2. The deliveries' channel read in place, with no copy and no wait** (aot-compilation, appendix item 2: "The
+  delivered calls reach the ports, in delivery order, through a channel laid out once with the region ... Each port reads
+  it in place, by view, and nothing copies it. Only the driver moves bytes"; "The writer never waits and never checks for
+  a full channel"; "The code must: ... publish them to each port through the channel above, read in place, ... with no
+  copy and no wait (M4 and M5 go)").
+  - rdma/mesh-flow.c: each lane's place `at[d][q]` is a delivery's index, read in place as entry `at` mod hdr
+    `deliveries_room` of the region's channel below hdr `delivered` (acquire, once a lane_take); deliveries_copy (M5:
+    the copy into the child's memory, grown by doubling, and `delivery_read[p]` told after it) is deliveries_join, the
+    child's first-pass place at `delivered` alone (M3's join stands); struct port_plans `orders`, `base`, `copied` and
+    `room` gone.
+  - rdma/mesh-records.c orders_deliver: entry k mod `deliveries_room` written for delivery k with nothing read before
+    it; M4's test of every reading port's `delivery_read[p]`, the head staying while one trailed by the room, and its
+    log line (`full`) gone.
+  - rdma/mesh.h: hdr `delivery_read[p]` read and written no more, kept by name (CH2-1); notes dated. The room a plan
+    claims is not built (stop 1); the room is MESH_DELIVERY_ROOM, as M3 laid it out (CH2-2).
+- **PM. The deal fixes positions, not members** (aot-compilation, appendix item 5: "So the deal fixes positions, not
+  members. Each lane keeps the positions the deal gives it. In each execution, the member at each position is the one σ
+  puts there. Each port holds a record for every member of every set it carries a position of, each record a view of
+  that member's page (R1). So any member can be posted at any of the set's positions on its cables"; "(Corrected
+  2026-11-05: ... each cable keeps only its own members (the implementation's M1) ...)").
+  - rdma/mesh-flow.c link_prepare: for each set with a position on this cable, a record of each of its M members on the
+    pair, those whose own position the deal gave another cable built from their own hops after every lane's records
+    (PM1); the frames test (EMSGSIZE) over every member against every position's line on this cable; `members[d]` the
+    set's M records in list order, `slot_position` a position's index j among the set's M positions; struct flow_set's
+    `local` and `ranks`, and `ranks[d]`, gone (M1 reversed).
+  - position_record: position j posts member x[j] of set_draw's one permutation of the M positions, drawn per (execution,
+    set) as before (OP, LR) (PM4).
+  - The receive's round rule (design/disjoint-pages-change-request.md D.3.5, "named once per landing"): a record of round
+    j is posted only where its page's phase field reads mesh_phase(j) (acquire), its round j - 1 landed through
+    whichever port's child, where it read the record's own `landings`; the round is stored in the record as it is posted
+    (`round`, in `landings`'s 8 bytes) and its landing flips bit field + (j & 1) and wakes by it (PM2).
+  - plan_end's cancellation: each receive's count raised to its final value where it reads below it (count_raise), where
+    it was raised where the record's own landings were below its copy's executions (PM3).
+  - rdma/mesh.h (struct mesh_hop's notes, "Both ends") and metal-microbench tools/e2b_replay.m (the sets' comment):
+    dated notes.
+
+- **TA. ReduceScatter inserted where GSPMD inserts it** (aot-compilation A4: "A2's partitioner inserts these two where
+  GSPMD's does. ReduceScatter goes where a reduction's result is sharded: "gradients will be communicated with
+  ReduceScatter instead of AllReduce" (GSPMD §3.2)"), sub-agent T3. rdma/mesh_compile.py _partition: a Dot whose
+  contracting dimension both operands shard along one mesh dimension that the output shards one of its own dimensions
+  along gives its partial sums a ReduceScatter onto that output dimension (GSPMD §3.2; §5.1, "replace the AllReduce on
+  the output BSM with a ReduceScatter", Figure 7's RS-y), where it gathered both operands' contracting dimension; the
+  AllReduce where the output leaves the mesh dimension unused, and Figure 6's AllGather of a contracting dimension the
+  operands shard unalike, as before (TA1 to TA3). Commits 7b429aa6, 7f0c60ea (a comment refilled).
+- **TT. A program's calls as a dataflow graph, analysed at compile time** (aot-compilation A10), sub-agent T3.
+  rdma/mesh_compile.py `program(block)`: Pathways' program tracer (Barham et al. §3) as torch.fx's symbolic tracer with
+  each compiled function a leaf (a compiled module by `Tracer.is_leaf_module`, a compiled function by `torch.fx.wrap`,
+  read in torch v2.14.0's source); each node reads its argument nodes and writes its result, so Bernstein's conditions
+  order a call after one whose result it reads (TT2); each compiled function's bound is the width of that order on its
+  calls, the most no two of which are ordered, by Dilworth's theorem through Fulkerson's matching, matched by Hopcroft
+  and Karp's phases (the three the turns' D.5 names) (TT3); calls whose effects commute found by Rinard and Diniz's
+  symbolic test (TOPLAS 19(6) §4.8, Figure 15, §4.9.2's rewrite rules) on the function's body traced by FX, a body FX
+  cannot trace taken not to commute (§4.8) (TT4, TT5); the output, `Calls` (`mine`, `outstanding`, `orders`,
+  `commuting`), carried in the IR's `calls` (A8), from the traced program under whose call the backend compiles the
+  function (TT6 to TT8). mesh_plan's call and rdma/mesh.py unchanged: the bound reaches no plan (stop 1). Commit
+  210f6cfe.
+
+### Found already done (the code at f3f7cf46 and 4b0d2da2 does what the document states)
+
+- **R4, function B's outputs** ("An output page is available once its presence is set, as an element of an I-structure
+  is ... Here the presence is C3's supplied word ... A producer's store releases whatever pages its work has written, any
+  number at once and in any order. The bridge reads the words in place and sends each released page (R1)"; "The
+  receiving side reads landings by masks (C3)"; "The release follows the producing work. The existing kernels write their
+  pages, and the supplied store follows them. No kernel is written"). Each source range's one supplied word is stored by
+  its producer after its last write (metal-microbench metal_recording.m: "A sent range's release: a system-scope fence
+  after the producer's last store, then the range's supplied word raised"; rdma/mesh-collective.c mesh_host_publish);
+  each send record of the range reads the word on its own (mesh-flow.c link_send_drain: "where the range's supplied word
+  reads at least t + 1"), so every released page leaves as its lane reaches it, none waiting for another page; receives
+  are read by the masked first pass (C3.1). "The revisions of 46ae8fdf", stop 2 (a release of each page) is answered by
+  this text: one store releases whatever its work wrote.
+- R5: "Every rank solves the same program with the same library, built from the same source with the same flags, on one
+  thread": the source and flags are HB's, the one thread LP6's.
+- Item 2: "deliver orders as Fig. 5's destinations do" (CH); "interleave released executions on each cable" (DL3, CH);
+  "remove Q4's hold and Q4′'s timeout skip" (DL4, O1); "remove the coordination's Q3′" (SN; the pending ORDERs kept
+  across a map move, V1 #4).
+- Item 5: "Every program declares each consumer's kind" (EK); "The counter is (execution, set), so a set is drawn once
+  per execution" (OP); Lemire's rejection step (LR). The item's fabric is a reading of the members, no code.
+- A7's sequencer and its citation (SQ); item 6's names (N1); A9 and R8 as now.
+
+### Decisions taken where the documents are silent (each the implementer's, with its reason)
+
+- **HB1 (R5).** HiGHS's C++ sources compiled with -std=c++17, and every source with -DNDEBUG. Reason: BUILD.bazel sets
+  neither, leaving the language standard to the toolchain and NDEBUG to Bazel's compilation mode, and every member's own
+  clang has its own defaults; HiGHS's meson.build names `cpp_std=c++17`, and the HConfig.h BUILD.bazel copies defines
+  `CMAKE_BUILD_TYPE "RELEASE"` and `HiGHSRELEASE`, a release build, which compiles with NDEBUG. So every member compiles
+  the same source with the same flags (R5).
+- **HB2 (R5).** "Links it statically" as the 216 objects themselves on each link line, with -lc++ for their runtime,
+  not an archive. Reason: R5 names cc and c++ as the tools the build uses; an archive needs ar or libtool, and linking
+  the objects is linking them statically.
+- **HB3 (R5).** The source list, defines and config header are BUILD.bazel's target "highs" and its copy of
+  highs/HConfig.h.bazel.in, where CMakeLists.txt's need CMake's configure step to make HConfig.h from HConfig.h.in.
+  Reason: R5's cc and c++ alone, "cmake is not on the members"; BUILD.bazel is the source's own build of the library
+  with a compiler and a copied header, so nothing of a configure is written here.
+- **HB4 (R5).** The tarball, the extracted source and the objects live under rdma/.build/highs (`.build/` is ignored),
+  and `make -B` fetches, checks and builds them again with everything else. Reason: -B remakes every target, and the
+  fetch is the Makefile's own (the rules: "the Makefile's own fetch of the pinned HiGHS source").
+- **LX1 (R5).** "C_max held at the first's optimum" is C_max's bounds both set to its value in the first objective's
+  last solution, and the second objective's rounds start from the first's rows and basis. Reason: Isermann's sequential
+  solution of a lexicographic program fixes each earlier objective at its optimal value before the next; the rows found
+  are valid for the whole program, so keeping them only spares rounds. The first's last solution satisfies every row
+  within HiGHS's tolerance (LP3), so the second program is feasible within that tolerance.
+- **SW1 (item 2).** mesh_ports_named is removed with mesh_ports_held. Reason: the start's wait was its last caller (CH
+  had removed the delivery's), and the rules: "a replacement covers what the old code did and the old code is removed".
+- **SW2 (item 2).** "The late-loading port's refusal of it" is link_prepare's EALREADY where `executions` read above 0 at
+  the load. Reason: it is the refusal the start's wait existed for (sub-assignment 5's reason, quoted at the removed
+  code); a child that pairs again after a loss is refused ESTALE, the loss having moved the map's serial.
+- **CH2-1 (item 2).** hdr `delivery_read[p]` is kept by name, read and written no more, and MESH_VERSION stays 113.
+  Reason: no field moves (the header's rule, "a field is only ever appended"); bridge and children are one image.
+- **CH2-2 (item 2).** The channel keeps M3's room, MESH_DELIVERY_ROOM entries laid out once with the region. Reason:
+  the item's room by each plan's claim is stop 1 below; this is the room the code has.
+- **PM1 (item 5).** A record of a member whose own position the deal gave another cable is built from that member's own
+  hop (its page, words and bytes at this node) and stored after every lane's records, at no lane's place. Reason: "each
+  record a view of that member's page (R1)"; the lanes' records stay in lane, copy and assignment order, which the
+  cursors walk.
+- **PM2 (item 5, D.3.5).** Every receive's round rule reads its page's phase field: round j posted only where the field
+  reads mesh_phase(j). Reason: once a member's rounds are posted through several ports' children, a record's own
+  landings no longer count its page's landings; the phase field is the page's one record of its landings, written by
+  whichever child lands it (mesh.h, "Phases"), and for a page posted by one record alone the test is the old one (its
+  round j - 1 posted only after j - 2 landed, so the field reads mesh_phase(j - 1) or mesh_phase(j)). Its reach,
+  recorded: the field is 2 bits (C3.7, "PTX's mbarrier phase bit, widened to two"), so it tells round j - 1's landing
+  exactly while the page's earliest round not landed is at most three rounds before the one being posted; a member
+  whose earlier rounds sit on another cable's lane four or more rounds behind would read as landed. The documents name
+  no wider word, and nothing has been run.
+- **PM3 (item 5).** The end's cancellation raises each receive's count to its final value wherever it reads below it.
+  Reason: as PM2, no record counts its page's landings; count_raise leaves a count at or past its final as it is, and a
+  plan ends at a port only as its claim closes or its link stops, when every receive of it not landed is cancelled
+  (C3.1).
+- **PM4 (item 5).** σ is x after set_draw read as x[j] = the member at position j, both counted in list order among the
+  set's M positions on the pair. Reason: any fixed reading drawn alike at both ends gives each position one member in a
+  uniformly random permutation; this one needs no inverse.
+
+- **TA1 to TA4 (A4; sub-agent T3).** TA1: the ReduceScatter's local result keeps the output's sharding with the
+  scattered dimension held whole, onto the output dimension that mesh dimension shards (GSPMD §3.2's and §5.1's
+  examples). TA2: a partial's key is (node, its sharding, 'partial'), since lower passes _reduce_scatter its input's
+  sharding from the key (TC1). TA3: each Dot form of _operator contracts one dimension, so a partial lies along at most
+  one mesh dimension (`(m,) = partial` fails otherwise). TA4: CollectivePermute is inserted nowhere (stop 2).
+- **TT1 to TT9 (A10; sub-agent T3).** TT1: a callable is compiled where Dynamo's own marks say so
+  (`_torchdynamo_orig_callable`, and `_torchdynamo_wrapper_id` its own id, as eval_frame.py innermost_fn tests); a
+  compiled module is a leaf where the block is a module that holds it (FX's path_of_module). TT2: a node reads all its
+  argument nodes and writes its own result (symbolic tracing gives no types; in-place aliasing is not analysed), so of
+  Bernstein's three conditions only a read of an earlier result can fail. TT3: "fewer where Bernstein's conditions order
+  them" read as the order's width on the function's calls. TT4: the commutativity test on the body FX traces, its
+  commutative and associative operators torch's add, mul, maximum and minimum. TT5: a commuting chain is calls of one
+  function threading one accumulator through one argument, each result read by the next call alone; its calls are
+  unordered among themselves in `orders` and still ordered for the bound, since A10's commuting calls "may run in any
+  order" and its independent ones "in either order, or at once". TT6: `orders` the whole (transitive) order. TT7: the
+  traced program runs by torch.fx.Interpreter, which names the call it is in (`CALLING`), read by the backend when
+  Dynamo compiles within it; a function compiled outside any traced program carries None, and one compiled before keeps
+  what it had. TT8: every IR carries the program's `orders` and `commuting` whole, `mine` its own calls. TT9: the
+  analysis in Python, as the earlier ruling kept _complete there ("C9, torch").
+- **C9a (the coordinating implementer's ruling on the C9 hook's remark on 210f6cfe).** The hook asks that _analyse (the
+  order's closure and the chains), _width (Hopcroft and Karp's matching) and _execute (the symbolic execution's walk of
+  a body's graph) move into the graph module. They stay in rdma/mesh_compile.py. Reason: the earlier ruling, "C9,
+  torch: mesh_compile.py's sharding completion (GSPMD §3.5) stays there: it is the compilation's own pass (A2)", holds
+  for A10's pass ("The compilation must take a program's sequence of calls as a graph, decide at compile time ..."); the
+  C graph module has no closure, matching or width, so no second copy of one exists (rubric C9's concern); and Python's
+  graph module, rdma/mesh_graph.py, is a file the rules bar from change. Open for the operator.
+
+### Where the work stopped
+
+- **Stop 1. The room a plan claims in the deliveries' channel** (aot-compilation, appendix item 2):
+  > **Its room is fixed at compile time**, as synchronous dataflow fixes its buffers before the program runs, from the
+  > program's static schedule (E. A. Lee and D. G. Messerschmitt ...).
+
+  > An entry stays until every lane that carries its plan has taken its call. A lane trails its node's deliveries by at
+  > most two amounts added together. The first is A10's bound on the plan's calls outstanding at its submitter. The
+  > second is C3.3's u copies on each hop of the plan's routes. ... This bound is this document's derivation.
+
+  > So a plan claims room for that many entries, as it claims its pages (C3.4). A plan the room cannot hold fails with
+  > `ENOMEM` when it is planned, as a value without a lag does in C3.3.
+
+  No decision follows, for two reasons:
+  - **Its first term.** A10's bound has a computation for torch (TT, below) and none for the program the code runs on
+    another framework's delegate: A10 names Pathways' tracer and, "For torch", torch.fx's, and A1 gives that program's
+    one function, not its calls. That program submits its whole run in one start (tools/e2b_replay.m; N4), so "the
+    number of its calls in the block" would be its run's length, which C3.3 keeps out of the plan (mesh.h, "Copies": "the
+    run's length is no input of mesh_plan"; design/disjoint-pages-revision-coordination.md, rule 3: "`executions` is no
+    input of the plan").
+  - **The claim against one channel in delivery order.** The channel is one area, delivery k in entry k mod its room
+    ("in delivery order, through a channel laid out once with the region"), and a lane's place stays at the call it
+    serves, so an entry is reused when the k + room-th delivery comes, not when its plan's lanes have taken it. The
+    derivation bounds how far a lane trails its own plan's deliveries; another plan's deliveries at the node, on cables
+    that lane does not serve, keep coming while it waits at its plan's call (for example, plan Q on one cable and plan P
+    on another at one node, P's lane waiting at P's call n for P's program there to reach it, Q's calls delivered there
+    meanwhile), so the plans' claims together do not bound the entries after it. Rooms one a plan would make "An entry
+    stays until every lane that carries its plan has taken its call" hold, but then a call whose plan does not yet stand
+    at a node has no room there, which "Each node runs the destinations' code of their Fig. 5, as written" delivers all
+    the same (Fig. 5 has no such condition).
+
+  What was built of the item's channel is CH2; what was not: the claim, its ENOMEM, and a room from the program's
+  schedule.
+- **Stop 2. CollectivePermute's insertion** (aot-compilation A4): "A2's partitioner inserts these two where GSPMD's
+  does. ... CollectivePermute goes into halo exchange, "We use the CollectivePermute operator to exchange halo data
+  between partitions" (§4.3), and into a pipeline's buffer shifting, "GSPMD will turn the buffer shifting into
+  cross-device communication via CollectivePermute" (§3.3)." GSPMD places it in the halo exchange of windowed operators
+  (§4.3: "e.g., Convolution, ReduceWindow") and of data formatting operators (Slice, Pad, Reverse, Reshape), in a
+  pipeline's shifting by Pad and Slice (§3.3, §4.6: "can be done with a single CollectivePermute") and in resharding "to
+  change device order" (§4.5). The partitioner partitions elementwise operators and Dot alone and refuses the rest
+  (_operator, A-T2), and the placement operand names one device mesh, so none of those places arises among the
+  operators it partitions, and _collective_permute is still reached by nothing. Reaching it needs the partitioner to
+  partition one of those operators by GSPMD's rules, which A4 does not ask in words (sub-agent T3's stop).
+
+### Commits
+
+- mesh 841cba44 (rdma/Makefile: HB), fe14e70a (rdma/mesh-graph.{c,h}: LX), e1525cc7 (rdma/mesh-dataflow.c,
+  rdma/mesh-map.h, rdma/mesh-call.h: SW), c027460b (rdma/mesh-flow.c, rdma/mesh-records.c, rdma/mesh.h: CH2, SW's
+  refusal), 8fd88d86 (rdma/mesh-flow.c, rdma/mesh.h: PM), ae433c04 (rdma/Makefile: the HiGHS rules after `all`),
+  24746ef1 (rdma/mesh-flow.c: a note), 7b429aa6, 210f6cfe and 7f0c60ea (rdma/mesh_compile.py: TA, TT; sub-agent T3), and
+  this record.
+- metal-microbench a7642449 (tools/e2b_replay.m: PM's note, a comment).
+- The rules' C9 hook (mesh .claude/settings.json, bin/mesh-c9-review.py on a commit) gave its remark on 210f6cfe
+  (C9a); the earlier parts' "none installed" read only .git/hooks. No remark was shown on the coordinating
+  implementer's commits.
+
+### Integration
+
+At mesh 7f0c60ea and metal-microbench a7642449, both trees clean but for untracked build artifacts and level with
+origin: `make -B -C rdma` 0 (the pinned tarball fetched and its SHA-256 checked OK, HiGHS's 216 objects built,
+mesh-flow, mesh-heartbeat, mesh-stat and libmesh.dylib, the bridge and libmesh linking HiGHS's objects), `make -B -C rdma
+native-audit` 0 (mesh-flow.s, mesh-call.s, mesh-dataflow.s), `make .build/e2b_replay` 0 (libmesh_metal.dylib and
+e2b_replay against the new libmesh), no warning or error. Each changed C file compiled alone first, the lifecycle files
+unchanged and compiling against the new mesh.h; tools/e2b_replay.m compiled alone; rdma/mesh_compile.py compiles
+(py_compile; the cache entry it made, not there before, removed). Nothing was run.
+
+### What this changes among the earlier parts' open items
+
+- "The revisions of 46ae8fdf", stop 1 (A10's analysis): answered by A10's revised text and built for torch (TT); its
+  bound reaches no plan, and the program on a delegate has none (stop 1 above).
+- That part's stop 2 (function B's output pages): answered by R4's revised text and found already done.
+- That part's stop 3 (no cycle where the deal splits a set): answered by item 5's revised text (σ one renaming over every
+  lane, "So the deal fixes positions, not members") and built (PM); M1 is reversed. PM2's reach is recorded.
+- That part's M4 (the one wait at the writer) and M5 (each port's copy of the channel): gone (CH2). The channel's room
+  is M3's, its claim stop 1.
+- "The start's wait for every port to load" (listed for removal at 46ae8fdf's end): gone (SW).
+- "The revisions of 46ae8fdf", LP's objective (C_max alone, C̄_j off the critical path the solver's vertex's): the second
+  objective fixes them (LX).
+- "Before any run: the bridge now loads libhighs": no longer; HiGHS is in the bridge and libmesh, built from its pinned
+  source by the Makefile (HB).
