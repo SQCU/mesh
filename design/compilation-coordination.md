@@ -422,7 +422,9 @@ file, calls streams_cancel).
   epoch, so every rank's names agree whichever saw the map move first; EEXIST ignores a standing plan of another
   serial, and the parent's delivery matches the standing plan of the ORDER's name whose `serial` is map_serial. The
   pending ORDERs are kept across a node's serial move (delivery is by arrival order); seqnum still returns to 0 at the
-  sequencer's own move.
+  sequencer's own move. A call that fails after closing its context's earlier claims (ESTALE at step 4, or the map
+  reader's error there) leaves ctx->epoch at the named epoch less 1, so the next call names that epoch again (C's
+  report: otherwise a failed replan would name epoch + 1 where a peer's succeeded replan kept the old one).
 - **C-weights** (V1 #8, V3 #5): every task weight > 0 (Sinnen and Sousa, Definition 1: "The positive weight w(n)") and
   every `page` weight > 0, so each link occupation lasts > 0 and each link's start order is a topological order (R5,
   MSCCLang §5.2); local edges cost 0 (T1').
