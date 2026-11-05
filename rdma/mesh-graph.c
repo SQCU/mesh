@@ -574,8 +574,13 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
   return end;
 }
 
-/* New (design/disjoint-pages-change-request.md, Appendix C, C3.3; design/disjoint-pages-revision-coordination.md, D5
-   and "The allocator"): no tag source.
+/* New (design/disjoint-pages-change-request.md, Appendix C, C3.3; design/compilation-coordination.md, U1;
+   design/disjoint-pages-revision-coordination.md, "The allocator"): no tag source.
+   2026-11-04, owner C2 (U1): cited to C3.3 and U1, where it cited design/disjoint-pages-revision-coordination.md, D5.
+   Why: D5 appears in neither Lam, Rau nor C3.3's text (design/aot-compilation-change-request.md, appendix item 1); the
+   least lags decide C3.3's tests at every larger distance by U1's reason, its consumer's (every walk into a write
+   passes its range's production; the programs' dependences order each node's events of t before those of t + 1).
+   What must stay: the algorithm as it is.
    mesh_graph_lags' heap: the vertices whose distance is set but not yet known least, a binary heap by (distance,
    vertex), heap[0] the first; place[v] v's index in it, UINT32_MAX where v is not in it.  a comes before b where its
    distance is less, a tie to the lower vertex. */

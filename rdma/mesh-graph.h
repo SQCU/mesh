@@ -5,9 +5,15 @@
    mesh_graph_list_schedule is new (design/page-queue-change-request.md, "The rule both ends compute");
    mesh_graph_left_edge is new (design/disjoint-pages-change-request.md, Appendix A, A3, "The assignment";
    design/disjoint-pages-coordination.md, "The allocator"); mesh_graph_lags is new (design/disjoint-pages-change-request.md, Appendix C, C3.3;
-   design/disjoint-pages-revision-coordination.md, D5 and "The allocator"); mesh_graph_bottom_levels and
-   mesh_graph_contention_schedule are new, and mesh_graph_reach gains `parent` (design/plan-to-bridge-change-request.md,
-   R5; design/compilation-coordination.md, "The graph module" and T3 to T5, Q3). */
+   design/compilation-coordination.md, U1; design/disjoint-pages-revision-coordination.md, "The allocator");
+   mesh_graph_bottom_levels and mesh_graph_contention_schedule are new, and mesh_graph_reach gains `parent`
+   (design/plan-to-bridge-change-request.md, R5; design/compilation-coordination.md, "The graph module" and T3 to T5,
+   Q3).
+   2026-11-04, owner C2 (design/compilation-coordination.md, U1): mesh_graph_lags' source cited to C3.3 and U1, where it
+   cited design/disjoint-pages-revision-coordination.md, D5.  Why: D5 appears in neither Lam, Rau nor C3.3's text
+   (design/aot-compilation-change-request.md, appendix item 1); the least lags decide C3.3's tests at every larger
+   distance by U1's reason, its consumer's (every walk into a write passes its range's production; the programs'
+   dependences order each node's events of t before those of t + 1).  What must stay: the function as it is. */
 #ifndef MESH_GRAPH_H
 #define MESH_GRAPH_H
 #include <stddef.h>
@@ -140,9 +146,10 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
 /* 2026-11-04, sub-assignment 2: mesh_graph_happens_before (b399746f), a bit table of the paths over a template
    unrolled across `iterations` executions, is removed with its helpers in mesh-graph.c.  Why: C3.3's unroll factor u,
    each value's L and every interference test come from least lags over the template alone (mesh_graph_lags;
-   design/disjoint-pages-change-request.md, C3.3; design/disjoint-pages-revision-coordination.md, D5), never from a
-   table over the run's executions, which made a plan's compile time grow with the run's length (C1); its last caller,
-   mesh-collective.c's 2026-11-03 allocator, went in baede218.  What must stay: nothing in a plan's graph computation
+   design/disjoint-pages-change-request.md, C3.3; design/compilation-coordination.md, U1, where this note cited
+   design/disjoint-pages-revision-coordination.md, D5, 2026-11-04), never from a table over the run's executions,
+   which made a plan's compile time grow with the run's length (C1); its last caller, mesh-collective.c's 2026-11-03
+   allocator, went in baede218.  What must stay: nothing in a plan's graph computation
    depends on the run's length; a lag-0 cycle is found by mesh_graph_order over the lag-0 edges alone (EDEADLK), as
    this function found one and mesh-collective.c now does. */
 /* The least total lag over walks of one or more edges from source[s] to target[x] (s < sources, x < targets), in the
