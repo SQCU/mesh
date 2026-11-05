@@ -415,8 +415,8 @@ struct hdr {
   /* `client`: never written from 110, kept by name (design/compilation-coordination.md, L3: mesh-heartbeat.c
      replace_turn, a lifecycle file, reads it with `client_start` as its one client holder, and so finds none; open
      for the operator); each claim's holder is its head's owner and start (struct mesh_buffer's note).  `serial`: the
-     count that mints client words (mesh-dataflow.h mesh_attach) and claim generations, masked to 31 bits; it only
-     rises */
+     count that mints client words (mesh-dataflow.h mesh_attach, masked to 31 bits) and claim generations
+     (atomic_fetch_add + 1, unmasked, never 0: design/compilation-coordination.md, C-gen); it only rises */
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
   /* the page lists' area and room until 110 (`hop_off`, `hop_capacity`; struct mesh_hop's note), never read or

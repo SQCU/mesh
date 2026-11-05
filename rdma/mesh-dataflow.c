@@ -495,6 +495,42 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
   return out->self==MESH_ABSENT?ENOENT:0;
 }
 
+/* mesh-map.h mesh_ports_named, the start's port set, one copy (design/compilation-coordination.md, Q4'): the hops'
+   nodes a set of map indices, then each reach entry of this node's record whose peer is the record of a named index
+   (mesh_map_order: a node's index its place in ascending node-id order), its port's bit.  mesh_ports_held calls it on
+   its copy of the map, and the bridge parent's delivery (mesh-records.c) on the bridge's own map.  2026-11-04, owner
+   L, the coordinator's ruling Q4': moved out of mesh_ports_held, where the set was built inside the start's wait.
+   What must stay: one computation of the set for both its readers */
+uint32_t mesh_ports_named(const struct hdr *region,const struct mesh_state *state,const struct mesh_record *records,
+                          uint32_t count,int *error){
+  struct hdr *m=(struct hdr *)region;
+  *error=0;
+  const uint64_t entries=state->entries,at=state->hops;
+  if(!entries)return 0;
+  if(at>m->length || entries>(m->length-at)/sizeof(struct mesh_hop)){*error=EINVAL;return 0;}
+  if(count>MESH_NODES_MOST){*error=E2BIG;return 0;}
+  uint32_t order[MESH_NODES_MOST],self=count;
+  mesh_map_order(records,count,order);
+  for(uint32_t i=0;i<count;i++)if(records[i].node==m->node)self=i;
+  if(self==count){*error=ENOENT;return 0;}
+  const struct mesh_hop *hops=mesh_hops(m,state);
+  uint64_t named=0;
+  for(uint64_t k=0;k<entries;k++){
+    if(hops[k].node>=count){*error=EINVAL;return 0;}
+    named|=UINT64_C(1)<<hops[k].node;
+  }
+  const struct mesh_record *own=records+self;
+  uint32_t ports=0;
+  for(uint32_t i=0;i<own->reached && i<MESH_PORTS;i++)
+    for(uint32_t j=0;j<count;j++)
+      if(named>>j&1 && records[order[j]].node==own->reach[i].node){
+        if(own->reach[i].port>=MESH_PORTS){*error=EINVAL;return 0;}
+        ports|=UINT32_C(1)<<own->reach[i].port;
+        break;
+      }
+  return ports;
+}
+
 /* design/prepared-machine.md#M06 */
 /* design/algorithm-sources.md#programcopy */
 /* The configured latch (hdr `configured`'s compare-exchange) and the unbounded spin on each link's `prepared` are gone:
@@ -503,7 +539,7 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
    `refused[p]` where it refused it (mesh-flow.c); a plan whose `serial` is not the map's is stale (ESTALE).  The ports
    waited on are every port whose peer a hop names: the cables this node's own record lists (mesh-ports.c
    record_reach: a port whose link is up), in the map at the plan's serial, to the nodes the hops name (map indices,
-   struct mesh_hop `node`).  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read and the ports' wait
+   struct mesh_hop `node`): mesh_ports_named, the set's one copy, which the bridge parent's delivery tests too (Q4').  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read and the ports' wait
    together.  A spin, bounded: `held` and `refused` are stored with no wake.  A port is done once its `held` bit reads
    set (acquire), or its `refused` code reads not 0, which is returned; a port lost before it loads the plan sets
    neither, and the start ends at the bound with ETIMEDOUT.  A plan with no hop here waits on no port.
@@ -521,40 +557,23 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
    (`state`; mesh.h mesh_hops).  What must stay: the wait bounded by one deadline; the raise only after every named
    port holds the plan; EINVAL for entries or ports outside the region */
 static int mesh_ports_held(struct mesh_ctx *context,struct mesh_state *state){
-  struct hdr *m=context->M;
   const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
-  const uint64_t entries=state->entries,at=state->hops;
-  if(!entries)return 0;
-  if(at>context->len || entries>(context->len-at)/sizeof(struct mesh_hop))return EINVAL;
+  if(!state->entries)return 0;
   struct mesh_record r[MESH_NODES_MOST];
-  uint32_t count,order[MESH_NODES_MOST];
+  uint32_t count;
   uint64_t serial;
   int error=mesh_map_copy(context,deadline,r,&count,&serial);
   if(error)return error;
   if(state->serial!=serial)return ESTALE;
-  mesh_map_order(r,count,order);
-  uint32_t self=count;
-  for(uint32_t i=0;i<count;i++)if(r[i].node==m->node)self=i;
-  if(self==count)return ENOENT;
-  const struct mesh_hop *hops=mesh_hops(m,state);
-  uint64_t named=0;
-  for(uint64_t k=0;k<entries;k++){
-    if(hops[k].node>=count)return EINVAL;
-    named|=UINT64_C(1)<<hops[k].node;
-  }
-  uint32_t port[MESH_PORTS],ports=0;
-  for(uint32_t i=0;i<r[self].reached && i<MESH_PORTS;i++)
-    for(uint32_t j=0;j<count;j++)
-      if(named>>j&1 && r[order[j]].node==r[self].reach[i].node){port[ports++]=r[self].reach[i].port;break;}
-  for(uint32_t i=0;i<ports;i++){
-    if(port[i]>=MESH_PORTS)return EINVAL;
-    for(;;){
-      if(atomic_load_explicit(&state->held,memory_order_acquire)>>port[i]&1)break;
-      const int32_t code=atomic_load_explicit(&state->refused[port[i]],memory_order_acquire);
+  const uint32_t ports=mesh_ports_named(context->M,state,r,count,&error);
+  if(error)return error;
+  for(uint32_t p=0;p<MESH_PORTS;p++)
+    for(;ports>>p&1;){
+      if(atomic_load_explicit(&state->held,memory_order_acquire)>>p&1)break;
+      const int32_t code=atomic_load_explicit(&state->refused[p],memory_order_acquire);
       if(code)return code;
       if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline)return ETIMEDOUT;
     }
-  }
   return 0;
 }
 /* 2026-11-04, sub-assignment 1 (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-

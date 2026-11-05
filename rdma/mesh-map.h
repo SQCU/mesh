@@ -110,6 +110,18 @@ int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
 struct mesh_cable { uint32_t key[2],qps; uint64_t bandwidth; };
 __attribute__((visibility("hidden")))
 uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,struct mesh_cable *out /* room MESH_PORTS */);
+/* The start's port set, one copy (design/compilation-coordination.md, Q4' and "The region": mesh_transfers_start waits
+   on it, and the bridge parent's delivery tests it): a bit a port index, the ports whose peer a hop of the plan names,
+   that is this node's record's reach entries (hdr `node`'s record among records[0, count), as the map holds them) to
+   the nodes its hops name (struct mesh_hop `node`, map indices: ascending node-id order among records[0, count)).  0
+   with *error 0 where the plan has no hop here; else *error EINVAL where its entries lie outside the region (hdr
+   `length`), a hop names no record or a reach entry's port is MESH_PORTS or more, E2BIG past MESH_NODES_MOST records
+   (no plan is made on such a map: mesh-dataflow.h mesh_nodes_read), ENOENT where no record is this node's, and the
+   return 0.  The records are read as given: the caller holds them whole (a copy under the map's seqlock, or the
+   bridge's own map).  Hidden, as mesh_cables: the library and the bridge's images, built from mesh-dataflow.c, call it */
+__attribute__((visibility("hidden")))
+uint32_t mesh_ports_named(const struct hdr *,const struct mesh_state *,const struct mesh_record *records,uint32_t count,
+                          int *error);
 
 /* moved from mesh.h (review R1, C1): the region's layout, which sizes the link table (struct mesh_link_info); a client
    never lays out a region, the bridge does (mesh-link.c) */
