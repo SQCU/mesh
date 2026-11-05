@@ -971,6 +971,11 @@ static int order_before(const void *context, uint32_t a, uint32_t b) {
      only after every vertex an edge into it leaves (the order is topological with respect to the dependencies), and
      at each place the vertex taken is the first of the ready ones by the priority, the greatest first, a tie to the
      lower vertex (GO3).  MSCCLang names no tie; the lower index is the one every party computes alike.
+   - The priority is the consumer's operand.  Where this differs from the reference algorithm
+     (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO3′): MSCCLang §5.2 step (1)'s own
+     priority is "the depth (maximum hops from a root node) and reverse depth (maximum hops to a leaf node)", counted
+     in hops; mesh-collective.c's is R5's, the bottom level by eq. (7) over the weights (GO2).  The heap is step 3's
+     whichever priority it is given.
    - The heap's order is total, so the vertex it gives first among those in it does not depend on the order in which
      they entered: every party computes the same places from the same operands (F. B. Schneider, ACM Comput. Surv.
      1990, as R5 cites it).  Arithmetic: comparisons alone.

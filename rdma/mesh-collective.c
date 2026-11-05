@@ -74,7 +74,7 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,struct mesh_section section,
 
 /* a demand: the declared transfers of one identity from one source, one range to each of their destinations */
 struct plan_demand {
-  uint32_t source,identity,first;         /* first: its first declared transfer, which numbers it (T6) */
+  uint32_t source,identity,first;         /* first: its first declared transfer, which numbers it (GO5) */
   uint32_t mine;                          /* the index in `values` of this node's value of it (this node its source or
                                              a destination), else MESH_ABSENT */
   uint32_t tree,trees;                    /* its trees, plan `tree` [tree, tree + trees) */
@@ -118,12 +118,14 @@ struct plan_value { uint32_t demand,node,write,read,reads,source; };
    demand's range is a set and its page is on tree j (the solve's trees grouped by demand, p->tree's index), else 0.
    Its group (GO4): the entries of its nonzero `set`, `node` and `direction`, else the entry alone; `at` its group's
    least `place`, the place of the set's first page in that order (plan_schedule).
-   2026-11-04, owner C3 (GO4; GO4′: "`walk` goes with T6's ties"): `walk` (the hop's place in plan_walk's order, T6's
-   tie), `start` (its link's scheduled start of its page, T6), `earliest` (its group's least start) and `least` (its
-   group's least walk, S3) are gone, `place` and `at` in their place.  Why: each cable's list is a subsequence of one
-   global topological order built as MSCCLang §5.2 states in its step 3, and "Scheduled start times do not order the
-   lists" (design/plan-to-bridge-change-request.md, R5), which overturns T6 and S3.  What must stay: every other field
-   as plan_walk assigns it. */
+   2026-11-04, owner C3 (GO4): `walk` (the hop's place in plan_walk's order, T6's tie), `start` (its link's scheduled
+   start of its page, T6), `earliest` (its group's least start) and `least` (its group's least walk, S3) are gone,
+   `place` and `at` in their place.  Why: each cable's list is a subsequence of one global topological order built as
+   MSCCLang §5.2 states in its step 3, and "Scheduled start times do not order the lists"
+   (design/plan-to-bridge-change-request.md, R5), which overturns T6 and S3.  What must stay: every other field as
+   plan_walk assigns it.
+   2026-11-05, owner C3 (design/compilation-coordination.md, "The documents' revisions of edd4b583", "Amendments
+   during the work (2026-11-05)", GO4′: "`walk` goes with T6's ties"): the removal of `walk` cited to the ruling. */
 struct plan_entry { uint32_t value,node,direction,demand,field,communication,set,place,at; uint64_t page; };
 struct plan {
   struct mesh_ctx *context;
@@ -133,7 +135,7 @@ struct plan {
   uint32_t givens;
   uint32_t *named;                        /* named[j]: the first declared transfer of the demand whose range values[j]
                                              is here, MESH_ABSENT where none (a local value) */
-  struct plan_demand *demand;             /* the demands, by their first declared transfer (T6) */
+  struct plan_demand *demand;             /* the demands, by their first declared transfer (GO5) */
   uint32_t demands,n,self,copies;         /* copies: u (plan_unroll) */
   uint64_t serial;
   uint32_t *of;                           /* of[i]: declared[i]'s demand, p->demand[of[i]] */
@@ -917,12 +919,15 @@ static uint32_t plan_entry_side(const void *context,size_t k){
      (7)'s bottom level is "the length of the longest path leaving the node", so the longest); every dependency costs
      0 (a remote edge's time is in its communications; a local one is free, Definition 2, T1').  Each quotient the one
      the schedule computes for that route entry, one correctly rounded /, and the max by comparisons, so every rank's
-     levels agree.
+     levels agree.  Where this differs from the reference algorithm (design/compilation-coordination.md, "The
+     documents' revisions of edd4b583", GO3′): MSCCLang §5.2 step (1)'s own priority is "the depth (maximum hops from
+     a root node) and reverse depth (maximum hops to a leaf node)", counted in hops; the priority here is R5's, the
+     bottom level by eq. (7) over the weights (GO2), and step 3's heap orders by it.
    - The order (GO3): MSCCLang §5.2, step 3: "Sort instructions into a global topological order with respect to their
      dependencies with a heap using the priority to order instructions" (mesh-graph.h mesh_graph_heap_order): the
-     greatest bottom level first (R5: "Tasks are taken in decreasing bottom level"; HLFET's priority), a tie to the
-     lower instruction, the same at every rank (F. B. Schneider, Implementing fault-tolerant services using the state
-     machine approach, ACM Comput. Surv., 1990).
+     greatest bottom level first (R5: "Tasks are taken in decreasing bottom level"; HLFET's priority, where step (1)'s
+     is the depth and reverse depth in hops: GO3′, above), a tie to the lower instruction, the same at every rank (F.
+     B. Schneider, Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).
    - The lists (GO4): each of this node's entries (plan_walk; every field as it assigns them) takes its communication's
      place (`place`).  A set's entries on one node pair and direction (S1, S2: its nonzero `set`, `node` and
      `direction`, tree j's pages over that pair) take consecutive places at the place of the first of them in that
@@ -1126,7 +1131,9 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
 }
 
 /* mesh-collective.h mesh_plan.  The demands: the declared transfers grouped by source and identity, a range to each of
-   its destinations, numbered by their first declared transfer (design/compilation-coordination.md, T6).  The routing:
+   its destinations, numbered by their first declared transfer (design/compilation-coordination.md, "The documents'
+   revisions of edd4b583", GO5: "The demands stay numbered by their first declared transfer (T6's other half, not an
+   order of the lists)").  The routing:
    every demand at once over the map's node graph (a node pair an edge where the map gives it a capacity both ways, of
    the lesser of the two: mesh-dataflow.h struct mesh_nodes `capacity`, D.2's node pairs and their capacities from the
    map, and nothing else of how the bridge carries pages), a destination its source reaches by no path refused
@@ -1277,7 +1284,8 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,const st
   for(uint32_t k=0;k<count;k++)
     placed[key[k].index]=!k || key[k].source!=key[k-1].source || key[k].identity!=key[k-1].identity?key[k].index:
                          placed[key[k-1].index];
-  /* the demands numbered by their first declared transfer (design/compilation-coordination.md, T6): one opened at each
+  /* the demands numbered by their first declared transfer (design/compilation-coordination.md, "The documents'
+     revisions of edd4b583", GO5, T6's other half): one opened at each
      transfer that is its range's first, in declared order */
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;

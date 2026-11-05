@@ -314,16 +314,19 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      reading and writing, CACM 20(11), 1977, "Message Buffer"; design/compilation-coordination.md, "The documents'
      revisions of edd4b583", DL1).  The bridge parent's alone; it only rises.  The parent delivers its pending ORDERs
      in arrival order, which is sequence order (Défago et al., Fig. 5), the head first, with no timeout and no skip,
-     the head matched to a standing plan of its (group, epoch) on this node's map serial (DL2).  For the plan's next
-     execution t, the greater of the ORDER's `first` and `released`, numbered `sequence` + t - `first`: where t >= u
-     and some port of the plan's port set that has not refused the plan has `taken[p]` < t - u + 1, Lamport's sender
-     waits ("wait until ms < mr + P"), the head staying until a later turn of the parent's event loop, nobody
-     blocking; else the number is stored in sequence word t mod u, then `released` t + 1 (release): "put message in
-     B[ms mod P]; ms := ms + 1".  Before a plan's first number (its `released` 0) the parent adds 1 to hdr `plans`
-     (release, then wakes it: DL7, hdr `plans`' note), and hdr `plans` is woken after each turn that published.  The
-     head's wait holds every later ORDER behind it, since the deliveries are in sequence order: it is Lamport's
-     sender's wait for the buffer the appendix item names, not a hold of a plan's batch (DL2).  A port takes execution
-     t of the plan only where t < `executions` (D2) and its number is published (t < `released`, acquire).
+     the head matched to a standing plan of its (group, epoch) on this node's map serial (DL2).  The plan's next
+     execution is t = `released` (DL2′): where `first` <= t < `end`, it is numbered `sequence` + t - `first`; where
+     `end` <= t, the ORDER leaves the head, its executions all published; where `first` > t, the head stays, said on
+     the bridge's log once a head (Défago et al., Fig. 5: the message numbered `nextdeliver` has not arrived).  For t
+     numbered: where t >= u and some port of the plan's port set that has not refused the plan has `taken[p]` < t - u
+     + 1, Lamport's sender waits ("wait until ms < mr + P"), the head staying until a later turn of the parent's event
+     loop, nobody blocking; else the number is stored in sequence word t mod u, then `released` t + 1 (release): "put
+     message in B[ms mod P]; ms := ms + 1".  Before a plan's first number (its `released` 0) the parent adds 1 to hdr
+     `plans` (release, then wakes it: DL7, hdr `plans`' note), and after each turn that published it raises hdr
+     `plans` (mesh_notify: add 1, release, then wake; DL9).  The head's wait holds every later ORDER behind it, since
+     the deliveries are in sequence order: it is Lamport's sender's wait for the buffer the appendix item names, not a
+     hold of a plan's batch (DL2).  A port takes execution t of the plan only where t < `executions` (D2) and its
+     number is published (t < `released`, acquire).
      2026-11-04, owner C3 (DL2 to DL4; design/aot-compilation-change-request.md, appendix item 2, "Delivery at a
      node"): reversing Q4's hold and O2's reason for it (an ORDER delivered only once every port holding the plan
      released before had served it, `released` then its `end`, so this node's cables carried one plan's batch at a
@@ -332,21 +335,35 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      plans' sequences (D. E. Knuth, The Art of Computer Programming vol. 3, §5.4.1), so released executions of every
      plan interleave on each cable and nothing holds.  What must stay: a port takes t only below `executions` and
      `released`; `released` only rises.
+     2026-11-05, owner C3 (design/compilation-coordination.md, "The documents' revisions of edd4b583", the amendments
+     on the reviews, DL2′ and DL9; reviews X1 #2, #7 and X3 #4): the next execution `released`, where it was the
+     greater of the ORDER's `first` and `released`, and hdr `plans` raised after a turn that published, where it was
+     woken without a raise.  Why: the greater of the two let `released` pass executions whose words were never
+     written (an earlier ORDER of the plan that never reached this node), so a port would read them as published with
+     a stale number, and Lamport's ms advances one message at a time; a wake with no raise that lands between a
+     waiter's read of `plans` and its wait is lost until MESH_PAUSE_NS.  What must stay: delivery in sequence order,
+     no timeout and no skip; `released` only rises.
    - `taken[p]`: Lamport's mr, port p's (DL1): the least execution of the plan whose number port p may still read,
-     port p reading no number below it again; for a plan port p carries nothing of, or has cancelled or ended,
-     `released` as it rises.  Port p's alone; it only rises (release), and the port wakes hdr `plans` (without raising
-     it) where it rose.  Port p serves the executions of every plan it carries in sequence-number order, a k-way merge
-     (Knuth vol. 3, §5.4.1, as the appendix item states it: of each plan its next execution there, the least number
-     among them next; each of the port's own readers, each direction, merging on its own, the bridge's: DL3):
-     execution n of a plan a candidate where n < its `released` (acquire), its number its copy's word n mod u ("wait
-     until mr < ms; read message in B[mr mod P]"), every candidate read, then every plan's `released` and hdr `plans`
-     again (Lamport's "writing data elements in one order and reading them in the opposite order"), so the least number
-     over the second reading is next.  Both ends of a cable hold the same plans and the same records and read the same
-     numbers, so they post the same order (the item: "they merge alike"; DL3).
+     port p reading no number below it again.  For a plan port p carries nothing of, or has cancelled, it is
+     `released` as that rises (taken_tell, each pass); for a plan port p ends, it is raised to `released` once, at the
+     end, and the port then holds the plan no more (plan_end).  Port p's alone; it only rises (release), and the port
+     raises hdr `plans` (mesh_notify: add 1, release, then wake; DL9) where it rose.  Port p serves the executions of
+     every plan it carries in sequence-number order, a k-way merge (Knuth vol. 3, §5.4.1, as the appendix item states
+     it: of each plan its next execution there, the least number among them next; each of the port's own readers, each
+     direction, merging on its own, the bridge's: DL3): execution n of a plan a candidate where n < its `released`
+     (acquire), its number its copy's word n mod u ("wait until mr < ms; read message in B[mr mod P]"), every
+     candidate read, then every plan's `released` and hdr `plans` again (Lamport's "writing data elements in one order
+     and reading them in the opposite order"), so the least number over the second reading is next.  Both ends of a
+     cable hold the same plans and the same records and read the same numbers, so they post the same order (the item:
+     "they merge alike"; DL3).
      2026-11-04, owner C3 (DL1, DL4): `taken[p]` where `served[p]` was (the executions port p had served whole, every
      record of them done, which Q4's hold read).  Why: the hold is gone; a port's word is now the receiver's count of
      the buffer it no longer reads.  What must stay: port p its one writer; the word only rises; `released` for a plan
      the port carries nothing of.
+     2026-11-05, owner C3 (reviews X1 #4 and #7; DL9): an ended plan's `taken[p]` raised to `released` once, at its
+     end, where this note said it follows `released` as it rises (which a plan the port has freed cannot); and hdr
+     `plans` raised where `taken[p]` rose, where it was woken without a raise (Q4′'s form, overturned with Q4).  What
+     must stay: port p its one writer; the word only rises.
    - The sequence words (`sequences`, copy c's at `sequences` + 8 c): Lamport's B[c], P = u (DL1; R2, C3.3: "execution t
      runs copy t mod u"): word c the sequence number of the execution t, t mod u = c, the parent published last in
      copy c, struct mesh_order `sequence` + t - `first` of the ORDER that holds t.  The bridge parent's alone.  Where
@@ -577,16 +594,22 @@ struct hdr {
   /* 110 (design/compilation-coordination.md, "The region"): a count that only rises.  Every publication of a plan
      (mesh_plan), every close of a claim (mesh-dataflow.h mesh_claim_close, mesh_plan_retire, mesh_retire), every
      start (mesh-call.h mesh_transfers_start) and the bridge parent's first publication of a plan's sequence numbers
-     (mesh-records.c orders_deliver, before it stores the plan's first number, its `released` 0) adds 1 (release), then
-     wakes it (mesh_notify, OS_SYNC_WAKE_BY_ADDRESS_SHARED); the ports read it once a pass and walk the claims' heads
-     where it moved.  Many writers, as a count has; never reset.
+     (mesh-records.c orders_deliver, before it stores the plan's first number, its `released` 0), the bridge parent
+     after each turn of orders_deliver that published, and a port where a plan's `taken[p]` rose (mesh-flow.c
+     taken_tell, plan_end) add 1 (release), then wake it (mesh_notify, OS_SYNC_WAKE_BY_ADDRESS_SHARED); the ports read
+     it once a pass and walk the claims' heads where it moved.  Many writers, as a count has; never reset.
      2026-11-05, owner C3 (design/compilation-coordination.md, "The documents' revisions of edd4b583", "Amendments
      during the work (2026-11-05)", DL7): the bridge parent's first publication of a plan's sequence numbers named
      among the raisers.  Why: a plan stands at mesh_plan's store of its head's publication `state`, before mesh_plan
      raises this count, so a parent can publish the plan's first number, and a later plan's, before that raise; a
      port's merge (DL3: every candidate read, then every plan's `released` and this count again, in Lamport's opposite
      order) must see every plan that can hold a smaller number before it takes a later one, and a walk that reads the
-     parent's raise reads the plan standing.  What must stay: a count that only rises, many writers, never reset */
+     parent's raise reads the plan standing.  What must stay: a count that only rises, many writers, never reset.
+     2026-11-05, owner C3 (the amendments on the reviews, DL9; reviews X1 #7, V1 #9): the parent's turn that
+     published and a port's rise of `taken[p]` named among the raisers, where each woke the count without raising it.
+     Why: a wake with no raise that lands between a waiter's read of `plans` and its wait is lost until MESH_PAUSE_NS,
+     and the delivery now hands off between the parent and its ports once per execution past the u-th
+     (os_sync_wait_on_address returns at once where the word has moved).  What must stay: as above */
   _Atomic uint64_t plans;
 };
 /* every field at its 106 offset, the 108 fields after them, the 109 field after those, the 110 field after that (the
