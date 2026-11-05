@@ -11,15 +11,47 @@ CPPFLAGS += -DMESH_PROVIDER_RESERVED_QPS=$(MESH_PROVIDER_RESERVED_QPS)
 # mesh-graph.c's exp, log, flow and pack (review R1, round 2); the tag had the same hole.  Every node builds with its own
 # SDK, so the contraction is refused here for every translation unit, not left to one file's pragma
 CFLAGS_EXACT = -ffp-contract=off
-# HiGHS 1.15.1, Homebrew's `highs` (design/plan-to-bridge-change-request.md R5, Code: "rdma/Makefile: links the HiGHS
-# library through its C API (highs/interfaces/highs_c_api.h)"), wherever mesh-graph.c is compiled and linked: its
-# headers from the directory its pkg-config Cflags name, as a system include, since highs_c_api.h declares a static
-# function it never defines (design/compilation-coordination.md, "The revisions of 46ae8fdf", LP8); its library by
-# its absolute install name (otool -D: /opt/homebrew/opt/highs/lib/libhighs.1.dylib), so no rpath.  Installing it on
-# the members is the operator's step (R5)
-HIGHS ?= /opt/homebrew
-HIGHS_CFLAGS = -isystem $(HIGHS)/include/highs
-HIGHS_LIBS = -L$(HIGHS)/lib -lhighs
+# HiGHS (design/plan-to-bridge-change-request.md R5, Code: "rdma/Makefile builds HiGHS from its source at a pinned
+# release and links it statically.  The release is tag v1.15.1, commit 04024d701f79feb8e2f18bc3df0dffc04ef05088, fetched
+# as https://github.com/ERGO-Code/HiGHS/archive/refs/tags/v1.15.1.tar.gz and checked against SHA-256 a840d269...").
+# Fetched and checked as metal-microbench's Makefile fetches its pinned sources (E2B_REFERENCE_REVISION with
+# E2B_REFERENCE_SHA256: curl --fail, shasum -a 256 --check, then the move).  Built with cc and c++ alone (R5: "It is
+# built with the tools every member has, cc and c++"), as the source's own BUILD.bazel builds its cc_library "highs":
+# its srcs globs (HIGHS_SOURCES), its copts (-fexceptions -Wno-unused-variable -Wno-unused-but-set-variable), its
+# defines (CUPDLP_CPU), its includes (extern, extern/catch, highs, and the root where its copy_file puts HConfig.h, a
+# copy of highs/HConfig.h.bazel.in) and its linkopts (-lpthread).  R5: "It takes the same -ffp-contract=off as
+# mesh-graph.c and no fast-math"; -O2 as mesh-graph.c.  -std=c++17 and -DNDEBUG, which BUILD.bazel leaves to the
+# toolchain, are design/compilation-coordination.md, "The revisions of f3f7cf46", HB1.  Linked statically as its
+# objects (HB2), with libc++ for them, wherever mesh-graph.c is linked; mesh-graph.c includes the C API, "the C API is
+# highs/interfaces/highs_c_api.h of that source" (R5), from the source's highs directory as a system include, since
+# highs_c_api.h declares a static function it never defines ("The revisions of 46ae8fdf", LP8), and HConfig.h from
+# the root.  Nothing is installed by hand, and nothing comes from Homebrew (R5)
+HIGHS_TAG = v1.15.1
+HIGHS_SHA256 = a840d269dff2fafb371dd247df13ad5e026d7ce3b35ad3dc1eedd59bf0c2fb16
+HIGHS_TARBALL = .build/highs/$(HIGHS_TAG).tar.gz
+HIGHS = .build/highs/HiGHS-1.15.1
+HIGHS_BUILT = .build/highs/built
+HIGHS_SOURCES = highs/interfaces/highs_c_api.cpp highs/HighsExternalApi.cpp highs/HighsExternalDeps.cpp highs/io/*.cpp \
+  highs/io/filereaderlp/*.cpp highs/ipm/*.cpp highs/ipm/ipx/*.cc highs/ipm/basiclu/*.c highs/ipm/hipo/ipm/*.cpp \
+  highs/ipm/hipo/factorhighs/*.cpp highs/ipm/hipo/auxiliary/*.cpp highs/lp_data/*.cpp highs/mip/*.cpp highs/model/*.cpp \
+  highs/parallel/*.cpp highs/pdlp/*.cpp highs/pdlp/cupdlp/*.c highs/pdlp/hipdlp/*.cc highs/presolve/*.cpp \
+  highs/qpsolver/*.cpp highs/simplex/*.cpp highs/test_kkt/*.cpp highs/util/*.cpp
+HIGHS_FLAGS = -O2 -DNDEBUG $(CFLAGS_EXACT) -fexceptions -Wno-unused-variable -Wno-unused-but-set-variable -DCUPDLP_CPU \
+  -I. -Iextern -Iextern/catch -Ihighs
+HIGHS_CFLAGS = -isystem $(HIGHS)/highs -isystem $(HIGHS)
+HIGHS_LIBS = .build/highs/obj/*.o -lc++ -lpthread
+$(HIGHS_TARBALL):
+	mkdir -p .build/highs
+	curl --fail --location --output $@.part https://github.com/ERGO-Code/HiGHS/archive/refs/tags/$(HIGHS_TAG).tar.gz
+	echo '$(HIGHS_SHA256)  $@.part' | shasum -a 256 --check
+	mv $@.part $@
+$(HIGHS_BUILT): $(HIGHS_TARBALL) Makefile
+	tar -xzf $(HIGHS_TARBALL) -C .build/highs
+	cp $(HIGHS)/highs/HConfig.h.bazel.in $(HIGHS)/HConfig.h
+	mkdir -p .build/highs/obj
+	cd $(HIGHS) && for f in $(HIGHS_SOURCES); do o=../obj/$$(echo $$f | tr / _).o; \
+	  case $$f in *.c) cc $(HIGHS_FLAGS) -c $$f -o $$o;; *) c++ -std=c++17 $(HIGHS_FLAGS) -c $$f -o $$o;; esac || exit 1; done
+	touch $@
 HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h
 # the resident bridge (design/page-queue-change-request.md): its main and event loop (mesh-link.c), its ports' children
 # from the parent's side (mesh-children.c) and their own (mesh-child.c), discovery and pairing (mesh-ports.c), the
@@ -32,7 +64,7 @@ native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c $(HEADERS) Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
-mesh-flow: $(BRIDGE) $(HEADERS) Makefile
+mesh-flow: $(BRIDGE) $(HEADERS) $(HIGHS_BUILT) Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -Wall -Wextra -Werror -o .build/$@ $(BRIDGE) -lrdma $(HIGHS_LIBS) -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
@@ -44,7 +76,7 @@ mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-map.h mesh-holders.h Makefile
 # mesh_head_after), so it links mesh-dataflow.c, as the bridge and libmesh do
 mesh-stat: mesh-stat.c mesh-dataflow.c mesh.h mesh-map.h mesh-holders.h mesh-dataflow.h mesh-call.h
 	cc -O2 -o $@ mesh-stat.c mesh-dataflow.c
-libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) Makefile
+libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) $(HIGHS_BUILT) Makefile
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS)
 clean:
 	rm -f $(BINS)
