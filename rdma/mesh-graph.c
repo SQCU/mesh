@@ -4,11 +4,13 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
-/* HiGHS 1.15.1's C API (design/plan-to-bridge-change-request.md R5, Code: "links the HiGHS library through its C API
-   (highs/interfaces/highs_c_api.h)"), reached from the directory its own pkg-config Cflags name (.../include/highs,
-   where the header's own includes, "lp_data/..." and "util/...", resolve), as a system include (-isystem), since it
-   declares a static function it never defines, Highs_compilationDate (rdma/Makefile HIGHS_CFLAGS; "The revisions of
-   46ae8fdf", LP8) */
+/* HiGHS 1.15.1's C API (design/plan-to-bridge-change-request.md R5, Code: "The C API is highs/interfaces/highs_c_api.h
+   of that source"), reached from the source's highs directory (where the header's own includes, "lp_data/..." and
+   "util/...", resolve) and its root (where its HConfig.h is), as system includes (-isystem), since it declares a
+   static function it never defines, Highs_compilationDate (rdma/Makefile HIGHS_CFLAGS; "The revisions of 46ae8fdf",
+   LP8).  2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", HB): the pinned source the
+   Makefile fetches, checks and builds, where it was Homebrew's install (R5: "Nothing is installed by hand, and nothing
+   comes from Homebrew").  What must stay: the header included as <interfaces/highs_c_api.h> */
 #include <interfaces/highs_c_api.h>
 
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_reach, 6379e868; `parent` added
@@ -808,8 +810,19 @@ static int completion_edge_before(const void *a, const void *b) {
    - Termination: a row is added only where the solution falls short of it by more than the tolerance times 1 + its
      right side; HiGHS reports a solution optimal only within that tolerance of every row it holds, so no row is added
      twice, and a resource has finitely many sets (LP3).
-   completion[j] the last solution's C_j.  Every allocation precedes the first output written, and an error writes
-   none.  Cost: the rows' building O(V + E log E); each round O(V log V) for the separation and HiGHS's own solve. */
+   - The second objective (R5 at mesh f3f7cf46: "Then, over (14)'s optimal solutions, minimize Σ_j C_j: Chen's (1) and
+     Hall et al.'s (1) with unit weights.  The two are one lexicographic linear program (H. Isermann, Linear
+     lexicographic optimization, OR Spektrum 4, 1982).  They are solved in sequence, the second with C_max held at the
+     first's optimum"): where the first's rounds end, no row violated (`second` 0), C_max's bounds are both its value
+     in that optimal solution, its cost 0 and every C_j's cost 1, and the rounds go on, the rows kept, the same
+     separation, until no row is violated again.
+     2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", LX): new.  Why: R5, "(Corrected
+     2026-11-05: the text before minimized C_max alone.)"; "The second objective fixes C̄_j off the critical path,
+     which (14) alone leaves to whichever optimal vertex the solver returns".  What must stay: the first objective
+     solved whole, by its own rounds, before the second begins.
+   completion[j] the last solution's C_j, the second objective's.  Every allocation precedes the first output written,
+   and an error writes none.  Cost: the rows' building O(V + E log E); each round O(V log V) for the separation and
+   HiGHS's own solve. */
 int mesh_graph_completion_times(uint32_t vertices, const double *length, const uint32_t *resource, uint32_t resources,
                                 size_t edges, const uint32_t *from, const uint32_t *to, double *completion) {
   for (uint32_t j = 0; j < vertices; j++)
@@ -869,6 +882,7 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
     if (Highs_addRows(highs, total, lower, upper, nonzeros, start, index, value) == kHighsStatusError) result = EDOM;
     mesh_graph_rows(resources, vertices, depth_head, resource, first, member);
   }
+  int second = 0;
   while (!result) {
     if (Highs_run(highs) == kHighsStatusError) { result = EDOM; break; }
     const HighsInt model = Highs_getModelStatus(highs);
@@ -900,7 +914,16 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
       start[cuts] = nonzeros; lower[cuts] = bound; upper[cuts] = infinity; cuts++;
       for (size_t k = 0; k < prefix; k++) { index[nonzeros] = (HighsInt)key[k].vertex; value[nonzeros++] = length[key[k].vertex]; }
     }
-    if (!cuts) break;
+    if (!cuts && second) break;
+    if (!cuts) {
+      second = 1;
+      for (uint32_t j = 0; j < vertices; j++) lower[j] = 1;
+      if (Highs_changeColBounds(highs, (HighsInt)vertices, column[vertices], column[vertices]) == kHighsStatusError ||
+          Highs_changeColCost(highs, (HighsInt)vertices, 0) == kHighsStatusError ||
+          Highs_changeColsCostByRange(highs, 0, (HighsInt)vertices - 1, lower) == kHighsStatusError)
+        result = EDOM;
+      continue;
+    }
     if (Highs_addRows(highs, cuts, lower, upper, nonzeros, start, index, value) == kHighsStatusError) { result = EDOM; break; }
     total += cuts;
   }

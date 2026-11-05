@@ -189,7 +189,10 @@ int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *o
    Solved by cutting planes: each linear program by HiGHS's dual revised simplex (Q. Huangfu and J. A. J. Hall, Math.
    Program. Comput. 10(1), 2018), each resource's violated rows found by Queyranne's separation (M. Queyranne, Math.
    Programming 58, 1993) and added, until none is violated (design/compilation-coordination.md, "The revisions of
-   46ae8fdf", LP2 to LP6 and LP10).  completion[j] out: C̄_j of the last solution.  Every party solving the same
+   46ae8fdf", LP2 to LP6 and LP10); then, with C_max held at that optimum, minimize the sum of the C_j by the same
+   rounds (R5 at mesh f3f7cf46: "one lexicographic linear program (H. Isermann, Linear lexicographic optimization, OR
+   Spektrum 4, 1982)"; "The revisions of f3f7cf46", LX).  completion[j] out: C̄_j of the second objective's last
+   solution.  Every party solving the same
    operands with the same library computes the same C̄.  0; EINVAL where a length is negative or not finite, a resource or an edge
    names none, an edge runs from a vertex to itself, or the program has no solution (a cycle of positive length);
    EDOM where HiGHS reports an error or a status other than optimal or infeasible; ENOMEM, also where the program's
