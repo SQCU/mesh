@@ -485,7 +485,8 @@ static void orders_submit(void){
    words do not lie inside the region after its struct (mesh-flow.c plan_sequences_inside: a store there would be a
    fault, not an error value), each of which every port refuses (mesh-flow.c link_prepare, EINVAL), leave the head
    staying, EINVAL said on the bridge's log once a head (`unnamed`; DL2: reading it as served, B2-1, would let the
-   sender overwrite a word a port still reads; 2026-11-04, owner B4, the words' test on the coordinator's question).
+   sender overwrite a word a port still reads; 2026-11-04, owner B4, the words' test on the coordinator's question,
+   the coordinator's ruling DL8).
    The head's
    wait holds every later ORDER behind it: the deliveries are in sequence order, and no port could serve a later number
    before it where it carries both; it is Lamport's sender's wait for the buffer the item names, not Q4's hold of a
@@ -526,7 +527,18 @@ static void orders_submit(void){
    Nothing holds."  The words carry the delivery order to the ports, which O2 found nothing to carry.  What must
    stay: delivery from the head alone, in arrival order (sequence order), no timeout and no skip; the head matched to
    a standing plan of this node's map serial; `released` only rising (O4), this thread its one writer; a word written
-   only once no port of the set may still read the number it holds (Lamport's wait) */
+   only once no port of the set may still read the number it holds (Lamport's wait).
+   2026-11-05, owner B4, the coordinator's ruling DL7 (design/compilation-coordination.md, "The documents' revisions
+   of edd4b583", "Amendments during the work (2026-11-05)"): before a plan's first sequence number is stored (its
+   `released` reading 0 as its publication begins), hdr `plans` raised by 1 (release) and woken (region-shared):
+   mesh.h mesh_notify, whose release orders the raise before the word and `released` stored after it.  Why: DL3's
+   reading in Lamport's opposite order (mesh-flow.c lane_take) needs every plan that can hold a number smaller than one
+   a port acquired to be visible to that port's second reading, and mesh_plan stands a plan (its head's publication
+   `state`, release) before it raises `plans`, so this parent can see a plan standing and publish its first number, and
+   a later plan's, before that raise; a port that has not loaded the plan would then pass the `plans` test and take the
+   later number first while its peer took the earlier.  With the raise first, a port that acquires any later number
+   reads `plans` moved and walks the heads before it takes, and the walk reads the plan standing, since this parent
+   read it standing before raising.  What must stay: the raise before the plan's first word and `released` stores */
 static int unnamed;
 static void orders_deliver(void){
   int published=0;
@@ -561,6 +573,7 @@ static void orders_deliver(void){
         waits=set>>p&1 && !atomic_load_explicit(&state->refused[p],memory_order_acquire) &&
           atomic_load_explicit(&state->taken[p],memory_order_acquire)<t-copies+1;
       if(waits)break;
+      if(!released)mesh_notify(&M->plans);
       atomic_store_explicit(word+t%copies,order->sequence+(t-order->first),memory_order_relaxed);
       atomic_store_explicit(&state->released,t+1,memory_order_release);
       order->sequence+=t+1-order->first;order->first=t+1;

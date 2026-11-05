@@ -358,8 +358,9 @@ static void count_raise(_Atomic uint64_t *count,uint64_t final){
    (mesh-records.c orders_deliver) and each port reads them (lane_take), atomically, so a word outside the region or
    off its alignment would be a fault, not an error value (design/disjoint-pages-revision-coordination.md, "Rules":
    "Every failure is an error value, never a hang or a hardware fault"); tested as plan_inside tests the entries.
-   2026-11-04, owner B4: new, the coordinator's question on review of c649d4bf; one copy for both readers (mesh-bridge.h
-   declares it) */
+   2026-11-04, owner B4: new, the coordinator's question on review of c649d4bf, and his ruling DL8
+   (design/compilation-coordination.md, "The documents' revisions of edd4b583", "Amendments during the work
+   (2026-11-05)": such a plan, or one of `copies` 0, EINVAL); one copy for both readers (mesh-bridge.h declares it) */
 int plan_sequences_inside(const struct mesh_state *words){
   const uint64_t at=(uint64_t)((const char *)words-(const char *)M),w=words->sequences;
   return at<=M->length && w>=at+sizeof *words && !(w%sizeof(uint64_t)) && w<=M->length &&
@@ -931,8 +932,12 @@ static int plan_load(struct port *port,uint32_t head,uint64_t owner,uint64_t gen
    already.  A number read stays as read: the parent stores word n mod u again (for n + u) only once every port's
    `taken[p]` exceeds n (Lamport's "wait until ms < mr + P"), and this port's does not while this lane has not taken n
    (taken_tell).  Nothing is taken where hdr `plans` moved since the port's last walk (a plan standing, and so maybe
-   published, that the port has not loaded would be missed), nor where the least is an execution its node's program has
-   not submitted (n at or past the plan's `executions`, acquire, D2): it cannot be served, and nothing after it comes
+   published, that the port has not loaded would be missed): the parent raises `plans` before it publishes a plan's
+   first number (DL7, mesh-records.c orders_deliver; 2026-11-05, owner B4, the coordinator's ruling: mesh_plan stands
+   a plan before it raises `plans`, so without that raise a plan's first numbers could be published unseen by this
+   test), so every plan that can hold a number smaller than one this lane acquired is loaded here or moves `plans`
+   before the second reading.  Nor is anything taken where the least is an execution its node's program has not
+   submitted (n at or past the plan's `executions`, acquire, D2): it cannot be served, and nothing after it comes
    first.  The sequencer gives each execution its own number (mesh-records.c order_sequence), so no two candidates'
    are equal.  Both ends of a cable hold the same plans and the same records on each lane (link_prepare, one deal) and
    read the same numbers, so each lane takes the same executions in the same order at both ends ("they merge alike"),
