@@ -594,10 +594,16 @@ def _functional(node, current):
 # consistent shardings still exchange halos (section 4.3), so not of the priority section 3.5 gives because "there is
 # no communication if their inputs/outputs are sharded consistently" (T4-6).  An operator's operands are taken in its
 # rule's order, those it propagates through alone (Rule `propagate`).  A sharding is carried onto no dimension its mesh
-# dimension does not divide: section 4.1 pads such a dimension, which partition refuses (T4-9).  It is the
-# compilation's own pass (A2), here by the coordinator's ruling on C9's remark of d9efd96b; it walks no graph's edges by
-# a neighbours function, each step one operator's rule over its own operands in GSPMD's order, the graph's order and
-# its reverse (design/compilation-coordination.md, "The revisions of abecd389", T4-3)
+# dimension does not divide: section 4.1 pads such a dimension, which partition refuses (T4-9).  Its rounds are the
+# graph module's (rdma/mesh_graph.py propagate), each operator's edges the operands its rule propagates through at the
+# level, its visits the rule's carry (_carry) and refinement (_merge), forward into the operator's output and backward
+# into the operand
+# 2026-11-05 (design/aot-compilation-change-request.md A10: "The same holds wherever mesh's code walks a graph"; the C9
+# hook's remark on cc4a3e12, "a fixed-point traversal of the dataflow graph's operator edges ... it moves into the
+# graph module"; design/compilation-coordination.md, "The revisions of abecd389", T4-3): the rounds' loop over the
+# graph's order and its reverse goes, for mesh_graph.propagate, where the coordinator's ruling on C9's remark of
+# d9efd96b kept the pass whole here (A2's own pass: its rules stay here).  What must stay: the levels, the order of the
+# visits and each refinement as before
 def _complete(ir, operators, annotated):
     def refine(node, candidate):
         candidate = tuple(m if m < 0 or size and size % ir.shape[m] == 0 else -1
@@ -607,20 +613,18 @@ def _complete(ir, operators, annotated):
             return False
         ir.sharding[node] = merged
         return True
+
+    def forward(node, k):
+        rule = operators[node]
+        return refine(node, _carry(ir.sharding[rule.operands[k]], rule.labels[k], rule.out))
+
+    def backward(node, k):
+        rule = operators[node]
+        return refine(rule.operands[k], _carry(ir.sharding[node], rule.out, rule.labels[k]))
     for level in (0, 1):
-        changed = True
-        while changed:
-            changed = False
-            for forward, nodes in ((True, ir.order), (False, ir.order[::-1])):
-                for node in nodes:
-                    rule = operators.get(node)
-                    if rule is not None and rule.level is not None and rule.level <= level:
-                        for k in rule.propagate:
-                            operand, own = rule.operands[k], rule.labels[k]
-                            if forward:
-                                changed |= refine(node, _carry(ir.sharding[operand], own, rule.out))
-                            else:
-                                changed |= refine(operand, _carry(ir.sharding[node], rule.out, own))
+        mesh_graph.propagate(ir.order, lambda node: operators[node].propagate if operators.get(node) is not None
+                             and operators[node].level is not None and operators[node].level <= level else (),
+                             forward, backward)
 
 
 # GSPMD section 4.5, resharding: it "uses AllGather to replicate data along sharded dimensions, AllToAll to switch

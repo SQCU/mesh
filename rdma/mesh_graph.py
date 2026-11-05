@@ -44,6 +44,26 @@ def closure(order, neighbours):
     return reached
 
 
+def propagate(order, neighbours, forward, backward):
+    """Propagation to a fixed point along an acyclic graph's edges, in rounds over ``order`` (a topological order): a
+    forward pass over ``order`` calls forward(v, e) for each edge e of ``neighbours(v)`` (v's edges from the vertices
+    before it), then a backward pass over its reverse calls backward(v, e) for each, until a whole round changes
+    nothing, each call returning whether it changed anything.  The round-robin iterative algorithm of global data flow
+    analysis (G. A. Kildall, A unified approach to global program optimization, POPL 1973; J. B. Kam and J. D. Ullman,
+    Global data flow analysis and iterative algorithms, J. ACM 23(1), 1976), with GSPMD's alternation of directions: it
+    "runs the propagation pass on the entire graph in multiple iterations, and alternates between forward propagation
+    (input to output) and backward propagation (output to input)" (Y. Xu et al., GSPMD, arXiv 2105.04663, 2021, section
+    3.5).  It ends where every call changes its values only toward a finite bound, as GSPMD's refinement does ("This
+    property guarantees the pass could reach a fixed point after finite iterations")."""
+    changed = True
+    while changed:
+        changed = False
+        for visit, vertices in ((forward, order), (backward, order[::-1])):
+            for v in vertices:
+                for e in neighbours(v):
+                    changed |= visit(v, e)
+
+
 def paths(vertices, neighbours):
     """The paths of a linear forest, a forest whose components are paths (F. Harary, Graph Theory, 1969): a graph in
     which ``neighbours(v)`` gives each vertex at most one vertex and each vertex is given by at most one.  From each of
