@@ -56,8 +56,9 @@ class Nodes(C.Structure):
 FAILED = 2 ** 64 - 1
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
 CONTEXT = C.POINTER(Context)
-# mesh-graph.h mesh_graph_pack's `rooted`
-ROOTED = C.CFUNCTYPE(C.c_int, C.c_void_p, U)
+# 2026-11-04, owner T (design/compilation-coordination.md, A-T3'): mesh_graph_pack's and mesh_graph_tree_depth's
+# bindings are gone: the lowering picks no tree, and mesh_plan's demands and trees route the collectives.  What must
+# stay: the plan call's bindings
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
@@ -67,10 +68,7 @@ for name, result, arguments in (
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
         ('mesh_transfers_start', C.c_int, [CONTEXT, Q]),
         ('mesh_host_publish', None, [CONTEXT, Section, Q]),
-        ('mesh_host_arrived', Q, [CONTEXT, Section, Q]),
-        ('mesh_graph_pack', U, [U, U, C.POINTER(U), C.POINTER(U), C.POINTER(U), C.POINTER(U), U, C.POINTER(D), ROOTED,
-                                C.c_void_p, D, U, C.c_int, C.POINTER(U), C.POINTER(U), C.POINTER(D)]),
-        ('mesh_graph_tree_depth', U, [U, U, C.POINTER(U)])):
+        ('mesh_host_arrived', Q, [CONTEXT, Section, Q])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 

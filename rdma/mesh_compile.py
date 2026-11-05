@@ -3,7 +3,9 @@
 # graph with its fixed shapes (A1) is partitioned by the placement operand (A2), its collectives are lowered to declared
 # transfers and dependences (A4), all carried as one IR (A8) and weighed by the weighting operand (A3), then planned by
 # mesh_plan and run by torch's own operators on tensors over the placed pages (A9).  It chooses no placement and no
-# weight: both are the results of functions the program passes (the operator's ruling 2 of 2026-11-04).
+# weight: both are the results of functions the program passes (the operator's ruling 2 of 2026-11-04).  The
+# coordinator's rulings on its first form's stops: A-T3' (the collectives as declared transfers mesh_plan routes), A-T5
+# (a returned result over the plan's pages cloned) and A-T6 (one standing graph a program).
 import collections
 import ctypes as C
 import errno
@@ -35,8 +37,8 @@ DOT = {operator.matmul: torch.matmul, torch.matmul: torch.matmul, 'matmul': torc
 # mesh_split(tensor, device_mesh, dims_mapping) (section 3.1: each tensor dimension's mesh dimension, -1 none)
 Placement = collections.namedtuple('Placement', 'mesh nodes splits')
 # an inserted collective (GSPMD sections 2.1, 4.2 and 4.5): its kind, the FX node whose local value it carries, the
-# mesh dimensions its groups lie along, the tensor dimension it gathers or switches (None for an AllReduce) and its
-# place in the FX graph's order
+# mesh dimensions its groups lie along, the tensor dimension it gathers or the two it switches (None for an AllReduce)
+# and its item's place in this node's program
 Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 
 
@@ -45,12 +47,12 @@ Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 # placement operand (A2) and the mesh it names, each tensor's sharding (GSPMD section 3.1), this node's partitioned
 # graph with its collectives, and the task graph as mesh_plan takes it (design/plan-to-bridge-change-request.md R3 and
 # R4; design/compilation-coordination.md, T1): the declared transfers with their kinds, the dependences and this node's
-# values; `weights` is the weighting operand once weights(ir) has given it (A3)
+# values; `weights` is the weighting operand once weights(ir) has given it (A3).  `placed`: the keys of the local values
+# that lie over the plan's pages (an AllReduce's result and its slices); `made`: the keys the reshard steps have made
 class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
         self.order = list(gm.graph.nodes)
-        self.position = {node: i for i, node in enumerate(self.order)}
         self.shape, self.coords, self.map = _mesh(placement, nodes.count)
         here = [d for d, index in enumerate(self.map) if index == nodes.self]
         if not here:
@@ -58,28 +60,30 @@ class IR:
         self.device, self.index, self.identity = here[0], nodes.self, 0
         self.sharding, self.program, self.reduced, self.roles, self.events = {}, [], {}, {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
+        self.placed, self.made = set(), set()
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
-    def local(self, node):
-        return tuple(s // self.shape[m] if m >= 0 else s for s, m in zip(_value(node).shape, self.sharding[node]))
+    def local(self, node, sharding):
+        return tuple(s // self.shape[m] if m >= 0 else s for s, m in zip(_value(node).shape, sharding))
 
-    # one range (mesh-collective.h struct mesh_declared): `node`'s local value from device `source` to each device of
-    # `destinations`, a declared transfer each, of one identity.  MESH_JOIN: the host releases a range whole by one
-    # supplied word (mesh_host_publish), so its consumer takes it whole (design/plan-to-bridge-change-request.md R4;
-    # design/compilation-coordination.md, P1's reason).  This node's value of it (MESH_EXECUTION, wire) where it is
-    # its source or a destination.  The declared transfers' indices
-    def transfer(self, node, source, destinations):
-        shape, dtype, value = self.local(node), _value(node).dtype, mesh.ABSENT
+    # one range (mesh-collective.h struct mesh_declared): a local value of `node` of `shape` from device `source` to
+    # each device of `destinations`, a declared transfer each, of one identity.  MESH_JOIN: the host releases a range
+    # whole by one supplied word (mesh_host_publish), so its consumer takes it whole (design/plan-to-bridge-change-
+    # request.md R4; design/compilation-coordination.md, P1 and A-T3').  This node's value of it (MESH_EXECUTION, wire)
+    # where it is its source or a destination.  Each destination's declared transfer's index
+    def transfer(self, node, shape, source, destinations):
+        dtype, value, transfers = _value(node).dtype, mesh.ABSENT, {}
         size, ends = dtype.itemsize * math.prod(shape), [self.map[d] for d in [source] + destinations]
         if self.index in ends:
             value = len(self.values)
             self.values.append(mesh.Value(section=mesh.Section(bytes=size), kind=mesh.EXECUTION, wire=1))
             self.layouts.append((dtype, shape))
-        first, self.identity = len(self.declared), self.identity + 1
-        for end in ends[1:]:
-            mine = value if self.index in (ends[0], end) else mesh.ABSENT
-            self.declared.append(mesh.Declared(ends[0], end, self.identity, mesh.JOIN, mine, 0, size))
-        return list(range(first, len(self.declared)))
+        self.identity += 1
+        for d in destinations:
+            transfers[d] = len(self.declared)
+            mine = value if self.index in (ends[0], self.map[d]) else mesh.ABSENT
+            self.declared.append(mesh.Declared(ends[0], self.map[d], self.identity, mesh.JOIN, mine, 0, size))
+        return transfers
 
 
 # J. Ansel et al., PyTorch 2, ASPLOS 2024, sections 3.5 and 5.1: a node's fake tensor, "the metadata of a tensor without
@@ -179,7 +183,8 @@ def _operator(node):
 # (possibily by combining with existing compatible sharding)", so it reaches a fixed point.  Priorities: "Elementwise
 # operators are assigned the highest priority to propagate through in both directions" and "Operators like Dot ... are
 # assigned lower priority": level 0 propagates through elementwise operators alone to its fixed point, level 1 through
-# Dot as well (design/compilation-coordination.md, A-T2).  An operator's operands are taken in argument order
+# Dot as well (design/compilation-coordination.md, A-T2).  An operator's operands are taken in argument order.  It is
+# the compilation's own pass (A2), here by the coordinator's ruling on C9's remark of d9efd96b
 def _complete(ir, operators, annotated):
     def refine(node, candidate):
         merged = _merge(ir.sharding[node], candidate)
@@ -204,22 +209,40 @@ def _complete(ir, operators, annotated):
 
 # GSPMD section 4.5, resharding: it "uses AllGather to replicate data along sharded dimensions, AllToAll to switch
 # sharded dimensions, CollectivePermute to change device order, and DynamicSlice to shard replicated dimensions", and
-# "could use multiple steps of resharding to reach the desired sharding": each mesh dimension's AllGather or AllToAll,
-# then each one's DynamicSlice (a local slice, no communication).  One device mesh orders every tensor's devices alike,
-# so no CollectivePermute arises.  The key of `node`'s local value in `want`
-def _reshard(ir, node, have, want, position):
+# "could use multiple steps of resharding to reach the desired sharding": each mesh dimension's AllGather, then each
+# one's AllToAll into a dimension no mesh dimension holds (one whose dimension is held is refused, naming it), then
+# each one's DynamicSlice (a local slice, no communication; a slice of a value over the plan's pages lies over them
+# too).  One device mesh orders every tensor's devices alike, so no CollectivePermute arises.  Each step an item of this
+# node's program: (kind, the keys it reads, the key it makes, its operand), none repeated whose key an earlier one made
+# (that value stands through the execution).  The key of `node`'s local value in `want`
+def _reshard(ir, node, have, want):
+    def step(item):
+        if item[2] not in ir.made:
+            ir.made.add(item[2])
+            ir.program.append(item)
     for m in range(len(ir.shape)):
-        i, j = (s.index(m) if m in s else -1 for s in (have, want))
-        if i >= 0 and i != j:
+        if m in have and m not in want:
+            after = tuple(-1 if s == m else s for s in have)
+            step(('collective', ((node, have),), (node, after),
+                  Collective('all-gather', node, (m,), have.index(m), len(ir.program))))
+            have = after
+    for m in range(len(ir.shape)):
+        if m in have and have.index(m) != want.index(m):
+            i, j = have.index(m), want.index(m)
+            if have[j] >= 0:
+                raise NotImplementedError('%s: an AllToAll along mesh dimension %d into dimension %d, which mesh '
+                                          'dimension %d holds: refused (GSPMD section 4.5)'
+                                          % (node.name, m, j, have[j]))
             after = tuple(-1 if k == i else m if k == j else s for k, s in enumerate(have))
-            collective = Collective('all-gather' if j < 0 else 'all-to-all', node, (m,), i if j < 0 else (i, j),
-                                    position)
-            ir.program.append(('collective', collective, (node, have), (node, after)))
+            step(('collective', ((node, have),), (node, after),
+                  Collective('all-to-all', node, (m,), (i, j), len(ir.program))))
             have = after
     for m in range(len(ir.shape)):
         if m in want and m not in have:
             after = tuple(m if k == want.index(m) else s for k, s in enumerate(have))
-            ir.program.append(('slice', (node, have), (node, after), want.index(m), m))
+            step(('slice', ((node, have),), (node, after), (want.index(m), m)))
+            if (node, have) in ir.placed:
+                ir.placed.add((node, after))
             have = after
     return node, have
 
@@ -234,23 +257,16 @@ def _reshard(ir, node, have, want, position):
 # the callable stands for the graph)
 def _partition(ir, operators):
     inputs = 0
-    for position, node in enumerate(ir.order):
+    for node in ir.order:
         if node.op == 'placeholder':
             whole = (-1,) * len(ir.sharding[node])
-            ir.program.append(('input', (node, whole), inputs))
-            _reshard(ir, node, whole, ir.sharding[node], position)
+            ir.program.append(('input', (), (node, whole), inputs))
+            _reshard(ir, node, whole, ir.sharding[node])
             inputs += 1
         elif node.op == 'output':
-            keys = {}
-            for value in node.all_input_nodes:
-                if value in ir.reduced:
-                    raise NotImplementedError(
-                        '%s: the graph returns an AllReduce\'s result, which lies over its plan\'s pages, written '
-                        'again by a later execution (mesh-collective.h struct mesh_value: copy t mod count), while '
-                        'what the callable returns is its caller\'s; the contract takes no decision between a copy '
-                        'and the caller holding the plan\'s pages: stopped' % value.name)
-                keys[value] = _reshard(ir, value, ir.sharding[value], (-1,) * len(ir.sharding[value]), position)
-            ir.program.append(('output', node, keys))
+            keys = {value: _reshard(ir, value, ir.sharding[value], (-1,) * len(ir.sharding[value]))
+                    for value in node.all_input_nodes}
+            ir.program.append(('output', tuple(keys.values()), None, (node, keys)))
         else:
             _, operands, labels, out = operators[node]
             used, partial = {m for m in ir.sharding[node] if m >= 0}, []
@@ -267,12 +283,13 @@ def _partition(ir, operators):
                     want[i] = kept[0]
                 if kept[0] >= 0:
                     partial.append(kept[0])
-            keys = [_reshard(ir, o, ir.sharding[o], tuple(w), position) for o, w in zip(operands, wants)]
+            keys = [_reshard(ir, o, ir.sharding[o], tuple(w)) for o, w in zip(operands, wants)]
             key = (node, 'partial') if partial else (node, ir.sharding[node])
-            ir.program.append(('call', node, keys, key))
+            ir.program.append(('call', tuple(keys), key, node))
             if partial:
-                ir.reduced[node] = Collective('all-reduce', node, tuple(partial), None, position)
-                ir.program.append(('collective', ir.reduced[node], key, (node, ir.sharding[node])))
+                ir.reduced[node] = Collective('all-reduce', node, tuple(partial), None, len(ir.program))
+                ir.program.append(('collective', (key,), (node, ir.sharding[node]), ir.reduced[node]))
+                ir.placed.add((node, ir.sharding[node]))
 
 
 # design/aot-compilation-change-request.md A2: GSPMD's two passes by the placement operand, "sharding completion and
@@ -322,57 +339,87 @@ def _groups(ir, dims):
     return list(groups.values())
 
 
-# design/compilation-coordination.md, A-T3: the AllReduce's tree is mesh_graph_pack's (A4) and its root the tree's.
-# Stopped, as A-T3 directs where a lowering needs a decision its texts do not give
-def _tree(ir, group):
-    raise NotImplementedError(
-        'AllReduce over map indices %s: its tree is mesh_graph_pack\'s and its root the tree\'s (A-T3); the contract '
-        'gives neither mesh_graph_pack\'s rooted, eps, most and shallow nor which of the trees it returns (each rooted '
-        'vertex\'s, heaviest first) the AllReduce takes: G. Wang et al., Blink, MLSys 2020, section 3.3 reduces "to a '
-        'chosen root vertex", and section 4 splits the buffer "among all the spanning trees based on their weights"; '
-        'stopped' % [ir.map[d] for d in group])
+# Positions are half steps of this node's program: item g writes, reads and releases at 2g, and waits for and reads
+# what arrives at 2g + 1.  `node`'s readers over the plan's pages: the items reading a key of it that lies over them,
+# else `default`.  The span covers every read, so an edge into the event precedes its first and one out of it follows
+# its last
+def _readers(ir, node, default):
+    reads = [2 * g for g, item in enumerate(ir.program) if any(k in ir.placed and k[0] is node for k in item[1])]
+    return (min(reads), max(reads)) if reads else (default, default)
 
 
-# design/compilation-coordination.md, A-T3: AllReduce as Blink states it (section 3.3: "we first run a reduce operation
-# to a chosen root vertex ... and then do a broadcast operation from the root vertex using the same tree" in "the
-# reverse direction").  Each tree edge a declared transfer of the child's partial toward the root; the root's combine
-# of each one MSCCLang's receive-reduce-copy (M. Cowan et al., ASPLOS 2023, section 4.2: it "receives a chunk, reduces
-# it with a source chunk, and locally copies it to the destination"), by the function's own add; then the sum down the
-# same edges, one range from the root to its children.  A child's forward of the sum to children of its own is
-# stopped: MSCCLang forwards a chunk by a receive and a send of one buffer (section 4.3, rcs), but a received range's
-# value is one range's alone (mesh-collective.h struct mesh_declared `value`), and the contract takes no decision
-# between a copy and another form.  The tree as mesh_graph_pack gives it: its root and each vertex's parent, the root
-# its own, over the group's places; its depth the graph module's (mesh-graph.h mesh_graph_tree_depth).  Events (device,
-# declared transfer, kind, first and last FX positions): a leaf's production of its partial and its consumption of the
-# sum; the root's consumption of each partial, its production of the sum and its own read of it
-def _all_reduce(ir, collective, group, root, parent):
-    node, at = collective.node, collective.position
-    if mesh.LIB.mesh_graph_tree_depth(len(group), root, (mesh.U * len(group))(*parent)) != 1:
-        raise NotImplementedError('AllReduce of %s: a tree other than one edge deep forwards the root\'s sum at a '
-                                  'child; stopped (A-T3)' % node.name)
-    leaves, root = [d for v, d in enumerate(group) if v != root], group[root]
+# design/compilation-coordination.md, A-T3': AllReduce as Blink states it (G. Wang et al., MLSys 2020, section 3.3: "we
+# first run a reduce operation to a chosen root vertex ... and then do a broadcast operation from the root vertex"), the
+# root the group's first device in the device mesh's order (GSPMD section 3.1: it "preserves the order of devices in
+# device_mesh", so the placement operand's chooser decides it).  The reduce: each other member's partial one declared
+# transfer to the root, written over its range's pages by the Dot's out= form; the root's combine of each landed
+# partial with its own MSCCLang's receive-reduce-copy (M. Cowan et al., ASPLOS 2023, section 4.2: it "receives a chunk,
+# reduces it with a source chunk, and locally copies it to the destination") by the function's own add.  The broadcast:
+# the root's sum one range to every other member.  mesh_plan's demands and trees route them, relays forwarding as the
+# transport does (A4: "A relay's forward is its fused receive-copy-send").  Events (device, declared transfer, kind,
+# first, last): a member's production of its partial (the Dot's item) and consumption of the sum (its readers); the
+# root's consumption of each partial and production of the sum (its item, after arrival) and its own read of the sum
+def _all_reduce(ir, c, group, have):
+    node, root, members = c.node, group[0], group[1:]
     if DOT[node.target] is None:
         raise NotImplementedError('AllReduce of %s (%s): torch gives no out= form to write its partial over its '
                                   'range\'s placed pages (A-T4)' % (node.name, node.target))
-    readers = [ir.position[user] for user in node.users] or [at]
-    up, down = {d: ir.transfer(node, d, [root]) for d in leaves}, ir.transfer(node, root, leaves)
-    for k, d in enumerate(leaves):
-        ir.events += [(d, up[d][0], 'P', at, at), (d, down[k], 'C', min(readers), max(readers)),
-                      (root, up[d][0], 'C', at, at)]
-    ir.events += [(root, down[0], 'P', at, at), (root, down[0], 'S', min(readers), max(readers))]
+    shape, dot, after = ir.local(node, ir.sharding[node]), 2 * c.position - 2, 2 * c.position + 1
+    readers = _readers(ir, node, after)
+    up, down = [ir.transfer(node, shape, d, [root])[root] for d in members], ir.transfer(node, shape, root, members)
+    for d, partial in zip(members, up):
+        ir.events += [(d, partial, 'P', dot, dot), (d, down[d], 'C') + readers, (root, partial, 'C', after, after)]
+    first = min(down.values())
+    ir.events += [(root, first, 'P', after, after), (root, first, 'S') + readers]
     if ir.device == root:
-        ir.roles[collective] = ('root', [ir.declared[up[d][0]].value for d in leaves], ir.declared[down[0]].value)
-    elif ir.device in leaves:
-        ir.roles[collective] = ('leaf', ir.declared[up[ir.device][0]].value,
-                                ir.declared[down[leaves.index(ir.device)]].value)
+        ir.roles[c] = (0, {None: ir.declared[first].value}, {p + 1: ir.declared[u].value for p, u in enumerate(up)})
+    elif ir.device in members:
+        me = group.index(ir.device)
+        ir.roles[c] = (me, {0: ir.declared[up[me - 1]].value}, {0: ir.declared[down[ir.device]].value})
 
 
-# the program's own data edges at each node (mesh-collective.h struct mesh_dependence; design/compilation-
-# coordination.md, T1: task to task at one node), every rank's, as the program runs them.  An event is in force over
-# the FX positions [first, last] where it writes or reads its range: two events of one node in one execution are
-# ordered where the one's last position precedes the other's first (lag 0), and a node's every event of execution t
-# precedes its every event of execution t + 1 (lag 1), since execution t's call returns before execution t + 1's
-# begins.  An end's kinds bit: a production's, a source read's, a consumption's none
+# design/compilation-coordination.md, A-T3': AllGather (GSPMD section 4.2: it "concatenates tensors from all
+# participants following a specified order"): each member's shard one range to every other member, written over its
+# range's pages by torch's copy_ (a range lies on its placed pages, design/disjoint-pages-change-request.md C3.2; the
+# shard is torch's own, A-T4); each receiver's result torch.cat of the shards in the group's order.  Events: each
+# member's production of its range (its item) and each other member's consumption of it (its item, after arrival)
+def _all_gather(ir, c, group, have):
+    shape, sent, received = ir.local(c.node, have), 2 * c.position, 2 * c.position + 1
+    ranges = [ir.transfer(c.node, shape, d, [e for e in group if e != d]) for d in group]
+    for d, transfers in zip(group, ranges):
+        ir.events.append((d, min(transfers.values()), 'P', sent, sent))
+        ir.events += [(e, i, 'C', received, received) for e, i in transfers.items()]
+    if ir.device in group:
+        me = group.index(ir.device)
+        ir.roles[c] = (me, {None: ir.declared[min(ranges[me].values())].value},
+                       {p: ir.declared[t[ir.device]].value for p, t in enumerate(ranges) if p != me})
+
+
+# design/compilation-coordination.md, A-T3': AllToAll (GSPMD section 4.2: it "logically splits the input of each
+# participant along one dimension, then sends each piece to a different participant.  On receiving data pieces from
+# others, each participant concatenates the pieces to produce its result"): piece q of member p, along the dimension
+# the mesh dimension moves to, one declared transfer p -> q, written by torch's copy_ as an AllGather's shard is; each
+# receiver's result torch.cat of the pieces in sender order along the dimension it leaves.  Events as an AllGather's
+def _all_to_all(ir, c, group, have):
+    shape, sent, received = list(ir.local(c.node, have)), 2 * c.position, 2 * c.position + 1
+    shape[c.dim[1]] //= len(group)
+    pieces = {(p, q): ir.transfer(c.node, tuple(shape), d, [e])[e]
+              for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
+    for (p, q), i in pieces.items():
+        ir.events += [(group[p], i, 'P', sent, sent), (group[q], i, 'C', received, received)]
+    if ir.device in group:
+        me = group.index(ir.device)
+        ir.roles[c] = (me, {q: ir.declared[i].value for (p, q), i in pieces.items() if p == me},
+                       {p: ir.declared[i].value for (p, q), i in pieces.items() if q == me})
+
+
+# the program's own data edges at each node (mesh-collective.h struct mesh_dependence: event `from` before event `to`,
+# `to` in execution t + lag where `from` is in t; design/disjoint-pages-change-request.md, C3.5: a stage's reads and
+# writes "in the order its command buffer runs them"), every rank's, by the program's order on that rank, whose
+# executions run in order (execution t's call returns before execution t + 1's begins).  An event is in force over
+# its half steps [first, last]: two events of one node in one execution are ordered where the one's last precedes the
+# other's first (lag 0), and each of its events of execution t precedes each of execution t + 1 (lag 1).  An end's
+# kinds bit: a production's, a source read's, a consumption's none
 def _dependences(ir):
     bits = {'P': (mesh.FROM_PRODUCED, mesh.TO_PRODUCED), 'S': (mesh.FROM_SOURCE_READ, mesh.TO_SOURCE_READ),
             'C': (0, 0)}
@@ -387,26 +434,21 @@ def _dependences(ir):
     return edges
 
 
-# design/aot-compilation-change-request.md A4: each inserted collective lowered to declared transfers and dependences,
-# which mesh_plan's demands and trees route jointly (design/compilation-coordination.md, A-T3).  AllReduce is Blink's
-# (_all_reduce); the contract gives no lowering of the others, so each is stopped, naming why
-STOPPED = {'all-gather': 'Blink lowers AllGather as "AllReduce without using a reduction function" (G. Wang et al., '
-                         'MLSys 2020, section 4), whose root\'s concatenation of the pieces is no operator of the '
-                         'function\'s and whose forwards send on a received range, which a declared transfer cannot '
-                         'name (mesh-collective.h struct mesh_declared `value`)',
-           'all-to-all': 'A-T3 gives the lowering of AllReduce alone'}
+# design/aot-compilation-change-request.md A4 and design/compilation-coordination.md, A-T3': each inserted collective,
+# over each of its device groups, lowered to declared transfers and dependences, which mesh_plan's demands and trees
+# route jointly ("rdma/mesh-collective.c's demands and trees, as now, fed by A2's collectives"); any other collective
+# (CollectivePermute, ReduceScatter and the rest) refused, naming it
+LOWERINGS = {'all-reduce': _all_reduce, 'all-gather': _all_gather, 'all-to-all': _all_to_all}
 
 
 def lower(ir):
     for item in ir.program:
         if item[0] == 'collective':
-            collective = item[1]
-            if collective.kind in STOPPED:
-                raise NotImplementedError('%s of %s along mesh dimensions %s (GSPMD section 4.5): %s; stopped (A-T3)'
-                                          % (collective.kind, collective.node.name, collective.dims,
-                                             STOPPED[collective.kind]))
+            collective = item[3]
+            if collective.kind not in LOWERINGS:
+                raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
             for group in _groups(ir, collective.dims):
-                _all_reduce(ir, collective, group, *_tree(ir, group))
+                LOWERINGS[collective.kind](ir, collective, group, item[1][0][1])
     ir.dependences = _dependences(ir)
 
 
@@ -457,47 +499,69 @@ def _arrived(context, section, t):
             raise OSError(errno.ETIMEDOUT, 'execution %d of a received range: not arrived within MESH_PLATFORM_NS' % t)
 
 
-# one item of this node's program at execution t, on execution t's copies (mesh-collective.h struct mesh_value: copy t
-# mod count).  A leaf's Dot writes its partial over its range's pages by torch's out= form and releases it
-# (mesh_host_publish); its AllReduce waits for the sum.  The root's AllReduce waits for each partial in turn and adds it
-# in, MSCCLang's receive-reduce-copy (section 4.2) by torch.add's out= form, then releases the sum
+# one item of this node's program, (kind, the keys it reads, the key it makes, its operand), at execution t on
+# execution t's copies (mesh-collective.h struct mesh_value: copy t mod count).  A member's Dot writes its partial over
+# its range's pages by torch's out= form and releases it (mesh_host_publish); the root's AllReduce waits for each
+# partial in turn and adds it in, MSCCLang's receive-reduce-copy (section 4.2) by torch.add's out= form, then releases
+# the sum, for which every other member waits (A-T3').  An AllGather or AllToAll copies each of this node's shards or
+# pieces over its range's pages (torch's copy_) and releases it, then waits for each other member's and concatenates
+# them in the group's order (torch.cat; A-T3').  A returned value over the plan's pages is torch.clone'd: execution
+# t + u writes those pages again (C3.3), and a torch.compile callable's outputs outlive its call
+# (design/compilation-coordination.md, A-T5)
 def _run(ir, context, tensors, item, env, inputs, t):
-    if item[0] == 'input':
-        env[item[1]] = inputs[item[2]]
-    elif item[0] == 'slice':
-        _, source, key, dim, m = item
+    kind, reads, key, operand = item
+
+    def copy(value):
+        return tensors[value][1][t % len(tensors[value][1])]
+
+    def publish(value):
+        mesh.LIB.mesh_host_publish(C.byref(context), tensors[value][0], t)
+
+    def arrived(value):
+        _arrived(context, tensors[value][0], t)
+        return copy(value)
+    if kind == 'input':
+        env[key] = inputs[operand]
+    elif kind == 'slice':
+        (source,), (dim, m) = reads, operand
         size = env[source].shape[dim] // ir.shape[m]
         env[key] = env[source].narrow(dim, ir.coords[ir.device][m] * size, size)
-    elif item[0] == 'call':
-        _, node, keys, key = item
-        given = iter(keys)
-        args = [env[next(given)] if isinstance(a, Node) else a for a in node.args]
-        role = ir.roles.get(ir.reduced.get(node))
-        if role and role[0] == 'leaf':
-            section, copies = tensors[role[1]]
-            env[key] = DOT[node.target](*args, **node.kwargs, out=copies[t % len(copies)])
-            mesh.LIB.mesh_host_publish(C.byref(context), section, t)
-        elif node.op == 'call_method':
-            env[key] = getattr(args[0], node.target)(*args[1:], **node.kwargs)
+    elif kind == 'call':
+        given = iter(reads)
+        args = [env[next(given)] if isinstance(a, Node) else a for a in operand.args]
+        role = ir.roles.get(ir.reduced.get(operand))
+        if role and role[0]:
+            env[key] = DOT[operand.target](*args, **operand.kwargs, out=copy(role[1][0]))
+            publish(role[1][0])
+        elif operand.op == 'call_method':
+            env[key] = getattr(args[0], operand.target)(*args[1:], **operand.kwargs)
         else:
-            env[key] = node.target(*args, **node.kwargs)
-    elif item[0] == 'collective':
-        _, collective, source, key = item
-        role = ir.roles[collective]
-        section, copies = tensors[role[2]]
-        if role[0] == 'leaf':
-            _arrived(context, section, t)
-            env[key] = copies[t % len(copies)]
-        else:
-            total, partial = copies[t % len(copies)], env[source]
-            for value in role[1]:
-                received, arrived = tensors[value]
-                _arrived(context, received, t)
-                partial = torch.add(partial, arrived[t % len(arrived)], out=total)
-            mesh.LIB.mesh_host_publish(C.byref(context), section, t)
+            env[key] = operand.target(*args, **operand.kwargs)
+    elif kind == 'collective':
+        (source,), (me, sent, received) = reads, ir.roles[operand]
+        if operand.kind == 'all-reduce' and me:
+            env[key] = arrived(received[0])
+        elif operand.kind == 'all-reduce':
+            total, partial = copy(sent[None]), env[source]
+            for p in sorted(received):
+                partial = torch.add(partial, arrived(received[p]), out=total)
+            publish(sent[None])
             env[key] = total
+        else:
+            gather, members = operand.kind == 'all-gather', len(received) + 1
+            dim = operand.dim if gather else operand.dim[0]
+            size = 0 if gather else env[source].shape[operand.dim[1]] // members
+
+            def part(q):
+                return env[source] if gather else env[source].narrow(operand.dim[1], q * size, size)
+            for q, value in sent.items():
+                copy(value).copy_(part(q))
+                publish(value)
+            env[key] = torch.cat([part(me) if p == me else arrived(received[p]) for p in range(members)], dim)
     else:
-        env['output'] = map_arg(item[1].args[0], lambda n: env[item[2][n]])
+        node, keys = operand
+        env['output'] = map_arg(node.args[0], lambda n: torch.clone(env[keys[n]]) if keys[n] in ir.placed
+                                else env[keys[n]])
 
 
 # design/aot-compilation-change-request.md A9; design/compilation-coordination.md, A-T4.  mesh_plan writes the lists
@@ -505,9 +569,14 @@ def _run(ir, context, tensors, item, env, inputs, t):
 # program is the function's own operators, this node's partitioned graph run by torch on tensors over the placed pages,
 # each copy of each value wrapped by torch.frombuffer over mesh_section_address (every address a constant of the plan,
 # design/disjoint-pages-change-request.md, C3.3).  The callable submits each function execution to this node's bridge
-# by mesh_transfers_start (A7; Q1) before it runs it
+# by mesh_transfers_start (A7; Q1) before it runs it.  One compiled graph stands a program at a time: the plan's name
+# (group, epoch) is per context, so a second graph while one stands is refused (design/compilation-coordination.md,
+# A-T6, open for the operator)
 def serialize(ir):
     context, count = _context(), len(ir.declared)
+    if context.state:
+        raise RuntimeError('several functions of one program each standing as its own plan: the plan\'s name is per '
+                           'context, and this program\'s graph stands (design/compilation-coordination.md, A-T6)')
     if len(ir.weights) != count or not all(isinstance(w, mesh.Weight) for w in ir.weights):
         raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight each (A3)'
                          % (len(ir.weights), count))
@@ -515,7 +584,7 @@ def serialize(ir):
     mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), (mesh.Declared * count)(*ir.declared),
                                   (mesh.Weight * count)(*ir.weights), count, values, len(values),
                                   (mesh.Dependence * len(ir.dependences))(*ir.dependences), len(ir.dependences)))
-    state, executions, tensors = context.state, [0], []
+    executions, tensors = [0], []
     for value, (dtype, shape) in zip(values, ir.layouts):
         copies = []
         for c in range(value.section.count):
@@ -528,9 +597,6 @@ def serialize(ir):
         tensors.append((value.section, copies))
 
     def run(*inputs):
-        if context.state != state:
-            raise RuntimeError('this graph\'s plan no longer stands: a later mesh_plan of this program closed it '
-                               '(mesh-collective.h mesh_plan)')
         t = executions[0]
         mesh.check(mesh.LIB.mesh_transfers_start(C.byref(context), t + 1))
         env = {}
