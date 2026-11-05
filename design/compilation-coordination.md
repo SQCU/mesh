@@ -417,6 +417,39 @@ file, calls streams_cancel).
   plan's name (group, epoch) is per context, so two contexts of one program would collide.
 - **C9, torch:** mesh_compile.py's sharding completion (GSPMD §3.5) stays there: it is the compilation's own pass (A2).
 
+- **C-epoch** (V1 #5): a call names its plan (group, ctx->epoch + 1) and raises ctx->epoch only once the plan stands;
+  where the context's standing plan is cancelled (its `serial` is not map_serial, D.3.6), the call keeps that plan's
+  epoch, so every rank's names agree whichever saw the map move first; EEXIST ignores a standing plan of another
+  serial, and the parent's delivery matches the standing plan of the ORDER's name whose `serial` is map_serial. The
+  pending ORDERs are kept across a node's serial move (delivery is by arrival order); seqnum still returns to 0 at the
+  sequencer's own move.
+- **C-weights** (V1 #8, V3 #5): every task weight > 0 (Sinnen and Sousa, Definition 1: "The positive weight w(n)") and
+  every `page` weight > 0, so each link occupation lasts > 0 and each link's start order is a topological order (R5,
+  MSCCLang §5.2); local edges cost 0 (T1').
+- **Q6, extended** (V3 #4): the bridge parent also keeps the island (this node's tree parent and children, the
+  sequencer) and the plan it released last; each pending ORDER its arrival time (Q4's bound); the pending list grows
+  by reallocation as ORDERs arrive (an allocation of the bridge parent at run time, A7's delivery queue, Défago Fig.
+  5's `pending`). An ORDER the parent has no memory to hold is logged and dropped (its plan's executions end at their
+  bounds); an island it cannot compute leaves none (nothing is submitted or ordered until the next map move).
+- **A-T3', as a difference** (V2 #9, V3 #1): Blink §3.3 reduces "using the undirected graph" and broadcasts "using the
+  same tree but with links going in the reverse direction"; here each partial travels whole to the root over mesh_plan's
+  routed demands (relays forward, A4: "A relay's forward is its fused receive-copy-send"), the root alone combines, and
+  the sum's trees are its own. Why: A4's "Code" line routes A2's collectives as mesh-collective.c's demands and trees.
+  What must stay: a reduce to one root, then a broadcast from it.
+- **A-T7** (V2 #1, #3; V3 #2): a produced range is written a half step after the reads that make it: its operator
+  computes into a fresh tensor, then torch's copy_ writes it into the range's placed pages, and the range is published;
+  an AllGather shard or AllToAll piece is written into its range by copy_ (T's decision: the range lies on placed
+  pages, C3.2, and the shard is memory torch allocated). So each item's read -> write edge (MSCCLang §4's recv -> rrc)
+  is true and declared. The dependences are the chain over position classes (every event of one position to every
+  event of the next at lag 0, the last class to the first at lag 1), mesh-collective.h's semantics (C3.5).
+- **A-T8:** every torch consumer is MESH_JOIN: each range is released whole by one mesh_host_publish (P1's reason).
+- **A-T9:** a reshard's steps run AllGather, AllToAll, then DynamicSlice, the order in which GSPMD §4.5 names them.
+- **A-T10:** an annotation naming a mesh dimension of size 1 reads as -1 (GSPMD §3.1: dims_mapping naming no mesh
+  dimension that divides the tensor is replicated).
+- **Sources read beyond the list above:** GSPMD §3.2 with Figure 6 (gspmd.txt 142-189 R, 526-532), §4.1 (padding, not
+  implemented: a dimension the mesh does not divide is refused) and §4.4 (recursive partitioning, partition grouping,
+  466-537); Sinnen and Sousa Definition 1 (the task graph's positive weights) and Definition 2 (local communication).
+
 ### The provisional operand values (recorded as provisional, not as choosers)
 
 - **P1. Placement, e2b:** its existing hand partition (tools/prepare_e2b.py's ranks, as the manifest gives them), read
