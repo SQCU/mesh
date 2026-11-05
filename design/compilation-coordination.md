@@ -1199,3 +1199,23 @@ Text extracted with `pdftotext -layout` into the session scratchpad's papers/ fo
 - **Défago et al.** (defago.txt): Fig. 5, as above.
 - **Not read:** Knuth vol. 3 §5.4.1 (the book; searched, no reproduction of its text found): the merge is the item's
   own statement, the least first; the tree of losers that section is cited for elsewhere is not built.
+
+### Amendments during the work (2026-11-05), each the coordinator's ruling on an implementer's finding
+
+- **DL7** (B4's finding: a plan stands at mesh_plan's store of its head's publication `state`, before mesh_plan
+  raises hdr `plans`, so a bridge parent can see it standing and publish its first number, and a later plan's, before
+  the raise; a port that has not loaded it would then pass DL3's `plans` test and take the later number first while
+  its peer takes the earlier). The bridge parent adds 1 to hdr `plans` (release, then wakes it) before it publishes a
+  plan's first sequence number (its `released` 0), so a port that acquires any later number reads the move and walks
+  the heads before it takes; a walk that reads the raise reads the plan standing, since the parent saw it standing
+  before raising. Why: DL3's reading in Lamport's opposite order needs every plan that can hold a smaller number to be
+  visible to the second reading; mesh_plan's own order (stand, then raise) leaves the first publication of a plan the
+  one case it is not. mesh.h's note on hdr `plans` names the parent's first publication among its raisers.
+- **DL8** (B4): a plan whose sequence words do not lie inside the region after its struct, 8-aligned, or whose
+  `copies` is 0, is EINVAL: orders_deliver leaves its head staying, said once a head, and every port refuses it
+  (link_prepare, through plan_inside; plan_sequences_inside, one copy, mesh-flow.c), as a plan's entries outside the
+  region are refused. Why: an atomic store or load there would be a fault, not an error value.
+- **GO4′** (C3): the no-cycle argument at plan_schedule rests on each group's least-placed member's predecessor (its
+  place precedes that member's, so every group's least place follows the least place of each group it depends on),
+  for any weights, where GO4's text said every page above takes its place before the least place of those below,
+  which holds only where a tree's pages have equal bottom levels. The conclusion stands. `walk` goes with T6's ties.
