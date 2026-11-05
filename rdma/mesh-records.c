@@ -481,9 +481,12 @@ static void orders_submit(void){
    hdr `plans` is woken (region-shared) after a turn that published, so the ports see it.  Where this differs from the
    paper, recorded (DL1): every port of the set is a receiver of every message, so the sender's wait is over every
    receiver's mr; and a port's mr is the least of its lanes' next reads (mesh-flow.c).  A port set that cannot be
-   computed (mesh_ports_named's error), and a plan whose `copies` is 0, which has no sequence word and which every port
-   refuses (mesh-flow.c link_prepare, EINVAL), leave the head staying, said on the bridge's log once a head
-   (`unnamed`; DL2: reading it as served, B2-1, would let the sender overwrite a word a port still reads).  The head's
+   computed (mesh_ports_named's error), and a plan whose `copies` is 0, which has no sequence word, or whose sequence
+   words do not lie inside the region after its struct (mesh-flow.c plan_sequences_inside: a store there would be a
+   fault, not an error value), each of which every port refuses (mesh-flow.c link_prepare, EINVAL), leave the head
+   staying, EINVAL said on the bridge's log once a head (`unnamed`; DL2: reading it as served, B2-1, would let the
+   sender overwrite a word a port still reads; 2026-11-04, owner B4, the words' test on the coordinator's question).
+   The head's
    wait holds every later ORDER behind it: the deliveries are in sequence order, and no port could serve a later number
    before it where it carries both; it is Lamport's sender's wait for the buffer the item names, not Q4's hold of a
    plan's whole batch (DL2, recorded; the operator's to judge).  Re-read on each turn of the event loop; nobody waits.
@@ -539,7 +542,7 @@ static void orders_deliver(void){
     const uint64_t copies=state->copies;
     int error=0;
     const uint32_t set=mesh_ports_named(M,state,mesh_records(M),(uint32_t)atomic_load(&M->map_nodes),&error);
-    if(!error && !copies)error=EINVAL;
+    if(!error && (!copies || !plan_sequences_inside(state)))error=EINVAL;
     if(error){
       if(!unnamed)
         mesh_say("bridge","the ports of plan (%llu, %llu) not computed (%s): its ORDER of executions [%llu, %llu) stays at "

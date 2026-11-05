@@ -481,6 +481,11 @@ void streams_cancel(const struct port *port);
    and map_adopt, after a write that moved the serial, on the bridge parent's one event-loop thread
    (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2) */
 void plan_stale(void);
+/* 2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1, DL2): whether
+   a plan's sequence words (its `copies` uint64 words at its `sequences`) lie inside the region, after its struct
+   mesh_state, at a uint64's alignment; mesh-flow.c's, one copy, which mesh-records.c orders_deliver reads before it
+   stores into them and mesh-flow.c link_prepare before a port reads them */
+int plan_sequences_inside(const struct mesh_state *words);
 /* tag rdma/mesh-link.c:56-65 port_halt, static there; mesh-events.c (peer_terminated) and mesh-child.c call it */
 void port_halt(struct port *port,_Atomic uint32_t *which);
 

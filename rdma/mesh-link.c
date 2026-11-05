@@ -94,7 +94,14 @@ void wake(void){
    2026-11-04, owner B2, the coordinator's ruling on reviews V1's and V3's finding 11 ("every wait ends in bounded
    time"): the wait takes the timed form, bounded by MESH_PAUSE_NS, as each port's progress thread waits on `plans`
    (mesh-flow.c), so the watcher reads the stop within MESH_PAUSE_NS of it.  What must stay: the word read before the
-   loop's wake is the one waited on */
+   loop's wake is the one waited on.
+   2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL2 and DL3;
+   design/aot-compilation-change-request.md, appendix item 2, "Delivery at a node"), reversing the first note's "delivers
+   an ORDER once the ports have served the plan released before" (Q4's hold, gone): the turn publishes each of the
+   head's executions as L. Lamport's Message Buffer sender may (Concurrent reading and writing, CACM 20(11), 1977:
+   "wait until ms < mr + P"; mesh-records.c orders_deliver), and a port wakes `plans` (no raise) where its `taken[p]`,
+   the sender's mr, rose (mesh-flow.c taken_tell), so this watcher wakes the loop for the turn that publishes on.  No
+   behavior changed.  What must stay: as above */
 static void *control_watch(void *unused){
   (void)unused;
   while(!stop){
@@ -376,7 +383,11 @@ static uint64_t turn_due(uint64_t liveness){
      B2's line here (the coordinator's ruling Q4'), `due_at(&due,orders_due());`, the pending ORDER's bound, at which a
      head whose plan did not stand here was delivered with nothing released: the bound is gone (mesh-records.c
      orders_deliver: a head stays at the head, Defago et al., Fig. 5, no timeout and no skip;
-     design/aot-compilation-change-request.md, appendix items 2 and 3).  What must stay: the tag's times, verbatim */
+     design/aot-compilation-change-request.md, appendix items 2 and 3).  What must stay: the tag's times, verbatim.
+     2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL2): a head
+     also stays where Lamport's sender waits for its buffer (some port's `taken[p]` below t - u + 1), and that wait has
+     no due time either: the port's wake of `plans` where its `taken[p]` rose wakes the loop (control_watch), and the
+     turn's MESH_PAUSE_NS bound above stands.  No behavior changed.  What must stay: as above */
   if(find_wanted)due_at(&due,windows_end());
   due_at(&due,atomic_load(&exit_at));
   for(uint32_t p=0;p<port_count;p++){
