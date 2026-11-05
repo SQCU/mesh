@@ -1258,3 +1258,11 @@ Text extracted with `pdftotext -layout` into the session scratchpad's papers/ fo
   across a map move".
 - **Noted, not this unit's:** the C9 hook's remark on tools/prepare_e2b.py:1680 (prepare()'s backward reachability
   from the logits over the operator graph, 864a0ae4, 2026-11-03) is on code this unit does not change.
+- **DL10** (B4's finding on DL9's fixes: a port that ends a plan it carries, a halt among the causes, raises its
+  `taken[p]` to `released` (plan_end), so the parent may publish up to `released` + u - 1 and overwrite words of
+  executions below that; where the port's child loads the plan again before this node's run began, `executions` 0,
+  link_prepare's EALREADY does not refuse it, and its lanes read words already overwritten). link_prepare refuses
+  (EALREADY) a plan it carries units of whose `taken[p]` is above 0 at the load, as it refuses one whose `executions`
+  is above 0: a load after this port has taken or been told past numbers that the parent may since have overwritten
+  cannot know them, as a load after the run began cannot know which executions landed (the refusal's own reason,
+  link_prepare's note). The refusal is the plan's `refused[p]`, which the parent's wait leaves out (DL2).
