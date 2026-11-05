@@ -192,11 +192,12 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      request.md A9; design/compilation-coordination.md, T7).
    - `serial`: the map serial the plan was made against, every entry's the same and the state section's `serial`.
    - `set`: 0 for a hop of a sequence; else j + 1 for a page of tree j of a set range, a range every declared transfer
-     of which is MESH_PAGES, j the tree's index in the solve's trees, the same in both ends' entries of the hop
-     (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md, "The appendix's
-     revisions", S1 to S3).  A set's entries are contiguous on their cable within each copy, in walk order, both ends'
-     alike (S3); each execution of a set is carried in a uniformly random permutation of its members (S4, S5).  The
-     bridge sees a set or a sequence and no kind (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
+     of which is MESH_PAGES, j the tree's index in the solve's trees grouped by demand (the same at every rank), the
+     same in both ends' entries of the hop (design/aot-compilation-change-request.md, appendix item 5;
+     design/compilation-coordination.md, "The appendix's revisions", S1 to S3).  A set's entries are contiguous on
+     their cable within each copy, in walk order, both ends' alike (S3); each execution of a set is carried in a
+     uniformly random permutation of its members (S4, S5).  The bridge sees a set or a sequence and no kind
+     (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
    2026-11-04, owner L2 (the appendix, item 5): `set` and `padding1` appended, where every hop was one of a sequence in
    the schedule's order.  Why: the pages of function B's operands are written as a set, not a sequence (R4, item 5).
    What must stay: offsets 0-47 as at 110; both ends' entries of a hop the same `set`.
@@ -339,12 +340,21 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    `bytes` in place of `padding`, where every hop moved its whole page; the entries are in the plan's state section,
    where they were the layout's area at hdr `hop_off` (`hops` of them, at most `hop_capacity`).  What must stay: both
    ends' lists the same hops in the same order; every copy the same order.
+   2026-11-04, owner L2 (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md,
+   "The appendix's revisions", S2, S3: T6 amended): each entry's group is its set's entries of the same `node` and
+   `direction` where `set` is not 0, else the entry alone, and the entries are sorted by their group's least start in
+   the schedule, then their group's least walk, then their own walk; so a set's entries are contiguous on their cable
+   within each copy, in walk order, both ends' alike, and every other entry keeps the schedule's order.  A set's
+   position i follows its receive at position i upstream, whose group start is earlier, so the per-cable order stays a
+   topological order of the unrolled executions (S2; MSCCLang, section 5.2).  What must stay: both ends' lists the
+   same hops in the same order; every copy the same order.
    Several plans (design/plan-to-bridge-change-request.md R8; design/compilation-coordination.md, Q5): each plan is in
    its own claim, and any number stand at once; a program holds nothing but its plans' claims (C3.4).  Writing a plan
    (mesh-collective.c mesh_plan; e6bd7db2's section 6):
    1. mesh_plan computes everything first: its demands, routes, the task graph and its schedule, the template with the
       program's data edges, the least lags and u, the items and both colourings, this node's entries of one copy and
-      every room; EINVAL or ENOMEM found here leave every standing plan standing.
+      every room; EINVAL, EEXIST (a plan of the same (group, function) standing here on the same map; N1) or ENOMEM
+      found here leave every standing plan standing.
    2. The plan's claim of exactly the rows and pages it uses, with its generation from hdr `serial`, taken whole or not
       at all (mesh-dataflow.h mesh_claim_take: the head's `start`, its owner word last; ENOMEM leaves every standing
       plan standing).  Nothing is claimed at attach (C3.4).
