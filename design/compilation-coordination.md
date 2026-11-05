@@ -1343,3 +1343,139 @@ no bytecode written). Nothing was run.
   retirement at exit; L3; V1 #9 (its per-ORDER form, now DL9's raise for the delivery's hand-offs); the torch path's
   refused collectives and operators; the α–β chooser not built (ruling 3); `qps` in mesh-map.h; runs wait for the
   operator's authorization (C3.8).
+
+## The revisions of 67ca86f8
+
+The record of the unit whose instruction is design/plan-to-bridge-change-request.md and
+design/aot-compilation-change-request.md as mesh 67ca86f8 holds them ("The document is the whole instruction to an
+implementer"; "Where the document is silent, the implementer stops at that point and reports it. It takes no decision
+of its own"), from mesh 67ca86f8 and metal-microbench bb7f7426. Its rules are design/disjoint-pages-revision-
+coordination.md, "Rules (every sub-agent)", verbatim; that file's ownership table and decisions are not this unit's.
+One implementer did the work and dispatched no sub-agent. What the code did not yet do was found by reading both
+documents in full and comparing their text at 67ca86f8 with edd4b583's, which the code implemented ("The documents'
+revisions of edd4b583", above), and with the code. This part takes no decision: each clause below is done as the
+document states it, found already done, or stopped, with the document's words at that point.
+
+### Done
+
+- **SP. A set's pages keep their places** (plan-to-bridge R5): "A set's pages (design/aot-compilation-change-request.md,
+  appendix item 5) keep their places in that order. The set's random permutation is drawn over those places.
+  (Corrected 2026-11-05: the first text moved a set's pages to consecutive places, which nothing requires.)"
+  - rdma/mesh-collective.c plan_schedule: GO4's groups go (struct plan_entry `at`, plan_entry_side, the least-place
+    pass over mesh_graph_rows); every entry, a set's among them, is sorted by its own place (plan_entry_order), so each
+    node pair's list at each end is a subsequence of the one global order, both ends' alike, every copy's the same.
+  - rdma/mesh-flow.c link_prepare: a set is the picks of one copy and direction with the same nonzero `set`, wherever
+    they lie in the list, its members in list order (where it was a maximal run of consecutive picks, S3), and the
+    EINVAL for a `set` in two runs of one copy (S7) goes; the permutation stays per cable, over the positions the deal
+    gave it (S7′). position_record: a lane that meets one set again after another in an execution draws it again, the
+    same permutation.
+  - rdma/mesh-collective.h and rdma/mesh.h: the notes, each reversal dated. MESH_VERSION stays 112 (no layout moves).
+  - GO4's and GO4′'s argument (the groups in order of their least places a topological order with each group whole,
+    so any permutation within a group one too) is withdrawn at each note; see stop 3.
+- **EK. Every program declares each consumer's kind** (aot-compilation, appendix item 5): "Every program declares each
+  consumer's kind. A consumer that reduces partial sums, or otherwise takes pages in any order, is function B (R4)."
+  - tools/prepare_e2b.py: prepare()'s set `summed` is `reduced`, the (partial, rank) pairs whose consumer at that rank
+    reduces the partial with the other ranks': the pieces a combine sums (EB1, as before); kv_merge's split-KV partials
+    and normalizers at each rank that merges them (R4's example, "online softmax (M. Milakov and N. Gimelshein ...)":
+    kv_merge sums exp(lse_r - M) o_r and exp(lse_r - M) over the ranks); and each vocabulary contribution at every rank,
+    since every rank runs maxloc_reduce, the max of the ranks' (value, index) pairs (the turns: "elementwise maps, and
+    sum or max reductions"). Each such destination's kind is "pages"; EB3's and review X3 #7's "join" for them is
+    reversed with dated notes. tools/e2b_replay.m: e2b_ir's comment on "pages". A directory prepared before keeps its
+    manifest's kinds until it is prepared again.
+
+### Found already done (the code at 67ca86f8 and bb7f7426 does what the document states)
+
+- R4's correction: "Ordering coflows to minimize their completion time is Varys's smallest-effective-bottleneck first
+  ... R5 does not require it." No code implements or names Varys; a join's pages carry its consumer's bottom level
+  (GO2).
+- R4: "A's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
+  assignment gives each tensor one contiguous range". mesh_plan's items are each value's copies, each coloured by
+  mesh_graph_left_edge to one run [colour, colour + size) (plan_place).
+- A4: "AllGather is one broadcast from each source over its packed trees (Blink §3.1). AllToAll is point-to-point
+  demands, one per ordered pair of ranks, routed jointly as concurrent multicommodity flow". rdma/mesh_compile.py
+  _all_gather declares each member's shard one range to every other member, which mesh_plan routes as one demand over
+  its trees; _all_to_all declares one transfer an ordered pair; mesh_plan routes every demand at once by mesh_graph_flow
+  (Garg and Könemann's rounds).
+- Item 6: "name each compiled function alike at every rank: (the program's group, the function's ordinal in the
+  program's order of compilation)". mesh_compile.py takes the next of FUNCTIONS (1, 2, ...) at each call of the
+  backend's compile function; e2b plans one function, 1; the plan is (group, function) (N1).
+- The scope, A1's, A9's and R8's new wording, and item 5's "For the program the code runs today, tools/prepare_e2b.py
+  does the declaring": wording, no code.
+
+### Where the work stopped
+
+- **Stop 1. Item 2, "Delivery at a node".** The item:
+  > A program's calls are a sequence, so each plan has at most one call outstanding. The sequencer numbers each call's
+  > submission (Défago, Schiper and Urbán, 2004), and a call returns only once its executions are done (C3.1).
+  >
+  > The bridge parent writes, for each plan, its one outstanding call's sequence number and executions into words of
+  > that plan's state, each with a single writer (C3's rule 2). No word is reused while its call is outstanding, so
+  > nothing waits to write.
+  >
+  > Each port serves the outstanding calls of every standing plan in sequence-number order. Both ends of a cable read
+  > the same numbers, so they serve alike.
+
+  Where it is silent:
+  - **When a node's words of a plan's next call are written.** The parent writes a call's words when the sequencer's
+    ORDER of it reaches its node. The ORDER of call k + 1 follows the submission at the plan's sender (the least of the
+    plan's nodes, Q2), whose program makes it once its own call k returned, and item 4 states what that means: "A call
+    returns once its own landings and sends are done (C3.1). So at each end every page of an execution is matched".
+    At another node of the plan, call k can still be outstanding then: its program not yet at call k, or a lane there
+    still to post a forward of call k to a third node. The item says no word is reused while its call is outstanding
+    and nothing waits to write; it does not say what the parent does with an ORDER of a plan's next call that reaches a
+    node where the plan's call is outstanding: store its words over those a lane still reads (the lane's two ends would
+    then read different numbers), or keep the ORDER pending (a wait, every later ORDER there behind it in sequence
+    order), and if so until what (this node's program's next submission, or every lane there having taken call k).
+  - **What a call is where one start submits several executions.** Item 6: "have each call launch one execution of its
+    function"; this item: "its one outstanding call's sequence number and executions". e2b's one start raises
+    `executions` to its steps at once (N4): one call of many executions, or many calls outstanding at once, which "each
+    plan has at most one call outstanding" excludes.
+
+  Nothing changed: the code is as edd4b583's item left it (Lamport's buffer: u sequence words a plan, `released` its
+  ms, each port's `taken[p]` its mr, the parent's wait where the buffer is full, DL10's refusal on `taken[p]`), which
+  the correction names "a ring whose writer waits when it is full". The item's other "The code must" lines were done
+  before: orders delivered in sequence order with no timeout and no skip (O1), released executions interleaved on each
+  cable (DL3), Q4's hold and Q4′'s skip gone (DL4, O1).
+- **Stop 2. Edge scheduling.** R5's method: "Bottom levels count each edge's weight over its route's cables, as Sinnen
+  and Sousa's eq. (7) does ... (Corrected 2026-11-05: the first text also required their edge scheduling, whose start
+  times order nothing once the lists follow the reference algorithm below.)" R5's "Code": "rdma/mesh-graph.{h,c}: bottom
+  levels, and the list schedule with edge scheduling." A6: "List scheduling by bottom level, with edge scheduling under
+  contention, over the weights of A3." The method no longer requires edge scheduling; R5's "Code" line and A6 still
+  name it. Nothing changed: plan_schedule still calls mesh_graph_contention_schedule and nothing reads its starts
+  (GO5). The bottom levels are as the method states (GO2: a communication on link L weighs c(e) / b(L), so a remote
+  edge's weight counts over its route's cables).
+- **Stop 3. No cycle among the permuted sequences.** R5: "A set's pages ... keep their places in that order. The set's
+  random permutation is drawn over those places"; and "Each cable carries execution t's sends in that order, then
+  execution t + 1's. That order is a topological order of the unrolled executions, since every lag points forward. So
+  the cables' sequences cannot wait on each other in a cycle". SP builds the first as written. The second holds for the
+  places' order; each execution's permutation (item 5, per cable, S7′) changes which page a set's place carries, and
+  the documents state no argument for the permuted sequences. GO4's groups made every permutation within a group a
+  topological order too. With a set's places spread, that holds where every edge of the set's tree draws the same
+  permutation over equally many members (S7′'s counter: one execution, set and cable place), and not otherwise. For
+  example: nodes x, y, z; a set of pages a and b on the tree x -> y -> z at places 10 and 30 of (x, y), dealt to its
+  second cable, and 20 and 40 of (y, z), whose one cable is at place 0; a demand from y over y -> z -> x at 21 and 22;
+  one from z over z -> x -> y at 26 and 28, on (x, y)'s second cable (each lane in order, the places a topological
+  order). Where (x, y) draws a at 10 and b at 30 and (y, z) draws b at 20, y's send at 20 waits for b's landing at 30,
+  which is behind x's forward at 28, which waits for the landing at 26, behind z's forward at 22, which waits for the
+  landing at 21, behind y's send at 20. No argument and no mechanism was added.
+
+### Commits
+
+- mesh cf5842fa (rdma/mesh-collective.{c,h}, rdma/mesh.h, rdma/mesh-flow.c: SP), and this record.
+- metal-microbench 43e6302f (tools/prepare_e2b.py, tools/e2b_replay.m: EK).
+- The rules' C9 hook did not run: mesh has none installed (.git/hooks holds only pre-commit.countermanded-20260922,
+  and core.hooksPath is unset), so no remark was given.
+
+### Integration
+
+At mesh cf5842fa and metal-microbench 43e6302f, both trees clean and level with origin: `make -B -C rdma` 0 (mesh-flow,
+mesh-heartbeat, mesh-stat, libmesh.dylib), `make -B -C rdma native-audit` 0, `make .build/e2b_replay` 0
+(libmesh_metal.dylib and e2b_replay against the new libmesh), no warning or error; each changed C file compiled alone
+first, and tools/prepare_e2b.py compiles (py_compile; its __pycache__ entries were there before). Nothing was run.
+
+### What this changes among the earlier parts' open items
+
+- "No cycle on a cable" (W3 #6), which GO4 answered, is open again: stop 3.
+- "Item 5's reach in e2b" and "Function B not declared" (EB3, X3 #7): kv_merge's partials and normalizers and the
+  vocabulary's contributions are function B (EK).
+- "GO5" stands, with stop 2; "DL2's head-of-line wait" stands, with stop 1.
