@@ -1623,6 +1623,71 @@ design/aot-compilation-change-request.md, and are held here once.
 > "If a child stops reading for 4096 deliveries, "
 > consider whether this is a fictional problem or a problem that appears only through idiomatic citation free code before making any further statements
 
+**Claude:**
+
+> (｀・ω・´) All of it is in the documents (mesh `f19406ea`, pushed). Nothing new is implemented yet.
+>
+> **The Homebrew install was mine, and it was wrong.** I installed `highs` by hand last turn. I've uninstalled it.
+> - **R5 now requires a pinned, scripted build:** `rdma/Makefile` builds HiGHS from source at tag v1.15.1 (commit `04024d70`, tarball SHA-256 `a840d269…`) and links it statically. That's the same pattern metal-microbench's Makefile already uses for its pinned sources.
+> - **It builds with `cc` and `c++` only.** cmake isn't on the members; I checked m5ult2.
+> - **Until that build exists, `main` won't build**, because the Makefile still points at `/opt/homebrew`.
+>
+> **The copy came from the implementer, not the documents.** Its own decision M5 copied the channel into each port's memory. It did this to get around a fixed 4096-entry area, and its M4 then made the writer wait when that area filled. Neither had a citation. Item 2 now says each port reads the channel in place, by view, and nothing copies it.
+>
+> **Is a full channel a real problem? No, it's fictional.**
+> - An entry stays only until every lane carrying its plan has taken that call.
+> - A plan's own dependences limit how far a lane can fall behind its deliveries:
+>   - A send completes only once its receive is posted (data-model §3).
+>   - A receive can only be posted into a free copy (C3.3).
+> - So the lag is at most A10's bound on outstanding calls plus C3.3's copies along the plan's routes. I derived that myself, and the document says so.
+> - That makes the room a compile-time number. Synchronous dataflow fixes its buffer sizes before the program runs in the same way (Lee & Messerschmitt 1987). Each plan claims its room when planned, or fails with `ENOMEM` then.
+> - Overflowing it needs a stopped process. Process death belongs to the failport's lifecycle (item 4), and a slow node gets no handler (item 3).
+> - So the writer never waits and never checks. The problem only existed because of the idiomatic fixed area plus copy plus wait.
+>
+> **The topology right now.** No bridge is running on any member, so `mesh-stat --map` had nothing to show. I ran the repo's read-only `bin/mesh-nodeinfo.sh` on each member over ssh instead. It found five Macs and 13 cables, a multigraph with cycles:
+> - Studio and m5ult2: 3 cables
+> - Studio-2 and Studio-3: 4
+> - Studio and Studio-3: 2
+> - Studio and mini, Studio-2 and mini, Studio-2 and m5ult2, mini and m5ult2: 1 each
+> - No cable at all for Studio/Studio-2, Studio-3/m5ult2 and Studio-3/mini; those pairs relay through other nodes.
+>
+> One cable in each of the first two pairs is inferred from the nodes' routes rather than read directly from a port.
+>
+> **Deadlock freedom on any graph** (item 5):
+> - **The general condition:** Dally & Seitz (1987) show that routing is deadlock-free exactly when the channel dependency graph has no cycle. That holds for any topology and any number of relaying nodes.
+> - **What gives us that:** MSCCLang's single global order. Every lane's sequence is a subsequence of it, which is the ordered-resources rule against circular wait (Havender 1968; Coffman et al. 1971).
+> - **When the permutation is safe:** it keeps the order acyclic only if it is one renaming of the set's members, applied alike on every lane the set crosses: every hop, every relay, every parallel cable, and the consumer tasks too. Function B takes its pages in any order, and indexes inside shapes aren't compiled, so that's allowed.
+> - **Why:** a set's members share one producer, one route and an any-order consumer, so the renaming is an automorphism of the task graph. An automorphism maps a topological order onto a topological order.
+> - **What changes in the code:** the deal fixes *positions* on each cable, not members. Each port holds a view of every member of each set it carries, so any member can go at any of the set's positions. The implementer's M1 assigned members to cables instead, and that is what produced the cycle.
+>
+> **A10, with citations:**
+> - **The graph of calls** comes from Pathways §3's tracer: "a new program tracer … that a user can wrap around a block of Python code that calls many compiled functions … each compiled function is represented by a computation node in a dataflow graph".
+> - **For torch,** that's torch.fx's symbolic tracer (Reed et al., MLSys 2022), with each compiled function as a leaf.
+> - **The bound** is the number of a function's calls in the traced block, since Pathways sends the whole block in "a single message (describing the entire subgraph)" (§4.5).
+>
+> **The smaller mistakes, now fixed:**
+> - **Objective:** the LP minimizes makespan first, then total completion time over those optima (lexicographic LP, Isermann 1982). That pins down the completion times off the critical path.
+> - **Header path:** corrected.
+> - **Same order on every rank:** every rank builds HiGHS from the same source with the same flags.
+> - **ReduceScatter and CollectivePermute:** now inserted where GSPMD inserts them (§3.2, §3.3, §4.3), so the new lowerings can actually be reached.
+> - **The start's wait for every port to load:** now listed for removal.
+>
+> **Still not written:** function B releasing its output pages one at a time on the GPU side. I haven't got a citation for how to do that yet.
+>
+> Shall I launch the implementer on `f19406ea`?
+>
+> Sources:
+> - [Dally & Seitz 1987](https://scilit.net/publications/168cfcffb16b178ce26c677b94247b80)
+> - [Lee & Messerschmitt 1987](https://ptolemy.berkeley.edu/publications/papers/87/staticscheduling)
+> - [Isermann 1982](https://scilit.com/publications/2e374c6ad337493e8255e27d3a4e1ca8)
+> - [torch.fx, MLSys 2022](https://proceedings.mlsys.org/paper_files/paper/2022/hash/7c98f9c7ab2df90911da23f9ce72ed6e-Abstract.html)
+
+**The operator:**
+
+> sure go for it.
+> "function B releasing its output pages one at a time on the GPU side."
+> one at a time? who says any part of this code is synchronized s.t. there is a global sync point which interrupts numeric backends each and every time any page has been received from dma? synchronizaiton s.t. only one page at a time is ever made available to the dma bridge after any numeric backend function concludes? citation? literature? idiomaticity?
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
@@ -1712,6 +1777,24 @@ code, and each method is used as its source states it.
     - A is one task with an edge from every page of its operand.
     - B is one task per page, each with an edge from its own page, and its outputs are pages that leave as each is
       produced.
+    - **Nothing synchronizes B's outputs one page at a time, and nothing interrupts a backend when a page lands.**
+      > one at a time? who says any part of this code is synchronized s.t. there is a global sync point which
+      > interrupts numeric backends each and every time any page has been received from dma? synchronizaiton s.t. only
+      > one page at a time is ever made available to the dma bridge after any numeric backend function concludes?
+      > citation? literature? idiomaticity?
+      - An output page is available once its presence is set, as an element of an I-structure is. Each element has its
+        own presence. Its producer writes it once, in any order, and a reader waits only for the element it reads,
+        with no barrier over the structure (Arvind, R. S. Nikhil and K. K. Pingali, I-structures: data structures for
+        parallel computing, ACM TOPLAS 11(4), 1989).
+      - Here the presence is C3's supplied word: "the producer stores it after writing its pages. One store can
+        release a whole range of pages." Its store follows its pages in C3's writing order (Boehm and Adve, 2008). A
+        producer's store releases whatever pages its work has written, any number at once and in any order. The bridge
+        reads the words in place and sends each released page (R1).
+      - The receiving side reads landings by masks (C3), so a landing interrupts no backend. A backend's work and the
+        bridge's transfers overlap (aot-compilation, appendix item 2; Pathways §4.5).
+      - The release follows the producing work. The existing kernels write their pages, and the supplied store follows
+        them. No kernel is written (aot-compilation A9).
+      - (Corrected 2026-11-05: Claude's message of that day said "one at a time", which nothing requires.)
     - Their weights come from the weighting operand.
     - A's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
       assignment gives each tensor one contiguous range (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020; C3.3;
