@@ -419,8 +419,9 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
   /* the assignment, and this cable's units on each of its queue pairs: unit k of a direction its hop's `bytes` long
      (T7), 1 to a page's bytes, none a plan writes else (EINVAL); and a hop a lane's queue cannot hold refused, not left
      unposted: its frames past the lane's receive room (lane_reset's frame_capacity) or past its SEND gate's
-     (link_connect), EMSGSIZE.  2026-11-04, owner B1 (T7): every unit a page (page_bytes()) and the frames test one
-     page's for every lane before; what must stay: no hop assigned to a lane that cannot hold it */
+     (link_connect), EMSGSIZE.  The bytes' EINVAL is design/compilation-coordination.md, B1-1 ("a hop whose `bytes`
+     is 0 or past a page is EINVAL").  2026-11-04, owner B1 (T7): every unit a page (page_bytes()) and the frames test
+     one page's for every lane before; what must stay: no hop assigned to a lane that cannot hold it */
   uint64_t lane_units[2][MESH_LINK_LANES]={{0}};
   for(int d=0;d<2;d++){
     if(!units[d])continue;
@@ -910,7 +911,8 @@ static void link_close(struct port *port,uint32_t served){
    it), on the port's progress thread where hdr `plans` moved since its last walk (link_run): each loaded plan whose
    claim closed or was reused (plan_stands no longer) ended (plan_end); then each standing plan (mesh-dataflow.h
    mesh_head_after, mesh_head_state) this port has neither loaded (a flow of its head and generation) nor refused (its
-   `refused[p]` not 0, which port p alone writes, so a refusal by an earlier child of this port stands) loaded
+   `refused[p]` not 0, which port p alone writes and never resets, so a refusal by an earlier child of this port
+   stands: design/compilation-coordination.md, B1-1, "`refused[p]` is never reset") loaded
    (plan_load), and listed after those loaded before it.  A plan published or closed during the walk may be met or
    missed (mesh-dataflow.h: a walk reads a moving set); each publication and close raises `plans` again, so the next
    pass walks again.  `refused[p]` is read before the announcement: a value read of a claim released meanwhile only
@@ -976,13 +978,17 @@ static void plans_walk(struct port *port,uint32_t served){
    2026-11-04, owner B1 (design/compilation-coordination.md, Q4' and Q3'): each raise of `served[p]` wakes hdr
    `plans` without raising it (served_tell); and a held plan whose `serial` is no longer this node's `map_serial`
    (read once a pass) is cancelled (FLOW_CANCELLED: the bridge parent has cancelled its receives, plan_stale, D.3.6,
-   "a plan stands only while its map does", and dropped its pending ORDERs, Q3'): it is served no more, and its
+   "a plan stands only while its map does", and dropped its pending ORDERs, Q3'; read so, design/compilation-
+   coordination.md, B1-1: "a port reads a plan as cancelled where its `serial` is not this node's map_serial"): it is
+   served no more, and its
    `served[p]` is raised to its `released` and on to every later `released` read while the port holds it, as a plan
    it carries nothing of (Q4': "raises `served[p]` to `released` for a plan cancelled").  Where requests of it are
    outstanding as it is cancelled, the port is ended and its link lost (plan_outstanding), since the parent may now
    release another plan's batch onto the same queue pairs, which only the child's exit clears (link_close's note,
-   2026-11-03); this the ruling does not state, and is the plan's end's rule (plan_end) applied here.  What must stay:
-   no plan's pages posted beside another's outstanding requests */
+   2026-11-03): the plan's end's rule (plan_end) applied here, design/compilation-coordination.md, B1-1 ("a plan
+   cancelled while it has requests posted stops the port and loses its link, as link_close does for a plan's end").
+   `served[p]` for a carried plan rises when the bound it serves is done whole (B1-1).  What must stay: no plan's pages
+   posted beside another's outstanding requests */
 static int link_run(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
   const uint32_t p=port->index;
