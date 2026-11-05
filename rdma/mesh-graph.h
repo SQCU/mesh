@@ -8,7 +8,9 @@
    design/compilation-coordination.md, U1; design/disjoint-pages-revision-coordination.md, "The allocator");
    mesh_graph_bottom_levels and mesh_graph_contention_schedule are new, and mesh_graph_reach gains `parent`
    (design/plan-to-bridge-change-request.md, R5; design/compilation-coordination.md, "The graph module" and T3 to T5,
-   Q3).
+   Q3); mesh_graph_heap_order is new (design/plan-to-bridge-change-request.md, R5, "The order of each cable's list, by
+   the reference algorithm"; design/compilation-coordination.md, "The documents' revisions of edd4b583", "The graph
+   module" and GO3), its heap mesh_graph_lags' binary heap, one copy.
    2026-11-04, owner C2 (design/compilation-coordination.md, U1): mesh_graph_lags' source cited to C3.3 and U1, where it
    cited design/disjoint-pages-revision-coordination.md, D5.  Why: D5 appears in neither Lam, Rau nor C3.3's text
    (design/aot-compilation-change-request.md, appendix item 1); the least lags decide C3.3's tests at every larger
@@ -194,6 +196,15 @@ int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const u
                                    const uint32_t *from, const uint32_t *to, const double *cost, const size_t *route,
                                    const uint32_t *link, const uint32_t *communication, uint32_t links,
                                    const double *rate, double *start, double *link_start);
+/* M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, section 5.2, step 3: "Sort
+   instructions into a global topological order with respect to their dependencies with a heap using the priority to
+   order instructions."  Vertex v's priority priority[v]; edge e runs from[e] -> to[e] (an edge given twice counts
+   twice and is removed twice, so it changes nothing).  A vertex enters the heap once every edge into it leaves a
+   placed vertex; the heap's first is placed next, the greatest priority first and a tie to the lower vertex
+   (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO3).  place[v] out, v's place in the
+   order.  0; EINVAL where an edge names no vertex or the edges hold a cycle (a vertex left unplaced); ENOMEM */
+int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
+                          const uint32_t *to, uint32_t *place);
 
 #ifdef __cplusplus
 }
