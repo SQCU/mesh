@@ -40,6 +40,15 @@ HIGHS_FLAGS = -O2 -DNDEBUG $(CFLAGS_EXACT) -fexceptions -Wno-unused-variable -Wn
   -I. -Iextern -Iextern/catch -Ihighs
 HIGHS_CFLAGS = -isystem $(HIGHS)/highs -isystem $(HIGHS)
 HIGHS_LIBS = .build/highs/obj/*.o -lc++ -lpthread
+HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h
+# the resident bridge (design/page-queue-change-request.md): its main and event loop (mesh-link.c), its ports' children
+# from the parent's side (mesh-children.c) and their own (mesh-child.c), discovery and pairing (mesh-ports.c), the
+# kernel's loss and change events (mesh-events.c), the child's verbs jobs (mesh-lanes.c), the map (mesh-records.c) and
+# the data path over the page lists (mesh-flow.c); one image, its children `mesh-flow --child ...`
+BRIDGE = mesh-link.c mesh-children.c mesh-child.c mesh-ports.c mesh-events.c mesh-lanes.c mesh-records.c mesh-flow.c \
+  mesh-dataflow.c mesh-call.c mesh-graph.c
+all: $(BINS)
+# HiGHS's fetch and build (above), after `all`, the default goal
 $(HIGHS_TARBALL):
 	mkdir -p .build/highs
 	curl --fail --location --output $@.part https://github.com/ERGO-Code/HiGHS/archive/refs/tags/$(HIGHS_TAG).tar.gz
@@ -52,14 +61,6 @@ $(HIGHS_BUILT): $(HIGHS_TARBALL) Makefile
 	cd $(HIGHS) && for f in $(HIGHS_SOURCES); do o=../obj/$$(echo $$f | tr / _).o; \
 	  case $$f in *.c) cc $(HIGHS_FLAGS) -c $$f -o $$o;; *) c++ -std=c++17 $(HIGHS_FLAGS) -c $$f -o $$o;; esac || exit 1; done
 	touch $@
-HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h
-# the resident bridge (design/page-queue-change-request.md): its main and event loop (mesh-link.c), its ports' children
-# from the parent's side (mesh-children.c) and their own (mesh-child.c), discovery and pairing (mesh-ports.c), the
-# kernel's loss and change events (mesh-events.c), the child's verbs jobs (mesh-lanes.c), the map (mesh-records.c) and
-# the data path over the page lists (mesh-flow.c); one image, its children `mesh-flow --child ...`
-BRIDGE = mesh-link.c mesh-children.c mesh-child.c mesh-ports.c mesh-events.c mesh-lanes.c mesh-records.c mesh-flow.c \
-  mesh-dataflow.c mesh-call.c mesh-graph.c
-all: $(BINS)
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c $(HEADERS) Makefile
 	mkdir -p .build
