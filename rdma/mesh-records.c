@@ -206,11 +206,17 @@ static void map_put(const struct mesh_record *record){
    multicast algorithms: taxonomy and survey, ACM Comput. Surv. 36(4) 2004, section 7.1, Fig. 5, the UB variant), first
    in, first out (P. Barham et al., Pathways, MLSys 2022, section 4.4: "Our current implementation simply enqueues work
    in FIFO order").  A message m is a submission of a plan's executions [first, end) (struct mesh_order; Q1, Q2).
-   What A7 adds to C3.3's run time, and only that (design/compilation-coordination.md, Q6): the sequencer's `seqnum`,
-   this bridge's pending ORDERs (`pending`), and the plan's words `submitted`, `released` and `served` (mesh.h struct
-   mesh_state); beside them the island this map gives (`island`) and the plan this bridge released last (`last`), which
-   Q3's tree and Q4's release rule read.  None is a page of the region, and none is allocated per execution: the
-   pending ORDERs' array grows only where more ORDERs wait at once than ever before */
+   What A7 adds to C3.3's run time, and only that (design/compilation-coordination.md, "The documents' revisions of
+   edd4b583", DL6, Q6 as that part leaves it): the sequencer's `seqnum`, this bridge's pending ORDERs (`pending`, the
+   head's `first` and `sequence` advanced in place as its executions are published), and each plan's words
+   `submitted`, `released`, `taken` and its sequence words (mesh.h struct mesh_state); beside them the island this map
+   gives (`island`), which Q3's tree reads (Q6, extended).  None is a page of the region, and none is allocated per
+   execution: the pending ORDERs' array grows only where more ORDERs wait at once than ever before.
+   2026-11-04, owner B4 (DL4, DL6): the plan this bridge released last (`last`), which Q4's hold read, is gone with
+   the hold, and the ports' `served` is their `taken`.  Why: design/aot-compilation-change-request.md, appendix item
+   2, "Delivery at a node": the parent publishes each released execution's sequence number in its plan's state, one
+   word per copy, and each port merges them; "Nothing holds".  What must stay: nothing of it a page of the region, and
+   nothing allocated per execution */
 /* the island of this node (design/aot-compilation-change-request.md A7: "The island is the map's Thunderbolt-linked
    component"): `self` this node's map index, `sequencer` the sequencer's (UINT32_MAX both where the map holds no
    record of this node), `parent` the node id of this node's parent in the sequencer's tree (0 at the sequencer and
@@ -228,14 +234,21 @@ static uint64_t seqnum;
    gone.  Why: Defago et al.'s delivery is in sequence-number order (Fig. 5: "while exists (m', seqnum') in pending:
    seqnum' = nextdeliver do deliver (m'); nextdeliver := nextdeliver + 1"), with no timeout and no skip, and the bound
    was a handler for a slow node, which no requirement asks for (item 3).  What must stay: the pending ORDERs in
-   arrival order, delivered from the head */
+   arrival order, delivered from the head.
+   2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL2 and DL6):
+   the head's `first` and `sequence` advance in place as orders_deliver publishes its executions, one at a time
+   (`first` + 1, `sequence` + 1 each, so `sequence` stays the number of `first`), where the head was delivered whole
+   or not at all.  Why: L. Lamport's Message Buffer sender puts one message at a time ("put message in B[ms mod P]; ms
+   := ms + 1"), and may wait between two (Concurrent reading and writing, CACM 20(11), 1977).  What must stay: as
+   above */
 static struct pending { struct mesh_order order; } *pending;
 static size_t pendings,pending_room;
-/* the plan this bridge released last (Q4: "every port holding the previously released plan has served it"): its claim
-   head, the claim's generation (the head's struct mesh_page_entry `device`) and its state section; head UINT32_MAX
-   none.  Read only while that claim is the same and not released (orders_served), on this thread, the releaser's
-   (mesh_retired_release, clients_turn) */
-static struct { uint32_t head; uint64_t generation; struct mesh_state *state; } last={UINT32_MAX,0,NULL};
+/* 2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL4: "What goes:
+   Q4's hold, its test (mesh-records.c orders_served) and `last`"): `last`, the plan this bridge released last (its
+   claim head, generation and state section, which orders_served read for Q4's "every port holding the previously
+   released plan has served it"), is removed.  Why: no delivery waits on a whole plan's service now (orders_deliver);
+   each port merges the published executions of every standing plan (mesh-flow.c).  What must stay: every plan's words
+   read on this thread only while the plan stands here (orders_deliver's match) */
 
 /* the port of this node's cable toward adjacent node `node`, MESH_PORTS where none: the first in port order whose link
    is up with a queue pair in its plan, the test by which this node's record lists the cable (mesh-ports.c record_reach,
@@ -432,66 +445,48 @@ static void orders_submit(void){
     unsent=1;
   }
 }
-/* design/compilation-coordination.md, Q4 as amended (Q4', "Amendments during the work"): whether the plan this
-   bridge released last no longer stands here (mesh-dataflow.h mesh_head_state at its head not its state section, or
-   another claim's generation there), or every port of its set has refused it (`refused[p]` not 0, acquire) or holds it
-   (bit p of `held`, acquire) with `served[p]` (acquire) at least its `released`.  Its words are read only while it
-   stands, on this thread, the releaser's.
-   2026-11-04, owner B2, the coordinator's ruling Q4', reversing this function's first form, in which the set was the
-   plan's `held` bits alone and a claim not yet released stood for the plan: a plan released before its ports had
-   loaded it read as served, and the next could be released beside it.  The set Q4' names is the start's own, every
-   port whose peer a hop of the plan names: mesh-map.h mesh_ports_named, its one copy, which the start's wait reads
-   too (owner L, 63b5bcdf), over the map as this thread, its writer, holds it.  Where that set cannot be computed (its
-   error: EINVAL, E2BIG, ENOENT) nothing can be waited for, so the plan reads as served, said on the bridge's log: the
-   wait stays bounded.  What must stay: one copy of the start's port set, L's.
-   2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O2: "Not done: Q4's hold
-   stays"): this test is the hold, and its reason is O2's, in place of "A cable never interleaves two executions"
-   (Claude's words in the first contract's ruling 1, which design/aot-compilation-change-request.md, appendix item 2,
-   withdraws): on each queue pair the k-th SEND fills the k-th receive posted (Hilland et al., RDMA Protocol Verbs
-   Specification, section 8.2.2, design/prepared-machine.md#M08), so both ends must post the released executions of
-   several plans on each queue pair in one order; the ports, this bridge's child processes, share the region alone with
-   it, and what a delivery leaves there is each plan's `released`, a count, so two deliveries of different plans
-   between two passes of a port leave it no record of which came first; and carrying that order needs a structure the
-   change requests do not name (a log of delivered ORDERs in the region, a ring or unbounded, or a hand-off waited on,
-   a hold).  No behavior changed.  What must stay: this test before every release, until the operator names what
-   carries the delivery order to the ports (O2, open).
-   2026-11-04, owner B4 (mesh.h MESH_VERSION 112, the coordinator's mesh 932d098d): the port's word is `taken[p]`,
-   where it was `served[p]`, the name alone in this commit; design/compilation-coordination.md, "The documents'
-   revisions of edd4b583", DL2 and DL4 follow.  What must stay: as above until then */
-static int orders_served(void){
-  if(last.head==UINT32_MAX || mesh_head_state(M,last.head)!=last.state ||
-     atomic_load_explicit(&mesh_page(M)[last.head].device,memory_order_acquire)!=last.generation)return 1;
-  int error=0;
-  const uint32_t set=mesh_ports_named(M,last.state,mesh_records(M),(uint32_t)atomic_load(&M->map_nodes),&error);
-  /* design/compilation-coordination.md, B2-1 */
-  if(error){
-    mesh_say("bridge","the ports of plan (%llu, %llu), released last, not computed (%s): the next ORDER is delivered "
-             "without them",(unsigned long long)last.state->group,(unsigned long long)last.state->epoch,strerror(error));
-    return 1;
-  }
-  const uint64_t held=atomic_load_explicit(&last.state->held,memory_order_acquire),
-                 released=atomic_load_explicit(&last.state->released,memory_order_relaxed);
-  for(uint32_t p=0;p<MESH_PORTS;p++)
-    if(set>>p&1 && !atomic_load_explicit(&last.state->refused[p],memory_order_acquire) &&
-       !(held>>p&1 && atomic_load_explicit(&last.state->taken[p],memory_order_acquire)>=released))return 0;
-  return 1;
-}
+/* 2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL2 and DL4:
+   "What goes: Q4's hold, its test (mesh-records.c orders_served) and `last`"): orders_served is removed: the test,
+   before every delivery, that the plan this bridge released last no longer stood here, or that every port of its set
+   (mesh-map.h mesh_ports_named) had refused it or held it with `served[p]` at least its `released`, and, where that
+   set could not be computed, the plan read as served (B2-1), said on the bridge's log.  Why: it was Q4's hold (O2's
+   reason: what a delivery left the ports was a count, so the order of deliveries across plans did not reach them);
+   the delivery now publishes each execution's sequence number in its copy's word (L. Lamport, Concurrent reading and
+   writing, CACM 20(11), 1977, "Message Buffer"), and the ports merge them (mesh-flow.c), so "Nothing holds"
+   (design/aot-compilation-change-request.md, appendix item 2, "Delivery at a node"); B2-1's read-as-served would let
+   the sender overwrite a word a port still reads (DL2).  What must stay: the start's port set, one copy (L's), which
+   orders_deliver reads for Lamport's sender's wait */
 /* Defago et al., Fig. 5, the destinations: each delivers the pending messages in sequence-number order, the one
    numbered `nextdeliver` next.  Here, as recorded (design/compilation-coordination.md, Q3, Q4 and Q3-tree), it differs
    from Fig. 5: the sequencer's number starts at 0 (Fig. 5: 1); a SUBMIT of [first, end) takes end - first numbers, one
    an execution; and each node receives the ORDERs it takes in sequence order (one path from the sequencer down the
    island's tree, each hop in order), so delivery is by arrival order, the pending list's head standing for
    `nextdeliver`, and an ORDER's `sequence` is not compared.  The head is delivered once its plan stands here (its
-   (group, epoch), of this node's map serial: mesh-dataflow.h mesh_head_state) and every port holding the plan released
-   last has served it
-   (orders_served): its plan's `released` its `end` (release), and hdr `plans` woken so the ports see it.  So this
-   node's cables carry one plan's batch at a time, each execution whole, in sequence order: on each queue pair the k-th
-   SEND fills the k-th receive posted (link_prepare's note; Hilland et al., RDMA Protocol Verbs Specification, section
-   8.2.2, design/prepared-machine.md#M08), so both ends of a cable post the released executions of several plans on
-   each queue pair in one order, the sequence order both ends' parents deliver; the ports learn of a delivery only each
-   plan's `released`, a count, so the order of deliveries across plans does not reach them; and carrying it to them
-   needs a structure the change requests do not name (design/compilation-coordination.md, "The appendix's revisions",
-   O2).  Re-read on each turn of the event loop; nobody waits (Q4).
+   (group, epoch), of this node's map serial: mesh-dataflow.h mesh_head_state), with no timeout and no skip (O1); not
+   matched, it stays.  Its delivery is the publication of each of its executions by the sender of L. Lamport's Message
+   Buffer (Concurrent reading and writing, CACM 20(11), 1977: "sender: wait until ms < mr + P; put message in B[ms mod
+   P]; ms := ms + 1"; design/aot-compilation-change-request.md, appendix item 2, "Delivery at a node": "The bridge
+   parent writes each released execution's sequence number into its plan's state, one word per copy";
+   design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1 and DL2): P is the plan's `copies`
+   u, B[c] its sequence word c (at its `sequences` + 8 c), ms its `released`, and each receiver's mr a port's
+   `taken[p]`.  For the head's next execution t, the greater of its `first` and the plan's `released`, numbered
+   `sequence` + t - `first`: where t >= u and some port of the plan's port set (mesh-map.h mesh_ports_named, the
+   start's set, one copy, over the map as this thread, its writer, holds it) that has not refused the plan
+   (`refused[p]` 0, acquire) has `taken[p]` (acquire) below t - u + 1, Lamport's sender waits ("wait until ms < mr +
+   P"): the head stays, read again on a later turn of the event loop (a port wakes hdr `plans` where its `taken[p]`
+   rose, mesh-flow.c, and mesh-link.c control_watch wakes the loop), nobody blocking, as a head that does not stand
+   here stays (O1); else the number stored in word t mod u (an atomic store), then `released` t + 1 (release), "put
+   message in B[ms mod P]; ms := ms + 1", and the head's `first` and `sequence` advanced past t in place (DL6); then
+   on to t + 1.  An ORDER done (its `end` reached, or every execution of it below `released` already) leaves the head.
+   hdr `plans` is woken (region-shared) after a turn that published, so the ports see it.  Where this differs from the
+   paper, recorded (DL1): every port of the set is a receiver of every message, so the sender's wait is over every
+   receiver's mr; and a port's mr is the least of its lanes' next reads (mesh-flow.c).  A port set that cannot be
+   computed (mesh_ports_named's error), and a plan whose `copies` is 0, which has no sequence word and which every port
+   refuses (mesh-flow.c link_prepare, EINVAL), leave the head staying, said on the bridge's log once a head
+   (`unnamed`; DL2: reading it as served, B2-1, would let the sender overwrite a word a port still reads).  The head's
+   wait holds every later ORDER behind it: the deliveries are in sequence order, and no port could serve a later number
+   before it where it carries both; it is Lamport's sender's wait for the buffer the item names, not Q4's hold of a
+   plan's whole batch (DL2, recorded; the operator's to judge).  Re-read on each turn of the event loop; nobody waits.
    2026-11-04, owner B2, the coordinator's ruling Q4' (design/compilation-coordination.md, "Amendments during the
    work"): a head whose plan does not stand here is held at most MESH_PLATFORM_NS from its arrival (the rules' bounded
    wait; the loop's turn is due then, orders_due), then delivered with nothing released, said on the bridge's log as
@@ -516,23 +511,63 @@ static int orders_served(void){
    current).  Why: design/disjoint-pages-change-request.md, C3 ("Each state word has one writer, and no state word is
    reset while its plan stands") and C3.8 ("No state word is reset while its plan stands, and each has one writer").
    An ORDER of a cancelled plan can still match its replan, which keeps the plan's name (N1): open for the operator,
-   recorded by the coordinator.  What must stay: `released` never lowered */
+   recorded by the coordinator.  What must stay: `released` never lowered
+   2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL2, DL4 and
+   DL6; design/aot-compilation-change-request.md, appendix item 2, "Delivery at a node"), reversing O2's hold kept
+   above (the head delivered whole, `released` its `end`, only once every port holding the plan released last had
+   served it, orders_served, so this node's cables carried one plan's batch at a time, each execution whole): the
+   head's executions are published one at a time, each number in its copy's sequence word and `released` raised past
+   it (release), Lamport's sender waiting only where the buffer of u words is full; orders_served, `last` and B2-1's
+   read-as-served go.  Why: the item: "Each port serves the released executions of every standing plan in
+   sequence-number order: a k-way merge"; "Both ends of a cable read the same sequence numbers, so they merge alike.
+   Nothing holds."  The words carry the delivery order to the ports, which O2 found nothing to carry.  What must
+   stay: delivery from the head alone, in arrival order (sequence order), no timeout and no skip; the head matched to
+   a standing plan of this node's map serial; `released` only rising (O4), this thread its one writer; a word written
+   only once no port of the set may still read the number it holds (Lamport's wait) */
+static int unnamed;
 static void orders_deliver(void){
+  int published=0;
   while(pendings){
-    const struct mesh_order *order=&pending->order;
+    struct mesh_order *order=&pending->order;
     uint32_t head=mesh_head_after(M,UINT32_MAX);
     struct mesh_state *state=NULL;
     const uint64_t serial=atomic_load(&M->map_serial);
     while(head!=UINT32_MAX && !((state=mesh_head_state(M,head)) && state->group==order->group && state->epoch==order->epoch &&
                                state->serial==serial))
       head=mesh_head_after(M,head);
-    if(head==UINT32_MAX || !orders_served())return;
-    const uint64_t released=atomic_load_explicit(&state->released,memory_order_relaxed);
-    if(order->end>released)atomic_store_explicit(&state->released,order->end,memory_order_release);
-    last.head=head;last.state=state;last.generation=atomic_load_explicit(&mesh_page(M)[head].device,memory_order_acquire);
-    os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    if(head==UINT32_MAX)break;
+    const uint64_t copies=state->copies;
+    int error=0;
+    const uint32_t set=mesh_ports_named(M,state,mesh_records(M),(uint32_t)atomic_load(&M->map_nodes),&error);
+    if(!error && !copies)error=EINVAL;
+    if(error){
+      if(!unnamed)
+        mesh_say("bridge","the ports of plan (%llu, %llu) not computed (%s): its ORDER of executions [%llu, %llu) stays at "
+                 "the head",(unsigned long long)state->group,(unsigned long long)state->epoch,strerror(error),
+                 (unsigned long long)order->first,(unsigned long long)order->end);
+      unnamed=1;
+      break;
+    }
+    _Atomic uint64_t *word=(_Atomic uint64_t *)(void *)((char *)M+state->sequences);
+    int waits=0;
+    for(;;){
+      const uint64_t released=atomic_load_explicit(&state->released,memory_order_relaxed),
+                     t=order->first>released?order->first:released;
+      if(t>=order->end)break;
+      for(uint32_t p=0;t>=copies && p<MESH_PORTS && !waits;p++)
+        waits=set>>p&1 && !atomic_load_explicit(&state->refused[p],memory_order_acquire) &&
+          atomic_load_explicit(&state->taken[p],memory_order_acquire)<t-copies+1;
+      if(waits)break;
+      atomic_store_explicit(word+t%copies,order->sequence+(t-order->first),memory_order_relaxed);
+      atomic_store_explicit(&state->released,t+1,memory_order_release);
+      order->sequence+=t+1-order->first;order->first=t+1;
+      published=1;
+    }
+    if(waits)break;
+    unnamed=0;
     memmove(pending,pending+1,--pendings*sizeof *pending);
   }
+  if(published)os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
 /* 2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): orders_due (the pending head's bound, its
    arrival + MESH_PLATFORM_NS, which mesh-link.c turn_due waited for) is removed with the bound and its declaration
@@ -713,7 +748,12 @@ void clients_turn(int liveness){
      names plan_cancel's callers without it; and the sequencer's functions (island_set from map_put and map_adopt,
      order_heard from mesh-ports.c message_heard, orders_submit and orders_deliver here, clients_gone from the loop's
      EVFILT_PROC) run on this same thread, so orders_served reads a released plan's words only before this thread's
-     release can let its claim go.  What must stay: every one of them on main's thread */
+     release can let its claim go.  What must stay: every one of them on main's thread.
+     2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL2 and DL4):
+     orders_served is gone; orders_deliver reads and writes the words of the plan it matched standing in this call
+     (its `copies`, `sequences`, `refused`, `taken`, its sequence words and `released`), before this turn's release
+     below, on this thread, so a plan whose claim closes meanwhile keeps its pages until a later release.  What must
+     stay: as above */
   if(unreleased || liveness)unreleased=mesh_retired_release(M)!=0;
   busy_tell(busy);
 }
