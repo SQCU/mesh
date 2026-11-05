@@ -41,9 +41,9 @@ DOT = {operator.matmul, torch.matmul, 'matmul', torch.mm, 'mm', F.linear}
 # there can be multiple logical views").  splits: a placeholder's name to its dims_mapping, GSPMD's
 # mesh_split(tensor, device_mesh, dims_mapping) (section 3.1: each tensor dimension's mesh dimension, -1 none)
 Placement = collections.namedtuple('Placement', 'mesh nodes splits')
-# an inserted collective (GSPMD sections 2.1, 4.2 and 4.5): its kind, the FX node whose local value it carries, the
-# mesh dimensions its groups lie along, the tensor dimension it gathers or the two it switches (None for an AllReduce)
-# and its item's place in this node's program
+# an inserted collective (GSPMD sections 2.1, 3.2, 4.2 and 4.5): its kind, the FX node whose local value it carries,
+# the mesh dimensions its groups lie along, the tensor dimension it gathers or scatters or the two it switches (None for
+# an AllReduce; a CollectivePermute's its (source, target) places, TC2) and its item's place in this node's program
 Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 
 
@@ -269,13 +269,28 @@ def _reshard(ir, node, have, want):
 
 
 # GSPMD sections 3 and 4, per-operator partitioning: this node's program, in the FX graph's order.  A placeholder is
-# the function's whole input, sliced to its sharding (section 4.5, DynamicSlice).  An operator's operands are
-# resharded to the output's sharding on the dimensions they share with it; a Dot's contracting dimension keeps a mesh
-# dimension both operands shard it along and the output does not use, its local results partial sums then combined by
-# "AllReduce when the layer sums over a partitioned dimension" (section 2.1; section 4.2), and is replicated where the
-# output uses its mesh dimension ("unsharded on demand", section 3.2; Figure 6, "AllGather non-matching Bx").  The
-# output's values are resharded to replicated, so the callable returns the graph's whole values (PyTorch 2 section 3.1:
-# the callable stands for the graph)
+# the function's whole input, sliced to its sharding (section 4.5, DynamicSlice).  A Dot's contracting dimension keeps
+# a mesh dimension both operands shard it along, its local results partial sums along it.  Where the output does not
+# use that mesh dimension they are combined by "AllReduce when the layer sums over a partitioned dimension" (section
+# 2.1; section 4.2).  Where the output shards a dimension along it they are reduced onto that dimension by a
+# ReduceScatter: "gradients will be communicated with ReduceScatter instead of AllReduce" (section 3.2, the gradient's
+# contracting batch dimension and the weight's dimension both sharded on mesh dimension 0), and "replace the AllReduce
+# on the output BSM with a ReduceScatter" (section 5.1; Figure 7's finalized "bxShy, hyM -> bxSM, RS-y -> bxSmy"), so
+# the local result has the output's sharding but on that dimension, which it holds whole.  A contracting dimension the
+# two operands shard otherwise is replicated where the output uses its mesh dimension ("unsharded on demand", section
+# 3.2; Figure 6, "AllGather non-matching Bx").  An operator's operands are resharded to its local result's sharding on
+# the dimensions they share with it.  The output's values are resharded to replicated, so the callable returns the
+# graph's whole values (PyTorch 2 section 3.1: the callable stands for the graph).  A partial's key carries its
+# sharding, the members' partials' dims_mapping `lower` gives a ReduceScatter (TC1).  Each Dot form of _operator
+# contracts one dimension, so `partial` holds at most one mesh dimension
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", TA1 to TA3;
+# design/aot-compilation-change-request.md A4: "ReduceScatter goes where a reduction's result is sharded"): a
+# contracting dimension both operands shard along a mesh dimension the output uses was replicated, each operand
+# gathered before the Dot, and is now reduced by a ReduceScatter after it; the partial's key (node, 'partial') becomes
+# (node, its sharding, 'partial').  Why: GSPMD sections 3.2 and 5.1 put the ReduceScatter there, and `lower` reads a
+# collective's input sharding from its key.  What must stay: the AllReduce where the output leaves the mesh dimension
+# unused, the AllGather of a contracting dimension the operands shard unalike, and the refusal of one GSPMD gives no
+# rule for
 def _partition(ir, operators):
     inputs = 0
     for node in ir.order:
@@ -291,24 +306,32 @@ def _partition(ir, operators):
             ir.program.append(('output', tuple(keys.values()), None, (node, keys)))
         else:
             _, operands, labels, out = operators[node]
-            used, partial = {m for m in ir.sharding[node] if m >= 0}, []
-            wants = [list(_carry(ir.sharding[node], out, own)) for own in labels]
+            used, partial, contracted = {m for m in ir.sharding[node] if m >= 0}, [], {}
             for label in sorted(set(labels[0]).intersection(*labels[1:]) - set(out)):
-                at = [own.index(label) for own in labels]
-                kept = [-1 if s in used else s for s in (ir.sharding[o][i] for o, i in zip(operands, at))]
-                if kept[0] != kept[1]:
+                held = [ir.sharding[o][own.index(label)] for o, own in zip(operands, labels)]
+                if held[0] == held[1] >= 0:
+                    partial.append(held[0])
+                elif any(s >= 0 and s not in used for s in held):
                     raise NotImplementedError(
                         '%s: its contracting dimension on mesh dimensions %s in its two operands: GSPMD gives the '
-                        'AllReduce where both shard it alike (section 2.1) and the AllGather where the output takes '
-                        'its mesh dimension (section 3.2, Figure 6), and no rule here (A-T2)' % (node.name, kept))
-                for want, i in zip(wants, at):
-                    want[i] = kept[0]
-                if kept[0] >= 0:
-                    partial.append(kept[0])
+                        'AllReduce or the ReduceScatter where both shard it alike (sections 2.1, 3.2) and the '
+                        'AllGather where the output takes its mesh dimension (section 3.2, Figure 6), and no rule here '
+                        '(A-T2)' % (node.name, held))
+                contracted[label] = held[0] if held[0] == held[1] else -1
+            local = tuple(-1 if s in partial else s for s in ir.sharding[node])
+            wants = [list(_carry(local, out, own)) for own in labels]
+            for label, m in contracted.items():
+                for want, own in zip(wants, labels):
+                    want[own.index(label)] = m
             keys = [_reshard(ir, o, ir.sharding[o], tuple(w)) for o, w in zip(operands, wants)]
-            key = (node, 'partial') if partial else (node, ir.sharding[node])
+            key = (node, local, 'partial') if partial else (node, ir.sharding[node])
             ir.program.append(('call', tuple(keys), key, node))
-            if partial:
+            if any(m in used for m in partial):
+                (m,) = partial
+                ir.program.append(('collective', (key,), (node, ir.sharding[node]),
+                                   Collective('reduce-scatter', node, (m,), ir.sharding[node].index(m),
+                                              len(ir.program))))
+            elif partial:
                 ir.reduced[node] = Collective('all-reduce', node, tuple(partial), None, len(ir.program))
                 ir.program.append(('collective', (key,), (node, ir.sharding[node]), ir.reduced[node]))
                 ir.placed.add((node, ir.sharding[node]))
@@ -484,6 +507,10 @@ def _all_to_all(ir, c, group, have):
 # a ReduceScatter.  The partitioner here inserts none (_partition replicates a contracting dimension whose mesh
 # dimension the output uses, where GSPMD section 5 would "replace the AllReduce on the output BSM with a
 # ReduceScatter"), so this is reached once A2's partitioner inserts one.  What must stay: each slice to its keeper
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", TA1): _partition inserts it where a
+# Dot's partial sums lie along a mesh dimension the output shards (GSPMD sections 3.2 and 5.1), `dim` the output's
+# dimension along it and `have` the partial's sharding, so it is reached.  Why: A4, "A2's partitioner inserts these two
+# where GSPMD's does".  What must stay: each slice to its keeper
 def _reduce_scatter(ir, c, group, have):
     shape, sent, received = list(ir.local(c.node, have)), 3 * c.position, 3 * c.position + 1
     shape[c.dim] //= len(group)
@@ -513,6 +540,13 @@ def _reduce_scatter(ir, c, group, have):
 # refused a CollectivePermute.  The partitioner here inserts none (_reshard: one device mesh orders every tensor's
 # devices alike, "so no CollectivePermute arises"), so this is reached once A2's partitioner inserts one.  What must
 # stay: one transfer a pair
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", TA4): still inserted nowhere.  GSPMD
+# puts it in halo exchange, "We use the CollectivePermute operator to exchange halo data between partitions" (section
+# 4.3), for window-based operators ("e.g., Convolution, ReduceWindow") and data formatting operators (Slice, Pad,
+# Reverse, Reshape), and in a pipeline's buffer shifting, "pad_left(state, 1)[:-1]" along a sharded L (section 3.3),
+# whose "shifting using Pad and Slice can be done with a single CollectivePermute" (section 4.6); and in resharding "to
+# change device order" (section 4.5).  _operator partitions elementwise operators and Dot alone, refusing the rest
+# (A-T2), and the placement operand has one device mesh.  What must stay: one transfer a pair
 def _collective_permute(ir, c, group, have):
     pairs = tuple(tuple(pair) for pair in c.dim)
     places = [p for pair in pairs for p in pair]
