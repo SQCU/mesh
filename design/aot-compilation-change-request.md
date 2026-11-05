@@ -9,7 +9,66 @@ The compilation consumes operands that choose what it does not choose itself: wh
 and how much each task and transfer weighs (A3). It contains no chooser for either. A chooser that fills those operands
 is defined later, apart from all of this.
 
-## A1. The input is each program's captured dataflow graph, with shapes and types
+## Scope
+
+> the code is not about e2b and is about instead literally all tensor programs that can ever be written in torch and
+> torch like languages and dsls for accelerated edge optimized deployment of tensor programs, so stop acting liek this
+> is about a specific program called e2b
+
+> every problem presented has a tangible and immediate application which is an example of a broad calss of problems
+> which will also be supported at the very next step in integration once specific issues are resolved, this is
+> inductively demonstrated everywhere, and there is no excuse for making-excuses.
+
+Every requirement here holds for every tensor program written in torch or a torch-like language or DSL, and each is
+justified by a cited algorithm or data structure, never by one program.
+
+## How this document is written and used
+
+The operator set this form, and it is followed here:
+
+> write a change request document which covers all of the requirements and staes of affaires described by the user,
+> the narrowness of scope of the affected data structures and functions, and write tshis as a document insdie of the
+> docs or whatever of the corresponding repos, not as some wacky private note-for-subagents. the verbatim notes
+> discusisng this with the user would be fine. no embellishments are needed or allowed.
+
+(T173)
+
+> write up yet another change request document, just like the last one, which uses block quoted user and assistant
+> turns for the body of the text to make it as hard as possible to pretend there's an ambiguity or decision to make
+> here, rather than an unassailable and certain difference which must be remedied by a boring and canonical path
+
+(T212)
+
+> append your proposal to the change request and we finally have a unit of work we can assign to a subagent; the unit
+> of work *is* the change request document once the claude proposal is part of it.
+
+(T178)
+
+> "Citation practice:" this was the only acceptance criterion used for document format and content
+
+(2026-11-04, after T321)
+
+So:
+- **The body** is the turns, verbatim.
+- **Claude's proposal** follows the turns, in a section labelled Claude's. Each of its clauses is one of three things:
+  the operator's words, a cited source's own statement ("what is x and where does x come from in the literature"), or a
+  fact of the code.
+- **The document is the whole instruction to an implementer.** A brief adds nothing to it.
+- **Where the document is silent, the implementer stops at that point and reports it.** It takes no decision of its own.
+
+
+## The turns
+
+The turns are held once, in design/plan-to-bridge-change-request.md, "The turns", after
+design/disjoint-pages-change-request.md D.1. They are this document's body.
+
+## Claude's proposal
+
+This section and the appendices are Claude's (T178). The operator accepted the appendix "the citations the
+implementation omitted or ignored": "\"1->8\" acceptable as written here; launch revisions". Each clause is the
+operator's words, a cited source's own statement, or a fact of the code.
+
+### A1. The input is each program's captured dataflow graph, with shapes and types
 
 > the use of cudagraphs style 'shapes are compiled but indexes inside of shapes might not need to be'
 
@@ -24,10 +83,11 @@ is defined later, apart from all of this.
   - For a torch function: TorchDynamo's capture as an FX graph, handed to a `torch.compile` backend (J. Ansel et al.,
     PyTorch 2: faster machine learning through dynamic Python bytecode transformation and graph compilation, ASPLOS
     2024).
-  - For e2b on LiteRT: as now. tools/prepare_e2b.py reads the model's graph, and the recorder captures the delegate's
-    commands (metal_recording.m).
+  - For a program run through another framework's delegate: the recorder's capture of the delegate's commands
+    (metal_recording.m), as now. For the program the code runs today on LiteRT, tools/prepare_e2b.py reads the model's
+    graph.
 
-## A2. The placement operand: which nodes hold which sections
+### A2. The placement operand: which nodes hold which sections
 
 > which nodes are chosen to have which sections of a parallelizable task at all??? this is barely descriebd at all,
 > ebcause the problem of optimizing or choosing this modeling task is *evne more deferred* than the previous topic's
@@ -52,7 +112,7 @@ is defined later, apart from all of this.
   - A later chooser of the mapping onto the cabling may be topology mapping (T. Hoefler and M. Snir, Generic topology
     mapping strategies for large-scale parallel architectures, ICS 2011).
 
-## A3. The weighting operand: what each task and transfer costs
+### A3. The weighting operand: what each task and transfer costs
 
 > 1: multiplexing and routing link scheduling must be done with respect to weighting operands which can express any
 > relationship we expect to apepar later (consuming an operand of a certain type lets us defer the design or
@@ -70,7 +130,7 @@ is defined later, apart from all of this.
     Faster and simpler algorithms for multicommodity flow and other fractional packing problems, FOCS 1998).
 - **The chooser of the weights is defined later, apart, as the chooser of A2 is.**
 
-## A4. Collectives lower to page transfers over packed trees
+### A4. Collectives lower to page transfers over packed trees
 
 > the point of having aot schedulign and compilation of schedules is to allow us to interleave any combination of
 > transport requirements concurrently with one another, s.t. we are never underusing the bandiwdth on any cable routing
@@ -94,22 +154,25 @@ is defined later, apart from all of this.
     - §3.3: "to do an AllReduce operation on the directed graph, we first run a reduce operation to a chosen root vertex
       using the undirected graph and then do a broadcast operation from the root vertex using the same tree but with
       links going in the reverse direction."
+  - **AllGather** is one broadcast from each source over its packed trees (Blink §3.1). **AllToAll** is point-to-point
+    demands, one per ordered pair of ranks, routed jointly as concurrent multicommodity flow, the problem Garg and
+    Könemann's rounds solve (N. Garg and J. Könemann, FOCS 1998).
   - **Lowering.** MSCCLang (M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, §4 and
     §5) lowers operations on chunks into an instruction DAG of sends, receives and receive-reduce-copies. A relay's
     forward is its fused receive-copy-send. Here a chunk is a page.
 - **Code:** rdma/mesh-collective.c's demands and trees, as now, fed by A2's collectives in place of ranges declared by
   hand.
 
-## A5. Every page is placed ahead of time
+### A5. Every page is placed ahead of time
 
 - **Method:** design/plan-to-bridge-change-request.md R2, C3's allocator. As now.
 
-## A6. One schedule per function
+### A6. One schedule per function
 
 - **Method:** design/plan-to-bridge-change-request.md R3 to R5. List scheduling by bottom level, with edge scheduling
   under contention, over the weights of A3.
 
-## A7. Function executions of programs that run at once are ordered by one scheduler for the island
+### A7. Function executions of programs that run at once are ordered by one scheduler for the island
 
 > nothing happens when a program joins or leaves because a program is a sequence of like, function calls.
 
@@ -137,7 +200,7 @@ is defined later, apart from all of this.
   the highest-numbered process alive (H. Garcia-Molina, Elections in a distributed computing system, IEEE Trans.
   Comput. C-31(1), 1982). Which nodes are alive is the map's, which every bridge holds (mesh-records.c).
 
-## A8. The IR operand
+### A8. The IR operand
 
 > some operand must clearly carry the ir used to make this kind of optimization / planning choice, and something must
 > serialize this into an operand consumedy by ordinary transport / bridge functions?
@@ -151,7 +214,7 @@ is defined later, apart from all of this.
   §5).
 - A2 partitions, A4 lowers, A5 places and A6 orders it.
 
-## A9. The serialized operand, in MSCCL-IR's shape
+### A9. The serialized operand, in MSCCL-IR's shape
 
 > no inlining new numerical backends instead of writing collective and transfer and so on code which schedule the use of
 > existing code, basically.
@@ -165,10 +228,10 @@ is defined later, apart from all of this.
     and count. These are the plan's struct mesh_hop lists (design/plan-to-bridge-change-request.md R5);
   - the page table's bindings and the plan's state section (C3);
   - the GPU's program: the function's own existing kernels, bound to their placed pages. No kernel is written by the
-    compilation. For e2b these are the recorder's command buffers, as now.
+    compilation. For a delegate's program these are the recorder's command buffers, as now.
 - The bridge consumes the lists and the GPU runs the existing kernels. Nothing else is serialized.
 
-## What judges it
+### What judges it
 
 - design/plan-to-bridge-change-request.md's judges hold.
 - The compilation contains no chooser of placement and no chooser of weights; both arrive as operands.
@@ -253,12 +316,16 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **Recorded order:** the bridge may record the order it realized (its traces, rdma/mesh-flow.c `struct mesh_trace`
   under `MESH_LEDGER`). No collective or data code reads it.
 - **Delivery at a node.**
-  - The bridge parent writes each released execution's sequence number into its plan's state, one word per copy.
-    Each word has a single writer, as C3's rule 2 states (L. Lamport, Concurrent reading and writing, CACM 20(11),
-    1977).
-  - Each port serves the released executions of every standing plan in sequence-number order: a k-way merge (D. E.
-    Knuth, The Art of Computer Programming vol. 3, §5.4.1).
-  - Both ends of a cable read the same sequence numbers, so they merge alike. Nothing holds.
+  > nothing happens when a program joins or leaves because a program is a sequence of like, function calls.
+  - A program's calls are a sequence, so each plan has at most one call outstanding. The sequencer numbers each call's
+    submission (Défago, Schiper and Urbán, 2004), and a call returns only once its executions are done (C3.1).
+  - The bridge parent writes, for each plan, its one outstanding call's sequence number and executions into words of
+    that plan's state, each with a single writer (C3's rule 2). No word is reused while its call is outstanding, so
+    nothing waits to write.
+  - Each port serves the outstanding calls of every standing plan in sequence-number order. Both ends of a cable read
+    the same numbers, so they serve alike.
+  - (Corrected 2026-11-05: the first text wrote one word per copy, a ring whose writer waits when it is full. No
+    requirement asks for one, and T210 ruled modulo rings out.)
 - **The code must:**
   - deliver orders in sequence order;
   - publish them, and merge them at each port, as above;
@@ -318,8 +385,9 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
   their bytes are the same each time, so the requirement's mean and variance hold over the set.
 - **Function A's operands** (joins) keep the schedule's order.
-- **e2b declares its function B consumers.** tools/prepare_e2b.py gives each consumer its kind, and e2b's reductions of
-  partial sums are function B. Declaring every consumer function A would avoid demonstrating this requirement:
+- **Every program declares each consumer's kind.** A consumer that reduces partial sums, or otherwise takes pages in
+  any order, is function B (R4). A program that declares every consumer function A avoids demonstrating this
+  requirement. For the program the code runs today, tools/prepare_e2b.py does the declaring:
   > then your code isn't correct for deliberately avoiding demonstrating the requirements of the change request.
 
   (T233, of the same avoidance in the first implementation.)
@@ -339,7 +407,10 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **The code must:**
   - let a program hold any number of compiled functions at once, each its own plan with its own claim;
   - release a function's claim only when the program retires that function or itself;
-  - have each call launch one execution of its function.
+  - have each call launch one execution of its function;
+  - name each compiled function alike at every rank: (the program's group, the function's ordinal in the program's
+    order of compilation). Every rank runs the same calls in the same order, so every rank computes the same name with
+    nothing exchanged (F. B. Schneider, ACM Comput. Surv., 1990).
 
 ### 7. Torch's existing kernels on the GPU
 
