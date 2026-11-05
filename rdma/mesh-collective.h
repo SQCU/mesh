@@ -49,8 +49,9 @@
      destination: no page cut.  The ranges (demands) are numbered by their first declared transfer.
    - `kind` (design/plan-to-bridge-change-request.md, R4): the kind of the transfer's consumer at its destination,
      MESH_JOIN (function A, a blocking operator over its whole operand: one task, with an edge from every page of the
-     range) or MESH_PAGES (function B, a streaming homomorphism over pages: one task a page, each with an edge from its
-     own page); any other EINVAL.  The kind reaches the task graph alone: the bridge's lists carry none (R4, R5).
+     range) or MESH_PAGES (function B, a homomorphism over pages taken in any order, J. Gibbons, J. Functional
+     Programming, 1996, as R4 cites it: one task a page, each with an edge from its own page); any other EINVAL.  The
+     kind reaches the task graph alone: the bridge's lists carry none (R4, R5).
      2026-11-04, owner C (design/compilation-coordination.md, "The plan call", T6): `order`, the hand priority (lower
      first, the range's the least of its transfers'), is gone with plan_demand_order, `kind` in its place.  Why: R5's
      static schedule orders every node pair's sends; a hand priority is a second order.  What must stay: every rank
@@ -85,23 +86,24 @@
    client's earlier claims, which the bridge releases once it holds them no more (C3.4); nothing is claimed at attach,
    and nothing waits for a release.
 
-   The task graph and its schedule (design/plan-to-bridge-change-request.md, R3 to R5; design/compilation-coordination.md,
-   T1 to T6).  One execution's task graph G = (V, E, w, c) (Sinnen, 2007): its tasks the template's events, each on the
-   node its event is at (the placement operand: the declared transfers' sources and destinations, which the program's
-   placement function chose).  Each range's production at its source weighs `produced`; each declared transfer's
-   consumption at its destination, one task for MESH_JOIN or one a page for MESH_PAGES, weighs `consumed` (each page's
-   task); each range's source read, where a dependence names it, weighs `read`.  Its edges: page k of declared[i]'s range
-   from the production to the consumption (to page k's task for MESH_PAGES), of cost `page`, over the tree path the fill
-   gave page k; the production to the source read; each dependence of lag 0 (task to task at one node; an end that is a
-   MESH_PAGES consumption is each of its page tasks).  The lags stay the allocator's: the schedule is one execution's.
-   Its topology graph's links are the node graph's edges, each a pair of directed links of the pair's capacity over the
-   greatest (O. Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6) 2005, Definition
-   4).  The schedule is list scheduling with each task on its node, in decreasing bottom level, each edge scheduled on
-   its route's links under the contention model (Sinnen and Sousa, eq. (7), Algorithms 1 and 2; mesh-graph.h
-   mesh_graph_contention_schedule), a page crossing a tree edge once (T4).  Each copy's entries are in the order of their
-   link's scheduled start of their page, ties by the walk's order (T6), so each node pair's sends are in schedule order,
-   both ends' lists agree, and every rank writes the same order from the same inputs (F. B. Schneider, ACM Comput.
-   Surv., 1990).  The bridge spreads a node pair's sequence as its own (R5).
+   The task graph and its schedule (design/plan-to-bridge-change-request.md, R3 to R5; design/compilation-
+   coordination.md, T1 to T6).  One execution's task graph G = (V, E, w, c) (Sinnen, 2007): its tasks the template's
+   events, each on the node its event is at (the placement operand: the declared transfers' sources and destinations,
+   which the program's placement function chose).  Each range's production at its source weighs `produced`; each
+   declared transfer's consumption at its destination, one task for MESH_JOIN or one a page for MESH_PAGES, weighs
+   `consumed` (each page's task); each range's source read, where a dependence names it, weighs `read`.  Its edges:
+   page k of declared[i]'s range from the production to the consumption (to page k's task for MESH_PAGES), of cost
+   `page`, over the tree path the fill gave page k; the production to the source read; each dependence of lag 0 (task
+   to task at one node; an end that is a MESH_PAGES consumption is each of its page tasks), a local edge costing 0.
+   The lags stay the allocator's: the schedule is one execution's.  Its topology graph's links are the node graph's
+   edges, each a pair of directed links of the pair's capacity over the greatest (O. Sinnen and L. A. Sousa,
+   Communication contention in task scheduling, IEEE TPDS 16(6) 2005, Definition 4).  The schedule is list scheduling
+   with each task on its node, in decreasing bottom level, each edge scheduled on its route's links under the
+   contention model (Sinnen and Sousa, eq. (7), Algorithms 1 and 2; mesh-graph.h mesh_graph_contention_schedule), a
+   page crossing a tree edge once (T4).  Each copy's entries are in the order of their link's scheduled start of their
+   page, ties by the walk's order (T6), so each node pair's sends are in schedule order, both ends' lists agree, and
+   every rank writes the same order from the same inputs (F. B. Schneider, ACM Comput. Surv., 1990).  The bridge
+   spreads a node pair's sequence as its own (R5).
 
    The plan's name, and the plan in its claim (design/compilation-coordination.md, "The plan call" and Q5; the draft
    e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", as the operator's ruling 1 allows it).
@@ -191,8 +193,9 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
 int mesh_plan(struct mesh_ctx *,uint64_t group,const struct mesh_declared *,const struct mesh_weight *,uint32_t count,
               struct mesh_value *,uint32_t values,const struct mesh_dependence *,uint32_t dependences);
 
-/* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's.  Each reads the
-   plan by its row's publication `state` (the row's plan's state section), as before.
+/* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's, each by its range's
+   first row's publication, as before: mesh_host_publish its supplied word (`targets[0]`), mesh_host_arrived its words
+   and its plan's state section (`state`).
    2026-11-04, sub-assignment 3: mesh_host_inputs is removed (it did nothing: mesh_plan places and starts every word),
    and `invocation` is `execution`, a uint64_t, since a plan runs any number of executions.  What must stay: a host
    producer releases a range by one store, and a host reader reads a range's state, never a word a page. */
