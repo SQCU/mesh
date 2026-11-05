@@ -1479,3 +1479,213 @@ first, and tools/prepare_e2b.py compiles (py_compile; its __pycache__ entries we
 - "Item 5's reach in e2b" and "Function B not declared" (EB3, X3 #7): kv_merge's partials and normalizers and the
   vocabulary's contributions are function B (EK).
 - "GO5" stands, with stop 2; "DL2's head-of-line wait" stands, with stop 1.
+
+## The revisions of 46ae8fdf
+
+The record of the unit whose instruction is design/plan-to-bridge-change-request.md and
+design/aot-compilation-change-request.md as mesh 46ae8fdf holds them, from mesh 46ae8fdf and metal-microbench 43e6302f,
+with two clauses as mesh 0e56d8da revises them on the operator's turn that the turns record now ends with
+(plan-to-bridge R5, "Method" and "Code"; aot-compilation appendix item 2, "Delivery at a node", with A6 and A10's
+output). Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every sub-agent)", verbatim, but its
+reading order and its file table. The documents now allow an implementer's minimal decision where they are silent,
+recorded as its own ("How this document is written and used"); each such decision below is marked as the
+implementer's (M1 to M7 the coordinating implementer's, LP1 to LP11 sub-agent L's, TC1 to TC6 sub-agent T's) and is
+not a requirement of the documents. While the work ran, the coordinator held R5's priority and item 2's delivery for
+revision, then gave their text at 0e56d8da; no code had been changed for either before the hold, and none was reverted.
+Two sub-agents, each its files' one owner: L (rdma/mesh-graph.{h,c}, rdma/mesh-collective.{c,h}, rdma/Makefile) and T
+(rdma/mesh_compile.py); the rest by the coordinating implementer. Nothing was run.
+
+### Done
+
+- **OP. One permutation of the whole set per execution** (aot-compilation, appendix item 5: "The counter is
+  (execution, set), so a set is drawn once per execution. Every edge and every cable of the set's tree carries its share
+  of the set's pages in that one permutation's order"; "A draw for each cable departs from the counter"). rdma/mesh-flow.c:
+  set_draw draws Knuth's Algorithm P over the set's every position on the pair in the direction (M, in list order),
+  counted by (execution, set, block, 0), with no cable's place; position_record gives each cable the members the deal
+  gave it in that permutation's order (M1); struct flow_set `size` M, `local`, `ranks`; struct flow `place` gone; S7′'s
+  per-cable stream reversed with dated notes (mesh-flow.c, mesh.h, mesh-collective.{c,h}, and metal-microbench
+  tools/e2b_replay.m's comment).
+- **LR. Lemire's rejection step** (item 5: "With Lemire's rejection step, which the code must add, the integer is
+  exactly uniform"). set_draw takes each of Algorithm P's integers by D. Lemire, ACM TOMACS 29(1), 2019, section 4,
+  Algorithm 5, with L = 64 and s = j, each x the stream's next word, where it took the product's high word alone. The
+  algorithm's lines were read from arXiv 1805.10941v4 (its HTML), not from the journal's text.
+- **LP. R5's priority as one linear program** (R5 at 0e56d8da), sub-agent L. rdma/mesh-graph.{h,c}
+  mesh_graph_completion_times: Chen 2022's LP (14) with (14a), (1b) as each C_j's lower bound d_j, (1c) for each
+  dependency, and Hall, Schulz, Shmoys and Wein's row (5) on each resource, by cutting planes with Queyranne's
+  separation (each resource's members sorted by the current solution, the nested prefixes tested), each LP by HiGHS
+  1.15.1's dual simplex through its C API; it builds rows and calls the library. rdma/mesh-collective.c plan_schedule:
+  the program over GO1's instructions and dependencies, lengths w for a task and GO2's greatest c(e)/b(L) for a
+  communication, resources each node's device and each T2 directed link (LP1); mesh_graph_heap_order by -C̄, the least
+  C̄ first, a tie to the lower instruction (LP7). Edge scheduling's start times and the bottom levels are no longer
+  computed for the order, and mesh_graph_contention_schedule and mesh_graph_bottom_levels, with their helpers, are
+  removed (nothing else in either repo called them). rdma/Makefile links HiGHS (LP8). The notes quoting R5's earlier
+  text carry dated notes (LP), mesh.h's "Both ends" among them.
+- **CH. Delivery as the fixed sequencer's destinations deliver, through a FIFO channel** (item 2 at 0e56d8da: "Each
+  node runs the destinations' code of their Fig. 5, as written"; "Delivery does not wait for any earlier call to
+  finish"; "The delivered calls reach the ports, in delivery order, through a first-in, first-out channel whose writer
+  never waits"; "Each port reads the channel in order"; "An entry is reclaimed once every port has read past it, by
+  deferred reclamation"; "The code must ... publish them to each port through the channel above, in place of the
+  sequence words (`sequences`), `taken[p]` and the parent's wait while they are full").
+  - rdma/mesh-records.c orders_deliver: the pending head (arrival order is sequence order, as before) is delivered at
+    once, its plan's name and executions appended to the deliveries' channel, then hdr `delivered` raised (release),
+    and hdr `plans` raised and woken after a turn that delivered. The match to a standing plan, the port set, the
+    sequence words, `released`, Lamport's sender's wait and their log lines are gone.
+  - rdma/mesh.h, rdma/mesh-map.h, rdma/mesh-link.c: struct mesh_delivery, MESH_DELIVERY_ROOM, hdr `deliveries_off`,
+    `deliveries_room`, `delivered` and `delivery_read[p]` appended, the area laid out after the map's records and
+    compared by region_same; MESH_VERSION 113; struct mesh_state `released`, `taken` and `sequences` read and written
+    no more, kept by name in place (M3).
+  - rdma/mesh-flow.c: deliveries_copy (each port's child copies the channel into its own memory and tells
+    `delivery_read[p]`); lane_take reads that copy in order (M5), every served lane reading it; taken_store,
+    taken_tell, `told`, plan_end's raise of `taken[p]`, DL10's refusal on `taken[p]` and plan_sequences_inside gone.
+  - rdma/mesh-collective.c (sub-agent L, LP9): plan_layout places no sequence words; mesh_plan writes `sequences` 0.
+- **SN. The sequencer's number never goes back to 0** (item 2: "remove the coordination's Q3′: the sequencer's number
+  never goes back to 0"). mesh-records.c island_set's `seqnum=0` gone; `seqnum` from 0 at the bridge's start only.
+- **SQ. The sequencer's citation** (A7: "(Corrected 2026-11-05: the text called this the bully algorithm's coordinator
+  ... No election runs, so that algorithm is not used.)"). island_set's note cites Défago, Schiper and Urbán §7.1, "The
+  sequencer is unique, and the responsibility is not normally transfered to another processes" (checked in their
+  text), and A7's "the code's choice, which the fixed-sequencer class leaves open", where it cited Garcia-Molina.
+- **RS, CP. ReduceScatter and CollectivePermute lowered** (A4: "rdma/mesh_compile.py refuses CollectivePermute and
+  ReduceScatter now; this requirement covers them"), sub-agent T. rdma/mesh_compile.py _reduce_scatter (GSPMD §4.2;
+  each other member's slice one MESH_PAGES transfer to its keeper, R4's "reductions' partial sums", the keeper's
+  receive-reduce-copy by torch.add, the first half of Blink §3.3's AllReduce) and _collective_permute (GSPMD §4.2,
+  one point-to-point transfer a pair, routed as AllToAll's), each in LOWERINGS and _run; the "refused" comment fixed.
+  The partitioner inserts neither collective (code fact: _reshard, "no CollectivePermute arises"; _partition replicates
+  a contracting dimension the output's mesh dimension holds, where GSPMD §5 "replace[s] the AllReduce on the output BSM
+  with a ReduceScatter"), so both are reached only once A2's partitioner inserts them; no clause asks that change.
+- **R4's homomorphism cited as R4 cites it**, sub-agent T: mesh_compile.py's _consumer and _all_reduce cite Gibbons for
+  associativity and Meertens's bag homomorphisms (CWI Monographs 1, 1986) for commutativity.
+
+### Found already done (the code at 46ae8fdf and 43e6302f does what the document states)
+
+- Item 2: "no node drops a pending order when its map changes": the pending ORDERs are kept across this node's map
+  move (the ruling on review V1's finding 4). Q4's hold and Q4′'s skip are gone (DL4, O1), as the item says.
+- Item 2: "The sequencer numbers each call ... A call is one execution of its compiled function": order_sequence gives
+  a SUBMIT of [first, end) end - first numbers, one an execution; mesh_compile.py's call raises `executions` by one
+  (N4). For "A program submits one call per execution", see M2.
+- A7: "Each function execution is submitted once, by its plan's least node (`sender`)": orders_submit at the plan's
+  `sender` (Q2). A9: "Nothing else is serialized but each entry's set mark": struct mesh_hop `set`.
+- A2: GSPMD "produces a single program for all partitions": mesh_compile.py says nothing of one program a device.
+- A10's "the order constraints between calls, which the program keeps when it submits": every program here submits
+  its calls in program order (e2b_replay's start, mesh_compile.py's call), which keeps every such constraint.
+- Item 6's JAX and CUDA wording, item 7 (K1) and R8's attach (mesh-dataflow.c, claiming nothing): as now.
+- The appendix "a chooser for edge weights" is supplementary ("Using it means passing it in place of unit weights"):
+  no clause requires it; the unit weights stay (P2).
+
+### Decisions taken where the documents are silent (each the implementer's, with its reason)
+
+- **M1 (item 5).** A cable's "share" of a set is the members whose positions the deal gave that cable, and each
+  member's identity is its index among the set's positions on the pair in list order (the bridge's X_1 .. X_M, S5).
+  Reason: each port's child holds records for its own cable's members only (link_prepare), the documents name no way
+  for a member to be posted by a child that holds no record of it, and the hop names no index of a page within its
+  set. Its consequence for item 5's argument is stop 3 below.
+- **M2 (item 2).** A start that raises a plan's `executions` by k submits k calls, each one execution, each numbered
+  on its own; e2b's one start of its steps (N4) is unchanged. Reason: the item defines a call as one execution and the
+  sequencer already numbers each execution; how a program batches its submissions is stated nowhere.
+- **M3 (item 2, "How the bridge holds the channel is the bridge's own").** The channel is an area of the region laid
+  out with it, as the map's records are (disjoint-pages Appendix A, A3, "The bridge's own pages ... are laid out once
+  with the region", which stands), of MESH_DELIVERY_ROOM = 4096 entries of 32 bytes (a plan's name and executions
+  [first, end): M6), the k-th delivery in entry k mod 4096. A port's child begins reading at `delivered` as its first
+  pass reads it. Reason: port children are spawned processes that share only the region (mesh-children.c
+  posix_spawn, mesh-child.c shm_open); a plan a new child can serve stands on a map serial that its own pairing moved,
+  so every delivery of it comes after the child's start.
+- **M4 (item 2).** An entry is reused only once every port whose link is up with a queue pair in its plan (the test by
+  which mesh-ports.c record_reach lists a cable) has read past its last delivery; where one has not, the ORDER stays at
+  the head until a later turn, said once on the bridge's log. Reason: a finite area cannot hold more undelivered
+  entries than its room, and dropping a delivery at one end of a cable and not the other would break "the k-th SEND on
+  a queue pair fills the k-th receive" for every later call on that lane. This is a wait at the writer, which the
+  clause's "whose writer never waits" does not allow; it arises only where a port's child stops reading for 4096
+  deliveries, since each child copies every delivery into its own memory on each pass (M5).
+- **M5 (item 2).** Each port's child copies the channel into its own memory as it reads it (realloc by doubling, the
+  entries before every served lane's place let go), and each served lane reads that copy in order: a delivery of a
+  loaded plan it carries is taken at its cursor's execution n where first <= n < end and n is submitted here (D2),
+  passed where n >= end, and waited at where n < first (a delivery this node never made, order_take's ENOMEM); a
+  delivery of a plan it does not carry, of a cancelled plan, or of one standing here with this port's refusal is
+  passed; one of a plan not loaded otherwise is waited at. Reason: "Each port reads the channel in order", and a lane
+  that passed a delivery its peer takes would break the k-th SEND's match.
+- **M6 (item 2).** An entry holds the plan's name and [first, end) alone, no sequence number. Reason: the channel's
+  order is the delivery order, so a port needs no number to take the calls in sequence-number order.
+- **M7 (R3).** "V are tasks, each one operation of the captured graph executed at its node" is read as met by the
+  template's events (T1: a production, a source read, a consumption, each the declared operation at its node).
+  Reason: each task the code builds is one such operation's event; no clause asks every operation to be a task.
+- **LP1 to LP11 (sub-agent L, R5).** LP1: a task's resource its node's device (by map index), a communication's its
+  T2 directed link. LP2: each round adds each resource's most violated prefix alone. LP3: a prefix is violated only
+  where it falls short by more than HiGHS's `primal_feasibility_tolerance` x (1 + its right side), so no row is added
+  twice and the loop ends; no round bound. LP4: each dependency one row (duplicates from shared route prefixes, T4,
+  skipped). LP5: the separation's sort ties to the lower vertex; zero-length vertices left out of the cuts. LP6: HiGHS
+  options `solver` simplex, `simplex_strategy` 1, `parallel` off, `threads` 1, `output_flag` false, the rest its
+  defaults; rows added to the solved model. LP7: the least C̄ first as priority -C̄ to the unchanged heap. LP8: the
+  header included as <interfaces/highs_c_api.h> under -isystem $(HIGHS)/include/highs (HiGHS's pkg-config Cflags), since
+  under -I/opt/homebrew/include its own includes do not resolve and its declared, undefined static
+  Highs_compilationDate fails -Werror. LP9: the sequence words gone from the layout, `sequences` 0. LP10: EINVAL for a
+  self-edge, a bad length or resource, or an infeasible program (a cycle of positive length); EDOM for HiGHS's error or
+  any other status; ENOMEM past HiGHS's 32-bit indices. LP11: mesh_plan's "every weight > 0" test kept.
+- **TC1 to TC6 (sub-agent T, A4).** TC1: a ReduceScatter's `dim` the tensor dimension it scatters, slice q to the
+  member at place q in the device mesh's order. TC2: a CollectivePermute's `dim` its (source place, target place)
+  pairs within the group, as XLA's source_target_pairs. TC3: a CollectivePermute's transfers MESH_JOIN (their consumer
+  a clone, function A under P3). TC4: the permuted result torch.clone of what arrives, a tensor of its own, over no
+  placed page. TC5: a pair p -> p keeps the member's value with no transfer; a member no pair targets holds zeros, as
+  XLA's operation semantics state (checked on OpenXLA's page); the keeper adds its own slice first, then the landed
+  slices in group order. TC6: the R4 citations above.
+
+### Where the work stopped
+
+- **Stop 1. A10's analysis.** A10: "The compilation must take a program's sequence of calls as a graph, decide at
+  compile time which calls may be outstanding at once and in what orders, and compile that into the plans"; "The
+  calls' graph. It is the program's captured trace, as A1 captures one function: TorchDynamo's FX graph of the calls
+  and the tensors passing between them"; its output "for each compiled function, the most calls of it the analysis
+  lets be outstanding at once in the program that submits them, which bounds how many the program issues ahead".
+  Silent on: how the calls of compiled functions become an FX graph (the backend is called with each function's own
+  graph, PyTorch 2 §3.1, not the program's calls; and for a program on another framework's delegate A10 names no
+  capture); and what finite number the analysis gives where dependent calls are issued ahead as futures (Pathways §4.5,
+  which A10 cites): Bernstein's conditions and commutativity analysis order such calls, and bound nothing. Nothing was
+  built for the bound; the order constraints are found done above.
+- **Stop 2. Function B's output pages.** R4: "B is one task per page, each with an edge from its own page, and its
+  outputs are pages that leave as each is produced." The code gives each demand one production task, P(d), and a range
+  one supplied word, which its producer raises after its last write in an execution (C3.7: "One word serves every
+  execution"), so a range's pages leave together. A page leaving as it is produced needs a release of each page, which
+  neither document nor C3 states. Not changed.
+- **Stop 3 (narrowed). No cycle among the permuted sequences where the deal splits a set.** Item 5: "A set's pages
+  have one producer and one route (above), so they share their predecessors, and each cable's sequence is the same
+  renaming of them. So MSCCLang §5.2's argument against cycles holds." With OP and M1, a cable that carries every
+  position of a set on its pair carries the one renaming, so the argument holds where one cable carries every position
+  of the set on each pair of its tree. Where the deal splits a set's positions over a pair's cables, each cable carries
+  the permutation restricted to its members, which is not one renaming. For example: a set of pages a and b on the tree
+  x -> y -> z, at places 10 (cable A of (x, y)) and 30 (cable B of (x, y)), and 20 and 40 of (y, z), one cable; a demand
+  from y over y -> z -> x at 21 and 22; one from z over z -> x -> y at 26 and 28, on (x, y)'s cable B. Where the
+  permutation is (b, a), (y, z) carries b at 20 and a at 40, while each cable of (x, y) carries its one member; y's send
+  at 20 waits for b's landing at 30, behind x's forward at 28, which waits for the landing at 26, behind z's forward at
+  22, which waits for the landing at 21, behind y's send at 20. The one renaming on every cable would move a member to a
+  cable whose child holds no record of it (M1), which the documents name no mechanism for. No argument and no
+  mechanism was added.
+
+### Commits
+
+- mesh c2a226b0 (rdma/mesh-flow.c, rdma/mesh.h, rdma/mesh-collective.{c,h}: OP, LR).
+- mesh 7430505c (rdma/mesh_compile.py: RS, CP, R4's citations; sub-agent T).
+- mesh f4838c9d (rdma/mesh-graph.{h,c}, rdma/mesh-collective.{c,h}, rdma/Makefile: LP, LP9; sub-agent L).
+- mesh 71e060ba (rdma/mesh.h, rdma/mesh-map.h, rdma/mesh-link.c, rdma/mesh-records.c, rdma/mesh-flow.c,
+  rdma/mesh-bridge.h, rdma/mesh-dataflow.c: CH, SN, SQ).
+- metal-microbench 4b0d2da2 (tools/e2b_replay.m: OP's citation in a comment).
+- This record.
+- The rules' C9 hook did not run: mesh has none installed.
+
+### Integration
+
+At mesh 71e060ba and metal-microbench 43e6302f, both trees clean but for untracked build artifacts and level with
+origin: `make -B -C rdma` 0 (mesh-flow, mesh-heartbeat, mesh-stat and libmesh.dylib, the bridge image and libmesh
+linking HiGHS), `make -B -C rdma native-audit` 0, `make .build/e2b_replay` 0, no warning or error. Each changed C file
+compiled alone first, the lifecycle files unchanged and compiling against the new mesh.h, and rdma/mesh_compile.py
+compiles (py_compile). After metal-microbench 4b0d2da2 (a comment), `make .build/e2b_replay` 0 again. Nothing was run.
+
+### What this changes among the earlier parts' open items
+
+- "The revisions of 67ca86f8", stop 1 (delivery at a node) and stop 2 (edge scheduling): answered by 0e56d8da's text
+  and done (CH, LP); GO5's unread starts are gone.
+- Stop 3 of that part: narrowed to sets the deal splits over a pair's cables (stop 3 above).
+- "DL2's head-of-line wait", Lamport's sender's wait (DL1, DL2) and DL10: gone with the sequence words (CH); M4 is the
+  one wait left at the writer.
+- "Numbers across a reset" (review X1 #1): gone with the reset (SN).
+- "Replans reuse names": a replanned function keeps its name (N1), and a lane matches a delivery to a loaded plan by
+  name (M5), so a delivery made for a cancelled plan's executions that a lane meets after the cancelled plan has ended
+  and its replan is loaded is read as the replan's. It arises only after a map move cancels a call in flight; no
+  handler is added.
