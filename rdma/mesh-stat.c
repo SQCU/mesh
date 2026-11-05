@@ -2,6 +2,8 @@
 /* the map's records and the link table this tool prints, bridge-side (review R1, C1: moved out of mesh.h) */
 #include "mesh-map.h"
 #include "mesh-holders.h"
+/* 2026-11-04, owner B2: the walk of the claims' heads (mesh_head_after), for "clients" (clients_print) */
+#include "mesh-dataflow.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -91,6 +93,31 @@ static int map_print(struct hdr *m,size_t length){
   free(r);
   return 0;
 }
+/* not the tag's (2026-11-04, owner B2: design/plan-to-bridge-change-request.md R8; e6bd7db2's section 6, "Holders and
+   clients", as design/compilation-coordination.md ruling 1 and Q5 take it: "mesh-stat prints "clients":[pids] in place
+   of client"): the process of an open claim at head `head` (its owner word's low 32 bits; the owner not 0 and `closed`
+   0, each read with acquire), 0 where none is open there */
+static pid_t clients_open(struct hdr *h,uint32_t head){
+  const struct mesh_buffer *claim=mesh_buffers(h)+head;
+  const uint64_t owner=atomic_load_explicit(&claim->owner,memory_order_acquire);
+  return owner && !atomic_load_explicit(&claim->closed,memory_order_acquire)?(pid_t)(uint32_t)owner:0;
+}
+/* "clients": the processes of the region's open claims, each once, in the order of their first claim's head
+   (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed) */
+static void clients_print(struct hdr *h){
+  printf("\"clients\":[");
+  int first=1;
+  for(uint32_t head=mesh_head_after(h,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(h,head)){
+    const pid_t pid=clients_open(h,head);
+    if(!pid)continue;
+    uint32_t earlier=mesh_head_after(h,UINT32_MAX);
+    while(earlier<head && clients_open(h,earlier)!=pid)earlier=mesh_head_after(h,earlier);
+    if(earlier<head)continue;
+    printf("%s%d",first?"":",",(int)pid);
+    first=0;
+  }
+  printf("],");
+}
 /* design/algorithm-sources.md#programcopy */
 /* `--map` (map_print) beside main's `--ready`, each followed by the region's name where one is given */
 int main(int argc,char **argv){
@@ -116,8 +143,13 @@ int main(int argc,char **argv){
   int alive=!mesh_gone((pid_t)pid);
   uint32_t paired=0;
   for(uint32_t i=0;i<h->links;i++)paired+=alive && atomic_load(&mesh_links(h)[i].port.phase)==MESH_PAIRED;
-  printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"client\":%llu,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"links\":%u,\"paired_links\":%u,\"code\":%lld,\"domain\":%u,\"peers\":[",
-    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,(unsigned long long)(uint32_t)atomic_load(&h->client),
+  /* 2026-11-04, owner B2 (clients_print's note): "clients" the open claims' processes in place of "client", hdr
+     `client`'s low 32 bits, which nothing writes from 110 (design/compilation-coordination.md, L3).  What must stay:
+     every other field as before, in its place */
+  printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,",alive?"true":"false",alive?"true":"false",
+    paired?"true":"false",(unsigned long long)pid);
+  clients_print(h);
+  printf("\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"links\":%u,\"paired_links\":%u,\"code\":%lld,\"domain\":%u,\"peers\":[",
     h->version,h->node,h->pgsz,h->block,h->rows,h->links,paired,(long long)h->port.code,h->port.domain);
   for(uint32_t i=0;i<h->links;i++){
     struct mesh_link_info *link=&mesh_links(h)[i];

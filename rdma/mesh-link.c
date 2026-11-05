@@ -49,8 +49,10 @@ int64_t stop_reason;
 struct known known[MESH_KNOWN];
 /* tag pre-return-20261103 rdma/mesh-link.c:530-533 owners and model; `owners` one entry, main's one client word (hdr
    `client`), where the tag had MESH_CLIENTS slots, which main has not (3f72cbde 0905738c cf483b3e b71dcb36 33ca0dab 77349292 6f90dc97 a8952de9 6b33cc33) */
-/* each client slot's owner as clients_turn last read it */
-uint64_t owners[1];
+/* 2026-11-04, owner B2 (design/plan-to-bridge-change-request.md R8; design/compilation-coordination.md, L3 and Q5):
+   `uint64_t owners[1];`, the client word as clients_turn last read it, is removed: no client word is written from 110,
+   and clients_turn walks the claims' heads, keeping its last read of hdr `plans` itself (mesh-records.c `plans_seen`).
+   What must stay: `model` */
 /* design/transport.md: this node's record, its region, memory and model with its ports and health */
 char model[MESH_MODEL_BYTES];
 /* tag pre-return-20261103 rdma/mesh-link.c:1027-1030 ones, verbatim, and `held_pages` not here.  No duds' block is taken
@@ -81,12 +83,20 @@ void wake(void){
 
 /* tag pre-return-20261103 rdma/mesh-link.c:1498-1507 control_watch, verbatim (90179f5e 111d42f7 3f72cbde 0905738c cf483b3e 1835bef4 7c500c88 ad55cbf4 33ca0dab 1f9be1d5 a8952de9 6b33cc33) */
 /* design/transport.md: the clients' control word, watched for the event loop */
+/* 2026-11-04, owner B2 (design/compilation-coordination.md, "The region": hdr `plans`, "a count that only rises: every
+   publication of a plan, every close of a claim and every start adds 1, release, then wakes it"; Q2 and Q4: the
+   parent's turn submits a plan's executions once its start raises them, and delivers an ORDER once the ports have
+   served the plan released before), reversing the tag's watch of hdr `control`: the watcher parks on `plans`, each
+   move of which, and each wake of it, wakes the event loop for a turn, so a start's raise, a publication and a close
+   (mesh_retire's among them) are taken at once, not at the loop's next due time.  The stop's notification of `control`
+   (main) no longer wakes it; nothing joins it, as before, and the process's exit ends it.  What must stay: one
+   watcher, a wait that a move of the word or a wake ends */
 static void *control_watch(void *unused){
   (void)unused;
   while(!stop){
-    uint64_t seen=atomic_load_explicit(&M->control,memory_order_acquire);
+    uint64_t seen=atomic_load_explicit(&M->plans,memory_order_acquire);
     wake();
-    os_sync_wait_on_address(&M->control,seen,sizeof M->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+    os_sync_wait_on_address(&M->plans,seen,sizeof M->plans,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
   }
   return NULL;
 }
@@ -122,11 +132,14 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   else if(!named || CFGetTypeID(named)!=CFStringGetTypeID() || !CFStringGetCString(named,name,(CFIndex)room,kCFStringEncodingUTF8))refused="its name is missing";
   else if(!sized || CFGetTypeID(sized)!=CFNumberGetTypeID() || !CFNumberGetValue(sized,kCFNumberSInt64Type,&value) || value<=0)
     refused="its region_bytes, a positive number of bytes, is missing";
-  const CFStringRef keys[]={CFSTR("block_pages"),CFSTR("rows"),CFSTR("window_pages"),CFSTR("hops")};
-  uint32_t *const shape[]={&geometry->block,&geometry->rows,&geometry->wire_pages,&geometry->hops};
+  /* 2026-11-04, owner B2 (mesh-map.h mesh_geometry, 110: the page lists' area and its room `hops` gone, each plan's
+     entries in its own state section; design/compilation-coordination.md, "The region"): the key `hops` is read no
+     more, and a list that holds it is taken as one that does not, as any other key this list does not name.  What must
+     stay: the three keys of the layout, each a positive number of at most INT32_MAX */
+  const CFStringRef keys[]={CFSTR("block_pages"),CFSTR("rows"),CFSTR("window_pages")};
+  uint32_t *const shape[]={&geometry->block,&geometry->rows,&geometry->wire_pages};
   static const char *const wrong[]={"its block_pages is not a positive number of pages of at most INT32_MAX",
-    "its rows is not a positive number of rows of at most INT32_MAX","its window_pages is not a positive number of pages of at most INT32_MAX",
-    "its hops is not a positive number of entries of at most INT32_MAX"};
+    "its rows is not a positive number of rows of at most INT32_MAX","its window_pages is not a positive number of pages of at most INT32_MAX"};
   for(size_t k=0;!refused && k<sizeof keys/sizeof *keys;k++){
     CFTypeRef given=CFDictionaryGetValue(list,keys[k]);
     int64_t count=0;
@@ -179,11 +192,15 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    configuration's length: a configuration that grew the region then left the bridge exiting 1 and its heartbeat
    opening it again, forever.  What must stay: the layout fitted to the object, a bridge ending only where none fits */
 /* mesh_layout_within (be0e1e48) is mesh-map.h's, beside mesh_layout (review R2, B2) */
+/* 2026-11-04, owner B2 (mesh-map.h mesh_layout, 110: the page lists' area gone; mesh.h: hdr `hop_off` and
+   `hop_capacity` vacant, `vacant16` and `vacant17`, never read or written): those two are not compared, since
+   mesh_layout sets them no more.  What must stay: exactly the fields mesh_layout sets compared (the 2026-11-04 note
+   above) */
 static int region_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->wire_pages==b->wire_pages && a->links==b->links &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
          a->link_off==b->link_off && a->target_stride==b->target_stride && a->target_off==b->target_off &&
-         a->hop_off==b->hop_off && a->hop_capacity==b->hop_capacity && a->bridge_off==b->bridge_off &&
+         a->bridge_off==b->bridge_off &&
          atomic_load_explicit(&a->map_off,memory_order_relaxed)==atomic_load_explicit(&b->map_off,memory_order_relaxed) &&
          a->map_room==b->map_room && a->data_off==b->data_off && a->length==b->length;
 }
@@ -314,8 +331,19 @@ static void region_adopt(void){
     __atomic_store_n(&links[p].peer,0,__ATOMIC_SEQ_CST);atomic_store(&links[p].port.phase,MESH_UNKNOWN);atomic_store(&links[p].port.code,0);
     __atomic_store_n(&links[p].bandwidth,0,__ATOMIC_SEQ_CST);atomic_store(&links[p].port.prepared,0);
   }
-  const uint64_t client=atomic_load(&M->client);
-  if(client && !mesh_holds((pid_t)(uint32_t)client,atomic_load(&M->client_start)))mesh_retire(M,client);
+  /* 2026-11-04, owner B2 (design/plan-to-bridge-change-request.md R8; e6bd7db2's section 6, "Holders and clients", as
+     design/compilation-coordination.md ruling 1 and Q5 take it: "region_open retires each gone owner"), reversing the
+     one-client form above (hdr `client` and `client_start`, which nothing writes from 110, L3): each open claim (its
+     head's owner not 0, `closed` 0) whose owner's process does not hold the region (mesh-holders.h mesh_holds, by its
+     pid and the head's `start`) has that owner retired (mesh-dataflow.h mesh_retire: its claims closed).  Here, where
+     the adopted region's state is made this bridge's, after region_open and before the release, as the one client's
+     retirement was.  What must stay: every gone owner retired before the release below */
+  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
+    const struct mesh_buffer *claim=mesh_buffers(M)+head;
+    const uint64_t owner=atomic_load_explicit(&claim->owner,memory_order_acquire);
+    if(owner && !atomic_load_explicit(&claim->closed,memory_order_acquire) && !mesh_holds((pid_t)(uint32_t)owner,claim->start))
+      mesh_retire(M,owner);
+  }
   /* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.4; the contract, "The program's claim and
      its sections": mesh_retired_release releases each closed claim whose generation no port's `prepared` holds, after
      a seq_cst fence): every port's `prepared` is 0 above, so every closed claim is released here, after
@@ -507,10 +535,11 @@ int main(int argc,char **argv){
         else if(port && e->filter==EVFILT_READ && (int)e->ident==port->child_fd)child_heard(port);
       }
       /* differs from the tag: main's one client word (hdr `client`) where the tag walked its MESH_CLIENTS slots */
-      else if(e->filter==EVFILT_PROC){
-        uint64_t owner=atomic_load(&M->client);
-        if(owner && (uint32_t)owner==(uint32_t)e->ident)mesh_retire(M,owner);
-      }
+      /* 2026-11-04, owner B2 (e6bd7db2's section 6, "Holders and clients", as design/compilation-coordination.md
+         ruling 1 and Q5 take it: "The event loop's EVFILT_PROC retires every owner of the event's pid"), reversing the
+         one-client form (hdr `client`, never written from 110, L3): every open claim's owner of that pid retired
+         (mesh-records.c clients_gone).  What must stay: a holder's death is this event, not a poll */
+      else if(e->filter==EVFILT_PROC)clients_gone((pid_t)e->ident);
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)listener){
         struct sockaddr_in6 from;socklen_t size=sizeof from;int accepted;
         while((accepted=accept(listener,(struct sockaddr *)&from,&size))>=0){

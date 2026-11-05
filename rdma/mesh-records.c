@@ -5,7 +5,13 @@
    its one client word, the map's area laid out with the region in place of the tag's arena lease), and each line that
    is not the tag's has a note at its spot.  The map holds
    Thunderbolt-5-linked members only: a record no paired path from this node reaches is left out (map_put), and every
-   reach entry is a cable a port paired (mesh-ports.c record_reach). */
+   reach entry is a cable a port paired (mesh-ports.c record_reach).
+   2026-11-04, owner B2 (design/aot-compilation-change-request.md A7; design/plan-to-bridge-change-request.md R8;
+   design/compilation-coordination.md, Q2 to Q6): the client's watch is over the claims' heads, any number of plans
+   standing, and this file holds the island's fixed sequencer besides: the island and its tree from the map (island_set),
+   the SUBMIT and ORDER messages (order_heard), each plan's submission at its sender (orders_submit) and each ORDER's
+   delivery and release here (orders_deliver).  What must stay: every one of them on the bridge parent's one event-loop
+   thread, the map's one writer */
 #include "mesh-bridge.h"
 /* not the tag's: main's mesh-bridge.h does not include the library's header (the tag's included mesh-call.h), and
    mesh_retire and mesh_retired_release are declared there (mesh_arena_alloc, the tag's third, is called here no
@@ -22,9 +28,13 @@
    the bridge is its one client word, hdr `client` (the client's pid in its low 32 bits), so `busy` is 1 while that word
    names a client, 0 where it names none or this bridge (main's mesh_retire writes its retirer's pid there until it
    stores 0), in place of the tag's count of streams whose owner names a client */
-static void busy_tell(void){
-  const uint64_t owner=atomic_load_explicit(&M->client,memory_order_relaxed);
-  uint64_t busy=owner && (pid_t)(uint32_t)owner!=getpid();
+/* 2026-11-04, owner B2 (design/plan-to-bridge-change-request.md R8: "there is no client word"; e6bd7db2's section 6,
+   "Holders and clients", as design/compilation-coordination.md ruling 1 and Q5 take it: "busy = 1 where any open claim
+   names a live client other than the bridge"), reversing the note above's one-client form, in which `busy` read hdr
+   `client`, which nothing writes from 110 (L3): `busy` is clients_turn's walk of the claims' heads, 1 where an open
+   claim's owner is a process other than this bridge that its watch found live.  What must stay: `idle_since` and `busy`
+   stored as the tag stores them */
+static void busy_tell(uint64_t busy){
   if(busy)atomic_store_explicit(&M->idle_since,0,memory_order_relaxed);
   else if(!atomic_load_explicit(&M->idle_since,memory_order_relaxed))atomic_store_explicit(&M->idle_since,clock_gettime_nsec_np(CLOCK_REALTIME),memory_order_relaxed);
   atomic_store_explicit(&M->busy,busy,memory_order_release);
@@ -87,6 +97,8 @@ static struct known *known_at(uint32_t node){
    (mesh-link.c) found the same in the adopted region as in this bridge's layout, so nothing is taken again: the tag's
    test of `map` (MESH_ABSENT where none was leased), its taking of `map`, `map_pages` and the room, the held pages'
    count and the store of `map_off` go, and the area is adopted as it lies */
+/* not the tag's (2026-11-04, owner B2): the island computed from the map, after map_put and map_adopt (below) */
+static void island_set(void);
 void map_adopt(void){
   /* differs from the tag: the records cleared between two notifications of `map`, and `map_serial` moved where any
      were held, since every change of the map's nodes moves it (mesh.h `map_serial`): a plan made against the earlier
@@ -102,6 +114,10 @@ void map_adopt(void){
      notification, on this thread (region_adopt's, main's before the event loop).  What must stay: the call after the
      serial's move and its closing notification */
   if(moved)plan_stale();
+  /* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q3 and Q4): where the serial moved, the
+     island, its sequencer and its tree are this map's (island_set), the sequencer's number starts again and the
+     pending ORDERs of the old serial are dropped */
+  if(moved)island_set();
 }
 /* tag pre-return-20261103 rdma/mesh-records.c map_put (3f72cbde, abeffc1b), adapted: node-id order and the map serial */
 /* RFC 2328 s14: the map with `record` put in (its node's held record replaced, else added) and every record no paired
@@ -116,6 +132,16 @@ void map_adopt(void){
    reached set the tag's walk's */
 /* an edge's end for mesh_graph_reach: join e's record on `side` (map_put) */
 static uint32_t map_end(const void *context,uint32_t e,uint32_t side){ return ((const uint32_t (*)[2])context)[e][side]; }
+/* not the tag's lines: the joins of records r[0, n) (mesh_joined, symmetric) as edges, (a, b) for a < b in index order,
+   into `join` (room n (n - 1) / 2 + 1); their count.  2026-11-04, owner B2: map_put's loop, made one function so that
+   island_set reads the map's joins by the same code (design/compilation-coordination.md, Q3).  What must stay: one
+   reading of the joins */
+static uint32_t map_joins(struct mesh_record *r,uint64_t n,uint32_t (*join)[2]){
+  uint32_t joins=0;
+  for(uint64_t a=0;a<n;a++)
+    for(uint64_t b=a+1;b<n;b++){double beta;if(mesh_joined(r+a,r+b,&beta)){join[joins][0]=(uint32_t)a;join[joins][1]=(uint32_t)b;joins++;}}
+  return joins;
+}
 static void map_put(const struct mesh_record *record){
   const uint64_t n=atomic_load(&M->map_nodes);
   struct mesh_record *r=mesh_records(M);
@@ -132,12 +158,12 @@ static void map_put(const struct mesh_record *record){
   memcpy(next+at+1,r+at+!added,(size_t)(n-at-!added)*sizeof *r);
   /* not the tag's lines: the joins (mesh_joined, symmetric) as edges, and this node's record the reach's start; none
      reached where the map holds no record of this node, as the tag's walk seeded none */
-  uint64_t self=count,joins=0;
-  for(uint64_t a=0;a<count;a++){
-    if(next[a].node==M->node)self=a;
-    for(uint64_t b=a+1;b<count;b++){double beta;if(mesh_joined(next+a,next+b,&beta)){join[joins][0]=(uint32_t)a;join[joins][1]=(uint32_t)b;joins++;}}
-  }
-  if(self<count)mesh_graph_reach((uint32_t)count,(uint32_t)joins,map_end,join,(uint32_t)self,order,reached);
+  uint64_t self=count;
+  for(uint64_t a=0;a<count;a++)if(next[a].node==M->node)self=a;
+  const uint32_t joins=map_joins(next,count,join);
+  /* `parent` NULL: no tree is wanted of this reach (mesh-graph.h; design/compilation-coordination.md, "The graph
+     module": island_set's is the one tree) */
+  if(self<count)mesh_graph_reach((uint32_t)count,joins,map_end,join,(uint32_t)self,order,reached,NULL);
   free(join);
   uint64_t kept=0;
   for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+kept++,next+k,sizeof *next);
@@ -163,8 +189,206 @@ static void map_put(const struct mesh_record *record){
        is, mesh-flow.c plan_cancel's note).  RFC 2328 section 16: routes come from one version of the database.  What
        must stay: the call after the serial's move and its closing notification */
     if(moved)plan_stale();
+    /* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q3 and Q4): the island of the map as
+       written (island_set), after the cancellation */
+    if(moved)island_set();
   }
   free(next);free(reached);free(order);
+}
+
+/* not the tag's (2026-11-04, owner B2): the island's fixed sequencer (design/aot-compilation-change-request.md A7;
+   design/plan-to-bridge-change-request.md R8; the operator's ruling 1 of 2026-11-04, design/compilation-coordination.md:
+   "it is rqeuired to choose nad use a scheduler").  Function executions of programs that run at once on the island are
+   ordered by one sequencer: "To broadcast a message m, a sender sends m to the sequencer.  Upon receiving m, the
+   sequencer assigns it a sequence number and relays m with its sequence number to the destinations.  The latter then
+   deliver messages according to the sequence numbers" (X. Defago, A. Schiper and P. Urban, Total order broadcast and
+   multicast algorithms: taxonomy and survey, ACM Comput. Surv. 36(4) 2004, section 7.1, Fig. 5, the UB variant), first
+   in, first out (P. Barham et al., Pathways, MLSys 2022, section 4.4: "Our current implementation simply enqueues work
+   in FIFO order").  A message m is a submission of a plan's executions [first, end) (struct mesh_order; Q1, Q2).
+   What A7 adds to C3.3's run time, and only that (design/compilation-coordination.md, Q6): the sequencer's `seqnum`,
+   this bridge's pending ORDERs (`pending`), and the plan's words `submitted`, `released` and `served` (mesh.h struct
+   mesh_state); beside them the island this map gives (`island`) and the plan this bridge released last (`last`), which
+   Q3's tree and Q4's release rule read.  None is a page of the region, and none is allocated per execution: the
+   pending ORDERs' array grows only where more ORDERs wait at once than ever before */
+/* the island of this node (design/aot-compilation-change-request.md A7: "The island is the map's Thunderbolt-linked
+   component"): `self` this node's map index, `sequencer` the sequencer's (UINT32_MAX both where the map holds no
+   record of this node), `parent` the node id of this node's parent in the sequencer's tree (0 at the sequencer and
+   where none), `up` the port toward it and `down` the ports toward this node's children in the tree, `downs` of them
+   (design/compilation-coordination.md, Q3); MESH_PORTS no port */
+static struct island { uint32_t self,sequencer,parent,up,down[MESH_PORTS],downs; } island={UINT32_MAX,UINT32_MAX,0,MESH_PORTS,{0},0};
+/* Defago et al., Fig. 5, the sequencer's `seqnum`: the number the next execution submitted takes, from 0 on each map
+   serial (Q3: a plan stands only while its map does, D.3.6, so no order outlives its serial; Fig. 5 starts it at 1) */
+static uint64_t seqnum;
+/* Defago et al., Fig. 5, the destination's `pending`: the ORDERs this node has received and not delivered, in arrival
+   order (Q4), `pendings` of them in room for `pending_room` */
+static struct mesh_order *pending;
+static size_t pendings,pending_room;
+/* the plan this bridge released last (Q4: "every port holding the previously released plan has served it"): its claim
+   head, the claim's generation (the head's struct mesh_page_entry `device`) and its state section; head UINT32_MAX
+   none.  Read only while that claim is the same and not released (orders_served), on this thread, the releaser's
+   (mesh_retired_release, clients_turn) */
+static struct { uint32_t head; uint64_t generation; struct mesh_state *state; } last={UINT32_MAX,0,NULL};
+
+/* the port of this node's cable toward adjacent node `node`, MESH_PORTS where none: the first in port order whose link
+   is up with a queue pair in its plan, the test by which this node's record lists the cable (mesh-ports.c record_reach,
+   its reach entries in port order), so a join of the map between this node and `node` has one.  A tree's hop is one
+   control socket, the same for every message of a map serial, so each hop carries its messages in order
+   (design/compilation-coordination.md, Q3: "each hop on the existing control socket.  One path from the sequencer to
+   each node, each hop in order") */
+static uint32_t port_toward(uint32_t node){
+  uint32_t p=0;
+  while(p<port_count && !(ports[p].link.state==LINK_UP && plan_lanes(ports[p].link.plan) && ports[p].peer==node))p++;
+  return p<port_count?p:MESH_PORTS;
+}
+/* H. Garcia-Molina, Elections in a distributed computing system, IEEE Trans. Comput. C-31(1) 1982, section III-A: "the
+   node with the highest priority (i.e., with the highest identification number) out of the nodes that are
+   participating in the election will become coordinator"; Appendix I, Theorem A2: "Let node i be the operating node
+   with highest priority ... the system will eventually reach a state where S(i).s = "Normal" and S(i).c = i".  The
+   participating, operating nodes are the map's in this node's Thunderbolt-linked component (A7: "Which nodes are alive
+   is the map's, which every bridge holds"; design/compilation-coordination.md, Q3), each node's identification number
+   its node id: so the sequencer is the greatest node id the reach from this node meets over the map's joins
+   (mesh_joined, as map_put reads them; mesh-graph.h mesh_graph_reach), the coordinator Theorem A2 reaches, which every
+   bridge holding the same map computes alike.  The tree: the breadth-first tree of the reach from the sequencer
+   (mesh_graph_reach `parent`), ties as the map orders nodes (the joins in index order), this node's parent and children
+   in it (Q3).  On each map serial the sequencer's number starts at 0 and the pending ORDERs are dropped (Q3, Q4).
+   ENOMEM leaves no island, said once a map serial: no function execution is submitted or ordered here on it */
+static void island_set(void){
+  island=(struct island){.self=UINT32_MAX,.sequencer=UINT32_MAX,.up=MESH_PORTS};
+  seqnum=0;pendings=0;
+  const uint64_t n=atomic_load(&M->map_nodes);
+  struct mesh_record *r=mesh_records(M);
+  uint64_t self=n;
+  for(uint64_t a=0;a<n;a++)if(r[a].node==M->node)self=a;
+  if(self==n)return;
+  unsigned char *reached=malloc(n);
+  uint32_t *order=malloc(n*sizeof *order),*parent=malloc(n*sizeof *parent),(*join)[2]=malloc((n*(n-1)/2+1)*sizeof *join);
+  if(!reached || !order || !parent || !join){
+    free(reached);free(order);free(parent);free(join);
+    mesh_say("bridge","the island of map serial %llu not computed (ENOMEM): no function execution is ordered on it",
+             (unsigned long long)atomic_load(&M->map_serial));
+    return;
+  }
+  const uint32_t joins=map_joins(r,n,join);
+  mesh_graph_reach((uint32_t)n,joins,map_end,join,(uint32_t)self,order,reached,NULL);
+  uint64_t sequencer=self;
+  for(uint64_t k=0;k<n;k++)if(reached[k] && r[k].node>r[sequencer].node)sequencer=k;
+  mesh_graph_reach((uint32_t)n,joins,map_end,join,(uint32_t)sequencer,order,reached,parent);
+  island.self=(uint32_t)self;island.sequencer=(uint32_t)sequencer;
+  if(self!=sequencer){island.parent=r[parent[self]].node;island.up=port_toward(island.parent);}
+  for(uint64_t k=0;k<n && island.downs<MESH_PORTS;k++)if(k!=sequencer && parent[k]==self){
+    const uint32_t p=port_toward(r[k].node);
+    if(p<MESH_PORTS)island.down[island.downs++]=p;
+  }
+  free(reached);free(order);free(parent);free(join);
+}
+/* Defago et al., Fig. 5, the destinations: "when receive (m, seqnum): pending := pending U {(m, seqnum)}".  An ORDER
+   whose `nodes` lacks this node's map index is delivered at once, nothing here serving it
+   (design/compilation-coordination.md, Q4); `nodes` is a set of map indices below 64 (mesh.h struct mesh_state).  The
+   array grows by doubling; ENOMEM drops the ORDER, said: its plan's executions are not released here, and a wait on
+   them ends at its deadline */
+static void order_take(const struct mesh_order *order){
+  if(island.self>=64 || !(order->nodes>>island.self&1))return;
+  if(pendings==pending_room){
+    const size_t room=2*pending_room+1;
+    struct mesh_order *grown=realloc(pending,room*sizeof *grown);
+    if(!grown){
+      mesh_say("bridge","an ORDER of plan (%llu, %llu) not held (ENOMEM): its executions [%llu, %llu) are not released here",
+               (unsigned long long)order->group,(unsigned long long)order->epoch,(unsigned long long)order->first,
+               (unsigned long long)order->end);
+      return;
+    }
+    pending=grown;pending_room=room;
+  }
+  pending[pendings++]=*order;
+}
+/* Defago et al., Fig. 5, the sequencer's "send (m, sn(m)) to all", over the island's tree: an ORDER to each child, in
+   arrival order, on its hop's control socket, and taken here (design/compilation-coordination.md, Q3: "an ORDER down
+   to the children, each hop on the existing control socket") */
+static void order_relay(const struct mesh_order *order){
+  for(uint32_t k=0;k<island.downs;k++)port_say(ports+island.down[k],(struct message){.kind=ORDER},order,sizeof *order);
+  order_take(order);
+}
+/* Defago et al., Fig. 5, the sequencer: "when receive (m): sn(m) := seqnum; send (m, sn(m)) to all; seqnum := seqnum +
+   1".  A submission of end - first executions reaches it at once, so they take end - first consecutive numbers, first
+   in, first out (Pathways, section 4.4; design/compilation-coordination.md, Q3) */
+static void order_sequence(const struct mesh_order *submission){
+  struct mesh_order order=*submission;
+  order.sequence=seqnum;
+  seqnum+=order.end-order.first;
+  order_relay(&order);
+}
+/* Defago et al., Fig. 5, the sender's "send (m) to sequencer", over the island's tree: at the sequencer it is numbered
+   here, elsewhere it goes to this node's parent (design/compilation-coordination.md, Q3: "a SUBMIT up to the parent").
+   A submission whose `serial` is not this node's `map_serial` is dropped (Q3), as is one of no executions, or where
+   the map holds no record of this node */
+static void order_submit(const struct mesh_order *order){
+  if(order->serial!=atomic_load(&M->map_serial) || order->end<=order->first || island.self==UINT32_MAX)return;
+  if(island.self==island.sequencer)order_sequence(order);
+  else if(island.up<MESH_PORTS)port_say(ports+island.up,(struct message){.kind=SUBMIT},order,sizeof *order);
+}
+/* the sequencer's messages heard on a port's control socket (mesh-ports.c message_heard; design/compilation-
+   coordination.md, Q3): a SUBMIT is passed on toward the sequencer, or numbered there (order_submit); an ORDER from
+   this node's parent in the tree is relayed to its children and taken here (order_relay), and one from any other
+   node, or of another serial, is dropped.  A payload that is not one struct mesh_order is let be */
+void order_heard(struct port *from,const struct message *heard,const unsigned char *payload){
+  struct mesh_order order;
+  if(heard->bytes!=sizeof order)return;
+  memcpy(&order,payload,sizeof order);
+  if(heard->kind==SUBMIT)order_submit(&order);
+  else if(order.serial==atomic_load(&M->map_serial) && island.parent && from->peer==island.parent)order_relay(&order);
+}
+/* design/compilation-coordination.md, Q2 (Defago et al., section 7.1: the sequencer numbers each message its sender
+   sends once, so one bridge submits each plan's executions, the one at the plan's `sender`): for each plan standing
+   here (mesh-dataflow.h mesh_head_state) whose `sender` is this node's map index and whose `executions` (acquire, the
+   program's start, Q1) exceed its `submitted`, a SUBMIT of [submitted, executions), then `submitted` its executions
+   (this bridge its one writer) */
+static void orders_submit(void){
+  if(island.self==UINT32_MAX)return;
+  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
+    struct mesh_state *state=mesh_head_state(M,head);
+    if(!state || state->sender!=island.self)continue;
+    const uint64_t executions=atomic_load_explicit(&state->executions,memory_order_acquire);
+    if(executions<=state->submitted)continue;
+    const struct mesh_order order={.group=state->group,.epoch=state->epoch,.serial=state->serial,.first=state->submitted,
+                                   .end=executions,.nodes=state->nodes,.sender=state->sender};
+    state->submitted=executions;
+    order_submit(&order);
+  }
+}
+/* design/compilation-coordination.md, Q4: whether every port holding the plan this bridge released last has served
+   it, `served[p]` (acquire) at least its `released` for each bit p of its `held` (acquire).  Where that plan's claim is
+   released (its head's owner 0, or another claim's generation there) nothing holds it any more: the release keeps a
+   claim while its `held` is not 0 (mesh-dataflow.h mesh_retired_release) */
+static int orders_served(void){
+  if(last.head==UINT32_MAX)return 1;
+  if(!atomic_load_explicit(&mesh_buffers(M)[last.head].owner,memory_order_acquire) ||
+     atomic_load_explicit(&mesh_page(M)[last.head].device,memory_order_acquire)!=last.generation)return 1;
+  const uint64_t held=atomic_load_explicit(&last.state->held,memory_order_acquire),
+                 released=atomic_load_explicit(&last.state->released,memory_order_relaxed);
+  for(uint32_t p=0;p<MESH_PORTS;p++)if(held>>p&1 && atomic_load_explicit(&last.state->served[p],memory_order_acquire)<released)return 0;
+  return 1;
+}
+/* Defago et al., Fig. 5, the destinations: "while there is (m', seqnum') in pending with seqnum' = nextdeliver do
+   deliver (m'); nextdeliver := nextdeliver + 1".  Each node receives the ORDERs it takes in sequence order (one path
+   from the sequencer, each hop in order: Q3), so the pending ORDER of the least number is the one that arrived first,
+   the head (design/compilation-coordination.md, Q4).  The head is delivered once its plan stands here (its
+   (group, epoch): mesh-dataflow.h mesh_head_state) and every port holding the plan released last has served it
+   (orders_served): its plan's `released` its `end` (release), and hdr `plans` woken so the ports see it.  So this
+   node's cables carry one plan's batch at a time, each execution whole, in sequence order (the operator's ruling 1: "A
+   cable never interleaves two executions; it carries each whole, in sequence order").  Re-read on each turn of the
+   event loop; nobody waits (Q4) */
+static void orders_deliver(void){
+  while(pendings && orders_served()){
+    uint32_t head=mesh_head_after(M,UINT32_MAX);
+    struct mesh_state *state=NULL;
+    while(head!=UINT32_MAX && !((state=mesh_head_state(M,head)) && state->group==pending->group && state->epoch==pending->epoch))
+      head=mesh_head_after(M,head);
+    if(head==UINT32_MAX)return;
+    atomic_store_explicit(&state->released,pending->end,memory_order_release);
+    last.head=head;last.state=state;last.generation=atomic_load_explicit(&mesh_page(M)[head].device,memory_order_acquire);
+    memmove(pending,pending+1,--pendings*sizeof *pending);
+    os_sync_wake_by_address_all(&M->plans,sizeof M->plans,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  }
 }
 /* tag pre-return-20261103 rdma/mesh-records.c record_links_same (3f72cbde), adapted: a reach entry compared whole */
 /* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), boot and facts are the
@@ -284,30 +508,44 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    the order of this turn's last calls is reversed from the tag's (release, then let go): streams_let_go first, then
    the release, so a cancellation this turn computes from a plan's entries (mesh-flow.c plan_cancel) lands in that
    plan's pages before this turn's release can let them go.  What must stay: the cancellation before the release */
+/* 2026-11-04, owner B2 (design/plan-to-bridge-change-request.md R8: "The code must hold nothing for a program but its
+   plans' claims ... there is no client word"; e6bd7db2's section 6, "Holders and clients", as design/compilation-
+   coordination.md ruling 1 and Q5 take it: "clients_turn walks the heads.  It adds an EVFILT_PROC watch for each open
+   claim's pid, idempotent per pid, and retires at once a pid already gone"), reversing the one-client form above, in
+   which the turn read hdr `client`, which nothing writes from 110 (L3), and kept its last read in `owners[0]`: the
+   turn walks the claims' heads (mesh-dataflow.h mesh_head_after), and for each open claim (its owner not 0, `closed`
+   0) of a process other than this bridge adds the watch of its pid's exit, EV_ADD, which kqueue makes once a pid (an
+   event added again only updates the one there), udata 0 (the event loop's EVFILT_PROC retires every owner of that
+   pid: clients_gone); a pid already gone (ESRCH) has the claim's owner retired at once (mesh_retire: its claims closed,
+   `plans` raised).  streams_let_go's call goes: a gone client's claims are closed by its retirement, and the ports end
+   its plans (mesh-flow.c).  The turn then submits and delivers the sequencer's work (orders_submit, orders_deliver),
+   and the release runs where hdr `plans` moved since the last turn (a claim closed or a plan published: `plans_seen`,
+   in `owners[0]`'s place) or on a liveness turn, as before.  What must stay: the release last, after this turn's
+   cancellations and deliveries, on this thread */
+static uint64_t plans_seen;
 void clients_turn(int liveness){
   const pid_t self=getpid();
-  int changed=0;
-  uint64_t owner=atomic_load(&M->client);
-  if(!(owner && (pid_t)(uint32_t)owner==self)){
-    if(owner && owner!=owners[0]){
-      struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
-      if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH){mesh_retire(M,owner);owner=atomic_load(&M->client);}
-    }
-    changed|=owner!=owners[0];owners[0]=owner;
+  uint64_t busy=0;
+  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
+    struct mesh_buffer *claim=mesh_buffers(M)+head;
+    const uint64_t owner=atomic_load_explicit(&claim->owner,memory_order_acquire);
+    if(!owner || atomic_load_explicit(&claim->closed,memory_order_acquire) || (pid_t)(uint32_t)owner==self)continue;
+    struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
+    if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH)mesh_retire(M,owner);
+    else busy=1;
   }
-  unreleased|=changed;
-  /* where no client holds the region, this node's receives of the plan written that have not landed are cancelled:
-     each one's count word raised to its final value, no phase written (mesh-flow.c streams_let_go, plan_cancel;
-     design/disjoint-pages-change-request.md, C3.1 and C3.6), before the release below (the note above, 2026-11-04) */
-  streams_let_go();
+  orders_submit();
+  orders_deliver();
+  const uint64_t plans=atomic_load_explicit(&M->plans,memory_order_acquire);
+  unreleased|=plans!=plans_seen;plans_seen=plans;
   /* the tag's line again (the coordinator, at integration, once mesh-dataflow.c's mesh_retired_release returns the rows
      it kept, c01fa79d): a retired client's rows a port's plan may still name are kept, and looked at again next turn */
   /* 2026-11-04, sub-assignment 7, for mesh-flow.c plan_cancel (design/disjoint-pages-change-request.md, C3.6;
      design/disjoint-pages-revision-coordination.md, "The bridge": "plan_cancel and the release of retired claims
      (mesh_retired_release) both run on the bridge parent's one event-loop thread"): they do.  In the bridge,
-     mesh_retired_release is called here and in mesh-link.c region_adopt, and plan_cancel only from streams_cancel and
-     streams_let_go; each of those runs on the thread of mesh-link.c main alone: region_adopt before the event loop, its
-     streams_cancel(NULL) before its release; streams_let_go here, in clients_turn, the loop's turn; streams_cancel from
+     mesh_retired_release is called here and in mesh-link.c region_adopt, and plan_cancel only from streams_cancel;
+     each of those runs on the thread of mesh-link.c main alone: region_adopt before the event loop, its
+     streams_cancel(NULL) before its release; streams_cancel from
      mesh-ports.c port_lost and mesh-children.c child_reaped and child_heard, which only the loop's turn and its events
      reach (port_lost's callers: the loop's events, child_reaped, control_heard, hello_heard, network_heard and a
      control socket's connect; its turn's terminations_turn, ports_stalled, link_turn, port_open by child_spawn,
@@ -323,7 +561,23 @@ void clients_turn(int liveness){
      ports_find) only lists the devices; the terminations' queue (mesh-events.c peer_terminated, peer_arrived) only
      stores atomics (port_halt) and wakes the loop.  The port children's threads, which land and send, are other
      processes and call neither.  So a cancellation's stores, computed from a plan's entries read whole, are done before
-     any later call of the release can let that plan's pages go */
+     any later call of the release can let that plan's pages go.
+     2026-11-04, owner B2: streams_let_go, which this turn called, is gone (the note above this function), so this note
+     names plan_cancel's callers without it; and the sequencer's functions (island_set from map_put and map_adopt,
+     order_heard from mesh-ports.c message_heard, orders_submit and orders_deliver here, clients_gone from the loop's
+     EVFILT_PROC) run on this same thread, so orders_served reads a released plan's words only before this thread's
+     release can let its claim go.  What must stay: every one of them on main's thread */
   if(unreleased || liveness)unreleased=mesh_retired_release(M)!=0;
-  busy_tell();
+  busy_tell(busy);
+}
+/* not the tag's (2026-11-04, owner B2: e6bd7db2's section 6, "Holders and clients", as design/compilation-
+   coordination.md ruling 1 and Q5 take it: "The event loop's EVFILT_PROC retires every owner of the event's pid"): each
+   open claim whose owner's process is `pid` has that owner retired (mesh-dataflow.h mesh_retire: every claim it owns
+   closed, `plans` raised and woken); mesh-link.c's event loop, on main's thread */
+void clients_gone(pid_t pid){
+  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
+    const struct mesh_buffer *claim=mesh_buffers(M)+head;
+    const uint64_t owner=atomic_load_explicit(&claim->owner,memory_order_acquire);
+    if(owner && !atomic_load_explicit(&claim->closed,memory_order_acquire) && (pid_t)(uint32_t)owner==pid)mesh_retire(M,owner);
+  }
 }

@@ -9,7 +9,10 @@
    of bd85613e).  A node reached is one a Thunderbolt 5 cable of this node pairs with: no other node takes part.  A
    port's control socket stays open for its link's life, as at the tag: it carries one pairing exchange a pairing
    (HELLO, the records the map holds, LINK), then the RECORDs and the FAREWELL, and its end or failure is the link's
-   loss.  Every failure is port_lost with a code; nothing here waits. */
+   loss.  Every failure is port_lost with a code; nothing here waits.
+   2026-11-04, owner B2 (design/compilation-coordination.md, ruling 1, Q2 and Q3): the control socket carries the
+   island's sequencer's SUBMITs and ORDERs besides (message_heard; mesh-records.c order_heard), each hop of the island's
+   tree one control socket.  What must stay: one socket a pairing, its end the link's loss */
 #include "mesh-bridge.h"
 
 /* port_paired (mesh-bridge.h) is the tag's test of a port with a peer, `port->control>=0`, which every file reads */
@@ -248,10 +251,16 @@ static void link_heard(struct port *port,const struct message *heard){
 /* design/transport.md: the bridge's wire, a message a kind: a record, the peer's farewell (its "release
    everything": the link lost at once, so nothing is posted toward it again, design/transport.md) or its
    LINK; a message of any other kind is let be (AGENTS.md, "Fail toward access": unknown input, keep going) */
+/* 2026-11-04, owner B2 (the operator's ruling 1 of 2026-11-04, design/compilation-coordination.md: "The sequencer's
+   messages travel on the bridges' existing control sockets, as new message kinds in mesh-ports.c's handlers"; Q2 and
+   Q3): a SUBMIT and an ORDER, the island's fixed sequencer's messages (X. Defago, A. Schiper and P. Urban, ACM Comput.
+   Surv. 36(4) 2004, section 7.1, Fig. 5, UB), are taken by mesh-records.c order_heard.  What must stay: a kind not
+   known let be */
 static void message_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(heard->kind==RECORD)record_heard(port,payload,heard->bytes);
   else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);}
   else if(heard->kind==LINK)link_heard(port,heard);
+  else if(heard->kind==SUBMIT || heard->kind==ORDER)order_heard(port,heard,payload);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:832-856 port_heard, the budget both ends' smaller (MIN, 76be3217; bd85613e), main's struct mesh_link_info (abeffc1b 4bb01da0 3f72cbde 0905738c; first 6b33cc33) */
 /* a message heard on a port's control socket: before its peer's hello, that hello alone (any other let be); the hello

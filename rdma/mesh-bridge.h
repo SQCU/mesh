@@ -360,9 +360,12 @@ extern uint32_t ones;
    definitions (mesh-link.c).  The map's records, the last of the bridge's arena pages, are the layout's area (hdr
    `map_off`, `map_room`; mesh-records.c map_grow's note), so the bridge holds no arena page and allocates nothing
    from the arena.  What must stay: no bridge state counts or takes arena pages */
+/* 2026-11-04, owner B2 (design/plan-to-bridge-change-request.md R8; design/compilation-coordination.md, L3 and Q5):
+   `owners`, the client word as clients_turn last read it, goes with its definition (mesh-link.c): no client word is
+   written from 110, and clients_turn walks the claims' heads, keeping its last read of hdr `plans` itself
+   (mesh-records.c).  What must stay: `unreleased`, as the tag's */
 extern uint64_t memory,sequence;
 extern char model[MESH_MODEL_BYTES];
-extern uint64_t owners[];
 extern int unreleased;
 extern struct known known[MESH_KNOWN];
 /* defined in mesh-ports.c, with the tag's types (tag rdma/mesh-link.c; there `find_wanted`, `finder` and `everyone`
@@ -449,6 +452,14 @@ void health_init(void);
 uint64_t health_due(void);
 void health_turn(void);
 void clients_turn(int liveness);
+/* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q2 to Q4): the island's fixed sequencer's
+   messages heard on a port's control socket, a SUBMIT or an ORDER and its struct mesh_order (mesh-ports.c
+   message_heard) */
+void order_heard(struct port *from,const struct message *heard,const unsigned char *payload);
+/* not the tag's (2026-11-04, owner B2: e6bd7db2's section 6, "Holders and clients", as the contract's ruling 1 and Q5
+   take it): every open claim's owner whose process is `pid` retired, the event loop's EVFILT_PROC of clients_turn's
+   watch (mesh-link.c) */
+void clients_gone(pid_t pid);
 
 /* mesh-flow.c */
 int guard_raise(struct port *port);
