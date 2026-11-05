@@ -210,14 +210,17 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
 /* 2026-11-04, owner B2 (mesh-map.h mesh_layout, 110: the page lists' area gone; mesh.h: hdr `hop_off` and
    `hop_capacity` vacant, `vacant16` and `vacant17`, never read or written): those two are not compared, since
    mesh_layout sets them no more.  What must stay: exactly the fields mesh_layout sets compared (the 2026-11-04 note
-   above) */
+   above).
+   2026-11-05 (113; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): `deliveries_off` and
+   `deliveries_room` compared, the deliveries' channel's area mesh_layout now sets.  What must stay: as above */
 static int region_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->wire_pages==b->wire_pages && a->links==b->links &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
          a->link_off==b->link_off && a->target_stride==b->target_stride && a->target_off==b->target_off &&
          a->bridge_off==b->bridge_off &&
          atomic_load_explicit(&a->map_off,memory_order_relaxed)==atomic_load_explicit(&b->map_off,memory_order_relaxed) &&
-         a->map_room==b->map_room && a->data_off==b->data_off && a->length==b->length;
+         a->map_room==b->map_room && a->deliveries_off==b->deliveries_off && a->deliveries_room==b->deliveries_room &&
+         a->data_off==b->data_off && a->length==b->length;
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:1764 region_children, verbatim (07949b28) */
 static struct mesh_holder region_children[2*MESH_PORTS];

@@ -117,7 +117,8 @@ void map_adopt(void){
   /* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q3 and Q4): where the serial moved, the
      island, its sequencer and its tree are this map's (island_set), the sequencer's number starts again and the
      pending ORDERs of the old serial are dropped (2026-11-04, the coordinator's ruling on review V1's finding 4: kept,
-     island_set's note) */
+     island_set's note; 2026-11-05, design/compilation-coordination.md, "The revisions of 46ae8fdf", SN: the number is
+     never set back, design/aot-compilation-change-request.md, appendix item 2) */
   if(moved)island_set();
 }
 /* tag pre-return-20261103 rdma/mesh-records.c map_put (3f72cbde, abeffc1b), adapted: node-id order and the map serial */
@@ -216,7 +217,13 @@ static void map_put(const struct mesh_record *record){
    the hold, and the ports' `served` is their `taken`.  Why: design/aot-compilation-change-request.md, appendix item
    2, "Delivery at a node": the parent publishes each released execution's sequence number in its plan's state, one
    word per copy, and each port merges them; "Nothing holds".  What must stay: nothing of it a page of the region, and
-   nothing allocated per execution */
+   nothing allocated per execution.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): each plan's `released`, `taken`
+   and sequence words are gone from what A7 adds, and the deliveries' channel is added (mesh.h struct mesh_delivery:
+   the bridge's own pages, laid out with the region, as the map's are).  Why: design/aot-compilation-change-request.md
+   at mesh 0e56d8da, appendix item 2, "through the channel above, in place of the sequence words (`sequences`),
+   `taken[p]` and the parent's wait while they are full".  What must stay: nothing allocated per execution in the
+   region */
 /* the island of this node (design/aot-compilation-change-request.md A7: "The island is the map's Thunderbolt-linked
    component"): `self` this node's map index, `sequencer` the sequencer's (UINT32_MAX both where the map holds no
    record of this node), `parent` the node id of this node's parent in the sequencer's tree (0 at the sequencer and
@@ -224,7 +231,12 @@ static void map_put(const struct mesh_record *record){
    (design/compilation-coordination.md, Q3); MESH_PORTS no port */
 static struct island { uint32_t self,sequencer,parent,up,down[MESH_PORTS],downs; } island={UINT32_MAX,UINT32_MAX,0,MESH_PORTS,{0},0};
 /* Defago et al., Fig. 5, the sequencer's `seqnum`: the number the next execution submitted takes, from 0 on each map
-   serial (Q3: a plan stands only while its map does, D.3.6, so no order outlives its serial; Fig. 5 starts it at 1) */
+   serial (Q3: a plan stands only while its map does, D.3.6, so no order outlives its serial; Fig. 5 starts it at 1).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", SN): from 0 at the bridge's start, and
+   never set back (island_set's reset gone).  Why: design/aot-compilation-change-request.md, appendix item 2: "remove
+   the coordination's Q3′: the sequencer's number never goes back to 0", the operator: "fictional problem + nobody
+   asked + no citation + no algorithm + no explanation + idiomatic."  What must stay: the number only rising, Fig. 5's
+   "seqnum := seqnum + 1" */
 static uint64_t seqnum;
 /* Defago et al., Fig. 5, the destination's `pending`: the ORDERs this node has received and not delivered, in arrival
    order, which is sequence order (design/compilation-coordination.md, Q3, Q3-tree and DL2), `pendings` of them in room
@@ -270,35 +282,42 @@ static uint32_t island_parent(const void *context,size_t k){
   const struct island_tree *tree=context;
   return k==tree->root || tree->parent[k]>=tree->n?tree->n:tree->parent[k];
 }
-/* H. Garcia-Molina, Elections in a distributed computing system, IEEE Trans. Comput. C-31(1) 1982, section III-A: "the
-   node with the highest priority (i.e., with the highest identification number) out of the nodes that are
-   participating in the election will become coordinator"; Appendix I, Theorem A2: "Let node i be the operating node
-   with highest priority ... the system will eventually reach a state where S(i).s = "Normal" and S(i).c = i".  The
-   participating, operating nodes are the map's in this node's Thunderbolt-linked component (A7: "Which nodes are alive
-   is the map's, which every bridge holds"; design/compilation-coordination.md, Q3), each node's identification number
-   its node id: so the sequencer is the greatest node id the reach from this node meets over the map's joins
-   (mesh_joined, as map_put reads them; mesh-graph.h mesh_graph_reach), the coordinator Theorem A2 reaches, which every
-   bridge holding the same map computes alike.  The tree: the breadth-first tree of the reach from the sequencer
-   (mesh_graph_reach `parent`), ties as the map orders nodes (the joins in index order), this node's parent and children
-   in it (Q3).  On each map serial the sequencer's number starts at 0 and the pending ORDERs are dropped (Q3, Q4).
+/* The island's sequencer (design/aot-compilation-change-request.md A7, "The sequencer is unique and stays where it
+   is"): X. Defago, A. Schiper and P. Urban, Total order broadcast and multicast algorithms: taxonomy and survey, ACM
+   Comput. Surv. 36(4) 2004, section 7.1: "The sequencer is unique, and the responsibility is not normally transfered
+   to another processes"; it is the bridge of the highest-numbered node the map reaches, "the code's choice, which the
+   fixed-sequencer class leaves open" (A7): the greatest node id the reach from this node meets over the map's joins
+   (mesh_joined, as map_put reads them; mesh-graph.h mesh_graph_reach), the island being "the map's
+   Thunderbolt-linked component" (A7), which every bridge holding the same map computes alike; "A plan stands only
+   while its map does (design/disjoint-pages-change-request.md D.3.6), so no standing plan's sequencer changes" (A7).
+   The tree: the breadth-first tree of the reach from the sequencer (mesh_graph_reach `parent`), ties as the map orders
+   nodes (the joins in index order), this node's parent and children in it (Q3).
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", SQ and SN), reversing this note's
+   first form, which cited H. Garcia-Molina, Elections in a distributed computing system, IEEE Trans. Comput. C-31(1)
+   1982 (the bully algorithm's coordinator, "the highest identification number"), and said "On each map serial the
+   sequencer's number starts at 0 and the pending ORDERs are dropped (Q3, Q4)".  Why: A7, "(Corrected 2026-11-05: the
+   text called this the bully algorithm's coordinator ... No election runs, so that algorithm is not used.)"; and
+   appendix item 2, "remove the coordination's Q3′: the sequencer's number never goes back to 0, and no node drops a
+   pending order when its map changes" (`seqnum`'s note).  What must stay: the greatest node id reached, picked here;
+   no reset of `seqnum` and no drop of a pending ORDER.
    ENOMEM leaves no island, said once a map serial: no function execution is submitted or ordered here on it.
    2026-11-04, owner B2, the coordinator's rulings Q3' and C9 (design/compilation-coordination.md, "Amendments during
    the work"): this node's own map_serial moving is the one reset of `seqnum` and of the pending ORDERs, since D.3.6
    cancels every plan standing here at that move, so no pending order of it is served (no message's `serial` is
    compared: each node's map_serial is its own count); and this node's children are those mesh_graph_rows keys to it
    over the parent array (as mesh-collective.c's plan_tree_parent keys a tree), not a scan of the array.  What must
-   stay: the greatest identification number reached, Garcia-Molina's rule, picked here */
+   stay: the greatest identification number reached, picked here (2026-11-05, SQ: "Garcia-Molina's rule" no longer;
+   SN: the reset of `seqnum` gone) */
 /* 2026-11-04, owner B2, the coordinator's ruling on review V1's finding 4 (amending Q3'), reversing the note above's
    drop of the pending ORDERs at this node's serial move: they are kept, since delivery is by arrival order, and
    orders_deliver matches a head only to a plan standing here of this node's map serial (a plan of another serial is
    cancelled, D.3.6), the Q4' bound covering a head that never matches.  What must stay: `seqnum` 0 at this node's own
-   serial move.
+   serial move (2026-11-05, SN: no longer; `seqnum` is never set back).
    2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): Q4''s bound is gone, so no bound covers a
    head that never matches: it stays at the head (Defago et al., Fig. 5: delivery in sequence-number order, no timeout
    and no skip; design/aot-compilation-change-request.md, appendix items 2 and 3).  What must stay: as above */
 static void island_set(void){
   island=(struct island){.self=UINT32_MAX,.sequencer=UINT32_MAX,.up=MESH_PORTS};
-  seqnum=0;
   const uint64_t n=atomic_load(&M->map_nodes);
   struct mesh_record *r=mesh_records(M);
   uint64_t self=n;
@@ -340,7 +359,10 @@ static void island_set(void){
    2026-11-05, owner B4 (the coordinator's rulings on reviews X1 #2, #6 and X3 #4: DL2′, "Amendments during the work
    (2026-11-05)"): the note's "delivered at once" (Q4's words) restated with Q3, Q3-tree, DL2 and DL2′, and its drop's
    end true again: under DL2's greater of `first` and `released`, a later ORDER of the plan published past the dropped
-   executions' never-written words; under DL2′ the head stays there.  What must stay: as above */
+   executions' never-written words; under DL2′ the head stays there.  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): a dropped ORDER's executions never
+   enter the deliveries' channel here, and a lane that meets the plan's next delivery takes nothing past the gap
+   (mesh-flow.c lane_take), where the parent's head stayed at it.  What must stay: as above */
 static void order_take(const struct mesh_order *order){
   if(island.self>=64 || !(order->nodes>>island.self&1))return;
   if(pendings==pending_room){
@@ -368,7 +390,9 @@ static void order_take(const struct mesh_order *order){
    must stay: as above.
    2026-11-05, owner B4 (DL2′): true again, where DL2's greater of `first` and `released` let a later ORDER of the
    plan publish past the lost one's executions there: that child's head stays at the plan's next ORDER, whose `first`
-   is past its `released` (orders_deliver), said on its log (open, "Delivery's liveness").  What must stay: as above */
+   is past its `released` (orders_deliver), said on its log (open, "Delivery's liveness").  What must stay: as above.
+   2026-11-05 (CH): that child delivers the plan's next ORDER, and its lanes take nothing past the gap (mesh-flow.c
+   lane_take).  What must stay: as above */
 static void order_relay(const struct mesh_order *order){
   for(uint32_t k=0;k<island.downs;k++){
     struct port *down=ports+island.down[k];
@@ -566,65 +590,55 @@ static void orders_submit(void){
    word has moved.  Its cost, recorded: each raise moves `plans`, so each port walks the heads on its next pass
    (mesh-flow.c plans_walk), DL3's `plans` test lets a lane that read the old value take nothing for one pass, and
    this thread's release turn runs again (clients_turn: `plans` moved since `plans_seen`).  What must stay: DL7's raise
-   before a plan's first number, as it is */
-static int unnamed,unarrived;
+   before a plan's first number, as it is.
+   2026-11-05 (design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "Delivery at a node";
+   design/compilation-coordination.md, "The revisions of 46ae8fdf", CH, M4 and M5), reversing the notes above from
+   "The head is delivered once its plan stands here" on: each node runs Fig. 5's destination code as written ("when
+   receive (m, seqnum): pending := pending U {(m, seqnum)}"; "while exists (m', seqnum') in pending: seqnum' =
+   nextdeliver do deliver (m'); nextdeliver := nextdeliver + 1"), the pending list's head standing for `nextdeliver`
+   as above (arrival order is sequence order), and deliver(m') is the head's one entry appended to the deliveries'
+   channel (mesh.h struct mesh_delivery): its plan's name and executions [`first`, `end`), in entry k mod
+   `deliveries_room`, k hdr `delivered`, then `delivered` k + 1 (release).  Nothing waits for the plan to stand here,
+   for an earlier call to finish or for any port's `taken[p]`: "Delivery does not wait for any earlier call to finish,
+   since Fig. 5 has no such condition"; the plan's sequence words, `released`, the port set (mesh_ports_named), the
+   match to a standing plan and their log lines are gone ("publish them to each port through the channel above, in
+   place of the sequence words (`sequences`), `taken[p]` and the parent's wait while they are full").  Entry k mod
+   `deliveries_room` is reused for delivery k only once every port that reads the channel (its link up with a queue
+   pair in its plan: port_toward's test, mesh-ports.c record_reach's) has read past delivery k - `deliveries_room`
+   (`delivery_read[p]`, acquire, which its child stores after its copies, release): deferred reclamation ("An entry is
+   reclaimed once every port has read past it").  Where one has not, the head stays until a later turn of the event
+   loop, nobody blocking, said on the bridge's log once (`full`): the one wait left at the writer, which the item's
+   "whose writer never waits" does not allow and a channel of fixed room cannot avoid ("The revisions of 46ae8fdf",
+   M4).  hdr `plans` raised and woken after a turn that delivered (mesh.h mesh_notify), so the ports read the channel.
+   What must stay: delivery from the head alone, in arrival order (sequence order), with no timeout and no skip; the
+   entry's stores before `delivered`'s; no entry reused before every reading port has read past it */
+static int full;
 static void orders_deliver(void){
-  int published=0;
-  while(pendings){
-    struct mesh_order *order=&pending->order;
-    uint32_t head=mesh_head_after(M,UINT32_MAX);
-    struct mesh_state *state=NULL;
-    const uint64_t serial=atomic_load(&M->map_serial);
-    while(head!=UINT32_MAX && !((state=mesh_head_state(M,head)) && state->group==order->group && state->epoch==order->epoch &&
-                               state->serial==serial))
-      head=mesh_head_after(M,head);
-    if(head==UINT32_MAX)break;
-    const uint64_t copies=state->copies;
-    int error=0;
-    const uint32_t set=mesh_ports_named(M,state,mesh_records(M),(uint32_t)atomic_load(&M->map_nodes),&error);
-    const int wordless=!error && (!copies || !plan_sequences_inside(state));
-    if(error || wordless){
-      if(!unnamed && error)
-        mesh_say("bridge","the ports of plan (%llu, %llu) not computed (%s): its ORDER of executions [%llu, %llu) stays at "
-                 "the head",(unsigned long long)state->group,(unsigned long long)state->epoch,strerror(error),
-                 (unsigned long long)order->first,(unsigned long long)order->end);
-      else if(!unnamed)
-        mesh_say("bridge","plan (%llu, %llu) has no sequence words inside the region (copies %llu, sequences at %llu: "
-                 "EINVAL): its ORDER of executions [%llu, %llu) stays at the head",(unsigned long long)state->group,
-                 (unsigned long long)state->epoch,(unsigned long long)copies,(unsigned long long)state->sequences,
-                 (unsigned long long)order->first,(unsigned long long)order->end);
-      unnamed=1;
+  const uint64_t room=M->deliveries_room;
+  struct mesh_delivery *channel=(struct mesh_delivery *)(void *)((char *)M+M->deliveries_off);
+  int delivered=0;
+  while(pendings && room){
+    const uint64_t k=atomic_load_explicit(&M->delivered,memory_order_relaxed);
+    int stays=0;
+    for(uint32_t p=0;k>=room && p<port_count && !stays;p++)
+      stays=ports[p].link.state==LINK_UP && plan_lanes(ports[p].link.plan) &&
+        atomic_load_explicit(&M->delivery_read[ports[p].index],memory_order_acquire)<k-room+1;
+    if(stays){
+      if(!full)
+        mesh_say("bridge","the deliveries' channel is full (%llu entries a port has not read): the ORDER of plan (%llu, "
+                 "%llu), executions [%llu, %llu), stays at the head",(unsigned long long)room,
+                 (unsigned long long)pending->order.group,(unsigned long long)pending->order.epoch,
+                 (unsigned long long)pending->order.first,(unsigned long long)pending->order.end);
+      full=1;
       break;
     }
-    _Atomic uint64_t *word=(_Atomic uint64_t *)(void *)((char *)M+state->sequences);
-    int stays=0;
-    for(;;){
-      const uint64_t t=atomic_load_explicit(&state->released,memory_order_relaxed);
-      if(t>=order->end)break;
-      if(order->first>t){
-        if(!unarrived)
-          mesh_say("bridge","an ORDER of plan (%llu, %llu), executions [%llu, %llu), stays at the head: execution %llu, "
-                   "the next to publish here, is in no ORDER this node holds",(unsigned long long)state->group,
-                   (unsigned long long)state->epoch,(unsigned long long)order->first,(unsigned long long)order->end,
-                   (unsigned long long)t);
-        unarrived=stays=1;
-        break;
-      }
-      for(uint32_t p=0;t>=copies && p<MESH_PORTS && !stays;p++)
-        stays=set>>p&1 && !atomic_load_explicit(&state->refused[p],memory_order_acquire) &&
-          atomic_load_explicit(&state->taken[p],memory_order_acquire)<t-copies+1;
-      if(stays)break;
-      if(!t)mesh_notify(&M->plans);
-      atomic_store_explicit(word+t%copies,order->sequence+(t-order->first),memory_order_relaxed);
-      atomic_store_explicit(&state->released,t+1,memory_order_release);
-      order->sequence+=t+1-order->first;order->first=t+1;
-      published=1;
-    }
-    if(stays)break;
-    unnamed=unarrived=0;
+    const struct mesh_order *order=&pending->order;
+    channel[k%room]=(struct mesh_delivery){.group=order->group,.epoch=order->epoch,.first=order->first,.end=order->end};
+    atomic_store_explicit(&M->delivered,k+1,memory_order_release);
     memmove(pending,pending+1,--pendings*sizeof *pending);
+    delivered=1;full=0;
   }
-  if(published)mesh_notify(&M->plans);
+  if(delivered)mesh_notify(&M->plans);
 }
 /* 2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): orders_due (the pending head's bound, its
    arrival + MESH_PLATFORM_NS, which mesh-link.c turn_due waited for) is removed with the bound and its declaration

@@ -581,7 +581,8 @@ uint32_t mesh_ports_named(const struct hdr *region,const struct mesh_state *stat
    `refused[p]` where it refused it (mesh-flow.c); a plan whose `serial` is not the map's is stale (ESTALE).  The ports
    waited on are every port whose peer a hop names: the cables this node's own record lists (mesh-ports.c
    record_reach: a port whose link is up), in the map at the plan's serial, to the nodes the hops name (map indices,
-   struct mesh_hop `node`): mesh_ports_named, the set's one copy, which the bridge parent's delivery tests too (Q4').  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read and the ports' wait
+   struct mesh_hop `node`): mesh_ports_named, the set's one copy (Q4'; 2026-11-05, design/compilation-coordination.md, "The revisions of
+   46ae8fdf", CH: the bridge parent's delivery tests it no more).  One deadline, MESH_PLATFORM_NS from the start, bounds the map's read and the ports' wait
    together.  A spin, bounded: `held` and `refused` are stored with no wake.  A port is done once its `held` bit reads
    set (acquire), or its `refused` code reads not 0, which is returned; a port lost before it loads the plan sets
    neither, and the start ends at the bound with ETIMEDOUT.  A plan with no hop here waits on no port.

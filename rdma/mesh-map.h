@@ -111,7 +111,7 @@ struct mesh_cable { uint32_t key[2],qps; uint64_t bandwidth; };
 __attribute__((visibility("hidden")))
 uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,struct mesh_cable *out /* room MESH_PORTS */);
 /* The start's port set, one copy (design/compilation-coordination.md, Q4' and "The region": mesh_transfers_start waits
-   on it, and the bridge parent's delivery tests it): a bit a port index, the ports whose peer a hop of the plan names,
+   on it; 2026-11-05, "The revisions of 46ae8fdf", CH: the bridge parent's delivery tests it no more): a bit a port index, the ports whose peer a hop of the plan names,
    that is this node's record's reach entries (hdr `node`'s record among records[0, count), as the map holds them) to
    the nodes its hops name (struct mesh_hop `node`, map indices: ascending node-id order among records[0, count)).  0
    with *error 0 where the plan has no hop here; else *error EINVAL where its entries lie outside the region (hdr
@@ -136,7 +136,9 @@ uint32_t mesh_ports_named(const struct hdr *,const struct mesh_state *,const str
    The areas, in order, each at a page boundary and owning the rest of its last page: the row planes (MESH_PLANES,
    MESH_ROW_OWN alone), the arena bitmap, the page table, the buffers, the link table, the publications, the bridge's
    pages (struct mesh_bridge_pages), the map's records (`map_room` = MESH_MAP_ROOM of struct mesh_record at
-   `map_off`), then the arena at a block boundary.  A plan's state (struct mesh_state: its phases, counts, supplied
+   `map_off`), the deliveries' channel (`deliveries_room` = MESH_DELIVERY_ROOM of struct mesh_delivery at
+   `deliveries_off`; 113, 2026-11-05, design/compilation-coordination.md, "The revisions of 46ae8fdf", CH and M3: the
+   bridge's own pages laid out once with the region, as the map's are), then the arena at a block boundary.  A plan's state (struct mesh_state: its phases, counts, supplied
    words, status and entries) is no area of the layout: mesh_plan places it in the arena with the plan's other values,
    in the plan's claim (its claim head's publication `state`). */
 /* 2026-11-04, owner L (design/compilation-coordination.md, "The region"; design/plan-to-bridge-change-request.md R8):
@@ -178,6 +180,8 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->bridge_off=at; at+=sizeof(struct mesh_bridge_pages); at=(at+pgsz-1)/pgsz*pgsz;
   atomic_store_explicit(&h->map_off,at,memory_order_relaxed); h->map_room=MESH_MAP_ROOM;
   at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;
+  h->deliveries_off=at; h->deliveries_room=MESH_DELIVERY_ROOM;
+  at+=(uint64_t)MESH_DELIVERY_ROOM*sizeof(struct mesh_delivery); at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)g.pages*pgsz;
   h->length=at; return at;

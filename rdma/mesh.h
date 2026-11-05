@@ -33,8 +33,14 @@
    plan's function (item 6).  112: struct mesh_state `served` read as `taken` and `sequences` appended in the struct's
    tail (bytes 240-255; still 256 bytes): the plan's sequence words, one a copy, which the bridge parent writes and each
    port merges (design/aot-compilation-change-request.md, appendix item 2, "Delivery at a node";
-   design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1) */
-#define MESH_VERSION 112u
+   design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1).  113: the deliveries' channel
+   (struct mesh_delivery, MESH_DELIVERY_ROOM of them at hdr `deliveries_off`), hdr `deliveries_off`,
+   `deliveries_room`, `delivered` and `delivery_read` appended, the area laid out after the map's records; struct
+   mesh_state `released`, `taken` and `sequences` read and written no more (design/aot-compilation-change-request.md at
+   mesh 0e56d8da, appendix item 2, "Delivery at a node": "publish them to each port through the channel above, in
+   place of the sequence words (`sequences`), `taken[p]` and the parent's wait while they are full";
+   design/compilation-coordination.md, "The revisions of 46ae8fdf", CH) */
+#define MESH_VERSION 113u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -234,7 +240,8 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    hops in the same order, with the same `node`, `direction`, `pages`, `bytes`, `serial` and `set`; `page`, `word`,
    `field` and `count` are copy c's own.  Execution t runs copy t mod u.  A plan runs any number of executions: the
    run's length is no input of mesh_plan, and the bridge serves the executions t < struct mesh_state `executions` (D2)
-   and t < its `released` (below).  The plan's one allocator places every copy's pages before the first execution, two
+   that the deliveries' channel has delivered (struct mesh_delivery; 2026-11-05, CH: where it said t < its `released`).
+   The plan's one allocator places every copy's pages before the first execution, two
    copies sharing a page only where the plan's happens-before orders every read of the one before the other's write at
    the distances at which their executions meet, so nothing live at once shares a page and no execution waits on
    another's pages.
@@ -412,10 +419,12 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    page over a tree edge, whose send at one end and receive at the other are one instruction at one place, sorted as
    MSCCLang's step 3 states it, "Sort instructions into a global topological order with respect to their dependencies
    with a heap using the priority to order instructions" (M. Cowan et al., MSCCLang: Microsoft Collective
-   Communication Language, ASPLOS 2023, section 5.2), the priority the bottom level (O. Sinnen and L. A. Sousa,
-   Communication contention in task scheduling, IEEE TPDS 16(6), 2005, eq. (7)), a tie to the lower instruction
-   (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO1 to GO3; mesh-collective.c
-   plan_schedule).  Each node pair's list at each end is a subsequence of it, every entry at its own place, a set's
+   Communication Language, ASPLOS 2023, section 5.2), the priority each instruction's completion time C̄_j in one
+   linear program's optimal solution, the least first (R5 at mesh 0e56d8da: C.-Y. Chen, arXiv 2205.02474, 2022, LP
+   (14); L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, "Schedule-by-C̄j"), a tie
+   to the lower instruction (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO1 to GO3;
+   "The revisions of 46ae8fdf", LP; mesh-collective.c plan_schedule; 2026-11-05: the priority was the bottom level,
+   Sinnen and Sousa's eq. (7)).  Each node pair's list at each end is a subsequence of it, every entry at its own place, a set's
    among them (R5: "A set's pages ... keep their places in that order"), so both ends' lists agree; every rank
    computes the same order from the same inputs (F. B. Schneider, Implementing fault-tolerant services using the state
    machine approach, ACM Comput. Surv., 1990); and each cable carries execution t's sends in that order, then
@@ -429,9 +438,9 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    makes ("each cable's sequence is the same renaming of them.  So MSCCLang §5.2's argument against cycles holds")
    holds where one cable carries every position of the set on each pair of its tree, and is not shown where the deal
    splits a set's positions over a pair's cables (design/compilation-coordination.md, "The revisions of 46ae8fdf",
-   stop 3; "The revisions of 67ca86f8", stop 3, before it).  The list schedule is still computed and
-   orders no list (R5: "Scheduled start times do not order the lists"; GO5; "The revisions of 67ca86f8", stop 2).  How
-   a pair's sequence is spread over what its devices give it is the bridge's own (R5, R7).
+   stop 3; "The revisions of 67ca86f8", stop 3, before it).  Edge scheduling's start times are no longer
+   computed for the order (R5 at 0e56d8da; "The revisions of 46ae8fdf", LP; 2026-11-05: they were computed and read by
+   nothing, GO5).  How a pair's sequence is spread over what its devices give it is the bridge's own (R5, R7).
    2026-11-05 (design/compilation-coordination.md, "The revisions of 67ca86f8", SP): every entry at its own place,
    where a set's entries were at its first page's place (GO4), and the topological order R5's own, where it was GO4's
    groups in order of their least places with each set whole.  Why: R5, "(Corrected 2026-11-05: the first text moved
@@ -523,7 +532,16 @@ _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahe
    had served whole, which Q4's hold read) is `taken`, port p's count of the plan's executions whose sequence numbers it
    reads no more (L. Lamport, Concurrent reading and writing, CACM 20(11), 1977, "Message Buffer": the receiver's mr),
    and `sequences`, the region offset of the plan's sequence words (Lamport's B[0 .. P - 1], P = u), is appended in the
-   struct's tail.  What must stay: bytes 0-239 where they were, the struct 256 bytes */
+   struct's tail.  What must stay: bytes 0-239 where they were, the struct 256 bytes.
+   2026-11-05 (113; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): `released`, `taken` and
+   `sequences` are read and written no more, but for their starting value 0 where mesh_plan places the section, and
+   kept by name, every field in its place: the delivered calls reach the ports through the deliveries' channel (hdr
+   `deliveries_off`, struct mesh_delivery), where each execution's number was published in its plan's sequence word of
+   its copy, `released` raised past it, and the parent waited on every port's `taken[p]` while the words were full
+   (Lamport's Message Buffer).  Why: design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "The
+   delivered calls reach the ports, in delivery order, through a first-in, first-out channel whose writer never
+   waits"; "in place of the sequence words (`sequences`), `taken[p]` and the parent's wait while they are full".  The
+   notes above on those three words are the 112 form's.  What must stay: bytes 0-255 where they are */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
@@ -541,6 +559,25 @@ _Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,released)==168 && offsetof(struct mesh_state,taken)==176 &&
   offsetof(struct mesh_state,sequences)==240 && offsetof(struct mesh_state,padding2)==248,"mesh_state");
 
+/* The deliveries' channel (design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "Delivery at a
+   node"; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH and M3 to M6): the calls this node's bridge
+   parent has delivered, in delivery order, each one ORDER's (mesh-bridge.h struct mesh_order: the fixed sequencer's
+   relayed message, "m is the submitted call, its plan and its execution") plan name (`group`, `epoch`) and executions
+   [`first`, `end`), "a first-in, first-out channel whose writer never waits" (G. Kahn, The semantics of a simple
+   language for parallel programming, IFIP Congress 1974: an unbounded FIFO queue between processes).  The bridge's
+   own (item 2: "How the bridge holds the channel is the bridge's own"; R7): an area of the region laid out with it, as
+   the map's records are (design/disjoint-pages-change-request.md, Appendix A, A3, "The bridge's own pages (its
+   records) are laid out once with the region"), of hdr `deliveries_room` entries at `deliveries_off`; the k-th
+   delivery (k from 0, hdr `delivered` the count, the bridge parent its one writer, only rising) in entry k mod
+   `deliveries_room`.  Each port's child copies every delivery into its own memory as it reads it, in order, and tells
+   the count it has read in hdr `delivery_read[p]` (port p's alone, only rising); an entry is reused for delivery k only
+   once every port that reads (its link up with a queue pair in its plan, as mesh-ports.c record_reach lists a cable)
+   has read past delivery k - `deliveries_room`, by deferred reclamation ("An entry is reclaimed once every port has read
+   past it"; P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004): the
+   readers' announcements read before the reuse (mesh-records.c orders_deliver; mesh-flow.c deliveries_copy) */
+#define MESH_DELIVERY_ROOM 4096u
+struct mesh_delivery { uint64_t group,epoch,first,end; };
+_Static_assert(sizeof(struct mesh_delivery)==32,"mesh_delivery");
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
 /* 2026-11-04, sub-assignment 16 (design/page-queue-change-request.md, "Order, and what judges it"): the header fields
@@ -630,8 +667,18 @@ struct hdr {
      published and a port's rise of `taken[p]` named among the raisers, where each woke the count without raising it.
      Why: a wake with no raise that lands between a waiter's read of `plans` and its wait is lost until MESH_PAUSE_NS,
      and the delivery now hands off between the parent and its ports once per execution past the u-th
-     (os_sync_wait_on_address returns at once where the word has moved).  What must stay: as above */
+     (os_sync_wait_on_address returns at once where the word has moved).  What must stay: as above.
+     2026-11-05 (113; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): the parent raises it after
+     each turn that delivered a call into the deliveries' channel, where it raised it before a plan's first sequence
+     number and after a turn that published; no port raises it for a `taken[p]` (gone).  What must stay: as above */
   _Atomic uint64_t plans;
+  /* 113 (struct mesh_delivery's note; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): the
+     deliveries' channel, `deliveries_room` entries at `deliveries_off` (mesh-map.h mesh_layout); `delivered` the calls
+     the bridge parent has delivered into it, only rising (release after the entry's stores); `delivery_read[p]` the
+     deliveries port p's child has read, only rising (release after its copies) */
+  uint64_t deliveries_off,deliveries_room;
+  _Atomic uint64_t delivered;
+  _Atomic uint64_t delivery_read[MESH_PORTS];
 };
 /* every field at its 106 offset, the 108 fields after them, the 109 field after those, the 110 field after that (the
    vacant bytes' notes above struct hdr) */
@@ -643,7 +690,8 @@ _Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)
   offsetof(struct hdr,vacant7)==40 && offsetof(struct hdr,vacant14)==44 && offsetof(struct hdr,vacant8)==240 &&
   offsetof(struct hdr,vacant18)==248 && offsetof(struct hdr,vacant19)==256 && offsetof(struct hdr,map_off)==272 &&
   offsetof(struct hdr,vacant9)==352 && offsetof(struct hdr,vacant13)==384 && offsetof(struct hdr,map_room)==392 &&
-  offsetof(struct hdr,vacant21)==400 && offsetof(struct hdr,plans)==408 && sizeof(struct hdr)==416,
+  offsetof(struct hdr,vacant21)==400 && offsetof(struct hdr,plans)==408 && offsetof(struct hdr,deliveries_off)==416 &&
+  offsetof(struct hdr,delivered)==432 && offsetof(struct hdr,delivery_read)==440 && sizeof(struct hdr)==504,
   "struct hdr: no field moves");
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
