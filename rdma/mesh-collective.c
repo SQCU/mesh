@@ -774,7 +774,8 @@ static void plan_walk(struct plan *p){
         if(in!=MESH_ABSENT){
           mine=field++;
           if(p->entry)p->entry[at]=(struct plan_entry){.value=d->value,.node=in,.direction=MESH_RECEIVE,.demand=i,
-                                                       .field=mine,.communication=plan_communication(p,j,k-p->lead[j],self),
+                                                       .field=mine,
+                                                       .communication=plan_communication(p,j,k-p->lead[j],self),
                                                        .set=set,.page=k,.walk=at};
           at++;
         }

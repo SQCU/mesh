@@ -88,11 +88,12 @@
    rest on, a property of the program's dependences and not of the plan (struct mesh_dependence below), each node's
    events of execution t precede those of t + 1 by the program's own edges, so a production reaches its next instance
    at lag 1 and a walk at lag L through it continues at every lag past L.  mesh_plan does not test the premise
-   (design/aot-compilation-change-request.md, appendix item 1: ENOMEM refuses only a value with no such L).  The plan claims exactly the rows and pages it places (mesh-dataflow.h mesh_claim_take), and closes no other
-   claim: its own is closed only when the program retires the function (mesh-dataflow.h mesh_plan_retire) or itself
-   (mesh_detach, the bridge's retirement of a gone pid), or by the call's own failure after its writes (ESTALE, or the
-   second map read's error), and the bridge releases it once it holds it no more (C3.4); nothing is claimed at attach,
-   and nothing waits for a release.
+   (design/aot-compilation-change-request.md, appendix item 1: ENOMEM refuses only a value with no such L).  The plan
+   claims exactly the rows and pages it places (mesh-dataflow.h mesh_claim_take), and closes no other claim: its own
+   is closed only when the program retires the function (mesh-dataflow.h mesh_plan_retire) or itself (mesh_detach,
+   the bridge's retirement of a gone pid), or by the call's own failure after its writes (ESTALE, or the second map
+   read's error), and the bridge releases it once it holds it no more (C3.4); nothing is claimed at attach, and nothing
+   waits for a release.
    2026-11-04, owner C2 (design/compilation-coordination.md, N3 and N5; design/aot-compilation-change-request.md,
    appendix item 6): reversing the close of this client's earlier claims once the new plan stood.  Why: compiled
    functions coexist, each its own plan with its own claim, released only when the program retires that function or
