@@ -221,29 +221,40 @@ void mesh_claim_close(struct mesh_ctx *c,uint64_t generation){
   mesh_notify(&m->plans);
 }
 
+/* the head of the plan `plan` standing in a claim of this client, UINT32_MAX where none: the claim's record is its head
+   row, its owner word the client (mesh-dataflow.h mesh_claim_take; "The claim's record", above), and a plan stands
+   where its head's owner is not 0, `closed` 0 and publication `state` not 0, each read with acquire (mesh_head_state);
+   the handle is that publication `state` (design/compilation-coordination.md, "The appendix's revisions", N2).  A
+   plan's state section lies in its own claim's pages, which no other claim holds until the bridge releases that claim
+   (owner word 0), so at most one head of this client holds `plan`.  `plan` 0 names none: a claim whose plan has not
+   stood has publication `state` 0.  mesh_plan_retire's and mesh_transfers_start's one test of a handle */
+static uint32_t mesh_plan_head(struct mesh_ctx *c,uint64_t plan){
+  struct hdr *m=c->M;
+  if(!plan)return UINT32_MAX;
+  for(uint32_t row=mesh_head_after(m,UINT32_MAX);row!=UINT32_MAX;row=mesh_head_after(m,row))
+    if(atomic_load_explicit(&mesh_buffers(m)[row].owner,memory_order_acquire)==c->client &&
+       mesh_head_state(m,row)==mesh_state_at(m,plan))return row;
+  return UINT32_MAX;
+}
+
 /* mesh-dataflow.h mesh_plan_retire: the program's retirement of one compiled function
    (design/aot-compilation-change-request.md, appendix item 6: "release a function's claim only when the program
    retires that function or itself"; design/compilation-coordination.md, "The appendix's revisions", N3, as NVIDIA, CUDA
-   Programming Guide §4.2.3.1, cudaGraphExecDestroy(), destroys one instantiated graph).  The head this client owns
-   (its owner word, acquire) whose publication `state` (acquire) is `plan` closed (struct mesh_buffer `closed`,
-   release), then hdr `plans` raised and woken (mesh.h mesh_notify), so the ports end it and the bridge's turn finds
-   it.  A plan's state section lies in its own claim's pages, which no other claim holds until the bridge releases
-   that claim (owner word 0), so at most one head of this client holds `plan`.  Nothing is let go here: the bridge
-   releases the claim once no port holds it (mesh_retired_release; design/disjoint-pages-change-request.md, Appendix C,
-   C3.4: deferred reclamation, and nobody waits for it).  ENOENT where no head of this client holds `plan` (`plan` 0
-   names none: a claim whose plan has not stood has publication `state` 0) */
+   Programming Guide §4.2.3.1, cudaGraphExecDestroy(), destroys one instantiated graph).  The head of the plan standing
+   at `plan` in a claim of this client (mesh_plan_head) closed (struct mesh_buffer `closed`, release), then hdr `plans`
+   raised and woken (mesh.h mesh_notify), so the ports end it and the bridge's turn finds it.  Nothing is let go here:
+   the bridge releases the claim once no port holds it (mesh_retired_release; design/disjoint-pages-change-request.md,
+   Appendix C, C3.4: deferred reclamation, and nobody waits for it).  ENOENT where no plan of this client stands at
+   `plan`.
+   2026-11-04, owner L2, the coordinator's ruling on review W1's finding 4: a closed claim holds no standing plan
+   (mesh_head_state), so a second retire of one plan is ENOENT, where this function's first form closed a closed claim
+   again and returned 0.  What must stay: the close a release, `plans` raised and woken after it */
 int mesh_plan_retire(struct mesh_ctx *c,uint64_t plan){
-  struct hdr *m=c->M;
-  if(!plan)return ENOENT;
-  for(uint32_t row=mesh_head_after(m,UINT32_MAX);row!=UINT32_MAX;row=mesh_head_after(m,row)){
-    struct mesh_buffer *head=&mesh_buffers(m)[row];
-    if(atomic_load_explicit(&head->owner,memory_order_acquire)!=c->client ||
-       __atomic_load_n(&mesh_publication_at(m,row)->state,__ATOMIC_ACQUIRE)!=plan)continue;
-    atomic_store_explicit(&head->closed,1,memory_order_release);
-    mesh_notify(&m->plans);
-    return 0;
-  }
-  return ENOENT;
+  const uint32_t row=mesh_plan_head(c,plan);
+  if(row==UINT32_MAX)return ENOENT;
+  atomic_store_explicit(&mesh_buffers(c->M)[row].closed,1,memory_order_release);
+  mesh_notify(&c->M->plans);
+  return 0;
 }
 
 /* 2026-11-04, sub-assignment 5: the claim at attach (mesh_claim) and the release before it, waited for while a port's
@@ -643,11 +654,20 @@ static int mesh_ports_held(struct mesh_ctx *context,struct mesh_state *state){
    mesh_ports_named as before.  Each execution raised is one execution of the plan's compiled function (N4: "It may be
    launched any number of times without repeating the instantiation", §4.2.2).  Why: a program holds any number of
    compiled functions at once, each its own plan (item 6).  What must stay: the raise before the fence, the serial's
-   read after it */
+   read after it.
+   2026-11-04, owner L2, the coordinator's ruling on review W1's finding 4: EINVAL unless `plan` passes the tests
+   mesh-metal.m mesh_metal_transport_create applies (not 0, page-aligned, at or past hdr `data_off`, its struct inside
+   the region) and names the state section of a plan standing at a claim head of this client (mesh_plan_head: the
+   claim's record, mesh-dataflow.h mesh_claim_take; its owner word the client, `closed` 0, its publication `state`
+   `plan`; N2), where the first form tested the offset's bounds alone.  Why: a retired handle's pages are released by
+   the bridge and may be another claim's, so a raise through it would write a word that is not the plan's.  What must
+   stay: EINVAL before anything is raised */
 int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions){
   struct hdr *m=context->M;
-  const uint64_t at=plan;
-  if(!at || at>context->len || context->len-at<sizeof(struct mesh_state))return EINVAL;
+  const uint64_t at=plan,page=m->pgsz,len=context->len;
+  if(!at || at%page || at<m->data_off || at>len || len-at<sizeof(struct mesh_state) ||
+     mesh_plan_head(context,plan)==UINT32_MAX)
+    return EINVAL;
   struct mesh_state *state=mesh_state_at(m,at);
   const int error=mesh_ports_held(context,state);
   if(error)return error;

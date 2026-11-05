@@ -30,8 +30,11 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    bridge's own means (review 8's finding 1; review 10's finding 5).  A second start on the same plan waits as the
    first and raises it.  One execution is one execution of the plan's compiled function: torch's call t raises it to
    t + 1, e2b's run to its steps at once (design/aot-compilation-change-request.md, appendix item 6: "have each call
-   launch one execution of its function"; N4).  0 (also where the plan has no hop here), EINVAL where `plan` is 0 or
-   its state section or entries lie outside the region, the bridge's code where a port refused the plan
+   launch one execution of its function"; N4).  0 (also where the plan has no hop here), EINVAL where `plan` is 0, not
+   page-aligned, before hdr `data_off` or its struct past the region (mesh-metal.h mesh_metal_transport_create's
+   tests), names no plan standing at a claim head of this client (mesh-dataflow.h mesh_claim_take's record and
+   mesh_head_state: owner the client, `closed` 0, publication `state` `plan`; N2), or its entries lie outside the
+   region, the bridge's code where a port refused the plan
    (`refused`), ETIMEDOUT past the bound, ESTALE where the map moved since the plan was made (plan again), or the map
    reader's error value (mesh-dataflow.h mesh_nodes_read): each with `executions` not raised, but the ESTALE after the
    raise, with it raised.
@@ -42,7 +45,10 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    the fence and the serial's read after the raise.
    2026-11-04, owner L2 (the appendix, item 6; design/compilation-coordination.md, "The appendix's revisions", N2, N5):
    the plan the caller's `plan`, where it was the context's `state`, gone.  Why: a program holds any number of
-   compiled functions at once, each launched by its own calls (item 6).  What must stay: as above */
+   compiled functions at once, each launched by its own calls (item 6).  What must stay: as above.
+   2026-11-04, owner L2, the coordinator's ruling on review W1's finding 4: `plan` tested as above, where it was its
+   bounds alone.  Why: a retired handle's pages may be another claim's once the bridge releases them.  What must
+   stay: EINVAL before anything is raised */
 int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data

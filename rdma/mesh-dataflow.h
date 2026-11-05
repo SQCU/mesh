@@ -67,7 +67,8 @@ void mesh_retire(struct hdr *,uint64_t client);
    destroys one instantiated graph): the claim of this client whose head's publication `state` (acquire) is `plan`
    closed (struct mesh_buffer `closed`, release), then hdr `plans` raised and woken (mesh.h mesh_notify); nothing is let
    go here, the bridge releasing the claim once no port holds it (mesh_retired_release; C3.4).  0, or ENOENT where no
-   claim of this client holds that plan */
+   claim of this client holds that plan standing (mesh_head_state: a closed claim holds none, so a second retire of
+   one plan is ENOENT; 2026-11-04, owner L2, the coordinator's ruling on review W1's finding 4) */
 int mesh_plan_retire(struct mesh_ctx *,uint64_t plan);
 /* the first claim head row after `row` (row UINT32_MAX: the first in the region), UINT32_MAX where none: a row of
    MESH_ROW_OWN whose struct mesh_buffer `owner` reads (acquire) not 0, past `row`'s own claim where `row` is a head (its

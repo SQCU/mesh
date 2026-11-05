@@ -194,13 +194,17 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    - `set`: 0 for a hop of a sequence; else j + 1 for a page of tree j of a set range, a range every declared transfer
      of which is MESH_PAGES, j the tree's index in the solve's trees grouped by demand (the same at every rank), the
      same in both ends' entries of the hop (design/aot-compilation-change-request.md, appendix item 5;
-     design/compilation-coordination.md, "The appendix's revisions", S1 to S3).  A set's entries are contiguous on
-     their cable within each copy, in walk order, both ends' alike (S3); each execution of a set is carried in a
-     uniformly random permutation of its members (S4, S5).  The bridge sees a set or a sequence and no kind
-     (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
+     design/compilation-coordination.md, "The appendix's revisions", S1 to S3).  A set's entries are contiguous on its
+     node pair's list within each copy, in walk order, both ends' alike (S3): the plan's view, the bridge's cables its
+     own.  The bridge permutes a set's members per cable, each execution, at both ends (S4, S5, S7′: on each cable of
+     the pair, the members whose positions the deal gave that cable, among those positions).  The bridge sees a set or
+     a sequence and no kind (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
    2026-11-04, owner L2 (the appendix, item 5): `set` and `padding1` appended, where every hop was one of a sequence in
    the schedule's order.  Why: the pages of function B's operands are written as a set, not a sequence (R4, item 5).
    What must stay: offsets 0-47 as at 110; both ends' entries of a hop the same `set`.
+   2026-11-04, owner L2 (review W3's finding 12, the coordinator's ruling; S7′): a set contiguous on its node pair's
+   list and permuted per cable, where this note said contiguous on its cable and permuted whole.  Why: the deal spreads
+   a pair's positions over the pair's cables, and each cable's records are its own (S7′).  What must stay: as above.
    Copies (C3.3: modulo variable expansion, M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
    scheduling, MICRO 1994).  mesh_plan unrolls the plan's one execution, its template, into u copies: L of a routed
    value is the least lag at which every read of it in execution t happens before its write in t + L, and u the
@@ -332,9 +336,10 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    contention in task scheduling, IEEE TPDS 16(6), 2005; design/compilation-coordination.md, T6): every rank computes
    the same schedule from the same inputs (F. B. Schneider, Implementing fault-tolerant services using the state
    machine approach, ACM Comput. Surv., 1990), and each cable carries execution t's sends in that order, then
-   execution t + 1's, a topological order of the unrolled executions, so the cables' sequences cannot wait on each
-   other in a cycle (M. Cowan et al., MSCCLang, ASPLOS 2023, section 5.2).  How a pair's sequence is spread over what
-   its devices give it is the bridge's own (R5, R7).
+   execution t + 1's.  R5 states that order is a topological order of the unrolled executions, so the cables'
+   sequences cannot wait on each other in a cycle (M. Cowan et al., MSCCLang, ASPLOS 2023, section 5.2); for the
+   bridge's store-and-forward waits it is not shown (below).  How a pair's sequence is spread over what its devices
+   give it is the bridge's own (R5, R7).
    2026-11-04, owner L (design/plan-to-bridge-change-request.md R5; design/compilation-coordination.md, T6, T7): the
    order of the entries is the schedule's, where it was the walk's under a hand priority, and each entry carries its
    `bytes` in place of `padding`, where every hop moved its whole page; the entries are in the plan's state section,
@@ -343,11 +348,17 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    2026-11-04, owner L2 (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md,
    "The appendix's revisions", S2, S3: T6 amended): each entry's group is its set's entries of the same `node` and
    `direction` where `set` is not 0, else the entry alone, and the entries are sorted by their group's least start in
-   the schedule, then their group's least walk, then their own walk; so a set's entries are contiguous on their cable
-   within each copy, in walk order, both ends' alike, and every other entry keeps the schedule's order.  A set's
-   position i follows its receive at position i upstream, whose group start is earlier, so the per-cable order stays a
-   topological order of the unrolled executions (S2; MSCCLang, section 5.2).  What must stay: both ends' lists the
-   same hops in the same order; every copy the same order.
+   the schedule, then their group's least walk, then their own walk; so a set's entries are contiguous on their node
+   pair's list within each copy, in walk order, both ends' alike, and every other entry keeps the schedule's order.
+   What must stay: both ends' lists the same hops in the same order; every copy the same order.
+   2026-11-04, owner L2 (review W3's finding 6, the coordinator's ruling): withdrawn, the claim of aa112f5b that S2's
+   grouping keeps the per-pair order a topological order of the unrolled executions (a set's position i following its
+   receive at position i upstream, whose group start is earlier).  The contention schedule starts a page on a route's
+   links by Sinnen and Sousa's eq. (14), nonaligned (cut-through; mesh-graph.c: ts(e, Lk) = max{A, tf(e, Lk-1) -
+   ς(e, Lk), ts(e, L1)}), so a page's start on a link can precede its finish on the link before, and the start order
+   is not shown to be a topological order of the bridge's store-and-forward waits (a forward released by its receive's
+   landing), for the T6 order itself as for the groups.  Open for the operator (design/compilation-coordination.md,
+   the appendix's revisions, record).  What must stay: both ends' lists the same hops in the same order.
    Several plans (design/plan-to-bridge-change-request.md R8; design/compilation-coordination.md, Q5): each plan is in
    its own claim, and any number stand at once; a program holds nothing but its plans' claims (C3.4).  Writing a plan
    (mesh-collective.c mesh_plan; e6bd7db2's section 6):
