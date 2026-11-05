@@ -1646,6 +1646,16 @@ def _dropped(context, plan):
 # mesh.check's as any other.  (N5; appendix item 6): A-T6's refusal of a graph planned while another's plan stands goes,
 # and the plan is found by its handle, not by context.state.  What must stay: the serial test, and a replan's IR built
 # anew with the same placement operand
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", the coordinating implementer's choices
+# for mesh_plan's new operands; rdma/mesh-collective.h mesh_plan): `program`, the program's nodes, is the set of map
+# indices of the placement operand's nodes (ir.map, A2's mapping of the logical mesh onto the map's nodes), bit i for
+# map index i, the same at every rank and in every plan call of one program, its least the program's one sender
+# (design/aot-compilation-change-request.md A7: "sender(m) is the program's one sender: the least of the program's
+# nodes"); `outstanding` is A10's bound for this function, "the most calls of it the analysis lets be outstanding at
+# once in the program that submits them" (A10, "Its output"; ir.calls.outstanding), 0 where no traced program submits
+# it (ir.calls None), which mesh_plan fails with ENOMEM (appendix item 2: "A plan whose bound A10 cannot find fails
+# with `ENOMEM` when it is planned").  Both choices are the coordinating implementer's, not the documents'.  What must
+# stay: every operand the same at every rank
 def serialize(build, function):
     context, plan = _context(), {'stale': True, 'handle': 0, 'devices': ()}
 
@@ -1658,10 +1668,12 @@ def serialize(build, function):
             raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight each '
                              '(A3)' % (len(ir.weights), count))
         values, handle = (mesh.Value * len(ir.values))(*ir.values), mesh.Q()
-        mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), function, (mesh.Declared * count)(*ir.declared),
-                                      (mesh.Weight * count)(*ir.weights), count, values, len(values),
-                                      (mesh.Dependence * len(ir.dependences))(*ir.dependences), len(ir.dependences),
-                                      C.byref(handle)))
+        program = sum(1 << index for index in set(ir.map))
+        outstanding = ir.calls.outstanding if ir.calls is not None else 0
+        mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), function, program, outstanding,
+                                      (mesh.Declared * count)(*ir.declared), (mesh.Weight * count)(*ir.weights), count,
+                                      values, len(values), (mesh.Dependence * len(ir.dependences))(*ir.dependences),
+                                      len(ir.dependences), C.byref(handle)))
         plan.update(handle=handle.value, devices={layout[2] for layout in ir.layouts})
         try:
             if mesh.State.from_address(context.M + handle.value).serial != ir.serial:
