@@ -678,9 +678,14 @@ declarations above.
     sharing the region alone with it. What the parent's delivery leaves in the region is each plan's `released`, a
     count. Two deliveries of different plans between two passes of a port leave the port no record of which came
     first, and no word of the region holds it.
-  - Carrying the delivery order to the ports needs a structure no change request names: a log of the delivered
-    ORDERs in the region, which is a ring (bounded) or unbounded, or a hand-off the parent waits on, which is a hold.
-    R1's "queues of desired transfers" (U-Net, VIA) are bounded descriptor queues. This part may add neither.
+  - Carrying the delivery order to the ports needs one of two forms: a queue of the delivered ORDERs in the region
+    from the parent to its ports, bounded (a ring) or unbounded; or a hand-off in which the parent waits for its ports
+    to take each delivery (not to serve it), a hold. R1 names "queues of desired transfers" (U-Net, VIA: bounded
+    descriptor queues) and A7's method is Défago's `pending` queue, so a queue is of the kind the change requests
+    name; the brief of this part excludes rings and holds, so the form is the operator's to rule (2026-11-04, amended
+    on review W3's finding 5, where this said "a structure no change request names"). Pathways §4.5 (a.txt 420-424):
+    "computations may still be interleaved with those submitted by other concurrently executing programs". Hilland et
+    al. §8.2.2 is cited at the code (link_prepare's note, design/prepared-machine.md#M08), not read in this part.
   - So the hold that keeps one plan's batch at a time per node stays (orders_served, B2-1, the ports' `served`), its
     comments citing the reason above in place of "A cable never interleaves two executions" (Claude's words, which the
     appendix withdraws). Open for the operator: what carries the sequencer's delivery order from the bridge parent to
@@ -707,14 +712,14 @@ declarations above.
   operands (joins) keep the schedule's order").
 - **S2. The set's unit is one tree's pages.** A set range's pages on tree j (the fill's cut, mesh_graph_fill: tree
   j's run) are one set on every edge of tree j, `set` = j + 1, j the tree's index in the solve's trees grouped by
-  demand (mesh-collective.c p->tree order, the same at every rank). Every edge of tree j carries the same run of pages,
-  so both ends of each edge, and every edge of the tree, draw the same permutation (the same key, counter and size):
-  a relay forwards in the order it receives. Why one tree and not the range: the per-cable list stays a topological
-  order of the unrolled executions (R5; MSCCLang §5.2, the no-cycle condition): give the set's position i the order
-  key (its group start, then i); a forward at position i follows its receive at position i upstream (the same page,
-  the same permutation), whose group start is earlier; a source's set is released by one supplied word (C3.7), whose
-  production follows everything it depends on. Pages of one range reaching a node by two trees from two parents would
-  break the first step, so a cable carrying two trees of one range carries two sets.
+  demand (mesh-collective.c p->tree order, the same at every rank). Every edge of tree j carries the same run of pages
+  (plan_walk), so the set is the same pages on every edge of its tree and is named alike at both ends of each edge and
+  at every rank by its tree's number. A cable carrying two trees of one range carries two sets.
+  (2026-11-04, withdrawn on review W3's finding 6: this decision also argued that the grouping keeps each list a
+  topological order, from "a forward follows its receive upstream, whose group start is earlier". The contention
+  schedule starts a page on a route's links by Sinnen and Sousa's eq. (14), nonaligned (cut-through), so a page's start
+  on a link can precede its finish on the link before; the start order is not shown to be a topological order of the
+  bridge's store-and-forward waits, for T6's order itself as for the groups. Open for the operator, below.)
 - **S3. The layout.** struct mesh_hop `set` (above). The entries' order (T6 amended): each entry's group is its set's
   entries of the same `node` and `direction` where `set` is not 0, else the entry alone; the entries sorted by their
   group's least `start`, then their group's least `walk`, then their own `walk`. So a set's entries are contiguous on
@@ -725,7 +730,8 @@ declarations above.
 - **S4. The generator.** Threefry-4×64-20 (J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw, Parallel random
   numbers: as easy as 1, 2, 3, SC 2011, §4.2, Table 2, and §5: "Without AES-NI, we recommend Threefry-4×64-20 on CPUs";
   the bridge's progress threads run on the CPU). Philox4×32-10's key is 64 bits (Table 2: (4+2)×4), shorter than the
-  plan's name. Threefry-N×W-R "follows the same pattern of S and P boxes as Threefish, but with R rounds"; "The key
+  plan's name; Philox4×64-10's is 128 bits ((4+2)×8), the name's width, so the choice rests on §5's recommendation
+  (2026-11-04, review W3's finding 11). Threefry-N×W-R "follows the same pattern of S and P boxes as Threefish, but with R rounds"; "The key
   insertion schedule is the same as in Threefish, except that Threefry ignores the 'tweak'"; "For W = 64 and N ≥ 4,
   Threefry's rotation constants are taken from Threefish" (§4.2). So it is Threefish-256 (N. Ferguson et al., The Skein
   hash function family, v1.3, 2010, §3.3) with Nr = 20 and t0 = t1 = t2 = 0:
@@ -740,7 +746,11 @@ declarations above.
     smaller input if the full period length or key space is not needed"); a new random group each launch (R8).
   - The counter (p_0 .. p_3) = (execution t, the set's `set`, block b, 0) (§5.1: "concatenate the object identifier,
     i, and time, T, into a p-bit counter"); block b gives four 64-bit words, the (execution, set) stream's words 4b to
-    4b + 3. No (key, counter) is used twice (§5: "(key, counter) tuples must never be improperly re-used").
+    4b + 3. §5: "(key, counter) tuples must never be improperly re-used". Within one plan, two cables of one pair never
+    share a stream (S7′); every edge of tree j at the same place in its pair's cables draws the same stream, as S2's
+    one set along the tree means; a replan keeps its name (N1) and restarts its executions at 0, so it redraws the
+    cancelled plan's streams: open for the operator (2026-11-04, reviews W1's finding 2 and W3's finding 7, where this
+    said no (key, counter) is used twice).
 - **S5. The permutation.** D. E. Knuth, The Art of Computer Programming vol. 2, §3.4.2, Algorithm P (read in a
   reproduction citing the 3rd edition, pp. 145-146; the book itself not read): "P1. [Initialize.] Set j ← t. P2.
   [Generate U.] Generate a random number U, uniformly distributed between zero and one. P3. [Exchange.] Set k ←
@@ -752,8 +762,9 @@ declarations above.
   1964: not read (the ACM's copy behind a challenge page; a preview without the procedure).
 - **S6. Where the permutation meets the deal.** The deal stays link_prepare's, once a load, over the template's
   positions in list order, each position's length its own hop's `bytes` (O3); each execution's permutation then
-  chooses the member each of the set's positions carries, at both ends. This is the appendix's "before the deal"
-  exactly where a set's members have equal bytes (every set but one holding its range's last, shorter page); a deal
+  chooses the member each of the set's positions carries, at both ends. This is the brief's "The permutation applies
+  to both ends' entries of the set before the existing deal over lines" (the coordinator's instruction; neither change
+  request names the deal; review W3's finding 9) exactly where a set's members have equal bytes (every set but one holding its range's last, shorter page); a deal
   of each execution's permuted list would be a deal at run time, which it is not as it stands. Recorded as a
   difference.
 - **S7. At the bridge.** A member's record (its page, its words, its bytes) is the one link_prepare prepares, posted at
@@ -806,13 +817,14 @@ declarations above.
 Text extracted with `pdftotext -layout` into the session scratchpad's papers/ folder:
 - **Salmon et al. 2011** (random123.txt): §4.2 (lines 360-424): Threefry-N×W-R, its key schedule, its rotation
   constants from Threefish for W = 64, N ≥ 4, "Threefry-4×64-72 is identical to Threefish-256 with zero 'tweak'";
-  Table 2 (476-500): key and counter widths ((4+4)×8 for Threefry-4×64, (4+2)×4 for Philox4×32); §5 (555-585): "we
-  recommend Threefry-4×64-20 on CPUs", zero-padding a smaller input; §5.1 (586-640): keys and counters from
-  application variables, "(key, counter) tuples must never be improperly re-used".
-- **Ferguson et al., Skein v1.3** (skein.txt): §3.3 (676-780): Threefish's rounds, subkey injection every four
+  Table 2 (476-500): key and counter widths ((4+4)×8 for Threefry-4×64, (4+2)×4 for Philox4×32, (4+2)×8 for
+  Philox4×64); §5 (552-553): "we recommend Threefry-4×64-20 on CPUs"; (565) zero-padding a smaller input; §5.1
+  (586-640): keys and counters from application variables; (673-680) "(key, counter) tuples must never be improperly
+  re-used" (line ranges corrected on review W3's finding 11).
+- **Ferguson et al., Skein v1.3** (skein.txt): §3.3 (662-776): Threefish's rounds, subkey injection every four
   rounds, the MIX function, Table 3 (π), Table 4 (R_{d,j}), §3.3.2 the key schedule and C240.
 - **Frostig, Johnson and Leary 2018** (jax-sysml.txt, lines 60-90): trace caching and re-compilation.
-- **Pathways** (a.txt, lines 185-265): §3, compiled functions.
+- **Pathways** (a.txt, lines 185-265): §3, compiled functions; §4.5 (420-424), interleaving with other programs.
 - Read on the web, not saved: Knuth's Algorithm P as reproduced at gist.github.com/45cd3d09e545815cffe650ffe48eb23d;
   the CUDA Programming Guide, docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html, §4.2.2
   and §4.2.3.1; pytorch main's aten/src/ATen/DLConvertor.cpp (K1).
@@ -830,10 +842,9 @@ Text extracted with `pdftotext -layout` into the session scratchpad's papers/ fo
   permutation of its pages"); how a pair's sequence is spread over its cables stays the bridge's own (R5, R7). Which of
   a set's pages a cable carries is the deal's, fixed at the load; their order on it is drawn each execution. The
   counter's fourth word is the cable's place in the pair's key order (mesh-map.h mesh_cables: "cables in key order",
-  the same at both ends), so no (key, counter) is used on two cables (Salmon et al. §5). The no-cycle argument of S2
-  holds for any order within a group: a set's group start on a tree edge is past its group start on the edge above
-  (each page's start below follows its finish above), so a position's order key (its group start, then its place)
-  stays past its page's receive above whichever page the permutation puts there. B3's ENOTSUP refusal goes.
+  the same at both ends), so no two cables of one pair share a stream (Salmon et al. §5; S4). B3's ENOTSUP refusal
+  goes. (Its last sentence here, a no-cycle argument resting on "each page's start below follows its finish above",
+  is withdrawn: S2's note, review W3's finding 6.)
 
 ### Record of this part
 
