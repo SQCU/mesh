@@ -288,10 +288,9 @@ def _reshard(ir, node, have, want):
 # split [0, -1] and df [0, 1], so df's gradient contracts B along mesh dimension 0, along which df's D lies), and
 # "replace the AllReduce on the output BSM with a ReduceScatter" (section 5.1; Figure 7's finalized graph, the einsum of
 # bxShy and hyM to bxSM, then RS-y to bxSmy), so the local result has the output's sharding but on that dimension,
-# which it holds whole.  A contracting dimension the
-# two operands shard otherwise is replicated where the output uses its mesh dimension ("unsharded on demand", section
-# 3.2; Figure 6, "AllGather non-matching Bx").  An operator's operands are resharded to its local result's sharding on
-# the dimensions they share with it.  The output's values are resharded to replicated, so the callable returns the
+# which it holds whole.  A contracting dimension the two operands shard otherwise is replicated where the output uses
+# its mesh dimension ("unsharded on demand", section 3.2; Figure 6, "AllGather non-matching Bx").  An operator's
+# operands are resharded to its local result's sharding on the dimensions they share with it.  The output's values are resharded to replicated, so the callable returns the
 # graph's whole values (PyTorch 2 section 3.1: the callable stands for the graph).  A partial's key carries its
 # sharding, the members' partials' dims_mapping `lower` gives a ReduceScatter (TC1).  Each Dot form of _operator
 # contracts one dimension, so `partial` holds at most one mesh dimension
