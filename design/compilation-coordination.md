@@ -397,6 +397,26 @@ file, calls streams_cancel).
   placement and weighting functions as parameters; main passes e2b_placement (the manifest's routes as they are) and
   e2b_unit_weights. Which stage each rank runs stays the manifest's (prepare_e2b.py's hand partition), read by main.
 
+- **B1-1** (B1's report): a plan cancelled while it has requests posted stops the port and loses its link, as
+  link_close does for a plan's end (the receives end with the plan by the bridge's own means); a port reads a plan as
+  cancelled where its `serial` is not this node's map_serial (D.3.6, Q3'); `refused[p]` is never reset; `served[p]`
+  for a carried plan rises when the bound it serves is done whole; a hop whose `bytes` is 0 or past a page is EINVAL.
+- **B2-1** (B2's report): where mesh_ports_named cannot compute the port set (EINVAL, E2BIG, ENOENT: a map that moved),
+  the plan released last reads as served and the bridge logs it, so the hold stays bounded; D.3.6 cancels that plan.
+- **A-T3'** (T's stops 1-3): the lowering picks no tree. A4's "Code": "rdma/mesh-collective.c's demands and trees, as
+  now, fed by A2's collectives": each collective is declared transfers that mesh_plan routes jointly, relays forwarding
+  ("A relay's forward is its fused receive-copy-send"). AllReduce (Blink §3.3, a reduce to a chosen root, then a
+  broadcast from it): the root the group's first device in the device mesh's order (GSPMD §3.1: GSPMD "preserves the
+  order of devices in device_mesh", so the placement operand's chooser decides it); each other member's partial one
+  declared transfer to the root; the root's combine torch's own add (MSCCLang §4, receive-reduce-copy); the sum one
+  range from the root to every other member. AllGather and AllToAll as GSPMD §4.2 defines them, each piece one declared
+  transfer, each result torch.cat in the group's order. Every other collective refused by error.
+- **A-T5** (T's stop 4): a result the compiled callable returns is torch.clone'd (the function's own operator): the
+  plan's pages are reused by execution t + u (C3.3), and the callable's outputs outlive the call.
+- **A-T6** (T's stop 7, open for the operator): one compiled graph stands per program at a time; a second raises. The
+  plan's name (group, epoch) is per context, so two contexts of one program would collide.
+- **C9, torch:** mesh_compile.py's sharding completion (GSPMD §3.5) stays there: it is the compilation's own pass (A2).
+
 ### The provisional operand values (recorded as provisional, not as choosers)
 
 - **P1. Placement, e2b:** its existing hand partition (tools/prepare_e2b.py's ranks, as the manifest gives them), read
