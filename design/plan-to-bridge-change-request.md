@@ -115,8 +115,15 @@ design/aot-compilation-change-request.md.
   - trees packed by Garg and Könemann's rounds (N. Garg and J. Könemann, FOCS 1998; rdma/mesh-graph.h
     `mesh_graph_pack`);
   - each tree's pages assigned by the existing fill (rdma/mesh-collective.c).
+- **The order of each cable's list, by the reference algorithm.** Each cable's list is a subsequence of one global
+  topological order of the instructions, built as MSCCLang §5.2 states in its step 3: "Sort instructions into a global
+  topological order with respect to their dependencies with a heap using the priority to order instructions." The
+  priority is the bottom level. Scheduled start times do not order the lists.
+  > what algorithm is cited here, if any? no citations? use the reference algorithm instead.
+  - A set's pages (design/aot-compilation-change-request.md, appendix item 5) share their predecessors. They take
+    consecutive places at the place of the set's first page in that order.
 - **Executions:** execution t runs copy t mod u, and every address is a constant in the plan (C3.3, R2). Each cable
-  carries execution t's sends in the schedule's order, then execution t + 1's.
+  carries execution t's sends in that order, then execution t + 1's.
   - That order is a topological order of the unrolled executions, since every lag points forward.
   - So the cables' sequences cannot wait on each other in a cycle. MSCCLang states this for its thread blocks: "By
     assigning instructions to thread blocks in a topological order that respects communication and processing edges, all

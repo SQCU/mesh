@@ -252,8 +252,16 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     never global.
 - **Recorded order:** the bridge may record the order it realized (its traces, rdma/mesh-flow.c `struct mesh_trace`
   under `MESH_LEDGER`). No collective or data code reads it.
+- **Delivery at a node.**
+  - The bridge parent writes each released execution's sequence number into its plan's state, one word per copy.
+    Each word has a single writer, as C3's rule 2 states (L. Lamport, Concurrent reading and writing, CACM 20(11),
+    1977).
+  - Each port serves the released executions of every standing plan in sequence-number order: a k-way merge (D. E.
+    Knuth, The Art of Computer Programming vol. 3, §5.4.1).
+  - Both ends of a cable read the same sequence numbers, so they merge alike. Nothing holds.
 - **The code must:**
   - deliver orders in sequence order;
+  - publish them, and merge them at each port, as above;
   - interleave released executions on each cable;
   - remove Q4's hold and Q4′'s timeout skip.
 
@@ -310,6 +318,11 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
   their bytes are the same each time, so the requirement's mean and variance hold over the set.
 - **Function A's operands** (joins) keep the schedule's order.
+- **e2b declares its function B consumers.** tools/prepare_e2b.py gives each consumer its kind, and e2b's reductions of
+  partial sums are function B. Declaring every consumer function A would avoid demonstrating this requirement:
+  > then your code isn't correct for deliberately avoiding demonstrating the requirements of the change request.
+
+  (T233, of the same avoidance in the first implementation.)
 
 ### 6. Compiled functions coexist
 
