@@ -573,3 +573,252 @@ file, calls streams_cancel).
 - Carried from before: `qps` in mesh-map.h's struct mesh_reach and struct mesh_cable, and older tag text naming
   streams in mesh.h (design/disjoint-pages-rulings-coordination.md, "Open at the end").
 - Runs wait for the operator's authorization (C3.8 and both change requests' judges).
+
+## The appendix's revisions, 2026-11-04
+
+The coordinating agent's contract for design/aot-compilation-change-request.md, "Appendix: the citations the
+implementation omitted or ignored", items 1 to 7 (item 8 is no change), from mesh 689b89a0 and metal-microbench
+30a5f9fb. The operator approved it: "'1->8' acceptable as written here; launch revisions". Where that appendix and
+anything above in this file differ, the appendix holds: it overturns D5 (design/disjoint-pages-revision-coordination.md),
+Q4's hold, Q4′'s timeout skip, C-epoch, step 6 of the plan call (planning again closing every earlier plan of the
+client) and A-T6. The rules of this file's "Rules" and of design/disjoint-pages-rulings-coordination.md, "Rules for this
+unit" (with the previous contract's rules for every sub-agent) apply verbatim, and: no chooser, kernel, ring, timeout
+skip, hold or second form is added; no handler for a slow node, a "desynchronization" or a truncation (items 3 and 4).
+
+### The file split, one owner a file
+
+| files | owner |
+|---|---|
+| mesh rdma/mesh-collective.h, mesh-collective.c, mesh-graph.h, mesh-graph.c | C2 |
+| mesh rdma/mesh.h, mesh-map.h, mesh-dataflow.h, mesh-dataflow.c, mesh-call.h, mesh-call.c, mesh-metal.h, mesh-metal.m; metal-microbench tools/e2b_replay.m | L2 |
+| mesh rdma/mesh-flow.c, mesh-records.c, mesh-link.c, mesh-bridge.h, mesh-ports.c, mesh-stat.c | B3 |
+| mesh rdma/mesh.py, rdma/mesh_compile.py | T2 |
+| reviews, written findings only | W1 (mesh side), W2 (torch and program side), W3 (items 1-7 across both repos) |
+| this file, INDEX.md, the builds | coordinator |
+
+Headers first: L2 lands mesh.h, mesh-dataflow.h, mesh-call.h and mesh-metal.h as written below in its first commit,
+C2 lands mesh-collective.h as written below in its first. Other owners compile against them once they are pushed.
+
+### The names files share
+
+#### The plan call (mesh-collective.h, C2)
+
+```c
+/* aot-compilation appendix item 6 (design/compilation-coordination.md, "The appendix's revisions", N1 to N5): the plan
+   of one compiled function, named (group, function): `group` the launcher's (MESH_GROUP), 0 EINVAL; `function` the
+   program's own ordinal of the compiled function, the same at every rank, kept by every replan of that function; held
+   in struct mesh_state `epoch`.  EEXIST where a plan of that name stands here on the same map.  *plan out: the region
+   offset of the plan's state section once it stands (untouched on any failure).  No earlier plan is closed */
+int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t function,const struct mesh_declared *,
+              const struct mesh_weight *,uint32_t count,struct mesh_value *,uint32_t values,
+              const struct mesh_dependence *,uint32_t dependences,uint64_t *plan);
+```
+
+ENOMEM's text loses "or whose write does not reach its next instance at lag 1 (the contract's D5)" (U1). Every other
+declaration of mesh-collective.h is unchanged.
+
+#### The region and the start (mesh.h, mesh-dataflow.h, mesh-call.h, mesh-metal.h, L2)
+
+- MESH_VERSION 111. Its note: "111: struct mesh_hop `set` and `padding1` appended (56 bytes): a hop's set, 0 a
+  sequence (design/aot-compilation-change-request.md, appendix item 5); struct mesh_state `epoch` the plan's function
+  (item 6)."
+- `struct mesh_hop { uint32_t page,node,direction,field; uint64_t word,count; uint32_t pages,bytes; uint64_t serial;
+  uint32_t set,padding1; };` (56 bytes; offsets 0-47 unchanged, `set` 48, `padding1` 52). `set`: 0 for a hop of a
+  sequence; else j + 1 for a page of tree j of a set range (S1, S2), the same in both ends' entries of the hop.
+- struct mesh_state: no field moves; `epoch` holds the plan's function (N1). Its note's "`epoch` the planning
+  context's count of its mesh_plan calls" becomes "the program's ordinal of the compiled function".
+- `struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; uint32_t padding; };` (32 bytes): `epoch`
+  and `state` go (N5): the context holds no plan.
+- `void mesh_claim_close(struct mesh_ctx *,uint64_t generation);`: this client's claim of `generation` closed
+  (release), `plans` raised and woken. The `others` form goes with step 6.
+- `int mesh_plan_retire(struct mesh_ctx *,uint64_t plan);`: the program's retirement of one compiled function (N3):
+  the claim of this client whose head's publication `state` is `plan` closed (release), `plans` raised and woken; 0,
+  or ENOENT where no claim of this client holds that plan. The bridge releases it once no port holds it (C3.4, as
+  now). The program's own retirement is mesh_detach's mesh_retire and the bridge's retirement of a gone pid, as now.
+- `int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);`: as now, by `plan` in place of
+  `ctx->state` (EINVAL where `plan` is 0 or its section or entries lie outside the region).
+- `int mesh_metal_transport_create(struct mesh_ctx *,uint64_t plan,void *device,struct mesh_metal_transport *);`: as
+  now, by `plan`; mesh_metal_receive_prepare and mesh_metal_publication_prepare test a row's `state` against the
+  transport's `offset` alone.
+
+#### The torch bindings (mesh.py, T2)
+
+Context loses `epoch` and `state`; the bindings of mesh_plan, mesh_transfers_start and mesh_plan_retire follow the
+declarations above.
+
+### Decisions this part takes, and their sources
+
+#### Item 1, unrolling
+
+- **U1.** plan_unroll's refusal of a write whose least cycle is not 1 (D5) goes; ENOMEM is only the value with a read
+  that reaches no later write of it (C3.3: "A value with no such L fails the plan with `ENOMEM`"). L(v) and u stay
+  the least lags' (L(v) the largest least lag over v's reads, u the largest L), and the interference tests stay the
+  least lags' tests at the distances the copies' executions meet (C3.3). What makes the least lags C3.3's
+  happens-before at every larger distance, in the code as it stands: every walk of the template into a write passes
+  the write's range's production P (the transport's edges into a landing W leave only from P; edges into P are the
+  program's dependences alone, mesh-collective.c plan_template), and both programs' dependences order every event of
+  a node in execution t before each of its events in t + 1 (tools/e2b_replay.m e2b_ir: "r's last to its first at lag
+  1"; rdma/mesh_compile.py _dependences: "every event no lag-0 edge leaves to every event none enters (lag 1)"), so a
+  walk at lag L through P continues through P's next instances at every lag past L. The comments that cite D5
+  (plan_unroll, plan_interferes, mesh-graph.h's and mesh-graph.c's source notes, mesh.h's "Copies") cite C3.3 and
+  this decision instead. A lone AllGather or AllToAll plans (its landing reaches its next instance at lag 2, u 2).
+
+#### Item 2, order
+
+- **O1.** The sequencer's delivery is in sequence order, the pending list's head first (Défago et al., Fig. 5), with
+  no timeout and no skip: Q4′'s bound (orders_deliver's skip after MESH_PLATFORM_NS, `orders_due`, the pending entry's
+  `arrived`, mesh-link.c turn_due's wait for it) goes. A head whose plan does not stand here stays at the head.
+- **O2. Not done: Q4's hold stays, and with it no execution of one plan interleaves with another plan's on a cable.**
+  The evidence:
+  - On each queue pair the k-th SEND fills the k-th receive posted (link_prepare's note; Hilland et al., RDMA
+    Protocol Verbs Specification, §8.2.2, design/prepared-machine.md#M08), so both ends of a cable must post the
+    released executions of several plans on each queue pair in one order: sequence order, the one both ends' parents
+    deliver.
+  - The ports are the bridge parent's child processes (mesh-flow.c's header: "in a port's child (mesh-child.c)"),
+    sharing the region alone with it. What the parent's delivery leaves in the region is each plan's `released`, a
+    count. Two deliveries of different plans between two passes of a port leave the port no record of which came
+    first, and no word of the region holds it.
+  - Carrying the delivery order to the ports needs a structure no change request names: a log of the delivered
+    ORDERs in the region, which is a ring (bounded) or unbounded, or a hand-off the parent waits on, which is a hold.
+    R1's "queues of desired transfers" (U-Net, VIA) are bounded descriptor queues. This part may add neither.
+  - So the hold that keeps one plan's batch at a time per node stays (orders_served, B2-1, the ports' `served`), its
+    comments citing the reason above in place of "A cable never interleaves two executions" (Claude's words, which the
+    appendix withdraws). Open for the operator: what carries the sequencer's delivery order from the bridge parent to
+    its ports.
+- **O3. The deal as it stands.** link_prepare deals each plan's template once at its load (mesh_graph_list_schedule
+  over the u copies' units in list order, carried from 0), and each lane serves its plan's executions in order, so
+  consecutive executions of one plan interleave across the lines already (each line in execution order, the lines
+  independent). The deal carries no bytes from one plan to the next; applying it across plans' consecutive executions
+  would be a deal at run time, which it is not as it stands. Recorded, nothing changed.
+
+#### Items 3 and 4
+
+- **H1.** What the last unit added for a slow node is Q4′'s bound (O1); it goes. Every wait stays bounded by C3's
+  rule as before (the start's wait, the host's and the GPU's waits on counts, the map reader).
+- **H2.** No handler for a truncation is added. The open item "a plan ended at one node while a peer still serves it"
+  (V1 #2 and #6) and V1 #3 are withdrawn (below, "Open at the end"), as is Claude's claim that the failport discarded
+  such a channel. mesh-flow.c plan_outstanding (the tag's stream_end: a plan ended with requests outstanding loses the
+  link) is the bridge's existing end of a plan, not a handler added for truncation, and stays.
+
+#### Item 5, independent flows in uniformly random order
+
+- **S1. Which pages.** A range is a set where every declared transfer of it is MESH_PAGES (function B at every
+  destination, R4). A range with any MESH_JOIN destination keeps the schedule's order (the appendix: "Function A's
+  operands (joins) keep the schedule's order").
+- **S2. The set's unit is one tree's pages.** A set range's pages on tree j (the fill's cut, mesh_graph_fill: tree
+  j's run) are one set on every edge of tree j, `set` = j + 1, j the tree's index in the solve's trees grouped by
+  demand (mesh-collective.c p->tree order, the same at every rank). Every edge of tree j carries the same run of pages,
+  so both ends of each edge, and every edge of the tree, draw the same permutation (the same key, counter and size):
+  a relay forwards in the order it receives. Why one tree and not the range: the per-cable list stays a topological
+  order of the unrolled executions (R5; MSCCLang §5.2, the no-cycle condition): give the set's position i the order
+  key (its group start, then i); a forward at position i follows its receive at position i upstream (the same page,
+  the same permutation), whose group start is earlier; a source's set is released by one supplied word (C3.7), whose
+  production follows everything it depends on. Pages of one range reaching a node by two trees from two parents would
+  break the first step, so a cable carrying two trees of one range carries two sets.
+- **S3. The layout.** struct mesh_hop `set` (above). The entries' order (T6 amended): each entry's group is its set's
+  entries of the same `node` and `direction` where `set` is not 0, else the entry alone; the entries sorted by their
+  group's least `start`, then their group's least `walk`, then their own `walk`. So a set's entries are contiguous on
+  their cable within each copy, in walk order (the tree's page order), both ends' alike (a send at x to y and its
+  receive at y read the same start; walk order agrees per pair, mesh.h "Both ends"), and every other entry keeps the
+  schedule's order. The set's extent is the maximal run of a direction's entries naming one peer within one copy with
+  the same nonzero `set`.
+- **S4. The generator.** Threefry-4×64-20 (J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw, Parallel random
+  numbers: as easy as 1, 2, 3, SC 2011, §4.2, Table 2, and §5: "Without AES-NI, we recommend Threefry-4×64-20 on CPUs";
+  the bridge's progress threads run on the CPU). Philox4×32-10's key is 64 bits (Table 2: (4+2)×4), shorter than the
+  plan's name. Threefry-N×W-R "follows the same pattern of S and P boxes as Threefish, but with R rounds"; "The key
+  insertion schedule is the same as in Threefish, except that Threefry ignores the 'tweak'"; "For W = 64 and N ≥ 4,
+  Threefry's rotation constants are taken from Threefish" (§4.2). So it is Threefish-256 (N. Ferguson et al., The Skein
+  hash function family, v1.3, 2010, §3.3) with Nr = 20 and t0 = t1 = t2 = 0:
+  - d = 0 .. 19: e_{d,i} = v_{d,i} + k_{d/4,i} mod 2^64 where d mod 4 = 0, else v_{d,i}; (f_{d,2j}, f_{d,2j+1}) =
+    MIX_{d,j}(e_{d,2j}, e_{d,2j+1}), y0 = x0 + x1 mod 2^64, y1 = (x1 <<< R_{d mod 8, j}) ⊕ y0; v_{d+1,i} = f_{d,π(i)},
+    π = (0, 3, 2, 1) (Table 3); output c_i = v_{20,i} + k_{5,i} mod 2^64;
+  - R_{d,j} for Nw = 4 (Table 4): d = 0: 14, 16; 1: 52, 57; 2: 23, 40; 3: 5, 37; 4: 25, 33; 5: 46, 12; 6: 58, 22;
+    7: 32, 32;
+  - k_4 = C240 ⊕ k_0 ⊕ k_1 ⊕ k_2 ⊕ k_3, C240 = 0x1BD11BDAA9FC1A22; k_{s,i} = k_{(s+i) mod 5} for i = 0, 1, 2 (the tweak
+    terms 0), k_{s,3} = k_{(s+3) mod 5} + s mod 2^64 (§3.3.2).
+  - The key (k_0 .. k_3) = (struct mesh_state `group`, `epoch`, 0, 0), the plan's name zero-padded (§5: "zero-pad a
+    smaller input if the full period length or key space is not needed"); a new random group each launch (R8).
+  - The counter (p_0 .. p_3) = (execution t, the set's `set`, block b, 0) (§5.1: "concatenate the object identifier,
+    i, and time, T, into a p-bit counter"); block b gives four 64-bit words, the (execution, set) stream's words 4b to
+    4b + 3. No (key, counter) is used twice (§5: "(key, counter) tuples must never be improperly re-used").
+- **S5. The permutation.** D. E. Knuth, The Art of Computer Programming vol. 2, §3.4.2, Algorithm P (read in a
+  reproduction citing the 3rd edition, pp. 145-146; the book itself not read): "P1. [Initialize.] Set j ← t. P2.
+  [Generate U.] Generate a random number U, uniformly distributed between zero and one. P3. [Exchange.] Set k ←
+  ⌊jU⌋ + 1. ... Exchange X_k ↔ X_j. P4. [Decrease j.] Decrease j by 1. If j > 1, return to step P2." Here t is the
+  set's size m, X_1 .. X_m the set's members in their list order, the s-th U (s = 0, 1, ... as j runs m, m - 1, ...,
+  2) the stream's word s read as r / 2^64, so k = ⌊j r / 2^64⌋ + 1, the high word of the 128-bit product j r, plus 1
+  (integer arithmetic, so both ends compute the same; P3's note: k is not a remainder modulo j). The set's position i
+  (its i-th entry in list order, from 1) carries member X_i in that execution. R. Durstenfeld, Algorithm 235, CACM 7(7)
+  1964: not read (the ACM's copy behind a challenge page; a preview without the procedure).
+- **S6. Where the permutation meets the deal.** The deal stays link_prepare's, once a load, over the template's
+  positions in list order, each position's length its own hop's `bytes` (O3); each execution's permutation then
+  chooses the member each of the set's positions carries, at both ends. This is the appendix's "before the deal"
+  exactly where a set's members have equal bytes (every set but one holding its range's last, shorter page); a deal
+  of each execution's permuted list would be a deal at run time, which it is not as it stands. Recorded as a
+  difference.
+- **S7. At the bridge.** A member's record (its page, its words, its bytes) is the one link_prepare prepares, posted at
+  the position its execution's permutation gives it, on that position's line. EMSGSIZE where a member is more frames
+  than a line of one of its set's positions holds; EINVAL where a set's entries are not contiguous on the pair within a
+  copy. Each lane computes an (execution, set)'s permutation once, into room taken at the load (the largest set it
+  carries a position of): nothing is allocated at run time. A receive record's round test (`landings`) and a send's
+  release are the member record's own. The bridge sees `set`, a set or a sequence, and no kind (R4).
+
+#### Item 6, compiled functions coexist
+
+- **N1. Names.** A plan is (group, function), `function` the program's ordinal of its compiled function, passed to
+  mesh_plan and kept by every replan of that function. Every rank runs the same program and compiles its functions in
+  the same order (the per-context count C-epoch read was this order; PyTorch 2 §3.1: the backend's compile function is
+  called with each captured graph; e2b plans one function, 1). A replan of a function on the same map is EEXIST
+  until the program retires the standing one. Sources for coexistence: R. Frostig, M. J. Johnson and C. Leary,
+  Compiling machine learning programs via high-level tracing, SysML 2018 ("JAX trace caching creates a monomorphic
+  signature for the parameters to the traced computation, such that newly encountered array element types, array
+  dimensions, or tuple members trigger a re-compilation"); NVIDIA, CUDA Programming Guide §4.2.2 ("Work submission
+  using graphs is separated into three distinct stages: definition, instantiation, and execution"; "It may be launched
+  any number of times without repeating the instantiation") and §4.2.3.1 (`cudaGraphExecDestroy()`); Pathways §3 ("We
+  refer to these computations with known resource requirements as 'compiled functions'"), §4.4.
+- **N2. The handle** is the plan's state section offset, mesh_plan's `*plan` (as an instantiated graph's
+  cudaGraphExec_t): the start, the GPU's transport and the retirement take it.
+- **N3. Retirement.** A function's claim is closed only by mesh_plan_retire (the program retires the function), by
+  mesh_detach or the bridge's retirement of a gone pid (the program itself), or by the plan call's own failure after
+  its writes (ESTALE at step 4, its own claim alone).
+- **N4. One execution a call.** mesh_transfers_start raises the plan's `executions`, one function execution each:
+  torch's call t raises it to t + 1; e2b's run raises it to its steps at once, each step one execution of its one
+  function, launched back to back as an instantiated graph is launched any number of times.
+- **N5. What goes.** mesh_plan's step 6 (every earlier claim of the client closed), C-epoch (the epoch kept from a
+  cancelled plan, the count raised once the plan stands, left at the named epoch less 1 on failure), struct mesh_ctx
+  `epoch` and `state`, mesh_claim_close's `others`, and A-T6's single standing graph.
+
+#### Item 7, torch's kernels
+
+- **K1.** T2 finds torch's existing interface for a device tensor over existing memory in torch v2.14.0 (the
+  installed .venv-torch's version): its source (aten/src/ATen/DLConvertor.cpp, torch/utils/dlpack.py) and
+  documentation, read at that tag. The coordinator's first reading of the file on pytorch main: toDLPack exports an
+  MPS tensor as kDLMetal with `data` its storage's base (the MTLBuffer) and `byte_offset` its offset;
+  dlDeviceToTorchDevice maps kDLMetal to an MPS device; fromDLPackImpl passes `data` to at::from_blob on that device.
+  If v2.14.0 holds the same, the MPS path is torch.from_dlpack of a DLPack tensor of device kDLMetal whose `data` is an
+  id<MTLBuffer> over the copy's placed pages, made by newBufferWithBytesNoCopy as mesh-metal.m and e2b_replay.m's
+  placed_buffer make theirs, the graph's operators then torch's own MPS kernels; a range is published only after the
+  GPU's writes to it are complete (torch's own synchronization). Where v2.14.0 does not hold it, T2 reports with the
+  lines read and writes no interface.
+
+### What each source said, where it was read
+
+Text extracted with `pdftotext -layout` into the session scratchpad's papers/ folder:
+- **Salmon et al. 2011** (random123.txt): §4.2 (lines 360-424): Threefry-N×W-R, its key schedule, its rotation
+  constants from Threefish for W = 64, N ≥ 4, "Threefry-4×64-72 is identical to Threefish-256 with zero 'tweak'";
+  Table 2 (476-500): key and counter widths ((4+4)×8 for Threefry-4×64, (4+2)×4 for Philox4×32); §5 (555-585): "we
+  recommend Threefry-4×64-20 on CPUs", zero-padding a smaller input; §5.1 (586-640): keys and counters from
+  application variables, "(key, counter) tuples must never be improperly re-used".
+- **Ferguson et al., Skein v1.3** (skein.txt): §3.3 (676-780): Threefish's rounds, subkey injection every four
+  rounds, the MIX function, Table 3 (π), Table 4 (R_{d,j}), §3.3.2 the key schedule and C240.
+- **Frostig, Johnson and Leary 2018** (jax-sysml.txt, lines 60-90): trace caching and re-compilation.
+- **Pathways** (a.txt, lines 185-265): §3, compiled functions.
+- Read on the web, not saved: Knuth's Algorithm P as reproduced at gist.github.com/45cd3d09e545815cffe650ffe48eb23d;
+  the CUDA Programming Guide, docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html, §4.2.2
+  and §4.2.3.1; pytorch main's aten/src/ATen/DLConvertor.cpp (K1).
+- Not read: Durstenfeld 1964 (S5); Boehm and Adve 2008 (item 4: nothing is built from it); J. W. S. Liu and C. L. Liu
+  1974 (the deal is the existing code's).
+
+### Record of this part
+
+(Filled in as the work lands.)
