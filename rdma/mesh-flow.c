@@ -1903,8 +1903,10 @@ static struct flow **place_at(struct port_plans *at,uint32_t k,uint32_t plans){
    link_prepare made for each plan against `map_serial`, made once here before the index is used, since the index
    names the operand's entries only in its own view (where they are one view, the index is below the operand's `nodes`
    by construction).  Where the view holds no record of the peer, no plan of the operand has an entry toward it, and
-   none is loaded.  Else the places toward the index (mesh.h mesh_algo_adjacent: R-6; W8), each plan standing at one
-   and not refused by this port (`refused[p]`, never reset) loaded (plan_load) into the table, grown to `plans` read
+   none is loaded.  Else the places toward the index (mesh.h mesh_algo_adjacent: R-6; W8), each plan standing at one,
+   not removed (struct mesh_state `removed`, read after the acquire: whatisRCU.rst, "any reader starting after the
+   removal phase will be unable to gain a reference to the removed data items"; rcu_dereference) and not refused by
+   this port (`refused[p]`, never reset) loaded (plan_load) into the table, grown to `plans` read
    once.  A failed view read (ETIMEDOUT, EINVAL, ENOMEM: records_read) is said and loads none of the operand, as
    link_prepare's map read refused each plan.  The flows loaded are counted in `holding`, the operand's places kept
    (struct port_plans `adjacent`, `listed`).  What must stay: only the places toward the peer loaded; the view's reading
@@ -1935,7 +1937,8 @@ static void plans_load(struct port *port,struct port_plans *at,uint64_t generati
   for(uint32_t j=0;j<at->listed;j++){
     const uint32_t k=at->adjacent[j];
     struct mesh_state *words=mesh_algo_standing(M,k);
-    if(!words || atomic_load_explicit(&words->refused[port->index],memory_order_relaxed))continue;
+    if(!words || atomic_load_explicit(&words->removed,memory_order_acquire) ||
+       atomic_load_explicit(&words->refused[port->index],memory_order_relaxed))continue;
     if(!plan_load(port,k,generation,words,index,place_at(at,k,plans)))at->holding++;
   }
 }
@@ -2439,10 +2442,17 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    only where the operand's view is that one.  Every child of the port is spawned after this call (mesh-ports.c
    port_lost and mesh-children.c child_reaped call it before mesh-ports.c port_open's child_spawn) */
 static struct cancelled { uint32_t node,index,every; struct mesh_view_id view; } cancelled[MESH_PORTS];
-static void plan_cancel_at(void *context,uint32_t k){
+/* design/problems-of-14b9a757-change-request.md, "Sources for the stops", 11; Documentation/RCU/whatisRCU.rst: "The
+   removal phase removes references to data items within a data structure ..., and can run concurrently with readers";
+   rcu_assign_pointer, "that of a store-release operation" */
+static void plan_remove(struct mesh_state *words){
+  atomic_store_explicit(&words->removed,1,memory_order_release);
+  plan_cancel(words);
+}
+static void plan_remove_at(void *context,uint32_t k){
   (void)context;
   struct mesh_state *words=mesh_algo_standing(M,k);
-  if(words)plan_cancel(words);
+  if(words)plan_remove(words);
 }
 void streams_cancel(const struct port *port){
   struct mesh_state *words;
@@ -2465,12 +2475,12 @@ void streams_cancel(const struct port *port){
                              .every=error!=0,.view=view};
     free(records);
   }
-  if(last->node && last->every)for(uint32_t k=0;(words=plan_from(&k));k++)plan_cancel(words);
+  if(last->node && last->every)for(uint32_t k=0;(words=plan_from(&k));k++)plan_remove(words);
   else if(last->node && last->index!=UINT32_MAX && mesh_algo_open(M) &&
           !mesh_view_compare(mesh_plan_view(mesh_algo_state(M,mesh_algo(M),0)),last->view)){
     uint32_t listed;
     const uint32_t *adjacent=mesh_algo_adjacent(M,last->index,&listed);
-    mesh_graph_row_visit(adjacent,listed,plan_cancel_at,NULL);
+    mesh_graph_row_visit(adjacent,listed,plan_remove_at,NULL);
   }
   if(!port->child){
     atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);

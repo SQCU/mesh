@@ -759,14 +759,17 @@ static inline int mesh_view_compare(struct mesh_view_id a,struct mesh_view_id b)
      2026-11-06: "A plan then stands while its view does, and its view while the sequencer's map does").
    - `sequencer` and `boot`, where `padding3[0]` and `padding3[1]` were: that view's creator (hdr `view_sequencer`,
      `view_boot`), so the plan's view is struct mesh_view_id (`serial`, `sequencer`, `boot`), mesh_plan_view.
-   What must stay: every other field where it is, the struct 320 bytes */
+   What must stay: every other field where it is, the struct 320 bytes.
+   `removed`, where `padding4` was, the bridge parent its one writer (design/problems-of-14b9a757-change-request.md,
+   "Sources for the stops", 11; Documentation/RCU/whatisRCU.rst: "The removal phase removes references to data items
+   within a data structure") */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
   uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
   _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced;
   uint32_t waits,tells; uint64_t syncs; uint32_t calls; _Atomic uint32_t closed; uint64_t rows,submit_room,transfers;
-  uint32_t sequencer,padding4; uint64_t boot,padding3[3]; };
+  uint32_t sequencer; _Atomic uint32_t removed; uint64_t boot,padding3[3]; };
 _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
@@ -784,7 +787,8 @@ _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,syncs)==240 && offsetof(struct mesh_state,calls)==248 &&
   offsetof(struct mesh_state,closed)==252 && offsetof(struct mesh_state,rows)==256 &&
   offsetof(struct mesh_state,submit_room)==264 && offsetof(struct mesh_state,transfers)==272 &&
-  offsetof(struct mesh_state,sequencer)==280 && offsetof(struct mesh_state,boot)==288,"mesh_state");
+  offsetof(struct mesh_state,sequencer)==280 && offsetof(struct mesh_state,removed)==284 &&
+  offsetof(struct mesh_state,boot)==288,"mesh_state");
 /* the view a plan was made in (struct mesh_view_id) */
 static inline struct mesh_view_id mesh_plan_view(const struct mesh_state *s){
   return (struct mesh_view_id){.id=s->serial,.sequencer=s->sequencer,.boot=s->boot};
