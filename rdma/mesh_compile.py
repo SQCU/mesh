@@ -54,7 +54,7 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # corruption"
 class IR:
     def __init__(self, gm, placement, nodes):
-        self.gm, self.placement, self.weights = gm, placement, None
+        self.gm, self.weights = gm, None
         self.order = list(gm.graph.nodes)
         self.shape, self.coords, self.map = _mesh(placement)
         here = [d for d, index in enumerate(self.map) if index == nodes.self]
