@@ -2325,7 +2325,11 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
        2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G2, G3 and
        V2; "The revisions of 55b9cbad"): each row bound to its page as plan_rows decided it, a share's rows to its
        `of`'s pages among them, where this walked each value's ranges again; no row is gathered for a mapping and no
-       `view` written (G3).  What must stay: as above */
+       `view` written (G3).  The implementer's decision, recorded (the header is silent): a `state` 1 value's bytes 0
+       once over every row of it, a share's rows too, as D3 has it ("every `state` 1 value's bytes 0 once"): that write
+       is the plan's, before the first execution, so it precedes `of`'s producer's first write (an invariant's "once,
+       after the plan and before the first execution", design/disjoint-pages-change-request.md D.3.2).  What must
+       stay: as above */
     for(uint32_t j=0;j<p->givens;j++){
       const struct mesh_value *v=p->given+j;
       const struct mesh_section x=v->section;
