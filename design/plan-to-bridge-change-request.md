@@ -1977,6 +1977,29 @@ code, and each method is used as its source states it.
     - For values typed as one run, placement is dynamic storage allocation with contiguous blocks, NP-complete in the
       strong sense (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979, problem SR2). There C3.3's
       greedy by size stays (Pisarchyk and Lee).
+    - **The typed case is an interval-order question, unless the run is virtual.**
+      - Each item's first write and last access are events of Lamport's happens-before order (L. Lamport, Time,
+        clocks, and the ordering of events in a distributed system, CACM 21(7), 1978).
+      - Item x precedes item y when x's last access happens before y's first write. Items conflict when neither
+        precedes the other, so the conflict graph is the incomparability graph of that order.
+      - It is an interval graph exactly when the order is an interval order, that is, has no induced 2 + 2 (P. C.
+        Fishburn, Intransitive indifference with unequal indifference intervals, J. Math. Psychology 7, 1970). Then
+        placing the typed values is SR2 on interval lifetimes. A landing written by another node's send can make a
+        2 + 2.
+      - **The run can be virtual instead.** The page table maps consecutive virtual pages to frames placed anywhere
+        (Kilburn et al.; Denning), and Metal 4 has that map for buffers. A placement sparse buffer, made by
+        `newBufferWithLength:options:placementSparsePageSize:`, is mapped by `MTL4CommandQueue`'s
+        `updateBufferMappings:heap:operations:count:`. There "Metal walks the tiles in the range in buffer offset order,
+        assigning the next tile from the heap in increasing order, starting at heapOffset", from an `MTLHeap` of type
+        `MTLHeapTypePlacement` (macOS 26 SDK, MTL4CommandQueue.h, MTLDevice.h).
+      - mesh's history has both remaining forms:
+        - composed views over `mach_vm_remap`;
+        - their replacement on 2026-11-02, "one GPU address table an occurrence written by the lowering, no composed
+          remapped view" (6255e92b, 9ac9163a), a table the kernel reads, as PagedAttention's block table is.
+      - Unproven: whether the region's pages can be the tiles of a placement heap. The region is shared by the bridge
+        and the programs and registered for transfers, and no header read here makes a heap over existing memory.
+        Where the run is virtual, every value is placed as pages anywhere, and the interval-order question does not
+        arise.
     - C3.3's text above applied greedy by size to every value, because it gave every value one run. The typing
       confines that to the operands that need it.
   - **A received range is pages of its destination value.** A collective's receive lands in the pages of the value it

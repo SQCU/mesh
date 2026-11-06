@@ -3140,6 +3140,11 @@ points 1, 2 and 4, and are superseded with them.
 
 Open, outside these points:
 - The forced HiGHS build's 11.7 s against the eight-second bound.
-- Torch's own allocations: kernel scratch, and results of operators with no out variant.
-- Whether a landing's lifetime is an interval on the receiving node's order. It no longer matters for point 6's untyped
-  values; it still matters for the typed ones.
+- Torch's own allocations (kernel scratch, and results of operators with no out variant) are not a requirement. The
+  operator, 2026-11-05: ""- torch's own allocations (kernel scratch, and results of ops with no out= form);" i dunno
+  who cares...?"
+- The typed values' placement, as PB R2 now states it canonically. The order of first writes and last accesses under
+  happens-before (Lamport 1978) is an interval order exactly when it has no induced 2 + 2 (Fishburn 1970); then
+  placement is SR2. A landing can make a 2 + 2. The question goes away if the run is virtual, by a Metal 4 placement
+  sparse buffer over a placement heap. Whether the region's pages can be such a heap's tiles is unproven, and proving
+  it is a run.
