@@ -1946,8 +1946,8 @@ def lower(ir):
             ir.declares[collective] = range(first, len(ir.declared))
     firsts = mesh_graph.ends(range(len(ir.program))[::-1], lambda g: ir.program[g][1])
     for kind, _, key, collective in ir.program:
-        if kind == 'collective':
-            ir.waits.setdefault(firsts.get(key, len(ir.program) - 1), []).append(collective)
+        if kind == 'collective' and key in firsts:
+            ir.waits.setdefault(firsts[key], []).append(collective)
     ir.dependences = _dependences(ir)
     _place(ir)
 
