@@ -38,7 +38,6 @@ PAD = {A.pad, A.constant_pad_nd}
 Placement = collections.namedtuple('Placement', 'mesh nodes splits')
 # GSPMD, sections 2.1, 3.2, 4.2 and 4.5
 Collective = collections.namedtuple('Collective', 'kind node dims dim position')
-Calls = collections.namedtuple('Calls', 'mine outstanding orders commuting')
 # GSPMD, section 4.1, "Static operator configurations"
 Local = collections.namedtuple('Local', 'op target args kwargs')
 # GSPMD, sections 3.2, 3.5, 4 and 4.6
@@ -61,7 +60,7 @@ class IR:
         self.device, self.identity = here[0] if here else None, 0
         self.sharding, self.program, self.roles, self.events = {}, [], {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
-        self.made, self.calls, self.locals, self.shapes = set(), None, {}, {}
+        self.made, self.outstanding, self.locals, self.shapes = set(), None, {}, {}
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
         self.publishes, self.inputs, self.declares, self.waits = {}, {}, {}, {}
@@ -1634,110 +1633,17 @@ class Tracer(torch.fx.Tracer):
         return isinstance(m, Function) or super().is_leaf_module(m, module_qualified_name)
 
 
-# M. C. Rinard and P. C. Diniz, Commutativity analysis: a new analysis technique for parallelizing compilers, ACM TOPLAS
-# 19(6), 1997, section 4.9.2: "simple arithmetic rewrite rules such as ex1-ex2 => ex1+(-ex2), -(-ex) => ex and
-# ex1*(ex2+ex3) => (ex1*ex2)+(ex1*ex3)", and "rules such as (ex1+ex2)+ex3 => (ex1+ex2+ex3) that convert binary
-# applications of commutative and associative operators to n-ary applications.  It then sorts the operands according to
-# an arbitrary order on expressions"; footnote 4: "ignore[s] here potential anomalies caused by the finite
-# representation of numbers"
-ALGEBRA = {operator.add: 'add', torch.add: 'add', 'add': 'add', operator.mul: 'mul', torch.mul: 'mul', 'mul': 'mul',
-           operator.sub: 'sub', torch.sub: 'sub', 'sub': 'sub', operator.neg: 'neg', torch.neg: 'neg', 'neg': 'neg',
-           torch.maximum: 'maximum', 'maximum': 'maximum', torch.minimum: 'minimum', 'minimum': 'minimum'}
-
-
-def _rewrite(name, operands):
-    def of(e, kind):
-        return isinstance(e, tuple) and e[:1] == (kind,)
-    if name == 'sub':
-        return _rewrite('add', (operands[0], _rewrite('neg', operands[1:])))
-    if name == 'neg':
-        return operands[0][1] if of(operands[0], 'neg') else ('neg', operands[0])
-    for i, e in enumerate(operands):
-        if name == 'mul' and of(e, 'add'):
-            return _rewrite('add', tuple(_rewrite('mul', operands[:i] + operands[i + 1:] + (term,)) for term in e[1:]))
-    flat = [f for e in operands for f in (e[1:] if of(e, name) else (e,))]
-    return (name,) + tuple(sorted(flat, key=repr))
-
-
-# Rinard and Diniz, sections 3.2.1 and 4.9.1: symbolic execution "simply executes the operations, computing with
-# expressions instead of values".  torch 2.14.0 torch/fx/interpreter.py: "executes an FX graph Node-by-Node"
-def _expression(op, target, args, kwargs):
-    name = ALGEBRA.get(target) if op in ('call_function', 'call_method') and not kwargs else None
-    if name and len(args) == 1 + (name != 'neg'):
-        return _rewrite(name, tuple(args))
-    return op, target, tuple(args), tuple(sorted(kwargs.items()))
-
-
-class _Symbolic(torch.fx.Interpreter):
-    def call_function(self, target, args, kwargs):
-        return _expression('call_function', target, args, kwargs)
-
-    def call_method(self, target, args, kwargs):
-        return _expression('call_method', target, args, kwargs)
-
-    def call_module(self, target, args, kwargs):
-        return _expression('call_module', target, args, kwargs)
-
-    def get_attr(self, target, args, kwargs):
-        return _expression('get_attr', target, args, kwargs)
-
-
-# Rinard and Diniz, section 4.8: executed symbolically "in both execution orders", the simplified expressions "denote
-# the same value"; "If it cannot symbolically execute the methods, the commutativity-testing algorithm conservatively
-# assumes that the methods may not commute".  torch.fx TraceError: "symbolically traced variables cannot be used as
-# inputs to control flow"
-def _commutes(module, k):
-    tracer = Tracer()
-    try:
-        graph = tracer.trace(module)
-    except torch.fx.proxy.TraceError:
-        return False
-    body, count = torch.fx.GraphModule(tracer.root, graph), sum(node.op == 'placeholder' for node in graph.nodes)
-
-    def run(first, second):
-        inner = _Symbolic(body).run(*[('symbol', 'receiver') if i == k else ('symbol', first, i) for i in range(count)])
-        return _Symbolic(body).run(*[inner if i == k else ('symbol', second, i) for i in range(count)])
-    return k < count and run(1, 2) == run(2, 1)
-
-
 # A. J. Bernstein, Analysis of programs for parallel processing, IEEE Trans. Electronic Computers EC-15(5), 1966: i and
-# j are independent where W(i) & R(j) = R(i) & W(j) = W(i) & W(j) = {}.  Rinard and Diniz, section 2: "can execute in
-# any order without affecting the overall behavior".  Width by Dilworth's theorem, Fulkerson's matching, Hopcroft and
-# Karp
-def _analyse(gm, of, modules):
+# j are independent where W(i) & R(j) = R(i) & W(j) = W(i) & W(j) = {}.  Width by Dilworth's theorem, Fulkerson's
+# matching, Hopcroft and Karp
+def _analyse(gm, of):
     nodes = list(gm.graph.nodes)
-    callee = {node: of.get(node) for node in nodes}
-    calls = [node for node in nodes if callee[node] is not None]
-    place = {node: i for i, node in enumerate(calls)}
-    link, follower = {}, {}
-    for b in calls:
-        reads = []
-        map_arg((b.args, b.kwargs), reads.append)
-        for k, a in enumerate(b.args):
-            if isinstance(a, Node) and a in place and callee[a] == callee[b] and len(a.users) == 1 \
-                    and reads.count(a) == 1 and link.get(a, (a, k))[1] == k and _commutes(modules[callee[b]], k):
-                link[b], follower[a] = (a, k), b
-                break
-    chains = mesh_graph.paths(calls, lambda a: [follower[a]] if a in follower else [])
-    step = {node: chain for chain in chains for node in chain}
-
-    def inputs(node):
-        found = set(node.all_input_nodes)
-        if node in link:
-            receiver = step[node][0].args[link[node][1]]
-            found = (found - {link[node][0]}) | ({receiver} if isinstance(receiver, Node) else set())
-        for i in node.all_input_nodes:
-            if i in step and step[i][-1] is i:
-                found |= set(step[i])
-        return found
-    held, ordered = mesh_graph.closure(nodes, lambda node: node.all_input_nodes), mesh_graph.closure(nodes, inputs)
-    orders = frozenset((place[a], place[b]) for b in calls for a in ordered[b] if a in place)
-    commuting = tuple(tuple(place[node] for node in chain) for chain in chains)
+    calls = [node for node in nodes if node in of]
+    held = mesh_graph.closure(nodes, lambda node: node.all_input_nodes)
     entries = {}
-    for f in dict.fromkeys(callee[node] for node in calls):
-        mine = [node for node in calls if callee[node] == f]
-        entries[f] = Calls(tuple(place[node] for node in mine),
-                           mesh_graph.width(mine, lambda a: [b for b in mine if a in held[b]]), orders, commuting)
+    for f in dict.fromkeys(of[node] for node in calls):
+        mine = [node for node in calls if of[node] == f]
+        entries[f] = mesh_graph.width(mine, lambda a: [b for b in mine if a in held[b]])
     return entries
 
 
@@ -1825,7 +1731,7 @@ def program(block, *example_inputs):
     exporter = _Export(gm, FakeTensorMode())
     exporter.run(*[exporter.fake(x) for x in example_inputs])
     compiled, of, calls = exporter.compiled, exporter.of, exporter.calls
-    entries = _analyse(gm, of, [record.function.module for record in compiled])
+    entries = _analyse(gm, of)
     operands = [record.function.placement(record.gm, record.examples) for record in compiled]
     placeholders = [n for n in gm.graph.nodes if n.op == 'placeholder']
     readers = [[of[n] for n in gm.graph.nodes if n in of and p in n.all_input_nodes] for p in placeholders]
@@ -1841,7 +1747,7 @@ def program(block, *example_inputs):
         irs = []
         for k, (record, operand) in enumerate(zip(compiled, operands)):
             ir = partition(record.gm, operand, nodes)
-            ir.calls = entries[k]
+            ir.outstanding = entries[k]
             lower(ir)
             ir.weights = list(record.function.weights(ir))
             irs.append(ir)
@@ -1855,7 +1761,7 @@ def program(block, *example_inputs):
         functions = (mesh.Function * len(irs))(*[
             mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
                           C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
-                          len(e), 0, ir.calls.outstanding, 0)
+                          len(e), 0, ir.outstanding, 0)
             for ir, (d, w, v, e) in zip(irs, arrays)])
         deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
         if state['mapping'] is not None:
