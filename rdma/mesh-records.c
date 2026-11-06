@@ -806,24 +806,20 @@ static int unsent;
    serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: a plan of another
    map serial not matched.
    2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4 and K2; "The
-   revisions of 55b9cbad"): the operand (mesh.h struct mesh_algo) read from its publication: `published` (acquire) not
-   0 and not `retired` (acquire), then its `group` compared, then the plan at place epoch - 1 (mesh_algo_plan), where
-   the root's `owner` and `closed` were read and the epoch tested against 0 and `plans`.  Why: K2, "Run-time bound and
-   null tests of facts the plan fixes go", and mesh.h mesh_algo_plan, which tests no bound: a message's epoch is a
-   place of this operand once its group is this operand's, since every rank passes the same IR (mesh-collective.h
-   mesh_plan: "every rank passes the same IR but its values"; struct mesh_function: function k is named (group, k + 1),
-   so an epoch is at least 1 and at most `plans`).  The group is compared first, and only after the publication is
-   acquired: it is the operand published here that a message is matched to (run-time state; a message of another
-   launch's group names no place here), and the operand's words stand while it is not retired (its next is written
-   only after this thread's release: mesh-dataflow.h mesh_retired_release).  The implementer's (sub-agent D's) order of
-   the reads, the minimal one that reads no place a foreign group names.  What must stay: a plan of another map serial
-   not matched; the group compared before any place is read */
+   revisions of 55b9cbad"): the plan at place epoch - 1 of the operand (mesh.h mesh_algo_plan, the bridge's one reading
+   of the program's plans: its `published` acquired, then `retired`, then the plan's `closed`), then the operand's
+   `group` and the plan's `serial` compared, where the root's `owner` and `closed` were read and the epoch tested
+   against 0 and `plans`.  Why: K2, "Run-time bound and null tests of facts the plan fixes go", and mesh_algo_plan,
+   which tests no bound: every rank passes the same IR (mesh-collective.h mesh_plan: "every rank passes the same IR but
+   its values"; struct mesh_function: function k is named (group, k + 1), so an epoch is at least 1 and at most
+   `plans`); `group` is read after mesh_algo_plan's acquire of `published`, which orders it behind the publication.
+   The coordinator's ruling on d61df2a9 (one reading of the publication), reversing this unit's first form, which read
+   `published` and `retired` again before `group`.  What must stay: one reading of the publication; a plan of another
+   map serial not matched */
 static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
-  const struct mesh_algo *algo=mesh_algo(M);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
-  if(!published || atomic_load_explicit(&algo->retired,memory_order_acquire)==published || algo->group!=group)return NULL;
   struct mesh_state *state=mesh_algo_plan(M,(uint32_t)(epoch-1));
-  return state && state->serial==atomic_load_explicit(&M->map_serial,memory_order_relaxed)?state:NULL;
+  return state && mesh_algo(M)->group==group &&
+    state->serial==atomic_load_explicit(&M->map_serial,memory_order_relaxed)?state:NULL;
 }
 /* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
    "`queues_inside` (mesh-records.c 958, 1170)"; "Answered in the documents", "Run-time checks left": "mesh-records.c
@@ -916,19 +912,15 @@ static void orders_announce(int liveness){
    and its `function` against the source's epoch): the one entry the COUNT names, `entry` (mesh-bridge.h struct
    mesh_count; the source's tell's struct mesh_sync `entry`, the index of the edge among the sink plan's waits),
    raised where its count rises (release) and woken; no loop over the waits and no search of the map.  Why: K1, as
-   MSCCL-IR's steps name their dependences by index (`depid`, `deps`); A9, "searches for nothing".  One test of the
-   COUNT is kept, `entry` below the sink plan's `waits`, the implementer's (sub-agent D's): `entry` is another node's
-   word, written by that node's mesh_plan for its plan of this name, and that this node's plan of the same name and view
-   is the same plan is run-time state, not a fact this node's plan fixes.  A replan keeps its name (design/compilation-
-   coordination.md N1, and its open item: "An ORDER of a cancelled plan can still match its replan, which keeps the
-   plan's name"), and a node that hears a map's move first replans on the new map, in the view still installed, while
-   a node the move has not reached holds its plan of the old map, whose waits may be fewer: an entry past them would be
-   a store outside the plan's synchronization edges, a fault, not an error value.  An entry within them raises a count
-   of a plan whose map has moved, which its cancellation raises to UINT64_MAX anyway (mesh-flow.c plan_cancel).  What
-   must stay: each count only rising, this thread its one writer */
+   MSCCL-IR's steps name their dependences by index (`depid`, `deps`); A9, "searches for nothing".  `entry` is read as
+   given, with no test of its bound (K2; "Compile-time, never runtime checks"; the coordinator's ruling on d61df2a9,
+   reversing this unit's first form, which kept `entry` below the sink plan's `waits`): its producer, one hop up, is
+   the source's mesh_plan (mesh-collective.c plan_graph, sub-agent C's), which computes from the same IR the same
+   graph the sink's computes (mesh.h struct mesh_sync: the tell's `entry` the index of its edge among the sink plan's
+   waits at the sink).  What must stay: each count only rising, this thread its one writer */
 static void count_take(const struct mesh_count *c){
   struct mesh_state *s=c->view==installed.view?plan_here(c->group,c->function):NULL;
-  if(!s || c->entry>=s->waits)return;
+  if(!s)return;
   _Atomic uint64_t *count=&mesh_syncs(M,s)[c->entry].count;
   if(c->count<=atomic_load_explicit(count,memory_order_relaxed))return;
   atomic_store_explicit(count,c->count,memory_order_release);
