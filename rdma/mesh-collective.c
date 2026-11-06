@@ -27,21 +27,15 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
   const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
   const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
   const uint64_t copies=state->copies,copy=execution%copies,round=execution/copies,pages=entry->pages;
-  const uint32_t expected=mesh_phase(round+1),behind=mesh_phase(round);
+  const uint32_t expected=mesh_phase(round+1);
   const uint64_t count=atomic_load_explicit((_Atomic uint64_t *)((char *)m+entry->count+8*copy),memory_order_acquire);
   _Atomic uint64_t *group=(_Atomic uint64_t *)((char *)m+entry->phases+copy*mesh_group_bytes(entry->pages));
-  int landed=1;
   for(uint64_t w=0;w<(pages+31)/32;w++){
     const uint64_t word=atomic_load_explicit(group+w,memory_order_acquire);
-    for(uint64_t k=w*32;k<pages && k<w*32+32;k++){
-      const uint32_t field=(uint32_t)(word>>(2*(k%32))&3);
-      if(field==expected)continue;
-      if(field!=behind)return UINT64_MAX;
-      landed=0;
-    }
+    for(uint64_t k=w*32;k<pages && k<w*32+32;k++)
+      if((uint32_t)(word>>(2*(k%32))&3)!=expected)return count>=(round+1)*pages?UINT64_MAX:0;
   }
-  if(landed)return 1;
-  return count>=(round+1)*pages?UINT64_MAX:0;
+  return 1;
 }
 
 /* libfabric man/fi_cntr.3.md: "Counters record the number of requested operations that have completed"; "fi_cntr_readerr:
@@ -981,10 +975,7 @@ static int plan_graph(struct plan *plans,uint32_t count,const uint32_t *calls,ui
   if((status=mesh_graph_cycle_mean(V,t,built,from,to,delay,&mean)))goto done;
   if(mean==INFINITY){status=ENOMEM;goto done;}
   if((status=mesh_graph_convert_sc(V,t,built,from,to,&added,added_from,added_to)) ||
-     (status=mesh_graph_determine_delays(V,t,built,from,to,delay,added,added_from,added_to,added_delay))){
-    if(status==EDEADLK || status==ERANGE)status=ENOMEM;
-    goto done;
-  }
+     (status=mesh_graph_determine_delays(V,t,built,from,to,delay,added,added_from,added_to,added_delay)))goto done;
   for(uint32_t a=0;a<added;a++){
     const uint32_t tail=added_from[a],head=added_to[a],j=call[tail],h=call[head];
     if(__builtin_add_overflow(added_delay[a],(place[j]+(uint64_t)lead[tail])/plans[calls[j]].calls,&delay[built+a])){
@@ -1031,7 +1022,6 @@ static int plan_graph(struct plan *plans,uint32_t count,const uint32_t *calls,ui
     const uint32_t source[2]={2*j+1,here?actor[j]+plan_rank(p->nodes,self):2*j+1},target[2]={2*j,2*j+1};
     uint32_t lags[4];
     if((status=mesh_graph_lags(V,first,plan_room_head,plan_room_lag,&rooms,2,source,2,target,lags)))goto done;
-    if(lags[0]==UINT32_MAX || !lags[0] || (here && (lags[3]==UINT32_MAX || !lags[3]))){status=ENOMEM;goto done;}
     p->submit_room+=lags[0];
     if(here)p->room+=lags[3];
   }
