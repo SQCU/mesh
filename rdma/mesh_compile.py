@@ -33,6 +33,15 @@
 # bound over the program's one mapping (points 6 and 8); a collective's parts placed at their places in its values
 # (point 7); and at a node with no section a call starts its plan and computes nothing (point 2).  What must stay: no
 # placement and no weight chosen here
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines" and "Answered in
+# the documents (2026-11-05, the coordinator, on this part's record)"; "The revisions of 55b9cbad"): every part sent
+# from its producer's pages, each value laid out by PB R2's layout answer (V1, the note above _span); a rank's own part
+# shared through the page table (V2, struct mesh_share); a halo's pieces landing in its window's value (V3); every
+# parameter and buffer an invariant (V4); every program input placed and written by the caller (V5, program); the
+# runner's constants of the plan (K3, _steps); one deadline an execution (B1); mesh_plan waiting for the release (B2);
+# the retirement after torch's work in an MPSEvent's notification (B3); one pairwise-exchange body (G2, _exchange); the
+# program's own mapping of its rows (G3, _mapped); the program's operand struct mesh_algo (G4).  What must stay: no
+# placement and no weight chosen here
 import collections
 import ctypes as C
 import errno
@@ -176,6 +185,16 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V5; "The
 # revisions of 55b9cbad"): `inputs`, this node's: by the index of an input of the traced block, the value of `lag`
 # HOST_LAG that holds it here and its shape (program).  What must stay: as above
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1 to V3; "The
+# revisions of 55b9cbad"): every rank's: `form` and `fixed`, each value's layout (the note above _span); `landing`, by
+# a window's region and each CollectivePermute's arrival, the value they lie in, every piece of the region landing at its
+# place there, and the arrival's first slice along the window's dimension (_region); `regions`, by that landing value,
+# the windowed operand, the dimension, the operand's first slice there and the grain of its parts (_region); `halos`,
+# by landing value, where its middle comes from (_halo).  This node's: `views`, keys lying in another's value, by key
+# (that key, the first element, sizes, strides); `shared`, the own parts shared (the note above _span), and `share`
+# their struct mesh_share (_place); `fallbacks`, by item, the copies it makes where a share cannot be (_place);
+# `added`, the values of no key of the program, each with its positions where it is local.  What must stay: every
+# operand of mesh_plan the same at every rank
 class IR:
     def __init__(self, gm, placement, nodes, blockbytes):
         self.gm, self.placement, self.weights, self.blockbytes = gm, placement, None, blockbytes
@@ -189,6 +208,8 @@ class IR:
         self.metas, self.forms, self.over, self.producer, self.bases = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.blocks, self.added = {}, {}, {}, {}, {}
         self.sends, self.publishes, self.inputs = {}, {}, {}
+        self.form, self.fixed, self.views, self.shared, self.share = {}, set(), {}, [], []
+        self.landing, self.regions, self.halos, self.fallbacks = {}, {}, {}, {}
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
     def local(self, node, sharding):
@@ -209,8 +230,11 @@ class IR:
     # node's place of it, set where its key is placed (_place; mesh-collective.h struct mesh_declared `first`).  Why:
     # design/plan-to-bridge-change-request.md R2, corrected: "A range is not a value of its own".  What must stay: one
     # identity a range, its bytes its local shape's
-    def transfer(self, node, shape, source, destinations, kind):
-        size, ends = _value(node).dtype.itemsize * math.prod(shape), [self.map[d] for d in [source] + destinations]
+    # 2026-11-05 ("The revisions of 55b9cbad", V1): `size`, the range's bytes, its run's (a run of whole blocks in its
+    # value's layout, padding within it: the note above _span), where they were its local shape's.  What must stay:
+    # one identity a range, its bytes every rank's
+    def transfer(self, size, source, destinations, kind):
+        ends = [self.map[d] for d in [source] + destinations]
         self.identity += 1
         transfers = {}
         for d in destinations:
@@ -799,6 +823,14 @@ def _extent(window, parts, n, o):
 # 2026-11-05 (design/aot-compilation-change-request.md, appendix item 7; design/compilation-coordination.md, "The
 # revisions of e4a7398e", OV): a piece or a region no longer adds its key to `placed`; _over gives a view its base's
 # pages, and a region made by its concatenation pages of its own.  What must stay: the steps
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V3: "The halo
+# window concatenates its received pieces, `torch.cat(parts, dim, out=target)` (2192).  The pieces must land at their
+# places in the window region's value (point 7), so no concatenation remains"; "The revisions of 55b9cbad"), reversing
+# step (2)'s concatenation: where a region is no view of its one read, the pieces and the value lie in one landing
+# value, (2)'s concatenation as a layout: `landing`, each arrival's and the region's, the arrival's first slice along
+# the dimension (the reads' order, Figure 9b's); `regions`, the landing value's operand, dimension, the operand's first
+# slice and the gcd of the reads' extents there (every part's bound a multiple of it, _grain); the region (3) a view of
+# it (_halo).  What must stay: the steps (1), (3) and (4) as before, every rank's
 def _region(ir, consumer, key, window, m, o):
     node, shape = key[0], _shape(ir, key)
     dim, parts, size = window.dim, ir.shape[m], _value(key[0]).shape[window.dim]
@@ -821,6 +853,17 @@ def _region(ir, consumer, key, window, m, o):
     region = (node, key[1], 'region', consumer, dim)
     fill = window.fill if any(a < 0 or a + length > size for a in starts) else None
     ir.shapes[region] = tuple(length if i == dim else s for i, s in enumerate(shape))
+    if len(reads) > 1 or fill is not None:
+        landed, at, sizes = region + ('landed',), 0, [n if k == key else ir.shapes[k][dim] for k in reads]
+        ir.shapes[landed] = tuple(sum(sizes) if i == dim else s for i, s in enumerate(shape))
+        for k, extent in zip(reads, sizes):
+            if k == key:
+                middle = at
+            else:
+                ir.landing[k] = (landed, at)
+            at += extent
+        ir.landing[region] = (landed, None)
+        ir.regions[landed] = (key, dim, middle, math.gcd(*sizes), region)
     ir.program.append(('window', tuple(reads), region, (dim, m, tuple(a - q * n + left for q, a in enumerate(starts)),
                                                         length, tuple(starts), size, fill)))
     return region, after
@@ -1116,6 +1159,10 @@ def _viewed(item):
 # constant).  That fails region-only memory"; "The revisions of 55b9cbad"): a module attribute that is a tensor (a
 # parameter, a buffer, a lifted constant) makes pages of its own, an invariant of the plan (_place), where its set was
 # empty.  What must stay: each other key's set as above
+# 2026-11-05 ("The revisions of 55b9cbad", V3): a CollectivePermute's arrival and a window's region lie over their
+# landing value (_region), the region over its reads' pages as well (its middle may be the operand's own); a
+# CollectivePermute's own pair, where its result was its operand's, no longer arises apart (no pair of _region's is
+# one).  What must stay: each other key's set as above
 def _over(ir):
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
@@ -1128,9 +1175,10 @@ def _over(ir):
         if kind == 'call':
             form = ir.forms.get(key)
             return joined if form is None else frozenset() if form == 'functional' else frozenset((key,))
-        if kind in ('window', 'collective'):
-            return frozenset((key,)) | (joined if kind == 'collective' and operand.kind == 'collective-permute'
-                                        else frozenset())
+        if key in ir.landing:
+            return frozenset((ir.landing[key][0],)) | (joined if kind == 'window' else frozenset())
+        if kind == 'collective':
+            return frozenset((key,))
         if kind == 'constant' and isinstance(key[0].meta.get('val'), torch.Tensor):
             return frozenset((key,))
         return frozenset()
@@ -1235,78 +1283,201 @@ def _consumer(ir, roots):
 #   production at the item's sends, where it is copied (design/compilation-coordination.md, A-T7).
 # - _send: this node's release of a sent range, after its producer where it is made in place (`publishes`), else at the
 #   item's sends after its copy (`sends`).
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1 and V2, and
+# "Answered in the documents", "A part that is not whole blocks" and "AllToAll's own piece"; "The revisions of
+# 55b9cbad"), reversing the note above where a part that is no run beginning a block is refused (_landing) or copied
+# into a value of its own (_part):
+# - The layout (PB R2, corrected: "A value's layout is separate from its logical shape ... The layout is determined by
+#   the `LayoutProto` proto", whose `minor_to_major` "describes the minor-to-major ordering of the dimensions within a
+#   shape" (XLA, "Shapes and layout"; that page also has "Padding"); "So a collective's result takes the layout with the
+#   collective's dimension most-major, each part padded to whole blocks.  Each part is then a run of whole blocks"):
+#   `form` holds, by key with pages of its own, (d, s), its dimension d most-major with stride s (in elements) and its
+#   other dimensions row-major beneath it (_strides), its value s x its extent along d elements (_size); a key with no
+#   form is row-major, (0, the product of its later dimensions).  The padding is the implementer's minimal form, recorded
+#   in design/compilation-coordination.md: each slice along d is padded to s, the least stride at least the slice's
+#   elements for which m slices are whole blocks (_grain: s a multiple of E / gcd(m, E), E a block's elements), m the
+#   grain every part's bounds along d are multiples of, so every run of parts begins and ends on a block, and the value
+#   stays one strided view of its logical shape (a torch tensor is "one storage with sizes and strides",
+#   design/aot-compilation-change-request.md appendix item 7, c10/core/TensorImpl.h), which its producer's out variant
+#   writes whole ("A producer writes its value in that layout by its out variant into a strided view of its placed
+#   pages", the brief) and every consumer reads as it reads any strided tensor.  Where E is a power of two, as a block's
+#   bytes are, and m one too, m x s is the parts' elements rounded up to a block, as padding each part would make it.
+#   `fixed`: the keys whose form a collective has fixed, the first to name one fixing it (_claim), so every range of a
+#   value is cut from its one layout; each rank computes the same forms from the same program.
+# - A part sent (_sent): from its producer's pages at its place (_run_of: its key a value's own or a narrow of one along
+#   the value's most-major dimension, that value's form along the part's dimension, claimed for it where no collective
+#   fixed it, and its blocks held by no other range here), "The code must send each part as a view of its producer's
+#   pages at their places" (V1); else, "Where a consumer's operand cannot take that view, the change of layout is an
+#   operator of its own, run as its out variant into placed pages" (PB R2): the key laid out once into a value of its
+#   own along the part's dimension (_laid, torch's copy_ into that value's strided view at the item's sends, one copy
+#   of the operand where _part copied each part), and the part a run of it.  That covers a key that is no value's own
+#   or narrow (a slice, a view an operator makes, an input or a parameter, whose `lag` and MESH_INVARIANT forms no
+#   declared transfer may name: mesh-collective.h struct mesh_value), and one whose value a collective laid out along
+#   another dimension or whose blocks another range holds ("no two ranges at this node share a block of it", struct
+#   mesh_declared).  A Run: the value it lies in, its first element and its elements there, the part's sizes and
+#   strides (its view, the same at the receiver), and `at`, the item whose sends lay it out (None where its producer
+#   writes it).
+# - A rank's own part (V2; PB R2, corrected: "A rank's own part is shared, not copied ... the result's rows for the
+#   rank's own part name the operand's own pages"): `shared`, each (value, its first element, of, its first element,
+#   elements, the fallback), a struct mesh_share once placed (_place); the fallback, a copy at an item, only where the
+#   two values are not both named by a declared transfer here, which struct mesh_share requires ("of the same copies
+#   (both named by a declared transfer here, or both of the same `lag`)"), as a halo's region at a partition that
+#   receives or sends no piece.
+# - Received parts land in one value (_buffer), each at a block, each viewed as its sender's part is (its Run's sizes and
+#   strides), so the receiver reads it as the sender laid it out: a collective's ranges are cut alike at every rank.
+# What must stay: every range a run of whole blocks of one value at this node, beginning a block; every rank's ranges,
+# bytes and forms the same; no part copied but by a layout change
+Run = collections.namedtuple('Run', 'key offset extent sizes strides at')
+
+
 def _span(ir, key, first, count):
-    size = _value(key[0]).dtype.itemsize
+    size = _layout(ir, key)[0].itemsize
     return first * size // ir.blockbytes, -(-((first + count) * size) // ir.blockbytes)
 
 
-def _landing(ir, c, base, dim, parts):
-    shape, size = _shape(ir, base), _value(base[0]).dtype.itemsize
-    part = math.prod(shape) // parts
-    if parts > 1 and (math.prod(shape[:dim]) != 1 or part * size % ir.blockbytes):
-        raise NotImplementedError(
-            '%s of %s: its %d parts along dimension %d of %s, %d bytes each, are not runs of its pages that each '
-            'begin a block of %d bytes, so a part cannot land at its place in the value (design/compilation-'
-            'coordination.md, '
-            '"The documents\' corrections of 2026-11-05", point 7; mesh-collective.h struct mesh_declared `first`)'
-            % (c.kind, c.node.name, parts, dim, tuple(shape), part * size, ir.blockbytes))
-    for p in range(parts):
-        ir.blocks.setdefault(base, []).append(_span(ir, base, p * part, part))
-    return part
+def _block(ir, key):
+    return ir.blockbytes // _layout(ir, key)[0].itemsize
 
 
+def _grain(ir, key, d, m):
+    shape, e = _layout(ir, key)[1], _block(ir, key)
+    g = e // math.gcd(m, e)
+    return -(-math.prod(shape[:d] + shape[d + 1:]) // g) * g
+
+
+def _form(ir, key):
+    shape = _layout(ir, key)[1]
+    return ir.form.get(key) or ((0, math.prod(shape[1:])) if shape else (None, 1))
+
+
+def _strides(shape, d, s):
+    strides, step = [0] * len(shape), 1
+    for e in reversed(range(len(shape))):
+        if e != d:
+            strides[e], step = step, step * shape[e]
+    if d is not None:
+        strides[d] = s
+    return tuple(strides)
+
+
+def _size(ir, key):
+    (d, s), shape = _form(ir, key), _layout(ir, key)[1]
+    return shape[d] * s if d is not None else 1
+
+
+def _claim(ir, key, d, m):
+    if key not in ir.fixed:
+        ir.form[key] = (d, _grain(ir, key, d, m))
+        ir.fixed.add(key)
+    form = _form(ir, key)
+    return form[0] == d and m * form[1] % _block(ir, key) == 0
+
+
+def _within(ir, base, d, first, length):
+    shape, (e, s) = list(_layout(ir, base)[1]), _form(ir, base)
+    offset, extent = (0, _size(ir, base)) if d is None else (first * s, length * s)
+    if d is not None:
+        shape[d] = length
+    span = _span(ir, base, offset, extent)
+    if any(a < span[1] and span[0] < b for a, b in ir.blocks.get(base, ())):
+        return None
+    ir.blocks.setdefault(base, []).append(span)
+    return Run(base, offset, extent, tuple(shape), _strides(_layout(ir, base)[1], e, s), None)
+
+
+def _run_of(ir, key, dim, start, length, m):
+    base = ir.bases.get(key)
+    if base is None or base[0] in ir.inside or dim is not None and base[1] not in (None, dim):
+        return None
+    value, along, at = base
+    d = dim if dim is not None else along
+    if d is None:
+        ir.fixed.add(value)
+        return _within(ir, value, None, 0, 0)
+    first = at + (start if dim is not None else 0)
+    length = length if dim is not None else _layout(ir, key)[1][d]
+    if not _claim(ir, value, d, math.gcd(m, first)):
+        return None
+    return _within(ir, value, d, first, length)
+
+
+def _laid(ir, c, key, d, m, s=None):
+    own = (key[0], 'laid', c.position, key, d)
+    if own not in ir.added:
+        ir.shapes[own], ir.added[own] = tuple(_layout(ir, key)[1]), (c.position, c.position)
+        if d is not None:
+            ir.form[own] = (d, _grain(ir, own, d, m) if s is None else s)
+        ir.fixed.add(own)
+        ir.sends.setdefault(c.position, []).append((None, ((own, None), (key, None))))
+    return own
+
+
+def _sent(ir, c, key, dim, start, length, m):
+    run = _run_of(ir, key, dim, start, length, m)
+    if run is None:
+        run = _within(ir, _laid(ir, c, key, dim, m), dim, start, length)._replace(at=c.position)
+    return run
+
+
+# a sent range's events: its production where its run is written (its producer's third step, or the sends of the item
+# that lays it out), and the source's own reads of the value it lies in, its source read (mesh-collective.h struct
+# mesh_dependence, MESH_FROM_SOURCE_READ, "the source's own read of the range it sends"); this node's release of it
+# after its producer (`publishes`), or at the item's sends after the layout change (`sends`)
+def _produced(ir, d, i, run, received, roots=frozenset()):
+    at = 3 * ir.producer[run.key] + 2 if run.at is None else 3 * run.at
+    return [(d, i, 'P', at, at), (d, i, 'S') + _readers(ir, {run.key} | roots, received)]
+
+
+def _send(ir, c, i, run):
+    if run.at is None:
+        ir.publishes.setdefault(ir.producer[run.key], []).append((i, None))
+    else:
+        ir.sends.setdefault(c.position, []).append((i, None))
+
+
+# the value `slots` parts land in, each a run as `run` (a part's sizes and strides, its elements rounded up to whole
+# blocks, P), part j from element j x P; the value and P
+def _buffer(ir, c, run, slots):
+    buffer = (c.node, 'received', c.position)
+    e = _block(ir, run.key)
+    part = -(-run.extent // e) * e
+    ir.shapes[buffer], ir.form[buffer], ir.added[buffer] = (slots, part), (0, part), None
+    ir.fixed.add(buffer)
+    for j in range(slots):
+        ir.views[(buffer, j)] = (buffer, j * part, run.sizes, run.strides)
+    ir.views[(buffer, 'parts')] = (buffer, 0, (slots,) + run.sizes, (part,) + run.strides)
+    return buffer, part
+
+
+# a key's base (2026-11-05, "The revisions of 55b9cbad", V1, reversing `bases`' element offset, which assumed one
+# row-major layout): (the key with pages of its own whose value it lies in, the dimension it is a narrow along or None,
+# its first slice along it), a narrow composing with its read's along one dimension; None where it is no such run in
+# every layout (a slice of the partition, a view an operator makes, an input, a module attribute, a window's region or
+# a CollectivePermute's arrival, the last two views of the landing value, _region).  What must stay: a forward problem
+# of the program's keys (mesh_graph.forward, _over)
 def _base(ir, item, bases):
     kind, reads, key, operand = item
     if kind == 'narrow':
-        (dim, start, length), shape = operand, _shape(ir, reads[0])
-        if bases[0] is None or math.prod(shape[:dim]) != 1:
+        dim, start, _ = operand
+        if bases[0] is None or bases[0][1] not in (None, dim):
             return None
-        return bases[0][0], bases[0][1] + start * math.prod(shape[dim + 1:])
-    if kind == 'call' and ir.forms.get(key) not in (None, 'functional') or kind == 'window' and not _viewed(item) \
+        return bases[0][0], dim, bases[0][2] + start
+    if kind == 'call' and ir.forms.get(key) not in (None, 'functional') \
             or kind == 'collective' and operand.kind != 'collective-permute':
-        return key, 0
+        return key, None, 0
     return None
 
 
+# 2026-11-05 ("The revisions of 55b9cbad", V1): a key whose form a collective fixed is made in its own value, so it is
+# never made inside another; a window's region is a view of its landing value (V3), no longer made by a concatenation.
+# What must stay: an out variant's or a ReduceScatter's result not yet placed in another value
 def _directed(ir, key):
     g = ir.producer.get(key)
-    if g is None or key in ir.inside or key in ir.blocks:
+    if g is None or key in ir.inside or key in ir.blocks or key in ir.fixed:
         return False
     kind, _, _, operand = ir.program[g]
     return kind == 'call' and ir.forms.get(key) not in (None, 'functional') \
-        or kind == 'window' and not _viewed(ir.program[g]) \
         or kind == 'collective' and operand.kind == 'reduce-scatter'
-
-
-def _part(ir, c, key, at):
-    shape, size = _shape(ir, key), _value(key[0]).dtype.itemsize
-    count = math.prod(shape) if at is None else math.prod(shape[:at[0]]) * at[2] * math.prod(shape[at[0] + 1:])
-    offset = 0 if at is None else at[1] * math.prod(shape[at[0] + 1:])
-    base = ir.bases.get(key) if at is None or math.prod(shape[:at[0]]) == 1 else None
-    if base is not None and base[0] not in ir.inside:
-        span = _span(ir, base[0], base[1] + offset, count)
-        if (base[1] + offset) * size % ir.blockbytes == 0 \
-                and not any(a < span[1] and span[0] < b for a, b in ir.blocks.get(base[0], ())):
-            ir.blocks.setdefault(base[0], []).append(span)
-            return (base[0], base[1] + offset), True
-    own = (key[0], 'sent', c.position, key, at)
-    ir.shapes[own] = tuple(shape) if at is None else tuple(at[2] if d == at[0] else s for d, s in enumerate(shape))
-    return (own, 0), False
-
-
-def _produced(ir, d, i, place, own, sent, received):
-    if not own:
-        return [(d, i, 'P', sent, sent)]
-    at = 3 * ir.producer[place[0]] + 2
-    return [(d, i, 'P', at, at), (d, i, 'S') + _readers(ir, {place[0]}, received)]
-
-
-def _send(ir, c, i, place, own, key, at):
-    if own:
-        ir.publishes.setdefault(ir.producer[place[0]], []).append((i, None))
-    else:
-        ir.added[place[0]] = None
-        ir.sends.setdefault(c.position, []).append((i, ((place[0], None), (key, at))))
 
 
 # design/compilation-coordination.md, A-T3': AllReduce as a reduce to a chosen root, then a broadcast from it (G. Wang
@@ -1340,33 +1511,38 @@ def _send(ir, c, i, place, own, key, at):
 # (`received`, one part a member in the group's order: "the received slices landing at their places in one value", as
 # ReduceScatter's), where each was a value of its own; the sum sent from the result's value and every member's sum
 # landing in its result's.  What must stay: the events as before but the member's production where its partial is copied
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1 and K3; "The
+# revisions of 55b9cbad"): a member's partial sent from its run (_sent: its producer's pages where it is a value's own,
+# else laid out once into a value of its own), the root's received partials landing in one value each viewed as the
+# partial is (_buffer), the sum its result's value whole; `roles` this node's place in the group and its receives in
+# the order the runner reads them, each with the key of the part it lands in (K3: "the received parts' landing order,
+# which lowering records in `ir.at` and the runner re-derives", now the runner's constant).  What must stay: the
+# events as before, a member's production where its partial is laid out at the item's sends
 def _all_reduce(ir, c, groups, key, made):
-    shape, arrive = _shape(ir, key), 3 * c.position + 1
-    readers, (place, own) = _readers(ir, {made}, arrive + 1), _part(ir, c, key, None)
-    received, k, n = (c.node, 'received', c.position), len(groups[0]), math.prod(shape)
-    ir.shapes[received] = (k - 1,) + tuple(shape)
-    _landing(ir, c, received, 0, k - 1)
-    _landing(ir, c, made, 0, 1)
+    arrive, k = 3 * c.position + 1, len(groups[0])
+    readers, run = _readers(ir, {made}, arrive + 1), _sent(ir, c, key, None, 0, 0, 1)
+    ir.fixed.add(made)
+    total, (buffer, part) = _within(ir, made, None, 0, 0), _buffer(ir, c, run, k - 1)
+    size = _layout(ir, key)[0].itemsize
     for group in groups:
         root, members = group[0], group[1:]
-        up = [ir.transfer(c.node, shape, d, [root], mesh.PAGES)[root] for d in members]
-        down = ir.transfer(c.node, shape, root, members, _consumer(ir, {made}))
+        up = [ir.transfer(run.extent * size, d, [root], mesh.PAGES)[root] for d in members]
+        down = ir.transfer(total.extent * size, root, members, _consumer(ir, {made}))
         for d, partial in zip(members, up):
-            ir.events += _produced(ir, d, partial, place, own, arrive - 1, arrive) \
+            ir.events += _produced(ir, d, partial, run, arrive) \
                 + [(d, down[d], 'C') + readers, (root, partial, 'C', arrive, arrive)]
         first = min(down.values())
         ir.events += [(root, first, 'P', arrive + 1, arrive + 1), (root, first, 'S') + readers]
         if ir.device == root:
-            ir.roles[c] = (0, {None: first}, {j + 1: i for j, i in enumerate(up)}, received)
+            ir.roles[c] = (0, [(i, (buffer, j)) for j, i in enumerate(up)])
             ir.at.update({i: (made, 0) for i in down.values()})
-            ir.at.update({i: (received, j * n) for j, i in enumerate(up)})
-            ir.added[received] = None
+            ir.at.update({i: (buffer, j * part) for j, i in enumerate(up)})
             ir.publishes.setdefault(c.position, []).append((first, None))
         elif ir.device in members:
             me = group.index(ir.device)
-            ir.roles[c] = (me, {0: up[me - 1]}, {0: down[ir.device]}, None)
-            ir.at.update({up[me - 1]: place, down[ir.device]: (made, 0)})
-            _send(ir, c, up[me - 1], place, own, key, None)
+            ir.roles[c] = (me, [(down[ir.device], None)])
+            ir.at.update({up[me - 1]: (run.key, run.offset), down[ir.device]: (made, 0)})
+            _send(ir, c, up[me - 1], run)
 
 
 # design/compilation-coordination.md, A-T3': AllGather (GSPMD section 4.2: it "concatenates tensors from all
@@ -1391,32 +1567,51 @@ def _all_reduce(ir, c, groups, key, made):
 # and, made in place, the operand's, its source read; each other member's consumption of its part spanning the result's
 # readers, as a CollectivePermute's arrival's (CP-1).  What must stay: each member's range to every other member,
 # MESH_JOIN
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1 and V2, and
+# "Answered in the documents", "A part that is not whole blocks"; "The revisions of 55b9cbad"), reversing the note
+# above where a part must be a row-major run beginning a block (_landing) and the own shard not made in place is copied:
+# the result laid out with the gathered dimension most-major, each part padded to whole blocks (PB R2, corrected: "So a
+# collective's result takes the layout with the collective's dimension most-major, each part padded to whole blocks"),
+# its stride the shard's run's where the shard is sent from a run, so the result's part p is member p's shard as laid
+# out, and the result one strided view of its logical shape, read by its consumers as it is ("The consumer reads the
+# result through its strided view"; Megatron's column-parallel gather along the last dimension, "the common case", is
+# such a view).  The own shard: made in place by its producer (`inside`, as before); else sent from its run (_sent) and
+# the result's part me those pages (`shared`, V2: "make the result's rows for the own part name the operand's own
+# pages"), where it was copied into the result's narrow.  What must stay: each member's range to every other member,
+# MESH_JOIN
 def _all_gather(ir, c, groups, key, made):
-    shape, sent, received = _shape(ir, key), 3 * c.position, 3 * c.position + 1
-    n = _landing(ir, c, made, c.dim, len(groups[0]))
+    d, k, received = c.dim, len(groups[0]), 3 * c.position + 1
+    n = _shape(ir, key)[d]
     own = _directed(ir, key)
+    run = Run(key, None, None, None, None, None) if own else _sent(ir, c, key, d, 0, n, n)
+    ir.form[made] = (d, _grain(ir, made, d, n) if own else run.strides[d])
+    ir.fixed.add(made)
+    s, size = ir.form[made][1], _layout(ir, made)[0].itemsize
     if own:
         ir.inside[key] = (made, None)
-    produced, roots = 3 * ir.producer[key] + 2 if own else sent, {made} | ({key} if own else set())
+        ir.fixed.add(key)
+    for p in range(k):
+        _within(ir, made, d, p * n, n)
     last = max(received, _readers(ir, {made}, received)[1])
     for group in groups:
-        ranges = [ir.transfer(c.node, shape, d, [e for e in group if e != d], mesh.JOIN) for d in group]
-        for d, transfers in zip(group, ranges):
-            i = min(transfers.values())
-            ir.events += [(d, i, 'P', produced, produced), (d, i, 'S') + _readers(ir, roots, received)]
-            ir.events += [(e, j, 'C', received, last) for e, j in transfers.items()]
+        ranges = [ir.transfer(n * s * size, e, [f for f in group if f != e], mesh.JOIN) for e in group]
+        for e, transfers in zip(group, ranges):
+            ir.events += _produced(ir, e, min(transfers.values()), run, received, frozenset((made,)))
+            ir.events += [(f, j, 'C', received, last) for f, j in transfers.items()]
         if ir.device in group:
             me = group.index(ir.device)
-            for p, transfers in enumerate(ranges):
-                ir.at.update({j: (made, p * n) for e, j in transfers.items() if p == me or e == ir.device})
+            ir.at.update({j: (made, me * n * s) if own else (run.key, run.offset) for j in ranges[me].values()})
+            ir.at.update({t[ir.device]: (made, p * n * s) for p, t in enumerate(ranges) if p != me})
+            ir.roles[c] = (me, [(t[ir.device], None) for p, t in enumerate(ranges) if p != me])
             mine = min(ranges[me].values())
-            ir.roles[c] = (me, {None: mine}, {p: t[ir.device] for p, t in enumerate(ranges) if p != me}, None)
             if own:
-                ir.inside[key] = (made, me * n)
+                ir.inside[key] = (made, me * n * s)
                 ir.publishes.setdefault(ir.producer[key], []).append((mine, None))
             else:
-                ir.sends.setdefault(c.position, []).append(
-                    (mine, ((made, (c.dim, me * shape[c.dim], shape[c.dim])), (key, None))))
+                ir.views[(made, 'own')] = (made, me * n * s, run.sizes, run.strides)
+                ir.shared.append((made, me * n * s, run.key, run.offset, run.extent,
+                                  (c.position, (made, 'own'), key, None)))
+                _send(ir, c, mine, run)
 
 
 # design/compilation-coordination.md, A-T3': AllToAll (GSPMD section 4.2: it "logically splits the input of each
@@ -1438,30 +1633,56 @@ def _all_gather(ir, c, groups, key, made):
 # a copy, as NCCL moves a rank's own block by its send and receive to itself (the implementation's choice, recorded in
 # design/compilation-coordination.md, "The revisions of 4e78f6f4", against point 7's "no copy of a part remains").
 # What must stay: one declared transfer p -> q a piece, MESH_JOIN
-def _all_to_all(ir, c, groups, key, made):
-    (i, j), k = c.dim, len(groups[0])
-    shape, result = _shape(ir, key), _shape(ir, made)
-    sent, received, nj, ni = 3 * c.position, 3 * c.position + 1, shape[j] // k, result[i] // k
-    piece = tuple(nj if d == j else size for d, size in enumerate(shape))
-    part = _landing(ir, c, made, i, k)
-    places = [_part(ir, c, key, (j, q * nj, nj)) for q in range(k)]
-    last = max(received, _readers(ir, {made}, received)[1])
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G2: "AllToAll's
+# and ReduceScatter's one pairwise-exchange body, with CollectivePermute's send branch (mesh_compile.py 1430–1502)", to
+# be merged ("Refactor by pattern analysis: merge duplicated patterns found by analysis"); "The revisions of
+# 55b9cbad"): the three lowerings' one body, a declared transfer for each pair (p, q), p != q, of each group, of `runs[q]`
+# (the run this node sends to place q, every rank's: its bytes), MESH_JOIN or MESH_PAGES by `kind`; its events, the
+# sender's production and source read where its run is written (_produced) and the receiver's consumption from the
+# arrival to `last`; at this node, its sends from their runs (_send) and its receives landing where `lands(p, me)` puts
+# the part from place p, (the value, its first element, the part's key), `roles` this node's place and its receives in
+# the group's order.  What must stay: one transfer a pair, every rank's
+def _exchange(ir, c, groups, pairs, runs, lands, kind, last):
+    received, size = 3 * c.position + 1, _layout(ir, runs[0].key)[0].itemsize
     for group in groups:
-        pieces = {(p, q): ir.transfer(c.node, piece, d, [e], mesh.JOIN)[e]
-                  for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
-        for (p, q), x in pieces.items():
-            ir.events += _produced(ir, group[p], x, *places[q], sent, received) + [(group[q], x, 'C', received, last)]
+        moved = {(p, q): ir.transfer(runs[q].extent * size, group[p], [group[q]], kind)[group[q]]
+                 for p, q in pairs if p != q}
+        for (p, q), x in moved.items():
+            ir.events += _produced(ir, group[p], x, runs[q], received) + [(group[q], x, 'C', received, last)]
         if ir.device in group:
             me = group.index(ir.device)
-            ir.roles[c] = (me, {q: x for (p, q), x in pieces.items() if p == me},
-                           {p: x for (p, q), x in pieces.items() if q == me}, None)
-            for (p, q), x in pieces.items():
+            ir.roles[c] = (me, [(x, lands(p, me)[2]) for (p, q), x in moved.items() if q == me])
+            for (p, q), x in moved.items():
                 if p == me:
-                    ir.at[x] = places[q][0]
-                    _send(ir, c, x, *places[q], key, (j, q * nj, nj))
+                    ir.at[x] = runs[q].key, runs[q].offset
+                    _send(ir, c, x, runs[q])
                 elif q == me:
-                    ir.at[x] = (made, p * part)
-            ir.sends.setdefault(c.position, []).append((None, ((made, (i, me * ni, ni)), (key, (j, me * nj, nj)))))
+                    ir.at[x] = lands(p, me)[:2]
+
+
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1, V2 and G2,
+# and "Answered in the documents", "AllToAll's own piece" and "A part that is not whole blocks"; "The revisions of
+# 55b9cbad"), reversing the note above where a piece is a row-major run or copied and the own piece is copied: piece q a
+# run of the operand laid out with the dimension it leaves most-major (_sent), the pieces landing in one value, piece p
+# at part p, each viewed as its sender laid it out (_buffer), the own piece there the operand's own pages (`shared`, V2:
+# "AllToAll's own piece ... The code must make the result's rows for the own part name the operand's own pages").  A
+# part's bytes are its sender's layout, in which the dimension it leaves is most-major, so the result's parts along the
+# dimension it gathers are no strided view of its logical shape; the result is read through the parts' view and laid
+# out once into its own value (PB R2: "The consumer reads the result through its strided view, here (part, row,
+# column).  Where a consumer's operand cannot take that view, the change of layout is an operator of its own, run as
+# its out variant into placed pages ... It is not a copy in the transfer"), torch's copy_ into its strided view (_steps),
+# the pieces' consumption ending there.  What must stay: one declared transfer p -> q a piece, MESH_JOIN
+def _all_to_all(ir, c, groups, key, made):
+    (_, j), k = c.dim, len(groups[0])
+    nj = _shape(ir, key)[j] // k
+    runs = [_sent(ir, c, key, j, q * nj, nj, nj) for q in range(k)]
+    buffer, part = _buffer(ir, c, runs[0], k)
+    _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], runs,
+              lambda p, me: (buffer, p * part, (buffer, p)), mesh.JOIN, 3 * c.position + 1)
+    if ir.device is not None:
+        me = ir.roles[c][0]
+        ir.shared.append((buffer, me * part, runs[me].key, runs[me].offset, runs[me].extent,
+                          (c.position, (buffer, me), key, (j, me * nj, nj))))
 
 
 # design/aot-compilation-change-request.md A4: ReduceScatter (GSPMD section 4.2: it "is semantically equivalent to an
@@ -1494,31 +1715,18 @@ def _all_to_all(ir, c, groups, key, made):
 # sent from its place in the partial's value where it is one (_part), else copied once; the slices member q receives
 # landing in one value (`received`), the one from the j-th other member of the group's order at its place j
 # (_landing), each a value of its own before.  What must stay: each slice to its keeper, MESH_PAGES
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1 and G2; "The
+# revisions of 55b9cbad"): slice q a run of the partial laid out with `dim` most-major (_sent), sent by the exchange
+# AllToAll's is (_exchange); the slices from the j-th other member landing at part j of one value, each viewed as its
+# sender laid it out (_buffer).  What must stay: each slice to its keeper, MESH_PAGES, the sum in the group's order
 def _reduce_scatter(ir, c, groups, key, made):
-    dim, k, shape = c.dim, len(groups[0]), _shape(ir, key)
-    sent, received, n = 3 * c.position, 3 * c.position + 1, shape[dim] // k
-    piece = tuple(n if d == dim else size for d, size in enumerate(shape))
-    places = [_part(ir, c, key, (dim, q * n, n)) for q in range(k)]
-    buffer = (c.node, 'received', c.position)
-    ir.shapes[buffer] = (k - 1,) + piece
-    part = _landing(ir, c, buffer, 0, k - 1)
-    for group in groups:
-        slices = {(p, q): ir.transfer(c.node, piece, d, [e], mesh.PAGES)[e]
-                  for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
-        for (p, q), x in slices.items():
-            ir.events += _produced(ir, group[p], x, *places[q], sent, received) \
-                + [(group[q], x, 'C', received, received)]
-        if ir.device in group:
-            me = group.index(ir.device)
-            others = [p for p in range(k) if p != me]
-            ir.roles[c] = (me, {q: x for (p, q), x in slices.items() if p == me},
-                           {p: slices[(p, me)] for p in others}, buffer)
-            for (p, q), x in slices.items():
-                if p == me:
-                    ir.at[x] = places[q][0]
-                    _send(ir, c, x, *places[q], key, (dim, q * n, n))
-            ir.at.update({slices[(p, me)]: (buffer, r * part) for r, p in enumerate(others)})
-            ir.added[buffer] = None
+    dim, k = c.dim, len(groups[0])
+    n = _shape(ir, key)[dim] // k
+    runs = [_sent(ir, c, key, dim, q * n, n, n) for q in range(k)]
+    buffer, part = _buffer(ir, c, runs[0], k - 1)
+    _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], runs,
+              lambda p, me: (buffer, (p - (p > me)) * part, (buffer, p - (p > me))), mesh.PAGES,
+              3 * c.position + 1)
 
 
 # design/aot-compilation-change-request.md A4: CollectivePermute (GSPMD section 4.2: it "exchanges data among a list of
@@ -1563,6 +1771,16 @@ def _reduce_scatter(ir, c, groups, key, made):
 # revisions of 4e78f6f4"): the halo's piece sent from its place where it is a run of its base's value (_part: a
 # narrow of a value made by an out variant), else copied once (a slice, which has no out variant); the arrival landing
 # in the result's value, held whole.  What must stay: one transfer a pair
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1, V3 and G2;
+# "The revisions of 55b9cbad"), reversing the note above where the arrival is a value of its own and the piece a narrow
+# of a row-major run or copied: V3, "The pieces must land at their places in the window region's value (point 7), so no
+# concatenation remains": the arrival lands at its place in its region's landing value (`landing`, _region), laid out
+# with the window's dimension most-major (_halo); the piece sent from its run in the value its region's middle is
+# (_halo: the operand's own value or its one layout change), or, where its blocks are another piece's there (a halo
+# wider than a shard, or two halos over a shard), laid out once into a value of its own ("no two ranges at this node
+# share a block of it", struct mesh_declared), by the exchange AllToAll's is (_exchange); the arrival's consumption to
+# the last reader of the landing value.  A member no pair targets holds XLA's zeros at its arrival's place, written
+# there (_steps).  What must stay: one transfer a pair, XLA's pairs refused at compile time where malformed
 def _collective_permute(ir, c, groups, key, made):
     pairs = tuple(tuple(pair) for pair in c.dim)
     places, k = [p for pair in pairs for p in pair], len(groups[0])
@@ -1570,24 +1788,51 @@ def _collective_permute(ir, c, groups, key, made):
             or len({p for p, _ in pairs}) != len(pairs) or len({q for _, q in pairs}) != len(pairs):
         raise ValueError('%s: a CollectivePermute\'s pairs %s over a group of %d: each a (source, target) place, no two '
                          'with one source or one target (XLA\'s source_target_pairs)' % (c.node.name, pairs, k))
-    shape, sent, received = _shape(ir, key), 3 * c.position, 3 * c.position + 1
-    (place, own), last = _part(ir, c, key, None), max(received, _readers(ir, {made}, received)[1])
-    _landing(ir, c, made, 0, 1)
-    for group in groups:
-        moved = {(p, q): ir.transfer(c.node, shape, group[p], [group[q]], mesh.JOIN)[group[q]]
-                 for p, q in pairs if p != q}
-        for (p, q), x in moved.items():
-            ir.events += _produced(ir, group[p], x, place, own, sent, received) + [(group[q], x, 'C', received, last)]
-        if ir.device in group:
-            me = group.index(ir.device)
-            ir.roles[c] = (me, {q: x for (p, q), x in moved.items() if p == me},
-                           {p: x for (p, q), x in moved.items() if q == me}, None)
-            for (p, q), x in moved.items():
-                if p == me:
-                    ir.at[x] = place
-                    _send(ir, c, x, place, own, key, None)
-                elif q == me:
-                    ir.at[x] = (made, 0)
+    landed, at = ir.landing[made]
+    (source, first, laid), (_, d, _, _, _) = _halo(ir, landed, c), ir.regions[landed]
+    _, start, length = ir.program[ir.producer[key]][3]
+    run = _within(ir, source, d, first + start, length)
+    run = run._replace(at=laid) if run is not None else \
+        _within(ir, _laid(ir, c, key, d, 1, _form(ir, landed)[1]), d, 0, length)._replace(at=c.position)
+    s = _form(ir, landed)[1]
+    ir.views[made] = (landed, at * s, run.sizes, _strides(_layout(ir, landed)[1], d, s))
+    _exchange(ir, c, groups, pairs, [run] * k, lambda p, me: (landed, at * s, made), mesh.JOIN,
+              max(3 * c.position + 1, _readers(ir, {landed}, 3 * c.position + 1)[1]))
+
+
+# A window's region's landing value (2026-11-05, design/compilation-coordination.md, "Review of 4e78f6f4 against the
+# requirement lines", V3; "The revisions of 55b9cbad"): its first CollectivePermute (`c`) decides, once, where the
+# region's middle, the windowed operand's own slices, comes from: the operand's own value at its place where the
+# operand is a value's own or a narrow of one along the window's dimension and that value's form is, or can be claimed,
+# along it with the region's grain (_claim), else its one layout change into a value of its own laid out so (_laid, at
+# that CollectivePermute's sends); the landing value laid out with the window's dimension most-major with that value's
+# stride (PB R2's layout), so a piece's bytes as its sender laid them out are its slices at their place; its middle
+# that value's pages (`shared`, PB R2: "A rank's own part is shared, not copied"), else copied there at the window's item
+# (the fallback); the region a view of it at this partition's offset (`views`).  With no CollectivePermute (`c` None, a
+# window of a fill alone) the middle is copied.  (that value, the operand's first slice in it, the item that lays it
+# out or None)
+def _halo(ir, landed, c):
+    if landed not in ir.halos:
+        operand, d, middle, m, region = ir.regions[landed]
+        base, window = ir.bases.get(operand), ir.producer[region]
+        own = c is not None and base is not None and base[0] not in ir.inside and base[1] in (None, d) \
+            and _claim(ir, base[0], d, math.gcd(m, base[2]))
+        source, first = (base[0], base[2]) if own else (_laid(ir, c, operand, d, m), 0) if c else (None, 0)
+        s = _form(ir, source)[1] if source is not None else _grain(ir, landed, d, m)
+        ir.form[landed], ir.added[landed] = (d, s), (c.position if c else window, window)
+        ir.fixed.add(landed)
+        strides, sizes = _strides(_layout(ir, landed)[1], d, s), _layout(ir, operand)[1]
+        ir.views[(landed, 'middle')] = (landed, middle * s, sizes, strides)
+        if source is not None:
+            ir.shared.append((landed, middle * s, source, first * s, sizes[d] * s,
+                              (window, (landed, 'middle'), operand, None)))
+        else:
+            ir.fallbacks.setdefault(window, []).append(((landed, 'middle'), operand, None))
+        if ir.device is not None:
+            _, mesh_dim, offsets, length, _, _, _ = ir.program[window][3]
+            ir.views[region] = (landed, offsets[ir.coords[ir.device][mesh_dim]] * s, _layout(ir, region)[1], strides)
+        ir.halos[landed] = source, first, None if own or c is None else c.position
+    return ir.halos[landed]
 
 
 # the program's own data edges at each node (mesh-collective.h struct mesh_dependence: event `from` before event `to`,
@@ -1714,30 +1959,54 @@ def lower(ir):
 # one: placed once for the plan's life, as Lam places a loop invariant outside the kernel" (mesh-collective.h struct
 # mesh_value), its positions not read, as tools/e2b_replay.m places every operand no route names and no host writes;
 # its producer's one write, the load, is program's (`make`).  What must stay: as above
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1 to V3; "The
+# revisions of 55b9cbad"), reversing the notes above where a value is its key's elements row-major: each value its
+# form's elements (_size: padding within it, the note above _span), each key's home (value, first element, sizes,
+# strides) its strided view there, a key that lies in another's value (`inside`, `views`) at its place in it, a value of
+# no key local with the positions it was made with where no range names it here (a region's landing value at a
+# partition that receives no piece, a layout change that sends none); each own part shared (`shared`) a struct
+# mesh_share in blocks where both its values are named by a declared transfer here, as struct mesh_share requires
+# ("of the same copies (both named by a declared transfer here, or both of the same `lag`)"), else copied at its
+# item (`fallbacks`, the implementer's decision recorded in design/compilation-coordination.md: the pages cannot be one
+# item of two values of unlike copies); a region with no CollectivePermute (a fill alone) gets its landing value here
+# (_halo with none); a received parts' value named by no declared transfer here (an AllReduce member's) holds no pages.
+# What must stay: no value at a node the placement maps no device, the positions as above
 def _place(ir):
     if ir.device is None:
         return
+    for landed in ir.regions:
+        _halo(ir, landed, None)
     last = mesh_graph.ends(range(len(ir.program)),
                            lambda g: [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())])
-    wired, bases = {base for base, _ in ir.at.values()}, []
+    wired, keys = {base for base, _ in ir.at.values()}, []
     for g, (kind, reads, key, operand) in enumerate(ir.program):
-        if kind == 'output' or key in ir.inside or key not in ir.over.get(key, ()):
-            continue
-        if kind == 'collective' and operand.kind == 'collective-permute' and not ir.roles[operand][2] \
-                and any(tuple(pair) == (ir.roles[operand][0],) * 2 for pair in operand.dim):
-            continue
-        bases.append((key, g))
-    for key, g in bases + [(key, None) for key in ir.added]:
+        if kind != 'output' and key not in ir.inside and key in ir.over.get(key, ()):
+            keys.append((key, g, g))
+    for key, span in ir.added.items():
+        if span or key in wired:
+            keys.append((key, None, span[0] if span else 0))
+    for key, g, begin in keys:
         dtype, shape = _layout(ir, key)
         wire, invariant = int(key in wired), g is not None and ir.program[g][0] == 'constant'
-        ir.homes[key] = (ir.value(dtype, math.prod(shape), _value(key[0]).device.type, wire, 0 if wire else g,
-                                  0 if wire else last.get(key, g),
-                                  kind=mesh.INVARIANT if invariant else mesh.EXECUTION), 0, shape)
+        ir.homes[key] = (ir.value(dtype, _size(ir, key), _value(key[0]).device.type, wire, 0 if wire else begin,
+                                  0 if wire else max(begin, last.get(key, begin)),
+                                  kind=mesh.INVARIANT if invariant else mesh.EXECUTION), 0, shape,
+                         _strides(shape, *_form(ir, key)))
     for key, (made, offset) in ir.inside.items():
-        ir.homes[key] = (ir.homes[made][0], offset, _layout(ir, key)[1])
+        ir.homes[key] = (ir.homes[made][0], offset, _layout(ir, key)[1], ir.homes[made][3])
+    for key, (base, offset, sizes, strides) in ir.views.items():
+        if base in ir.homes:
+            ir.homes[key] = (ir.homes[base][0], offset, sizes, strides)
     for i, (base, offset) in ir.at.items():
         ir.declared[i].value = ir.homes[base][0]
         ir.declared[i].first = offset * _layout(ir, base)[0].itemsize // ir.blockbytes
+    for value, first, of, at, count, (g, target, source, narrow) in ir.shared:
+        size = _layout(ir, value)[0].itemsize
+        if value in wired and of in wired:
+            ir.share.append(mesh.Share(ir.homes[value][0], first * size // ir.blockbytes, ir.homes[of][0],
+                                       at * size // ir.blockbytes, -(-count * size // ir.blockbytes)))
+        else:
+            ir.fallbacks.setdefault(g, []).append((target, source, narrow))
 
 
 # design/compilation-coordination.md, P2: unit weights, every task and every edge 1, a weighting function the program
@@ -1867,14 +2136,15 @@ RETIRE = C.cast(mesh.LIB.mesh_retire, C.c_void_p)
 # revisions of 4e78f6f4"): each publish a range's section, its first row the range's first block in its value
 # (_bind: "mesh_host_arrived and mesh_host_publish take a section of the range", the coordinator's brief), each with
 # its value's device, where it was a value's section.  What must stay: a publish after its range's last write, no wait
-def _publish(context, sections, devices, t):
-    metal = [section for section, device in zip(sections, devices) if device == 'mps']
-    for section, device in zip(sections, devices):
-        if device != 'mps':
-            mesh.LIB.mesh_host_publish(C.byref(context), section, t)
-    if metal:
-        mesh.check(TORCH.mesh_torch_publish(PUBLISH, C.addressof(context), (mesh.Section * len(metal))(*metal),
-                                            len(metal), t))
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K3; "The
+# revisions of 55b9cbad"): the CPU sections and the MPS sections' array given, constants of the plan (_release), where
+# each publish split its sections by device and made the array.  What must stay: a publish after its range's last
+# write, no wait
+def _publish(context, cpu, metal, t):
+    for section in cpu:
+        mesh.LIB.mesh_host_publish(C.byref(context), section, t)
+    if metal is not None:
+        mesh.check(TORCH.mesh_torch_publish(PUBLISH, C.addressof(context), metal, len(metal), t))
 
 
 # DLPack as torch v2.14.0 bundles it (torch's include/ATen/dlpack.h, DLPACK_MAJOR_VERSION 1, DLPACK_MINOR_VERSION 3):
@@ -2141,14 +2411,19 @@ def _dlpack_tensor(device, data, offset, owner, dtype, shape, mapping):
 # revisions of 55b9cbad"): `given` as well, for each program input this function's values hold (IR `inputs`), its copies'
 # tensors on its device and, for the caller's write, each copy's CPU tensor over the same pages of the mapping (the
 # device tensor itself on the CPU), by _dlpack_tensor as every copy is.  What must stay: as above
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V1; "The
+# revisions of 55b9cbad"): each placed key's tensor its home's strided view of its copy (torch's as_strided at the
+# copy's storage offset plus the home's first element: "the offset in the underlying storage of the output tensor",
+# torch 2.14.0 torch/_torch_docs.py as_strided), where it was a narrow of the copy viewed in its shape.  What must
+# stay: as above
 def _bind(context, ir, values, addresses, buffer, mapping):
     header, copies = mesh.Header.from_address(context.M), []
     for v, (dtype, numel, device), at in zip(values, ir.layouts, addresses):
         copies.append([_dlpack_tensor('cpu', a, 0, None, dtype, (numel,), mapping) if device == 'cpu' else
                        _dlpack_tensor('mps', buffer, a - mapping.view.address, buffer, dtype, (numel,), mapping)
                        for a in at])
-    places = {key: [copy.narrow(0, offset, math.prod(shape)).view(shape) for copy in copies[v]]
-              for key, (v, offset, shape) in ir.homes.items()}
+    places = {key: [copy.as_strided(sizes, strides, copy.storage_offset() + offset) for copy in copies[v]]
+              for key, (v, offset, sizes, strides) in ir.homes.items()}
     given = {i: ([copy.view(shape) for copy in copies[v]],
                  [copy.view(shape) if ir.layouts[v][2] == 'cpu' else
                   _dlpack_tensor('cpu', a, 0, None, ir.layouts[v][0], shape, mapping) for copy, a in
@@ -2228,96 +2503,150 @@ def _bind(context, ir, values, addresses, buffer, mapping):
 # its exported graph's ATen operator (_call), its out variant called with its result's place by its out argument's
 # name.  What must stay: one execution a call, every read of a received range after its arrival, a release after its
 # range's writes
-def _run(ir, context, run, g, env, inputs, t, deadline):
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K3: "Values
+# recomputed every execution from make()-time facts become constants of the plan (mesh_compile.py 2167, 2220–2221,
+# 2320, 2323): `ir.sends`' release lists, `own`, `ir.device`, and the received parts' landing order, which lowering
+# records in `ir.at` and the runner re-derives (2215, 2219)"; V1 to V3; "The revisions of 55b9cbad"), reversing _run,
+# which read each of these from the IR at every execution: each item of this node's program is a step made once, when
+# the plan is bound (_steps), holding as constants its release lists (_release: each copy's target views by copy, the
+# CPU sections and the MPS sections' array), its receives' sections and part views in the order the lowering recorded
+# them (`roles`), its place's tensors by copy, a CollectivePermute's own pair, a window's offsets and fill views, an
+# AllToAll's layout change's views; a node with no section has no step and gives no value (`ir.device` read once).
+# The steps of an item: its fallback copies (_place), then a collective's sends (`sends`), then its work, then its
+# publishes (`publishes`).  Its work as before but: a window's region is a view of its landing value, where its pieces
+# landed (V3), so it fills its parts outside the operand alone, torch.cat goes; an AllToAll's result is laid out from its
+# parts' view by torch's copy_ into its strided view (_all_to_all); a CollectivePermute's result is its arrival's place.
+# What must stay: one execution a call, every read of a received range after its arrival, a release after its range's
+# writes, every wait of the execution by its one deadline
+def _steps(ir, context, places, sections, devices, spec):
+    if ir.device is None:
+        return (), lambda env: None
+    return [_step(ir, context, places, sections, devices, g) for g in range(len(ir.program))], \
+        lambda env: pytree.tree_unflatten(list(env['output']), spec)
+
+
+def _release(context, places, sections, devices, entries):
+    copies = [([_narrow(x, into) for x in places[target]], source, out)
+              for _, copy in entries if copy is not None for (target, into), (source, out) in (copy,)]
+    published = [i for i, _ in entries if i is not None]
+    cpu, metal = [sections[i] for i in published if devices[i] != 'mps'], \
+        [sections[i] for i in published if devices[i] == 'mps']
+    metal = (mesh.Section * len(metal))(*metal) if metal else None
+
+    def release(env, t):
+        for targets, source, out in copies:
+            targets[t % len(targets)].copy_(_narrow(env[source], out))
+        _publish(context, cpu, metal, t)
+    return release
+
+
+def _combine(context, total, first, parts, t, deadline):
+    for section, part in parts:
+        _arrived(context, section, t, deadline)
+        torch.add(first, part[t % len(part)], out=total)
+        first = total
+    return total
+
+
+def _step(ir, context, places, sections, devices, g):
     kind, reads, key, operand = ir.program[g]
+    before = _release(context, places, sections, devices, ir.sends.get(g, ()))
+    after = _release(context, places, sections, devices, ir.publishes.get(g, ()))
+    fallbacks = [(places[target], source, at) for target, source, at in ir.fallbacks.get(g, ())]
+    mine, source = places.get(key), reads[0] if reads else None
 
-    def place(k):
-        copies = run['places'][k]
-        return copies[t % len(copies)]
-
-    def release(entries):
-        for _, copy in entries:
-            if copy is not None:
-                (target, into), (source, out) = copy
-                _narrow(place(target), into).copy_(_narrow(env[source], out))
-        published = [i for i, _ in entries if i is not None]
-        if published:
-            _publish(context, [run['sections'][i] for i in published], [run['devices'][i] for i in published], t)
-
-    def arrived(i):
-        _arrived(context, run['sections'][i], t, deadline)
-
-    def combine(total, first, parts):
-        for i, part in parts:
-            arrived(i)
-            torch.add(first, part, out=total)
-            first = total
-        return total
-    if kind == 'collective':
-        release(ir.sends.get(g, ()))
+    def placed(env, inputs, t, deadline):
+        env[key] = mine[t % len(mine)]
     if kind == 'input':
-        env[key] = inputs[operand]
-    elif kind == 'constant':
-        env[key] = place(key) if key in run['places'] else operator.attrgetter(operand)(ir.gm)
-    elif kind == 'slice':
-        (source,), (dim, m) = reads, operand
-        size = env[source].shape[dim] // ir.shape[m]
-        env[key] = env[source].narrow(dim, ir.coords[ir.device][m] * size, size)
-    elif kind == 'narrow':
-        (source,), (dim, start, length) = reads, operand
-        env[key] = env[source].narrow(dim, start, length)
+        def work(env, inputs, t, deadline):
+            env[key] = inputs[operand]
+    elif kind == 'constant' and mine is None:
+        value = operator.attrgetter(operand)(ir.gm)
+
+        def work(env, inputs, t, deadline):
+            env[key] = value
+    elif kind in ('slice', 'narrow') or kind == 'window' and mine is None:
+        if kind == 'slice':
+            size = _layout(ir, source)[1][operand[0]] // ir.shape[operand[1]]
+            at = (operand[0], ir.coords[ir.device][operand[1]] * size, size)
+        elif kind == 'narrow':
+            at = operand
+        else:
+            at = (operand[0], operand[2][ir.coords[ir.device][operand[1]]], operand[3])
+
+        def work(env, inputs, t, deadline):
+            env[key] = env[source].narrow(*at)
     elif kind == 'window':
-        dim, m, offsets, length, starts, size, fill = operand
+        dim, m, _, length, starts, size, fill = operand
         q = ir.coords[ir.device][m]
-        if key not in ir.homes:
-            env[key] = env[reads[0]].narrow(dim, offsets[q], length)
-        else:
-            target, at, parts = place(key), 0, []
-            for k in reads:
-                n = env[k].shape[dim]
-                low, high = max(offsets[q], at), min(offsets[q] + length, at + n)
-                if low < high:
-                    parts.append(env[k].narrow(dim, low - at, high - low))
-                at += n
-            torch.cat(parts, dim, out=target)
-            if fill is not None:
-                below, above = min(length, max(0, -starts[q])), min(length, max(0, size - starts[q]))
-                target.narrow(dim, 0, below).fill_(fill)
-                target.narrow(dim, above, length - above).fill_(fill)
-            env[key] = target
+        below, above = min(length, max(0, -starts[q])), min(length, max(0, size - starts[q]))
+        outside = [(x.narrow(dim, 0, below), x.narrow(dim, above, length - above)) for x in mine] \
+            if fill is not None else ()
+
+        def work(env, inputs, t, deadline):
+            env[key] = mine[t % len(mine)]
+            for part in outside[t % len(outside)] if outside else ():
+                part.fill_(fill)
     elif kind == 'call':
-        local, given = ir.locals[operand], iter(reads)
-        args, kwargs = map_arg((local.args, local.kwargs), lambda n: env[next(given)])
-        if key in ir.homes:
-            out, name = ir.forms[key]
-            out(*args, **kwargs, **{name: place(key)})
-            env[key] = place(key)
-        else:
-            env[key] = _call(local, args, kwargs)
+        local, form = ir.locals[operand], ir.forms.get(key) if mine is not None else None
+
+        def work(env, inputs, t, deadline):
+            given = iter(reads)
+            args, kwargs = map_arg((local.args, local.kwargs), lambda n: env[next(given)])
+            if form is None:
+                env[key] = _call(local, args, kwargs)
+            else:
+                form[0](*args, **kwargs, **{form[1]: mine[t % len(mine)]})
+                env[key] = mine[t % len(mine)]
     elif kind == 'collective':
-        (source,), (me, sent, received, buffer) = reads, ir.roles[operand]
-        if operand.kind == 'all-reduce' and me:
-            arrived(received[0])
-            env[key] = place(key)
-        elif operand.kind == 'all-reduce':
-            parts = place(buffer)
-            env[key] = combine(place(key), env[source],
-                               [(received[p], parts[j]) for j, p in enumerate(sorted(received))])
-        elif operand.kind == 'reduce-scatter':
-            size, parts = env[source].shape[operand.dim] // (len(received) + 1), place(buffer)
-            env[key] = combine(place(key), env[source].narrow(operand.dim, me * size, size),
-                               [(i, parts[j]) for j, i in enumerate(received.values())])
-        elif operand.kind == 'collective-permute' and not received:
+        me, receives = ir.roles[operand]
+        waits = [sections[i] for i, _ in receives]
+        parts = [(sections[i], places[part]) for i, part in receives]
+        if operand.kind in ('all-reduce', 'reduce-scatter') and (operand.kind != 'all-reduce' or me == 0):
+            at = (operand.dim, me * _layout(ir, source)[1][operand.dim] // (len(receives) + 1),
+                  _layout(ir, source)[1][operand.dim] // (len(receives) + 1)) if operand.kind != 'all-reduce' else None
+
+            def work(env, inputs, t, deadline):
+                env[key] = _combine(context, mine[t % len(mine)], _narrow(env[source], at), parts, t, deadline)
+        elif operand.kind == 'all-to-all':
+            (i, _), k = operand.dim, len(receives) + 1
+            laid = [x.unflatten(i, (k, x.shape[i] // k)).movedim(i, 0) for x in mine]
+            pieces = places[(receives[0][1][0], 'parts')]
+
+            def work(env, inputs, t, deadline):
+                for section in waits:
+                    _arrived(context, section, t, deadline)
+                laid[t % len(laid)].copy_(pieces[t % len(pieces)])
+                env[key] = mine[t % len(mine)]
+        elif operand.kind == 'collective-permute' and not receives:
             own = any(tuple(pair) == (me, me) for pair in operand.dim)
-            env[key] = env[source] if own else place(key).zero_()
+
+            def work(env, inputs, t, deadline):
+                if own:
+                    mine[t % len(mine)].copy_(env[source])
+                else:
+                    mine[t % len(mine)].zero_()
+                env[key] = mine[t % len(mine)]
         else:
-            for i in received.values():
-                arrived(i)
-            env[key] = place(key)
-    else:
+            def work(env, inputs, t, deadline):
+                for section in waits:
+                    _arrived(context, section, t, deadline)
+                env[key] = mine[t % len(mine)]
+    elif kind == 'output':
         node, keys = operand
-        env['output'] = map_arg(node.args[0], lambda n: env[keys[n]])
-    release(ir.publishes.get(g, ()))
+
+        def work(env, inputs, t, deadline):
+            env['output'] = map_arg(node.args[0], lambda n: env[keys[n]])
+    else:
+        work = placed
+
+    def step(env, inputs, t, deadline):
+        for targets, given, at in fallbacks:
+            targets[t % len(targets)].copy_(_narrow(env[given], at))
+        before(env, t)
+        work(env, inputs, t, deadline)
+        after(env, t)
+    return step
 
 
 # a tensor's narrow (dim, start, length), the tensor itself where it is None (2026-11-05, "The revisions of 4e78f6f4":
@@ -2433,19 +2762,21 @@ def _dropped(context, state):
 # bound) and gives every wait of that execution, these and its own later ones"), given to mesh_transfers_start and to
 # every _arrived of the execution (_run), where the start and each arrival took a deadline of its own.  What must
 # stay: one execution a call, the start at every node of the program, one deadline an execution
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K3; "The
+# revisions of 55b9cbad"): the plan's state section read through one ctypes view made when the plan is bound (`state`),
+# and the items run as their steps (_steps), a node with no section having none and giving no value, where each
+# execution made the view and tested `ir.device`.  What must stay: as above
 def _execute(context, run, args, kwargs):
-    ir, t = run['ir'], run['executions']
+    t = run['executions']
     deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
     status = mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1, deadline)
-    if mesh.State.from_address(context.M + run['plan']).executions > t:
+    if run['state'].executions > t:
         run['executions'] = t + 1
     mesh.check(status)
-    if ir.device is None:
-        return None
     env, inputs = {}, pytree.arg_tree_leaves(*args, **kwargs)
-    for g in range(len(ir.program)):
-        _run(ir, context, run, g, env, inputs, t, deadline)
-    return pytree.tree_unflatten(list(env['output']), run['spec'])
+    for step in run['steps']:
+        step(env, inputs, t, deadline)
+    return run['result'](env)
 
 
 # design/aot-compilation-change-request.md A10, "The calls' graph": Pathways' program tracer, "a new program tracer
@@ -2886,22 +3217,24 @@ def program(block, *example_inputs):
                 irs[k].inputs[i] = (irs[k].value(*x[:3], 0, 0, 0, lag=HOST_LAG), x[3])
         arrays = [((mesh.Declared * len(ir.declared))(*ir.declared), (mesh.Weight * len(ir.weights))(*ir.weights),
                    (mesh.Value * len(ir.values))(*ir.values),
-                   (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir in irs]
+                   (mesh.Dependence * len(ir.dependences))(*ir.dependences),
+                   (mesh.Share * len(ir.share))(*ir.share)) for ir in irs]
         functions = (mesh.Function * len(irs))(*[
             mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
-                          C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), None, len(d),
-                          len(v), len(e), 0, ir.calls.outstanding, 0) for ir, (d, w, v, e) in zip(irs, arrays)])
+                          C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)),
+                          C.cast(h, C.POINTER(mesh.Share)), len(d), len(v), len(e), len(h), ir.calls.outstanding, 0)
+            for ir, (d, w, v, e, h) in zip(irs, arrays)])
         mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
                                       (mesh.U * len(calls))(*calls), len(calls)))
         state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
         try:
             if any(mesh.State.from_address(context.M + f.plan).serial != nodes.serial for f in functions):
                 raise OSError(errno.ESTALE, 'a plan\'s map serial is not the one its IR was built on: plan again')
-            view, addresses = _mapped(context, [values for _, _, values, _ in arrays])
+            view, addresses = _mapped(context, [values for _, _, values, _, _ in arrays])
             state['mapping'].view = view
             buffer = _placed_buffer(view) if 'mps' in state['devices'] else None
             try:
-                bound = [_bind(context, ir, values, at, buffer, state['mapping']) for ir, (_, _, values, _), at in
+                bound = [_bind(context, ir, values, at, buffer, state['mapping']) for ir, (_, _, values, _, _), at in
                          zip(irs, arrays, addresses)]
             finally:
                 if buffer:
@@ -2914,10 +3247,10 @@ def program(block, *example_inputs):
             _retire(context, state)
             raise
         state['inputs'] = [next((b[3][i] for b in bound if i in b[3]), None) for i in range(len(given))]
-        state.update(stale=False, runs=[{'ir': ir, 'plan': f.plan, 'executions': 0, 'spec': record.spec,
-                                         'places': places, 'sections': sections, 'devices': devices}
-                                        for ir, f, record, (places, sections, devices, _) in
-                                        zip(irs, functions, compiled, bound)])
+        state.update(stale=False, runs=[
+            dict(zip(('steps', 'result'), _steps(ir, context, places, sections, devices, record.spec)), plan=f.plan,
+                 executions=0, state=mesh.State.from_address(context.M + f.plan))
+            for ir, f, record, (places, sections, devices, _) in zip(irs, functions, compiled, bound)])
     make()
 
     def ended():
