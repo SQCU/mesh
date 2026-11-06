@@ -214,20 +214,24 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
    the identifier of the view the message is sent in (design/aot-compilation-change-request.md A7: "m is one
    submission: its plan's name (`group`, `epoch`), the identifier of the view it is sent in (below), and a range of its
    executions"; "Every message carries its view's identifier").  Why: "the map serial it was made on ... no receiver
-   can compare: each node's serial is its own count" (A7's correction).  What must stay: the layout */
-struct mesh_order { uint64_t group,epoch,view,first,end,sequence,nodes; uint32_t sender,padding; };
+   can compare: each node's serial is its own count" (A7's correction).  What must stay: the layout
+   120 (JGroups ViewId.java): `view` the view's identifier, its Lamport time and its creator (mesh.h struct
+   mesh_view_id), where it was the Lamport time alone */
+struct mesh_order { uint64_t group,epoch; struct mesh_view_id view; uint64_t first,end,sequence,nodes;
+  uint32_t sender,padding; };
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ1): an ORDER's `sequence` is sn(m),
    one number a message however many executions [first, end) it carries, from 1 (X. Défago, A. Schiper and P. Urbán,
    ACM Comput. Surv. 36(4), 2004, Fig. 5: "Initialization: seqnum := 1"; "sn(m) := seqnum ... seqnum := seqnum + 1";
    design/aot-compilation-change-request.md A7: "One submission is one message however many executions it carries"),
    where it was the number of `first`, first + k numbered sequence + k; `sender` the program's sender (mesh.h struct
-   mesh_state `sender`).  What must stay: the layout */
+   mesh_state `sender`).  What must stay: every field but `view` where it is */
 /* the payload of an ARRIVE (`bytes` sizeof): plan (group, epoch) stands at the node whose id is `node`; `sender` the
    node id of the program's sender, the one that counts it (mesh-records.c arrival_take) */
 /* 2026-11-05 (115; "The revisions of 3f106747", VW): `view` appended, the identifier of the view the arriving node
    has installed (A7: "Each arrival carries its view's identifier, and the program's sender counts only the arrivals of
-   the view it has installed").  What must stay: an arrival names its plan, its node and the sender that counts it */
-struct mesh_arrival { uint64_t group,epoch; uint32_t node,sender; uint64_t view; };
+   the view it has installed").  What must stay: an arrival names its plan, its node and the sender that counts it.
+   120 (JGroups ViewId.java): `view` the view's identifier (mesh.h struct mesh_view_id) */
+struct mesh_arrival { uint64_t group,epoch; uint32_t node,sender; struct mesh_view_id view; };
 /* the payload of a VIEW (`bytes` sizeof plus 4 a member): view `view` (Transis's identifier: G. V. Chockler, I. Keidar
    and R. Vitenberg, ACM Comput. Surv. 33(4), 2001, §3.1.1), created by the sequencer whose node id is `sequencer` and
    whose bridge started at `boot` (mesh.h hdr `boot`: the process, "one start of a bridge", A7), `last` the last
@@ -265,12 +269,14 @@ struct mesh_group_view { uint64_t view,last,boot; uint32_t sequencer,members,rec
    "`count_take`'s search (mesh-records.c 896): the COUNT carries the sink entry's index"; "The revisions of
    55b9cbad"): `function` 32 bits and `entry` after it, the index of the edge among the sink plan's waits at the sink
    (mesh.h struct mesh_sync `entry` of the source's tell), so the sink's bridge raises that one entry, read by index.
-   Why: K1, as MSCCL-IR's steps name their dependences by index (`depid`, `deps`).  What must stay: 48 bytes, every
-   field before `function` where it is */
-struct mesh_count { uint64_t group,epoch,view,count; uint32_t node,sink,function,entry; };
-_Static_assert(sizeof(struct mesh_count)==48 && offsetof(struct mesh_count,count)==24 &&
-  offsetof(struct mesh_count,node)==32 && offsetof(struct mesh_count,function)==40 &&
-  offsetof(struct mesh_count,entry)==44,"mesh_count");
+   Why: K1, as MSCCL-IR's steps name their dependences by index (`depid`, `deps`).
+   120 (JGroups ViewId.java): `view` the view's identifier (mesh.h struct mesh_view_id), 24 bytes, so the struct is
+   64 */
+struct mesh_count { uint64_t group,epoch; struct mesh_view_id view; uint64_t count;
+  uint32_t node,sink,function,entry; };
+_Static_assert(sizeof(struct mesh_count)==64 && offsetof(struct mesh_count,view)==16 &&
+  offsetof(struct mesh_count,count)==40 && offsetof(struct mesh_count,node)==48 &&
+  offsetof(struct mesh_count,function)==56 && offsetof(struct mesh_count,entry)==60,"mesh_count");
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:0; }
 
 /* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: each stream's
@@ -599,10 +605,11 @@ void streams_cancel(const struct port *port);
    (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2)
    2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on
    the view's map ... A plan then stands while its view does, and its view while the sequencer's map does (D.3.6)";
-   "The revisions of 14b9a757"): every standing plan whose `serial` is not the installed view's identifier (mesh.h hdr
-   `view`) cancelled, called by mesh-records.c view_install, after it stores the view (under `view_map`), and by
-   map_adopt, after it stores no view installed (hdr `view` 0: a bridge started again is a new process, "A bridge's
-   counter is the identifier of the last view it installed, 0 before its first"), on the bridge parent's one thread; a
+   "The revisions of 14b9a757"): every standing plan whose view (mesh.h mesh_plan_view) is not the installed view's
+   identifier (mesh.h mesh_view_installed; JGroups ViewId.equals) cancelled, called by mesh-records.c view_install,
+   after it stores the view (under `view_map`), and by map_adopt, after it stores no view installed (hdr `view` 0: a
+   bridge started again is a new process, "A bridge's counter is the identifier of the last view it installed, 0
+   before its first"), on the bridge parent's one thread; a
    move of this node's own map ends no plan (its link losses cancel their receives as before).  What must stay: the
    fence before any plan or its `executions` is read; on the parent's one thread */
 void plan_stale(void);

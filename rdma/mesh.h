@@ -73,8 +73,11 @@
    `view_off` and `view_nodes`, the installed view's identifier and the sequencer's map records its first message
    carried, which plans are made on and stand by; the wire's VIEW carrying those records (mesh-bridge.h struct
    mesh_group_view) (design/compilation-coordination.md, "The root cause of the copies, and the revised work list",
-   R-1 and R-6; design/aot-compilation-change-request.md A7, corrected 2026-11-06; "The revisions of 14b9a757") */
-#define MESH_VERSION 119u
+   R-1 and R-6; design/aot-compilation-change-request.md A7, corrected 2026-11-06; "The revisions of 14b9a757").  120:
+   hdr `view_sequencer` and `view_boot` appended and struct mesh_state `sequencer` and `boot` where `padding3[0]` and
+   `padding3[1]` were, the installed view's creator and a plan's view's; struct mesh_view_id, the view's identifier,
+   in the wire's ORDER, SUBMIT, ARRIVE and COUNT (mesh-bridge.h) (JGroups ViewId.java) */
+#define MESH_VERSION 120u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -655,6 +658,20 @@ static inline uint64_t mesh_group_bytes(uint32_t pages){ return ((uint64_t)pages
 struct mesh_status { _Atomic uint32_t behind,ahead,first,padding; };
 _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahead)==4 &&
   offsetof(struct mesh_status,first)==8,"mesh_status");
+/* JGroups ViewId (https://raw.githubusercontent.com/belaban/JGroups/master/src/org/jgroups/ViewId.java): `id` "Lamport
+   time of the view"; `sequencer` and `boot` the "Address of the creator of this view", a sequencer's node id and its
+   bridge's start (hdr `boot`), as JGroups' UUID (src/org/jgroups/util/UUID.java): "Logical address which is unique
+   over space and time" */
+struct mesh_view_id { uint64_t id; uint32_t sequencer,padding; uint64_t boot; };
+_Static_assert(sizeof(struct mesh_view_id)==24 && offsetof(struct mesh_view_id,sequencer)==8 &&
+  offsetof(struct mesh_view_id,boot)==16,"mesh_view_id");
+/* ViewId.compareTo: "The comparison is done on the IDs, if they are equal, we use the creator", `id > other.id ? 1 :
+   id < other.id ? -1 : creator.compareTo(other.creator)`; the creator's as UUID.compareTo, its first word, then its
+   second.  ViewId.equals: compareTo == 0 */
+static inline int mesh_view_compare(struct mesh_view_id a,struct mesh_view_id b){
+  return a.id>b.id?1:a.id<b.id?-1:a.sequencer>b.sequencer?1:a.sequencer<b.sequencer?-1:
+    a.boot>b.boot?1:a.boot<b.boot?-1:0;
+}
 /* the start of a plan's state section, at its claim head's publication `state` (struct mesh_hop's note, "The state
    section"); `phases`, `counts`, `supplied`, `status` and `hops` region offsets; `nodes` a set of map indices.
    2026-11-04, owner L (design/compilation-coordination.md, "The region"): bytes 64-255 appended, the plan's name,
@@ -737,17 +754,19 @@ _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahe
      corrected 2026-11-06), so several begin in one row and a row's publication names none of them alone; the
      declared transfer's index is the IR's own name of it.  Every row's publication (mesh_publication_at) is written by
      nothing now and read by nothing.
-   - `serial` is the identifier of the installed view whose map the plan was made on (hdr `view`), every entry's
+   - `serial` is the Lamport time of the installed view whose map the plan was made on (hdr `view`), every entry's
      `serial` the same, where it was the map serial; the plan stands while that view is installed (A7, corrected
      2026-11-06: "A plan then stands while its view does, and its view while the sequencer's map does").
+   - `sequencer` and `boot`, where `padding3[0]` and `padding3[1]` were: that view's creator (hdr `view_sequencer`,
+     `view_boot`), so the plan's view is struct mesh_view_id (`serial`, `sequencer`, `boot`), mesh_plan_view.
    What must stay: every other field where it is, the struct 320 bytes */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
   uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
   _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced;
-  uint32_t waits,tells; uint64_t syncs; uint32_t calls; _Atomic uint32_t closed; uint64_t rows,submit_room,transfers,
-  padding3[5]; };
+  uint32_t waits,tells; uint64_t syncs; uint32_t calls; _Atomic uint32_t closed; uint64_t rows,submit_room,transfers;
+  uint32_t sequencer,padding4; uint64_t boot,padding3[3]; };
 _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
@@ -764,7 +783,12 @@ _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,waits)==232 && offsetof(struct mesh_state,tells)==236 &&
   offsetof(struct mesh_state,syncs)==240 && offsetof(struct mesh_state,calls)==248 &&
   offsetof(struct mesh_state,closed)==252 && offsetof(struct mesh_state,rows)==256 &&
-  offsetof(struct mesh_state,submit_room)==264 && offsetof(struct mesh_state,transfers)==272,"mesh_state");
+  offsetof(struct mesh_state,submit_room)==264 && offsetof(struct mesh_state,transfers)==272 &&
+  offsetof(struct mesh_state,sequencer)==280 && offsetof(struct mesh_state,boot)==288,"mesh_state");
+/* the view a plan was made in (struct mesh_view_id) */
+static inline struct mesh_view_id mesh_plan_view(const struct mesh_state *s){
+  return (struct mesh_view_id){.id=s->serial,.sequencer=s->sequencer,.boot=s->boot};
+}
 /* One synchronization edge of the program's IPC graph at a plan's actor at this node (117; design/aot-compilation-
    change-request.md, appendix item 2: "The compilation adds synchronization edges by BSL's Convert-to-SC-graph (§9,
    Fig. 6) and sets their delays by DetermineDelays (Fig. 8)"; "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k −
@@ -991,13 +1015,16 @@ struct hdr {
      is the sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates
      the view.  Every member plans on those records"; "The revisions of 14b9a757"): `view_map` and `view`, where
      `vacant16` and `vacant17` were, and `view_off` and `view_nodes`, where `vacant18` and `vacant19` were.  `view` the
-     identifier of the view this node's bridge installed (mesh-records.c view_install), 0 before its first, and its
+     Lamport time of the view this node's bridge installed (mesh-records.c view_install), 0 before its first, and its
      `view_nodes` records (mesh-map.h struct mesh_record), the ones the view's first message carried, at `view_off`
      (mesh-map.h mesh_layout: room `map_room`, laid out once with the region), written under `view_map`, a seqlock as
      `map` is (odd while the bridge parent writes, mesh_notify before and after; read whole as mesh_map_whole reads `map`:
      even before the read and unchanged after it, mesh-dataflow.c mesh_nodes_read).  The
-     bridge parent their one writer.  A plan is made on those records (mesh-dataflow.h mesh_nodes_read), its `serial`
-     `view` (struct mesh_state), and stands while `view` is it.  What must stay: every other field in its place */
+     bridge parent their one writer.  `view_sequencer` and `view_boot` (appended) the view's creator, written with
+     `view` under `view_map`: the view's identifier is struct mesh_view_id (mesh_view_installed).  A plan is made on
+     those records (mesh-dataflow.h mesh_nodes_read), its view that identifier (struct mesh_state `serial`,
+     `sequencer`, `boot`), and stands while the installed view is it.  What must stay: every other field in its
+     place */
   _Atomic uint64_t view_map,view;
   uint64_t vacant8;
   uint64_t view_off;
@@ -1079,6 +1106,9 @@ struct hdr {
   uint64_t deliveries_off,deliveries_room;
   _Atomic uint64_t delivered;
   _Atomic uint64_t delivery_read[MESH_PORTS];
+  _Atomic uint32_t view_sequencer;
+  uint32_t vacant22;
+  _Atomic uint64_t view_boot;
 };
 /* every field at its 106 offset, the 108 fields after them, the 109 field after those, the 110 field after that (the
    vacant bytes' notes above struct hdr) */
@@ -1091,8 +1121,15 @@ _Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)
   offsetof(struct hdr,view_off)==248 && offsetof(struct hdr,view_nodes)==256 && offsetof(struct hdr,map_off)==272 &&
   offsetof(struct hdr,vacant9)==352 && offsetof(struct hdr,vacant13)==384 && offsetof(struct hdr,map_room)==392 &&
   offsetof(struct hdr,algo_off)==400 && offsetof(struct hdr,plans)==408 && offsetof(struct hdr,deliveries_off)==416 &&
-  offsetof(struct hdr,delivered)==432 && offsetof(struct hdr,delivery_read)==440 && sizeof(struct hdr)==504,
+  offsetof(struct hdr,delivered)==432 && offsetof(struct hdr,delivery_read)==440 &&
+  offsetof(struct hdr,view_sequencer)==504 && offsetof(struct hdr,view_boot)==512 && sizeof(struct hdr)==520,
   "struct hdr: no field moves");
+/* the installed view's identifier (struct mesh_view_id: hdr `view`, `view_sequencer`, `view_boot`) */
+static inline struct mesh_view_id mesh_view_installed(struct hdr *m,memory_order order){
+  return (struct mesh_view_id){.id=atomic_load_explicit(&m->view,order),
+                               .sequencer=atomic_load_explicit(&m->view_sequencer,order),
+                               .boot=atomic_load_explicit(&m->view_boot,order)};
+}
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/prepared-machine.md#M07 */

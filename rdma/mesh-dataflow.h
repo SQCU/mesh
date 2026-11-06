@@ -193,12 +193,16 @@ uint32_t mesh_retired_release(struct hdr *);
    0 where none joins them.
    2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member plans on those records";
    "The revisions of 14b9a757"), reversing the map's: the records are the installed view's (mesh.h hdr `view_off`,
-   `view_nodes`), the sequencer's map its first message carried; `serial` is the view's identifier (hdr `view`), the one
-   a plan is made on and stands by (struct mesh_state `serial`); a node's index its place in ascending node-id order
-   among the view's records.  What must stay: the struct */
+   `view_nodes`), the sequencer's map its first message carried; `serial` is the view's Lamport time (hdr `view`), and
+   `sequencer` and `boot` (appended) its creator (hdr `view_sequencer`, `view_boot`): the view's identifier, struct
+   mesh_view_id, the one a plan is made on and stands by (struct mesh_state `serial`, `sequencer`, `boot`); a node's
+   index its place in ascending node-id order among the view's records.  What must stay: the struct */
 #define MESH_NODES_MOST 32
 struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NODES_MOST];
-                    uint64_t capacity[MESH_NODES_MOST][MESH_NODES_MOST]; /* bits/s, a pair's cables summed; 0 none */ };
+                    uint64_t capacity[MESH_NODES_MOST][MESH_NODES_MOST]; /* bits/s, a pair's cables summed; 0 none */
+                    uint32_t sequencer,padding; uint64_t boot; };
+_Static_assert(offsetof(struct mesh_nodes,capacity)==144 && offsetof(struct mesh_nodes,sequencer)==8336 &&
+  offsetof(struct mesh_nodes,boot)==8344 && sizeof(struct mesh_nodes)==8352,"mesh_nodes");
 /* 0, or an error value: ETIMEDOUT where no whole copy was read within MESH_PLATFORM_NS of its start, ESRCH where the
    bridge left its write open (its process gone), E2BIG past MESH_NODES_MOST records, EINVAL where the records lie
    outside the region, ENOENT where the map holds no record of this node (hdr `node`); read under the map seqlock

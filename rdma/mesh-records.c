@@ -122,7 +122,8 @@ void map_adopt(void){
      the call above on the map's move: the earlier bridge's view ends with its process (A7: "A process is one start of a
      bridge.  A bridge started again is a new process"; "This algorithm does not tolerate the failure of the
      sequencer"), so the view's records are taken as this bridge's, none installed, as the map's are: hdr `view_nodes`
-     and `view` 0, under `view_map` (mesh_notify before and after), `view` this bridge's counter, 0 before its first
+     and the identifier (`view`, `view_sequencer`, `view_boot`) 0, under `view_map` (mesh_notify before and after),
+     `view` this bridge's counter, 0 before its first
      view (A7: "A bridge's counter is the identifier of the last view it installed, 0 before its first").  Then
      plan_stale, the coordinator's ruling on 1acf8b31 ("at adoption ... this process's installed view is none.  Store
      hdr `view` = 0 and `view_nodes` = 0 under `view_map` (mesh_notify before and after), then call plan_stale(), so
@@ -135,6 +136,8 @@ void map_adopt(void){
   mesh_notify(&M->view_map);
   atomic_store_explicit(&M->view_nodes,0,memory_order_relaxed);
   atomic_store_explicit(&M->view,0,memory_order_relaxed);
+  atomic_store_explicit(&M->view_sequencer,0,memory_order_relaxed);
+  atomic_store_explicit(&M->view_boot,0,memory_order_relaxed);
   mesh_notify(&M->view_map);
   plan_stale();
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ2): hdr `delivered` stored 0 at the
@@ -290,26 +293,14 @@ static struct island { uint32_t self,sequencer,parent,up,down[MESH_PORTS],downs;
    each member"; appendix item 2: "the number begins again at 1 only at a view's creation, by A7's views".  What must
    stay: the number only rising within a view */
 static uint64_t seqnum=1;
-/* The view this bridge has installed (design/aot-compilation-change-request.md A7, "The island is a dynamic group, and
-   each of its views is a static system"; G. V. Chockler, I. Keidar and R. Vitenberg, Group communication
-   specifications: a comprehensive study, ACM Comput. Surv. 33(4), 2001; design/compilation-coordination.md, "The
-   revisions of 3f106747", VW): `view` its identifier, 0 before the first, and so this bridge's counter, Transis's
-   "local counter ... increased by a process upon each installation" (§3.1.1), which its record carries (mesh-map.h
-   struct mesh_record `view`); `sequencer` and `boot` the process that created it, a bridge's node id and its start
-   (hdr `boot`): "A process is one start of a bridge.  A bridge started again is a new process: "In Isis [RB91] a
-   process recovering after a crash is assigned a different identifier (using a new incarnation number)"" (A7).  0 at
-   this bridge's start, a new process's.  What must stay: `view` only rising (Property 3.2, Local Monotonicity)
-   2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06; mesh.h hdr `view`: "the
-   identifier of the view this node's bridge installed (mesh-records.c view_install), 0 before its first"; "The
-   revisions of 14b9a757", A7): `view` goes from this struct; the identifier is hdr `view`, which view_install stores
-   under `view_map` and every reader here takes (view_installed), so the bridge's counter has one store, the region's,
-   which programs and ports read too (metal-microbench AGENTS.md: "One canonical store per concept").  map_adopt sets
-   it 0 at this bridge's start on an adopted region, as a made region holds 0.  What must stay: the counter only rising
-   within this bridge's life (Property 3.2, Local Monotonicity); `sequencer` and `boot` the creating process */
-static struct installed { uint64_t boot; uint32_t sequencer; } installed;
-/* the identifier of the view installed here, this bridge's counter (hdr `view`; the parent its one writer, so a
-   relaxed load reads its own last store) */
-static uint64_t view_installed(void){ return atomic_load_explicit(&M->view,memory_order_relaxed); }
+/* The identifier of the view this bridge has installed (mesh.h struct mesh_view_id; JGroups ViewId.java: "Lamport time
+   of the view", "Address of the creator of this view"): hdr `view`, `view_sequencer` and `view_boot`, which
+   view_install stores under `view_map`, the parent their one writer, so relaxed loads read its own last stores; 0
+   before the first, as map_adopt stores them at this bridge's start.  `view` is this bridge's counter, Transis's
+   "local counter ... increased by a process upon each installation" (G. V. Chockler, I. Keidar and R. Vitenberg, ACM
+   Comput. Surv. 33(4), 2001, §3.1.1), which its record carries with the creator (mesh-map.h struct mesh_record `view`,
+   `view_sequencer`, `view_boot`) */
+static struct mesh_view_id view_installed(void){ return mesh_view_installed(M,memory_order_relaxed); }
 /* the messages this node has passed through Fig. 5's delivery in every view it installed, each delivered into its
    plan's queue or discarded (§5.2.4), hdr `delivered`'s value and each queue entry's `sequence`: the message's place
    in this node's delivery order, which within a view is its sn(m)'s order and across views Local Monotonicity's.  Why:
@@ -497,7 +488,7 @@ static void order_take(const struct mesh_order *order){
      messages of the view it has installed (Sending View Delivery)", "(Sending View Delivery) If a process p receives
      message m in view V, and some process q (possibly p = q) sends m in view V′, then V = V′" (Chockler, Keidar and
      Vitenberg, Property 4.3).  What must stay: the ORDER appended in arrival order */
-  if(island.self==UINT32_MAX || order->view!=view_installed())return;
+  if(island.self==UINT32_MAX || mesh_view_compare(order->view,view_installed()))return;
   if(pendings==pending_room){
     const size_t room=2*pending_room+1;
     struct pending *grown=realloc(pending,room*sizeof *grown);
@@ -575,11 +566,14 @@ static void order_relay(const struct mesh_order *order){
    sequencer's map moves, it numbers no further message of the old view"; Sending View Delivery (Property 4.3), the
    message received in the view it was sent in.  What must stay: first in, first out */
 static void order_sequence(const struct mesh_order *submission){
-  if(!view_installed() || submission->view!=view_installed() || installed.sequencer!=M->node || installed.boot!=M->boot){
-    mesh_say("bridge","a SUBMIT of plan (%llu, %llu), executions [%llu, %llu), discarded: sent in view %llu, this sequencer's "
-             "view %llu",(unsigned long long)submission->group,(unsigned long long)submission->epoch,
-             (unsigned long long)submission->first,(unsigned long long)submission->end,
-             (unsigned long long)submission->view,(unsigned long long)view_installed());
+  const struct mesh_view_id view=view_installed();
+  if(!view.id || mesh_view_compare(submission->view,view) || view.sequencer!=M->node || view.boot!=M->boot){
+    mesh_say("bridge","a SUBMIT of plan (%llu, %llu), executions [%llu, %llu), discarded: sent in view (%llu, %u, "
+             "%llu), this sequencer's view (%llu, %u, %llu)",(unsigned long long)submission->group,
+             (unsigned long long)submission->epoch,(unsigned long long)submission->first,
+             (unsigned long long)submission->end,(unsigned long long)submission->view.id,submission->view.sequencer,
+             (unsigned long long)submission->view.boot,(unsigned long long)view.id,view.sequencer,
+             (unsigned long long)view.boot);
     return;
   }
   struct mesh_order order=*submission;
@@ -641,9 +635,10 @@ static int order_submit(const struct mesh_order *order){
    - "(Self Inclusion) If process p installs view V, then p is a member of V." (Property 3.1): view_install installs
      only a view whose members name this node;
    - "(Local Monotonicity) If a process p installs view V after installing view V′ then the identifier of V is greater
-     than that of V′." (Property 3.2): view_install installs only a view whose identifier passes this bridge's counter,
-     and view_create gives a view one more than the greatest counter among its members (Transis's identifier, §3.1.1),
-     the counters as the members' records carry them and this bridge's own;
+     than that of V′." (Property 3.2): view_install installs only a view whose identifier is greater than the one
+     installed here, in JGroups' order of view identifiers (mesh.h mesh_view_compare), and view_create gives a view
+     one more than the greatest counter among its members (Transis's identifier, §3.1.1), the counters as the members'
+     records carry them and this bridge's own, with this process as its creator;
    - "(Initial View Event) Every send, recv and safe_prefix event occurs within some view." (Property 3.3), "so that no
      send events occur before the first view_chng event": no SUBMIT, ARRIVE or COUNT is sent here before this bridge's
      first view (orders_submit, orders_announce, counts_tell);
@@ -679,10 +674,11 @@ static void orders_deliver(uint64_t last);
    sequencer's map does (D.3.6)"; mesh.h hdr `view_map`; mesh-bridge.h plan_stale; "The revisions of 14b9a757", A7),
    reversing "hdr `map_serial` moved, while `map` is odd" and the decision that installation moves the serial D.3.6
    reads: `records` (the VIEW's v->records map records, mesh-map.h struct mesh_record) stored as the installed view's at
-   hdr `view_off` (mesh-map.h mesh_view_records), with `view_nodes` their count and `view` the view's identifier, under
-   `view_map` (mesh_notify before and after, as `map` is written), the bridge's counter now that one word
-   (struct installed's note); then plan_stale, which cancels every plan whose `serial` is not hdr `view`.  A plan is
-   made on those records (mesh-dataflow.c mesh_nodes_read) with the view's identifier as its `serial`, so it stands
+   hdr `view_off` (mesh-map.h mesh_view_records), with `view_nodes` their count and `view`, `view_sequencer` and
+   `view_boot` the view's identifier (mesh.h struct mesh_view_id), under `view_map` (mesh_notify before and after, as
+   `map` is written), the bridge's counter now `view` (view_installed's note); then plan_stale, which cancels every
+   plan whose view is not that identifier.  A plan is made on those records (mesh-dataflow.c mesh_nodes_read) with the
+   view's identifier as its `serial`, `sequencer` and `boot`, so it stands
    only within its view, and every member's plans of one view are computed from the same records ("So every member of
    a view computes the same plan from the same operands", F. B. Schneider, ACM Comput. Surv. 22(4), 1990).  The flush
    above runs before the store, so the old view's messages go to the old view's plans.  What must stay: the store under
@@ -690,15 +686,16 @@ static void orders_deliver(uint64_t last);
 static void view_install(const struct mesh_group_view *v,const uint32_t *member,const unsigned char *records){
   int named=0;
   for(uint32_t i=0;i<v->members;i++)named|=member[i]==M->node;
-  const uint64_t counter=view_installed();
-  if(!named || v->view<=counter)return;
-  if(counter && installed.sequencer==v->sequencer && installed.boot==v->boot)orders_deliver(v->last);
+  const struct mesh_view_id installed=view_installed(),id={.id=v->view,.sequencer=v->sequencer,.boot=v->boot};
+  if(!named || mesh_view_compare(id,installed)<=0)return;
+  if(installed.id && installed.sequencer==v->sequencer && installed.boot==v->boot)orders_deliver(v->last);
   pendings=0;nextdeliver=1;arrivals_held=0;
-  installed=(struct installed){.boot=v->boot,.sequencer=v->sequencer};
   mesh_notify(&M->view_map);
   memcpy(mesh_view_records(M),records,(size_t)v->records*sizeof(struct mesh_record));
   atomic_store_explicit(&M->view_nodes,v->records,memory_order_relaxed);
-  atomic_store_explicit(&M->view,v->view,memory_order_relaxed);
+  atomic_store_explicit(&M->view,id.id,memory_order_relaxed);
+  atomic_store_explicit(&M->view_sequencer,id.sequencer,memory_order_relaxed);
+  atomic_store_explicit(&M->view_boot,id.boot,memory_order_relaxed);
   mesh_notify(&M->view_map);
   plan_stale();
   record_changed();
@@ -732,7 +729,8 @@ _Static_assert(VIEW_BYTES(MESH_MAP_ROOM,MESH_MAP_ROOM)<=MESH_TOPOLOGY_MESSAGE_BY
    the map's order (ascending node id, map_put's), and is installed here with them as at every member.  What must
    stay: the view made after the tree it is sent down; its records the map's as it was created */
 static void view_create(const struct mesh_record *r,uint64_t n,const unsigned char *reached){
-  uint64_t greatest=view_installed();
+  const struct mesh_view_id installed=view_installed();
+  uint64_t greatest=installed.id;
   uint32_t members=0;
   for(uint64_t k=0;k<n;k++)if(reached[k]){members++;if(r[k].node!=M->node && r[k].view>greatest)greatest=r[k].view;}
   const size_t bytes=VIEW_BYTES(members,n);
@@ -757,13 +755,14 @@ static void view_create(const struct mesh_record *r,uint64_t n,const unsigned ch
    member from one that installed the sequencer's own view, each announcement names the process that created its
    bridge's installed view as well as its counter" (design/aot-compilation-change-request.md at mesh b5a3c6e6;
    design/compilation-coordination.md, "The revisions of b5a3c6e6", RV).  The view a record names is its counter and
-   its creator (mesh-map.h struct mesh_record `view`, `view_sequencer`, `view_boot`), as struct installed names the
-   view installed here; a member that installed the sequencer's own view names it whole, its counter equal to the
-   identifier, and creates none, nor does the sequencer's own record (record_changed writes it from `installed`).
-   What must stay: 0 at every node but the sequencer */
+   its creator (mesh-map.h struct mesh_record `view`, `view_sequencer`, `view_boot`), as hdr `view`, `view_sequencer`
+   and `view_boot` name the view installed here; a member that installed the sequencer's own view names it whole, and
+   creates none, nor does the sequencer's own record (record_changed writes it from view_installed).  "Other than"
+   and "not less than" are one test in JGroups' order of view identifiers (mesh.h mesh_view_compare): greater.  What
+   must stay: 0 at every node but the sequencer */
 static int view_announced(const struct mesh_record *record){
-  return island.self!=UINT32_MAX && island.self==island.sequencer && record->view>=view_installed() &&
-    (record->view!=view_installed() || record->view_sequencer!=installed.sequencer || record->view_boot!=installed.boot);
+  const struct mesh_view_id named={.id=record->view,.sequencer=record->view_sequencer,.boot=record->view_boot};
+  return island.self!=UINT32_MAX && island.self==island.sequencer && mesh_view_compare(named,view_installed())>0;
 }
 /* A VIEW heard from this node's parent in the island's tree (order_heard): relayed down, as an ORDER is, then
    installed here where it may be (view_install).  A payload that is not one struct mesh_group_view and its members is let
@@ -916,7 +915,7 @@ static int unsent;
 static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
   if(!mesh_algo_open(M) || mesh_algo(M)->group!=group)return NULL;
   struct mesh_state *state=mesh_algo_standing(M,(uint32_t)(epoch-1));
-  return state && state->serial==view_installed()?state:NULL;
+  return state && !mesh_view_compare(mesh_plan_view(state),view_installed())?state:NULL;
 }
 /* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
    "`queues_inside` (mesh-records.c 958, 1170)"; "Answered in the documents", "Run-time checks left": "mesh-records.c
@@ -958,7 +957,7 @@ static void arrivals_apply(void){
   for(size_t k=0;k<arrivals_held;){
     struct mesh_state *s=plan_here(arrivals[k].group,arrivals[k].epoch);
     const uint32_t at=view_index_of(arrivals[k].node);
-    if(arrivals[k].view!=view_installed()){arrivals[k]=arrivals[--arrivals_held];continue;}
+    if(mesh_view_compare(arrivals[k].view,view_installed())){arrivals[k]=arrivals[--arrivals_held];continue;}
     if(!s || s->sender!=self){k++;continue;}
     if(at<64)s->arrived|=UINT64_C(1)<<at;
     arrivals[k]=arrivals[--arrivals_held];
@@ -987,12 +986,12 @@ static void arrivals_apply(void){
    view's records (mesh-map.h mesh_view_records), whose places the plan's `sender` names, where it was this node's
    map's.  What must stay: a plan of another view not announced; none before the first view */
 static void orders_announce(int liveness){
-  const uint64_t view=view_installed();
-  if(!view)return;
+  const struct mesh_view_id view=view_installed();
+  if(!view.id)return;
   const struct mesh_record *r=mesh_view_records(M);
   struct mesh_state *state;
   for(uint32_t k=0;(state=plan_from(&k));k++){
-    if(state->serial!=view || (state->announced && !liveness))continue;
+    if(mesh_view_compare(mesh_plan_view(state),view) || (state->announced && !liveness))continue;
     const struct mesh_arrival a={.group=state->group,.epoch=state->epoch,.node=M->node,.sender=r[state->sender].node,
                                  .view=view};
     const int routed=tree_toward(ARRIVE,&a,sizeof a,a.sender);
@@ -1032,7 +1031,7 @@ static void orders_announce(int liveness){
    graph the sink's computes (mesh.h struct mesh_sync: the tell's `entry` the index of its edge among the sink plan's
    waits at the sink).  What must stay: each count only rising, this thread its one writer */
 static void count_take(const struct mesh_count *c){
-  struct mesh_state *s=c->view==view_installed()?plan_here(c->group,c->function):NULL;
+  struct mesh_state *s=!mesh_view_compare(c->view,view_installed())?plan_here(c->group,c->function):NULL;
   if(!s)return;
   _Atomic uint64_t *count=&mesh_syncs(M,s)[c->entry].count;
   if(c->count<=atomic_load_explicit(count,memory_order_relaxed))return;
@@ -1066,12 +1065,12 @@ static void count_take(const struct mesh_count *c){
    mesh_view_records), whose places an edge's `node` names: "Every member plans on those records", so the index names
    the same node at both ends by construction.  What must stay: as above */
 static void counts_tell(int liveness){
-  const uint64_t view=view_installed();
-  if(!view)return;
+  const struct mesh_view_id view=view_installed();
+  if(!view.id)return;
   const struct mesh_record *r=mesh_view_records(M);
   struct mesh_state *state;
   for(uint32_t k=0;(state=plan_from(&k));k++){
-    if(state->serial!=view || !state->tells)continue;
+    if(mesh_view_compare(mesh_plan_view(state),view) || !state->tells)continue;
     const uint64_t count=atomic_load_explicit(&state->submissions,memory_order_acquire);
     struct mesh_sync *edge=mesh_syncs(M,state)+state->waits;
     for(uint32_t e=0;e<state->tells;e++){
@@ -1098,8 +1097,8 @@ static void counts_tell(int liveness){
    records (view_index_of), where it was island.self, its place in this node's own map.  What must stay: as above */
 struct program_head { struct mesh_state *state; uint64_t seen; };
 static void orders_submit(void){
-  const uint64_t view=view_installed();
-  if(!view)return;
+  const struct mesh_view_id view=view_installed();
+  if(!view.id)return;
   const uint32_t self=view_index_of(M->node);
   for(int sent=1;sent;){
     sent=0;
@@ -1107,7 +1106,7 @@ static void orders_submit(void){
     size_t count=0,room=0;
     struct mesh_state *state;
     for(uint32_t k=0;(state=plan_from(&k));k++){
-      if(state->sender!=self || state->serial!=view)continue;
+      if(state->sender!=self || mesh_view_compare(mesh_plan_view(state),view))continue;
       if(count==room){
         struct program_head *grown=realloc(heads,(2*room+1)*sizeof *grown);
         if(!grown){free(heads);mesh_say("bridge","the programs' submissions not read (ENOMEM): read on a later turn");return;}
@@ -1407,11 +1406,12 @@ struct mesh_record *record_held(uint32_t node){
    identifier (A7: "Each bridge's announcement of itself to the sequencer carries its counter").  What must stay: as
    above */
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of b5a3c6e6", RV): and the process that created that
-   view, `installed`'s `sequencer` and `boot` (A7: "each announcement names the process that created its bridge's
-   installed view as well as its counter").  What must stay: as above */
+   view, hdr `view_sequencer` and `view_boot` (view_installed) (A7: "each announcement names the process that created
+   its bridge's installed view as well as its counter").  What must stay: as above */
 void record_changed(void){
+  const struct mesh_view_id view=view_installed();
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=(uint64_t)mesh_arena_pages(M)*M->pgsz,.memory=memory,
-                          .view=view_installed(),.view_boot=installed.boot,.view_sequencer=installed.sequencer};
+                          .view=view.id,.view_boot=view.boot,.view_sequencer=view.sequencer};
   memcpy(own.model,model,sizeof own.model);
   own.reached=record_reach(own.reach,MESH_PORTS);
   own.health=health;

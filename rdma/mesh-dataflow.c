@@ -494,7 +494,8 @@ int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
    sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates the
    view.  Every member plans on those records"; "So every member of a view computes the same plan from the same
    operands"; "The revisions of 14b9a757", A7), reversing the map's records: the installed view's records (mesh.h hdr
-   `view_nodes` of them at `view_off`, mesh-map.h mesh_view_records) and its identifier (hdr `view`) as `*serial`, read
+   `view_nodes` of them at `view_off`, mesh-map.h mesh_view_records) and its identifier (hdr `view`, `view_sequencer`,
+   `view_boot`: mesh.h mesh_view_installed) as `*view`, read
    whole under the view's seqlock `view_map` as the map's are under `map`: `view_map` read (acquire) even, the words
    read, an acquire fence and `view_map` read again the same (mesh.h mesh_map_whole's two steps, which that function
    takes for `map` alone).  ESTALE where no view is installed (`view` 0), after a whole read: the implementer's decision
@@ -502,7 +503,8 @@ int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
    and Chockler, Keidar and Vitenberg's "no send events occur before the first view_chng event" (Property 3.3), so a
    plan, whose sends are the view's, is made in some view; ESTALE is mesh_plan's "plan again" (mesh-collective.h).
    What must stay: one whole copy under the seqlock; the deadline's ESRCH and ETIMEDOUT as before */
-static int mesh_view_copy(struct mesh_ctx *c,uint64_t deadline,struct mesh_record *r,uint32_t *count,uint64_t *serial){
+static int mesh_view_copy(struct mesh_ctx *c,uint64_t deadline,struct mesh_record *r,uint32_t *count,
+                          struct mesh_view_id *view){
   struct hdr *m=c->M;
   for(;;){
     const uint64_t before=atomic_load_explicit(&m->view_map,memory_order_acquire),now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
@@ -513,13 +515,13 @@ static int mesh_view_copy(struct mesh_ctx *c,uint64_t deadline,struct mesh_recor
       continue;
     }
     const uint64_t nodes=atomic_load_explicit(&m->view_nodes,memory_order_relaxed),at=m->view_off;
-    *serial=atomic_load_explicit(&m->view,memory_order_relaxed);
+    *view=mesh_view_installed(m,memory_order_relaxed);
     const int fits=at>=sizeof *m && at<=c->len && nodes<=(c->len-at)/sizeof *r;
     if(fits && nodes<=MESH_NODES_MOST)memcpy(r,(char *)m+at,nodes*sizeof *r);
     if(!mesh_seqlock_whole(&m->view_map,before))continue;
     if(!fits)return EINVAL;
     if(nodes>MESH_NODES_MOST)return E2BIG;
-    if(!*serial)return ESTALE;
+    if(!view->id)return ESTALE;
     *count=(uint32_t)nodes;return 0;
   }
 }
@@ -546,16 +548,17 @@ static uint64_t mesh_capacity(const struct mesh_record *a,const struct mesh_reco
    mesh.h hdr `view`: "A plan is made on those records (mesh-dataflow.h mesh_nodes_read), its `serial` `view`"; "The
    revisions of 14b9a757", A7), reversing "`serial` is the map's (hdr `map_serial`)": the nodes, their indices,
    capacities and this node's index are the installed view's records' (mesh_view_copy), read as the map's were, and
-   `serial` is the view's identifier; ESTALE where no view is installed, besides mesh-dataflow.h's errors.  What must
-   stay: a node's index its place in ascending node-id order among the records; the pairs' capacities mesh_cables' */
+   `serial`, `sequencer` and `boot` are the view's identifier (mesh.h struct mesh_view_id, read with the records);
+   ESTALE where no view is installed, besides mesh-dataflow.h's errors.  What must stay: a node's index its place in
+   ascending node-id order among the records; the pairs' capacities mesh_cables' */
 int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
   struct mesh_record r[MESH_NODES_MOST];
   uint32_t count,order[MESH_NODES_MOST];
-  uint64_t serial;
-  int error=mesh_view_copy(c,clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS,r,&count,&serial);
+  struct mesh_view_id view;
+  int error=mesh_view_copy(c,clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS,r,&count,&view);
   if(error)return error;
   mesh_map_order(r,count,order);
-  *out=(struct mesh_nodes){.serial=serial,.count=count,.self=MESH_ABSENT};
+  *out=(struct mesh_nodes){.serial=view.id,.count=count,.self=MESH_ABSENT,.sequencer=view.sequencer,.boot=view.boot};
   for(uint32_t i=0;i<count;i++){
     out->node[i]=r[order[i]].node;
     if(out->node[i]==c->M->node)out->self=i;
@@ -699,13 +702,15 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
      count only rises (appendix item 2, "a count that only rises"), so a value read that differs from the one before is
      a rise.  A bounded wait: each one of os_sync_wait_on_address_with_timeout's ends by its bound, and the loop ends at
      ETIMEDOUT where the count stops rising short of its bound.
-   - ESTALE where the plan's serial is not the installed view's identifier (mesh.h hdr `view`, acquire), where it was hdr
-     `map_serial`: the plan's `serial` is the view it was made in (mesh.h struct mesh_state; aot A7, corrected
-     2026-11-06: "A plan then stands while its view does, and its view while the sequencer's map does"), and a view's
-     installation cancels every plan of another (mesh-records.c view_install, mesh-flow.c plan_stale), raising each
-     edge's count to UINT64_MAX and waking it, so a waiter of the old view reads that or ESTALE.
-   - After the raise, the fence, then hdr `view`'s read, ESTALE where it is not the plan's serial: the pairing above,
-     with the view's installation (view_install stores `view`, then plan_stale fences and reads the plans' `executions`).
+   - ESTALE where the plan's view is not the installed view's identifier (mesh.h mesh_view_compare of mesh_plan_view and
+     mesh_view_installed, acquire), where it was hdr `map_serial`: the plan's `serial`, `sequencer` and `boot` are the
+     view it was made in (mesh.h struct mesh_state; aot A7, corrected 2026-11-06: "A plan then stands while its view
+     does, and its view while the sequencer's map does"), and a view's installation cancels every plan of another
+     (mesh-records.c view_install, mesh-flow.c plan_stale), raising each edge's count to UINT64_MAX and waking it, so a
+     waiter of the old view reads that or ESTALE.
+   - After the raise, the fence, then the installed view's identifier read, ESTALE where it is not the plan's view: the
+     pairing above, with the view's installation (view_install stores the identifier, then plan_stale fences and reads
+     the plans' `executions`).
    What must stay: the waits before the raise, nothing raised where one fails; the raise before the fence, the serial's
    read after it */
 /* the plan's row of waits into its call at place `place` (mesh.h struct mesh_state `rows`): row[0] the index at `syncs`
@@ -727,7 +732,7 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
                until=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
       while(seen<need){
         const uint64_t now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-        if(atomic_load_explicit(&m->view,memory_order_acquire)!=state->serial)return ESTALE;
+        if(mesh_view_compare(mesh_view_installed(m,memory_order_acquire),mesh_plan_view(state)))return ESTALE;
         if(now>=until)return ETIMEDOUT;
         os_sync_wait_on_address_with_timeout(&edge[e].count,seen,sizeof edge[e].count,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
                                              OS_CLOCK_MACH_ABSOLUTE_TIME,until-now);
@@ -745,7 +750,7 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
   }
   mesh_notify(&m->plans);
   atomic_thread_fence(memory_order_seq_cst);
-  return atomic_load_explicit(&m->view,memory_order_relaxed)!=state->serial?ESTALE:0;
+  return mesh_view_compare(mesh_view_installed(m,memory_order_relaxed),mesh_plan_view(state))?ESTALE:0;
 }
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed (sub-assignment 7's 2026-11-03 wait, bounded by
