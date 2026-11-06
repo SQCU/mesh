@@ -3169,3 +3169,273 @@ Open, outside these points:
   chains (PB R2). The operator: "ok so we're done with this topic because the constraints which seemed to require
   heroic intervention were fictional and involved only idiomatic code." Left is a measurement, when runs are
   authorized: whether TLB reach over a mapped run differs from the region's own mapping.
+
+## The revisions of 4e78f6f4
+
+The record of the unit whose instruction is "The documents' corrections of 2026-11-05 (the coordinator)" above, points
+1, 2 and 4 to 8, from mesh 4e78f6f4 and metal-microbench e9fd7538, with the documents as 389c4072 and f715c249 revised
+them during the unit (point 5's answers on the plan call's form and on how the bridge finds a program's plans; A9, "What
+the bridge runs: the self-timed schedule"). Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every
+sub-agent)". The coordinating implementer fixed the shared interface first (dd215cbe), then five sub-agents worked on
+disjoint files: G (rdma/mesh-graph.c), C (rdma/mesh-collective.c), D (rdma/mesh-dataflow.c, mesh-call.c, mesh-flow.c,
+mesh-records.c, mesh-link.c, mesh-stat.c, mesh-bridge.h), T (rdma/mesh_compile.py, mesh.py, mesh-torch.mm) and E
+(metal-microbench tools/e2b_replay.m). T's session ended on a network error after its last commit and before its report;
+its decisions below are read from its notes at the code. Nothing was run but the compilers, `python3 -m py_compile` and
+the four incremental builds.
+
+### Done
+
+- **Point 1, capture by `torch.export`** ("capture each torch program with `torch.export` before it runs, the same at
+  every rank, with nothing run eagerly between compiled calls. rdma/mesh_compile.py's Dynamo backend (`serialize`)
+  goes"). T, 44ebaa3b and 35711f88:
+  - A compiled function is `Function(module, placement, weights)`, a leaf of A10's tracer. `backend`, `serialize`, the
+    Dynamo markers and `CALLING` are gone.
+  - `program(block, *example_inputs)` traces the block and runs it once over fake tensors (`_Export`, a
+    torch.fx.Interpreter in a FakeTensorMode). It refuses at compile time any node that is not a placeholder, a call of
+    a compiled function, an `operator.getitem` of such a call's result, or the output.
+  - Each call is exported as mesh's engines.py captured, `torch.export.export(module, args, kwargs, strict=False)`.
+    Then come `run_decompositions({})` (torch 2.14.0 exported_program.py: "If empty, we don't decompose any
+    operator") and `module(check_guards=False)`. A function called with other metadata is another compiled function.
+  - Ordinals follow program order, so every rank names them alike whatever its device. This answers "The revisions of
+    e4a7398e", "Where the documents are wrong", A4's compile count.
+  - The partitioner reads the exported graph's ATen operators: its tables are `torch.ops.aten` packets.
+- **Point 2, a node with no section** ("start its plans' executions and relay, and compute nothing. `_absent` goes").
+  - T's `_execute` raises the plan's executions (mesh_transfers_start) and returns no value where the function maps
+    this node no device. `_absent` is gone.
+  - A call with a section that reads such a call's result is refused at compile time (A4, withdrawn text: "it has no
+    value for any program code to read").
+- **Point 4, the program's whole IPC graph** ("build the program's whole IPC graph at compile time, every function
+  together, with each queue's room (5) in it. `plan_rooms`' part graph goes"). C, c6c9c77f and 8d697c32, to the brief:
+  - **Actors.** `plan_graph` builds one graph over every call of the block: σ_j and β_j for each call at the sender,
+    and x_{j,v} for each node of its function's plan ("The actors are each node's parts of the program's calls").
+  - **Edges.**
+    - The sender's two sequences in program order, as BSL §4.1's processor cycle (delay 1 back).
+    - Each call's queues and transfers (delay u, mapped to the block's executions).
+    - A10's edges from each call's end to the start of its function's call `outstanding` calls later.
+  - **Conversion and rooms.** Convert-to-SC-graph and DetermineDelays run over the whole graph. Each queue's room is
+    the sum of its calls' bounds (5).
+  - **Synchronization edges.** Each added edge is a struct mesh_sync entry, a wait at its sink's plan and a tell at
+    its source's (mesh.h 117). D implemented the waits (mesh_transfers_start) and the carrying of the counts
+    (counts_tell and count_take; struct mesh_count `function`, the sink plan).
+- **Point 5, one offline allocation** ("place the whole program's values in one offline allocation at compile time.
+  These go: `mesh_claim_take`'s first fit and the claim's head record; `mesh_plan_head`'s walk ...; `ENOMEM` from
+  fragmentation. Release at retirement stays deferred reclamation (RCU). The program's group still names its plans").
+  - **The plan call** takes A8's one IR of the whole program and writes A9's serialized operand, as 389c4072 answers:
+    "The plan call's form for a whole program is A8 and A9". The IR is struct mesh_function per compiled function and
+    `calls`, A10's calls in program order (dd215cbe).
+  - **The serialized operand's root** is at the layout's one place: struct mesh_program at hdr `program_off`, laid out
+    after the bridge's pages (mesh-map.h). Its `table` names each function's state section. The bridge reads the plans
+    there (mesh_program_plan, D's `plan_from`), as 389c4072 and f715c249 answer: "the serialized operand's place is a
+    constant the region's layout names once"; A9, "the bridge reads the serialized operand at a place its compilation
+    fixed, and searches for nothing".
+  - **Gone.** D removed mesh_claim_take, mesh_claim_close, mesh_head_after, mesh_head_state, mesh_plan_head and the
+    first fit. Every walk of claim heads in mesh-flow.c, mesh-records.c, mesh-link.c and mesh-stat.c is gone, and so
+    are mesh_transfers_start's tests of its handle.
+  - **Retirement.** mesh_plan_retire closes one plan's state. mesh_retire closes the root. mesh_retired_release frees
+    the root, as deferred reclamation, once no port's `prepared` is its generation and no plan's `held` is set.
+  - **Numbering.** C numbers rows from row 0 and blocks from each space's first; there is no claim and no
+    fragmentation.
+- **Point 6, a value as its ordered page-table rows** ("Represent a value as its ordered page-table rows ... Place
+  every value's pages anywhere, by the fewest chains of the interference order ... Dilworth's theorem, computed by
+  Fulkerson's bipartite matching ... Give an operand typed as one run its run as a mapping written when the plan is
+  made ... Greedy by size goes, with `mesh_graph_left_edge`'s colouring").
+  - **The chains.** G wrote mesh_graph_chains: Fulkerson's network with each item one vertex of capacity its blocks,
+    a maximum flow by Hopcroft and Karp's (Dinic's) phases, the chains numbered by their first elements (876b1d69).
+    It removed mesh_graph_left_edge.
+  - **The placement.** C places every item of every function by it, one call per space, under the order `plan_before`
+    (decision PO-1 below). Rows are bound block by block, each block anywhere.
+  - **The mapping.** `run` values get one mapping (mesh_view_compose: ncclMeshPageTableCompose's reservation and
+    `mach_vm_remap`, restored from 1b372d09^ by D, 19c8f25e). 6b9d357b remaps a run of consecutive blocks at once, as
+    that function did.
+  - **Readers.** mesh_section_address names one row's block (D, 32a72160). E binds every e2b value through the
+    mapping in one MTLBuffer (d81575db); T binds CPU and MPS tensors over it.
+- **Point 7, transfers land in their value's pages** ("name, in each declared transfer, the pages of its destination
+  value that it lands in, as NCCL's receives land at offsets of one result ... no concatenation and no copy of a part
+  remains").
+  - **The interface.** struct mesh_declared `first`. C maps each range to blocks [first, first + P) of its value, with
+    its words at its own first row. The value's uncovered blocks are one item that shares no block.
+  - **Torch.** T lands AllGather's and AllToAll's parts at their places (torch.cat goes). ReduceScatter's slices and
+    the AllReduce root's partials land at their places in one value, summed by torch.add's out variant. A piece is sent
+    from its place in its producer's value, and `send`'s copy of a part goes (#6's stop 2).
+  - **e2b.** Its `first` is 0: each route is one whole operand at both ends, and every consumer binds each received
+    operand as its own input (E's reading of e2b_ir and the manifest). No concatenation or copy was there to remove.
+- **Point 8, torch MPS operands typed** ("the IR types each such operand, and the plan writes its mapping"). T types
+  every value it binds as a tensor `run` 1 and binds MPS tensors over one MTLBuffer made over the whole mapping, which
+  keeps PV-2's reason: one resource's accesses, which Metal's hazard tracking orders. `_Mapping` releases the view by
+  reference count once no tensor over it remains (G. E. Collins, 1960, cited at the code).
+- **The coordinator's findings on #6.**
+  - rdma/mesh-section.h holds the one struct mesh_section, C/C++-safe, and mesh-call.h and mesh-torch.mm include it
+    (dd215cbe, 32d9fcc3).
+  - `send`'s `pages(value).copy_(source)` is gone for parts (point 7). A copy stays where item 7's "What stays" puts
+    one ("an operator with no out variant, whose result is copied once into its placed pages where it must be there").
+
+### Found already done
+
+- e2b concatenates no received part (point 7): each consumer binds each received operand as its own input (E).
+- The program's sender, its views and its queues (A7, appendix item 2) needed no change but the edges' entries.
+- metal_recording.m compiled against the new headers unchanged; E's finding on its barrier is below.
+
+### Decisions taken where the documents are silent (each the named implementer's, with its reason)
+
+The two places the coordinator's first brief called open are not decisions: point 5's text (389c4072, f715c249) answers
+both. They are under Done, as A8 and A9 (the plan call) and A9 and R1 (the root at the layout's place).
+
+The coordinating implementer's:
+- **PO-1, the order over the copies.** R2 states the relation for one execution: "Two items may share a page exactly
+  when one's last access happens before the other's first write ... That relation is a partial order".
+  - Over u copies a page is written again by its chain's first item at c_1 + u. So copies (v, c) and (w, c′) are
+    ordered where c ≤ c′, c′ − c ≥ D_vw (D_vw = 0 and v ≠ w where c = c′), and c′ + E_w ≤ u, with E_w the largest
+    least lag from w's reads to any write at the node.
+  - The last clause gives every chain's wrap (c_k + E_{x_k} ≤ u ≤ c_1 + u) and keeps the relation transitive, by the
+    least lags' triangle through y's write before its reads, as Dilworth's theorem needs.
+  - C checked it and found it sound and conservative: it can cost pages.
+- **PO-2.** Items of different functions are unordered: no edge of either template orders them. Invariants, state
+  sections, the table, a lag-k value's copies and a named value's uncovered blocks are unordered with every item, as
+  plan_interferes had them interfering.
+- **PO-3, multiplicities.** An item's blocks are its multiplicity in Fulkerson's network (a vertex of capacity count on
+  each side), so the network has one vertex an item, not one a block. This is the same matching, with interchangeable
+  elements.
+- **PO-4, the state sections and the table are one run each.** mesh_graph_chains numbers an item ordered with no
+  other consecutively, so their readers (the bridge, mesh-metal.m) address them by region offset as before.
+- **IG-1, per-call actors.** Each call of the block is its own actor, and a function's plan has `calls` of them at a
+  node, its k-th start the call at place k mod `calls` (mesh.h struct mesh_state). Appendix item 6 makes a plan a
+  compiled function ("each call launch one execution of its function"), and "The actors are each node's parts of the
+  program's calls". So a plan can have several synchronization edges at a node, struct mesh_sync's entries.
+- **IG-2, A10's and the transfers' delays.** An edge of delay d in a function's executions runs from call place i to
+  (i + d) mod n, with delay ⌊(i + d) / n⌋ in the block's executions. For one call it is BS's x_s → σ and x_v → x_v.
+- **IG-3, BS-4 for an actor of a call.** A count of starts at a node implies the end of the call A10's edge leads
+  from. So a wait entry's `position` is the tail's A10 successor's place, and its delay in the rooms is DetermineDelays'
+  δ plus that edge's delay.
+- **IG-4.** A queue's room is the sum of its calls' bounds (5): one queue carries every call's tokens.
+- **EB-1, EBUSY.** mesh_plan refuses where the root's `owner` is not 0, before anything is written. The run is one
+  program on the whole collective (A7, corrected), and a page is reused only after deferred reclamation's release
+  (C3.4; RCU). A replan after ESTALE waits for the bridge's release: the torch program raises EBUSY and its next call
+  plans again.
+- **MV-1, one mapping a program.** It has one release, and one MTLBuffer over it keeps PV-2's one resource.
+- **Hunks in files no sub-agent held, each required by this unit's scope:**
+  - metal-microbench metal_recording.m (dc862ecb). MetalEncoder's queue barrier's visibility is Device |
+    ResourceAlias. E found that the mapping puts two values sharing a block at two virtual addresses of one page.
+    MTL4CommandEncoder.h: MTL4VisibilityOptionResourceAlias "Flushes caches to ensure that aliased virtual addresses are
+    memory consistent".
+  - metal-microbench Makefile:
+    - 0f3ae103 names libmesh's graph and section inputs, which the sub-make's rule omitted;
+    - 8c3a8e06: 0f3ae103 made the SDK's stamp older than the Makefile, its prerequisite, so the e2b build remade an
+      unchanged SDK, whose sparse-checkout step then failed on the existing clone. The stamp now takes its operands as
+      text, as rdma/Makefile keeps HiGHS's (HIGHS_INPUTS). "A dependency is remade only when its own inputs change."
+  - mesh rdma/Makefile:
+    - 4bfa3b55 lists mesh-section.h;
+    - 9c5210b3 makes mesh-stat from its own inputs (D's finding: it calls nothing of mesh-dataflow.c now).
+  - rdma/mesh-torch.mk: a571a6a6 lists mesh-section.h.
+  - rdma/mesh-ports.c: a comment's struct name.
+  - mesh.h mesh_program_state: one reading of a table word, where three files read it (D's finding; 9c5210b3).
+
+G's:
+- Which elements of an item continue chains: the first in[j] of item j continue, and the rest start chains. The
+  decomposition order is items by their predecessor counts, a linear extension. It is deterministic.
+- The bound: counts and items below 2^32, so every flow and chain number fits in 64 bits.
+
+C's:
+- `count` or `ncalls` 0 is EINVAL: no actor, so no graph.
+- One chains call where the window is the whole arena.
+- ENOMEM where the rows pass the page table's.
+- No run-time test that an added edge's tail is an x with an A10 edge: σ₀ reaches every vertex, so no sink SCC holds
+  a σ or β (the argument is at the code).
+- ρ is computed per call, so memory is O(V + E).
+- The map is read before the operand tests, so a malformed operand may report the reader's error first.
+
+D's:
+- The bridge's VIEW payload is renamed struct mesh_group_view, where mesh-dataflow.h's struct mesh_view collided with
+  it.
+- `plan_from`, one iterator for seven readers.
+- `clients_turn` keeps its exit watch beside mesh_holds.
+- Only a start that submits waits.
+- mesh_view_compose has no alignment operand.
+
+E's:
+- One MTLBuffer over the whole mapping. Metal 4's barriers name stages, not resources (MTL4CommandEncoder.h).
+- The mapping is released after mesh_detach.
+- The handle's EINVAL test after mesh_plan is dropped (point 5).
+
+T's (from its notes):
+- Example values are fake tensors. A function called with other metadata is another compiled function (JAX's trace
+  cache).
+- `_RemoveRuntimeAssertionsPass` (torch/_export/passes) strips the export's runtime assertions before partitioning.
+- A part not a run of its producer's value is sent from a value of its own, copied once (item 7's "What stays").
+- `_Mapping`'s reference count.
+
+### Where the work stopped
+
+- **IG-5, a node's actors in program order.** Appendix item 2: "The processors are the program's nodes. The actors are
+  each node's parts of the program's calls, in program order", with BSL §4.1's cycle.
+  - Against it: the same item, "Delivery does not wait for any earlier call to finish ... A call still running at a
+    node delays no later call's delivery there"; and A9 (f715c249): "Its processors are the sends of each adjacent
+    node and direction, R5's cables".
+  - A node's parts of successive calls overlap, so edges forcing them in sequence would bound the queues by an order
+    the code does not keep. They are not built. The sender's program thread and its TO-broadcast are sequential and
+    are built so.
+- **AllToAll's own piece** (T). The operand is one tensor its producer's out variant writes, and the other pieces are
+  sent from it, so the own piece reaches its place in the result by one copy, as NCCL moves a rank's own block by a
+  send to itself. Against point 7's "no copy of a part remains".
+- **A part that is no run of blocks** (T, `_landing`). A collective whose parts along their dimension are not runs of
+  the result's blocks, each beginning a block, is refused at compile time, citing point 7 and `first`. That covers a
+  gather along an inner dimension, or parts of a partial block. Point 7 names pages, and a page lands whole.
+
+### Where the documents are wrong, or contradict the code's facts
+
+- **Appendix item 2 against itself and A9**, the processors (IG-5 above).
+- **R2's "That relation is a partial order"** holds over one execution. Over u copies the wrap from a chain's last
+  item to its first's next instance is not implied by the pairwise relation; PO-1's clause restores transitivity.
+- **"Every failure but ESTALE and the second map read's is found before anything is written"** (mesh-collective.h)
+  cannot hold for the mapping. mesh_view_compose reads the rows' bindings, so a mapping Mach refuses is found after
+  them (C), and the root is then not published (d64b93e6).
+- **The coordinator's first brief** called the plan call's form and the bridge's finding of plans open. The documents
+  answer both (389c4072).
+
+### Open
+
+- **Aliased virtual addresses within one encoder.** The recorder's in-encoder barriers (the indirect command buffer's)
+  name no visibility. Whether they make aliased addresses of one page consistent is not stated in the headers. The
+  same holds for torch's MPS work over the one buffer. Both need a run.
+- **The C9 hook's remarks:**
+  - On dd215cbe, that the whole IPC graph "moves into the graph module": its algorithms are the graph module's
+    (cycle_mean, convert_sc, determine_delays, lags), and mesh_plan builds their operands.
+  - On 19c8f25e, on mesh_transfers_start's threshold (K − delay) × every + position + 1: BSL (7)'s arithmetic at the
+    sink, not a walk; not moved.
+  - On c6c9c77f, a walk over a parent table: moved to mesh_graph_rows (8d697c32).
+  - On T's commit, a walk up the narrows: moved to mesh_graph.forward (35711f88).
+- **Run-time checks left, outside these points** (D): mesh-records.c `queues_inside` and mesh-flow.c link_prepare's
+  room and entry tests check facts the plan fixes at compile time.
+- mesh-collective.h's IPC and order notes are the coordinating implementer's derivations, and they await the
+  operator's ruling.
+
+### Commits
+
+- mesh:
+  - dd215cbe (the interface: mesh.h, mesh-map.h, mesh-collective.h, mesh-dataflow.h, mesh-call.h, mesh-graph.h,
+    mesh-section.h);
+  - 4bfa3b55, 9c5210b3, d64b93e6, 6b9d357b, a571a6a6 (the coordinating implementer's);
+  - G: 876b1d69;
+  - C: c6c9c77f, 8d697c32;
+  - D: 19c8f25e, 32a72160, e2effc95, 8e0ffb74, 84f569e2, a54e1774, d9b4e570;
+  - T: 32d9fcc3, 44ebaa3b, 35711f88;
+  - this record.
+- metal-microbench: 0f3ae103, dc862ecb, 8c3a8e06 (the coordinating implementer's); E: d81575db.
+
+### Integration
+
+At mesh a571a6a6 and metal-microbench 8c3a8e06. Every build was incremental; HiGHS and the LiteRT/Dawn SDK were not
+rebuilt.
+- **`make -C rdma`:** exit 0, no warning.
+  - First whole build after C's c6c9c77f: 2.8 s. mesh-flow, mesh-heartbeat (its mesh.h changed), mesh-stat and
+    libmesh.dylib were remade.
+  - Later runs: up to date.
+- **`make -C rdma native-audit`:** exit 0, no warning.
+- **`make -C rdma -f mesh-torch.mk TORCH=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch`:** exit 0, no
+  warning, about 1 s.
+- **`make .build/e2b_replay`:** exit 0, no warning, 1.6 s. libmetal_recording, libmesh_metal and e2b_replay were
+  remade.
+  - The first try, before 8c3a8e06, stopped at the SDK's stamp, as above. Nothing was changed.
+- **Compiled alone first** with `-Wall -Wextra -Werror`, exit 0: every changed C file, the failport lifecycle files
+  (unchanged), mesh-ports.c, mesh-events.c, mesh-metal.m, e2b_replay.m, and metal_recording.m with metal_native.m.
+- **Python:** `python3 -m py_compile` passes rdma/mesh_compile.py and rdma/mesh.py.
+- **Nothing was run.** No plan, mapping, binding, export or publish here has been exercised.
