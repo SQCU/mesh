@@ -63,6 +63,11 @@ other projects, such as a game bot, and old dated records; they are not listed h
   only existing kernels. Its appendix gives each plan its own queue of delivered calls at each node (synchronous
   dataflow's FIFO queue on each arc), merged by sequence number, its room the self-timed buffer bound and feedforward
   queues put on cycles at compile time (Bhattacharyya, Sriram and Lee: Bfb, BBS, Convert-to-SC-graph).
+- [design/problems-of-14b9a757-change-request.md](design/problems-of-14b9a757-change-request.md): the twelve problems
+  the revisions of 14b9a757 created, each with its code, the published source quoted verbatim and the change. The
+  sources are MPI 4.1 §§6.1.3, 6.1.11, 7.7 and 7.8, MPICH's local copies, NCCL's in-place condition, GSPMD §§4.3 and 4.5
+  and its Appendix A.2, XLA's CollectivePermute, torch's `view`, `reshape` and `contiguous`, ExecuTorch's memory
+  planning, Garey and Johnson's SR2, loop-invariant code motion, Lee and Ha's self-timed schedule, and JGroups' ViewId.
 - [design/compilation-coordination.md](design/compilation-coordination.md): the coordinating agent's contract for
   the two change requests above (the file split, the names files share, the task graph and its contention schedule,
   plans in their claims and the island's fixed sequencer, the provisional operands, the sources read) and the record
