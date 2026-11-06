@@ -267,8 +267,8 @@ struct plan {
   uint32_t dependences;
   struct plan_demand *demand;             /* the demands, by their first declared transfer (GO5) */
   uint32_t demands,n,self,copies;         /* copies: u (plan_unroll) */
-  struct mesh_view_id view;               /* mesh_nodes_read's: the installed view's identifier (mesh.h struct
-                                             mesh_view_id; JGroups ViewId.java) */
+  struct mesh_view_id view;               /* JGroups ViewId.java: "Lamport time of the view", "Address of the
+                                             creator of this view" */
   uint32_t *of;                           /* of[i]: declared[i]'s demand, p->demand[of[i]] */
   /* the node graph (design/compilation-coordination.md, T2): pair e joins from[e] < to[e], of capacity[e], the lesser
      of the two directions' map capacities; `pairs` of them */
@@ -2957,8 +2957,9 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
      refuses a plan whose `serial` is not `map_serial` as it loads it, and cancels one that stands where the serial
      moves: mesh.h, "Cancellation").  2026-11-06 (A7, corrected 2026-11-06; "The revisions of 14b9a757", A7): the
      serial the installed view's identifier (mesh-dataflow.h mesh_nodes_read), so ESTALE where the installed view moved
-     while planning, as written; a bridge cancels a plan whose view (mesh.h mesh_plan_view) is not the installed view's
-     identifier (mesh.h mesh_view_compare; mesh-bridge.h plan_stale).
+     while planning, as written; a bridge cancels a plan whose view is not the installed view's identifier (JGroups
+     ViewId.java: "The comparison is done on the IDs, if they are equal, we use the creator."; mesh-bridge.h
+     plan_stale).
      What must stay: the second read after every write, ESTALE as written */
   if(!(status=mesh_nodes_read(context,&after)) &&
      mesh_view_compare((struct mesh_view_id){.id=after.serial,.sequencer=after.sequencer,.boot=after.boot},
