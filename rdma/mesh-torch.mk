@@ -8,7 +8,9 @@
 # program has already loaded, never a second copy.  A makefile of its own, so rdma/Makefile, a prerequisite of the
 # bridge's targets, is unchanged by it (the operator, 2026-11-05: "stop arbitrarily rebuilding unchanged dependencies")
 TORCH ?=
-libmesh-torch.dylib: mesh-torch.mm mesh-torch.mk
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of 4e78f6f4"): mesh-section.h, which mesh-torch.mm
+# includes since 32d9fcc3, among the inputs.  What must stay: remade only when its own inputs change
+libmesh-torch.dylib: mesh-torch.mm mesh-torch.mk mesh-section.h
 	$(if $(TORCH),,$(error TORCH: the installed torch package directory, .../site-packages/torch))
 	c++ -std=c++20 -fblocks -O2 -Wall -Wextra -Werror -isystem $(TORCH)/include -dynamiclib \
 	  -Wl,-install_name,@rpath/libmesh-torch.dylib -undefined dynamic_lookup -framework Foundation -framework Metal \
