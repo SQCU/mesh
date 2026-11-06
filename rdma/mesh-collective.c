@@ -87,9 +87,8 @@ struct plan {
   struct mesh_value *given;
   uint32_t givens;
   unsigned char *named;
-  uint32_t *uncovered;
   uint64_t *cut,*at,toward;
-  uint32_t sets,set_item,*set_first,*member,*set_blocks,*set_far,*block_first,*block_set,*block_element;
+  uint32_t sets,set_item,*set_first,*member,*set_blocks,*set_far,*set_of;
   const struct mesh_weight *weights;
   const struct mesh_dependence *dependence;
   uint32_t dependences;
@@ -423,10 +422,10 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
     }
     for(uint32_t j=0;j<p->givens;j++){
       const struct mesh_value *v=p->given+j;
-      if((p->named[j]?1u:v->wire)!=space)continue;
+      if(p->set_of[j]!=MESH_ABSENT || (p->named[j]?1u:v->wire)!=space)continue;
       const uint32_t kind=v->kind==MESH_EXECUTION && !v->lag?PLAN_LOCAL:PLAN_ALONE;
-      p->item[j]=p->uncovered[j]?(uint32_t)x->items:MESH_ABSENT;
-      for(uint32_t c=0;p->uncovered[j] && c<plan_copies(p,j);c++)plan_item_put(x,kind,f,j,c,p->uncovered[j],space);
+      p->item[j]=(uint32_t)x->items;
+      for(uint32_t c=0;c<plan_copies(p,j);c++)plan_item_put(x,kind,f,j,c,plan_blocks(m,v->section.bytes),space);
     }
     if(!space){p->state=(uint32_t)x->items;plan_item_put(x,PLAN_ALONE,f,0,0,plan_blocks(m,p->words),0);}
   }
@@ -531,9 +530,7 @@ static uint32_t plan_page(const struct plan_placement *x,uint32_t block,uint32_t
 
 static uint32_t plan_frame(const struct plan *p,const struct plan_placement *x,uint32_t block,uint32_t j,uint32_t c,
                            uint32_t k){
-  if(p->block_first[j]==MESH_ABSENT)return plan_page(x,block,p->item[j]+c,k);
-  const uint32_t at=p->block_first[j]+k,s=p->block_set[at];
-  return plan_page(x,block,s==MESH_ABSENT?p->item[j]+c:p->set_item+s*p->copies+c,p->block_element[at]);
+  return plan_page(x,block,p->set_of[j]==MESH_ABSENT?p->item[j]+c:p->set_item+p->set_of[j]*p->copies+c,k);
 }
 /* MTL4CommandEncoder.h, MTL4VisibilityOptionResourceAlias: "Flushes caches to ensure that aliased virtual addresses are
    memory consistent" (`shares`) */
@@ -1154,119 +1151,48 @@ static int plan_landings(const struct plan *p){
   return status;
 }
 
-struct plan_touch { uint64_t start,end; uint32_t value,member; };
-static int plan_touch_order(const void *a,const void *b){
-  const struct plan_touch *x=a,*y=b;
-  if(x->value!=y->value)return x->value<y->value?-1:1;
-  return (x->start>y->start)-(x->start<y->start);
-}
-static int plan_member_order(const void *a,const void *b){
-  const uint32_t x=*(const uint32_t *)a,y=*(const uint32_t *)b;
-  return (x>y)-(x<y);
-}
-struct plan_cover { const uint32_t *member; uint32_t members,value,block; };
-static int plan_same_set(const struct plan_cover *x,const struct plan_cover *y){
-  return x->members==y->members && !memcmp(x->member,y->member,(size_t)x->members*sizeof *x->member);
-}
-static int plan_cover_order(const void *a,const void *b){
-  const struct plan_cover *x=a,*y=b;
-  for(uint32_t k=0;k<x->members && k<y->members;k++)
-    if(x->member[k]!=y->member[k])return x->member[k]<y->member[k]?-1:1;
-  if(x->members!=y->members)return x->members<y->members?-1:1;
-  if(x->value!=y->value)return x->value<y->value?-1:1;
-  return (x->block>y->block)-(x->block<y->block);
+static uint32_t plan_demand_value(const void *context,size_t i){
+  const struct plan *p=context;
+  const struct plan_demand *d=p->demand+i;
+  return d->mine==MESH_ABSENT || d->value==MESH_ABSENT?p->givens:d->mine;
 }
 static int plan_sets(struct plan *p,const struct hdr *m){
-  const uint64_t quantum=plan_quantum(m);
-  uint64_t blocks=0,touches=0,relays=0;
-  if(!(p->block_first=malloc(((size_t)p->givens+1)*sizeof *p->block_first)))return ENOMEM;
-  for(uint32_t j=0;j<p->givens;j++){
-    p->block_first[j]=MESH_ABSENT;
-    if(!p->named[j])continue;
-    p->block_first[j]=(uint32_t)blocks;
-    if((blocks+=plan_blocks(m,p->given[j].section.bytes))>=UINT32_MAX)return ENOMEM;
+  size_t *first=malloc(((size_t)p->givens+2)*sizeof *first),*order=malloc(((size_t)p->demands+1)*sizeof *order);
+  uint64_t sets=0;
+  int status=!first || !order?ENOMEM:0;
+  if(!status){
+    mesh_graph_rows(p->givens+1,p->demands,plan_demand_value,p,first,order);
+    for(uint32_t j=0;j<p->givens;j++)sets+=first[j+1]>first[j];
+    for(uint32_t i=0;i<p->demands;i++)sets+=p->demand[i].value!=MESH_ABSENT && p->demand[i].mine==MESH_ABSENT;
+    p->set_of=malloc(((size_t)p->givens+1)*sizeof *p->set_of);
+    p->set_first=malloc((sets+1)*sizeof *p->set_first);
+    p->member=malloc(((size_t)p->demands+1)*sizeof *p->member);
+    p->set_blocks=malloc((sets+1)*sizeof *p->set_blocks);
+    p->set_far=malloc((sets+1)*sizeof *p->set_far);
+    if(!p->set_of || !p->set_first || !p->member || !p->set_blocks || !p->set_far)status=ENOMEM;
   }
-  for(uint32_t i=0;i<p->demands;i++){
-    const struct plan_demand *d=p->demand+i;
-    if(d->value==MESH_ABSENT)continue;
-    if(d->mine==MESH_ABSENT)relays++;
-    else touches+=d->instructions;
-  }
-  struct plan_touch *touch=malloc((touches+1)*sizeof *touch);
-  struct plan_cover *cover=malloc((blocks+1)*sizeof *cover);
-  uint32_t *held=malloc((touches+1)*sizeof *held);
-  p->block_set=malloc((blocks+1)*sizeof *p->block_set);
-  p->block_element=malloc((blocks+1)*sizeof *p->block_element);
-  int status=!touch || !cover || !held || !p->block_set || !p->block_element?ENOMEM:0;
-  if(status)goto done;
-  uint64_t t=0,covers=0,members=0;
-  for(uint32_t i=0;i<p->demands;i++){
-    const struct plan_demand *d=p->demand+i;
-    if(d->mine==MESH_ABSENT)continue;
-    for(uint64_t k=0;k<d->instructions;k++){
-      const uint64_t at=p->at[d->at+k];
-      touch[t++]=(struct plan_touch){at,at+p->cut[d->cut+k+1]-p->cut[d->cut+k],d->mine,d->value};
-    }
-  }
-  qsort(touch,touches,sizeof *touch,plan_touch_order);
-  for(uint64_t b=0;b<blocks;b++)p->block_set[b]=MESH_ABSENT;
-  for(uint64_t q=0;q<touches;){
-    const uint32_t j=touch[q].value;
-    const uint64_t b=touch[q].start/quantum,low=b*quantum,bytes=p->given[j].section.bytes,
-                   whole=bytes-low<quantum?bytes-low:quantum,from=members;
-    uint64_t reach=low,covered=0;
-    for(;q<touches && touch[q].value==j && touch[q].start/quantum==b;q++){
-      if(touch[q].end>reach){covered+=touch[q].end-(touch[q].start>reach?touch[q].start:reach);reach=touch[q].end;}
-      held[members++]=touch[q].member;
-    }
-    if(covered!=whole){members=from;continue;}
-    qsort(held+from,members-from,sizeof *held,plan_member_order);
-    uint64_t kept=from+1;
-    for(uint64_t k=from+1;k<members;k++)if(held[k]!=held[kept-1])held[kept++]=held[k];
-    members=kept;
-    cover[covers++]=(struct plan_cover){held+from,(uint32_t)(members-from),j,(uint32_t)b};
-  }
-  qsort(cover,covers,sizeof *cover,plan_cover_order);
-  uint64_t sets=relays,listed=relays;
-  for(uint64_t c=0;c<covers;c++)if(!c || !plan_same_set(cover+c-1,cover+c)){sets++;listed+=cover[c].members;}
-  if(sets>=UINT32_MAX || listed>=UINT32_MAX){status=ENOMEM;goto done;}
-  p->set_first=malloc((sets+1)*sizeof *p->set_first);
-  p->member=malloc((listed+1)*sizeof *p->member);
-  p->set_blocks=malloc((sets+1)*sizeof *p->set_blocks);
-  p->set_far=malloc((sets+1)*sizeof *p->set_far);
-  if(!p->set_first || !p->member || !p->set_blocks || !p->set_far){status=ENOMEM;goto done;}
   uint32_t s=0,at=0;
-  for(uint64_t c=0;c<covers;c++){
-    if(!c || !plan_same_set(cover+c-1,cover+c)){
-      p->set_first[s]=at;p->set_blocks[s]=0;
-      for(uint32_t k=0;k<cover[c].members;k++)p->member[at++]=cover[c].member[k];
-      s++;
-    }
-    const uint32_t b=p->block_first[cover[c].value]+cover[c].block;
-    p->block_set[b]=s-1;p->block_element[b]=p->set_blocks[s-1]++;
+  for(uint32_t j=0;!status && j<p->givens;j++){
+    p->set_of[j]=MESH_ABSENT;
+    if(first[j+1]==first[j])continue;
+    p->set_of[j]=s;p->set_first[s]=at;p->set_blocks[s++]=(uint32_t)plan_blocks(m,p->given[j].section.bytes);
+    for(size_t q=first[j];q<first[j+1];q++)p->member[at++]=p->demand[order[q]].value;
   }
-  for(uint32_t i=0;i<p->demands;i++){
+  for(uint32_t i=0;!status && i<p->demands;i++){
     struct plan_demand *d=p->demand+i;
     d->relay=MESH_ABSENT;
     if(d->value==MESH_ABSENT || d->mine!=MESH_ABSENT)continue;
     d->relay=s;p->set_first[s]=at;p->member[at++]=d->value;p->set_blocks[s++]=(uint32_t)plan_blocks(m,d->bytes);
   }
-  p->set_first[s]=at;p->sets=s;
-  for(uint32_t x=0;x<s;x++){
-    p->set_far[x]=0;
-    for(uint32_t k=p->set_first[x];k<p->set_first[x+1];k++)
-      if(p->farthest[p->member[k]]>p->set_far[x])p->set_far[x]=p->farthest[p->member[k]];
+  if(!status){
+    p->set_first[s]=at;p->sets=s;
+    for(uint32_t x=0;x<s;x++){
+      p->set_far[x]=0;
+      for(uint32_t k=p->set_first[x];k<p->set_first[x+1];k++)
+        if(p->farthest[p->member[k]]>p->set_far[x])p->set_far[x]=p->farthest[p->member[k]];
+    }
   }
-  for(uint32_t j=0;j<p->givens;j++){
-    if(p->block_first[j]==MESH_ABSENT)continue;
-    const uint64_t own=plan_blocks(m,p->given[j].section.bytes);
-    uint32_t alone=0;
-    for(uint64_t k=0;k<own;k++)
-      if(p->block_set[p->block_first[j]+k]==MESH_ABSENT)p->block_element[p->block_first[j]+k]=alone++;
-    p->uncovered[j]=alone;
-  }
-done:
-  free(touch);free(cover);free(held);
+  free(first);free(order);
   return status;
 }
 
@@ -1289,12 +1215,10 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   double *up=NULL,*down=NULL,*share=NULL,*rate=NULL,*latency=NULL;
   int status=0;
   p->named=calloc((size_t)given+1,sizeof *p->named);
-  p->uncovered=malloc(((size_t)given+1)*sizeof *p->uncovered);
   p->item=malloc(((size_t)given+1)*sizeof *p->item);
   p->demand=calloc((size_t)count+1,sizeof *p->demand);
   p->of=malloc(((size_t)count+1)*sizeof *p->of);
-  if(!key || !placed || !p->named || !p->uncovered || !p->item || !p->demand || !p->of){status=ENOMEM;goto done;}
-  for(uint32_t j=0;j<given;j++)p->uncovered[j]=(uint32_t)plan_blocks(m,values[j].section.bytes);
+  if(!key || !placed || !p->named || !p->item || !p->demand || !p->of){status=ENOMEM;goto done;}
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;
     uint64_t from,to,end;
@@ -1390,8 +1314,8 @@ done:
 }
 
 static void plan_free(struct plan *p){
-  free(p->named);free(p->uncovered);free(p->item);free(p->sync);free(p->cut);free(p->at);free(p->set_first);
-  free(p->member);free(p->set_blocks);free(p->set_far);free(p->block_first);free(p->block_set);free(p->block_element);
+  free(p->named);free(p->item);free(p->sync);free(p->cut);free(p->at);free(p->set_first);
+  free(p->member);free(p->set_blocks);free(p->set_far);free(p->set_of);
   free(p->wait_row);free(p->demand);free(p->of);free(p->parent);
   free(p->tree);free(p->run);free(p->members);free(p->lead);free(p->comm);free(p->child);free(p->value);free(p->read);
   free(p->here);free(p->first);free(p->head);free(p->lag);free(p->between);free(p->farthest);free(p->entry);
