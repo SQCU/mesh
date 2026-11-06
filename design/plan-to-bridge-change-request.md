@@ -1931,6 +1931,19 @@ code, and each method is used as its source states it.
   Interface Architecture, IEEE Micro, 1998). The region is registered once (data-model §2), and the receiver fixes where
   each page lands before it comes (data-model §3).
 - **Code:** as now. The plan's lists name pages, and the bridge's records name the same pages.
+- (Corrected 2026-11-06: design/compilation-coordination.md, "Review of 55b9cbad".) **A transfer is a list of byte
+  ranges of its source's pages, landing in byte ranges of its destination's pages.**
+  - A part of any view of a value, whether a slice, a narrow along any dimension, a window or a halo, is the bytes it
+    covers in its base's pages. That is one or more ranges of (page, offset, bytes), described by the view's shape and
+    strides.
+  - Communication describes noncontiguous data this way. MPI's derived datatypes give a type map, a sequence of (basic
+    type, displacement) pairs, which a send or a receive reads or writes in place. VIA's descriptors carry a list of
+    data segments over registered memory (Dunning et al., above). The coordinator cites both from memory.
+  - So a part is sent from its producer's pages, whatever its layout, with no copy, and it lands at its byte ranges in
+    its destination value's layout (R2).
+  - A change of layout exists only where a consumer's operand cannot take the landed layout as its view. It is then an
+    operator of the consumer's own, run as its out variant (design/aot-compilation-change-request.md appendix item 7),
+    never part of a transfer.
 
 ### R2. Every page is placed at compile time and named by the page table
 

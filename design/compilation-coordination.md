@@ -3936,3 +3936,74 @@ when they report.
   G4's holder in hdr `client` restores the heartbeat's finding of the program as its holder, which it had lost from 110.
 - **mesh-metal.m's waiter** (open). B1's one deadline per execution is to cover it and e2b's step waits together, as
   a joint change in the next unit.
+
+### Review of 55b9cbad against the requirement lines (2026-11-06, three read-only reviewers; the coordinator's answers)
+
+**The earlier findings:** fixed: V4, V5, B2, B3, G1, G2's four, G3. Partly fixed: V1, V2, V3, K1, K2, K3, K4, B1, G4. Each
+is restated below with what remains. Lines are at mesh 327df606 and metal-microbench d329555a.
+
+**Transport by view and region-only memory**
+- W1. `_laid` copies a whole key every execution (mesh_compile.py 1405–1414, 2548) wherever a part is not a run of its
+  producer's blocks:
+  - a `'slice'` (`_base` gives none, though the runner makes it a narrow);
+  - a narrow along another dimension;
+  - a window region or a CollectivePermute arrival;
+  - a layout fixed by another collective along another dimension;
+  - a base inside an AllGather result.
+  
+  The answer is PB R1's correction: a transfer is a list of byte ranges of its source's pages (MPI's type map; VIA's
+  data segments). So every part is sent from its producer's pages, and `_laid` and its copies go. A layout change
+  remains only as a consumer's own operator, where its operand cannot take the landed layout.
+- W2. AllToAll regressed. Its pieces now land in `_buffer` and all k are copied into the result every execution (2629),
+  where at 55b9cbad they landed in the result. Each piece must land at its byte ranges in the result (point 7; PB R1).
+- W3. Share fallbacks copy (2655): the window's middle where no CollectivePermute offers a share (1824, 1834), and a share
+  between two local values of one lag that the torch side refuses (2010), though struct mesh_share and the planner
+  accept it. A window's middle is the local value's own pages, a share. `ir.fallbacks` goes, both as a second form and
+  as a forbidden name ("fallbacks or second forms").
+- W4. Operators with several outputs are classed `'functional'` (1124–1127), so torch allocates their results, though
+  they have out variants (for example `native_layer_norm.out`). That fails region-only memory (item 7). Their out
+  variants take one `out` per result.
+
+**Compile-time, never run-time checks**
+- W5. K2: the bridge reads `plans` before `mesh_algo_open` acquires `published` (mesh-bridge.h 436; mesh.h 1114–1116),
+  so a replan with fewer plans can be read past. The count is read from the published operand after the acquire, so
+  the index is bounded by construction.
+- W6. K3: per-execution branches on make()-time facts remain (mesh_compile.py 2156, 2598, 2605, 2606, 2635). Each
+  execution's steps are built once at make() as closures with no test.
+- W7. K4: e2b flushes aliases in every encoder of a phase that touches a share (e2b_replay.m 1497–1507). `shares` is one
+  bit with no partner. The plan names each share's partner, so the flush goes on the handover barrier alone.
+- W8. The bridge's take and poll (mesh-flow.c 1263, 1879, 1891) visit every place to `plans`, empty ones included. The
+  places with flows toward each adjacent node are fixed when the plan is made, so they are a list the plan writes.
+- W9. The share rules are tested on both sides of the interface: mesh_compile.py 2010–2015 against mesh-collective.c 942
+  and 1949. They are tested once, at the planner's interface, which runs when the program is made, at compile time.
+  The torch side restates none.
+
+**The eight-second bound**
+- W10. B1: a deadline per execution is not the rule.
+  - The rule is the operator's, on stalls: "nothing you're running should take more than around 8000ms", judged by
+    time without progress.
+  - So every wait ends at MESH_PLATFORM_NS without progress, and the first ETIMEDOUT ends the run: no later wait runs.
+  - make()'s waits, `_retire` then `plan_released`, share one deadline.
+  - e2b's step waits (`platform_bound(units)`, e2b_replay.m 250) and mesh-metal.m's waiter take one bound each, not
+    one per unit.
+
+**The graph module, duplication and names**
+- W11. G4: `retired` has two writers, the program and the bridge for a dead holder (mesh-dataflow.c 78; mesh-records.c
+  1430, 1493; mesh-link.c 381). One writer each: the program writes `retired`, and the bridge writes only `released`. A
+  gone holder is read from the heartbeat's own holder words, never written as `retired`.
+- W12. `_claim` and `slots` (mesh_compile.py 1368, 1445) are inherited idiom. The first is XLA's layout assignment
+  ("The layout is determined by the `LayoutProto` proto"), and the second is a value's copies.
+- W13. Duplicated patterns, each to be merged:
+  - the producer-pages-else-layout decision (`_sent` 1420, `_halo` 1822, `_collective_permute` 1799), which W1 removes;
+  - the two copy loops (2548, 2655), which W1 and W3 remove;
+  - "published and not yet released", written three times (mesh-collective.c 2091; mesh-dataflow.c 354; mesh-flow.c
+    2157), to be beside `mesh_algo_open`;
+  - the holder's read and the gone-holder test (mesh-link.c 377–381; mesh-records.c 1425–1430, 1491–1493; mesh-stat.c
+    118–120);
+  - the mapping's row list in two effectors (mesh_compile.py 2289; e2b_replay.m 1437), to be one mesh-dataflow helper.
+
+**Built in the same unit, from the answers on 55b9cbad's record:**
+- every member of a view planning on the view's map (A7), which also makes K1's index safe;
+- values sent from their own pages whatever their copies;
+- ranges sharing a block by disjoint bytes, with offsets in instructions;
+- a share's one item and its lag.
