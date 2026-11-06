@@ -24,17 +24,14 @@
 #include <memory>
 #include <vector>
 
-// rdma/mesh-section.h struct mesh_section, as rdma/mesh.py Section binds it.
-// 2026-11-05 (design/compilation-coordination.md, "The revisions of 4e78f6f4", the coordinator's finding on "The
-// revisions of e4a7398e": "rdma/mesh-torch.mm declares its own `struct mesh_section` with a static_assert, instead of
-// including rdma/mesh-call.h. That is a duplicated pattern: merge it"): the header is included, where this file
-// declared a copy of the struct and asserted its layout; mesh-section.h holds the one declaration, with stddef.h and
-// stdint.h alone, so C++ includes it (mesh.h's stdatomic.h and infiniband/verbs.h, which mesh-call.h includes, do not
-// compile as C++: TP-1), and asserts the layout itself.  What must stay: no struct mesh_section declared here
-#include "mesh-section.h"
 // rdma/mesh-collective.h mesh_host_publish, whose address the caller passes (rdma/mesh_compile.py), with the context it
 // takes, so this library binds no mesh symbol of its own
-typedef void (*mesh_publish)(void *, struct mesh_section, uint64_t);
+// 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The
+// revisions of 14b9a757"; rdma/mesh-collective.h mesh_host_publish at mesh 31ee5d4a: "each by its declared transfer,
+// `plan` its function's state section ... and `transfer` its index among the function's declared transfers"), reversing
+// a range named by its first row's section: the publish takes (context, plan, transfer, execution), and
+// rdma/mesh-section.h, included for struct mesh_section alone, goes with it.  What must stay: no mesh symbol bound here
+typedef void (*mesh_publish)(void *, uint64_t, uint32_t, uint64_t);
 // rdma/mesh-dataflow.h mesh_retire(struct hdr *, uint64_t client), whose address the caller passes as it passes
 // mesh_host_publish's (2026-11-05, "The revisions of 55b9cbad", B3).  What must stay: no mesh symbol bound here
 typedef void (*mesh_retirement)(void *, uint64_t);
@@ -78,12 +75,15 @@ static bool after_torch(void (^action)(void)) {
 
 // execution `execution` of each of `count` sections published by `publish(context, section, execution)` after torch's
 // work so far (after_torch).  0; EIO where torch threw or scheduled no notification (nothing published)
-extern "C" int mesh_torch_publish(mesh_publish publish, void *context, const struct mesh_section *sections,
+// 2026-11-06 (R-1; "The revisions of 14b9a757"), reversing `sections`: execution `execution` of each of `count`
+// declared transfers of plan `plan`, `transfers` their indices, published by `publish(context, plan, transfer,
+// execution)`.  What must stay: every publish after torch's work so far, in one notification
+extern "C" int mesh_torch_publish(mesh_publish publish, void *context, uint64_t plan, const uint32_t *transfers,
                                   uint32_t count, uint64_t execution) {
   try {
-    const std::vector<mesh_section> released(sections, sections + count);
+    const std::vector<uint32_t> released(transfers, transfers + count);
     return after_torch(^{
-             for (const mesh_section &section : released) publish(context, section, execution);
+             for (const uint32_t transfer : released) publish(context, plan, transfer, execution);
            })
                ? 0
                : EIO;
