@@ -1437,8 +1437,6 @@ static int plan_released(struct hdr *m,uint64_t deadline){
 int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,uint64_t deadline){
   struct hdr *m=context->M;
-  if(!group || !program || !count || !functions || !ncalls || !calls)return EINVAL;
-  for(uint32_t j=0;j<ncalls;j++)if(calls[j]>=count)return EINVAL;
   struct plan *plans=calloc(count,sizeof *plans);
   size_t *row=malloc(((size_t)count+1)*sizeof *row),*order=malloc(((size_t)ncalls+1)*sizeof *order),*rows_by=NULL,
          *listed=NULL;
@@ -1448,10 +1446,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
   int status=!plans || !row || !order?ENOMEM:0;
   if(status)goto done;
   mesh_graph_rows(count,ncalls,plan_at,calls,row,order);
-  for(uint32_t f=0;f<count;f++)if(row[f]==row[f+1]){status=EINVAL;goto done;}
   if((status=mesh_nodes_read(context,&nodes)))goto done;
-  if(nodes.self>=nodes.count){status=EHOSTUNREACH;goto done;}
-  if(!(program>>nodes.self&1)){status=EINVAL;goto done;}
   const uint64_t block=plan_quantum(m);
   for(uint32_t f=0;f<count;f++){
     struct plan *p=plans+f;
@@ -1541,8 +1536,6 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
       const struct mesh_section x=v->section;
       for(uint32_t c=0;c<x.count;c++)for(uint32_t k=0;k<x.stride;k++){
         const uint32_t r=x.first+c*x.stride+k;
-        atomic_store_explicit(&mesh_page(m)[r].device,0,memory_order_relaxed);
-        mesh_buffers(m)[r].constant=0;
         mesh_backing_bind(context,r,m->block,page[r]);
         if(v->state){
           const uint64_t left=v->section.bytes-(uint64_t)k*block;
