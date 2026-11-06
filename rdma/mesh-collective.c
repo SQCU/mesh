@@ -1470,7 +1470,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
         frame=page[x.first+(size_t)(c%x.count)*x.stride+byte/block];
       }
       struct mesh_hop h={.page=frame,.node=e->node,.direction=e->direction,.field=MESH_ABSENT,
-                         .bytes=(uint32_t)(cut[1]-cut[0]),.serial=p->view.id,.set=e->set,
+                         .bytes=(uint32_t)(cut[1]-cut[0]),.set=e->set,
                          .offset=(uint32_t)(byte%block)};
       if(e->field==MESH_ABSENT)h.word=plan_supplied(p,d);
       else{
