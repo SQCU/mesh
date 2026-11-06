@@ -266,7 +266,7 @@ struct plan {
   const struct mesh_dependence *dependence;
   uint32_t dependences;
   struct plan_demand *demand;             /* the demands, by their first declared transfer (GO5) */
-  uint32_t demands,n,self,copies;         /* copies: u (plan_unroll) */
+  uint32_t demands,n,self,copies,start_lead; /* copies: u (plan_unroll); start_lead: struct mesh_function `lead` */
   struct mesh_view_id view;               /* JGroups ViewId.java: "Lamport time of the view", "Address of the
                                              creator of this view" */
   uint32_t *of;                           /* of[i]: declared[i]'s demand, p->demand[of[i]] */
@@ -935,7 +935,11 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
    several variables depending the unrolling factor".  M. Lam, PLDI 1988, §2.3: "The lifetime of a register variable is
    defi[n]ed as the duration between the f[i]rst assignment into the variable and it[s] last use."  MPI 4.1 §3.7: "The
    receiver should not access any part of the receive buffer after a nonblocking receive operation is called, until the
-   receive completes."  MPI 4.1 §3.9, MPI_START: "The request becomes active once the call is made." */
+   receive completes."  MPI 4.1 §3.9, MPI_START: "The request becomes active once the call is made."  A received copy
+   c's interval starts at the start of execution c - `lead` (M. Lam, PLDI 1988, §1: "In software pipelining, iterations
+   of a loop in a source program are continuously initiated at constant intervals without having to wait for preceding
+   iterations to complete.  That is, multiple iterations, in different stages of their computations, are in progress
+   simultaneously."). */
 static int plan_interval(const struct plan *plans,const struct plan_item *x,const uint64_t *operations,uint64_t *start,
                          uint64_t *end){
   if(x->kind!=PLAN_LOCAL && x->kind!=PLAN_ROUTED)return 0;
@@ -946,7 +950,7 @@ static int plan_interval(const struct plan *plans,const struct plan_item *x,cons
     *end=c*n+p->given[x->index].end;
     return 1;
   }
-  uint64_t back=0,from=0,last=n-1,length;
+  uint64_t back=p->start_lead,from=0,last=n-1,length;
   const uint32_t j=p->demand[p->value[p->here[p->member[p->set_first[x->index]]]].demand].mine;
   int received=j==MESH_ABSENT;
   for(uint32_t k=p->set_first[x->index];k<p->set_first[x->index+1];k++)
@@ -2305,7 +2309,7 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   if(!function->outstanding || function->outstanding>=UINT32_MAX)return ENOMEM;
   const uint32_t n=nodes->count;
   p->declared=declared;p->transfers=count;p->given=values;p->givens=given;p->weights=weights;
-  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;
+  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;p->start_lead=function->lead;
   struct plan_key *key=malloc(((size_t)count+1)*sizeof *key);
   uint32_t *root=NULL,*demand=NULL,*placed=malloc(((size_t)count+1)*sizeof *placed);
   size_t *trees=NULL;
