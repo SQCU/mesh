@@ -68,6 +68,9 @@ other projects, such as a game bot, and old dated records; they are not listed h
   sources are MPI 4.1 §§6.1.3, 6.1.11, 7.7 and 7.8, MPICH's local copies, NCCL's in-place condition, GSPMD §§4.3 and 4.5
   and its Appendix A.2, XLA's CollectivePermute, torch's `view`, `reshape` and `contiguous`, ExecuTorch's memory
   planning, Garey and Johnson's SR2, loop-invariant code motion, Lee and Ha's self-timed schedule, and JGroups' ViewId.
+  Its appendix adds item 13, flushed sends counted in error (Linux `ib_drain_sq`, rdma-core's flush status, libfabric's
+  error counter), and item 14, one block coloring over the u copies and the one-copy items (Hendren, Gao, Altman and
+  Mukerji's cyclic interval graphs and fat cover algorithm, read in Mukerji's 1994 thesis).
 - [design/compilation-coordination.md](design/compilation-coordination.md): the coordinating agent's contract for
   the two change requests above (the file split, the names files share, the task graph and its contention schedule,
   plans in their claims and the island's fixed sequencer, the provisional operands, the sources read) and the record

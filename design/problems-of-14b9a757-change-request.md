@@ -517,6 +517,8 @@ The implementation of the third sources (mesh 6a8a8524, 60f43ddb) raised two poi
 
 ## Stops that remain (2026-11-06, at mesh de70486f)
 
+Replaced by the appendix's items 13 and 14.
+
 - **Sends pending when a link ends.** A send that is posted but still pending when its plan is cancelled by a link loss
   is never counted.
   - Its completion is flushed by rdma/mesh-child.c `lanes_flush`. That is a failport lifecycle file, reused verbatim,
@@ -527,3 +529,145 @@ The implementation of the third sources (mesh 6a8a8524, 60f43ddb) raised two poi
 - **The u copies against one-copy items** (the second stops' item 7). They stay unordered with each other, costing pages
   only.
   - **Missing source:** Hendren, Gao, Altman and Mukerji's cyclic interval graphs (1992), named and not yet read.
+
+## Appendix: the stops of 36bd7cbd (2026-11-06)
+
+Code is cited at mesh 36bd7cbd. The two stops above are replaced by items 13 and 14.
+
+### The turns
+
+> "which is a failport file I'm not allowed to change, and it doesn't raise the counter." what is the citation to a
+> specific algorithm in the collective communications and async concurrent programming literature (no, this repo is
+> not an example) which says 'there's something called a failrpot' and 'once the failport exists nobody is allowed to
+> change it but you are allowed to use it but not to change it'?
+> "The source that would allow the sharing is Hendren et al.'s cyclic interval graphs (1992), which I've named but not
+> yet read."
+> add this citation and the corresponding implementation goal to a change request document or appendix to an existing
+> one. no further elaborationo r idiomatic computer science will be needed for a subagent to ahndle the assignment of
+> strictly implementing a method on a data type...?
+
+> i mean you can grab any ocr tool in the universe of any size as long as its under 96gb allocation plus parameters (or
+> 384gb allocation plus parameters) and literally use the 4 mac studios to literally OCR-parse the thesis you want?
+
+> but this feels like a subagent thing and i'm not surte that this exact single paper is the only source htat is needed
+> to get canonical reference examples of this solverkind; other implemetnations surely exist in the apache and mit
+> literature-of-programs
+
+### 13. A send pending at a link's end is never counted
+
+- **Code:**
+  - rdma/mesh-child.c:44–75 (`lanes_flush`) moves each lane with work outstanding to the error state and takes the
+    completions. Line 68 only lowers `left` for each one it takes: no counter is raised.
+  - rdma/mesh-flow.c:1577–1601 (`sends_complete`): on the data path, a SEND completion with a nonzero status raises
+    its record's error count (`record->count+1`, the record at `wr_id`).
+- **The stop's ground:** the stop of 36bd7cbd rested on "a failport lifecycle file, reused verbatim". No published
+  source says this. The operator's words it rested on (design/page-queue-change-request.md, 2026-11-03) are:
+  "then you have to verbatim reuse that process lifecycle code since you have no alternative to present or cite which
+  sin't odious and a waste of time to test or run." The stop is withdrawn.
+- **Source:**
+  - Linux v6.12, drivers/infiniband/core/verbs.c
+    (https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/infiniband/core/verbs.c):
+    - lines 2966–2967: "ib_drain_sq() - Block until all SQ CQEs have been consumed by the application."
+    - `__ib_drain_sq`, line 2829 onward:
+      ```
+      struct ib_qp_attr attr = { .qp_state = IB_QPS_ERR };
+      ...
+      ret = ib_modify_qp(qp, &attr, IB_QP_STATE);
+      ```
+  - rdma-core libibverbs/enum_strs.c:110, at a70151dfec390eb5f7fc5b266f51d601da2a7778
+    (https://raw.githubusercontent.com/linux-rdma/rdma-core/a70151dfec390eb5f7fc5b266f51d601da2a7778/libibverbs/enum_strs.c):
+    `[IBV_WC_WR_FLUSH_ERR]		= "Work Request Flushed Error",`
+  - libfabric man/fi_cntr.3.md (https://raw.githubusercontent.com/ofiwg/libfabric/main/man/fi_cntr.3.md):
+    - "fi_cntr_readerr: Reads the number of operations which have completed in error."
+    - "The read error call returns the number of operations that completed in error and were unable to update the
+      counter."
+- **Change:**
+  - Each SEND completion that `lanes_flush` takes raises its record's error count, as `sends_complete` does for a SEND
+    completion in error.
+  - Nothing else in `lanes_flush` or `child_leave` changes.
+
+### 14. The u copies against one-copy items
+
+- **Code:**
+  - rdma/mesh-collective.c:918 (`plan_before`) returns 0 where `x->kind != y->kind`. A PLAN_LOCAL item (a value of lag
+    0, one copy, positions `begin` to `end` in each execution) and a PLAN_ROUTED item (copy c of a set, one of u) are
+    unordered.
+  - So `mesh_graph_chains` (mesh-collective.c:1037; rdma/mesh-graph.h:198) never puts them on one block.
+  - rdma/mesh_compile.py:2036–2041: every value's positions are its lifetime. A landing's run from the execution's
+    receives' start to the item that waits for it.
+- **Source:**
+  - C. Mukerji, "Register allocation using cyclic interval graphs", M.Sc. thesis, McGill University, July 1994, Gao,
+    Guang R. (Supervisor) (https://mcgill.scholaris.ca/items/4e5e10ea-b427-4537-8a24-9a6efa7da1b6; PDF
+    https://mcgill.scholaris.ca/server/api/core/bitstreams/5031fdf9-9e78-49b5-97e9-f74540dde00d/content, read from
+    the page images 2026-11-06).
+    - Its pages 23 and 30 carry the footnote "Parts of this section has been excerpted from [HGAM92]": L. J. Hendren,
+      G. R. Gao, E. R. Altman and C. Mukerji, "A register allocation framework based on hierarchical cyclic interval
+      graphs", CC 1992, LNCS 641, pp. 176–191 (https://doi.org/10.1007/3-540-55984-1_17). The paper itself was not
+      read; Springer's copy is paywalled.
+  - §2.1, p. 21: "Let t0, t1, ... be the starting time points of a sequence of machine operations. Without loss of
+    generality, we use non-negative integers for the time points. We use [t : t'] to denote the interval between t and
+    t' including both end points. The notation [t, t') denotes the same interval but with the end point t' left out."
+  - §2.1, pp. 21–22: "we say that variable x is defined at time point t. The live range of x will continue to the time
+    point t', (t' > t), where it is last used in a statement, e.g. u = x + v. After time t', the value in x is no longer
+    live. In this paper, we define the lifetime interval of x to be [t, t')."
+  - Definition 2.1.1, p. 22: "A time t is covered by an interval I1 : [t1, t1'), if (t1 ≤ t < t1'), or by an interval
+    I1' : [t1, t1'] if (t1 ≤ t ≤ t1'), or by a cyclic interval I2 : ([t1, t1'), [t2, t2']), if t is covered by either
+    ([t1, t1') or [t2, t2'])."
+  - Definition 2.1.2, p. 22: "Two intervals I1, I2 overlap if there exists a time t that is covered by both I1 and I2."
+  - §3.1, p. 29: "Cyclic intervals wrap around from one iteration to the next, it is one long interval. However, in the
+    interval graphs, we choose to depict it as two intervals instead."
+  - §2.2, pp. 22–23, Problem 1: "Given a set of live ranges represented as a cyclic interval graph G, find a minimum
+    register (color) assignment for the intervals in G such that overlapping intervals are assigned different
+    registers."
+  - Definitions 2.3.1 and 2.3.2, p. 23:
+    - "The width of a cyclic interval graph G at time t, written as width(G,t), is the number of intervals covering t."
+    - "The maximum width of a cyclic interval graph G, written Wmax(G), is the maximum width(G,t), for all t which is
+      covered by some interval in G."
+    - "The minimum width of a cyclic interval graph G, written Wmin(G), is the minimum width(G,t), for all t which is
+      covered by some interval in G."
+  - Theorem 2.3.1 and its proof, p. 24: "Let G be an interval graph containing no cyclic intervals. Then G is optimally
+    colorable with Wmax(G) colors." The proof's left edge algorithm [HS71]: "Assume G spans from time 0 to time n.
+    Starting from the left end (at time, t = 0), move from left to right along the time line. For each interval, I,
+    which ends at t, release its color back to the pool of free colors. For each interval I beginning at t, give I a
+    free color which is not being used by any interval covering t. Initially, the pool contains k = Wmax(G) free
+    colors."
+  - Theorem 2.3.2 and its proof, p. 24: "Let G be an interval graph containing cyclic intervals. Then G is optimally
+    colorable with Wmax(G) ≤ k ≤ Wmax(G) + Wmin(G) colors." "Cut G at the point where it has the minimum width
+    Wmin(G). Take the intervals covering the cutting point out of G and call the remaining part G'. Obviously, we can
+    now treat G' as a non-cyclic interval graph. Coloring G' with the left-to-right algorithm guarantees it to be
+    colored with no more than k' = Wmax(G) colors (Theorem 2.3.1). Then, it is trivial to see that we can use Wmin(G)
+    more colors to color the removed intervals."
+  - Definitions 3.2.1 and 3.2.2 and Theorem 3.2.1, p. 32:
+    - "The fat spots of a cyclic interval graph G, written fatspots(G), is the set of all times ti where width(G, ti) =
+      Wmax(G)."
+    - "A fat cover of a cyclic interval graph, G, relative to interval I is a subgraph F (I ∈ F) of G that obeys the
+      following two properties: (1) all intervals in F are non-overlapping, and (2) ∀ti ∈ fatspots(G), there exists an
+      interval in F that covers ti."
+    - "If a cyclic interval graph G is colorable in k = Wmax(G) colors, then for each cyclic interval Ic of G, there
+      exists a fat cover for G relative to Ic, call it F, such that G − F is k − 1 colorable."
+  - §3.2.3, pp. 32–33, the fat cover algorithm: "Given a graph G with m cyclic intervals Ci1, Ci2, ..., Cim, the
+    algorithm proceeds in two phases.
+    1. The first phase : attempts to use m colors to find a fat cover for each of the m cyclic intervals. At the ith
+       step, a traversal from left to right is performed to find a fat cover for interval Ci (call this fat cover Fi).
+       If such a cover is found, a traversal from right to left is performed which assigns the same new color Ci to all
+       of the intervals in Fi.
+    2. The second phase : If the first phase succeeds in coloring m cyclic intervals with m colors, then the second
+       phase need only consider a reduced graph G' that contains no cyclic intervals. G' has a maximum width of w =
+       Wmax(G) − m. The coloring of G' is guaranteed to use only w new colors (see proof of Theorem 2.3.1). A
+       straightforward left-to-right algorithm is used to color the remaining non-cyclic intervals. [...] However, if
+       the first phase fails to find a fat cover at some stage, the second phase simply colors the remaining cyclic
+       intervals with new colors, and applies the simple left to right algorithm to color the remaining intervals. In
+       this case, the resultant coloring may or may not be optimal."
+  - M. Lam, PLDI 1988, §2.3, as quoted in the second stops' item 7: "the minimum degree of unrolling, u, to implement
+    the same schedule is simply max_i q_i."
+- **Change:**
+  - The PLAN_LOCAL and PLAN_ROUTED items of one plan at a node are the intervals of one cyclic interval graph G.
+  - G's time points are the node's operations, in program order, over the u executions of the unrolled template.
+  - Each live range is one lifetime interval, from its write to its last read. A value of lag 0 has one per execution;
+    a routed copy has one. A lifetime that crosses the end of the u executions is a cyclic interval.
+  - An item of b blocks is b intervals of the same lifetime. Each color is a block of the space.
+  - G is colored by the fat cover algorithm (§3.2.3), with the left edge algorithm for the non-cyclic remainder. This
+    replaces `plan_before` and `mesh_graph_chains` for these items.
+  - PLAN_ALONE items stay as they are.
+  - The algorithm's text in §3.2.6 and Appendix A, and the open implementations of this kind of solver, are appended
+    below once read. They are the implementer's reference for the steps the quotes above leave open.
