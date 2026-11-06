@@ -922,10 +922,10 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
   return result;
 }
 
-/* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14.  Mukerji 1994, §3.1:
-   "Front-end of cyclic intervals : While sweeping the graph from left to right, the first section of the interval that
-   is encountered is called the front-end of the cyclic interval"; "Tail-end of cyclic intervals : The second section of
-   the cyclic interval that is encountered while sweeping the graph is the tail-end of the interval" */
+/* Mukerji 1994, §3.1: "Front-end of cyclic intervals : While sweeping the graph from left to right, the first section
+   of the interval that is encountered is called the front-end of the cyclic interval"; "Tail-end of cyclic intervals :
+   The second section of the cyclic interval that is encountered while sweeping the graph is the tail-end of the
+   interval" */
 static uint32_t cover_sections(uint64_t length, uint64_t start, uint64_t end, uint64_t *from, uint64_t *to) {
   if (start <= end) { from[0] = start; to[0] = end; return 1; }
   from[0] = 0; to[0] = end; from[1] = start; to[1] = length - 1;
@@ -959,10 +959,7 @@ static size_t cover_find(const uint64_t *point, size_t points, uint64_t at) {
   }
   return low;
 }
-/* mesh-graph.h mesh_graph_fat_cover.  design/problems-of-14b9a757-change-request.md, "Appendix: the stops of
-   36bd7cbd", 14: "G is colored by Main Fatcover, Establish All Covers Of C_i and Choose A Cover For C_i as printed, with
-   the left edge algorithm (A.0.1) for the non-cyclic remainder.  A cyclic interval with no fat cover gets new colors,
-   as §3.2.3's second phase states."  Mukerji 1994:
+/* Mukerji 1994:
    - Definitions 2.3.1, 2.3.2 and 3.2.1: "the number of intervals covering t"; "the maximum width(G,t), for all t which
      is covered by some interval in G"; "the set of all times ti where width(G, ti) = Wmax(G)".
    - §3.2.6, p. 38: "The colored intervals are removed from the graph and the resulting graph contains no cyclic
@@ -1752,7 +1749,6 @@ int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t ed
   return result;
 }
 
-/* mesh-graph.h mesh_graph_intersect: the intervals by key, then start, a tie in either order */
 static int intersect_before(const void *a, const void *b) {
   const struct mesh_graph_interval *x = a, *y = b;
   if (x->key != y->key) return x->key < y->key ? -1 : 1;
@@ -1765,7 +1761,6 @@ int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval) {
   return 0;
 }
 
-/* mesh-graph.h mesh_graph_row_visit */
 void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context) {
   for (uint32_t j = 0; j < count; j++) visit(context, row[j]);
 }

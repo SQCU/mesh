@@ -197,14 +197,13 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
    a cycle, which a strict partial order cannot (nothing written).  What must stay: the chains' numbering */
 int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
                       const void *context, uint64_t *chain, uint64_t *chains);
-/* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14.  C. Mukerji, Register
-   allocation using cyclic interval graphs, M.Sc. thesis, McGill University, 1994:
+/* C. Mukerji, Register allocation using cyclic interval graphs, M.Sc. thesis, McGill University, 1994:
    - Definition 2.1.1: "A time t is covered by ... an interval I1' : [t1, t1'] if (t1 ≤ t ≤ t1'), or by a cyclic
      interval I2 : ([t1, t1'), [t2, t2'])"; §3.1: "Cyclic intervals wrap around from one iteration to the next";
      interval i is [start[i], end[i]] on the times 0 .. length - 1, cyclic where end[i] < start[i].
    - Algorithm 3.2.1's input: "The number of registers, reg_num, needed by each interval"; need[i].  Its output: "every
-     interval, i, of the graph has been assigned colors, c1..regnum(i)"; color[o_i + k], k < need[i], o_i the sum of
-     need[j] over j < i; *colors the colors used.
+     interval, i, of the graph has been ... assigned colors, c_{1..regnum(i)}"; color[o_i + k], k < need[i], o_i the
+     sum of need[j] over j < i; *colors the colors used.
    - §3.2.6, Main Fatcover, Establish All Covers Of C_i and Choose A Cover For C_i; Appendix A, Algorithm A.0.1.
    0; ENOMEM */
 int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *start, const uint64_t *end,
@@ -293,15 +292,14 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
 int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
                                 const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
                                 const uint32_t *added_to, uint64_t *added_delay);
-/* The sweep test for interval intersection (design/problems-of-14b9a757-change-request.md, item 9: "the destination
-   intervals of each node and execution are sorted by start.  Any interval that begins before its predecessor ends
-   makes the plan EINVAL.  That is the sweep test for interval intersection"): interval[0 .. count), each [start, end)
-   with start < end, sorted in place by key, then start; an interval is compared with those of its key alone.  1 where
-   an interval begins before its predecessor of the same key ends, else 0 */
+/* MPI 4.1 §6.1.11: "A datatype may specify overlapping entries.  The use of such a datatype in any communication in
+   association with a buffer updated by the operation is erroneous."  interval[0 .. count), each [start, end) with
+   start < end, sorted in place by key, then start; an interval is compared with those of its key alone.  1 where an
+   interval begins before its predecessor of the same key ends, else 0 */
 struct mesh_graph_interval { uint64_t key, start, end; };
 int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval);
 
-/* A vertex's adjacency row, row[0 .. count) (mesh_graph_rows), visited in order: visit(context, row[j]) */
+/* row[0 .. count) visited in order: visit(context, row[j]) */
 void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context);
 
 #ifdef __cplusplus
