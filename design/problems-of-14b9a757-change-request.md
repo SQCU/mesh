@@ -38,6 +38,32 @@ gives:
 - **A source missing here is a stop.** Where this document quotes no source for something the code needs, the
   implementer stops and names the gap. It invents nothing to fill it.
 
+## Terms
+
+The function `mesh_plan` keeps its name. What it writes is not called "a plan" in descriptions; each part has the name
+of its source. Everything listed is computed before execution 0, at each node.
+
+- **AOT compiled persistent requests:** one for each compiled function at each node, started once per execution. MPI
+  4.1 §3.9: "binding the list of communication arguments to a persistent communication request once and then
+  repeatedly using the request to start and complete operations." Its completion counters are libfabric fi_cntr(3)'s:
+  "Counters record the number of requested operations that have completed." It stands while its view does (JGroups
+  ViewId), and a view change removes it (Linux RCU's removal phase).
+- **AOT compiled memory plan:** every value's pages and offsets. ExecuTorch: "a memory planning pass ... assigns a
+  memory ID to each tensor and an offset in the buffer".
+- **AOT compiled memory schedule:** when each page holds which value, over the u executions. Lam 1988 §2.3: "If the
+  lifetime of a variable is l, and an iteration is initiated every s cycles, then at least ⌈l/s⌉ number of values must
+  be kept alive concurrently, in that many locations." The intervals are colored as Mukerji 1994 §3.2 colors a cyclic
+  interval graph.
+- **AOT compiled static link schedule:** each link's sends, receives and forwards, in order. MSCCLang §4: "A remote copy
+  expands into a send and a receive instruction"; §5.2's heap topological order, keyed by Chen 2022's linear program.
+  Run self-timed: "retain the processor assignment and actor ordering specified by the fully static schedule" (Lee and
+  Ha, as Bhattacharyya, Sriram and Lee state it, §2).
+- **AOT allocated page table:** the names of pages and where they are. PagedAttention: "block tables—the mapping between
+  logical and physical KV blocks of each request".
+
+What stays dynamic at run time, within the compiled shapes: each execution's start and completion counts; the order in
+which an independent flow's pages are drawn (Fisher–Yates over Threefry); and indexes inside compiled shapes.
+
 ## 1. An AllToAll is refused
 
 - **Code:**
