@@ -385,10 +385,7 @@ static uint64_t plan_blocks(const struct hdr *m,uint64_t bytes){
   const uint64_t quantum=plan_quantum(m);
   return (bytes+quantum-1)/quantum;
 }
-/* values[j]'s copies: u where a range lies in it and for a MESH_EXECUTION value of lag 0
-   (design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: "each variable is "split into
-   several variables depending the unrolling factor": a value of lag 0 has one interval per execution"), k for a value
-   of lag k >= 1, 1 for every other (2026-11-05,
+/* values[j]'s copies: u where a range lies in it, k for a value of lag k >= 1, 1 for every other (2026-11-05,
    design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G2: "the copies expression
    (1947, 2026)", one function where mesh_plan wrote it twice and plan_items once more; "The revisions of 55b9cbad").
    2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1;
@@ -397,7 +394,7 @@ static uint64_t plan_blocks(const struct hdr *m,uint64_t bytes){
    among them ("whose copies are then the plan's u"), no MESH_INVARIANT value being named (plan_function;
    design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8).  What must stay: one function */
 static uint32_t plan_copies(const struct plan *p,uint32_t j){
-  if(p->named[j] || (p->given[j].kind==MESH_EXECUTION && !p->given[j].lag))return p->copies;
+  if(p->named[j])return p->copies;
   return p->given[j].lag?p->given[j].lag:1;
 }
 
@@ -861,9 +858,10 @@ struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,ele
      need reads the template does not hold for a share.  Its premise is U1's: `value`'s reads of the shared blocks in
      execution t precede `of`'s write in t + u where that write is this node's own (a production or a local value's);
      a share whose `of` blocks land here is not ordered so by any edge the plan holds;
-   - PLAN_LOCAL items, and PLAN_ROUTED items of a set in a value of lag 0 here: design/problems-of-14b9a757-change-
-     request.md, "Appendix: the stops of 36bd7cbd", 14, "This replaces `plan_before` and `mesh_graph_chains` for these
-     items" (plan_interval, plan_place);
+   - two local execution values of lag 0 of one plan (PLAN_LOCAL): x before y where x's `end` is below y's `begin`,
+     their positions on this node's program order in one execution, this node's work running in that order (and, by
+     U1's premise, each node's events of execution t before those of t + 1, so the next execution's write of x
+     follows y's reads); a local execution value and a routed copy are unordered;
    - two routed copies x = (v, c) and y = (w, c') of one plan (PLAN_ROUTED), D_vw = between[v x local + w], E_w =
      farthest[w], u the copies: x before y where c <= c', c' - c >= D_vw (and, where c == c', D_vw == 0 and v != w:
      y's write in x's execution follows x's every read), and c' + E_w <= u.  The last clause is the document's
@@ -913,12 +911,13 @@ struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,ele
    value's `begin` and `end`; PLAN_ALONE an invariant and a copy of a value of lag k >= 1 ("Mutable buffers and device
    resident constants keep their data across calls, so they are never freed"), the state sections and the table among
    the invariants */
-struct plan_order { const struct plan *plans; const struct plan_item *item; const uint32_t *index; };
+struct plan_order { const struct plan *plans; const struct plan_item *item; };
 static int plan_before(const void *context,uint32_t a,uint32_t b){
   const struct plan_order *order=context;
-  const struct plan_item *x=order->item+order->index[a],*y=order->item+order->index[b];
-  if(x->kind!=PLAN_ROUTED || y->kind!=PLAN_ROUTED || x->function!=y->function)return 0;
+  const struct plan_item *x=order->item+a,*y=order->item+b;
+  if(x->kind!=y->kind || x->function!=y->function || x->kind==PLAN_ALONE)return 0;
   const struct plan *p=order->plans+x->function;
+  if(x->kind==PLAN_LOCAL)return p->given[x->index].end<p->given[y->index].begin;
   const uint64_t u=p->copies,c=x->copy,later=y->copy;
   if(c>later || later+p->set_far[y->index]>u)return 0;
   uint64_t most=0;
@@ -944,7 +943,7 @@ static void plan_item_put(struct plan_placement *x,uint32_t kind,uint32_t functi
    routed copies (a, c), a major, each its demand's P blocks, a relay's among them (this node on a demand's trees but
    neither its source nor a destination: no `values` entry names it and no row holds it), in the window; then its
    values in `values`' order: a named value's blocks no range covers, one item a copy, in the window (the value is
-   wire); a local value's items, one a copy (plan_copies), in the window where `wire` is 1; then its
+   wire); a local value's one item, or a value of lag k >= 1's k, its copies, in the window where `wire` is 1; then its
    state section (plan_layout's `words` in blocks), outside; last the program's table, `count` words in blocks,
    outside, once (mesh.h struct mesh_algo `table`).  Every item has a block at least.  The plan's `routed`, `item`
    and `state` and the table's index are each item's place in this order, rewritten alike by every pass.
@@ -1013,27 +1012,7 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
      and the table's blocks are consecutive and each is at its first block's page.
    - ENOMEM where a space's chains pass its blocks (mesh_arena_range(m, space).count / block), or the items pass their
      words, before anything is written.  No first fit, no claim and no ENOMEM from fragmentation (point 5).
-   0; ENOMEM (mesh_graph_chains' too).
-   design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: "The PLAN_LOCAL and
-   PLAN_ROUTED items of one plan at a node are the intervals of one cyclic interval graph G"; "An item of b blocks is
-   one interval needing b colors (Algorithm 3.2.1's reg_num).  Each color is a block of the space"; "This replaces
-   `plan_before` and `mesh_graph_chains` for these items"; "PLAN_ALONE items stay as they are" (mesh-graph.h
-   mesh_graph_fat_cover). */
-/* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: "G's time points are the node's
-   operations, in program order, over the u executions of the unrolled template"; "Each live range is one lifetime
-   interval, from its write to its last read"; "a value of lag 0 has one interval per execution, and a routed copy has
-   one"; rdma/mesh_compile.py, "every value's positions its lifetime" */
-static int plan_interval(const struct plan *plans,const struct plan_item *x,const uint64_t *operations,uint64_t *start,
-                         uint64_t *end){
-  if(x->kind!=PLAN_LOCAL && x->kind!=PLAN_ROUTED)return 0;
-  const struct plan *p=plans+x->function;
-  const uint32_t j=x->kind==PLAN_LOCAL?x->index:
-                   p->demand[p->value[p->here[p->member[p->set_first[x->index]]]].demand].mine;
-  if(j==MESH_ABSENT || p->given[j].lag)return 0;
-  *start=(uint64_t)x->copy*operations[x->function]+p->given[j].begin;
-  *end=(uint64_t)x->copy*operations[x->function]+p->given[j].end;
-  return 1;
-}
+   0; ENOMEM (mesh_graph_chains' too). */
 static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct plan_placement *x){
   *x=(struct plan_placement){0};
   plan_items(plans,count,m,x,1);
@@ -1051,47 +1030,16 @@ static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct pla
   x->range[0]=mesh_arena_range(m,0);
   const int one=x->range[0].first==x->range[1].first && x->range[0].count==x->range[1].count;
   const uint32_t first[3]={0,one?(uint32_t)x->items:x->split,(uint32_t)x->items};
-  uint64_t *operations=malloc(((size_t)count+1)*sizeof *operations),*counts=malloc(((size_t)x->items+1)*sizeof *counts),
-           *start=malloc(((size_t)x->items+1)*sizeof *start),*end=malloc(((size_t)x->items+1)*sizeof *end),
-           *out=malloc(((size_t)x->elements+1)*sizeof *out);
-  uint32_t *index=malloc(((size_t)x->items+1)*sizeof *index);
-  int status=!operations || !counts || !start || !end || !out || !index?ENOMEM:0;
-  for(uint32_t f=0;!status && f<count;f++){
-    operations[f]=1;
-    for(uint32_t j=0;j<plans[f].givens;j++){
-      const struct mesh_value *v=plans[f].given+j;
-      if(v->kind==MESH_EXECUTION && !v->lag && (uint64_t)v->end+1>operations[f])operations[f]=(uint64_t)v->end+1;
-    }
-  }
-  for(uint32_t s=0;!status && s<2;s++){
+  for(uint32_t s=0;s<2;s++){
     if(first[s]==first[s+1])continue;
-    uint64_t blocks=0;
-    uint32_t rest=0;
-    for(uint32_t i=first[s];i<first[s+1];i++)
-      if(!plan_interval(plans,x->item+i,operations,start,end)){index[rest]=i;counts[rest++]=x->count[i];}
-    if(rest){
-      const struct plan_order order={plans,x->item,index};
-      status=mesh_graph_chains(rest,counts,plan_before,&order,out,&blocks);
-      for(uint64_t r=0,o=0;!status && r<rest;r++)
-        for(uint64_t k=0;k<counts[r];k++)x->chain[x->item[index[r]].element+k]=out[o++];
-    }
-    for(uint32_t f=0;!status && f<count;f++){
-      uint32_t n=0;
-      for(uint32_t i=first[s];i<first[s+1];i++)
-        if(x->item[i].function==f && plan_interval(plans,x->item+i,operations,start+n,end+n)){
-          index[n]=i;counts[n++]=x->count[i];
-        }
-      if(!n)continue;
-      uint64_t colors=0;
-      status=mesh_graph_fat_cover((uint64_t)plans[f].copies*operations[f],n,start,end,counts,out,&colors);
-      for(uint64_t r=0,o=0;!status && r<n;r++)
-        for(uint64_t k=0;k<counts[r];k++)x->chain[x->item[index[r]].element+k]=blocks+out[o++];
-      blocks+=colors;
-    }
-    if(!status && blocks>x->range[x->item[first[s]].space].count/m->block)status=ENOMEM;
+    const struct plan_order order={plans,x->item+first[s]};
+    uint64_t chains=0;
+    const int status=mesh_graph_chains(first[s+1]-first[s],x->count+first[s],plan_before,&order,
+                                       x->chain+x->item[first[s]].element,&chains);
+    if(status)return status;
+    if(chains>x->range[x->item[first[s]].space].count/m->block)return ENOMEM;
   }
-  free(operations);free(counts);free(start);free(end);free(out);free(index);
-  return status;
+  return 0;
 }
 /* item i's element k's first arena page: its space's first page and its chain's block (point 6: "Chain j of a space is
    that space's block j"); a routed copy's a block inside the registered window */
