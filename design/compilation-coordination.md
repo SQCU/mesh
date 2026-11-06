@@ -3439,3 +3439,36 @@ rebuilt.
   (unchanged), mesh-ports.c, mesh-events.c, mesh-metal.m, e2b_replay.m, and metal_recording.m with metal_native.m.
 - **Python:** `python3 -m py_compile` passes rdma/mesh_compile.py and rdma/mesh.py.
 - **Nothing was run.** No plan, mapping, binding, export or publish here has been exercised.
+
+### Answered in the documents (2026-11-05, the coordinator, on this part's record)
+
+Verified at mesh d28b18e4 and metal-microbench 8c3a8e06: `make -C rdma`, `native-audit`, `mesh-torch.mk` with TORCH
+set, and `make .build/e2b_replay` 0 incrementally, no warning; rdma/mesh_compile.py, mesh_graph.py and mesh.py compile.
+Three read-only reviews of the diff against the requirement lines are recorded below when they report.
+- **IG-5** (stop). Appendix item 2 now states the program-order cycle as each node's submissions, of time 0. Each
+  call's part follows its submission, and A10's bound is the edge from a part's end to the submission b calls later.
+  BSL counts the iterations a processor may hold by the delay on its back edge. So the parts overlap by up to b calls,
+  and their sends are actors on R5's cables, A9's processors. The two statements describe different processors of one
+  IPC graph.
+- **AllToAll's own piece** (stop). PB R2 now states that the result's rows for the rank's own part name the operand's
+  own pages: sharing by reference through the page table, as fbufs and IO-Lite pass buffers, with no copy.
+- **A part that is not whole blocks** (stop). PB R2 now states that the result's layout is chosen, separately from its
+  logical shape (XLA's `LayoutProto`, `minor_to_major` and padding). The collective's dimension is most-major, each part
+  padded to whole blocks, and the result is read through its strided view. A consumer that cannot take that view has
+  its own layout change, as an out-variant operator. The refusal goes. It refused Megatron's column-parallel gather
+  along the last dimension, the common case.
+- **R2's partial order over the u copies** (document error). PB R2 now carries PO-1's clause, cited to modulo variable
+  expansion (Lam 1988) and cyclic interval graphs (Hendren et al., CC 1992).
+- **"Every failure … before anything is written"** (document error, rdma/mesh-collective.h). The rule is that nothing
+  is visible before the root's publication: one release store after every write, in C3's writing order, as RCU
+  publishes a structure only once it is initialized (McKenney and Slingwine). A mapping that Mach refuses after the row
+  writes leaves nothing published, which d64b93e6 does. The header's sentence is to be restated so.
+- **EB-1** (a decision this part took, to be changed). An EBUSY that hands a retry to the program's next call is not
+  deferred reclamation's form. In RCU's form the writer waits for the grace period to end (`synchronize_rcu`), here the
+  bridge's release of the old root. So mesh_plan waits for it, bounded by MESH_PLATFORM_NS, and returns ETIMEDOUT past
+  the bound.
+- **Run-time checks left** (D's finding). mesh-records.c `queues_inside` and mesh-flow.c link_prepare's room and entry
+  tests check facts the plan fixes at compile time, which the compile-time requirement forbids. They go in the next
+  unit.
+- **Still open, needing a run:** whether Metal keeps aliased virtual addresses of one page consistent within an
+  encoder, and under torch's MPS work over the one buffer (MTL4VisibilityOptionResourceAlias, dc862ecb).

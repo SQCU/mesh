@@ -740,6 +740,20 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
           asked for (A1, corrected). Every function is exported and compiled before the program runs, so the
           compilation builds the program's whole IPC graph, as this item states above, and each queue's room is (5) in
           that graph.
+        - (Corrected 2026-11-05: design/compilation-coordination.md, "The revisions of 4e78f6f4", IG-5.) **The
+          program-order cycle is each node's submissions, not its calls' parts.**
+          - BSL counts the iterations a processor may hold at once by the delay on its back edge. The cycle quoted
+            above has "delay((vn, v1)) = 1".
+          - Each node's program submits its calls in program order. The sender "TO-broadcasts the program's
+            submissions in the order the program makes them" (A7), and every node's program starts its plans'
+            executions in its own program order. So the submissions σ_1 … σ_n of the block's calls are one processor's
+            actors, in that order, each of time 0, as the sender's submission is above.
+          - Call k's part at the node, x_k, follows its submission (σ_k → x_k, delay 0). A10's bound b is the edge from
+            x_k to the submission b calls later.
+          - So successive parts overlap by up to b calls, and no edge orders the parts themselves: "A call still
+            running at a node delays no later call's delivery there" (below).
+          - A part's sends are actors on R5's cables, A9's processors, in the self-timed order. The two statements
+            describe different processors of one IPC graph, so they do not contradict each other.
         - **The program's submission and its bridge's TO-broadcast** are two actors at the sender. The submissions'
           queue between them is an IPC edge with a bound of its own. Their work is IPC operations alone, and "t(v)
           includes the time taken to execute all IPC operations (sends and receives) that the actor v performs" (BSL

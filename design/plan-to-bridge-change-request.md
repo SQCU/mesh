@@ -1978,6 +1978,17 @@ code, and each method is used as its source states it.
       A decomposition theorem for partially ordered sets, Annals of Mathematics 51(1), 1950). It is found by maximum
       bipartite matching (D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered sets, Proc.
       AMS 7(4), 1956), exactly and in polynomial time.
+    - (Corrected 2026-11-05: design/compilation-coordination.md, "The revisions of 4e78f6f4", PO-1.) **Over C3.3's u
+      copies the order needs one more clause.**
+      - The relation above holds over one execution. Over u copies, a page is written again by its chain's first item
+        u executions later, so a chain's last item must end before that write.
+      - Copies (v, c) and (w, c′) are ordered where c ≤ c′, c′ − c is at least the least lag from v to w, and c′ plus
+        w's largest least lag to a write at the node is at most u. That keeps the relation transitive.
+      - This is modulo variable expansion's premise, that a value's u copies are distinct within the unrolled body (M.
+        Lam, Software pipelining, PLDI 1988). A lifetime that wraps the period is a circular arc, the structure of
+        register allocation for such loops (L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, A register
+        allocation framework based on hierarchical cyclic interval graphs, CC 1992).
+      - The clause can cost pages, and the implementation checked it sound.
     - No value is placed as one run. So greedy by size (Pisarchyk and Lee), and the contiguous-block problem it
       approximates (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979, problem SR2), have no use
       here. The chains replace C3.3's colouring.
@@ -2008,6 +2019,24 @@ code, and each method is used as its source states it.
     value of its own. This supersedes the plan call's "That value is MESH_EXECUTION and wire, its bytes the range's,
     and one range's alone" (rdma/mesh-collective.h; design/disjoint-pages-revision-coordination.md, "The plan call"),
     which cites nothing.
+    - (Corrected 2026-11-05: design/compilation-coordination.md, "The revisions of 4e78f6f4", stops.) **A rank's own
+      part is shared, not copied.** A value is its page-table rows, so the result's rows for the rank's own part name
+      the operand's own pages. This is sharing by reference through the page table, as fbufs (P. Druschel and L. L.
+      Peterson, Fbufs: a high-bandwidth cross-domain transfer facility, SOSP 1993) and IO-Lite (V. S. Pai, P. Druschel
+      and W. Zwaenepoel, IO-Lite: a unified I/O buffering and caching system, ACM TOCS 18(1), 2000) pass buffers
+      without copying them. Those pages are one item of the allocation, living until the later of the two values' last
+      reads.
+    - **A part that is not whole blocks is a layout to choose, not a refusal.**
+      - A value's layout is separate from its logical shape: "The order of these dimension numbers does not imply a
+        particular minor/major ordering in the layout of the shape. The layout is determined by the `LayoutProto`
+        proto", whose `minor_to_major` "describes the minor-to-major ordering of the dimensions within a shape" (XLA,
+        "Shapes and layout"; that page also has "Padding").
+      - So a collective's result takes the layout with the collective's dimension most-major, each part padded to whole
+        blocks. Each part is then a run of whole blocks.
+      - The consumer reads the result through its strided view, here (part, row, column). Where a consumer's operand
+        cannot take that view, the change of layout is an operator of its own, run as its out variant into placed
+        pages (design/aot-compilation-change-request.md appendix item 7). It is not a copy in the transfer.
+      - This is the common case: Megatron's column-parallel output, gathered along its last dimension.
 - **Code:** as now (C3, D.3.2), but for the correction above.
 
 ### R3. An execution is a task graph
