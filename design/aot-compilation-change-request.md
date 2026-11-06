@@ -91,6 +91,32 @@ statement, or a fact of the code.
   - For a torch function: TorchDynamo's capture as an FX graph, handed to a `torch.compile` backend (J. Ansel et al.,
     PyTorch 2: faster machine learning through dynamic Python bytecode transformation and graph compilation, ASPLOS
     2024).
+  - (Corrected 2026-11-05.) **For a torch program: `torch.export`, not a `torch.compile` backend.**
+    > is it idiomatic claudelish trying to imply a just in time or online problem when the user sided documentation
+    > emphasizes mayn constraints including saying in as many semantic frames as possible 'the bridge and mesh
+    > collectives do not support dynamic or eager operations conmingled with compiled operations, and we never run
+    > non-compiled operations ever, damn the consequences'?
+    > "compiling each torch function at its first call (BS-3). " has anyone asked for this beidse claudes trying to
+    > slowroll, procrastinate, delay the project, or otherwise tamper without benefit or cause?
+    - Nobody asked for capture at a function's first call. The text above chose `torch.compile`'s backend with no
+      requirement and no citation for the choice. The operator's turns ask the opposite: "compile the next transaction
+      aot based on literally any relevant information instead of doing a lazy jit syncing stalling waiting pipeline
+      choking 'ask'" (design/plan-to-bridge-change-request.md, the turns), and torch's work "should be AOT and produce
+      serialized objects we cna resume without needing to repeatedly re-compile anything" (2026-10-28).
+    - Torch's documentation states the difference. "`torch.compile` is a JIT compiler"; "When `torch.compile` runs
+      into an untraceable part of a model, it will "graph break" and fall back to running the program in the eager
+      Python runtime. In comparison, `torch.export` aims to get a full graph representation of a PyTorch model, so it
+      will error out when something untraceable is reached. Since `torch.export` produces a full graph disjoint from
+      any Python features or runtime, this graph can then be saved, loaded, and run in different environments and
+      languages" (PyTorch v2.11.0, docs/source/user_guide/torch_compiler/export.md, "JIT vs. AOT" and "Partial vs. Full
+      Graph Capture"). `export` "produces a traced graph representing only the Tensor computation of the function in
+      an Ahead-of-Time (AOT) fashion, which can subsequently be executed with different inputs or serialized" (torch
+      2.14.0, torch/export/__init__.py).
+    - So every function of a torch program is captured and compiled before the program runs, the same at every rank,
+      and nothing runs eagerly between its compiled calls. The program's calls between functions are A10's graph.
+    - mesh used it before: `torch.export.export(module, tuple(arguments), strict=False)` in
+      rdma/torch-mesh/torch_mesh/engines.py, from 2026-10-26 until 1f794b8f removed it with the rest of that frontend.
+      Its last capture before that deletion, 1f794b8f's compiler.py, traced with `make_fx` over fake tensors.
   - For a program run through another framework's delegate: the recorder's capture of the delegate's commands
     (metal_recording.m), as now. For the program the code runs today on LiteRT, tools/prepare_e2b.py reads the model's
     graph.
@@ -172,6 +198,12 @@ statement, or a fact of the code.
     program that reads a value between calls fails at such a node, which holds no value to read. (Corrected
     2026-11-05: the implementation's ND-2 made each output on the function's device by `torch.empty_strided`, memory
     outside the region; design/compilation-coordination.md, "The revisions of b5a3c6e6".)
+  - (Withdrawn 2026-11-05, later.) The meta-device text above rested on two things A1 now removes: eager code running
+    between compiled calls, and Dynamo tracing each function again at that node from its inputs. Dynamo's guards
+    include each input's device, so that node compiled its functions again, and its functions' ordinals drifted from
+    the other ranks' (design/compilation-coordination.md, "The revisions of e4a7398e"). With `torch.export` (A1), every
+    rank compiles the same exported program before it runs. A node with no section starts its plans' executions,
+    relays as its routes give it, and computes nothing; it has no value for any program code to read.
 - **Method:**
   - **Trees.** Blink (G. Wang et al., Blink: fast and generic collectives for distributed ML, MLSys 2020) builds
     collectives on packed spanning trees.
@@ -231,6 +263,14 @@ statement, or a fact of the code.
 
 - **What the code must do.** Order the function executions of every program on the island in one order, the same at
   every node, and keep each program's own order of its calls within it.
+  - (Corrected 2026-11-05.) "Every program" is the program: a run is one program on the whole collective. "Across all
+    programs running on the island" is Pathways' setting, many clients' programs, and no requirement here asks for it.
+    > why do you think you need special rules about 'numbers of programs at once'? literature. citations. canonical
+    > algorithms and datastructures. ignore and brush away idiomatic explanation, specification, etc.
+    The operator's turn on attaching: "is attaching conceptually real or do programs do nothing but what the allocator
+    lets them, with the shapes and coarse bin packing requierments of allocation known aot?"
+    (design/plan-to-bridge-change-request.md, the turns). The scheduler below orders the one program's function
+    executions, as it is written. Its one sender keeps FIFO Order (below).
 - **Why there is one order.** Pathways (P. Barham et al., Pathways: asynchronous distributed dataflow for ML, MLSys
   2022):
   - §2: "the system will deadlock if communicating computations are not enqueued in a consistent order".
@@ -613,7 +653,8 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     - The bridge serves its queues of page descriptors while the program computes, as a user-level network interface
       does (U-Net; VIA; design/plan-to-bridge-change-request.md R1).
   - **Each plan's delivered calls reach the bridge at a node through a queue of the plan's own.** It is laid out with
-    the plan's pages when the plan is placed, and claimed and released with them (C3.2, C3.4). The bridge reads it in
+    the plan's pages when the plan is placed, and placed and released with them by the one allocation over the program
+    (C3.2; C3.4 as corrected 2026-11-05). The bridge reads it in
     place, by view, and nothing copies it. Only the driver moves bytes (design/plan-to-bridge-change-request.md R1).
     > who added this and why is there a transfer by copy rather than a transfer by view? only an extremely specific
     > interface ever does anything copy-like, and that is the final dma driver, which we use, rather than simulate in
@@ -651,6 +692,10 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
           is a cycle of the program's graph, and "The number of tokens in any cycle of the IPC graph is always
           conserved" (BSL, Lemma 2). So (5) over the part's cycles is never less than (5) over the program's: the room
           is never too small.
+        - (Withdrawn 2026-11-05, later.) The bullet above rested on capture at a function's first call, which nobody
+          asked for (A1, corrected). Every function is exported and compiled before the program runs, so the
+          compilation builds the program's whole IPC graph, as this item states above, and each queue's room is (5) in
+          that graph.
         - **The program's submission and its bridge's TO-broadcast** are two actors at the sender. The submissions'
           queue between them is an IPC edge with a bound of its own. Their work is IPC operations alone, and "t(v)
           includes the time taken to execute all IPC operations (sends and receives) that the actor v performs" (BSL
@@ -898,6 +943,10 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 - **The code must:**
   - let a program hold any number of compiled functions at once, each its own plan with its own claim;
   - release a function's claim only when the program retires that function or itself;
+  - (Corrected 2026-11-05: each plan is placed with every other plan of the program by the one allocation over the
+    whole exported program (A1; disjoint-pages C3.2 and C3.4 as corrected). There is no claim per plan, and nothing
+    takes pages at run time. A function's pages are released when the program retires it or itself, by deferred
+    reclamation, as R8 cites.)
   - have each call launch one execution of its function;
   - name each compiled function alike at every rank: (the program's group, the function's ordinal in the program's
     order of compilation). Every rank runs the same calls in the same order, so every rank computes the same name with
@@ -969,6 +1018,21 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       torch/_inductor/cudagraph_trees.py); "the output from the first invocation will be overwritten by the second
       invocation" (docs, CUDAGraph Trees). A program that keeps an output longer clones it itself, outside the compiled
       function. This is the cudagraphs style A1 quotes.
+  - **Which operands need their pages in one run (2026-11-05, later).**
+    > if i say that tensors whose outputs or inputs cover arbitrary noncontiguous blocks of pages, then all functions
+    > which do not explicitly require contiguity at runtime for their exact inputs and outputs do not overconstrain the
+    > allocator and data movements by imposing contiguity.
+    - A value is a list of pages, each placed anywhere. Contiguity is a type of particular operands, as R4's function A
+      states it (design/plan-to-bridge-change-request.md R4).
+    - Torch's MPS operators consume a strided view within one buffer. MPSGraph takes an `MTLBuffer` with a shape, and
+      optionally "rowBytes for the fastest moving dimension" (MPSGraphTensorData.h, `initWithMTLBuffer:shape:dataType:`
+      and `…rowBytes:`). Torch's MPS backend: "Use gather kernel to solve strides for macOS < 15.0 / Starting with
+      macOS 15.0, MPS supports native strides directly in the kernels" (PyTorch v2.11.0,
+      aten/src/ATen/native/mps/OperationUtils.mm). A torch tensor is one storage with sizes and strides
+      (c10/core/TensorImpl.h, `Storage storage_`; c10/core/StorageImpl.h, one `DataPtr data_ptr_`).
+    - So an operand of a torch MPS operator needs its pages at addresses in one strided progression. A value read
+      only by page-wise consumers (transfers, function B, kernels that read through a page list, as PagedAttention's
+      block tables do) needs no such placement.
   - **What stays, being torch's:**
     - an operator with no out variant, whose result is copied once into its placed pages where it must be there;
     - a kernel's own scratch inside torch;

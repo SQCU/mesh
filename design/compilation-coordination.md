@@ -3066,3 +3066,80 @@ e9fd7538. Every build was incremental, and none rebuilt HiGHS.
 - rdma/mesh_compile.py and rdma/mesh_graph.py compile (`python3 -m py_compile`). mesh_compile's cache entry was there
   before; mesh_graph's 3.14 entry was rewritten, and whether it was there before is not known (ignored by .gitignore).
 - Nothing was run: no form, overload resolution, binding or publish here has been exercised.
+
+## The documents' corrections of 2026-11-05 (the coordinator)
+
+The operator, 2026-11-05: "then correct every point in any change request docuemnt so far that feigns to supervene
+upon the literature, the outer documentation and requirements of the project, etc. we now have a clear list of the
+points where the change request documenst were externally or self inconsistent and what the corresponding hcanges must
+be."
+
+Each point below names where the text was wrong, the source it was wrong against, and what the code must now do. The
+corrections are dated notes at each place, in design/aot-compilation-change-request.md (AOT),
+design/plan-to-bridge-change-request.md (PB) and design/disjoint-pages-change-request.md (DP). The part "The revisions
+of e4a7398e" above is not yet verified against the requirement lines. Its BS-3, ND, ND-2 and `_absent` forms rest on
+points 1, 2 and 4, and are superseded with them.
+
+1. **Capture at a function's first call (AOT A1).**
+   - Wrong against: the operator's "lazy jit" and "AOT … serialized objects" turns, and torch's docs: `torch.compile`
+     "is a JIT compiler" that falls back "to running the program in the eager Python runtime".
+   - Origin: Claude's A1 chose a `torch.compile` backend with no requirement for it.
+   - The code must: capture each torch program with `torch.export` before it runs, the same at every rank, with nothing
+     run eagerly between compiled calls. rdma/mesh_compile.py's Dynamo backend (`serialize`) goes. mesh history's
+     engines.py used `torch.export.export` (10-26 to 11-02).
+2. **The meta device at a node with no section (AOT A4).**
+   - Wrong against: point 1. It rested on eager code between calls and on Dynamo tracing again at that node.
+   - The code must: at such a node, start its plans' executions and relay, and compute nothing. `_absent` goes.
+3. **"Every program on the island" (AOT A7).**
+   - Wrong against: the operator's turns, which give no several-program requirement. Pathways' multi-client island is
+     Pathways' setting.
+   - The code must: no change. The scheduler orders the one program's executions.
+4. **Each plan builds its own part of the IPC graph (AOT appendix item 2).**
+   - Wrong against: point 1.
+   - The code must: build the program's whole IPC graph at compile time, every function together, with each queue's
+     room (5) in it. `plan_rooms`' part graph goes.
+5. **A claim per plan, placed by run-time first fit, and several programs at once (AOT appendix items 2 and 6; PB R8;
+   DP A2, C3 item 4, D.3 item 1).**
+   - Wrong against: the operator's turn 394 ("allocation known aot … do you think we're supporting dynamic runtime
+     allocations"), and DP A2's own classification of first fit as the run-time strategy to replace. "Several programs"
+     has no source but Claude's text.
+   - The code must: place the whole program's values in one offline allocation at compile time. These go:
+     - `mesh_claim_take`'s first fit and the claim's head record;
+     - `mesh_plan_head`'s walk of every claim head in `mesh_transfers_start` and `mesh_plan_retire`, a run-time check;
+     - `ENOMEM` from fragmentation.
+     Release at retirement stays deferred reclamation (RCU). The program's group still names its plans, as NCCL's
+     `ncclUniqueId` names a communicator.
+6. **Every value one run of pages (PB R2 and R4; DP C3.3).**
+   - Wrong against: the operator's typing, "function B requires set of pages operand_b to be complete but not
+     contiguous" and "domain:Async,noncontiguous,incomplete"; and the turn "collective functions only 'know' about
+     pages".
+   - The code must:
+     - Represent a value as its ordered page-table rows (Kilburn et al.; Denning; PagedAttention's block tables, Kwon et
+       al., SOSP 2023).
+     - Place one run, or one strided progression, only for an operand typed so: R4's function A, or a torch MPS
+       operator's operand (item 7).
+     - Place every other value's pages anywhere, by the fewest chains of the interference order. That is Dilworth's
+       theorem, computed by Fulkerson's bipartite matching, a function of rdma/mesh-graph.h or mesh_graph.py with caller
+       operands.
+     - Keep greedy by size for the typed values only.
+7. **A received range is a value of its own, "one range's alone" (rdma/mesh-collective.h; the plan call of
+   design/disjoint-pages-revision-coordination.md).**
+   - Wrong against: NCCL's receives at offsets of one result ("receiving data from rank `i` at offset
+     `i*sendcount`"). The contract cites nothing.
+   - The code must: name, in each declared transfer, the pages of its destination value that it lands in. A
+     collective's result is then the pages its parts land in, so no concatenation and no copy of a part remains (item 7;
+     the stops of "The revisions of e4a7398e").
+8. **Torch MPS operands (AOT appendix item 7).**
+   - Added: MPSGraph takes an `MTLBuffer` with a shape and an optional row stride, and torch uses native strides from
+     macOS 15.0. So such an operand is typed one strided progression (point 6).
+   - The code must: the IR types each such operand.
+9. **"Lease" (AOT appendix item 7; the deleted allocator.mm).**
+   - Wrong against: the coordination's rules ("No hashing, receipts, credits, gates, filters, locks, leases …"). The
+     canonical lease is a grant limited in time (Gray and Cheriton, SOSP 1989).
+   - The code must: no change. Item 9 (torch's own allocations in the region) is not written.
+
+Open, outside these points:
+- The forced HiGHS build's 11.7 s against the eight-second bound.
+- Torch's own allocations: kernel scratch, and results of operators with no out variant.
+- Whether a landing's lifetime is an interval on the receiving node's order. It no longer matters for point 6's untyped
+  values; it still matters for the typed ones.

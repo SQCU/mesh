@@ -411,6 +411,12 @@ now and the strategy that replaces it to their closest literature.
   Dynamic storage allocation: a survey and critical review, IWMM 1995. It optimizes for allocating without knowing the
   future: each request is served from what is free at that moment. It knows nothing of a value's lifetime, and it
   needs an atomic claim because other callers allocate concurrently.
+  - (Corrected 2026-11-05.) This describes the strategy of the code at mesh 7e9936d5, which this appendix replaces. It
+    is not a problem the project has. No requirement has requests arriving with an unknown future. The operator: "do
+    you think we're supporting dynamic runtime allocations or dynamic runtime page->page access patterns outside of the
+    types and reuirements presented so far?" (design/plan-to-bridge-change-request.md, the turns). C3.4's
+    implementation brought this strategy back, as `mesh_claim_take`'s first fit at each plan call (corrected at C3
+    item 4).
 - **Ring slots reused under a run-time window.** This is the bounded buffer: E. W. Dijkstra, Cooperating sequential
   processes, 1965. Its reuse gate is credit-based flow control: H. T. Kung and R. Morris, Credit-based flow control for
   ATM networks, IEEE Network 9(2), 1995. In GPU collectives it is NCCL's per-connection FIFO of `NCCL_STEPS` slots with
@@ -868,6 +874,13 @@ This section is Claude's. It consolidates the review in C1 into one proposal. It
      meet. A landing's write is set by another node's send, so lifetimes under happens-before are not intervals on one
      order, and left-edge doesn't apply. The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288,
      2020), as `mesh_graph_left_edge` does now.
+   - (Corrected 2026-11-05.) Greedy by size followed from giving every value one run of pages. Only operands typed as
+     one run need that (design/plan-to-bridge-change-request.md R4 and R2, corrected). Every other value is pages
+     placed anywhere, each item one page. Two items may share a page exactly when this interference test orders them,
+     and that relation is a partial order. So the fewest pages is the fewest chains, which by Dilworth's theorem
+     (Annals of Mathematics, 1950) equals the largest set of mutually unordered items, found exactly by bipartite
+     matching (Fulkerson, Proc. AMS, 1956). Greedy by size stays for the values typed as one run, where placement is
+     Garey and Johnson's SR2.
    - Its cost is compile time only, once per plan: quadratic at worst in one execution's values × u, never in the
      run's length. At run time there are no allocations and no bookkeeping; every address is a constant in the plan.
 4. **Nothing grabs.**
@@ -879,6 +892,16 @@ This section is Claude's. It consolidates the review in C1 into one proposal. It
    - The bridge's own turn releases a retired plan's pages once no port holds them. This is deferred reclamation (RCU's
      `call_rcu`, P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser, Practical lock-freedom,
      2004), and nobody waits for it.
+   - (Corrected 2026-11-05.) "It claims them when `mesh_plan` places them" named no method for where in the region a
+     plan's pages go. The code filled the gap with first fit over a bitmap at each plan call (`mesh_claim_take`), the
+     run-time strategy A2 names as the one this allocator replaces. "Any number of programs hold disjoint sections of
+     a node's region at once" has no source in the operator's turns (design/plan-to-bridge-change-request.md R8,
+     corrected). What holds instead:
+     - One offline allocation places every value of the whole exported program, at compile time
+       (design/aot-compilation-change-request.md A1, corrected). Nothing grabs, because nothing is placed that the
+       program does not use.
+     - There is no claim per plan, no first fit, and no run-time handle lookup.
+     - Release at retirement stays deferred reclamation, as above.
 5. **The normal program demonstrates the reuse.** `e2b_replay` passes its program's data edges to `mesh_plan` in place
    of `NULL, 0` (e2b_replay.m:578–579). They come from the captured graph's stages: each stage's reads and writes, in
    the order its command buffer runs them. `tools/prepare_e2b.py` writes them into the manifest where it doesn't
@@ -1446,6 +1469,11 @@ Items 1 to 4 are the report's departures, in its order. Items 5 and 6 are the an
 throughout.
 
 1. **Any number of programs at once.** (Departure D8.) On D.5:
+   - (Corrected 2026-11-05.) The premise has no source in the operator's turns: a run is one program on the whole
+     collective (design/plan-to-bridge-change-request.md R8, corrected). What stands of this item:
+     - attach takes nothing;
+     - a plan is named by the program's group, as NCCL names a communicator by the application's `ncclUniqueId`.
+     "Each plan in its own claim" goes, for C3 item 4's correction: one offline allocation over the program.
    - **Attach takes nothing.** There is no client word, no compare-and-swap and no EADDRINUSE. A client is named only
      in the heads of its claims (its pid and start), and only once it plans.
    - **Each plan in its own claim.** A plan's lists and its state section are placed by its allocator in its own

@@ -1945,7 +1945,47 @@ code, and each method is used as its source states it.
   - "The template is unrolled into u copies, and execution t runs copy t mod u."
   - "The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020)."
   - "At run time there are no allocations and no bookkeeping; every address is a constant in the plan."
-- **Code:** as now (C3, D.3.2).
+- (Corrected 2026-11-05.) **A value is a list of pages; only a typed operand is one run.**
+  > if i say that tensors whose outputs or inputs cover arbitrary noncontiguous blocks of pages, then all functions
+  > which do not explicitly require contiguity at runtime for their exact inputs and outputs do not overconstrain the
+  > allocator and data movements by imposing contiguity. dfoes this mean we have to virtualize a 'a buffer of length l
+  > is split across l/n pages of pagelength n, whose ordering is {struct}?' sure, but that was what all of these
+  > constraints already quite definitely and obviously implied this entire time
+  > Obviously the user is insisting in many different semantics that data processing functions do not 'know' or have
+  > access to raw poitners or even a mapping of what pointers are valid or used by programs in collectives, and that
+  > collective functions only 'know' about pages (and, at the maximum limit in runtime, 'know' that a specific list of
+  > pages are contiguous or noncontiguous, and whihc indices go where and when in transfers and function calls>).
+  - **The structure is the page table above.** A value's ordered list of pages is its page-table rows (Kilburn et
+    al.; Denning). The same structure for tensors is PagedAttention's: "PagedAttention allows storing continuous keys
+    and values in non-contiguous memory space" (W. Kwon et al., Efficient memory management for large language model
+    serving with PagedAttention, SOSP 2023, §4.1), with "block tables—the mapping between logical and physical KV
+    blocks of each request" (§4.2). Its known property is "near-zero waste in KV cache memory" (the abstract).
+    Functions see values only by name, and the runtime places them: Legion's logical regions and physical instances
+    (M. Bauer, S. Treichler, E. Slaughter and A. Aiken, Legion: expressing locality and independence with logical
+    regions, SC 2012).
+  - **Contiguity is a type of particular operands (R4).** A value whose consumer needs one run, or one strided
+    progression (a torch MPS operator, design/aot-compilation-change-request.md appendix item 7), is placed so. Every
+    other value's pages go anywhere.
+  - **The allocation problem this gives.**
+    - For pages placed anywhere, every item is one page. Two items may share a page exactly when one's last access
+      happens before the other's first write, which is C3.3's own interference test. That relation is a partial order:
+      if x ends before y begins and y ends before z begins, then x ends before z begins. A page holds a chain of it,
+      so the fewest pages is the fewest chains. By Dilworth's theorem that number equals the largest set of items no
+      two of which are ordered (R. P. Dilworth, A decomposition theorem for partially ordered sets, Annals of
+      Mathematics 51(1), 1950). It is found by maximum bipartite matching (D. R. Fulkerson, Note on Dilworth's
+      decomposition theorem for partially ordered sets, Proc. AMS 7(4), 1956), exactly and in polynomial time.
+    - For values typed as one run, placement is dynamic storage allocation with contiguous blocks, NP-complete in the
+      strong sense (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979, problem SR2). There C3.3's
+      greedy by size stays (Pisarchyk and Lee).
+    - C3.3's text above applied greedy by size to every value, because it gave every value one run. The typing
+      confines that to the operands that need it.
+  - **A received range is pages of its destination value.** A collective's receive lands in the pages of the value it
+    belongs to, at its place in that value: "receiving data from rank `i` at offset `i*sendcount`" (NCCL, ncclAllGather);
+    "the `recvbuff` on rank `i` will contain the i-th block of the result" (NCCL, ncclReduceScatter). A range is not a
+    value of its own. This supersedes the plan call's "That value is MESH_EXECUTION and wire, its bytes the range's,
+    and one range's alone" (rdma/mesh-collective.h; design/disjoint-pages-revision-coordination.md, "The plan call"),
+    which cites nothing.
+- **Code:** as now (C3, D.3.2), but for the correction above.
 
 ### R3. An execution is a task graph
 
@@ -2024,6 +2064,10 @@ code, and each method is used as its source states it.
     - A's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
       assignment gives each tensor one contiguous range (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020; C3.3;
       rdma/mesh-collective.c).
+    - (Corrected 2026-11-05.) Only A's operand, and any operand whose consumer needs one strided progression, is one
+      run. The bullet above gave every value's copy one run. That imposes A's type on B's operands and on every
+      transfer, which the operator's typing forbids: "function B requires set of pages operand_b to be complete but
+      not contiguous", "domain:Async,noncontiguous,incomplete" (above). See R2's correction.
 - **Code:** the IR carries each consumer's kind (aot-compilation A8). The bridge's lists carry no kind, only which
   entries are a set's (aot-compilation, appendix item 5).
 
@@ -2203,6 +2247,30 @@ code, and each method is used as its source states it.
     (aot-compilation A2, A3). The functions passed today are the existing programs' hand partitions and unit
     weights, and any other choosing function can replace them.
 - **Code:** rdma/mesh-dataflow.c, as now: attaching only maps the region, and claims nothing.
+- (Corrected 2026-11-05.) **No claim per plan, no first fit, and no rule for several programs.**
+  > in this istuation is there a real problem solved by this extra allocator? is this a fictitious problem with no
+  > origin, whose error correcting code nevertheless can cause real errors? is this a misplaced solution (there are two
+  > allocation goals which are both solved by the compiler at compile time and applied through a combination of
+  > constraints (at compile time))? a superflujous solution?
+  > why do you think you need special rules about 'numbers of programs at once'?
+  - **There is no origin.** "Several programs can run at once" appears only in Claude's text: this request's R8 table,
+    the disjoint-pages request's C3 item 4, D.3 item 1 and D.5, and deliverables.md's "T7. Multi-tenant fabric by
+    lease". The operator's one turn on it rejects run-time allocation: "is attaching conceptually real or do programs
+    do nothing but what the allocator lets them, with the shapes and coarse bin packing requierments of allocation
+    known aot? do you think we're supporting dynamic runtime allocations or dynamic runtime page->page access patterns
+    outside of the types and reuirements presented so far?" (the turns, above).
+  - **What the code had built on it.** `mesh_claim_take` takes three contiguous runs at each plan call by first fit
+    over a bitmap (rdma/mesh-dataflow.c, citing Knuth vol. 1 §2.5). That is run-time dynamic storage allocation, which
+    the disjoint-pages request's A2 names as the strategy its allocator replaces. Built on it:
+    - every `mesh_transfers_start` walks every claim head in the region to test its handle (`mesh_plan_head`);
+    - `ENOMEM` from fragmentation, the claim's record holding one `count<<32|first` word a run;
+    - no page shared between plans whose values are never live together.
+  - **The method.** One offline allocation over the whole exported program (design/aot-compilation-change-request.md
+    A1, corrected), at compile time, by R2's correction. Its input is the program's values with their lifetimes, and
+    which of them are typed as one run. A program's pages are released at its retirement by deferred reclamation, as
+    above. Nothing takes pages at run time, and no handle is looked up at run time.
+  - Function executions are the one program's, ordered by A7's scheduler (design/aot-compilation-change-request.md A7,
+    corrected).
 
 ### What judges it
 
