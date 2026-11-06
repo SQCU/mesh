@@ -13,7 +13,8 @@
    crt_externs.h and mach/mach_time.h went with the children's code, mesh-children.c), with main's headers of the
    holder probes (mesh-holders.h: mesh_started, mesh_holds; libproc.h with them) and of the client library (mesh-dataflow.h:
    mesh_retire, mesh_retired_release, which take the region; struct mesh_ctx no longer, the bridge's own `bridge` gone:
-   the shared state's note), which mesh-bridge.h does not include */
+   the shared state's note), which mesh-bridge.h does not include.  2026-11-06 ("The revisions of 14b9a757", R-8):
+   mesh_retired_release alone is called here; mesh_retire is the program's (region_adopt's note) */
 #include "mesh-bridge.h"
 #include "mesh-holders.h"
 #include "mesh-dataflow.h"
@@ -373,12 +374,17 @@ static void region_adopt(void){
      the release below.
      2026-11-06 ("Review of 4e78f6f4 against the requirement lines", G2: "merge duplicated patterns"; the
      coordinator's review): the operand's openness by mesh.h mesh_algo_open (mesh 52a12eb0), where `published` and
-     `retired` were read here; hdr `client` read after it.  What must stay: as above */
-  const uint64_t open=mesh_algo_open(M);
-  const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
-  if(open && (pid_t)(uint32_t)client!=getpid() &&
-     !mesh_holds((pid_t)(uint32_t)client,atomic_load_explicit(&M->client_start,memory_order_acquire)))
-    mesh_retire(M,client);
+     `retired` were read here; hdr `client` read after it.  What must stay: as above
+     2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8:
+     "One writer a word (W11; Lamport's single-writer registers): the program writes `retired`, the bridge writes only
+     `released`, and a gone holder is read from the heartbeat's words"; W11: "(mesh-dataflow.c 78; mesh-records.c 1430,
+     1493; mesh-link.c 381)"; "The revisions of 14b9a757", R-8 and R-10), reversing the notes above: no retirement here.
+     The release below reads the holder itself (mesh-holders.h mesh_algo_holder, gone by mesh_holds) and releases a
+     gone holder's operand as a retired one, once no port announces it and no plan is held, which every port's
+     `prepared` 0 above and streams_cancel(NULL) make so here.  The test of this bridge's own pid goes with the
+     retirement: the holder is mesh_plan's copy of a program's context (mesh.h struct mesh_algo's note), never this
+     bridge's, and a pid this bridge took again reads gone by its start.  What must stay: the release after
+     streams_cancel(NULL)'s stores, on this thread */
   /* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.4; the contract, "The program's claim and
      its sections": mesh_retired_release releases each closed claim whose generation no port's `prepared` holds, after
      a seq_cst fence): every port's `prepared` is 0 above, so every closed claim is released here, after
@@ -390,6 +396,11 @@ static void region_adopt(void){
   mesh_retired_release(M);
   if(atomic_load(&M->map)&1)atomic_fetch_add(&M->map,1);
   if(atomic_load(&M->health)&1)atomic_fetch_add(&M->health,1);
+  /* 2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06; mesh.h hdr `view_map`, "a
+     seqlock as `map` is"; "The revisions of 14b9a757", A7): the view's seqlock, which a bridge that died mid-write left
+     odd, made even as `map`'s is, so its readers (mesh-dataflow.c mesh_nodes_read) do not wait out their bound on it;
+     map_adopt then takes the view's records as this bridge's, none installed.  What must stay: before map_adopt */
+  if(atomic_load(&M->view_map)&1)atomic_fetch_add(&M->view_map,1);
   map_adopt();
   atomic_store(&M->busy,0);atomic_store(&M->stopping,0);
 }
