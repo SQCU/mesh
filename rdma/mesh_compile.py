@@ -489,8 +489,7 @@ def _region(ir, consumer, key, window, m, o, whole):
     starts, length, after, left, right = _extent(window, parts, n, o)
     if whole:
         left, right = max([-a for a in starts] + [0]), max([a + length - size for a in starts] + [0])
-    region, middle, first = (node, key[1], 'region', consumer, dim), (node, key[1], 'middle', consumer, dim), \
-        len(ir.program)
+    region, middle = (node, key[1], 'region', consumer, dim), (node, key[1], 'middle', consumer, dim)
     fill = window.fill if any(a < 0 or a + length > size for a in starts) else None
     ir.shapes[region] = tuple(length if i == dim else s for i, s in enumerate(shape))
     offsets = tuple(a - (0 if whole else q * n) + left for q, a in enumerate(starts))
@@ -514,7 +513,7 @@ def _region(ir, consumer, key, window, m, o, whole):
     if left or right:
         landed, at = region + ('landed',), left if whole else 0
         ir.shapes[landed] = tuple(left + n + right if i == dim else s for i, s in enumerate(shape))
-        ir.added[landed] = (first, len(ir.program))
+        ir.added[landed] = False
         for k in reads:
             ir.inside[k] = (landed, dim, dict.fromkeys(ir.coords, at))
             at += ir.shapes[k][dim]
@@ -714,7 +713,7 @@ def _formed(ir, item, operands):
     made = (key,) if len(results) == 1 else tuple(key + ('out', j) for j in range(len(results)))
     if len(results) > 1:
         for k, r in zip(made, results):
-            ir.metas[k], ir.added[k], ir.results[k] = r, (ir.producer[key],) * 2, key
+            ir.metas[k], ir.added[k], ir.results[k] = r, False, key
     ir.forms[key] = (out, tuple(zip(names, made)))
     return result
 
@@ -946,7 +945,7 @@ def _inside(ir):
 def _all_reduce(ir, c, groups, key, made):
     arrive, k = 3 * c.position + 1, len(groups[0])
     readers, received = _readers(ir, {made}, arrive + 1), (c.node, 'received', c.position)
-    ir.shapes[received], ir.added[received] = (k - 1,) + _layout(ir, key)[1], None
+    ir.shapes[received], ir.added[received] = (k - 1,) + _layout(ir, key)[1], True
     for group in groups:
         root, members = group[0], group[1:]
         up = [ir.transfer(d, [root], mesh.PAGES, _strided(ir, ir.places[d][key]),
@@ -1028,7 +1027,7 @@ def _reduce_scatter(ir, c, groups, key, made):
     dim, k = c.dim, len(groups[0])
     n, received = _shape(ir, key)[dim] // k, (c.node, 'received', c.position)
     shape = _layout(ir, key)[1]
-    ir.shapes[received], ir.added[received] = (k - 1,) + shape[:dim] + (n,) + shape[dim + 1:], None
+    ir.shapes[received], ir.added[received] = (k - 1,) + shape[:dim] + (n,) + shape[dim + 1:], True
     _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], key,
               lambda e, q: _narrowed(ir.places[e][key], dim, q * n, n),
               lambda f, p, q: (_part(ir, received, p - (p > q)), received, (received, p - (p > q))), mesh.PAGES,
@@ -1109,8 +1108,8 @@ def lower(ir):
             ir.declares[collective] = range(first, len(ir.declared))
     firsts = mesh_graph.ends(range(len(ir.program))[::-1], lambda g: ir.program[g][1])
     for kind, _, key, collective in ir.program:
-        if kind == 'collective':
-            ir.waits.setdefault(firsts.get(key, len(ir.program) - 1), []).append(collective)
+        if kind == 'collective' and key in firsts:
+            ir.waits.setdefault(firsts[key], []).append(collective)
     ir.dependences = _dependences(ir)
     _place(ir)
 
@@ -1134,7 +1133,7 @@ def _place(ir):
         if place is not None and place.writer == ir.results.get(key, key) and place.writer in ir.producer:
             begins[place.owner] = min(begins.get(place.owner, len(ir.program)), ir.producer[place.writer])
     for key, place in places.items():
-        if place is None or place.owner != key or key in ir.added and ir.added[key] is None and key not in wired:
+        if place is None or place.owner != key or ir.added.get(key) and key not in wired:
             continue
         dtype, shape = _layout(ir, key)
         wire, first = int(key in wired), begins.get(key, 0)
@@ -1283,10 +1282,7 @@ DEVICE = []
 def _metal_device():
     if not DEVICE:
         probe = torch.empty(1, device='mps')
-        device = GET(probe.untyped_storage().data_ptr(), SELECTOR[b'device'])
-        if not device:
-            raise OSError(errno.ENODEV, 'torch\'s MPS buffer names no MTLDevice (MTLResource.h `device`)')
-        DEVICE.append(device)
+        DEVICE.append(GET(probe.untyped_storage().data_ptr(), SELECTOR[b'device']))
     return DEVICE[0]
 
 
@@ -1593,8 +1589,7 @@ def _retire(context, state, deadline):
 # remaining live finalizer is called unless its atexit attribute has been set to false"
 def _dropped(context, state):
     if state['mapping'] is not None:
-        _retire(context, state, time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-                + (0 if state['timeout'] is not None else mesh.PLATFORM_NS))
+        _retire(context, state, time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS)
 
 
 # MPI 4.1, section 3.9, MPI_START: "The request becomes active once the call is made. [...] The communication buffer
@@ -1612,11 +1607,9 @@ def _started(context, plan, metal):
 # torch 2.14.0 torch/fx/graph.py, _PyTreeCodeGen: process_inputs, `pytree.arg_tree_leaves(*inputs)`; process_outputs,
 # `pytree.tree_unflatten(out, self.pytree_info.out_spec)`
 def _execute(context, run, args, kwargs):
-    t, k = run['executions'], run['state'].submissions
-    status = mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1)
-    if run['state'].submissions > k:
-        run['executions'] = t + 1
-    mesh.check(status)
+    t = run['executions']
+    mesh.check(mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1))
+    run['executions'] = t + 1
     run['started'](t)
     c, env, inputs = t % len(run['steps']), {}, pytree.arg_tree_leaves(*args, **kwargs)
     for step in run['steps'][c]:
@@ -1840,7 +1833,7 @@ def program(block, *example_inputs):
              for x in example_inputs]
     constants = [None if isinstance(x, torch.Tensor) else x for x in example_inputs]
     context, state = _context(), {'stale': True, 'mapping': None, 'runs': None, 'devices': (), 'executions': 0,
-                                  'ended': 0, 'inputs': [None] * len(given), 'timeout': None}
+                                  'ended': 0, 'inputs': [None] * len(given)}
 
     def make():
         nodes = mesh.Nodes()
@@ -1870,49 +1863,35 @@ def program(block, *example_inputs):
         mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
                                       (mesh.U * len(calls))(*calls), len(calls), deadline))
         state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
+        views = [mesh.State.from_address(context.M + f.plan) for f in functions]
+        # JGroups ViewId.java: "The comparison is done on the IDs, if they are equal, we use the creator"
+        if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
+            raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
+        view, addresses = _mapped(context, functions, len(irs), [values for _, _, values, _ in arrays])
+        state['mapping'].view = view
+        buffer = _placed_buffer(view) if 'mps' in state['devices'] else None
         try:
-            views = [mesh.State.from_address(context.M + f.plan) for f in functions]
-            # JGroups ViewId.java: "The comparison is done on the IDs, if they are equal, we use the creator"
-            if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
-                raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
-            view, addresses = _mapped(context, functions, len(irs), [values for _, _, values, _ in arrays])
-            state['mapping'].view = view
-            buffer = _placed_buffer(view) if 'mps' in state['devices'] else None
-            try:
-                bound = [_bind(context, ir, values, at, buffer, state['mapping']) for ir, (_, _, values, _), at in
-                         zip(irs, arrays, addresses)]
-            finally:
-                if buffer:
-                    PUT(buffer, SELECTOR[b'release'])
-            for ir, (places, _, _) in zip(irs, bound):
-                loaded = ir.loads & places.keys()
-                needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
-                host = mesh_graph.forward([key for key in ir.attributes if key in needed],
-                                          lambda key: ir.attributes[key][1],
-                                          lambda key, values: _hosted(ir, ir.attributes[key], values))
-                for key in loaded:
-                    places[key][0].copy_(host[key])
-            runs = [dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
-                         plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan),
-                         started=_started(context, f.plan, any(layout[2] == 'mps' for layout in ir.layouts)))
-                    for ir, f, record, (places, devices, _) in zip(irs, functions, compiled, bound)]
-        except BaseException:
-            _retire(context, state, deadline)
-            raise
+            bound = [_bind(context, ir, values, at, buffer, state['mapping']) for ir, (_, _, values, _), at in
+                     zip(irs, arrays, addresses)]
+        finally:
+            if buffer:
+                PUT(buffer, SELECTOR[b'release'])
+        for ir, (places, _, _) in zip(irs, bound):
+            loaded = ir.loads & places.keys()
+            needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
+            host = mesh_graph.forward([key for key in ir.attributes if key in needed],
+                                      lambda key: ir.attributes[key][1],
+                                      lambda key, values: _hosted(ir, ir.attributes[key], values))
+            for key in loaded:
+                places[key][0].copy_(host[key])
+        runs = [dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
+                     plan=f.plan, executions=0,
+                     started=_started(context, f.plan, any(layout[2] == 'mps' for layout in ir.layouts)))
+                for ir, f, record, (places, devices, _) in zip(irs, functions, compiled, bound)]
         state['inputs'] = [next((b[2][i] for b in bound if i in b[2]), None) for i in range(len(given))]
         state.update(stale=False, runs=runs)
 
-    def timed(work):
-        if state['timeout'] is not None:
-            raise OSError(errno.ETIMEDOUT, 'the program\'s run ended at its first ETIMEDOUT (R-7): %s'
-                          % state['timeout'])
-        try:
-            return work()
-        except OSError as failure:
-            if failure.errno == errno.ETIMEDOUT:
-                state['timeout'] = failure
-            raise
-    timed(make)
+    make()
 
     def ended():
         return TORCH.mesh_torch_ended() if 'mps' in state['devices'] else state['ended']
@@ -1923,15 +1902,15 @@ def program(block, *example_inputs):
         else:
             state['ended'] = b + 1
 
-    def writable():
+    def inputs():
         if state['stale']:
             make()
         b = state['executions']
         _wait(lambda: ended() + HOST_LAG > b, ended, 'execution %d of the program: execution %d not ended, no end for '
-              'MESH_PLATFORM_NS, so its inputs\' copy is not free (D.3.3)' % (b, b - HOST_LAG))
+              'MESH_PLATFORM_NS, so its inputs\' copy is not free' % (b, b - HOST_LAG))
         return tuple(None if placed is None else placed[1][b % len(placed[1])] for placed in state['inputs'])
 
-    def execution():
+    def run():
         if state['stale']:
             make()
         b = state['executions']
@@ -1948,12 +1927,6 @@ def program(block, *example_inputs):
             raise
         end(b)
         return result
-
-    def inputs():
-        return timed(writable)
-
-    def run():
-        return timed(execution)
     run.inputs = inputs
     weakref.finalize(run, _dropped, context, state)
     return run
