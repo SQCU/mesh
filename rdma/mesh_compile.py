@@ -3932,6 +3932,9 @@ def program(block, *example_inputs):
 
     def run():
         return timed(execution)
-    run.inputs = inputs
+    # the executions ended (`ended`): execution b's outputs hold its values once it is above b, as e2b_replay.m reads
+    # a step's outputs once the queue has signalled its end (MTL4CommandQueue.h signalEvent:value: "after all GPU work
+    # prior to this point is complete")
+    run.inputs, run.ended = inputs, ended
     weakref.finalize(run, _dropped, context, state)
     return run
