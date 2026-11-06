@@ -2645,3 +2645,37 @@ made, not there before, removed). Nothing was run.
   does not can still tell an old plan's arrival before its own map moves, counted toward the sender's replan.
 - "Delivery's liveness" (an ORDER lost on the way): unchanged within a view; at a view's change the old view's
   undelivered messages are never delivered (A7).
+
+### Answered in the documents (2026-11-05, the coordinator, on this part's record)
+
+Verified at mesh a71f5c87 and metal-microbench e9fd7538: `make -B -C rdma`, `make -B -C rdma native-audit` and `make
+.build/e2b_replay` 0, no warning; rdma/mesh_compile.py compiles. Each finding of "Where the documents are wrong" is
+answered in design/aot-compilation-change-request.md as follows.
+- Item 2, "Where they live": the five functions are the graph module's C half, their one caller `mesh_plan` (BS-1
+  kept, the text corrected).
+- Item 2, "the program's IPC graph": each plan builds its own part when it is planned, and by BSL's Lemma 2 its bound
+  is never less than the program's (BS-3 kept, the text states it).
+- Item 2, the times of the program's submission and the TO-broadcast: 0, since their work is IPC operations, whose
+  time BSL §4.1 counts in the actor that performs them, and A3 weighs neither. The rooms read delays alone (BS-2
+  kept, the text states it).
+- Item 2, the added edge's count: the program's starts at the source's node, the edge's delay DetermineDelays' plus
+  A10's bound (BS-4 kept, the text states it).
+- A4, a node of the program the placement maps no device: it compiles and plans each function with no section of its
+  own and relays as its routes give it. NCCL: "Collective operations have to be called for each rank (hence CUDA
+  device), using the same count and the same datatype, to form a complete collective operation. Failure to do so will
+  result in undefined behavior, including hangs, crashes, or data corruption." **Code: rdma/mesh_compile.py's IR
+  refuses such a node, and must not.**
+- A7, a member's counter that rose after the sequencer counted it: the sequencer also creates a view whenever a
+  member's announcement names a view other than its installed one with a counter not less than that view's
+  identifier. Each announcement names the process that created its bridge's installed view as well as its counter, so
+  a member that installed the sequencer's own view (its counter equal to the identifier) does not trigger one.
+  **Code: rdma/mesh-map.h's record and rdma/mesh-records.c's view creation.**
+- A7, sender(m), e2b's launcher: run_pair.py starts rank r at map index r on every node, so e2b's program's nodes are
+  0 … R − 1 (PG-2 kept, the text states it); a torch program's launcher passes MESH_PROGRAM.
+
+Outside the documents: the forced build took 113.2 s, against the operator's "nothing you're running should take more
+than around 8000ms in any situation" (2026-10-31). HiGHS's 216 translation units were compiled one after another by a
+shell loop. They now compile at once, one per hardware thread (rdma/Makefile, mesh 579f5b58), and the forced build
+takes 16.4 s, HiGHS's part about 11.7 s on 18 threads. Its longest unit is 4.9 s, so the floor on one node is the
+compiler time, 176 s under contention. Reaching the bound needs the other nodes' cores, or a smaller source set than
+R5's BUILD.bazel globs. Open.

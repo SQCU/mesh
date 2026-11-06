@@ -155,6 +155,14 @@ statement, or a fact of the code.
   plan at once (rdma/mesh-collective.c, `mesh_graph_flow`). Each compiled function is its own plan (appendix item 6).
   Every node of the map is a node of the program, since every run is launched on the whole collective, so every relay
   holds the plan (A7, sender(m)).
+- A node of the program to which the placement operand maps no device (A2) compiles and plans each function as every
+  node does, with no section of its own. It declares the function's transfers as every rank does, and its part of each
+  call is the relaying its routes give it. NCCL states the rule for every rank of a communicator: "Collective
+  operations have to be called for each rank (hence CUDA device), using the same count and the same datatype, to form
+  a complete collective operation. Failure to do so will result in undefined behavior, including hangs, crashes, or
+  data corruption." (NCCL User Guide, "Collective Operations"). (Corrected 2026-11-05: rdma/mesh_compile.py's IR
+  refused such a node, "map index %d, this node, is no device of the placement operand (A2)", so it held no plan and
+  relayed nothing; design/compilation-coordination.md, "The revisions of 3f106747", "Where the documents are wrong".)
 - **Method:**
   - **Trees.** Blink (G. Wang et al., Blink: fast and generic collectives for distributed ML, MLSys 2020) builds
     collectives on packed spanning trees.
@@ -258,7 +266,10 @@ statement, or a fact of the code.
       one message.
     - **sender(m)** is the program's one sender: the least of the program's nodes. It TO-broadcasts the program's
       submissions in the order the program makes them. The program's nodes are the nodes its launcher started it at,
-      an operand of the plan call (`program`) that the launcher passes as it passes `group` (MESH_GROUP). Every run is
+      an operand of the plan call (`program`) that the launcher passes as it passes `group` (MESH_GROUP). e2b's
+      launcher, tools/mesh/run_pair.py, passes no node set: it starts rank r at map index r on every node of the
+      collective, so e2b's program's nodes are map indices 0 … R − 1, which tools/e2b_replay.m passes. A torch
+      program's launcher passes them as MESH_PROGRAM beside MESH_GROUP (rdma/mesh_compile.py `_program`). Every run is
       launched on the whole collective ("you may never use less than the entire collective under any circumstances.
       all is okay, 2 is not okay. all is cheaper than 2."), so the program's nodes are every member of the view, every
       relay of A4's routes is one of them, and every node of every plan, relays among them, calls `mesh_plan` and holds
@@ -303,7 +314,14 @@ statement, or a fact of the code.
   - **The membership service is the sequencer.** It decides each view alone, as Amoeba does: "Suspected processes are
     excluded from the group as the result of the unilateral decision of a single process" (Défago, Schiper and Urbán,
     §9.1.1). A view's members are the nodes the sequencer's map reaches. The sequencer creates a view at its bridge's
-    start and at each move of its map.
+    start and at each move of its map. It also creates one whenever a member's announcement names a view other than the
+    sequencer's installed one, with a counter not less than that view's identifier. Such a member installed another
+    sequencer's view after the announcement the sequencer counted, and it ignores the sequencer's view by Local
+    Monotonicity. The identifier is "computed based on the values of local counters" (below), so the sequencer computes
+    it again from the counters it now holds. To tell such a member from one that installed the sequencer's own view,
+    each announcement names the process that created its bridge's installed view as well as its counter. (Corrected
+    2026-11-05: a risen counter moved no map, so no view followed it; design/compilation-coordination.md, "The
+    revisions of 3f106747", "Where the documents are wrong".)
   - **The view identifier is Transis's**: "a positive integer. This integer is computed based on the values of local
     counters, maintained by all processes. This local counter is increased by a process upon each installation"
     (Chockler, Keidar and Vitenberg, §3.1.1). A bridge's counter is the identifier of the last view it installed, 0
@@ -618,6 +636,19 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
         transfers, each with C3.3's u copies as its delay, and these queues. At each node, A10's bound is the delay on
         the edge from a call's completion to the program's later submission. Execution times t(x) are A3's weighting
         operand.
+        - **Each plan builds its own part of that graph**, when it is planned: its actors, its queues and its transfers,
+          with the program's sender and A10's bound. A torch function is compiled at its first call (A1: TorchDynamo
+          hands each captured graph to the backend), so no later function's routes exist yet. Every cycle of the part
+          is a cycle of the program's graph, and "The number of tokens in any cycle of the IPC graph is always
+          conserved" (BSL, Lemma 2). So (5) over the part's cycles is never less than (5) over the program's: the room
+          is never too small.
+        - **The program's submission and its bridge's TO-broadcast** are two actors at the sender. The submissions'
+          queue between them is an IPC edge with a bound of its own. Their work is IPC operations alone, and "t(v)
+          includes the time taken to execute all IPC operations (sends and receives) that the actor v performs" (BSL
+          §4.1). A3 weighs neither, so each takes time 0, where BSL's times are positive integers. A room reads delays
+          alone, (5) and Theorem 2's "Bfb(e) = ρ(snk(e), src(e)) + delay(e)"; only the cycle mean and DetermineDelays
+          read times, and a cycle's mean is defined for times of 0. (2026-11-05: design/compilation-coordination.md,
+          "The revisions of 3f106747", BS-2 and BS-3, and "Where the documents are wrong".)
       - **On a cycle**, the queue's room is BSL's self-timed buffer bound: "Bfb(e) = min({Delay(C) | C is a cycle that
         contains e})" (§4.3, (5)). Its synchronization is their BBS, which "only explicitly ensures" that "an
         invocation of snk(e) never attempts to read data from the buffer unless the buffer contains at least one token"
@@ -631,9 +662,18 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       - **An added edge (vj, vi)** holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" (BSL (7)). Its source raises a
         count that only rises (C3's counted completion: Portals 4 counting events), and its sink reads that count
         before its k-th start. The bridge carries the count from source to sink, as it carries an arrival.
-      - **Where they live.** The strongly connected components, Convert-to-SC-graph, Bellman–Ford's cycle mean and
-        MinDelay's binary search are functions of rdma/mesh_graph.py. They take the caller's vertices, edges, delays
-        and times as operands (A10: "The same holds wherever mesh's code walks a graph").
+        - The end of a node's part of a call is not in the region at that node: only its port children see its sends
+          complete. The count its source raises is therefore the program's starts of the plan at that node. A start
+          there follows the end of the call A10's bound before it, since A10's bound is the delay on the edge from a
+          call's completion to the program's later submission. So the edge the count holds is (7) with
+          DetermineDelays' delay plus A10's bound, and the rooms take that delay. (2026-11-05: design/compilation-
+          coordination.md, "The revisions of 3f106747", BS-4.)
+      - **Where they live.** The strongly connected components, Convert-to-SC-graph, Bellman–Ford's cycle mean,
+        MinDelay's binary search and DetermineDelays are functions of the graph module's C half, rdma/mesh-graph.h and
+        mesh-graph.c. They take the caller's vertices, edges, delays and times as operands (A10: "The same holds
+        wherever mesh's code walks a graph"). Their one caller is `mesh_plan`, which alone holds each plan's routes and
+        u when it plans. (Corrected 2026-11-05: the text said rdma/mesh_graph.py, where nothing calls them;
+        design/compilation-coordination.md, "The revisions of 3f106747", BS-1.)
       - A plan whose bound cannot be found fails with `ENOMEM` when it is planned, as a value without a lag does in
         C3.3. That happens where A10 finds no bound, or where a cycle has no delay (BSL's Lemma 1: deadlock).
     - **The bridge takes its plans' calls by a multiway merge on the sequence number** (D. E. Knuth, The Art of Computer
@@ -671,7 +711,7 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
   - deliver orders as Fig. 5's destinations do;
   - publish each plan's deliveries to the bridge at each node through the plan's own queue above, read in place and
     taken by the multiway merge, with no copy, no wait and no check. Each queue's room is its self-timed buffer bound
-    in the program's IPC graph, and the feedforward queues' synchronization edges come from Convert-to-SC-graph and
+    in its plan's part of the program's IPC graph, and the feedforward queues' synchronization edges come from Convert-to-SC-graph and
     DetermineDelays, all at compile time (BSL, above). This replaces the sequence words (`sequences`), `taken[p]` and
     the parent's wait while they are full (Lamport's buffer; the coordination's DL1), and then the one channel for
     every plan (the implementation's CH2, with M3's room). M4 and M5 stay gone;
