@@ -231,6 +231,7 @@ class IR:
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
         self.publishes, self.inputs, self.declares, self.waits = {}, {}, {}, {}
+        self.attributes, self.loads = {}, set()
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
@@ -1111,6 +1112,13 @@ def partition(gm, placement, nodes):
                              'most once (GSPMD section 3.1)' % (name, mapping, len(ir.shape)))
         ir.sharding[node] = tuple(m if m >= 0 and ir.shape[m] > 1 else -1 for m in mapping)
         annotated.add(node)
+    # GSPMD section 4.5, "DynamicSlice to shard replicated dimensions"; torch 2.14.0 torch/export/exported_program.py,
+    # ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers";
+    # design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 8
+    replicated = mesh_graph.forward(ir.order, lambda node: node.all_input_nodes,
+                                    lambda node, operands: node.op == 'get_attr' or node.op == 'call_function'
+                                    and bool(operands) and all(operands) and _aliases(ir.locals[node]))
+    annotated |= {node for node, whole in replicated.items() if whole and ir.sharding[node] is not None}
     _complete(ir, operators, annotated)
     for node, sharding in ir.sharding.items():
         for size, m in zip(_value(node).shape if sharding is not None else (), sharding or ()):
@@ -1123,6 +1131,13 @@ def partition(gm, placement, nodes):
     ir.sent = mesh_graph.reach([item[1][0] for item in ir.program if item[0] == 'collective'],
                                lambda key: items[key][1][:1] if items[key][0] in ('slice', 'narrow')
                                or _viewed(items[key]) else ())
+    # GSPMD section 4.5, as above: "Sources for the third stops", 8, "Loading only the slices a node reads"
+    attributes = mesh_graph.forward(list(items), lambda key: items[key][1],
+                                    lambda key, reads: items[key][0] == 'constant'
+                                    and isinstance(key[0].meta.get('val'), torch.Tensor) or bool(reads) and all(reads)
+                                    and (items[key][0] in ('slice', 'narrow') or _viewed(items[key])))
+    ir.attributes = {key: items[key] for key, attribute in attributes.items() if attribute}
+    ir.loads = {k for _, reads, key, _ in ir.program if key not in ir.attributes for k in reads} & ir.attributes.keys()
     _forms(ir)
     _inside(ir)
     ir.places = {device: _places(ir, device) for device in ir.coords}
@@ -1445,6 +1460,8 @@ def _placement(ir, item, reads, device, added):
         return source if source[:4] == place[:4] else place
     if key in ir.taken:
         return added[ir.taken[key]]
+    if key in ir.loads:
+        return _own(ir, key)
     if (kind in ('slice', 'narrow') or _viewed(item)) and reads[0] is not None:
         return _narrowed(reads[0], *_cut(ir, kind, operand, reads[0].sizes, device))
     form = ir.forms.get(key)
@@ -1453,8 +1470,7 @@ def _placement(ir, item, reads, device, added):
         view = _view(ir, key, ir.locals[operand], item[1], reads)
         if view is not None:
             return view
-    if kind == 'collective' or kind == 'constant' and isinstance(key[0].meta.get('val'), torch.Tensor) \
-            or isinstance(form, tuple) and any(result == key for _, result in form[1]) \
+    if kind == 'collective' or isinstance(form, tuple) and any(result == key for _, result in form[1]) \
             or kind == 'call' and key in ir.sent:
         return _own(ir, key)
     return None
@@ -2026,11 +2042,10 @@ def _place(ir):
         if place is None or place.owner != key or key in ir.added and ir.added[key] is None and key not in wired:
             continue
         dtype, shape = _layout(ir, key)
-        g, wire, first = ir.producer.get(key), int(key in wired), begins.get(key, 0)
+        wire, first = int(key in wired), begins.get(key, 0)
         ir.owned[key] = ir.value(dtype, math.prod(shape), _device(ir, key), wire, 0 if key in landed else first,
                                  max(first, last.get(key, first)),
-                                 kind=mesh.INVARIANT if g is not None and ir.program[g][0] == 'constant'
-                                 else mesh.EXECUTION)
+                                 kind=mesh.INVARIANT if key in ir.loads else mesh.EXECUTION)
     ir.homes = {key: (ir.owned[place.owner], place.offset, place.sizes, place.strides)
                 for key, place in places.items() if place is not None and place.owner in ir.owned}
     for i, owner in ir.at.items():
@@ -2713,6 +2728,16 @@ def _completed(ir, context, plan, state, c, collective):
     return steps
 
 
+# GSPMD section 4.5, "DynamicSlice to shard replicated dimensions"; torch 2.14.0 torch/export/exported_program.py,
+# ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers";
+# design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 8
+def _hosted(ir, item, reads):
+    kind, read, _, operand = item
+    if kind == 'constant':
+        return operator.attrgetter(operand)(ir.gm)
+    return reads[0].narrow(*_cut(ir, kind, operand, _layout(ir, read[0])[1], ir.device))
+
+
 # MPICH MPIR_Localcopy, torch 2.14.0 torch/_tensor_docs.py copy_: "Copies the elements from src into self tensor and
 # returns self"; none where the source is the destination's view (MPI_IN_PLACE, _placement)
 def _copied(ir, read, key, cut, source, target):
@@ -3337,7 +3362,8 @@ class _Export(torch.fx.Interpreter):
 # - R-1: the plan call's functions carry no share.
 # - design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8 (torch 2.14.0
 #   torch/export/exported_program.py, ExportedProgram: "a state_dict containing tensor values of all lifted parameters
-#   and buffers"): each node loads its own copy of every invariant.
+#   and buffers"): each node loads, from the state_dict tensor by copy_, each DynamicSlice of an attribute its program
+#   reads, and an attribute whole only where it reads it whole ("Sources for the third stops", 8; _hosted).
 # - R-10: the program's mapping is mesh_view_values' (_mapped).
 # - R-4: each compiled function's steps are made once a copy (_steps), inside the plan's failure handling.
 # What must stay: no placement and no weight chosen here; every operand of mesh_plan the same at every rank but this
@@ -3410,9 +3436,11 @@ def program(block, *example_inputs):
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
             for ir, (places, _, _) in zip(irs, bound):
-                for kind, _, key, target in ir.program:
-                    if kind == 'constant' and key in places:
-                        places[key][0].copy_(operator.attrgetter(target)(ir.gm))
+                host = {} if ir.device is None else \
+                    mesh_graph.forward(list(ir.attributes), lambda key: ir.attributes[key][1],
+                                       lambda key, reads: _hosted(ir, ir.attributes[key], reads))
+                for key in ir.loads & places.keys():
+                    places[key][0].copy_(host[key])
             runs = [dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
                          plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan))
                     for ir, f, record, (places, devices, _) in zip(irs, functions, compiled, bound)]
