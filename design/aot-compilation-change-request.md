@@ -400,6 +400,18 @@ statement, or a fact of the code.
     the old one with `ESTALE`, as D.3.6 ends a plan at its map's move, and the plan's replan arrives in the new view.
     Each arrival carries its view's identifier, and the program's sender counts only the arrivals of the view it has
     installed.
+  - (Corrected 2026-11-06: design/compilation-coordination.md, "The revisions of 55b9cbad", "Where the documents are
+    wrong".) **Every member of a view plans on the view's map.**
+    - The text above let each node plan on its own map. While a map move floods, two nodes can plan one name on two
+      maps within one view. An index one plan gives the other, a signal's entry, can then name an entry the other
+      plan does not have: a store outside it.
+    - The map a view is created from is the sequencer's, and the view's first message carries it: the records the
+      sequencer's map holds when it creates the view. Every member plans on those records.
+    - So every member of a view computes the same plan from the same operands. Replicas that start in the same state
+      and execute the same inputs in the same order produce the same outputs (F. B. Schneider, Implementing
+      fault-tolerant services using the state machine approach: a tutorial, ACM Comput. Surv. 22(4), 1990). An index
+      one end's plan gives is the other end's by construction, and nothing tests it at run time.
+    - A plan then stands while its view does, and its view while the sequencer's map does (D.3.6).
 - **A plan's destinations exist before its first message.** Within a view, Section 3's static system holds for the
   processes the view names, and a plan's first message must find all of them holding the plan.
   > "What I was describing is that compilation finishes at different nodes at different times. "

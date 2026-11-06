@@ -3905,3 +3905,34 @@ rebuilt.
 - **Python:** `python3 -m py_compile` passes rdma/mesh_compile.py, mesh.py and mesh_graph.py (T: pyflakes clean on
   mesh_compile.py).
 - **Nothing was run.** No plan, wait, release, share, layout, mapping, flush or retirement here has been exercised.
+
+### Answered in the documents (2026-11-06, the coordinator, on this part's record)
+
+Verified at mesh 327df606 and metal-microbench d329555a: the four builds exit 0 incrementally with no warning, and
+rdma/mesh_compile.py, mesh_graph.py and mesh.py compile. Three read-only reviews of this unit's diff are recorded below
+when they report.
+- **V1 and V2 for program inputs and parameters** (stop). PB R2 now states that any value a transfer names is sent from
+  its own pages, whatever its copies (R1: "nothing copied on the way").
+  - An invariant is placed once in the registered window and read by every execution's send, its supplied word raised
+    once (C3.2).
+  - An input is placed per execution and written by its caller as a host producer (C3.1).
+  - The plan call's rules against this are the coordination's contract, not a requirement, and go.
+- **V1 for overlapping parts** (stop). PB R2 now states that ranges may share a block where their bytes are disjoint.
+  - C3 writes "each byte once per use", each byte, not each block.
+  - Each range keeps its own landed count (item 5), and a page instruction names its bytes at their offset in the
+    page, as MSCCL-IR's steps name a destination offset and count.
+  - The contract's "no two ranges at this node share a block" goes.
+- **A plan's name in a view does not identify its compiled plan** (document error, D's finding). A7 now states that
+  every member of a view plans on the view's map.
+  - The view's first message carries the records of the sequencer's map that the view was created from.
+  - Every member computes the same plan from the same operands (Schneider 1990), so a signal's index names the same
+    entry at both ends by construction, with no test at run time.
+  - The fault D found, a store outside the sink's edges, cannot then arise.
+- **V2 where the shared blocks land as a received range** (document error, C's finding). PB R2 now states that a
+  share's pages are one item from the earlier first write to the later last read. Where the first write is a landing,
+  the next landing follows the last read by C3.3's lag test. A share with no such lag fails with ENOMEM, as C3.3 fails
+  any value. C's choice, shared blocks unordered for the whole program, is then not needed.
+- **Appendix item 8 against G4.** These do not contradict. Item 8 settled the heartbeat's holders "with no change", and
+  G4's holder in hdr `client` restores the heartbeat's finding of the program as its holder, which it had lost from 110.
+- **mesh-metal.m's waiter** (open). B1's one deadline per execution is to cover it and e2b's step waits together, as
+  a joint change in the next unit.

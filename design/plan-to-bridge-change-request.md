@@ -2037,6 +2037,31 @@ code, and each method is used as its source states it.
         cannot take that view, the change of layout is an operator of its own, run as its out variant into placed
         pages (design/aot-compilation-change-request.md appendix item 7). It is not a copy in the transfer.
       - This is the common case: Megatron's column-parallel output, gathered along its last dimension.
+    - (Corrected 2026-11-06: design/compilation-coordination.md, "The revisions of 55b9cbad", stops and document
+      errors.) **Any value a transfer names is sent from its own pages, whatever its copies.**
+      - R1: "The code must move every page from the page that holds it to the page it lands in, with nothing copied on
+        the way."
+      - An invariant, written before the first execution and read by every one (C3.2: "placed once, for the plan's
+        whole life"), is placed in the registered window when a transfer names it. Every execution's send reads its
+        one copy, and its supplied word is raised once.
+      - A program's input is placed per execution, and its caller writes it there as a host producer (C3.1: "A host
+        producer is ordered by the event"). It is sent from those pages.
+      - The plan call's rules that a lag-k value is "named by no declared transfer", that a transfer's value is
+        "MESH_EXECUTION and wire", and that a share's two values have "the same copies" are the coordination's
+        contract, not a requirement, and they go. A share whose operand is an invariant names the operand's one copy
+        from every copy of its result.
+    - **Ranges may share a block where their bytes are disjoint.**
+      - C3's rule is "Its producer or its landing writes each byte once per use", each byte, not each block. Each range
+        keeps its own landed count of each copy (design/aot-compilation-change-request.md appendix item 5).
+      - A page instruction names its bytes at their offset in its page, as MSCCL-IR's steps name a destination offset
+        and a count. The coordinator cites MSCCL-IR's step attributes from memory.
+      - At a source, any number of ranges read the same blocks. A halo wider than a shard, or two halos over one shard,
+        is then sent with no copy.
+      - The plan call's "no two ranges at this node share a block of it" goes with this.
+    - **A share's pages are one item from the earlier first write to the later last read.** Where that first write is
+      a landing, the next landing into those pages follows the last read by C3.3's lag test, as any value's does. A
+      share with no such lag fails the plan with `ENOMEM`, as C3.3 fails any value: "A value with no such L fails the
+      plan with `ENOMEM`, naming the value."
 - **Code:** as now (C3, D.3.2), but for the correction above.
 
 ### R3. An execution is a task graph
