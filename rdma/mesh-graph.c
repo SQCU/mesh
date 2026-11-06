@@ -694,69 +694,218 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
   return result;
 }
 
-/* New (design/disjoint-pages-change-request.md, Appendix A, A3, "The assignment";
-   design/disjoint-pages-coordination.md, "The allocator"): no tag source.
-   mesh_graph_left_edge's placed runs, kept by first colour */
-struct left_edge_run { uint64_t start,end; uint32_t item; };
-/* mesh-graph.h mesh_graph_left_edge.  An item's run starts at colour 0 and walks the placed runs by first colour,
-   moved to the end of each it overlaps and interferes with, until a placed run starts at or past its run's end (as
-   every later one does).  After its turn a walked run does not interfere or ends at or below the start, which only
-   rises, so the run reached overlaps none it interferes with; and a rise to a run's end passes only starts whose run
-   overlaps that one, so the start reached is the lowest.  A start past capacity - size is ENOSPC at once (the lowest
-   lies at or past it).  The run then goes in among the placed after those starting at or below it (a binary search
-   and one move).  This is the offset calculation of Pisarchyk and Lee's greedy by size (the tensors placed so far
-   walked in offset order), at the lowest colour free of interference, where theirs takes the smallest gap that fits.
-   Cost: each item walks the placed runs once, so O(items^2) interference tests and run moves at worst (items all
-   interfering: items^2 / 2 tests, 4.5 x 10^8 for 30,000), and O(items) memory.
-   `interferes` NULL, every pair interfering: the walk's result without the walk.  The placed runs then lie end to
-   end from colour 0 in the caller's order, so each item's lowest start is the end of the runs before it (an empty
-   run, which overlaps none, colour 0 as above), and ENOSPC where that end passes capacity - size: O(items), no
-   memory. */
-int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *order,
-                         int (*interferes)(const void *context, uint32_t a, uint32_t b), const void *context,
-                         uint64_t capacity, uint64_t *colour, uint64_t *used) {
-  if (!interferes) {
-    uint64_t end = 0;
-    int full = 0;
-    for (uint32_t n = 0; n < items; n++) {
-      const uint32_t i = order[n];
-      const uint64_t need = size[i];
-      if (need > capacity - end) { full = 1; break; }
-      colour[i] = need ? end : 0;
-      end += need;
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6: "Place every
+   value's pages anywhere, by the fewest chains of the interference order" and "Greedy by size goes, with
+   `mesh_graph_left_edge`'s colouring"; "The revisions of 4e78f6f4"): mesh_graph_left_edge and its placed runs (struct
+   left_edge_run) are removed, the left-edge colouring of items that each took a run of colours at the lowest colour
+   free of interference, the offset calculation of greedy by size (T. Hashimoto and J. Stevens, DAC 1971; Y. Pisarchyk
+   and J. Lee, arXiv 2001.03288, 2020).  Why: design/plan-to-bridge-change-request.md R2, corrected 2026-11-05: "No
+   value is placed as one run.  So greedy by size (Pisarchyk and Lee), and the contiguous-block problem it approximates
+   (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979, problem SR2), have no use here.  The chains
+   replace C3.3's colouring."  What must stay: placement an operand of the caller's, by mesh_graph_chains below. */
+/* New (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6; "The revisions of
+   4e78f6f4"; design/plan-to-bridge-change-request.md R2, corrected 2026-11-05; design/disjoint-pages-change-request.md,
+   A3 and C3.3, corrected 2026-11-05): no tag source.
+   mesh_graph_chains' network: item i's left vertex L_i = i and right vertex R_i = items + i, the source 2 items and the
+   sink 2 items + 1.  The middle arcs, one for each ordered pair i before j: edge e from L_tail[e] to R_head[e], flow[e]
+   its flow f(i, j), the edges out of L_i first[i] .. first[i + 1] - 1 in the caller's order of j, and those into R_j
+   into[into_first[j] .. into_first[j + 1]) in the caller's order of i; out[i] the flow from the source into L_i, in[j]
+   the flow from R_j into the sink. */
+struct chains_net {
+  uint32_t items;
+  const uint64_t *count;
+  const size_t *first, *into_first, *into;
+  const uint32_t *head, *tail;
+  uint64_t *flow, *out, *in;
+};
+/* vertex u's arcs in the residual network, in their order: the source's to L_0 .. L_items-1; L_i's to each R_j it
+   precedes, in the caller's order; R_j's to the sink first, then back to each L_i that precedes it, in the caller's
+   order; the sink's none */
+static size_t chains_arcs(const struct chains_net *n, size_t u) {
+  const size_t items = n->items;
+  if (u < items) return n->first[u + 1] - n->first[u];
+  if (u < 2 * items) return 1 + n->into_first[u - items + 1] - n->into_first[u - items];
+  return u == 2 * items ? items : 0;
+}
+/* vertex u's arc a: its head (*to) and residual capacity.  Source -> L_i: count[i] less out[i]; L_i -> R_j: unbounded
+   (UINT64_MAX); R_j -> sink: count[j] less in[j]; R_j -> L_i, back along the middle arc: f(i, j) */
+static uint64_t chains_arc(const struct chains_net *n, size_t u, size_t a, size_t *to) {
+  const size_t items = n->items;
+  if (u < items) { *to = items + n->head[n->first[u] + a]; return UINT64_MAX; }
+  if (u == 2 * items) { *to = a; return n->count[a] - n->out[a]; }
+  const size_t j = u - items;
+  if (!a) { *to = 2 * items + 1; return n->count[j] - n->in[j]; }
+  const size_t e = n->into[n->into_first[j] + a - 1];
+  *to = n->tail[e];
+  return n->flow[e];
+}
+/* `delta` more along vertex u's arc a: its flow raised, or, back along a middle arc, that arc's lowered */
+static void chains_push(struct chains_net *n, size_t u, size_t a, uint64_t delta) {
+  const size_t items = n->items;
+  if (u < items) n->flow[n->first[u] + a] += delta;
+  else if (u == 2 * items) n->out[a] += delta;
+  else if (!a) n->in[u - items] += delta;
+  else n->flow[n->into[n->into_first[u - items] + a - 1]] -= delta;
+}
+/* Dinic's layered network: each vertex's level its distance from the source over the arcs of positive residual
+   capacity, by a breadth-first search (queue[0 .. vertices)), ended once the sink is reached; unreached SIZE_MAX.  1
+   where the sink is reached, else 0 (no augmenting path: the flow is maximum). */
+static int chains_layer(const struct chains_net *n, size_t *level, size_t *queue) {
+  const size_t vertices = 2 * (size_t)n->items + 2, sink = vertices - 1;
+  for (size_t v = 0; v < vertices; v++) level[v] = SIZE_MAX;
+  level[vertices - 2] = 0;
+  queue[0] = vertices - 2;
+  for (size_t at = 0, end = 1; at < end && level[sink] == SIZE_MAX; at++)
+    for (size_t a = 0, arcs = chains_arcs(n, queue[at]); a < arcs; a++) {
+      size_t v;
+      if (!chains_arc(n, queue[at], a, &v) || level[v] != SIZE_MAX) continue;
+      level[v] = level[queue[at]] + 1;
+      queue[end++] = v;
     }
-    *used = end;
-    return full ? ENOSPC : 0;
-  }
-  struct left_edge_run *placed = malloc(((size_t)items + 1) * sizeof *placed);
-  size_t count = 0;
-  uint64_t most = 0;
-  int result = placed ? 0 : ENOMEM;
-  for (uint32_t n = 0; !result && n < items; n++) {
-    const uint32_t i = order[n];
-    const uint64_t need = size[i];
-    uint64_t c = 0;
-    if (need > capacity) { result = ENOSPC; break; }
-    for (size_t p = 0; p < count && placed[p].start < c + need; p++)
-      if (placed[p].end > c && interferes(context, i, placed[p].item)) {
-        c = placed[p].end;
-        if (c > capacity - need) { result = ENOSPC; break; }
+  return level[sink] != SIZE_MAX;
+}
+/* Dinic's blocking flow in the layered network: depth-first searches from the source (path[0 .. depth), at most one
+   vertex a level), each along an arc of positive residual capacity into the next level, the sink's level the last (a
+   vertex there other than the sink leads to no augmenting path of this phase).  Each vertex's arcs are taken in their
+   order from a pointer, at[u], that passes an arc once it is found saturated or leading to no path: Dinic's removal of
+   blocked arcs from the layered network, each arc passed at most once a phase.  At the sink, the path's least residual
+   capacity is pushed along it and the search goes back to the tail of the first arc that saturated; a vertex whose arcs
+   are all passed is left, and its parent's pointer passes the arc into it.  The phase ends when the source's arcs are
+   all passed, so every path to the sink in the layered network holds a saturated arc. */
+static void chains_block(struct chains_net *n, const size_t *level, size_t *at, size_t *path) {
+  const size_t vertices = 2 * (size_t)n->items + 2, sink = vertices - 1;
+  for (size_t v = 0; v < vertices; v++) at[v] = 0;
+  size_t depth = 1, v = 0;
+  path[0] = vertices - 2;
+  while (depth) {
+    const size_t u = path[depth - 1];
+    if (u == sink) {
+      uint64_t least = UINT64_MAX;
+      for (size_t k = 0; k + 1 < depth; k++) {
+        const uint64_t residual = chains_arc(n, path[k], at[path[k]], &v);
+        if (residual < least) least = residual;
       }
-    if (result) break;
-    colour[i] = c;
-    if (c + need > most) most = c + need;
-    if (!need) continue; /* an empty run overlaps none */
-    size_t lo = 0, hi = count;
-    while (lo < hi) {
-      const size_t mid = lo + (hi - lo) / 2;
-      if (placed[mid].start <= c) lo = mid + 1; else hi = mid;
+      size_t saturated = depth;
+      for (size_t k = 0; k + 1 < depth; k++) {
+        chains_push(n, path[k], at[path[k]], least);
+        if (saturated == depth && !chains_arc(n, path[k], at[path[k]], &v)) saturated = k;
+      }
+      depth = saturated + 1;
+      continue;
     }
-    memmove(placed + lo + 1, placed + lo, (count - lo) * sizeof *placed);
-    placed[lo] = (struct left_edge_run){c, c + need, i};
-    count++;
+    const size_t arcs = chains_arcs(n, u);
+    for (; at[u] < arcs; at[u]++)
+      if (chains_arc(n, u, at[u], &v) && level[v] == level[u] + 1 && (v == sink || level[v] < level[sink])) break;
+    if (at[u] < arcs) path[depth++] = v;
+    else if (--depth) at[path[depth - 1]]++;
   }
-  *used = most;
-  free(placed);
+}
+/* mesh-graph.h mesh_graph_chains.  R2, corrected 2026-11-05: "By Dilworth's theorem that number equals the largest set
+   of items no two of which are ordered (R. P. Dilworth, A decomposition theorem for partially ordered sets, Annals of
+   Mathematics 51(1), 1950).  It is found by maximum bipartite matching (D. R. Fulkerson, Note on Dilworth's
+   decomposition theorem for partially ordered sets, Proc. AMS 7(4), 1956), exactly and in polynomial time."  The Python
+   half's form of the same method is rdma/mesh_graph.py `width`, by `matching` (Hopcroft and Karp's phases); this one
+   gives the chains too, and takes multiplicities.
+   - The network (mesh-graph.h: Fulkerson's bipartite graph, "with an item's elements as one vertex of capacity count[i]
+     on each side"): source -> L_i of capacity count[i], R_j -> sink of capacity count[j], and L_i -> R_j wherever
+     before(context, i, j) != 0, unbounded (it stands for the count[i] x count[j] element pairs, more than L_i takes
+     in).  An integral flow of value F is then a matching of F element pairs, f(i, j) of them an element of item i's
+     followed by one of item j's, and conversely.  `before` is called once for each ordered pair of distinct items, i
+     then j in the caller's order, items x (items - 1) calls; never with a == b, the order being irreflexive.
+   - Its maximum flow by Dinic's phases (E. A. Dinic, Algorithm for solution of a problem of maximum flow in a network
+     with power estimation, Soviet Math. Doklady 11, 1970), which on a network of capacities are Hopcroft and Karp's (J.
+     E. Hopcroft and R. M. Karp, An n^5/2 algorithm for maximum matchings in bipartite graphs, SIAM J. Comput. 2(4),
+     1973; mesh-graph.h; mesh_graph.py `matching`: "a breadth-first search layers the graph ... to the length of the
+     shortest augmenting paths, then depth-first searches augment along vertex-disjoint paths of that length, until
+     none is left"): each phase the layered network (chains_layer), then a blocking flow in it (chains_block), until
+     the sink is not reached.  The residual network's arcs are chains_arcs' and chains_arc's; the arcs back into the
+     source and out of the sink lie on no path from the source to the sink and are left out.  Each phase lengthens the
+     shortest augmenting path (Dinic), an odd length from 3 to 2 items + 1, so there are at most `items` phases; where
+     every count is 1 they are Hopcroft and Karp's own, O(sqrt(items)) of them.
+   - The chains.  Item j's first in[j] elements (in[j] = the sum of f(i, j) over i) continue chains and its other
+     count[j] - in[j] begin them; item i's first out[i] elements (out[i] = the sum of f(i, j) over j) are continued.
+     The elements that begin chains are numbered 0, 1, ... in the elements' order, item i's element k at o_i + k, o_i
+     the sum of count[h] over h < i (mesh-graph.h).  Then the items are taken in a linear extension of `before`, and
+     for each item i its edges L_i -> R_j in the caller's order of j: the next f(i, j) of item i's elements, from its
+     first, give their chains to the next f(i, j) of item j's, from its first, in turn.  An item's predecessors all
+     come before it in the extension, so each element's chain is set before it is given.  The extension: the items by
+     their number of predecessors, ascending, a tie in the caller's order (mesh_graph_rows, a stable counting sort, with
+     depth_head over the counts, its rows in queue's words); a before b makes every predecessor of a one of b
+     (transitivity), and a one of b but not of a (irreflexivity), so b has more.
+     - Each element then has at most one element before it in its chain and one after it, of an item it follows or
+       precedes, so each chain is a path x_1 -> x_2 -> ... of mutually ordered elements (transitivity), and they number
+       the elements less F, the fewest (Fulkerson).
+     - An item that precedes and follows none has no flow in or out: its count[i] elements begin chains, numbered
+       consecutively.
+   Arithmetic: integer + - and comparisons alone, every loop in the caller's order or the extension's, no hashing:
+   every party with the same operands finds the same flow and the same chains.  Bound: each count[i] < 2^32 (the caller's block counts) and
+   items < 2^32, so the elements' sum, every flow and every chain number lie below 2^64, under the unbounded capacity
+   UINT64_MAX.  The edges' arrays double from 64 entries while `before` is read; a doubling's size cannot pass SIZE_MAX,
+   since half of it was already allocated.  Every allocation precedes the first output written, so ENOMEM writes none.
+   Cost: items x (items - 1) calls of `before`; memory O(items + E) for E ordered pairs, 24 bytes each (head and tail's
+   8 of them up to twice that while they grow); each phase O(items + E) for the layering and O(items x E) for the
+   blocking flow (Dinic). */
+int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
+                      const void *context, uint64_t *chain, uint64_t *chains) {
+  const size_t vertices = 2 * (size_t)items + 2;
+  const size_t rows = (size_t)items + 1;
+  size_t *first = malloc(rows * sizeof *first), *into_first = malloc(rows * sizeof *into_first);
+  size_t *order = malloc(rows * sizeof *order), *into = NULL;
+  size_t *level = malloc(vertices * sizeof *level), *queue = malloc(vertices * sizeof *queue);
+  size_t *at = malloc(vertices * sizeof *at), *path = malloc(vertices * sizeof *path);
+  uint32_t *predecessors = calloc(rows, sizeof *predecessors), *head = NULL, *tail = NULL;
+  uint64_t *out = calloc(rows, sizeof *out), *in = calloc(rows, sizeof *in), *flow = NULL;
+  uint64_t *place = malloc(rows * sizeof *place), *taken = calloc(rows, sizeof *taken);
+  int result = first && into_first && order && level && queue && at && path && predecessors && out && in && place &&
+               taken ? 0 : ENOMEM;
+  size_t edges = 0, room = 0;
+  if (!result) first[0] = 0;
+  for (uint32_t i = 0; !result && i < items; i++) {
+    for (uint32_t j = 0; !result && j < items; j++) {
+      if (i == j || !before(context, i, j)) continue;
+      if (edges == room) {
+        room = room ? 2 * room : 64;
+        uint32_t *grown = realloc(head, room * sizeof *grown);
+        if (grown) head = grown;
+        grown = grown ? realloc(tail, room * sizeof *grown) : NULL;
+        if (!grown) { result = ENOMEM; break; }
+        tail = grown;
+      }
+      head[edges] = j; tail[edges++] = i;
+      predecessors[j]++;
+    }
+    first[i + 1] = edges;
+  }
+  if (!result) {
+    flow = calloc(edges + 1, sizeof *flow);
+    into = malloc((edges + 1) * sizeof *into);
+    if (!flow || !into) result = ENOMEM;
+  }
+  if (!result) {
+    mesh_graph_rows(items, edges, depth_head, head, into_first, into);
+    struct chains_net net = {items, count, first, into_first, into, head, tail, flow, out, in};
+    while (chains_layer(&net, level, queue)) chains_block(&net, level, at, path);
+    uint64_t next = 0, o = 0;
+    for (uint32_t i = 0; i < items; i++) {
+      place[i] = o;
+      for (uint64_t k = in[i]; k < count[i]; k++) chain[o + k] = next++;
+      o += count[i];
+    }
+    mesh_graph_rows(items, items, depth_head, predecessors, queue, order);
+    for (uint32_t p = 0; p < items; p++) {
+      const size_t i = order[p];
+      uint64_t from = place[i];
+      for (size_t e = first[i]; e < first[i + 1]; e++) {
+        const uint32_t j = head[e];
+        for (uint64_t k = 0; k < flow[e]; k++) chain[place[j] + taken[j] + k] = chain[from + k];
+        taken[j] += flow[e];
+        from += flow[e];
+      }
+    }
+    *chains = next;
+  }
+  free(first); free(into_first); free(order); free(into); free(level); free(queue); free(at); free(path);
+  free(predecessors); free(head); free(tail); free(out); free(in); free(place); free(taken); free(flow);
   return result;
 }
 
