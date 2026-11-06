@@ -57,9 +57,22 @@ class Value(C.Structure):
                 ('run', U), ('shares', U), ('padding1', Q)]
 
 
+# 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The
+# revisions of 14b9a757"): mesh-collective.h struct mesh_strided (Strided), a view of a value's bytes, offset and strides
+# in bytes, and Declared's `from` and `to` views where `first` and `bytes` were (328 bytes); struct mesh_share (Share)
+# and Function's `share` and `shares` gone (64 bytes).  What must stay: the fields in the headers' order and of their
+# types
+STRIDED_DIMS = 8
+
+
+class Strided(C.Structure):
+    _fields_ = [('offset', Q), ('element', Q), ('dims', U), ('padding', U), ('size', Q * STRIDED_DIMS),
+                ('stride', Q * STRIDED_DIMS)]
+
+
 class Declared(C.Structure):
-    _fields_ = [('source', U), ('destination', U), ('identity', U), ('kind', U), ('value', U), ('first', U),
-                ('bytes', Z)]
+    _fields_ = [('source', U), ('destination', U), ('identity', U), ('kind', U), ('value', U), ('padding', U),
+                ('from_', Strided), ('to', Strided)]
 
 
 class Weight(C.Structure):
@@ -70,14 +83,10 @@ class Dependence(C.Structure):
     _fields_ = [('from', U), ('to', U), ('lag', U), ('kinds', U)]
 
 
-class Share(C.Structure):
-    _fields_ = [('value', U), ('first', U), ('of', U), ('at', U), ('blocks', U), ('padding', U)]
-
-
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
-                ('dependence', C.POINTER(Dependence)), ('share', C.POINTER(Share)), ('count', U), ('values', U),
-                ('dependences', U), ('shares', U), ('outstanding', Q), ('plan', Q)]
+                ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
+                ('padding', U), ('outstanding', Q), ('plan', Q)]
 
 
 class View(C.Structure):
@@ -111,7 +120,7 @@ class State(C.Structure):
                 ('sender', U), ('outstanding', U), ('submitted', Q), ('delivered', Q), ('submissions', Q),
                 ('broadcast', Q), ('arrived', Q), ('room', Q), ('deliveries', Q), ('submits', Q), ('announced', Q),
                 ('waits', U), ('tells', U), ('syncs', Q), ('calls', U), ('closed', U), ('rows', Q),
-                ('submit_room', Q), ('padding3', Q * 6)]
+                ('submit_room', Q), ('transfers', Q), ('padding3', Q * 5)]
 
 
 # mesh-dataflow.h struct mesh_nodes, the map reader's (mesh_nodes_read)
@@ -153,18 +162,25 @@ CONTEXT = C.POINTER(Context)
 # is the client" above: mesh_retire retires the program's operand (mesh.h struct mesh_algo, A9's `<algo>`) where hdr
 # `client`, its holder, is the client and its `published` is not 0 (`retired` = `published`), taking the region and the
 # client word as before.  What must stay: each binding the header's declaration
+# 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1, R-7
+# and R-10; "The revisions of 14b9a757"): mesh_plan takes the preparation's one absolute deadline, CLOCK_MONOTONIC
+# nanoseconds, last; mesh_transfers_start takes none (each wait bounded by MESH_PLATFORM_NS without progress);
+# mesh_host_publish and mesh_host_arrived name a range by its plan and its declared transfer's index, where they took
+# its first row's section; mesh_view_values maps every `run` value of the program and gives each value's offset in the
+# mapping.  What must stay: each binding the header's declaration
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_nodes_read', C.c_int, [CONTEXT, C.POINTER(Nodes)]),
-        ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U]),
+        ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, Q]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_compose', C.c_int, [CONTEXT, C.POINTER(U), Z, C.POINTER(View)]),
+        ('mesh_view_values', C.c_int, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(View)]),
         ('mesh_view_release', None, [View]),
         ('mesh_retire', None, [C.c_void_p, Q]),
-        ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q, Q]),
-        ('mesh_host_publish', None, [CONTEXT, Section, Q]),
-        ('mesh_host_arrived', Q, [CONTEXT, Section, Q])):
+        ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q]),
+        ('mesh_host_publish', None, [CONTEXT, Q, U, Q]),
+        ('mesh_host_arrived', Q, [CONTEXT, Q, U, Q])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 

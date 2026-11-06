@@ -302,6 +302,54 @@
    What must stay: every rank passes the same IR but its values and `value`s, and computes the same demands, trees,
    template, u, schedule and order of each function from them; every failure but ESTALE and the second map read's is
    found before anything is written. */
+/* 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1;
+   design/plan-to-bridge-change-request.md R1 at mesh 56ede97e, "Why the code copies" and "What the code must do
+   instead"; "The revisions of 14b9a757"), reversing the notes above where a declared transfer names one run of blocks
+   (`first`, `bytes`), a value's layout is fixed for a transfer, and a value's blocks are another's by a struct
+   mesh_share:
+   - A transfer's source and destination are each a view of a value (struct mesh_strided: offset, sizes, strides), as a
+     torch tensor is one storage under an offset, sizes and strides (torch 2.14.0 c10/core/TensorImpl.h, `Storage
+     storage_`, `sizes_and_strides_`).  R1: "A transfer's source and destination are each a view (offset, sizes,
+     strides) of a value.  The compilation flattens each view into its list of (row, offset, bytes) blocks, adjacent
+     blocks merged, as datatype processing flattens a type map.  The bridge's instructions are those blocks (aot A9:
+     MSCCL-IR's steps with offset and count)"; MPI's derived datatypes, a type map read or written in place (R. Ross,
+     N. Miller and W. D. Gropp, EuroPVM/MPI 2003; J. Wu, P. Wyckoff and D. K. Panda, IPDPS 2004, as R1 cites them).
+   - mesh_plan flattens each view of a range into its extents of the value's bytes, in its index order, adjacent extents
+     merged; the range's bytes are the concatenation of its source view's extents, and the i-th byte of the source's
+     goes to the i-th byte of each destination's (MPI's matching of type signatures).  Its instructions are the common
+     refinement of the source's and every destination's extents, each cut at its value's block boundaries, and of the
+     range's own bytes cut at every multiple of a block's bytes (block x pgsz), so each instruction is one extent within
+     one block at its source, at each destination and at a relay, as an MSCCL-IR step names one offset and one count at
+     each end.  Every rank computes the same instructions from the same views (aot A7, corrected: every member of a view
+     plans on the view's map; F. B. Schneider, ACM Comput. Surv. 22(4), 1990), so both ends' lists hold the same hops.
+     A relay holds the range in its own bytes' order, its byte s at its block s / (block x pgsz) and offset s mod
+     (block x pgsz).  The refinement's cut at the range's own block multiples is the coordinating implementer's, so a
+     relay's pages are its range's bytes in blocks (the record, "Decisions").
+   - A value's layout is the program's own: no layout is chosen for a transfer, no part is padded, and nothing is packed
+     or unpacked (R1: "Then there is no packing and no unpacking, no layout chosen for a transfer's sake, and no share
+     record.  A value's layout is the program's own, torch's strides").  Ranges at one node may share a block where
+     their bytes are disjoint (PB R2, corrected 2026-11-06: "Ranges may share a block where their bytes are disjoint");
+     at a source any number of ranges read the same bytes.  "no two ranges at this node share a block of it" goes.
+   - A frame (a placed block) is named by the rows of the values whose blocks it holds over the program's one
+     allocation, the page table's own sharing (PB R2, 2026-11-06: "A value's rows naming another value's frames is the
+     page table's own sharing, with no record and no rules of its own.  The record goes"); struct mesh_share, struct
+     mesh_function `share` and `shares`, and their EINVALs go.  A block a range's instructions touch is an item whose
+     accesses are those of every range touching it, from the first write to the last read, ordered by C3.3's lag test
+     (R-1: "A frame's item lives from the first write to the last read over every value naming it, with C3.3's lag
+     test"); a block holding bytes no range here covers is an item that lives the program's whole life, as before.
+   - Any value a transfer names is sent from its own pages, whatever its copies (PB R2, corrected 2026-11-06): the plan
+     call's rules that a lag-k value is "named by no declared transfer" and that a transfer's value is "MESH_EXECUTION
+     and wire" go.  A source may be a MESH_INVARIANT value, one copy for the plan's life, which every copy's send reads,
+     its supplied word raised once (C3.2); or a value of `lag` k >= 1, a host producer's (C3.1), whose copies are then
+     the plan's u, written for execution t into copy t mod u after execution t - k has ended, the program's dependences
+     declaring that order (struct mesh_dependence's premise).  A destination is a MESH_EXECUTION value of `lag` 0, its
+     landing that execution's write (EINVAL otherwise: a landing writes its bytes each execution, C3.7).  Every value a
+     transfer names here is placed in the registered window, whatever its `wire` ("is placed in the registered window
+     when a transfer names it").
+   - A range's words at this node are named by its declared transfer's index, not by a row: ranges sharing a block
+     begin in one row (mesh.h struct mesh_state `transfers`; mesh_host_publish, mesh_host_arrived and mesh-metal.h).
+   What must stay: every rank passes the same IR but its values and `value`s, and computes the same demands, trees,
+   instructions, template, u, schedule and order of each function from them. */
 enum { MESH_INVARIANT, MESH_EXECUTION };
 /* a value at this node.  In: section.bytes (> 0), kind, wire, state (1 only on a local MESH_INVARIANT value, wire 0),
    for a local MESH_EXECUTION value of lag 0 its first and last positions on this node's own program order in one
@@ -335,7 +383,18 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
      page, and only a barrier between their accesses needs the alias flush (metal-microbench metal_recording.m
      MetalEncoder; MTL4CommandEncoder.h, MTL4VisibilityOptionResourceAlias: "Flushes caches to ensure that aliased
      virtual addresses are memory consistent").
-   What must stay: 64 bytes, every field before `shares` where it was */
+   What must stay: 64 bytes, every field before `shares` where it was
+   2026-11-06 ("The root cause of the copies, and the revised work list", R-1 and R-5; "The revisions of 14b9a757"):
+   - A value a declared transfer names here (its source's or a destination's `value`) is placed in the registered
+     window whatever its `wire`; its copies are 1 where it is MESH_INVARIANT and u otherwise, a value of `lag` k >= 1
+     among them (the note before this struct).  `wire` is read for every other value.
+   - `shares` (out) is 1 where a frame bound in one of the value's rows is bound in another row at this node (another
+     value's or another copy's, by the program's one allocation: no record makes one), as above.  R-5: "The plan knows
+     each frame's virtual names through R-1's rows.  Metal 4's `MTL4VisibilityOptionResourceAlias` ... goes on the
+     barrier between a write under one name and a read under another, and on no other": a value whose `shares` is 1
+     hands its frames to another row's name after its last access in each execution, and another hands them to it
+     before its first.
+   What must stay: 64 bytes, every field where it is */
 struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag,run,shares; uint64_t padding1; };
 _Static_assert(sizeof(struct mesh_value)==64 && offsetof(struct mesh_value,run)==48 &&
                offsetof(struct mesh_value,shares)==52 && offsetof(struct mesh_value,padding1)==56,
@@ -358,8 +417,36 @@ enum { MESH_JOIN, MESH_PAGES };
    covers here are one item of their own, which shares no block with any other (no edge of the template orders their
    write, as a value of `lag` k's copy).  "one range's alone" goes.  What must stay: 32 bytes, every other field where
    it was */
-struct mesh_declared { uint32_t source,destination,identity,kind,value,first; size_t bytes; };
-_Static_assert(sizeof(struct mesh_declared)==32 && offsetof(struct mesh_declared,first)==20,"mesh_declared");
+/* A view of a value's bytes (2026-11-06, "The root cause of the copies, and the revised work list", R-1: "A transfer's
+   source and destination are each a view (value, offset, sizes, strides)"; PB R1 at mesh 56ede97e; "The revisions of
+   14b9a757"): a torch strided view, one storage under an offset, sizes and strides (torch 2.14.0
+   c10/core/TensorImpl.h `storage_offset_`, `sizes_and_strides_`), its offset and strides in bytes and `element` the
+   bytes of one element.  Its bytes are, for every index (i_0 .. i_{dims-1}) with i_d < size[d], the extent
+   [offset + sum_d i_d x stride[d], + element) of each copy of the value, in the order of the index with the last
+   dimension fastest (C order, the order in which torch's copy_ matches two tensors' elements); `dims` 0 is the one
+   extent [offset, offset + element).  `element` >= 1, `dims` <= MESH_STRIDED_DIMS, every size[d] >= 1, and every extent
+   within the value's bytes (struct mesh_section `bytes`): EINVAL otherwise, at the plan.  size[d] and stride[d] for d
+   >= dims are not read.  What must stay: 152 bytes, every field where it is (rdma/mesh.py Strided) */
+#define MESH_STRIDED_DIMS 8u
+struct mesh_strided { uint64_t offset,element; uint32_t dims,padding; uint64_t size[MESH_STRIDED_DIMS],
+                      stride[MESH_STRIDED_DIMS]; };
+_Static_assert(sizeof(struct mesh_strided)==152 && offsetof(struct mesh_strided,dims)==16 &&
+               offsetof(struct mesh_strided,size)==24 && offsetof(struct mesh_strided,stride)==88,
+               "mesh_strided: rdma/mesh.py Strided");
+/* 2026-11-06 (R-1; "The revisions of 14b9a757"), reversing `first` and `bytes`: a declared transfer's range is the bytes
+   its source's value shows through `from`, landing in the bytes its destination's value shows through `to`, both every
+   rank's alike (a node plans every end's instructions from them: the note before struct mesh_value).
+   - `from`: the range's bytes in its source's value, the same in every declared transfer of one range (EINVAL
+     otherwise); `to`: declared[i]'s bytes in its destination's value.  The two name as many bytes (EINVAL otherwise),
+     the range's bytes B, and byte i of `from` lands at byte i of `to`.
+   - `value`: the index in `values` of this node's value of it, the one `from` views where this node is the source, the
+     one `to` views where it is declared[i]'s destination; MESH_ABSENT elsewhere.  A destination's value is
+     MESH_EXECUTION of `lag` 0 (EINVAL otherwise).
+   `first` and `bytes` go: a range's place is its views, and its bytes theirs.  What must stay: `source`,
+   `destination`, `identity`, `kind` and `value` where they were */
+struct mesh_declared { uint32_t source,destination,identity,kind,value,padding; struct mesh_strided from,to; };
+_Static_assert(sizeof(struct mesh_declared)==328 && offsetof(struct mesh_declared,from)==24 &&
+               offsetof(struct mesh_declared,to)==176,"mesh_declared: rdma/mesh.py Declared");
 /* aot-compilation A3: the weighting operand, one entry a declared transfer, the program's weighting function's result.
    produced: w of the range's production at its source; consumed: w of the consumption at declared[i]'s destination
    (for MESH_PAGES, of each page's task); read: w of the source's own read of the range (where a dependence names it);
@@ -419,17 +506,19 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    2026-11-05 ("The revisions of 55b9cbad", sub-agent C's decisions, accepted): EINVAL also where `of`'s run is itself
    another share's run (a share of a share: every share is tested before any is bound, so no order of them decides),
    and where the two values' `wire` differ (a block lies in one space, mesh-dataflow.h mesh_arena_range).  What must
-   stay: every test before anything is written */
-struct mesh_share { uint32_t value,first,of,at,blocks,padding; };
-_Static_assert(sizeof(struct mesh_share)==24,"mesh_share: rdma/mesh.py Share");
-/* 2026-11-05 ("The revisions of 55b9cbad", V2): `share` after `dependence`, `shares` of them (struct mesh_share)
-   where `padding` was; 72 bytes.  What must stay: `outstanding` and `plan` as their notes state them */
+   stay: every test before anything is written
+   2026-11-06 ("The root cause of the copies, and the revised work list", R-1; design/plan-to-bridge-change-request.md
+   R2 at mesh 56ede97e: "The share record of the implementation (`struct mesh_share`), and its rules, is a restricted
+   form of the sharing stated above.  A value's rows naming another value's frames is the page table's own sharing,
+   with no record and no rules of its own.  The record goes (R1)"; "The revisions of 14b9a757"): struct mesh_share and
+   its tests go, and struct mesh_function's `share` and `shares` with it (64 bytes, as before 55b9cbad).  Two values'
+   rows name one frame by the program's one allocation alone (the note before struct mesh_value).  What must stay:
+   `outstanding` and `plan` as their notes state them */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
-                       const struct mesh_dependence *dependence; const struct mesh_share *share;
-                       uint32_t count,values,dependences,shares; uint64_t outstanding,plan; };
-_Static_assert(sizeof(struct mesh_function)==72 && offsetof(struct mesh_function,share)==32 &&
-               offsetof(struct mesh_function,count)==40 && offsetof(struct mesh_function,shares)==52 &&
-               offsetof(struct mesh_function,outstanding)==56 && offsetof(struct mesh_function,plan)==64,
+                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
+                       uint64_t outstanding,plan; };
+_Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function,count)==32 &&
+               offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56,
                "mesh_function: rdma/mesh.py Function");
 /* The 116 plan call's notes on its operands, kept (2026-11-05, "The revisions of 4e78f6f4": restored where dd215cbe
    dropped them; sub-agent C's finding).  aot-compilation appendix item 6 (design/compilation-coordination.md, "The
@@ -542,8 +631,32 @@ _Static_assert(sizeof(struct mesh_function)==72 && offsetof(struct mesh_function
    ETIMEDOUT (the previous operand not released within MESH_PLATFORM_NS); ESTALE (the map moved while planning: plan
    again on the map as it is); or the map reader's error.  What must stay: every rank passes the same IR but its values
    and `value`s, and computes the same demands, trees, template, u, schedule, order, IPC graph and allocation */
+/* 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1, R-6,
+   R-7 and R-8; "The revisions of 14b9a757"), reversing the notes above where they differ:
+   - The declared transfers are views (struct mesh_declared `from`, `to`), flattened and refined into instructions as
+     the note before struct mesh_value states; struct mesh_share and its EINVALs go; each instruction's offset in its
+     page is its entry's (mesh.h struct mesh_hop `offset`).  A range's words at this node are its declared transfers'
+     entries (mesh.h struct mesh_state `transfers`), not a row's publication.
+   - The map planned on is the installed view's (design/aot-compilation-change-request.md A7, corrected 2026-11-06:
+     "The map a view is created from is the sequencer's, and the view's first message carries it ... Every member plans
+     on those records"; mesh-dataflow.h mesh_nodes_read), so the plan's `serial` is that view's identifier (mesh.h hdr
+     `view`), and mesh_plan's second read is ESTALE where the installed view moved.
+   - The operand's top level names, for each map index, the places of the plans with an entry toward it (mesh.h struct
+     mesh_algo `adjacent`; R-6: "Each cable's processor executes its list of instructions in the compile-time order
+     ... It scans no table of plans"), written before `published`.
+   - `deadline` (clock_gettime_nsec_np(CLOCK_MONOTONIC) nanoseconds, absolute): the previous operand's release is
+     waited for until it, ETIMEDOUT at it, nothing written (R-7: "make()'s waits share one deadline"), where the wait
+     took MESH_PLATFORM_NS from its own start.  The caller's one deadline covers its own earlier wait of the same
+     preparation (rdma/mesh_compile.py's retirement) and this one.
+   - The release waited for is "published and not yet released" (mesh.h mesh_algo_unreleased; R-10), and nothing here
+     writes `retired` or `released` (R-8: "the program writes `retired`, the bridge writes only `released`").
+   0; EINVAL (as before but struct mesh_share's; a malformed view, two views of one transfer naming different bytes,
+   one range's transfers with different `from`, a destination's value not MESH_EXECUTION of `lag` 0); EHOSTUNREACH;
+   ENOMEM; ETIMEDOUT (the previous operand not released by `deadline`); ESTALE (the installed view moved while planning:
+   plan again); or the map reader's error.  What must stay: every rank passes the same IR but its values and `value`s,
+   and computes the same demands, trees, instructions, template, u, schedule, order, IPC graph and allocation */
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
-              const uint32_t *calls,uint32_t ncalls);
+              const uint32_t *calls,uint32_t ncalls,uint64_t deadline);
 
 /* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's, each by its range's
    first row's publication, as before: mesh_host_publish its supplied word (`targets[0]`), mesh_host_arrived its words
@@ -551,12 +664,35 @@ int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_func
    2026-11-04, sub-assignment 3: mesh_host_inputs is removed (it did nothing: mesh_plan places and starts every word),
    and `invocation` is `execution`, a uint64_t, since a plan runs any number of executions.  What must stay: a host
    producer releases a range by one store, and a host reader reads a range's state, never a word a page. */
+/* 2026-11-06 ("The root cause of the copies, and the revised work list", R-1; "The revisions of 14b9a757"), reversing
+   "each by its range's first row's publication": each by its declared transfer, `plan` its function's state section
+   (struct mesh_function `plan`) and `transfer` its index among the function's declared transfers, entry `transfer` of
+   the plan's `transfers` (mesh.h struct mesh_state, mesh_transfer_at), which mesh_plan writes.  Why: ranges may share a
+   block where their bytes are disjoint (PB R2, corrected 2026-11-06), so several ranges begin in one row and a row
+   names no one range; the IR's index is the program's own name of the transfer, read by index (A9: "the bridge reads
+   the serialized operand at a place its compilation fixed, and searches for nothing").  What must stay: one store
+   releases a range; a range read by its words, never a word a page */
 /* a host producer's release of execution t of a source range: its supplied word raised to t + 1 (release), never
    lowered, so publishes run in any order (a torch MPSEvent's notification, rdma/mesh-torch.mm) leave it at the
-   greatest (2026-11-05, design/compilation-coordination.md, "The revisions of e4a7398e", TP-3, where it was stored) */
-void mesh_host_publish(struct mesh_ctx *,struct mesh_section,uint64_t execution);
+   greatest (2026-11-05, design/compilation-coordination.md, "The revisions of e4a7398e", TP-3, where it was stored).
+   A range sent from a MESH_INVARIANT value is released once, after its load, with `execution` UINT64_MAX - 1, so every
+   execution's send reads its one copy (PB R2, corrected 2026-11-06: "its supplied word is raised once").  Nothing
+   where this node is not the transfer's source */
+void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 /* execution t of a received range: 1 where every field of its copy t mod u reads mesh_phase(t / u + 1) (acquire);
    UINT64_MAX where a field reads neither that nor mesh_phase(t / u) (ahead), or where its count has reached
-   (t / u + 1) x P with a field still behind (cancelled); else 0 (not yet) */
-uint64_t mesh_host_arrived(struct mesh_ctx *,struct mesh_section,uint64_t execution);
+   (t / u + 1) x P with a field still behind (cancelled); else 0 (not yet); 0 where this node is not the transfer's
+   destination */
+uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
+/* The program's one mapping of its values (2026-11-06, "The root cause of the copies, and the revised work list", R-10:
+   "the mapping's row list in one mesh-dataflow helper over the plan's rows"; W13: "the mapping's row list in two
+   effectors (mesh_compile.py 2289; e2b_replay.m 1437), to be one mesh-dataflow helper"; "The revisions of 14b9a757"):
+   every value of `functions` whose `run` is 1, function by function and value by value in `values`' order, each
+   value's copies in order, block k of copy c its row section.first + c x section.stride + k (mesh-section.h), mapped
+   by mesh_view_compose into `*view`; offset[i] the byte offset in the mapping of value i's copy 0, i counted over every
+   function's values in order, copy c at offset[i] + c x section.pages x pgsz, UINT64_MAX for a value whose `run` is 0.
+   Called by the program's effector once mesh_plan has written the rows; an effector, given rows and deciding nothing.
+   0 or mesh_view_compose's error, nothing mapped and every offset UINT64_MAX (mesh-dataflow.c) */
+int mesh_view_values(struct mesh_ctx *,const struct mesh_function *functions,uint32_t count,uint64_t *offset,
+                     struct mesh_view *view);
 #endif

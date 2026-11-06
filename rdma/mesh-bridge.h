@@ -238,8 +238,15 @@ struct mesh_arrival { uint64_t group,epoch; uint32_t node,sender; uint64_t view;
    was struct mesh_view, which mesh-dataflow.h names from mesh dd215cbe (a value's mapping, mesh_view_compose), and
    mesh-flow.c, mesh-records.c and mesh-link.c include both headers.  The name is the group membership service's
    "view" (Chockler, Keidar and Vitenberg, above), the island's group (A7).  What must stay: the layout, every field
-   where it is */
-struct mesh_group_view { uint64_t view,last,boot; uint32_t sequencer,members; };
+   where it is
+   2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "The map a view is created from
+   is the sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates
+   the view.  Every member plans on those records"; "The revisions of 14b9a757"): `records` after `members`, and the
+   VIEW's payload is the struct, its `members` node ids (uint32_t), padded to 8 bytes, then its `records` map records
+   (mesh-map.h struct mesh_record), the sequencer's map as it created the view; a member installing the view stores
+   them as its installed view's (mesh.h hdr `view_off`, `view_nodes`, under `view_map`).  What must stay: every field
+   before `records` where it is */
+struct mesh_group_view { uint64_t view,last,boot; uint32_t sequencer,members,records,padding; };
 /* the payload of a COUNT (`bytes` sizeof): plan (group, epoch)'s synchronization edge from the node whose id is
    `node` to the node whose id is `sink`, its source's count `count` in view `view` (mesh.h struct mesh_state `tells`,
    `waits`, `wait_count`) */
@@ -432,9 +439,18 @@ extern uint32_t ones;
    2026-11-05 (118; design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4 and
    K2; "The revisions of 55b9cbad"): the places below struct mesh_algo `plans` (mesh.h mesh_algo_plan, which tests no
    bound now), where it read the root's.  What must stay: as above */
+/* 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-3:
+   "Publication is read as RCU's publish-subscribe (W5): every field of the published operand is read through the
+   acquired publication, never before it (McKenney and Slingwine)"; W5: "the bridge reads `plans` before
+   `mesh_algo_open` acquires `published` (mesh-bridge.h 436; mesh.h 1114–1116), so a replan with fewer plans can be
+   read past.  The count is read from the published operand after the acquire, so the index is bounded by
+   construction"; "The revisions of 14b9a757"): the publication acquired first (mesh.h mesh_algo_open), then `plans`
+   read, then each place's plan (mesh_algo_standing), where `plans` was read before the acquire at each step.  What
+   must stay: every plan read at its place and none searched for */
 static inline struct mesh_state *plan_from(uint32_t *k){
-  for(;*k<mesh_algo(M)->plans;++*k){
-    struct mesh_state *state=mesh_algo_plan(M,*k);
+  if(!mesh_algo_open(M))return NULL;
+  for(const uint32_t plans=mesh_algo(M)->plans;*k<plans;++*k){
+    struct mesh_state *state=mesh_algo_standing(M,*k);
     if(state)return state;
   }
   return NULL;

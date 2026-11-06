@@ -29,11 +29,17 @@ int mesh_metal_transport_create(struct mesh_ctx *,uint64_t plan,void *device,str
 void mesh_metal_transport_destroy(struct mesh_metal_transport *);
 /* a received range's words, byte offsets in the transport's buffer: copy c's phase group at phases + c x group, its
    count word at count + 8 c; pages P; copies u */
+/* 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1;
+   "The revisions of 14b9a757"), reversing a range named by its first row's publication: by `transfer`, its index
+   among the transport's plan's declared transfers, entry `transfer` of the plan's `transfers` (mesh.h struct mesh_state,
+   mesh_transfer_at), which lies in the plan's state section, the transport's buffer.  Why: ranges may share a block
+   where their bytes are disjoint, so a row names no one range (mesh-collective.h mesh_host_publish's note).  What must
+   stay: one input a received range and one supplied word a source range, as byte offsets in the one buffer */
 struct mesh_metal_input { uint64_t phases,group,count; uint32_t pages,copies; };
-int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,struct mesh_metal_input *);
+int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,uint32_t transfer,struct mesh_metal_input *);
 /* a source range's supplied word, its byte offset in the transport's buffer */
 struct mesh_metal_publication { uint64_t supplied; };
-int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,
+int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,uint32_t transfer,
                                    struct mesh_metal_publication *);
 /* one repetition's wait (design/disjoint-pages-rulings-coordination.md, R11 as review 10 amended it): pass `pass` of a
    repetition's `passes` reads a received range whose count word of copy 0 is at byte offset `count` of the transport's

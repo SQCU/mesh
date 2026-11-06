@@ -30,4 +30,19 @@ static inline uint64_t mesh_started(pid_t process){
 /* the process `pid` of start `start` alive (a start of 0, which a region an earlier bridge or library wrote holds:
    the pid alone) */
 static inline int mesh_holds(pid_t pid,uint64_t start){ return start?mesh_started(pid)==start:!mesh_gone(pid); }
+/* The open operand's holder (2026-11-06, design/compilation-coordination.md, "The root cause of the copies, and the
+   revised work list", R-8: "a gone holder is read from the heartbeat's words", and R-10: "the holder's read and
+   gone-holder test", W13: "(mesh-link.c 377–381; mesh-records.c 1425–1430, 1491–1493; mesh-stat.c 118–120)", each
+   merged; "The revisions of 14b9a757"): hdr `client`'s low 32 bits its pid and hdr `client_start` its start, the words
+   mesh-heartbeat.c replace_turn reads as its one client holder, read after the publication's acquire (mesh.h
+   mesh_algo_open: mesh_plan stores them before `published`); {0} where the operand is not open.  The one read of the
+   holder: the bridge parent's turn and its exit event, the region's adoption, mesh-stat, the release and a port's test
+   of a plan's standing read it here, and test it gone by mesh_holds(pid, start) alone; none writes `retired` for it
+   (R-8).  What must stay: the holder read after the publication */
+struct mesh_algo_holder { pid_t pid; uint32_t padding; uint64_t start; };
+static inline struct mesh_algo_holder mesh_algo_holder(struct hdr *m){
+  if(!mesh_algo_open(m))return (struct mesh_algo_holder){0};
+  return (struct mesh_algo_holder){.pid=(pid_t)(uint32_t)atomic_load_explicit(&m->client,memory_order_acquire),
+                                   .start=atomic_load_explicit(&m->client_start,memory_order_acquire)};
+}
 #endif

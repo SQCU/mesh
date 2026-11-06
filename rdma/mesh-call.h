@@ -83,8 +83,16 @@
      / `calls`, at once where that bound is 0 or below; no entry of another place is read.  Why: K1, "the waits are
      stored in rows keyed by call place, and each edge's delay is folded into its threshold".
    What must stay: the waits before the raise, nothing raised where one fails; ESTALE where the plan's serial is not
-   the map's; the raise before the fence, the serial's read after it */
-int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions,uint64_t deadline);
+   the map's; the raise before the fence, the serial's read after it
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7: "Every
+   wait ends at MESH_PLATFORM_NS without progress, and the first ETIMEDOUT ends the run ... The operator's bound is
+   judged by time without progress"; W10: "B1: a deadline per execution is not the rule"; "The revisions of 14b9a757"),
+   reversing `deadline`: each wait here ends at MESH_PLATFORM_NS after the last rise of its count it read (its
+   progress), ETIMEDOUT past it, nothing raised; the caller ends its run at the first ETIMEDOUT.  ESTALE where the
+   plan's serial is not the installed view's (mesh.h hdr `view`; A7, corrected 2026-11-06), where it was the map
+   serial.  What must stay: the waits before the raise, nothing raised where one fails; the raise before the fence, the
+   serial's read after it */
+int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data
    path (design/disjoint-pages-change-request.md, Appendix C, C4): a new plan's state is in new pages, never the

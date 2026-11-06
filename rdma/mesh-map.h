@@ -114,6 +114,9 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
    seqlock's, stays in mesh.h */
 /* tag pre-return-20261103 rdma/mesh.h mesh_records, verbatim (the map: mesh.h, above mesh_map_whole) */
 static inline struct mesh_record *mesh_records(struct hdr *m){ return (struct mesh_record *)((char *)m+atomic_load_explicit(&m->map_off,memory_order_relaxed)); }
+/* the installed view's map records, `view_nodes` of them (mesh.h hdr `view_off`; 2026-11-06, A7 corrected, "The
+   revisions of 14b9a757") */
+static inline struct mesh_record *mesh_view_records(struct hdr *m){ return (struct mesh_record *)((char *)m+m->view_off); }
 
 /* moved from mesh-dataflow.h (review R1, C1): the records' joins, bridge-side only (the note above) */
 /* tag pre-return-20261103 rdma/mesh-dataflow.h mesh_joined, verbatim (the bridge's map reads it: mesh-records.c; the
@@ -205,6 +208,10 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->algo_off=at; at+=sizeof(struct mesh_algo); at=(at+pgsz-1)/pgsz*pgsz;
   atomic_store_explicit(&h->map_off,at,memory_order_relaxed); h->map_room=MESH_MAP_ROOM;
   at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;
+  /* 2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member plans on those
+     records"; "The revisions of 14b9a757"): the installed view's map records (mesh.h hdr `view_off`, `view_nodes`), the
+     map's room, after the map's.  What must stay: every area before it where it was */
+  h->view_off=at; at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)g.pages*pgsz;
   h->length=at; return at;

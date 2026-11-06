@@ -67,8 +67,14 @@
    the waits in rows by call place (struct mesh_state `rows`, where `padding5` was), each delay folded into its `base`,
    a tell naming its sink's wait (`entry`); the wire's COUNT carrying that entry (mesh-bridge.h)
    (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4, B2 and K1; "The
-   revisions of 55b9cbad") */
-#define MESH_VERSION 118u
+   revisions of 55b9cbad").  119: struct mesh_hop `offset` where `padding1` was, an instruction's bytes at their
+   offset in its page; struct mesh_state `transfers` where `padding3[0]` was, each declared transfer's range's words;
+   struct mesh_algo `nodes` and `adjacent`, the plans with entries toward each map index; hdr `view_map`, `view`,
+   `view_off` and `view_nodes`, the installed view's identifier and the sequencer's map records its first message
+   carried, which plans are made on and stand by; the wire's VIEW carrying those records (mesh-bridge.h struct
+   mesh_group_view) (design/compilation-coordination.md, "The root cause of the copies, and the revised work list",
+   R-1 and R-6; design/aot-compilation-change-request.md A7, corrected 2026-11-06; "The revisions of 14b9a757") */
+#define MESH_VERSION 119u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -258,6 +264,18 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      each execution, at both ends (S4, S5, S7′: on each cable of the pair, the members whose positions the deal gave
      that cable, among those positions, wherever they lie in the list).  The bridge sees a set or a sequence and no
      kind (design/plan-to-bridge-change-request.md R4).  `padding1` 0.
+   2026-11-06 (119; design/compilation-coordination.md, "The root cause of the copies, and the revised work list",
+   R-1: "The bridge's instructions are those blocks: aot A9, MSCCL-IR's steps with offset and count"; PB R2, corrected
+   2026-11-06: "A page instruction names its bytes at their offset in its page, as MSCCL-IR's steps name a destination
+   offset and a count"; "The revisions of 14b9a757"), reversing "A hop moves its `bytes` from the start of that page":
+   `offset` where `padding1` was, the byte of block `page` at which the hop's `bytes` begin, so a hop moves bytes
+   [page x pgsz + offset, + bytes) of the region's arena, `offset` + `bytes` <= block x pgsz (mesh_plan's: each
+   instruction one extent within one block at each end, mesh-collective.h); every copy's entries of a hop the same
+   `offset` where their blocks hold the same bytes, both ends' a hop's own (a send's in its source's block, a receive's
+   in its destination's or its relay's).  `bytes` is the instruction's: the refinement's extent, at most block x pgsz,
+   where it was min(Q, B - k Q) of page k.  A receive's `pages` is its range's instructions this node receives in one
+   copy (its range's P), each of them one field of its range's group and one arrival on its count.  What must stay:
+   offsets 0-51 where they are, 56 bytes
    2026-11-04, owner L2 (the appendix, item 5): `set` and `padding1` appended, where every hop was one of a sequence in
    the schedule's order.  Why: the pages of function B's operands are written as a set, not a sequence (R4, item 5).
    What must stay: offsets 0-47 as at 110; both ends' entries of a hop the same `set`.
@@ -622,10 +640,10 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    each in its claim, ordered by the island's sequencer (A7).  What must stay: a plan's words written before it stands
    and never rewritten while it stands; the announcement and its re-read before the release. */
 struct mesh_hop { uint32_t page,node,direction,field; uint64_t word,count; uint32_t pages,bytes; uint64_t serial;
-  uint32_t set,padding1; };
+  uint32_t set,offset; };
 _Static_assert(sizeof(struct mesh_hop)==56 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,count)==24 &&
   offsetof(struct mesh_hop,pages)==32 && offsetof(struct mesh_hop,bytes)==36 && offsetof(struct mesh_hop,serial)==40 &&
-  offsetof(struct mesh_hop,set)==48 && offsetof(struct mesh_hop,padding1)==52,"mesh_hop");
+  offsetof(struct mesh_hop,set)==48 && offsetof(struct mesh_hop,offset)==52,"mesh_hop");
 /* the bytes one lane loads of the phase list: 64 receives' phases (struct mesh_state `phases`) */
 #define MESH_LANE_BYTES 16u
 /* the phase code, Gray 00 01 11 10 (struct mesh_hop's note, "Phases") */
@@ -706,14 +724,30 @@ _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahe
    rows[a] .. rows[a + 1] - 1 (the waits sorted by call place: mesh-graph.h mesh_graph_rows' compressed rows, keyed by
    place).  Why: K1; design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule":
    "Every address in it is fixed at compile time ... and searches for nothing".  What must stay: every other field
-   where it is, the struct 320 bytes */
+   where it is, the struct 320 bytes
+   2026-11-06 (119; design/compilation-coordination.md, "The root cause of the copies, and the revised work list",
+   R-1; "The revisions of 14b9a757"):
+   - `transfers`, where `padding3[0]` was: the region offset of one struct mesh_publication (64 bytes) for each of the
+     function's declared transfers, in their order (mesh_transfer_at), each written once by mesh_plan, read by index:
+     where this node is the transfer's source, `sends` 1, `targets[0]` {word: the region offset of its range's supplied
+     word, count 1, stride 0}; where it is the transfer's destination, `pages` the range's instructions it receives a
+     copy (P), `phases` the region offset of its copy-0 phase group (copy c's at phases + c x mesh_group_bytes(P)),
+     `count` the region offset of its copy-0 count word (copy c's at count + 8 c); `state` this section's region offset
+     where either holds; every other field 0.  Why: ranges may share a block where their bytes are disjoint (PB R2,
+     corrected 2026-11-06), so several begin in one row and a row's publication names none of them alone; the
+     declared transfer's index is the IR's own name of it.  Every row's publication (mesh_publication_at) is written by
+     nothing now and read by nothing.
+   - `serial` is the identifier of the installed view whose map the plan was made on (hdr `view`), every entry's
+     `serial` the same, where it was the map serial; the plan stands while that view is installed (A7, corrected
+     2026-11-06: "A plan then stands while its view does, and its view while the sequencer's map does").
+   What must stay: every other field where it is, the struct 320 bytes */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
   uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
   _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced;
-  uint32_t waits,tells; uint64_t syncs; uint32_t calls; _Atomic uint32_t closed; uint64_t rows,submit_room,
-  padding3[6]; };
+  uint32_t waits,tells; uint64_t syncs; uint32_t calls; _Atomic uint32_t closed; uint64_t rows,submit_room,transfers,
+  padding3[5]; };
 _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
@@ -730,7 +764,7 @@ _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,waits)==232 && offsetof(struct mesh_state,tells)==236 &&
   offsetof(struct mesh_state,syncs)==240 && offsetof(struct mesh_state,calls)==248 &&
   offsetof(struct mesh_state,closed)==252 && offsetof(struct mesh_state,rows)==256 &&
-  offsetof(struct mesh_state,submit_room)==264,"mesh_state");
+  offsetof(struct mesh_state,submit_room)==264 && offsetof(struct mesh_state,transfers)==272,"mesh_state");
 /* One synchronization edge of the program's IPC graph at a plan's actor at this node (117; design/aot-compilation-
    change-request.md, appendix item 2: "The compilation adds synchronization edges by BSL's Convert-to-SC-graph (§9,
    Fig. 6) and sets their delays by DetermineDelays (Fig. 8)"; "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k −
@@ -832,12 +866,33 @@ _Static_assert(sizeof(struct mesh_sync)==32 && offsetof(struct mesh_sync,entry)=
    - `plans`, `group` and `table` as above.
    A plan of the program stands where `published` is not 0, `retired` is not `published` (each acquire) and its state
    section's `closed` is 0 (mesh_algo_plan).  What must stay: 64 bytes, `plans`, `group` and `table` written before
-   `published` */
-struct mesh_algo { _Alignas(64) _Atomic uint64_t published; _Atomic uint64_t retired,released; uint32_t plans,padding;
-  uint64_t group,table,padding1[2]; };
+   `published`
+   2026-11-06 (119; design/compilation-coordination.md, "The root cause of the copies, and the revised work list",
+   R-3, R-6, R-8 and R-10; "The revisions of 14b9a757"):
+   - `nodes`, where `padding` was: the node count n of the map the operand was planned on (the installed view's,
+     mesh-dataflow.h mesh_nodes_read); `adjacent`, where `padding1[0]` was: the region offset of n + 1 uint32_t words
+     `first` and then the places, map index i's places [first[i], first[i + 1]) of the words after `first` (mesh-graph.h
+     mesh_graph_rows' compressed rows, keyed by map index), each a place k below `plans` whose plan has an entry naming
+     node i (struct mesh_hop `node`, either direction), ascending; mesh_plan's, placed with the table and written before
+     `published` (mesh_algo_adjacent).  Why: R-6, "Each cable's processor executes its list of instructions in the
+     compile-time order, firing each on its dependency word ... It scans no table of plans"; W8, "The places with flows
+     toward each adjacent node are fixed when the plan is made, so they are a list the plan writes".
+   - Every field is read through the acquired publication, never before it (R-3: "every field of the published operand
+     is read through the acquired publication, never before it (McKenney and Slingwine)"; RCU's rcu_dereference):
+     mesh_algo_open or mesh_algo_unreleased first, then `plans`, `group`, `table`, `nodes` and `adjacent`.
+   - One writer a word (R-8: "the program writes `retired`, the bridge writes only `released`, and a gone holder is
+     read from the heartbeat's words"; L. Lamport, On interprocess communication, Distributed Computing 1(2), 1986):
+     `published` and `retired` are the program's process's, `released` the bridge parent's.  The operand is open
+     where `published` is not 0 and neither `retired` nor `released` is it (mesh_algo_open); a gone holder's operand is
+     open until the bridge, which reads the holder from the heartbeat's words (hdr `client`, `client_start`;
+     mesh-holders.h mesh_algo_holder), releases it.
+   What must stay: 64 bytes, `plans`, `group`, `table`, `nodes` and `adjacent` written before `published` */
+struct mesh_algo { _Alignas(64) _Atomic uint64_t published; _Atomic uint64_t retired,released; uint32_t plans,nodes;
+  uint64_t group,table,adjacent,padding1; };
 _Static_assert(sizeof(struct mesh_algo)==64 && offsetof(struct mesh_algo,retired)==8 &&
-  offsetof(struct mesh_algo,released)==16 && offsetof(struct mesh_algo,plans)==24 &&
-  offsetof(struct mesh_algo,group)==32 && offsetof(struct mesh_algo,table)==40,"mesh_algo");
+  offsetof(struct mesh_algo,released)==16 && offsetof(struct mesh_algo,plans)==24 && offsetof(struct mesh_algo,nodes)==28 &&
+  offsetof(struct mesh_algo,group)==32 && offsetof(struct mesh_algo,table)==40 &&
+  offsetof(struct mesh_algo,adjacent)==48,"mesh_algo");
 
 /* The deliveries' channel (design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "Delivery at a
    node"; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH and M3 to M6): the calls this node's bridge
@@ -931,11 +986,21 @@ struct hdr {
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
   /* the page lists' area and room until 110 (`hop_off`, `hop_capacity`; struct mesh_hop's note), never read or
-     written; `vacant8` the word stride's bytes until 108 (the note above), never read or written */
-  uint64_t vacant16,vacant17,vacant8;
-  /* the one plan's entries and generation until 110 (`hops`, `plan`; struct mesh_hop's note, "Several plans"), never
-     read or written */
-  uint64_t vacant18,vacant19;
+     written; `vacant8` the word stride's bytes until 108 (the note above), never read or written.
+     2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "The map a view is created from
+     is the sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates
+     the view.  Every member plans on those records"; "The revisions of 14b9a757"): `view_map` and `view`, where
+     `vacant16` and `vacant17` were, and `view_off` and `view_nodes`, where `vacant18` and `vacant19` were.  `view` the
+     identifier of the view this node's bridge installed (mesh-records.c view_install), 0 before its first, and its
+     `view_nodes` records (mesh-map.h struct mesh_record), the ones the view's first message carried, at `view_off`
+     (mesh-map.h mesh_layout: room `map_room`, laid out once with the region), written under `view_map`, a seqlock as
+     `map` is (odd while the bridge parent writes, mesh_notify before and after; mesh_map_whole reads it whole).  The
+     bridge parent their one writer.  A plan is made on those records (mesh-dataflow.h mesh_nodes_read), its `serial`
+     `view` (struct mesh_state), and stands while `view` is it.  What must stay: every other field in its place */
+  _Atomic uint64_t view_map,view;
+  uint64_t vacant8;
+  uint64_t view_off;
+  _Atomic uint64_t view_nodes;
   /* tag pre-return-20261103 rdma/mesh.h struct hdr `map`, `map_off`, `map_nodes`, verbatim: the map's seqlock
      (mesh_notify, mesh_map_whole) and its `map_nodes` records at `map_off` (mesh_records), at most `map_room`.  From
      108 `map_off` is the layout's (mesh-map.h mesh_layout), set once with the region, where it was arena pages the
@@ -1018,11 +1083,11 @@ struct hdr {
    vacant bytes' notes above struct hdr) */
 _Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)==36 && offsetof(struct hdr,planes_off)==56 &&
   offsetof(struct hdr,target_off)==104 && offsetof(struct hdr,data_off)==128 && offsetof(struct hdr,target_stride)==152 &&
-  offsetof(struct hdr,client)==160 && offsetof(struct hdr,vacant16)==224 && offsetof(struct hdr,vacant17)==232 &&
+  offsetof(struct hdr,client)==160 && offsetof(struct hdr,view_map)==224 && offsetof(struct hdr,view)==232 &&
   offsetof(struct hdr,map_serial)==288 &&
   offsetof(struct hdr,bridge_off)==296 && offsetof(struct hdr,client_start)==304 && offsetof(struct hdr,stopping)==344 &&
   offsetof(struct hdr,vacant7)==40 && offsetof(struct hdr,vacant14)==44 && offsetof(struct hdr,vacant8)==240 &&
-  offsetof(struct hdr,vacant18)==248 && offsetof(struct hdr,vacant19)==256 && offsetof(struct hdr,map_off)==272 &&
+  offsetof(struct hdr,view_off)==248 && offsetof(struct hdr,view_nodes)==256 && offsetof(struct hdr,map_off)==272 &&
   offsetof(struct hdr,vacant9)==352 && offsetof(struct hdr,vacant13)==384 && offsetof(struct hdr,map_room)==392 &&
   offsetof(struct hdr,algo_off)==400 && offsetof(struct hdr,plans)==408 && offsetof(struct hdr,deliveries_off)==416 &&
   offsetof(struct hdr,delivered)==432 && offsetof(struct hdr,delivery_read)==440 && sizeof(struct hdr)==504,
@@ -1106,15 +1171,47 @@ static inline struct mesh_state *mesh_algo_state(struct hdr *m,const struct mesh
    else 0 (2026-11-05, "The revisions of 55b9cbad", G2 and G4: the one form of the test that mesh_algo_plan,
    mesh-records.c clients_turn and its pid's retirement, mesh-link.c region_adopt and mesh-stat.c each wrote; "merge
    duplicated patterns found by analysis").  What must stay: the publication read before the retirement */
-static inline uint64_t mesh_algo_open(struct hdr *m){
+/* 2026-11-06 (119; design/compilation-coordination.md, "The root cause of the copies, and the revised work list",
+   R-3, R-8 and R-10; "The revisions of 14b9a757"):
+   - mesh_algo_unreleased: the operand published and not yet released, its `published` generation where it is not 0
+     and `released` (acquire, after it) is not it, else 0.  R-10: ""published and not yet released"" written three
+     times (W13: mesh-collective.c, mesh-dataflow.c, mesh-flow.c), "to be beside `mesh_algo_open`": its one form.
+   - mesh_algo_open: unreleased, and `retired` (acquire) not it either.  The `released` test is R-8's: the bridge
+     writes no `retired` for a gone holder, so the operand it released stays published and unretired, and is open no
+     more once released.
+   - mesh_algo_standing: function k + 1's plan where its `closed` (acquire) is 0, else NULL, read by a caller that has
+     acquired the publication (mesh_algo_open) and read `plans` after it, k below them.  mesh_algo_plan: the two in
+     that order.  R-3: "every field of the published operand is read through the acquired publication, never before it"
+     (McKenney and Slingwine; rcu_dereference before the fields it guards).
+   What must stay: the publication read before every other word of the operand */
+static inline uint64_t mesh_algo_unreleased(struct hdr *m){
   const struct mesh_algo *algo=mesh_algo(m);
   const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
-  return published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published?published:0;
+  return published && atomic_load_explicit(&algo->released,memory_order_acquire)!=published?published:0;
 }
-static inline struct mesh_state *mesh_algo_plan(struct hdr *m,uint32_t k){
-  if(!mesh_algo_open(m))return NULL;
+static inline uint64_t mesh_algo_open(struct hdr *m){
+  const uint64_t published=mesh_algo_unreleased(m);
+  return published && atomic_load_explicit(&mesh_algo(m)->retired,memory_order_acquire)!=published?published:0;
+}
+static inline struct mesh_state *mesh_algo_standing(struct hdr *m,uint32_t k){
   struct mesh_state *state=mesh_algo_state(m,mesh_algo(m),k);
   return !atomic_load_explicit(&state->closed,memory_order_acquire)?state:NULL;
+}
+static inline struct mesh_state *mesh_algo_plan(struct hdr *m,uint32_t k){
+  return mesh_algo_open(m)?mesh_algo_standing(m,k):NULL;
+}
+/* the places of the plans with an entry toward map index i (struct mesh_algo `adjacent`): *count of them at the
+   result, ascending; read after the publication's acquire (R-3, R-6) */
+static inline const uint32_t *mesh_algo_adjacent(struct hdr *m,uint32_t i,uint32_t *count){
+  const struct mesh_algo *algo=mesh_algo(m);
+  const uint32_t *first=(const uint32_t *)(const void *)((const char *)m+algo->adjacent);
+  *count=first[i+1]-first[i];
+  return first+algo->nodes+1+first[i];
+}
+/* declared transfer `transfer`'s range's words at this node (struct mesh_state `transfers`; R-1) */
+static inline const struct mesh_publication *mesh_transfer_at(struct hdr *m,const struct mesh_state *state,
+                                                              uint32_t transfer){
+  return (const struct mesh_publication *)(const void *)((const char *)m+state->transfers+(size_t)transfer*64);
 }
 /* the synchronization edges of plan `state` here, `waits` into it then `tells` out of it (struct mesh_sync's note) */
 static inline struct mesh_sync *mesh_syncs(struct hdr *m,const struct mesh_state *state){
