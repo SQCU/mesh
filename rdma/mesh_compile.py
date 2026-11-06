@@ -233,6 +233,9 @@ class IR:
     # storage_`); its layout the element type, its elements and its device, every key over it a run of its elements
     # (_place).  Its place is the mapping mesh_plan writes (mesh-collective.h struct mesh_value `view`).  What must
     # stay: a value MESH_EXECUTION, routed in the window, local outside it with its positions
+    # 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3; "The
+    # revisions of 55b9cbad"): its place is in the program's own mapping of its rows (_mapped), `view` being gone from
+    # struct mesh_value.  What must stay: as above
     def value(self, dtype, numel, device, wire, begin, end):
         self.values.append(mesh.Value(section=mesh.Section(bytes=dtype.itemsize * numel), kind=mesh.EXECUTION,
                                       wire=wire, begin=begin, end=end, run=1))
@@ -1782,8 +1785,15 @@ def _program():
 
 # mesh-collective.h mesh_host_arrived, waited on for at most MESH_PLATFORM_NS (mesh.h): 1 arrived; FAILED a field ahead
 # or the range cancelled; 0 not yet
-def _arrived(context, section, t):
-    deadline = time.monotonic_ns() + mesh.PLATFORM_NS
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B1: "An
+# execution's waits each take a fresh MESH_PLATFORM_NS deadline: the start's edges, then each `_arrived`.  So one
+# execution is bounded by 5 s x (1 + arrivals).  The code must give one execution one absolute deadline, shared by all
+# its waits"; "The revisions of 55b9cbad"): the wait ends at `deadline`, the execution's one (_execute), on the clock
+# mesh-call.h mesh_transfers_start names, clock_gettime_nsec_np(CLOCK_MONOTONIC), which Python reads as
+# time.clock_gettime_ns(time.CLOCK_MONOTONIC), where each wait took time.monotonic_ns() + MESH_PLATFORM_NS of its own.
+# The spin is bounded by the deadline even where the range never arrives (a bounded spin-wait).  What must stay: 1,
+# FAILED and 0 as mesh_host_arrived gives them, ETIMEDOUT past the deadline
+def _arrived(context, section, t, deadline):
     while True:
         status = mesh.LIB.mesh_host_arrived(C.byref(context), section, t)
         if status == 1:
@@ -1791,8 +1801,9 @@ def _arrived(context, section, t):
         if status == mesh.FAILED:
             raise OSError(errno.ECANCELED, 'execution %d of a received range: a field ahead, or the range cancelled '
                                            '(mesh-collective.h mesh_host_arrived)' % t)
-        if time.monotonic_ns() > deadline:
-            raise OSError(errno.ETIMEDOUT, 'execution %d of a received range: not arrived within MESH_PLATFORM_NS' % t)
+        if time.clock_gettime_ns(time.CLOCK_MONOTONIC) > deadline:
+            raise OSError(errno.ETIMEDOUT, 'execution %d of a received range: not arrived by the execution\'s '
+                                           'deadline (MESH_PLATFORM_NS from its start)' % t)
 
 
 # design/aot-compilation-change-request.md, appendix item 7, "A publish waits for nothing": "a torch MPS event is
@@ -1942,6 +1953,34 @@ class _Mapping:
             self.view = mesh.View()
 
 
+# The program's one mapping of its values (2026-11-05, design/compilation-coordination.md, "Review of 4e78f6f4 against
+# the requirement lines", G3: "The planner calls `mach_vm_remap` and writes virtual addresses into the IR, and reads
+# `getpid()` ... Deciders see pages.  The plan writes rows, and the program's effector maps them"; "The revisions of
+# 55b9cbad"; mesh-dataflow.h mesh_view_compose: "called by the program's effector ... over its `run` values' rows once
+# mesh_plan has written them"): every `run` value of every compiled function, function by function and value by value
+# in `values`' order, each value's copies in order, block k of copy c its row section.first + c x section.stride + k
+# (mesh-section.h: "copy c's rows first + c x P + k, k < P"), as mesh_plan's mapping was ordered (the coordinating
+# implementer's MV-1: one mapping a program, one release, one MTLBuffer over it).  Every value here is `run` 1
+# (IR.value).  The mapping (mesh.View) and, by function, each value's copies' addresses in it, copy c of a value P
+# blocks long at its first block's address + c x section.pages x pgsz; mesh_view_compose's error value raised (ENOMEM,
+# EINVAL), nothing mapped.  An effector: it reads the rows the plan wrote and decides nothing.  What must stay: one
+# mapping a program, every `run` value's copies consecutive in it in row order
+def _mapped(context, functions):
+    header = mesh.Header.from_address(context.M)
+    rows = [v.section.first + c * v.section.stride + k for values in functions for v in values if v.run
+            for c in range(v.section.count) for k in range(v.section.stride)]
+    view = mesh.View()
+    mesh.check(mesh.LIB.mesh_view_compose(C.byref(context), (mesh.U * max(len(rows), 1))(*rows), len(rows),
+                                          C.byref(view)))
+    at, addresses = view.address or 0, []
+    for values in functions:
+        addresses.append([])
+        for v in values:
+            addresses[-1].append([at + c * v.section.pages * header.pgsz for c in range(v.section.count * v.run)])
+            at += v.section.count * v.run * v.section.pages * header.pgsz
+    return view, addresses
+
+
 HELD = {}
 
 
@@ -2054,13 +2093,17 @@ def _dlpack_tensor(device, data, offset, owner, dtype, shape, mapping):
 # the range's first block in its value's rows (value.first + first, struct mesh_declared), its blocks x block pages,
 # the value's count and stride (the brief: "mesh_host_arrived and mesh_host_publish take a section of the range"), and
 # its value's device.  What must stay: each device's `data` and `byte_offset` as torch's own export sets them
-def _bind(context, ir, values, buffer, mapping):
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3: "Deciders see
+# pages.  The plan writes rows, and the program's effector maps them"; "The revisions of 55b9cbad"): each value's
+# copies at the addresses the program's own mapping gives them (`addresses`, _mapped), where they were read from
+# struct mesh_value `view`, which the plan no longer writes.  What must stay: each device's `data` and `byte_offset`
+# as torch's own export sets them
+def _bind(context, ir, values, addresses, buffer, mapping):
     header, copies = mesh.Header.from_address(context.M), []
-    for v, (dtype, numel, device) in zip(values, ir.layouts):
-        addresses = [v.view + c * v.section.pages * header.pgsz for c in range(v.section.count)]
+    for v, (dtype, numel, device), at in zip(values, ir.layouts, addresses):
         copies.append([_dlpack_tensor('cpu', a, 0, None, dtype, (numel,), mapping) if device == 'cpu' else
                        _dlpack_tensor('mps', buffer, a - mapping.view.address, buffer, dtype, (numel,), mapping)
-                       for a in addresses])
+                       for a in at])
     places = {key: [copy.narrow(0, offset, math.prod(shape)).view(shape) for copy in copies[v]]
               for key, (v, offset, shape) in ir.homes.items()}
     sections, devices = {}, {}
@@ -2138,7 +2181,7 @@ def _bind(context, ir, values, buffer, mapping):
 # its exported graph's ATen operator (_call), its out variant called with its result's place by its out argument's
 # name.  What must stay: one execution a call, every read of a received range after its arrival, a release after its
 # range's writes
-def _run(ir, context, run, g, env, inputs, t):
+def _run(ir, context, run, g, env, inputs, t, deadline):
     kind, reads, key, operand = ir.program[g]
 
     def place(k):
@@ -2155,7 +2198,7 @@ def _run(ir, context, run, g, env, inputs, t):
             _publish(context, [run['sections'][i] for i in published], [run['devices'][i] for i in published], t)
 
     def arrived(i):
-        _arrived(context, run['sections'][i], t)
+        _arrived(context, run['sections'][i], t, deadline)
 
     def combine(total, first, parts):
         for i, part in parts:
@@ -2263,6 +2306,14 @@ def _narrow(tensor, at):
 # (_Mapping).  The bridge releases the root once no port holds a plan of it (mesh-dataflow.h mesh_retired_release,
 # deferred reclamation), and mesh_plan is EBUSY until then.  What must stay: the synchronization and the wait before
 # the root is closed, ETIMEDOUT with it standing
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4 and B2;
+# "The revisions of 55b9cbad"; mesh-dataflow.h mesh_retire at mesh b35234c3), reversing the note above where it names
+# a root, its `owner` and `closed`, and EBUSY: mesh_retire retires the program's operand (mesh.h struct mesh_algo)
+# where hdr `client` is this context's `client` and its `published` is not 0 (`retired` = `published`, release, then
+# hdr `plans` raised and woken); the bridge parent releases it once no port holds a plan of it (mesh_retired_release:
+# `released` = `published`), and the next mesh_plan waits for that release, bounded by MESH_PLATFORM_NS, ETIMEDOUT
+# past it (B2), where it was EBUSY.  What must stay: the retirement after torch's work on the values, its wait
+# bounded, ETIMEDOUT with the operand standing; the mapping released once retired and no tensor over it remains
 def _retire(context, state):
     for device in state['devices']:
         torch.get_device_module(device).synchronize()
@@ -2270,7 +2321,7 @@ def _retire(context, state):
     while TORCH.mesh_torch_notifying():
         if time.monotonic_ns() > deadline:
             raise OSError(errno.ETIMEDOUT, 'a publish\'s notification not run within MESH_PLATFORM_NS of its device\'s '
-                                           'synchronization: the program\'s root left standing (rdma/mesh-torch.mm)')
+                                           'synchronization: the program\'s operand left standing (rdma/mesh-torch.mm)')
     mesh.LIB.mesh_retire(context.M, context.client)
     mapping = state['mapping']
     mapping.retired = True
@@ -2314,9 +2365,17 @@ def _dropped(context, state):
 # program code to read"); a call with a section here that reads one is refused when the program is planned (program).
 # _absent and serialize go: the program is planned whole by program, and _execute is a call's part of its run.  What
 # must stay: one execution a call, the start at every node of the program
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B1: "The code
+# must give one execution one absolute deadline, shared by all its waits"; "The revisions of 55b9cbad"): the
+# execution's one deadline, taken once where it begins, clock_gettime_nsec_np(CLOCK_MONOTONIC) + MESH_PLATFORM_NS
+# (mesh-call.h mesh_transfers_start: "which the caller takes once where the execution begins (its MESH_PLATFORM_NS
+# bound) and gives every wait of that execution, these and its own later ones"), given to mesh_transfers_start and to
+# every _arrived of the execution (_run), where the start and each arrival took a deadline of its own.  What must
+# stay: one execution a call, the start at every node of the program, one deadline an execution
 def _execute(context, run, args, kwargs):
     ir, t = run['ir'], run['executions']
-    status = mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1)
+    deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
+    status = mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1, deadline)
     if mesh.State.from_address(context.M + run['plan']).executions > t:
         run['executions'] = t + 1
     mesh.check(status)
@@ -2324,7 +2383,7 @@ def _execute(context, run, args, kwargs):
         return None
     env, inputs = {}, pytree.arg_tree_leaves(*args, **kwargs)
     for g in range(len(ir.program)):
-        _run(ir, context, run, g, env, inputs, t)
+        _run(ir, context, run, g, env, inputs, t, deadline)
     return pytree.tree_unflatten(list(env['output']), run['spec'])
 
 
@@ -2666,6 +2725,24 @@ class _Export(torch.fx.Interpreter):
 # Each run interprets the block (_Program), each call of a compiled function one execution of its plan (_execute).
 # The program is retired when its callable is collected (_dropped).  What must stay: no placement and no weight chosen
 # here; every operand of mesh_plan the same at every rank but this node's values
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3, G4 and B2,
+# and "Answered in the documents", EB-1; "The revisions of 55b9cbad"; mesh-collective.h mesh_plan at mesh b35234c3),
+# reversing the notes above where they differ:
+# - mesh_plan gives no mapping and writes no address (G3: "The plan writes rows, and the program's effector maps
+#   them"): once it returns, this program maps its values' rows itself (_mapped, mesh-dataflow.h mesh_view_compose)
+#   and binds each value at its place in that mapping (_bind); a mapping Mach refuses is this program's error after a
+#   plan that stands ("A mapping Mach refuses is the program's error, after a plan that stands", mesh-collective.h),
+#   so the program is retired (_retire) and the error raised, as any failure after mesh_plan.
+# - EBUSY goes (B2: "The replan must wait for the release, bounded by MESH_PLATFORM_NS, as RCU's writer waits out a
+#   grace period (`synchronize_rcu`), with ETIMEDOUT past it"; EB-1): a plan again after ESTALE or ECANCELED first
+#   retires this program's own operand (_retire;
+#   mesh-dataflow.h mesh_retire), then mesh_plan waits for the bridge's release of it and returns ETIMEDOUT past
+#   MESH_PLATFORM_NS with nothing written, raised as any failure, `stale` left set so the next run plans again.
+# - The program's operand is mesh.h struct mesh_algo, A9's serialized operand in MSCCL-IR's shape (G4: "Its name is
+#   A9's ... "Root" also names the trees' roots ... and goes from this record"), its holder this process, the
+#   context's `client` and `start`, which mesh_attach set (mesh-dataflow.h struct mesh_ctx) and mesh_plan copies.
+# What must stay: no placement and no weight chosen here; every operand of mesh_plan the same at every rank but this
+# node's values; a failure after mesh_plan retires the program
 def program(block, *example_inputs):
     tracer = Tracer()
     gm = torch.fx.GraphModule(tracer.root, tracer.trace(block))
@@ -2703,19 +2780,20 @@ def program(block, *example_inputs):
                    (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir in irs]
         functions = (mesh.Function * len(irs))(*[
             mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
-                          C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
-                          len(e), 0, ir.calls.outstanding, 0) for ir, (d, w, v, e) in zip(irs, arrays)])
-        view = mesh.View()
+                          C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), None, len(d),
+                          len(v), len(e), 0, ir.calls.outstanding, 0) for ir, (d, w, v, e) in zip(irs, arrays)])
         mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
-                                      (mesh.U * len(calls))(*calls), len(calls), C.byref(view)))
-        state.update(mapping=_Mapping(view), devices={layout[2] for ir in irs for layout in ir.layouts})
+                                      (mesh.U * len(calls))(*calls), len(calls)))
+        state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
         try:
             if any(mesh.State.from_address(context.M + f.plan).serial != nodes.serial for f in functions):
                 raise OSError(errno.ESTALE, 'a plan\'s map serial is not the one its IR was built on: plan again')
+            view, addresses = _mapped(context, [values for _, _, values, _ in arrays])
+            state['mapping'].view = view
             buffer = _placed_buffer(view) if 'mps' in state['devices'] else None
             try:
-                bound = [_bind(context, ir, values, buffer, state['mapping']) for ir, (_, _, values, _) in
-                         zip(irs, arrays)]
+                bound = [_bind(context, ir, values, at, buffer, state['mapping']) for ir, (_, _, values, _), at in
+                         zip(irs, arrays, addresses)]
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
