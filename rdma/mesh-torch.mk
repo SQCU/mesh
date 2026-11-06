@@ -10,7 +10,12 @@
 TORCH ?=
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of 4e78f6f4"): mesh-section.h, which mesh-torch.mm
 # includes since 32d9fcc3, among the inputs.  What must stay: remade only when its own inputs change
-libmesh-torch.dylib: mesh-torch.mm mesh-torch.mk mesh-section.h
+# 2026-11-06 (design/compilation-coordination.md, "The revisions of 14b9a757", sub-agent T's finding): mesh-section.h
+# out of the inputs, since mesh-torch.mm includes it no more (f0523b8d: a range named by its plan and declared transfer,
+# mesh-collective.h mesh_host_publish), so a change of it remakes nothing here ("No rebuilding unchanged dependencies: a
+# dependency is remade only when its own inputs change").  What must stay: every file mesh-torch.mm reads of this
+# repository among the inputs
+libmesh-torch.dylib: mesh-torch.mm mesh-torch.mk
 	$(if $(TORCH),,$(error TORCH: the installed torch package directory, .../site-packages/torch))
 	c++ -std=c++20 -fblocks -O2 -Wall -Wextra -Werror -isystem $(TORCH)/include -dynamiclib \
 	  -Wl,-install_name,@rpath/libmesh-torch.dylib -undefined dynamic_lookup -framework Foundation -framework Metal \
