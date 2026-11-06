@@ -163,6 +163,15 @@ statement, or a fact of the code.
   data corruption." (NCCL User Guide, "Collective Operations"). (Corrected 2026-11-05: rdma/mesh_compile.py's IR
   refused such a node, "map index %d, this node, is no device of the placement operand (A2)", so it held no plan and
   relayed nothing; design/compilation-coordination.md, "The revisions of 3f106747", "Where the documents are wrong".)
+  - Its calls return tensors on PyTorch's meta device: "The "meta" device is an abstract device which denotes a tensor
+    which records only metadata, but no actual data", and "Most operations can be performed on meta tensors, producing
+    new meta tensors that describe what the result would have been if you performed the operation on a real tensor"
+    (PyTorch, "Meta device"). So the program's code between calls there computes shapes alone and allocates nothing,
+    and its next compiled function is traced with the shapes and types every rank's is. "Because meta tensors do not
+    have real data, you cannot perform data-dependent operations like torch.nonzero() or item()" (the same page): a
+    program that reads a value between calls fails at such a node, which holds no value to read. (Corrected
+    2026-11-05: the implementation's ND-2 made each output on the function's device by `torch.empty_strided`, memory
+    outside the region; design/compilation-coordination.md, "The revisions of b5a3c6e6".)
 - **Method:**
   - **Trees.** Blink (G. Wang et al., Blink: fast and generic collectives for distributed ML, MLSys 2020) builds
     collectives on packed spanning trees.
@@ -905,6 +914,35 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
   is written by the compilation."
 - **The code must:** run each function's existing backend kernels (torch's MPS kernels, or any other backend's) on
   tensors over the placed pages, and write none of its own.
+- (2026-11-05, later) **What the torch path adds beyond torch's own work, and removes.**
+  > is this a result of strictly reusing an upstream module or inlining? if it's a property of the upstream, all we can
+  > do is reduce the use of overcopies and overwriting of intermediates (and so on) beyond what torch algorithmically
+  > requires in whatever torch headers we add to change the behavior of these torch functions in our page-using apis...
+  - The code is not torch's; it is rdma/mesh_compile.py `_run`:
+    - It runs each operator in its functional form (`local.target(*args, **kwargs)`, `torch.cat`, `torch.add`,
+      `masked_fill`), so torch's allocator makes each result outside the placed pages.
+    - It copies each sent value into its placed pages between two full device synchronizations (`write`:
+      `synchronize()`, `target.copy_(source)`, `synchronize()`).
+    - It clones each placed output (`torch.clone`).
+  - Torch's own kernels take a result made beforehand. "Instead of allocating returned tensors in kernel
+    implementations, an operator's out variant will take in a pre-allocated tensor to its out kwarg, and store the
+    result there. This makes it easier for memory planners to perform tensor lifetime analysis. In ExecuTorch, an out
+    variant pass is performed before memory planning" (ExecuTorch, "Concepts", Out variant). "In ExecuTorch, a memory
+    planning pass is run before the graph is saved to flatbuffer. This assigns a memory ID to each tensor and an offset
+    in the buffer, marking where storage for the tensor starts" (the same page, Memory planning). Here the memory
+    planner is C3's one allocator, which places by lifetime (C3.3).
+  - **The code must:**
+    - place every value of the node's partitioned graph by the one allocator. A view (a narrow, a slice) is its base's
+      pages, and its base lives as long as it does;
+    - run each operator as its out variant into its result's placed pages;
+    - have each sent value's producer make it in its sent pages, so nothing copies it there. A collective's result is
+      the pages its parts land in, so no concatenation copies them (transport by view, design/plan-to-bridge-change-request.md R1);
+    - wait for the device only where a publish needs its writes done, once for all the values published at that point;
+    - copy an output only where its pages are reused before the caller can read it (C3.3's u copies).
+  - **What stays, being torch's:**
+    - an operator with no out variant, whose result is copied once into its placed pages where it must be there;
+    - a kernel's own scratch inside torch;
+    - torch's device stream.
 
 ### 8. Settled, with no change
 

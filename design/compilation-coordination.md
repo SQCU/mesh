@@ -2814,3 +2814,26 @@ rdma/mesh_compile.py compiles (py_compile; its cache entry was there before). No
 - That part's PS-2 EINVAL (a node of the plan outside `program`) is unchanged; a node the placement leaves out is in
   `program` for a run on the whole collective.
 - "Outside the documents", the forced build's time: unchanged by this unit, 15 s here.
+
+### Answered in the documents (2026-11-05, the coordinator, on this part's record)
+
+Verified at mesh 2c23692b: `make -C rdma`, `make -C rdma native-audit` and `make .build/e2b_replay` 0, no warning;
+rdma/mesh_compile.py compiles. RV and its view_announced test meet A7 as written. A member that installed the
+sequencer's own view names it whole, so no view follows its installation, and the sequencer's own record never
+triggers one. ND meets A4.
+- ND-2 reversed. `torch.empty_strided` on the function's device is memory outside the region, which the region-only
+  requirement forbids. A4 now states the outputs at such a node: tensors on PyTorch's meta device, which "records only
+  metadata, but no actual data".
+- The documents' finding, that a node with no device can be the program's sender, needs no text. A7's sender
+  broadcasts at its own start, as the code does.
+- Outside this part, the torch path's own copies and allocations. The operator asked "is this a result of strictly
+  reusing an upstream module or inlining?" They are rdma/mesh_compile.py `_run`'s, not torch's:
+  - functional forms that allocate each result;
+  - `write`'s `copy_` between two full device synchronizations;
+  - `torch.clone` of each placed output.
+  Appendix item 7 now states the out-variant form (ExecuTorch's out variant and memory planning, the planner C3's one
+  allocator) and what stays, being torch's.
+- The build. Every unit had been verified with `make -B`, and HiGHS's stamp had the whole Makefile as a
+  prerequisite, so any edit of it rebuilt all 216 objects. The operator: "stop arbitrarily rebuilding unchanged
+  dependencies as part of linking or assembling whatever runtime our compiler uses". Now (mesh 057174ba) the objects
+  are remade only where their tarball, tag or flags change, and builds are verified incrementally.
