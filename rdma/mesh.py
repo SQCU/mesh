@@ -110,6 +110,8 @@ PLATFORM_NS = 5000000000
 # revisions of 4e78f6f4"): the whole section, 320 bytes, its tail from byte 232 the plan's synchronization edges
 # (`waits`, `tells`, `syncs`), `calls` and `closed`, where it ended at `entries` (mesh.h struct mesh_state and its
 # assert).  What must stay: the words in the header's order and at its offsets
+# JGroups ViewId.java, "Lamport time of the view" and "Address of the creator of this view": a plan's view (`serial`,
+# `sequencer`, `boot`), mesh.h mesh_plan_view, and the map read's (Nodes `serial`, `sequencer`, `boot`)
 class State(C.Structure):
     _fields_ = [('copies', U), ('receives', U), ('ranges', U), ('releases', U), ('phases', Q), ('counts', Q),
                 ('supplied', Q), ('status', Q), ('executions', Q), ('padding', Q), ('group', Q), ('epoch', Q),
@@ -117,7 +119,8 @@ class State(C.Structure):
                 ('sender', U), ('outstanding', U), ('submitted', Q), ('delivered', Q), ('submissions', Q),
                 ('broadcast', Q), ('arrived', Q), ('room', Q), ('deliveries', Q), ('submits', Q), ('announced', Q),
                 ('waits', U), ('tells', U), ('syncs', Q), ('calls', U), ('closed', U), ('rows', Q),
-                ('submit_room', Q), ('transfers', Q), ('padding3', Q * 5)]
+                ('submit_room', Q), ('transfers', Q), ('sequencer', U), ('padding4', U), ('boot', Q),
+                ('padding3', Q * 3)]
 
 
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7: "Every
@@ -139,7 +142,7 @@ NODES_MOST = 32
 
 class Nodes(C.Structure):
     _fields_ = [('serial', Q), ('count', U), ('self', U), ('node', U * NODES_MOST),
-                ('capacity', (Q * NODES_MOST) * NODES_MOST)]
+                ('capacity', (Q * NODES_MOST) * NODES_MOST), ('sequencer', U), ('padding', U), ('boot', Q)]
 
 
 # mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled

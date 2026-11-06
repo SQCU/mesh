@@ -3223,9 +3223,10 @@ class _Export(torch.fx.Interpreter):
 # - one mesh_plan call for the whole program (point 5: "The plan call's form for a whole program is A8 and A9 ... there
 #   is one IR of the program and one serialized operand of it"): every function's declared transfers, weights, values,
 #   dependences and A10 bound as its struct mesh_function, the block's calls in program order as `calls`, the
-#   program's one mapping out (`*view`); every plan's map serial then compared with the IR's (ESTALE, the coordinator's
-#   ruling on review V2's finding 6), every value bound over the mapping (_bind), MPS values over one buffer of it
-#   (_placed_buffer); a failure after mesh_plan retires the program;
+#   program's one mapping out (`*view`); every plan's view (`serial`, `sequencer`, `boot`) then compared with the map
+#   read's, ESTALE where they differ (JGroups ViewId.java: "The comparison is done on the IDs, if they are equal, we use
+#   the creator"), every value bound over the mapping (_bind), MPS values over one buffer of it (_placed_buffer); a
+#   failure after mesh_plan retires the program;
 # - after an ESTALE or a cancelled range (ECANCELED) the next run plans again: the program retired (_retire), then
 #   planned whole on the map as it is; mesh_plan is EBUSY until the bridge has released the root (mesh-collective.h:
 #   "EBUSY where the root's `owner` is not 0 ... before anything is written"), raised as any failure, and the next
@@ -3359,7 +3360,8 @@ def program(block, *example_inputs):
                                       (mesh.U * len(calls))(*calls), len(calls), deadline))
         state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
         try:
-            if any(mesh.State.from_address(context.M + f.plan).serial != nodes.serial for f in functions):
+            views = [mesh.State.from_address(context.M + f.plan) for f in functions]
+            if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
                 raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
             view, addresses = _mapped(context, functions, len(irs), [values for _, _, values, _ in arrays])
             state['mapping'].view = view
