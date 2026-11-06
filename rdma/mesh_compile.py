@@ -1124,24 +1124,28 @@ def _fresh(ir, key):
     return item[0] == 'collective' and item[3].kind in ('all-gather', 'all-to-all', 'reduce-scatter')
 
 
+# 2026-11-05 (the C9 hook's remark on 63638057: "a topological pass over the program DAG ... it moves into the graph
+# module"; design/compilation-coordination.md, "The revisions of e4a7398e", C9): the pass is mesh_graph.forward over the
+# keys in the program's order, each key's predecessors the keys its item reads, its transfer the rule above.  What must
+# stay: each key's set as above
 def _over(ir):
     sources = collections.Counter(item[1][0] for item in ir.program if item[0] == 'collective')
-    for g, item in enumerate(ir.program):
-        kind, reads, key, operand = item
-        if kind == 'output':
-            continue
-        ir.producer[key] = g
-        joined = frozenset().union(*(ir.over.get(k, ()) for k in reads))
-        if kind in ('slice', 'narrow') or _viewed(item):
-            ir.over[key] = joined
-        elif kind == 'call':
+    items = {item[2]: item for item in ir.program if item[0] != 'output'}
+    ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
+
+    def rule(key, sets):
+        kind, reads, _, operand = items[key]
+        joined = frozenset().union(*sets)
+        if kind in ('slice', 'narrow') or _viewed(items[key]):
+            return joined
+        if kind == 'call':
             form = ir.forms.get(key)
-            ir.over[key] = joined if form is None else frozenset() if form == 'functional' else frozenset((key,))
-        elif kind in ('window', 'collective'):
-            ir.over[key] = frozenset((key,)) | (joined if kind == 'collective' and operand.kind == 'collective-permute'
-                                                else frozenset())
-        else:
-            ir.over[key] = frozenset()
+            return joined if form is None else frozenset() if form == 'functional' else frozenset((key,))
+        if kind in ('window', 'collective'):
+            return frozenset((key,)) | (joined if kind == 'collective' and operand.kind == 'collective-permute'
+                                        else frozenset())
+        return frozenset()
+    ir.over = mesh_graph.forward(list(items), lambda key: items[key][1], rule)
     ir.inplace = {reads[0] for kind, reads, key, operand in ir.program if kind == 'collective'
                   and operand.kind == 'all-gather' and sources[reads[0]] == 1 and _fresh(ir, reads[0])}
 
@@ -1482,14 +1486,15 @@ def lower(ir):
 # execution for a local value, its one copy (mesh-collective.h: `count` "1 for every other")
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e", PV): new, where a node's values were its
 # ranges alone and every operator's result torch's.  What must stay: no value at a node the placement maps no device
+# 2026-11-05 (the C9 hook's remark on 63638057: "last-use liveness over the program's read edges ... it moves into the
+# graph module"; design/compilation-coordination.md, "The revisions of e4a7398e", C9): each value's last reader is
+# mesh_graph.ends over the items in order, each item's uses the keys over which its reads lie.  What must stay: the
+# positions as above
 def _place(ir):
     if ir.device is None:
         return
-    last = {}
-    for g, item in enumerate(ir.program):
-        for k in item[1]:
-            for owner in ir.over.get(k, ()):
-                last[owner] = g
+    last = mesh_graph.ends(range(len(ir.program)),
+                           lambda g: [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())])
     for key, c in ir.reduced.items():
         me, sent, received = ir.roles[c]
         if me and _fresh(ir, key):
