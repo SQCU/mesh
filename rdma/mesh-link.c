@@ -355,17 +355,26 @@ static void region_adopt(void){
      head's owner not 0, `closed` 0) whose owner's process does not hold the region (mesh-holders.h mesh_holds, by its
      pid and the head's `start`) has that owner retired (mesh-dataflow.h mesh_retire: its claims closed).  Here, where
      the adopted region's state is made this bridge's, after region_open and before the release, as the one client's
-     retirement was.  What must stay: every gone owner retired before the release below */
-  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
-    const struct mesh_buffer *claim=mesh_buffers(M)+head;
-    const uint64_t owner=atomic_load_explicit(&claim->owner,memory_order_acquire);
-    if(owner && !atomic_load_explicit(&claim->closed,memory_order_acquire) && !mesh_holds((pid_t)(uint32_t)owner,claim->start))
-      mesh_retire(M,owner);
-  }
+     retirement was.  What must stay: every gone owner retired before the release below.
+     2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+     revisions of 4e78f6f4"), reversing the walk of the claims' heads: the program's root (mesh.h struct mesh_program,
+     at the layout's one place), where it is open (`owner` not 0, `closed` 0, each acquire) and its owner's process
+     does not hold the region (mesh_holds, by its pid and the root's `start`), has that owner retired (mesh-dataflow.h
+     mesh_retire: the root closed); the release below is the root's.  Why: point 5, "These go: `mesh_claim_take`'s
+     first fit and the claim's head record"; "Release at retirement stays deferred reclamation (RCU)".  What must
+     stay: the gone owner retired before the release below */
+  struct mesh_program *program=mesh_program(M);
+  const uint64_t owner=atomic_load_explicit(&program->owner,memory_order_acquire);
+  if(owner && !atomic_load_explicit(&program->closed,memory_order_acquire) && !mesh_holds((pid_t)(uint32_t)owner,program->start))
+    mesh_retire(M,owner);
   /* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.4; the contract, "The program's claim and
      its sections": mesh_retired_release releases each closed claim whose generation no port's `prepared` holds, after
      a seq_cst fence): every port's `prepared` is 0 above, so every closed claim is released here, after
-     streams_cancel(NULL)'s stores, on the same thread (main, before the event loop: region_open's caller) */
+     streams_cancel(NULL)'s stores, on the same thread (main, before the event loop: region_open's caller).
+     2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the
+     program's root released here where it is closed, every port's `prepared` 0 above and every port's `held` bit of
+     its plans cleared by streams_cancel(NULL) (no port is found yet: mesh-flow.c held_clear), where every closed claim
+     was.  What must stay: the release after streams_cancel(NULL)'s stores, on this thread */
   mesh_retired_release(M);
   if(atomic_load(&M->map)&1)atomic_fetch_add(&M->map,1);
   if(atomic_load(&M->health)&1)atomic_fetch_add(&M->health,1);
