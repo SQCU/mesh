@@ -61,7 +61,14 @@ struct mesh_metal_wait { uint64_t count; uint32_t pages,copies,pass,padding; };
    argument.  Why: a run's waits table was steps x passes x reads, though each wait is affine in t: the trip-count
    unrolling C1 and C3.3 rejected (design/disjoint-pages-change-request.md, D.3.7: nothing bound grows with the steps).
    What must stay: the event set to each value once every wait of that value or less is met, in order; the bounded
-   wait and the stop setting the final value at once */
+   wait and the stop setting the final value at once
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7:
+   "Every wait ends at MESH_PLATFORM_NS without progress ... The operator's bound is judged by time without progress";
+   "The revisions of 14b9a757", sub-agent E's finding), reversing "a value not met within MESH_PLATFORM_NS of the last
+   value set": a wait whose count word reads below its target for MESH_PLATFORM_NS after its last rise (the thread's
+   first read of it, or the last read that found it risen; mesh-metal.m waits_run) sets the final value at once and
+   ends with ETIMEDOUT, so the bound is one, judged without progress, and the first value's bound no longer counts from
+   this call.  What must stay: as above */
 struct mesh_metal_waiter;
 int mesh_metal_waits_start(struct mesh_metal_transport *,void *event,const struct mesh_metal_wait *,size_t waits,
                            uint32_t passes,uint64_t repetitions,struct mesh_metal_waiter **);
