@@ -62,7 +62,8 @@ class Value(C.Structure):
 # in bytes, and Declared's `from` and `to` views where `first` and `bytes` were (88 bytes); struct mesh_share (Share)
 # and Function's `share` and `shares` gone (64 bytes).  What must stay: the fields in the headers' order and of their
 # types
-# MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY's ndims: Strided's `dims` (size, stride) pairs at `pairs` (32 bytes)
+# MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY: "The ndims parameter specifies the number of dimensions in the full
+# data array and gives the number of elements in array_of_sizes, array_of_subsizes, and array_of_starts."
 class Strided(C.Structure):
     _fields_ = [('offset', Q), ('element', Q), ('dims', U), ('padding', U), ('pairs', C.POINTER(Q))]
 
@@ -83,7 +84,7 @@ class Dependence(C.Structure):
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
                 ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
-                ('lead', U), ('outstanding', Q), ('plan', Q)]
+                ('padding', U), ('outstanding', Q), ('plan', Q)]
 
 
 class View(C.Structure):
@@ -110,8 +111,9 @@ PLATFORM_NS = 5000000000
 # revisions of 4e78f6f4"): the whole section, 320 bytes, its tail from byte 232 the plan's synchronization edges
 # (`waits`, `tells`, `syncs`), `calls` and `closed`, where it ended at `entries` (mesh.h struct mesh_state and its
 # assert).  What must stay: the words in the header's order and at its offsets
-# JGroups ViewId.java, "Lamport time of the view" and "Address of the creator of this view": a plan's view (`serial`,
-# `sequencer`, `boot`), mesh.h mesh_plan_view, and the map read's (Nodes `serial`, `sequencer`, `boot`)
+# JGroups ViewId.java: "Lamport time of the view" (`serial`), "Address of the creator of this view" (`sequencer`,
+# `boot`), here and in Nodes; UUID.java: "Logical address which is unique over space and time."  libfabric
+# man/fi_cntr.3.md: "Counters record the number of requested operations that have completed." (`completions`)
 class State(C.Structure):
     _fields_ = [('copies', U), ('receives', U), ('ranges', U), ('releases', U), ('phases', Q), ('counts', Q),
                 ('supplied', Q), ('status', Q), ('executions', Q), ('completions', Q), ('group', Q), ('epoch', Q),
@@ -129,8 +131,9 @@ class State(C.Structure):
 # header's assert), the stride of struct mesh_state `transfers` (mesh.h mesh_transfer_at), so a host reader finds a
 # received range's count word, copy c's at `count` + 8 c, whose rises are its progress (rdma/mesh_compile.py _arrived).
 # What must stay: the fields in the header's order and at its offsets
-# mesh.h struct mesh_publication `completion` (design/problems-of-14b9a757-change-request.md, "Sources for the third
-# stops", 7)
+# rdma-core libibverbs/man/ibv_post_send.3, NOTES: "The buffers used by a WR can only be safely reused after WR the
+# request is fully executed and a work completion has been retrieved from the corresponding completion queue (CQ)."
+# libfabric man/fi_cntr.3.md: "Counters record the number of requested operations that have completed." (`completion`)
 class Target(C.Structure):
     _fields_ = [('word', Q), ('count', U), ('stride', U)]
 
@@ -152,8 +155,7 @@ class Nodes(C.Structure):
                 ('capacity', (Q * NODES_MOST) * NODES_MOST), ('sequencer', U), ('padding', U), ('boot', Q)]
 
 
-# mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled; and mesh_host_sent's, a
-# range's send cancelled
+# mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled
 FAILED = 2 ** 64 - 1
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
 CONTEXT = C.POINTER(Context)
