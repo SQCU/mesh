@@ -96,8 +96,18 @@ _Static_assert(sizeof(struct mesh_reach)==24,"mesh_reach");
    view (mesh-records.c view_install).  Why: the record is the bridge's announcement of itself, flooded to every node
    and so to the sequencer (RFC 2328 s13's database, mesh-records.c record_heard).  What must stay: the record only
    appended to */
+/* 2026-11-05 (116; design/aot-compilation-change-request.md A7, "The membership service is the sequencer": "To tell such
+   a member from one that installed the sequencer's own view, each announcement names the process that created its
+   bridge's installed view as well as its counter"; design/compilation-coordination.md, "The revisions of b5a3c6e6",
+   RV): `view_boot` and `view_sequencer` appended, that process, the creating sequencer's start (hdr `boot`) and node
+   id as mesh-records.c struct installed names it (A7: "A process is one start of a bridge"), 0 both until the
+   record's bridge installs a view; `padding` 0, so the record holds no byte its writer leaves unset.  Why: the
+   sequencer creates a view where a member's announcement names a view other than its installed one with a counter
+   not less than that view's identifier (mesh-records.c view_announced).  What must stay: the record only appended
+   to */
 struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
-  char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_PORTS]; struct mesh_health health; uint64_t view; };
+  char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_PORTS]; struct mesh_health health; uint64_t view;
+  uint64_t view_boot; uint32_t view_sequencer,padding; };
 /* the map's room: the records its area of the layout holds (hdr `map_room`, mesh_layout) */
 #define MESH_MAP_ROOM 256u
 /* moved from mesh.h (review R1, C1): the map's records' reader, bridge-side only (the note above); mesh_map_whole, the

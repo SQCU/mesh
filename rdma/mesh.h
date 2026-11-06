@@ -52,8 +52,11 @@
    edge's (`waits`, `tells`, `wait_delay`, `wait_count`, `told`) and its submissions' queue's room (`submit_room`);
    the wire's VIEW and COUNT, and struct mesh_order's `view` where its `serial` was (mesh-bridge.h); hdr `map_serial`
    moved at each view's installation too (design/aot-compilation-change-request.md at mesh 3f106747, A7 and appendix
-   item 2; design/compilation-coordination.md, "The revisions of 3f106747") */
-#define MESH_VERSION 115u
+   item 2; design/compilation-coordination.md, "The revisions of 3f106747").  116: struct mesh_record `view_boot`,
+   `view_sequencer` and `padding` appended, the process that created the record's bridge's installed view (mesh-map.h)
+   (design/aot-compilation-change-request.md at mesh b5a3c6e6, A7, "The membership service is the sequencer";
+   design/compilation-coordination.md, "The revisions of b5a3c6e6") */
+#define MESH_VERSION 116u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this

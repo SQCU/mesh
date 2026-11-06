@@ -99,6 +99,9 @@ static struct known *known_at(uint32_t node){
    count and the store of `map_off` go, and the area is adopted as it lies */
 /* not the tag's (2026-11-04, owner B2): the island computed from the map, after map_put and map_adopt (below) */
 static void island_set(void);
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of b5a3c6e6", RV): whether a record map_put wrote has
+   the sequencer create a view (below) */
+static int view_announced(const struct mesh_record *record);
 void map_adopt(void){
   /* differs from the tag: the records cleared between two notifications of `map`, and `map_serial` moved where any
      were held, since every change of the map's nodes moves it (mesh.h `map_serial`): a plan made against the earlier
@@ -197,7 +200,14 @@ static void map_put(const struct mesh_record *record){
     if(moved)plan_stale();
     /* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q3 and Q4): the island of the map as
        written (island_set), after the cancellation */
-    if(moved)island_set();
+    /* 2026-11-05 (design/aot-compilation-change-request.md A7, "The membership service is the sequencer": "It also
+       creates one whenever a member's announcement names a view other than the sequencer's installed one, with a
+       counter not less than that view's identifier"; design/compilation-coordination.md, "The revisions of b5a3c6e6",
+       RV and RV-1): island_set also where the write moved no serial and the record it put is such an announcement at
+       the sequencer (view_announced), so island_set's view_create makes the view, its identifier "computed again from
+       the counters it now holds" (A7), the map's.  Why: A7's correction, "a risen counter moved no map, so no view
+       followed it".  What must stay: island_set after the cancellation at every move */
+    if(moved || view_announced(record))island_set();
   }
   free(next);free(reached);free(order);
 }
@@ -412,7 +422,13 @@ static void island_set(void){
      design/aot-compilation-change-request.md A7: "The membership service is the sequencer ... A view's members are the
      nodes the sequencer's map reaches.  The sequencer creates a view at its bridge's start and at each move of its
      map": this is the one place both reach (map_put's first write of this bridge's own record moves the map, and every
-     later move calls this).  What must stay: the view made after the tree it is sent down */
+     later move calls this).  What must stay: the view made after the tree it is sent down.
+     2026-11-05 (design/compilation-coordination.md, "The revisions of b5a3c6e6", RV-1): map_put calls this too where a
+     member's announcement names another view with a counter not less than the installed view's identifier
+     (view_announced), the map unmoved, so the island here is the one computed at its last move and the view's members
+     are those nodes.  Why: A7, "It also creates one whenever a member's announcement names a view other than the
+     sequencer's installed one"; "A view's members are the nodes the sequencer's map reaches".  What must stay: as
+     above */
   if(self==sequencer)view_create(r,n,reached);
   free(reached);free(order);free(parent);free(join);free(first);free(child);
 }
@@ -659,6 +675,22 @@ static void view_create(const struct mesh_record *r,uint64_t n,const unsigned ch
   tree_down(VIEW,message,(uint32_t)bytes);
   view_install(&v,member);
   free(message);
+}
+/* Whether `record`, which map_put has just written into the map, has this bridge, the island's sequencer, create a
+   view (map_put then calls island_set, and island_set view_create): A7, "The membership service is the sequencer":
+   "It also creates one whenever a member's announcement names a view other than the sequencer's installed one, with a
+   counter not less than that view's identifier.  Such a member installed another sequencer's view after the
+   announcement the sequencer counted, and it ignores the sequencer's view by Local Monotonicity ... To tell such a
+   member from one that installed the sequencer's own view, each announcement names the process that created its
+   bridge's installed view as well as its counter" (design/aot-compilation-change-request.md at mesh b5a3c6e6;
+   design/compilation-coordination.md, "The revisions of b5a3c6e6", RV).  The view a record names is its counter and
+   its creator (mesh-map.h struct mesh_record `view`, `view_sequencer`, `view_boot`), as struct installed names the
+   view installed here; a member that installed the sequencer's own view names it whole, its counter equal to the
+   identifier, and creates none, nor does the sequencer's own record (record_changed writes it from `installed`).
+   What must stay: 0 at every node but the sequencer */
+static int view_announced(const struct mesh_record *record){
+  return island.self!=UINT32_MAX && island.self==island.sequencer && record->view>=installed.view &&
+    (record->view!=installed.view || record->view_sequencer!=installed.sequencer || record->view_boot!=installed.boot);
 }
 /* A VIEW heard from this node's parent in the island's tree (order_heard): relayed down, as an ORDER is, then
    installed here where it may be (view_install).  A payload that is not one struct mesh_view and its members is let
@@ -1142,8 +1174,13 @@ static void orders_deliver(uint64_t last){
    too, so a record whose counter rose is written into the map (map_put, which moves no serial for it: neither its
    nodes nor its cables changed) and the sequencer reads the counter there (view_create).  What must stay: a
    health-only change written under the health serial alone */
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of b5a3c6e6", RV): the installed view's creator
+   (`view_sequencer`, `view_boot`) compared too, so a record that names another view at an unchanged counter is
+   written into the map, where view_announced reads it.  Why: A7, "each announcement names the process that created its
+   bridge's installed view as well as its counter".  What must stay: as above */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
   int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot && a->view==b->view &&
+    a->view_boot==b->view_boot && a->view_sequencer==b->view_sequencer &&
     a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
   for(uint32_t k=0;same && k<a->reached && k<MESH_PORTS;k++)
     same=!memcmp(a->reach+k,b->reach+k,sizeof *a->reach);
@@ -1171,9 +1208,12 @@ struct mesh_record *record_held(uint32_t node){
 /* 2026-11-05 ("The revisions of 3f106747", VW): the record carries this bridge's counter, its installed view's
    identifier (A7: "Each bridge's announcement of itself to the sequencer carries its counter").  What must stay: as
    above */
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of b5a3c6e6", RV): and the process that created that
+   view, `installed`'s `sequencer` and `boot` (A7: "each announcement names the process that created its bridge's
+   installed view as well as its counter").  What must stay: as above */
 void record_changed(void){
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=(uint64_t)mesh_arena_pages(M)*M->pgsz,.memory=memory,
-                          .view=installed.view};
+                          .view=installed.view,.view_boot=installed.boot,.view_sequencer=installed.sequencer};
   memcpy(own.model,model,sizeof own.model);
   own.reached=record_reach(own.reach,MESH_PORTS);
   own.health=health;
