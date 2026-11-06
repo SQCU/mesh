@@ -104,45 +104,6 @@
    read there alone */
 #include "mesh-holders.h"
 
-/* design/prepared-machine.md#M29: d6dceac's prepared SEND (its span and request, one cache line's worth of what the
-   post reads), its release its entry's `word` and `field` (mesh.h struct mesh_hop; design/disjoint-pages-change-
-   request.md, C3.7): from its range's source (`field` MESH_ABSENT), execution t's send released where the range's
-   supplied word reads (acquire) at least t + 1, its producer's release of t; forwarding (a relay's, or a destination's
-   that sends the page on), where its receive's phase field, bits [field, field + 2) of `word`, reads (acquire)
-   mesh_phase(t / u + 1), that receive's landing of t; t the execution its lane's cursor serves (struct cursor).  The
-   word is the plan's state section's, the record the child's.  One record a template entry, posted once for each
-   execution of its copy (link_prepare).
-   2026-11-04, sub-assignment 6: `mask` (2026-11-03: the bits of its word its release needed, MESH_SUPPLIED or its
-   receive's bit of its execution's landed record) is `field`, the landed records and MESH_SUPPLIED gone (C4).  What
-   must stay: the word and field in the line the post reads.
-   2026-11-04, owner B1 (design/compilation-coordination.md, T7): its span its hop's `bytes` long, where it was the
-   whole page (page_bytes()), and its frames frames_of(that length), posted and retired through its lane's gate alike
-   (link_send_drain: the completion names the record, so the record knows its frames), where every SEND took a page's
-   frames.  Why: R5, each hop with its bytes.  What must stay: one 256-byte cell, its span and request where the post
-   reads them.
-   2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL5: "each record
-   names its plan (struct flow), so a pass's completions are counted to their own plans while several interleave on
-   one queue pair"): `flow`, the plan whose record it is, in the cell's room after the request (offset 160: the
-   request, struct ibv_send_wr, is 128 bytes from 32), so the SEND completion, which names the record (`wr_id`),
-   counts its plan's `sent`; no field the post reads moves.  What must stay: as above
-   `count`, its hop's send-completion counter, its error count at count + 1 (mesh.h struct mesh_hop; rdma-core
-   libibverbs/man/ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION and fi_cntr_readerr;
-   design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7, and "Sources for the fourth
-   stops", 7) */
-struct flow;
-struct prepared_send {
-  _Alignas(128) _Atomic uint64_t *word;
-  uint32_t field,padding;
-  struct ibv_sge span;
-  struct ibv_send_wr request;
-  struct flow *flow;
-  _Atomic uint64_t *count;
-};
-_Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_send)==128 &&
-  offsetof(struct prepared_send,field)==8 && offsetof(struct prepared_send,span)==16 &&
-  offsetof(struct prepared_send,request)==32 &&
-  offsetof(struct prepared_send,request.send_flags)+sizeof(unsigned int)<=128 &&
-  offsetof(struct prepared_send,flow)==160 && offsetof(struct prepared_send,count)==168,"M29");
 /* design/prepared-machine.md#M08: d6dceac's prepared receive, its request and span verbatim, and what its landing
    writes (design/disjoint-pages-change-request.md, C3.1 and C3.7; design/disjoint-pages-revision-coordination.md, "The
    bridge"): its phase field, bits [field, field + 2) of `word`, and `count`, its range's count word of its copy, which
