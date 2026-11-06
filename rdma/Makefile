@@ -96,8 +96,11 @@ mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-map.h mesh-holders.h Makefile
 	cc $(CPPFLAGS) -O2 -Wall -Wextra -Werror -o $@ mesh-heartbeat.c
 # 2026-11-04 (design/compilation-coordination.md, B2's report): mesh-stat walks the claim heads (mesh-dataflow.h
 # mesh_head_after), so it links mesh-dataflow.c, as the bridge and libmesh do
-mesh-stat: mesh-stat.c mesh-dataflow.c mesh.h mesh-map.h mesh-holders.h mesh-dataflow.h mesh-call.h mesh-section.h
-	cc -O2 -o $@ mesh-stat.c mesh-dataflow.c
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of 4e78f6f4"; sub-agent D's finding): mesh-stat reads
+# the program's root at its place (mesh.h mesh_program), no claim head, so it is made from mesh-stat.c and the headers
+# it includes alone, where it linked mesh-dataflow.c.  What must stay: its inputs are what it includes
+mesh-stat: mesh-stat.c mesh.h mesh-map.h mesh-holders.h
+	cc -O2 -o $@ mesh-stat.c
 libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) $(HIGHS_BUILT) Makefile
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS)
 clean:

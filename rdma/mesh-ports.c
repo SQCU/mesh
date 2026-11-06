@@ -262,8 +262,8 @@ static void link_heard(struct port *port,const struct message *heard){
    2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", VW and BS): a VIEW, the sequencer's
    first message of a view (design/aot-compilation-change-request.md A7, "The island is a dynamic group, and each of
    its views is a static system"), and a COUNT, a synchronization edge's count (appendix item 2: "The bridge carries the
-   count from source to sink, as it carries an arrival"; mesh-bridge.h struct mesh_view, struct mesh_count), are taken
-   there too.  What must stay: as above */
+   count from source to sink, as it carries an arrival"; mesh-bridge.h struct mesh_group_view, struct mesh_view until
+   2026-11-05, "The revisions of 4e78f6f4", and struct mesh_count), are taken there too.  What must stay: as above */
 static void message_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(heard->kind==RECORD)record_heard(port,payload,heard->bytes);
   else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);}

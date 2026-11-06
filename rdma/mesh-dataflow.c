@@ -248,9 +248,8 @@ static int mesh_holding_retained(struct hdr *m,struct mesh_program *program){
   const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
   for(uint32_t p=0;p<links;p++)
     if(atomic_load_explicit(&mesh_links(m)[p].port.prepared,memory_order_acquire)==program->generation)return 1;
-  const uint64_t *table=(const uint64_t *)(const void *)((const char *)m+program->table);
   for(uint32_t k=0;k<program->plans;k++)
-    if(atomic_load_explicit(&mesh_state_at(m,table[k])->held,memory_order_acquire))return 1;
+    if(atomic_load_explicit(&mesh_program_state(m,program,k)->held,memory_order_acquire))return 1;
   return 0;
 }
 

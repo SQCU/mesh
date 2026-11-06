@@ -1001,6 +1001,13 @@ static inline struct mesh_state *mesh_state_at(struct hdr *m,uint64_t at){
 }
 /* the program's serialized operand's root, at the layout's one place (struct mesh_program's note) */
 static inline struct mesh_program *mesh_program(struct hdr *m){ return (struct mesh_program *)((char *)m+m->program_off); }
+/* function k + 1's state section, the root's `table` word k (struct mesh_program's note), closed or standing; the
+   caller's k below the root's `plans` (2026-11-05, "The revisions of 4e78f6f4": the one reading of a table word, where
+   mesh_program_plan, mesh-dataflow.c mesh_holding_retained and mesh-flow.c held_clear each read it, sub-agent D's
+   finding; the release and a dead child's `held` read closed plans too) */
+static inline struct mesh_state *mesh_program_state(struct hdr *m,const struct mesh_program *program,uint32_t k){
+  return mesh_state_at(m,((const uint64_t *)(const void *)((const char *)m+program->table))[k]);
+}
 /* function k + 1's plan (struct mesh_program `table` word k), NULL where it does not stand: the root's `owner` 0
    (acquire) or `closed` 1 (acquire), k not below its `plans`, or the plan's `closed` 1 (acquire).  The bridge's one
    reading of the program's plans, each at its compile-time place (A9, "What the bridge runs") */
@@ -1008,7 +1015,7 @@ static inline struct mesh_state *mesh_program_plan(struct hdr *m,uint32_t k){
   struct mesh_program *program=mesh_program(m);
   if(!atomic_load_explicit(&program->owner,memory_order_acquire) ||
      atomic_load_explicit(&program->closed,memory_order_acquire) || k>=program->plans)return NULL;
-  struct mesh_state *state=mesh_state_at(m,((const uint64_t *)(const void *)((char *)m+program->table))[k]);
+  struct mesh_state *state=mesh_program_state(m,program,k);
   return state && !atomic_load_explicit(&state->closed,memory_order_acquire)?state:NULL;
 }
 /* the synchronization edges of plan `state` here, `waits` into it then `tells` out of it (struct mesh_sync's note) */

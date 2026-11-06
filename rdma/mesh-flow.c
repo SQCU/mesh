@@ -2085,8 +2085,8 @@ static void plan_cancel(struct mesh_state *words,uint32_t from){
 static void held_clear(uint64_t ports){
   struct mesh_program *program=mesh_program(M);
   if(!atomic_load_explicit(&program->owner,memory_order_acquire))return;
-  const uint64_t *table=(const uint64_t *)(const void *)((const char *)M+program->table);
-  for(uint32_t k=0;k<program->plans;k++)atomic_fetch_and_explicit(&mesh_state_at(M,table[k])->held,~ports,memory_order_release);
+  for(uint32_t k=0;k<program->plans;k++)
+    atomic_fetch_and_explicit(&mesh_program_state(M,program,k)->held,~ports,memory_order_release);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:619-654 streams_open (11807bec), reduced to what it is under the page lists:
    the tag's streams made new and live for a new pairing; here the port's serving opened, as its lanes connect and
