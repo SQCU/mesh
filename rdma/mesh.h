@@ -300,8 +300,9 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    places with the plan's values in its claim (an invariant of the plan, no page-table row naming it), in new pages for
    every plan, apart from the data pages it tells of.  Its layout: the struct; the phases, counts, supplied words and
    status; the delivered calls' queue, `room` struct mesh_delivery at `deliveries`; the submissions' queue,
-   `outstanding` struct mesh_submission at `submits`; the entries; each 64-aligned (2026-11-05, "The revisions of
-   abecd389", PQ: the two queues where the sequence words were before 113) (mesh-collective.c plan_layout; design/compilation-coordination.md, "The documents' revisions of
+   `submit_room` struct mesh_submission at `submits` (`outstanding` of them at 114); the entries; each 64-aligned
+   (2026-11-05, "The revisions of abecd389", PQ: the two queues where the sequence words were before 113; "The
+   revisions of 3f106747", BS: `submit_room`) (mesh-collective.c plan_layout; design/compilation-coordination.md, "The documents' revisions of
    edd4b583", "The region").  Each word has one writer:
    - `phases`: the phase list, a dense array of 2-bit fields.  For each range this node receives (one it consumes,
      or a relay's own, whose forwards its phases release), in the plan's demand order, and copy c, a group of
