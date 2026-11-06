@@ -415,3 +415,57 @@ The implementation of the sources above (mesh 0f48775f, c840ff2f, bce1ed90, 028b
     its own never-freed pages (item 7).
   - The plan refuses a transfer whose source is MESH_INVARIANT (EINVAL at the plan).
   - LOADED and the execution UINT64_MAX − 1 are deleted. The function called once is not needed.
+
+## Sources for the third stops (2026-11-06)
+
+The implementation of the second sources (mesh 2155c2b8) stopped at three places.
+
+### 7. No word tells a node that its sends and forwards are complete
+
+- **Stop:** send completions, of sends and forwards alike, are counted only in the port child's private `struct flow`,
+  and only `plan_end` reads them. `wait_tensor` could therefore complete only the landings.
+- **Source:**
+  - rdma-core, libibverbs/man/ibv_post_send.3
+    (https://raw.githubusercontent.com/linux-rdma/rdma-core/master/libibverbs/man/ibv_post_send.3, NOTES): "The buffers
+    used by a WR can only be safely reused after WR the request is fully executed and a work completion has been
+    retrieved from the corresponding completion queue (CQ)."
+  - libfabric, man/fi_cntr.3.md (https://raw.githubusercontent.com/ofiwg/libfabric/main/man/fi_cntr.3.md, DESCRIPTION):
+    "Counters record the number of requested operations that have completed. Counters can provide a light-weight
+    completion mechanism by allowing the suppression of CQ completion entries. They are useful for applications that
+    only need to know the number of requests that have completed, and not details about each request."
+- **Change:**
+  - Each declared transfer has a send-completion counter at its source node, and each forward at its relay, in the
+    plan's state section beside the landing counts.
+  - The port child raises the counter by each work completion it retrieves for that transfer's sends or forwards, as
+    it raises a landing's count. This is in rdma-core's sense: the buffer may be reused only once the completion is
+    retrieved.
+  - The collective's `wait_tensor` at a node waits for its landing counts and its send-completion counters to reach
+    the execution's totals.
+  - The failport file mesh-lanes.c, which retrieves the completions, is unchanged. The raise is where `struct flow`
+    already counts them, in mesh-flow.c.
+  - PLAN_SENT goes once the hold has this end.
+
+### 8. A collective over a view of an invariant
+
+- **Stop:** where an aliasing slice, select or unsqueeze of a module attribute is an AllToAll's operand, the transfer
+  sends from the invariant's pages. The plan now refuses that program. The partitioner never makes that node's whole
+  value, which a DynamicSlice would need.
+- **Source:** GSPMD §4.5 (quoted at item 4): "DynamicSlice to shard replicated dimensions"; torch's `ExportedProgram`
+  (quoted at the second stops' item 8): every rank holds the state_dict.
+- **Change:**
+  - An invariant's sharding at the partitioner is replicated: every node holds it whole.
+  - A value made from invariants by views alone is replicated too, since a view of a replicated value is replicated at
+    every node.
+  - A collective whose operand is such a value is a resharding from replicated, so it is the DynamicSlice of its
+    result's sharding, at each node, with no transfer.
+
+### 8. Loading only the slices a node reads
+
+- **Stop:** make() loads each attribute whole, and its DynamicSlices are views of it. No source said how to load only
+  the slices where one node's placement needs several of one attribute.
+- **Source:** GSPMD §4.5, as above. Each resharding is its own DynamicSlice instruction, and so its own value.
+- **Change:**
+  - Each distinct DynamicSlice a node's program reads of an attribute is its own never-freed value at that node.
+  - Each is loaded once in make(), from the host's state_dict tensor, by torch's `copy_` of that slice into the value's
+    pages.
+  - The whole attribute is loaded only where the node reads it whole.
