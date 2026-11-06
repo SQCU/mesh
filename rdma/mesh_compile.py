@@ -1358,9 +1358,9 @@ def _consumer(ir, roots):
 #   `element` the element's bytes, its dimensions of size 1 dropped and adjacent ones merged where they nest, as torch's
 #   own collapse merges them ("The dimensions can be merged if and only if they are all "nested" with each other.  That
 #   is, they all have the property that stride[i] = stride[i+1] * shape[i+1]", torch 2.14.0 torch/_prims/__init__.py
-#   collapse_view, whose _collapse_view_helper takes `shape[idx] == 1` alike), which keeps the bytes' C order.  A view of
-#   more than MESH_STRIDED_DIMS merged dimensions, or of no placed value, is refused at compile time, naming it (struct
-#   mesh_strided: "`dims` <= MESH_STRIDED_DIMS ... EINVAL otherwise, at the plan").
+#   collapse_view, whose _collapse_view_helper takes `shape[idx] == 1` alike), which keeps the bytes' C order, its
+#   `dims` (size, stride) pairs at `pairs` (MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY's ndims).  A view of no
+#   placed value is refused at compile time, naming it.
 # - _produced and _send: a sent range's production at its writer's third step, its source read the span of the reads of
 #   its key and its value (_readers), and this node's release of it after that writer (`publishes`), or once after the
 #   load where the writer is a module attribute, an invariant (`loaded`: "A range sent from a MESH_INVARIANT value is
@@ -1438,13 +1438,8 @@ def _strided(ir, place):
             dims[-1] = (dims[-1][0] * n, s)
         else:
             dims.append((n, s))
-    if len(dims) > mesh.STRIDED_DIMS:
-        raise NotImplementedError('a part of %s viewed in %d dimensions that do not merge, past mesh-collective.h\'s '
-                                  'MESH_STRIDED_DIMS (%d)' % (place.owner[0].name, len(dims), mesh.STRIDED_DIMS))
-    view = mesh.Strided(offset=place.offset * size, element=size, dims=len(dims))
-    for d, (n, s) in enumerate(dims):
-        view.size[d], view.stride[d] = n, s * size
-    return view
+    pairs = (mesh.Q * (2 * len(dims)))(*[x for n, s in dims for x in (n, s * size)])
+    return mesh.Strided(offset=place.offset * size, element=size, dims=len(dims), pairs=pairs)
 
 
 def _produced(ir, d, i, key, received):

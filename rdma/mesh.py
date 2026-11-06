@@ -59,15 +59,12 @@ class Value(C.Structure):
 
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The
 # revisions of 14b9a757"): mesh-collective.h struct mesh_strided (Strided), a view of a value's bytes, offset and strides
-# in bytes, and Declared's `from` and `to` views where `first` and `bytes` were (328 bytes); struct mesh_share (Share)
+# in bytes, and Declared's `from` and `to` views where `first` and `bytes` were (88 bytes); struct mesh_share (Share)
 # and Function's `share` and `shares` gone (64 bytes).  What must stay: the fields in the headers' order and of their
 # types
-STRIDED_DIMS = 8
-
-
+# MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY's ndims: Strided's `dims` (size, stride) pairs at `pairs` (32 bytes)
 class Strided(C.Structure):
-    _fields_ = [('offset', Q), ('element', Q), ('dims', U), ('padding', U), ('size', Q * STRIDED_DIMS),
-                ('stride', Q * STRIDED_DIMS)]
+    _fields_ = [('offset', Q), ('element', Q), ('dims', U), ('padding', U), ('pairs', C.POINTER(Q))]
 
 
 class Declared(C.Structure):
