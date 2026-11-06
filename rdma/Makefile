@@ -31,6 +31,8 @@ HIGHS_SHA256 = a840d269dff2fafb371dd247df13ad5e026d7ce3b35ad3dc1eedd59bf0c2fb16
 HIGHS_TARBALL = .build/highs/$(HIGHS_TAG).tar.gz
 HIGHS = .build/highs/HiGHS-1.15.1
 HIGHS_BUILT = .build/highs/built
+HIGHS_INPUTS = .build/highs/inputs
+HIGHS_INPUT_TEXT = $(HIGHS_TAG) $(HIGHS_FLAGS)
 HIGHS_SOURCES = highs/interfaces/highs_c_api.cpp highs/HighsExternalApi.cpp highs/HighsExternalDeps.cpp highs/io/*.cpp \
   highs/io/filereaderlp/*.cpp highs/ipm/*.cpp highs/ipm/ipx/*.cc highs/ipm/basiclu/*.c highs/ipm/hipo/ipm/*.cpp \
   highs/ipm/hipo/factorhighs/*.cpp highs/ipm/hipo/auxiliary/*.cpp highs/lp_data/*.cpp highs/mip/*.cpp highs/model/*.cpp \
@@ -53,20 +55,32 @@ HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph
 # the data path over the page lists (mesh-flow.c); one image, its children `mesh-flow --child ...`
 BRIDGE = mesh-link.c mesh-children.c mesh-child.c mesh-ports.c mesh-events.c mesh-lanes.c mesh-records.c mesh-flow.c \
   mesh-dataflow.c mesh-call.c mesh-graph.c
-all: $(BINS)
+all: $(BINS) $(HIGHS_INPUTS)
 # HiGHS's fetch and build (above), after `all`, the default goal
 $(HIGHS_TARBALL):
 	mkdir -p .build/highs
 	curl --fail --location --output $@.part https://github.com/ERGO-Code/HiGHS/archive/refs/tags/$(HIGHS_TAG).tar.gz
 	echo '$(HIGHS_SHA256)  $@.part' | shasum -a 256 --check
 	mv $@.part $@
-$(HIGHS_BUILT): $(HIGHS_TARBALL) Makefile
+# 2026-11-05: HiGHS's objects remade only where their own inputs change, its tarball or HIGHS_INPUTS (its tag and
+# flags), where any edit of this Makefile remade them.  HIGHS_INPUTS is rewritten only where its text differs, as git's
+# Makefile keeps GIT-CFLAGS; where it is missing beside built objects it takes their stamp's time, since until now the
+# stamp followed this whole file, so those objects are of these inputs.  Why: the operator, 2026-11-05: "stop
+# arbitrarily rebuilding unchanged dependencies as part of linking or assembling whatever runtime our compiler uses".
+# What must stay: the objects remade at a change of the tarball, the tag or the flags, and at no other
+$(HIGHS_BUILT): $(HIGHS_TARBALL) $(wildcard $(HIGHS_INPUTS))
 	tar -xzf $(HIGHS_TARBALL) -C .build/highs
 	cp $(HIGHS)/highs/HConfig.h.bazel.in $(HIGHS)/HConfig.h
 	mkdir -p .build/highs/obj
 	cd $(HIGHS) && printf '%s\n' $(HIGHS_SOURCES) | xargs -P $(HIGHS_JOBS) -n 1 sh -c 'f=$$1; o=../obj/$$(echo $$f | tr / _).o; \
 	  case $$f in *.c) exec cc $(HIGHS_FLAGS) -c $$f -o $$o;; *) exec c++ -std=c++17 $(HIGHS_FLAGS) -c $$f -o $$o;; esac' sh
+	echo '$(HIGHS_INPUT_TEXT)' | cmp -s - $(HIGHS_INPUTS) || echo '$(HIGHS_INPUT_TEXT)' > $(HIGHS_INPUTS)
 	touch $@
+$(HIGHS_INPUTS): FORCE
+	mkdir -p .build/highs
+	if test ! -f $@ && test -f $(HIGHS_BUILT); then echo '$(HIGHS_INPUT_TEXT)' > $@ && touch -r $(HIGHS_BUILT) $@; \
+	else echo '$(HIGHS_INPUT_TEXT)' | cmp -s - $@ || echo '$(HIGHS_INPUT_TEXT)' > $@; fi
+FORCE:
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c $(HEADERS) Makefile
 	mkdir -p .build
@@ -87,7 +101,7 @@ libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEAD
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS)
 clean:
 	rm -f $(BINS)
-.PHONY: all clean native-audit
+.PHONY: all clean native-audit FORCE
 install-bridge: mesh-flow mesh-heartbeat mesh-stat
 	install -d $(MESH_PREFIX)/bin
 	install -m 755 mesh-flow mesh-heartbeat mesh-stat $(MESH_PREFIX)/bin/
