@@ -1441,18 +1441,15 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
       struct mesh_publication *entry=(struct mesh_publication *)(void *)(mesh_at(m,at)+p->publications+
                                                                          (size_t)i*sizeof(struct mesh_publication));
       if(t->source==p->self){
-        entry->targets[0]=(struct mesh_target){.word=plan_supplied(p,d),.count=1,.stride=0};
-        entry->state=base;
+        entry->targets[0]=(struct mesh_target){.word=plan_supplied(p,d)};
       }else if(t->destination==p->self){
         entry->pages=d->received;
         entry->phases=plan_group(p,d,0);
         entry->count=plan_count(p,d,0);
-        entry->state=base;
       }
       if(d->sending!=MESH_ABSENT){
         entry->sends=d->sends;
         entry->completion=plan_completion(p,d,0);
-        entry->state=base;
       }
     }
     struct mesh_hop *hop=mesh_hops(m,state);

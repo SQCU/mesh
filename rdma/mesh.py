@@ -72,12 +72,11 @@ class State(C.Structure):
 
 
 class Target(C.Structure):
-    _fields_ = [('word', Q), ('count', U), ('stride', U)]
+    _fields_ = [('word', Q)]
 
 
 class Publication(C.Structure):
-    _fields_ = [('sends', U), ('pages', U), ('phases', Q), ('count', Q), ('state', Q), ('targets', Target * 1),
-                ('completion', Q)]
+    _fields_ = [('sends', U), ('pages', U), ('phases', Q), ('count', Q), ('targets', Target * 1), ('completion', Q)]
 
 
 PUBLICATION_BYTES = 64

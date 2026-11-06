@@ -22,21 +22,20 @@ struct mesh_page_entry {
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
 enum { MESH_SEND, MESH_RECEIVE };
-struct mesh_target { uint64_t word; uint32_t count,stride; };
-_Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
+struct mesh_target { uint64_t word; };
+_Static_assert(sizeof(struct mesh_target)==8,"mesh_target");
 /* Copy c: phase group at phases + c × mesh_group_bytes(pages); count word at count + 8c; send-completion counter at
    completion + 16c, its error count at completion + 16c + 8.
    rdma-core, libibverbs/man/ibv_post_send.3, NOTES: "The buffers used by a WR can only be safely reused after WR the
    request is fully executed and a work completion has been retrieved from the corresponding completion queue (CQ)."
    libfabric, man/fi_cntr.3.md, DESCRIPTION: "Counters record the number of requested operations that have completed.";
    fi_cntr_readerr: "Reads the number of operations which have completed in error." */
-struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t pages; uint64_t phases,count,state;
-  struct mesh_target targets[1]; uint64_t completion,padding; };
+struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t pages; uint64_t phases,count;
+  struct mesh_target targets[1]; uint64_t completion; };
 _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 &&
   offsetof(struct mesh_publication,sends)==0 && offsetof(struct mesh_publication,pages)==4 &&
   offsetof(struct mesh_publication,phases)==8 && offsetof(struct mesh_publication,count)==16 &&
-  offsetof(struct mesh_publication,state)==24 && offsetof(struct mesh_publication,targets)==32 &&
-  offsetof(struct mesh_publication,completion)==48,"mesh_publication");
+  offsetof(struct mesh_publication,targets)==24 && offsetof(struct mesh_publication,completion)==32,"mesh_publication");
 /* `prepared`: M. M. Michael, Hazard pointers: safe memory reclamation for lock-free objects, IEEE TPDS 15(6), 2004 */
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
 
