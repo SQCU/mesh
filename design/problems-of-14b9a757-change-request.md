@@ -259,3 +259,100 @@ gives:
 - **Change:**
   - A view's identifier is (Lamport time, creator), where the creator is (sequencer node, boot).
   - A plan's `serial` is that pair, and every comparison compares the pair.
+
+## Sources for the stops (2026-11-06)
+
+The implementation of the items above (mesh 496ad4ef to 6d8d18ce, metal-microbench 73fe1517) stopped at four places for
+lack of a quoted source. Each source is given here verbatim, with the change it requires.
+
+### 4. Several partitioned spatial dimensions
+
+- **Stop:** no quoted source gave the order in which halo exchanges over several dimensions compose so that corner halos
+  arrive.
+- **Source:** XLA's SPMD partitioner, `PartitionedHlo::ReshardAsWindowedInput`
+  (https://raw.githubusercontent.com/openxla/xla/main/xla/service/spmd/spmd_partitioner.cc, read 2026-11-06):
+
+  ```
+  // Halo exchange.
+  HloInstruction* visiting_hlo = hlo_;
+  ...
+  // TODO(yuanzx): We are concatenating on each sharded dimension one at time,
+  // and in the second dimension (and beyond) we create halos by slicing the
+  // concat in the previous dimension, which is not optimal. ...
+  for (int dim = 0; dim < base_shape_.dimensions().size(); ++dim) {
+    int64_t shard_count = halo_exchange_target->dimension(dim);
+    if (shard_count == 1 || can_leave_dimension_partitioned[dim]) {
+      continue;
+    }
+    ...
+    auto resharded = ExchangeHaloAndGetValidData(
+        visiting_hlo, halo_exchange_base_shape, left_halo_size_functions,
+        right_halo_size_functions, ...);
+    ...
+    visiting_hlo = *resharded;
+  }
+  ```
+- **Change:**
+  - The exchanges run one sharded dimension at a time, in increasing dimension order.
+  - Each exchange's operand is the previous exchange's result, so the second exchange's halos carry the first's, and the
+    corners arrive with them.
+  - Each exchange is item 4's A.2 sequence.
+  - A dimension with one shard is skipped.
+  - The refusal for more than one dimension is deleted.
+
+### 7. Blocks holding bytes no transfer covers
+
+- **Stop:** no quoted source related a position in the program's order to the transfers. The IR has no event for the
+  program's own reads and writes. Copies kept across executions had no rule.
+- **Source:**
+  - ExecuTorch, exir/memory_planning.py (https://raw.githubusercontent.com/pytorch/executorch/main/exir/memory_planning.py,
+    read 2026-11-06), `update_tensor_lifetime`:
+    - "A tensor's lifetime are represented by the index of the first and last node referring that tensor in its
+      inputs/outputs."
+    - "Mutable buffers and device resident constants keep their data across calls, so they are never freed."
+  - The same file's test for two tensors sharing storage: `spec.lifetime[1] < alloc.spec.lifetime[0] or
+    spec.lifetime[0] > alloc.spec.lifetime[1]`.
+  - MPI 4.1 §3.7 (https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node71.htm):
+    - "The sender should not modify any part of the send buffer after a nonblocking send operation is called, until the
+      send completes."
+    - "The receiver should not access any part of the receive buffer after a nonblocking receive operation is called,
+      until the receive completes."
+- **Change:**
+  - **A value's lifetime** is [the index of the first node referring to it, the index of the last], over the exported
+    graph's nodes in order, as `update_tensor_lifetime` computes it. The compile passes each value's pair to the plan.
+  - **A transfer's ends** each occupy their value from the node that starts the transfer to the node that waits for its
+    completion (MPI §3.7). A send's source is held until its completion is awaited, and a landing's destination from the
+    receive's start.
+  - **A block's lifetime** spans the lifetimes of the values whose bytes it holds.
+  - **Sharing:** two blocks may share pages exactly where ExecuTorch's test finds their lifetimes disjoint.
+  - **Never freed:** a value whose data is kept across executions (a copy of lag k ≥ 1, and an invariant) is never
+    freed, as ExecuTorch's mutable buffers are not. Only these remain unordered with every item.
+
+### 8. An invariant's transfer outside the executions
+
+- **Stop:** no quoted source said how a computation moved out of the executions is planned and run.
+- **Source:** torch 2.14.0 torch/nn/parallel/distributed.py, DistributedDataParallel's arguments: "init_sync (bool):
+  Whether to sync during initialization to verify param shapes and broadcast parameters and buffers."
+  - The broadcast of the invariant parameters is a collective issued once at construction, before any iteration, and not
+    part of the iterations.
+- **Change:**
+  - An invariant's transfers are their own function, compiled and planned as any function is, called once in make()
+    before execution 0, awaited, then retired.
+  - The per-execution functions name the invariant's pages as a value that is never freed (item 7).
+  - LOADED and the execution UINT64_MAX − 1 are deleted.
+
+### 11. A plan loaded after its cancellation
+
+- **Stop:** a child spawned after a loss, before the next view, still loads the cancelled plan. Nothing the load reads
+  records the cancellation.
+- **Source:** the Linux kernel's RCU documentation, "What is RCU?"
+  (https://raw.githubusercontent.com/torvalds/linux/master/Documentation/RCU/whatisRCU.rst, read 2026-11-06):
+  - "The removal phase removes references to data items within a data structure (possibly by replacing them with
+    references to new versions of these data items), and can run concurrently with readers."
+  - "any reader starting after the removal phase will be unable to gain a reference to the removed data items".
+- **Change:**
+  - **Removal:** the cancellation at a loss removes the plan from the structure the load reads, stored before any child
+    is spawned for the port.
+  - **One writer:** that store is the bridge parent's alone.
+  - **The load:** it reads the removal after its acquire and gains no reference to the plan.
+  - **The program:** it learns of the cancellation through the raised counts, as plan_cancel already gives it.
