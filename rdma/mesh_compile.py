@@ -3167,7 +3167,11 @@ def _label(buffer, name):
 # placed and outlives the execution; any other buffer torch made is a value of the capture (metal_recording.m
 # MetalDelegateValues).  `owners`: each labelled buffer's (function, value).  Each call: (its node, its function, the
 # capture, its result, the capture's levels and its own values, struct mesh_value form).  Every capture's commands bind
-# no plan: its values are placed after it (_replays)
+# no plan: its values are placed after it (_replays).  A node where a declared transfer names one of its values runs its
+# steps (_execute) as before: the recorder holds a received operand's reader until its pages land by rewriting the
+# reader's source (metal_recording.m MetalMaskReaders: "Command %lu reads a received operand and has no recorded
+# source"), and torch 2.14.0's kernels come from `[device newLibraryWithData:getSectionData("metal_basic") error:&error]`
+# (aten/src/ATen/native/mps/OperationUtils.mm), a library with no source
 def _captured(context, irs, compiled, gm, of, constants, holders):
     lib, root, made = _recorder()
     _kernels(root)
@@ -3795,10 +3799,11 @@ def program(block, *example_inputs):
                 irs[k].inputs[i] = (irs[k].value(*x[:3], 0, 0, 0, lag=HOST_LAG), x[3])
             holders.append(k if x is not None else None)
         here = {layout[2] for ir in irs for layout in ir.layouts}
-        if here == {'mps'} and len(set(calls)) != len(calls):
+        replayed = here == {'mps'} and not any(d.value != mesh.ABSENT for ir in irs for d in ir.declared)
+        if replayed and len(set(calls)) != len(calls):
             raise NotImplementedError('a compiled function called more than once in the block: its replay binds its '
                                       'values by its plan\'s executions, the block\'s inputs by the block\'s')
-        captured = _captured(context, irs, compiled, gm, of, constants, holders) if here == {'mps'} else None
+        captured = _captured(context, irs, compiled, gm, of, constants, holders) if replayed else None
         own = [[] for _ in irs]
         for _, k, handle, _, levels, values, *_ in captured['calls'] if captured else ():
             for value in irs[k].values if handle is not None else ():
