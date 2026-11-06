@@ -1025,16 +1025,10 @@ done:
 
 /* MPI 4.1 §6.1.3 (https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node99.htm): "For any dimension i, it is
    erroneous to specify array_of_subsizes[i] < 1" */
-static int plan_view(const struct mesh_strided *v,uint64_t *bytes,uint64_t *end){
-  uint64_t b=v->element,e;
-  if(!b || __builtin_add_overflow(v->offset,v->element,&e))return EINVAL;
-  for(uint64_t d=0;d<v->dims;d++){
-    const uint64_t size=v->pairs[2*d],stride=v->pairs[2*d+1];
-    uint64_t step;
-    if(!size || __builtin_mul_overflow(b,size,&b) || __builtin_mul_overflow(size-1,stride,&step) ||
-       __builtin_add_overflow(e,step,&e))return EINVAL;
-  }
-  *bytes=b;*end=e;
+static int plan_view(const struct mesh_strided *v,uint64_t *bytes){
+  uint64_t b=v->element;
+  for(uint64_t d=0;d<v->dims;d++)if(!v->pairs[2*d] || __builtin_mul_overflow(b,v->pairs[2*d],&b))return EINVAL;
+  *bytes=b;
   return 0;
 }
 /* R. Ross, N. Miller and W. D. Gropp, Implementing fast and reusable datatype processing, EuroPVM/MPI 2003 */
@@ -1221,10 +1215,10 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   if(!key || !placed || !p->named || !p->item || !p->demand || !p->of){status=ENOMEM;goto done;}
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;
-    uint64_t from,to,end;
+    uint64_t from,to;
     /* MPI 4.1 §7.1 (https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm): "for collective operations, the
        amount of data sent must exactly match the amount of data specified by the receiver." */
-    if(plan_view(&t->from,&from,&end) || plan_view(&t->to,&to,&end) || from!=to){status=EINVAL;goto done;}
+    if(plan_view(&t->from,&from) || plan_view(&t->to,&to) || from!=to){status=EINVAL;goto done;}
     if(plan_blocks(m,from)>=UINT32_MAX/m->block){status=ENOMEM;goto done;}
     key[i]=(struct plan_key){t->source,t->identity,i};
   }
@@ -1234,9 +1228,9 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
                          placed[key[k-1].index];
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;
-    uint64_t bytes,end;
+    uint64_t bytes;
     if(placed[i]==i){
-      plan_view(&t->from,&bytes,&end);
+      plan_view(&t->from,&bytes);
       p->demand[p->demands++]=(struct plan_demand){.source=t->source,.identity=t->identity,.first=i,.mine=MESH_ABSENT,
                                                    .set=1,.bytes=bytes,.range=MESH_ABSENT,.relay=MESH_ABSENT};
     }
