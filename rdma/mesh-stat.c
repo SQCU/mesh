@@ -113,11 +113,18 @@ static int map_print(struct hdr *m,size_t length){
    called the root ("Root" names the trees' roots).  What must stay: the holder's process, 0 where none.
    2026-11-06 ("Review of 4e78f6f4 against the requirement lines", G2: "merge duplicated patterns"; the coordinator's
    review): the operand's openness by mesh.h mesh_algo_open (mesh 52a12eb0), hdr `client` read after it.  What must
-   stay: as above */
+   stay: as above
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8 and
+   R-10: "the holder's read and gone-holder test" merged; W13: "(mesh-link.c 377–381; mesh-records.c 1425–1430,
+   1491–1493; mesh-stat.c 118–120)"; "The revisions of 14b9a757", R-10): the holder by mesh-holders.h mesh_algo_holder,
+   its one read ({0} where the operand is not open), and its process where it holds the region by mesh_holds(pid,
+   start), else 0.  Why: R-8, "the bridge writes only `released`, and a gone holder is read from the heartbeat's words":
+   a gone holder's operand stays open until the bridge releases it, so the gone-holder test is read here as at every
+   site, and "client" names a live holder, as it did when the bridge retired a gone one (bin/mesh-bridge.sh's restart
+   guard reads it).  What must stay: the holder's process, 0 where none holds */
 static pid_t clients_open(struct hdr *h){
-  const uint64_t open=mesh_algo_open(h);
-  const uint64_t client=atomic_load_explicit(&h->client,memory_order_acquire);
-  return open?(pid_t)(uint32_t)client:0;
+  const struct mesh_algo_holder holder=mesh_algo_holder(h);
+  return mesh_holds(holder.pid,holder.start)?holder.pid:0;
 }
 /* "clients": the processes of the region's open claims, each once, in the order of their first claim's head
    (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed).
