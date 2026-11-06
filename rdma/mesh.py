@@ -29,6 +29,10 @@ class Context(C.Structure):
 # revisions of 4e78f6f4"): read for a copy's place in the program's mapping (mesh-collective.h struct mesh_value
 # `view`: copy c at view + c x section.pages x pgsz) and for a block's bytes (block x pgsz), which a part of a value
 # must begin at (struct mesh_declared `first`).  What must stay: the header's first words in its order
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3; "The
+# revisions of 55b9cbad"): the page size places a copy in the program's own mapping of its rows (rdma/mesh_compile.py
+# _mapped, mesh-dataflow.h mesh_view_compose), struct mesh_value `view` being gone.  What must stay: the header's first
+# words in its order
 class Header(C.Structure):
     _fields_ = [('magic', U), ('version', U), ('pgsz', U), ('block', U)]
 
@@ -144,6 +148,11 @@ CONTEXT = C.POINTER(Context)
 # revisions of 55b9cbad"): mesh_plan gives no mapping (the program maps its `run` values' rows by mesh_view_compose);
 # mesh_transfers_start takes the execution's one absolute deadline, CLOCK_MONOTONIC nanoseconds
 # (time.clock_gettime_ns(time.CLOCK_MONOTONIC)).  What must stay: each binding the header's declaration
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+# revisions of 55b9cbad"; mesh-dataflow.h mesh_retire at mesh b35234c3), reversing "its root closed where its `owner`
+# is the client" above: mesh_retire retires the program's operand (mesh.h struct mesh_algo, A9's `<algo>`) where hdr
+# `client`, its holder, is the client and its `published` is not 0 (`retired` = `published`), taking the region and the
+# client word as before.  What must stay: each binding the header's declaration
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
