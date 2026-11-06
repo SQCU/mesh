@@ -1,8 +1,9 @@
 // A torch program's publish of its sent ranges on torch's MPS stream (design/aot-compilation-change-request.md, appendix
 // item 7, "A publish waits for nothing": "a torch MPS event is recorded after the producer's out-variant kernel, the
-// publish is done in that event's notification, and torch's command buffer is committed without waiting"; the form
-// torch_mesh's allocator.mm took, mesh fba41159, "gives the lease back in a torch MPSEvent's notification after torch's
-// work so far"; design/compilation-coordination.md, "The revisions of e4a7398e", TP).  Each call is torch 2.14.0's own,
+// publish is done in that event's notification, and torch's command buffer is committed without waiting"; the event
+// form torch_mesh's allocator.mm used, mesh fba41159, "an action after torch's work so far, done in a torch MPSEvent's
+// notification", the item as mesh 0ffd880e states it, which cites that form alone; design/compilation-coordination.md,
+// "The revisions of e4a7398e", TP).  Each call is torch 2.14.0's own,
 // as its headers state it (torch/include/ATen/mps/MPSEvent.h, MPSStream.h): MPSEventPool::acquireEvent, MPSEvent::record
 // ("records an event on the stream"), MPSEvent::notify ("schedules a notifyListener callback for the event") and
 // MPSStream::synchronize(SyncType::COMMIT) ("commit and flush the command buffer").  No classic Metal is called here.
