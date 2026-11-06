@@ -56,9 +56,9 @@ class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
         self.order = list(gm.graph.nodes)
-        self.shape, self.coords, self.map = _mesh(placement, nodes.count)
+        self.shape, self.coords, self.map = _mesh(placement)
         here = [d for d, index in enumerate(self.map) if index == nodes.self]
-        self.device, self.index, self.serial, self.identity = here[0] if here else None, nodes.self, nodes.serial, 0
+        self.device, self.identity = here[0] if here else None, 0
         self.sharding, self.program, self.roles, self.events = {}, [], {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
         self.made, self.calls, self.locals, self.shapes = set(), None, {}, {}
@@ -93,17 +93,7 @@ class IR:
 # torch/_subclasses/fake_tensor.py, FakeTensor: "FakeTensor extends MetaTensors to also carry an additional
 # `fake_device` which tracks devices that would have been used"
 def _value(node):
-    value = node.meta.get('val')
-    if not isinstance(value, torch.Tensor):
-        raise NotImplementedError('%s (%s): no tensor value (torch.export: its meta[\'val\'])'
-                                  % (node.name, node.target))
-    if not all(isinstance(size, int) for size in value.shape):
-        raise ValueError('%s: symbolic sizes %s; A1 compiles shapes, so nothing at run time changes one'
-                         % (node.name, tuple(value.shape)))
-    if value.device.type not in ('cpu', 'mps'):
-        raise NotImplementedError('%s on %s: no binding of its tensors to the placed pages (a DLPack tensor of kDLCPU '
-                                  'or kDLMetal alone: K1)' % (node.name, value.device))
-    return value
+    return node.meta['val']
 
 
 # GSPMD, section 3.1
@@ -122,33 +112,16 @@ def _device(ir, key):
 
 
 # GSPMD, section 3.1; Alpa, section 4.1
-def _mesh(placement, count):
+def _mesh(placement):
     def item(at):
         value = placement.mesh
         for i in at:
             value = value[i]
         return value
-
-    def sequence(at):
-        return isinstance(item(at), (list, tuple))
-    first = mesh_graph.walk([()], lambda at: [at + (0,)] if sequence(at) and item(at) else [])
-    if sequence(first[-1]):
-        raise ValueError('the placement operand\'s mesh holds an empty sequence (A2)')
-    shape, coords = [len(item(at)) for at in first[:-1]], {}
-    for at in mesh_graph.walk([()], lambda at: [at + (i,) for i in range(len(item(at)))]
-                              if len(at) < len(shape) and sequence(at) else []):
-        if len(at) == len(shape):
-            if not isinstance(item(at), int) or item(at) in coords:
-                raise ValueError('the placement operand\'s mesh at %s: %r is no new device id (A2)' % (at, item(at)))
-            coords[item(at)] = at
-        elif not sequence(at) or len(item(at)) != shape[len(at)]:
-            raise ValueError('the placement operand\'s mesh at %s is not of shape %s (A2)' % (at, shape))
-    nodes = list(placement.nodes)
-    if sorted(coords) != list(range(len(coords))) or len(nodes) != len(coords) or len(set(nodes)) != len(nodes) \
-            or not all(isinstance(n, int) and 0 <= n < count for n in nodes):
-        raise ValueError('the placement operand: devices %s onto map indices %s of the map\'s %d nodes; each device '
-                         '0 .. D - 1 once, each onto its own index (A2)' % (sorted(coords), nodes, count))
-    return tuple(shape), coords, nodes
+    first = mesh_graph.walk([()], lambda at: [at + (0,)] if isinstance(item(at), (list, tuple)) else [])
+    shape = [len(item(at)) for at in first[:-1]]
+    places = mesh_graph.walk([()], lambda at: [at + (i,) for i in range(len(item(at)))] if len(at) < len(shape) else [])
+    return tuple(shape), {item(at): at for at in places if len(at) == len(shape)}, list(placement.nodes)
 
 
 # GSPMD, section 3.5, "Merging compatible shardings"
@@ -645,8 +618,6 @@ def _partition(ir, operators):
 # GSPMD, section 3: "sharding completion and per-operator partitioning"; section 3.1: "All devices have the same full
 # data".  A dimension over a mesh dimension of one device: s / 1 = s
 def partition(gm, placement, nodes):
-    if not isinstance(placement, Placement):
-        raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
     ir, operators, annotated = IR(gm, placement, nodes), {}, set()
     for node in ir.order:
         if node.op == 'call_function':
@@ -660,14 +631,8 @@ def partition(gm, placement, nodes):
             operators[node], operators[pad] = _merged(pad, operators[pad], rule), None
     names = {node.name: node for node in ir.order if node.op == 'placeholder'}
     for name, mapping in placement.splits.items():
-        node, mapping = names.get(name), tuple(mapping)
-        if node is None or ir.sharding[node] is None or len(mapping) != len(ir.sharding[node]) \
-                or not all(isinstance(m, int) and -1 <= m < len(ir.shape) for m in mapping) \
-                or len([m for m in mapping if m >= 0]) != len({m for m in mapping if m >= 0}):
-            raise ValueError('splits[%r] = %s: no placeholder\'s dims_mapping over a mesh of %d dimensions, each at '
-                             'most once (GSPMD section 3.1)' % (name, mapping, len(ir.shape)))
-        ir.sharding[node] = tuple(m if m >= 0 and ir.shape[m] > 1 else -1 for m in mapping)
-        annotated.add(node)
+        ir.sharding[names[name]] = tuple(m if m >= 0 and ir.shape[m] > 1 else -1 for m in mapping)
+        annotated.add(names[name])
     # GSPMD, section 4.5: "DynamicSlice to shard replicated dimensions".  torch 2.14.0 torch/export/exported_program.py,
     # ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers"
     replicated = mesh_graph.forward(ir.order, lambda node: node.all_input_nodes,
@@ -1209,26 +1174,11 @@ def _context():
 
 
 def _group():
-    text = os.environ.get('MESH_GROUP', '')
-    try:
-        group = int(text, 0)
-    except ValueError:
-        group = 0
-    if not 0 < group < 2 ** 64:
-        raise ValueError('MESH_GROUP %r: the run\'s group is a whole nonzero number, the same at every rank' % text)
-    return group
+    return int(os.environ['MESH_GROUP'], 0)
 
 
 def _program():
-    text = os.environ.get('MESH_PROGRAM', '')
-    try:
-        nodes = {int(item, 10) for item in text.split(',')}
-    except ValueError:
-        nodes = set()
-    if not nodes or not all(0 <= n < 64 for n in nodes):
-        raise ValueError('MESH_PROGRAM %r: the program\'s nodes, the map indices its launcher started it at, whole '
-                         'numbers below 64 apart by commas, the same at every rank' % text)
-    return sum(1 << n for n in nodes)
+    return sum(1 << n for n in {int(item, 10) for item in os.environ['MESH_PROGRAM'].split(',')})
 
 
 HOST_LAG = 2
@@ -1916,9 +1866,6 @@ def program(block, *example_inputs):
             ir.calls = entries[k]
             lower(ir)
             ir.weights = list(record.function.weights(ir))
-            if len(ir.weights) != len(ir.declared) or not all(isinstance(w, mesh.Weight) for w in ir.weights):
-                raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight '
-                                 'each (A3)' % (len(ir.weights), len(ir.declared)))
             irs.append(ir)
         for j, k in enumerate(calls):
             absent = sorted(r for r in reads[j] if irs[calls[r]].device is None)
