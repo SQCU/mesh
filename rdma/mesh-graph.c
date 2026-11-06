@@ -34,22 +34,6 @@ uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(con
   return count;
 }
 
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_order, ec2ad141 */
-/* mesh-graph.h */
-int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                     const void *context, uint32_t *indegree, uint32_t *ordinal) {
-  for (uint32_t v = 0; v < vertices; v++) { indegree[v] = 0; ordinal[v] = UINT32_MAX; }
-  for (size_t k = 0; k < first[vertices]; k++) indegree[head(context, k)]++;
-  for (uint32_t place = 0; place < vertices; place++) {
-    uint32_t next = 0;
-    while (next < vertices && (indegree[next] || ordinal[next] != UINT32_MAX)) next++;
-    if (next == vertices) return EDEADLK;
-    ordinal[next] = place;
-    for (size_t k = first[next]; k < first[next + 1]; k++) indegree[head(context, k)]--;
-  }
-  return 0;
-}
-
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_climb, 7e7f8726 */
 /* mesh-graph.h */
 uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from,
@@ -1016,34 +1000,63 @@ static int order_before(const void *context, uint32_t a, uint32_t b) {
      ENOMEM writes none.
    Cost: O((V + E) log V), each vertex entering and leaving the heap once at O(log V) each and each edge lowering one
    count once; memory O(V + E). */
+static uint32_t heap_place(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *rows, size_t k),
+                           const void *rows, int (*before)(const void *context, uint32_t a, uint32_t b),
+                           const void *context, uint32_t *indegree, uint32_t *heap, uint32_t *position,
+                           uint32_t *place) {
+  for (uint32_t v = 0; v < vertices; v++) { indegree[v] = 0; position[v] = UINT32_MAX; place[v] = UINT32_MAX; }
+  for (size_t k = 0; k < first[vertices]; k++) indegree[head(rows, k)]++;
+  size_t count = 0;
+  for (uint32_t v = 0; v < vertices; v++)
+    if (!indegree[v]) { heap[count] = v; heap_up(heap, position, before, context, count); count++; }
+  uint32_t placed = 0;
+  while (count) {
+    const uint32_t v = heap[0];
+    position[v] = UINT32_MAX;
+    if (--count) { heap[0] = heap[count]; heap_down(heap, position, before, context, count, 0); }
+    place[v] = placed++;
+    for (size_t k = first[v]; k < first[v + 1]; k++) {
+      const uint32_t w = head(rows, k);
+      if (!--indegree[w]) { heap[count] = w; heap_up(heap, position, before, context, count); count++; }
+    }
+  }
+  return placed;
+}
+struct heap_rows { const uint32_t *to; const size_t *order; };
+static uint32_t heap_rows_head(const void *rows, size_t k) {
+  const struct heap_rows *r = rows;
+  return r->to[r->order[k]];
+}
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place) {
   size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
-  size_t *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
+  uint32_t *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
   uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap);
   uint32_t *position = malloc(((size_t)vertices + 1) * sizeof *position);
   int result = !first || !order || !indegree || !heap || !position ? ENOMEM : 0;
   if (!result) {
     mesh_graph_rows(vertices, edges, word_at, from, first, order);
-    for (uint32_t v = 0; v < vertices; v++) { indegree[v] = 0; position[v] = UINT32_MAX; place[v] = UINT32_MAX; }
-    for (size_t e = 0; e < edges; e++) indegree[to[e]]++;
-    size_t count = 0;
-    for (uint32_t v = 0; v < vertices; v++)
-      if (!indegree[v]) { heap[count] = v; heap_up(heap, position, order_before, priority, count); count++; }
-    uint32_t placed = 0;
-    while (count) {
-      const uint32_t v = heap[0];
-      position[v] = UINT32_MAX;
-      if (--count) { heap[0] = heap[count]; heap_down(heap, position, order_before, priority, count, 0); }
-      place[v] = placed++;
-      for (size_t k = first[v]; k < first[v + 1]; k++) {
-        const uint32_t head = to[order[k]];
-        if (!--indegree[head]) { heap[count] = head; heap_up(heap, position, order_before, priority, count); count++; }
-      }
-    }
-    if (placed < vertices) result = EINVAL;
+    const struct heap_rows rows = {to, order};
+    if (heap_place(vertices, first, heap_rows_head, &rows, order_before, priority, indegree, heap, position, place) <
+        vertices)
+      result = EINVAL;
   }
   free(first); free(order); free(indegree); free(heap); free(position);
+  return result;
+}
+static int lower_before(const void *context, uint32_t a, uint32_t b) {
+  (void)context;
+  return a < b;
+}
+int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                     const void *context, uint32_t *indegree, uint32_t *ordinal) {
+  uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap);
+  uint32_t *position = malloc(((size_t)vertices + 1) * sizeof *position);
+  int result = !heap || !position ? ENOMEM : 0;
+  if (!result && heap_place(vertices, first, head, context, lower_before, NULL, indegree, heap, position, ordinal) <
+                     vertices)
+    result = EDEADLK;
+  free(heap); free(position);
   return result;
 }
 
