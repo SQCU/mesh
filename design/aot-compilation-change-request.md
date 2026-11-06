@@ -949,10 +949,14 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     - **A publish waits for nothing.** The text before allowed one device wait a publish point, which is still a
       synchronization of the whole device. Instead, a torch MPS event is recorded after the producer's out-variant
       kernel, the publish is done in that event's notification, and torch's command buffer is committed without waiting.
-      This is the form torch_mesh's allocator.mm took when it stopped calling classic Metal (mesh fba41159, "torch_mesh
-      calls no classic Metal"): it "gives the lease back in a torch MPSEvent's notification after torch's work so far",
-      by `at::mps::getMPSEventPool()->acquireEvent(false, stream)`, `record`, `notify`, then
-      `stream->synchronize(at::mps::SyncType::COMMIT)`. Torch 2.14.0's headers state each call: `MPSEvent::record`,
+      This is the event form torch_mesh's allocator.mm used once it stopped calling classic Metal (mesh fba41159, "torch_mesh
+      calls no classic Metal"): an action after torch's work so far, done in a torch MPSEvent's notification, by
+      `at::mps::getMPSEventPool()->acquireEvent(false, stream)`, `record`, `notify`, then
+      `stream->synchronize(at::mps::SyncType::COMMIT)`. Only that event form is cited here. The file's own action, the
+      return of what it called a "lease", is not: a "lease" names no canonical structure (C. G. Gray and D. R. Cheriton,
+      SOSP 1989, define a lease as a grant limited in time, and nothing there expired), and the coordination's rules
+      forbid leases ("No hashing, receipts, credits, gates, filters, locks, leases, slots, rings",
+      design/disjoint-pages-revision-coordination.md). Torch 2.14.0's headers state each call: `MPSEvent::record`,
       "records an event on the stream"; `MPSEvent::notify`, "schedules a notifyListener callback for the event";
       `SyncType::COMMIT`, "commit and flush the command buffer" (torch/include/ATen/mps/MPSEvent.h, MPSStream.h). The
       calls are torch's own API, so mesh calls no classic Metal. They need a small Objective-C++ torch extension, built
