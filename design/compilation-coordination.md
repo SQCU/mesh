@@ -2391,3 +2391,257 @@ quantitative requirements."
   - A4 against the barrier: every run is launched on the whole collective, so every node of the map, relays among
     them, is a node of the program and holds the plan (A4, A7). PS-2's EINVAL then arises only where a launcher passes
     fewer nodes than the map's.
+
+## The revisions of 3f106747
+
+The record of the unit whose instruction is design/plan-to-bridge-change-request.md and
+design/aot-compilation-change-request.md as mesh 3f106747 holds them, from mesh 3f106747 and metal-microbench 27093ce3.
+Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every sub-agent)", but its reading order and its
+file table, as the previous part's were. What the code did not yet do was found from the previous part's two stops and
+the coordinator's "Answered in the documents", and from what 3f106747 revised: A7, "The island is a dynamic group, and
+each of its views is a static system", whole; A7's sender(m) and A4 (the program's nodes the launcher's operand, every
+relay one of them); appendix item 2, "Its room is fixed at compile time, by the self-timed buffer bound"; item 5's text
+against RC-1. Each decision taken where the documents are silent is marked as the implementer's (VW, BS, PG the
+coordinating implementer's; G-n sub-agent G's) and is not a requirement of the documents. Sub-agent G was the one owner
+of rdma/mesh-graph.c; the rest is the coordinating implementer's. Nothing was run but the compilers, `python3 -m
+py_compile` and the three integration builds.
+
+### Done
+
+- **VW. The island a dynamic group, each view a static system** (A7: "The view properties the code must have are G. V.
+  Chockler, I. Keidar and R. Vitenberg's ... verbatim"; "A process is one start of a bridge"; "The membership service is
+  the sequencer ... The sequencer creates a view at its bridge's start and at each move of its map"; "The view
+  identifier is Transis's"; "A bridge installs a view when the view's first message reaches it"; "Fig. 5 runs within
+  each view as written"; "A change of view blocks and flushes"; "A plan stands only within the view its nodes' arrivals
+  were counted in").
+  - rdma/mesh-map.h: struct mesh_record `view`, the bridge's counter (MESH_VERSION 115), which its record, its
+    announcement of itself, floods; rdma/mesh-records.c record_links_same compares it, so a risen counter is written
+    into the map with no serial moved.
+  - rdma/mesh-records.c: `installed` (the view installed here, its creator's node id and start, `view` the counter);
+    island_set at the sequencer calls view_create: identifier one more than the greatest counter among the members (the
+    nodes the map reaches; the members' records' counters and its own), `last` seqnum - 1 where it created the view it
+    has installed, else 0, then "seqnum := 1", its VIEW down the island's tree, installed here; view_heard (from the tree
+    parent alone, as an ORDER) relays and installs; view_install: Self Inclusion and Local Monotonicity tested, the old
+    view flushed to `last` where it came from the same process (orders_deliver(last)), "nextdeliver := 1; pending := ∅",
+    the arrivals held let go, the counter the view's, hdr `map_serial` moved while `map` is odd and plan_stale, so every
+    plan of the old view ends with ESTALE, then record_changed (the counter announced).
+  - Every message carries its view's identifier: rdma/mesh-bridge.h struct mesh_order `view` where `serial` was,
+    struct mesh_arrival `view`, struct mesh_view, struct mesh_count; order_sequence numbers only its own installed
+    view's SUBMITs ("it numbers no further message of the old view"), order_take holds only the installed view's ORDERs
+    (Sending View Delivery), arrivals_apply counts only the installed view's arrivals; orders_submit, orders_announce and
+    counts_tell send nothing before the first view (Initial View Event).
+  - hdr `delivered` and each delivered entry's `sequence` are `passed`, the node's delivery order over its views (VW-4).
+  - rdma/mesh-ports.c takes VIEW and COUNT to order_heard. Commit 7b3afe21.
+- **BS. Each queue's room its self-timed buffer bound** (appendix item 2: "The compilation builds the program's IPC graph
+  from A10's analysis as BSL's §4.1 builds one"; "On a cycle, the queue's room is BSL's self-timed buffer bound";
+  "Feedforward ... The compilation adds synchronization edges by BSL's Convert-to-SC-graph (§9, Fig. 6) and sets their
+  delays by DetermineDelays (Fig. 8)"; "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" ...
+  Its source raises a count that only rises ... and its sink reads that count before its k-th start.  The bridge
+  carries the count from source to sink, as it carries an arrival"; "A plan whose bound cannot be found fails with
+  `ENOMEM` when it is planned ... where a cycle has no delay (BSL's Lemma 1: deadlock)").
+  - rdma/mesh-graph.h: mesh_graph_components (Tarjan), mesh_graph_cycle_mean (BSL's BellmanFord, Lawler's search),
+    mesh_graph_min_delay (MinDelay), mesh_graph_convert_sc (Convert-to-SC-graph, its edges in DetermineDelays' order
+    (e_s, a_1 .. a_k, b_l .. b_1)), mesh_graph_determine_delays (DetermineDelays), each over the caller's vertices,
+    edges, delays and times (commit 15b4e9d2); rdma/mesh-graph.c, sub-agent G: Tarjan's search with an explicit
+    stack (components_search, one copy), the zero-delay deadlock test by it over the delay-0 edges, Bellman and Ford's
+    positive-cycle test under time[from] - λ delay, Lawler's bisection, MinDelay's binary search over a copy of the
+    delays, Convert-to-SC-graph's chains and DetermineDelays' loop over one edge array, reusing mesh_graph_rows and
+    depth_head (commit 0bbdc5f2); the room of Convert-to-SC-graph's edges 2 x vertices (G-3, commit a91e0e82).
+  - rdma/mesh-collective.c plan_rooms: the plan's part of the program's IPC graph, σ (the program's submission at the
+    sender s), β (s's bridge's TO-broadcast), x_v (node v's part of the call, each node of the plan); σ -> β and β ->
+    x_v of delay 0 (the two queues), σ -> x_s and x_s -> σ of delay `outstanding` (or σ -> σ where s is no node of
+    the plan), x_v -> x_v of that delay elsewhere, each tree edge carrying pages both ways of delay u; times from the
+    weighting operand (t(σ) = t(β) = 0). ENOMEM where a cycle has zero delay; the added edges and their delays; `room`
+    ρ(x_self, β) and `submit_room` ρ(β, σ) by mesh_graph_lags (Theorem 2), each added edge's delay DetermineDelays'
+    plus `outstanding` (BS-4); the edge into this node (`waits`, `wait_delay`) and out of it (`tells`) in struct
+    mesh_state (320 bytes now). `spanned` computed before the rooms. The abecd389 rooms (`outstanding` + u x hops, and
+    `outstanding` for the submissions) are gone.
+  - rdma/mesh-dataflow.c mesh_transfers_start: the submissions' queue's room `submit_room`; at a sink, its k-th start
+    waits until `wait_count` reaches k - `wait_delay`, bounded by MESH_PLATFORM_NS (ETIMEDOUT), ESTALE where the plan's
+    serial moved, nothing raised in either case.
+  - rdma/mesh-records.c: counts_tell at the source (each plan's `submissions` toward its edge's sink where it rose past
+    `told`, and on every liveness turn), count_take at the sink (`wait_count` raised, its waiter woken); tree_toward and
+    tree_down, the tree's routes one copy, where order_relay, arrival_up and arrival_down each held one. rdma/mesh-flow.c
+    plan_cancel raises a cancelled plan's `wait_count` to UINT64_MAX and wakes it. Commits 7b3afe21, 6a1c6d3f, 069349d7.
+- **PG. The plan call's `program` the launcher's** (A7, sender(m): "The program's nodes are the nodes its launcher
+  started it at, an operand of the plan call (`program`) that the launcher passes as it passes `group` (MESH_GROUP)").
+  rdma/mesh_compile.py _program: MESH_PROGRAM, read as _group reads MESH_GROUP, passed by serialize, where the
+  placement operand's nodes were (PS-1 reversed). rdma/mesh-collective.h's note: `outstanding` the IPC graph's delay,
+  `program` the launcher's. Commits 0a6f4e5e, 6a1c6d3f; metal-microbench e9fd7538 (tools/e2b_replay.m's note, PG-2).
+
+### Found already done (the code at 3f106747 and 27093ce3 does what the document states)
+
+- Item 5: "Each range's landed count of each copy is such a count ... A relay's receive has one too" (RC-1: every
+  received range's count words, `counted`, rdma/mesh-collective.c plan_layout and mesh_plan; each receive entry's
+  `count`; rdma/mesh-flow.c link_receive_drain's round test on it, plan_end's and plan_cancel's raises).
+- A7, sender(m), for e2b: tools/e2b_replay.m passes its ranks' map indices 0 .. R - 1, the nodes its launcher started
+  it at (PG-2).
+- A4: "Every node of the map is a node of the program ... so every relay holds the plan": with `program` the
+  launcher's every node, mesh_plan's EINVAL for a node of the plan outside `program` (PS-2) does not arise for a run on
+  the whole collective (the torch path's case below, "Where the documents are wrong").
+
+### Decisions taken where the documents are silent (each the implementer's, with its reason)
+
+- **VW-1 (A7, flush).** The flush delivers the old view's messages this node holds, in Fig. 5's order, while each is
+  the next and numbered at most `last`; one not yet arrived is never delivered. Reason: a VIEW and its view's ORDERs
+  travel one tree, each hop in order, so the old view's messages ahead of it on an unchanged path arrive first; on a
+  path the map's move changed nothing bounds when one would, a wait for it would be unbounded, and installation ends
+  the old view's plans with ESTALE anyway.
+- **VW-2 (A7, a plan within its view).** Installation moves hdr `map_serial` (while `map` is odd) and calls plan_stale,
+  and no plan holds its view's identifier. Reason: A7: "Installing a view ends every plan of the old one with `ESTALE`,
+  as D.3.6 ends a plan at its map's move"; every reader of a plan's serial (the ports' loads and cancellations, the
+  start, mesh_plan's second map read, the programs' own tests) then ends the old view's plans by one path, and a plan
+  standing on the serial was made in the installed view, so an arrival or a SUBMIT of it carries that view. The cost:
+  a program that replans after its map moved and before the VIEW arrives plans again at the installation.
+- **VW-3 (A7, the view's first message).** A VIEW of its own, sent at the view's creation, relayed down the island's
+  tree from the sequencer as an ORDER is and taken from the tree parent alone, its members by node id. Reason: the
+  arrivals and the program's first SUBMIT need the view installed before any ORDER of it (Initial View Event), and each
+  node's map indices are its own.
+- **VW-4 (A7 and item 2's merge).** A delivered entry's `sequence` and hdr `delivered` are the message's place in this
+  node's delivery order over every view it installed (`passed`). Reason: the ports merge plans' entries by that number
+  against `delivered` (lane_take), sn(m) begins again at 1 each view, so it would set the key back; within a view the
+  order is sn(m)'s, the same at both ends of a cable, and the old view's plans are cancelled at installation.
+- **VW-5 (A7, the announcement).** The counter travels in the bridge's record (struct mesh_record `view`), compared by
+  record_links_same so a risen counter is written into the map without moving its serial. Reason: the record is the
+  bridge's announcement of itself, flooded to every node and so to the sequencer.
+- **VW-6 (A7, a process).** A process is (node id, hdr `boot`), `boot` the bridge's start on the wall clock. Reason:
+  hdr `boot` is "the bridge's start on the wall clock (ns, CLOCK_REALTIME), its records' boot", new at every start, as
+  Isis's incarnation number is.
+- **VW-7 (A7).** An arrival or a COUNT of a view other than the one installed is let go, retold on its node's liveness
+  turns. Reason: "the program's sender counts only the arrivals of the view it has installed"; installation lets the
+  held ones go in any case.
+- **BS-1 (item 2, "Where they live").** The five graph functions are the graph module's C half (rdma/mesh-graph.h,
+  mesh-graph.c), and rdma/mesh_graph.py gains none. Reason: their one caller is mesh_plan, which alone holds the plan's
+  routes (its trees, mesh_graph_flow's) and u (C3.3's allocator, plan_unroll) at planning; a Python copy no code calls
+  would be a second copy of each primitive (C9). The coordinator's brief allows it: "If the C side needs any, they go in
+  rdma/mesh-graph.h".
+- **BS-2 (item 2, the graph's actors).** The program's submission σ and its bridge's TO-broadcast β are two actors at
+  the sender, so the submissions' queue between them (PS-3) is an IPC edge with its own bound, `submit_room`; t(σ) =
+  t(β) = 0. Reason: PS-4's room, `outstanding`, rested on the sender's call not completing before its submission is
+  broadcast, which fails where the sender holds no page of the plan (its part done at once), stop 2's case; A3 weighs
+  neither, and with both 0, σ, the lowest of the least, is the source SCC's link, so the sink-source edge's sink is the
+  program's start, a point in control flow.
+- **BS-3 (item 2, "the program's IPC graph").** The graph is the plan's part of the program's IPC graph: its own
+  actors, queues and transfers, with the program's sender and A10's bound. Reason: each compiled function is planned at
+  its first call (PyTorch 2 §3.1), before the program's later functions have trees or u, and the hops and u are
+  mesh_plan's; every cycle C containing e bounds the tokens on e by Delay(C) (BSL Lemma 2), so (5) over a subgraph's
+  cycles bounds it over the whole graph's, an upper bound, never too small.
+- **BS-4 (item 2, the added edge's count).** A source's count is its node's program's starts of the plan
+  (`submissions`), carried by COUNT, and the sink waits in its own program's start (mesh_transfers_start) until it
+  reaches k - δ; in the rooms each added edge's delay is δ + `outstanding`. Reason: a node's part of a call ends at its
+  sends' completions and landings, which only its port children see, and the program's starts are a rising word in the
+  region at every node; a start of the plan follows the node's part of the call `outstanding` starts before (the delay
+  on its own edge "from a call's completion to the program's later submission"), so the constraint the count gives is
+  BSL (7) with δ + `outstanding`, never more than the bound assumes; the wait ends within MESH_PLATFORM_NS (ETIMEDOUT),
+  or at ESTALE where the plan is cancelled, which raises the count (plan_cancel), so it ends "when its source moves on,
+  or when the view ends".
+- **BS-5 (item 2).** A plan with no declared transfer has the graph's nodes {s} at every rank, and a node of the
+  program that is no node of the plan has `room` 1. Reason: such a plan's `nodes` is each rank's own (mesh_plan's
+  fallback), so every rank builds one graph only this way; no message reaches the queue of a node outside Dest(m).
+- **BS-6 (item 2, "The IPC edges are the plans' transfers, each with C3.3's u copies as its delay").** Each tree edge
+  y -> c carrying a demand's pages (`child`) is two IPC edges, x_y -> x_c and x_c -> x_y, each of delay u; t(x_v) is v's
+  task weights in one execution plus each page it sends or receives at the demand's greatest page weight. Reason: the
+  earlier derivation's u on each hop, both ways (the item's correction: it "holds only where the queue lies on a cycle
+  through the sender", its only feedforward case "where the program's sender holds no page"); BSL §4.1, "t(v) includes
+  the time taken to execute all IPC operations (sends and receives)"; GO2's greatest. Under mesh_plan's premise (each
+  node's events of execution t before those of t + 1) a node's take of a call trails its neighbour's by one call, at
+  most u.
+- **BS-7 (item 2).** One added edge at most enters and leaves each node's vertices, so struct mesh_state holds one edge
+  each way. Reason: σ reaches every vertex, so its SCC is the only source SCC and Convert-to-SC-graph chains the sink
+  SCCs alone, each link its node's one vertex, the sink-source edge entering σ (plan_rooms' note).
+- **PG-1 (A7, sender(m)).** The torch path's launcher passes the program's nodes as MESH_PROGRAM, map indices apart by
+  commas; mesh_compile.py refuses it missing or malformed, as MESH_GROUP. Reason: A7's "that the launcher passes as it
+  passes `group` (MESH_GROUP)"; mesh_compile.py reads MESH_GROUP from its environment.
+- **PG-2 (A7, sender(m), e2b).** tools/e2b_replay.m keeps its ranks 0 .. R - 1, and tools/mesh/run_pair.py is not
+  changed. Reason: run_pair.py starts rank r at map index r for every node of the collective and refuses a directory
+  not prepared for that many ranks, so those ranks are the nodes it started the program at; launch scripts are outside
+  this unit's files (the rules).
+- **G-1 (sub-agent G, mesh_graph_cycle_mean).** The mean returned is the bisection's upper end plus |V| τ. Reason: the
+  tolerant test can miss a cycle of length up to |C| τ, so the search ends just below the true maximum, and a graph
+  with edges added then fails at its own critical cycle (MinDelay ERANGE where BSL's answer exists); the margin makes a
+  tie at λ_max pass, the mean too high by at most about |V| τ.
+- **G-2 (G, the test's tolerance).** τ = 1e-9 x Σ time, an improvement of at most τ not counted. Reason: at λ_max the
+  critical cycle's length is 0 in exact arithmetic, and the rounding of a sum of |V| terms (about |V| 2^-53 Σ time) is
+  far below τ; scaled by the times, whose unit is the weighting operand's; 0 where every time is 0, the test exact.
+- **G-3 (G's finding, the coordinating implementer's ruling).** Convert-to-SC-graph's room is 2 x vertices, where the
+  header said `vertices` and G's code returned ENOMEM past it. Reason: Theorem 4's proof, "(n src + n snk – 1)",
+  reaches 2|V| - 1 where SCCs of one vertex are both source and sink; with the room no count passes it, so the test
+  goes (compile time, not run time). mesh_plan's graphs have one source SCC and add at most |V| - 1.
+- **G-4 (G).** EINVAL where a time is negative or not finite, their sum not finite, or MinDelay's λ negative or not
+  finite. Reason: the operands' test, as mesh_graph_completion_times tests its lengths.
+- **G-5 (G).** mesh_graph_cycle_mean's 0 where no cycle is positive at λ = 0 (no cycle, or none of positive time); at
+  most 200 bisection steps, or until the midpoint no longer moves (mesh_graph_fill's form); MinDelay tests r = bound
+  first (ERANGE), then at most 65 tests; DetermineDelays computes λ_max even where nothing is added (EDEADLK for a
+  zero-delay cycle), d_ub by an exact ceiling, its delays written once every δ is found. Reason: bounded loops, the
+  header's statements, every party the same result. A graph with no cycle and positive times has λ_max 0 and MinDelay
+  ERANGE; mesh_plan's graphs always have cycles (σ's, and every x_v's of delay `outstanding`).
+
+### Where the work stopped
+
+- Nowhere: each point the documents leave open took a minimal decision above.
+
+### Where the documents are wrong, or contradict the code's facts
+
+- Appendix item 2, "Where they live": "The strongly connected components, Convert-to-SC-graph, Bellman–Ford's cycle
+  mean and MinDelay's binary search are functions of rdma/mesh_graph.py." The graph they run on needs each plan's
+  routes and u, which mesh_plan alone computes, in C, at planning (mesh_graph_flow's trees; plan_unroll's u); so they
+  are the graph module's C half (BS-1).
+- Appendix item 2, "The compilation builds the program's IPC graph from A10's analysis": the torch path compiles each
+  function at its first call (PyTorch 2 §3.1: the custom compile function "is called with each captured graph"), so when
+  a plan is planned the program's later functions have no routes; the graph is the plan's part (BS-3), a sound bound by
+  Lemma 2, not the program's whole graph's least.
+- Appendix item 2, "Execution times t(x) are A3's weighting operand": A3 weighs no program submission and no
+  TO-broadcast, which the graph needs as actors (BS-2); they take 0, where BSL's "t(v) assigns a positive integer
+  execution time to each actor v" (§4.1).
+- Appendix item 2, "Its source raises a count that only rises ... and its sink reads that count before its k-th start":
+  the end of a node's part of a call is not in the region at that node (its sends' completions are its port children's
+  alone); the count raised is the program's starts, so each added edge holds BSL (7) with its delay plus `outstanding`
+  (BS-4).
+- A4, "so every relay holds the plan", for the torch path: rdma/mesh_compile.py's IR refuses a node that is no device
+  of the placement operand ("map index %d, this node, is no device of the placement operand (A2)"), so a node of the
+  program the placement leaves out plans nothing and holds no plan; the sentence holds where the placement operand maps
+  a device onto every node of the program, as e2b's does. The documents give no program for such a node.
+- A7, "The sequencer creates a view at its bridge's start and at each move of its map", with the counters read from
+  the members' records: a member's risen counter moves no map, so a view the sequencer creates before a member's latest
+  record reaches it can have an identifier no greater than that member's counter, and that member ignores it (Local
+  Monotonicity) until the sequencer's next view. Recorded; no handler (appendix items 3 and 4).
+- A7, sender(m), "that the launcher passes as it passes `group` (MESH_GROUP)": e2b's launcher, tools/mesh/run_pair.py,
+  passes each rank its rank and a directory prepared for the collective's ranks, no node set; the code's facts make
+  those ranks the nodes it started the program at (PG-2).
+- The previous part's PS-4 (the submissions' queue's room `outstanding`) rested on the same premise appendix item 2's
+  correction names for the delivered calls' queue: it fails where the program's sender holds no page of the plan. Now
+  its room is its own bound (BS-2).
+
+### Commits
+
+- mesh 15b4e9d2 (rdma/mesh-graph.h: the five declarations), 7b3afe21 (rdma/mesh.h, mesh-map.h, mesh-bridge.h,
+  mesh-records.c, mesh-ports.c, mesh-flow.c: VW and the counts' carriage), 6a1c6d3f (rdma/mesh-collective.c,
+  mesh-collective.h, mesh-dataflow.c: BS), 0a6f4e5e (rdma/mesh_compile.py: PG), 069349d7 (rdma/mesh.h: the layout
+  sentence), 0bbdc5f2 (rdma/mesh-graph.c: the five functions, sub-agent G), a91e0e82 (rdma/mesh-graph.h,
+  mesh-graph.c, mesh-collective.c: G-3), and this record.
+- metal-microbench e9fd7538 (tools/e2b_replay.m: PG-2's note).
+- The C9 hook (bin/mesh-c9-review.py on each mesh commit) returned no remark on any of them.
+
+### Integration
+
+At mesh a91e0e82 and metal-microbench e9fd7538, both level with origin, the trees clean but for this record and
+untracked build artifacts: `make -B -C rdma` 0 (the pinned HiGHS tarball fetched and its SHA-256 checked OK, its
+objects built, mesh-flow, mesh-heartbeat, mesh-stat and libmesh.dylib), `make -B -C rdma native-audit` 0, `make
+.build/e2b_replay` 0 in metal-microbench, no warning or error in any. Each changed C and Objective-C file compiled alone
+first, the lifecycle files (mesh-heartbeat.c, mesh-children.c, mesh-child.c, mesh-lanes.c) unchanged and compiling
+against the changed headers; rdma/mesh_compile.py compiles (py_compile; the cache entry mesh_compile.cpython-314.pyc it
+made, not there before, removed). Nothing was run.
+
+### What this changes among the earlier parts' open items
+
+- "The revisions of abecd389", stop 1 (Fig. 5 in an island whose bridges begin at different times): built (VW), as the
+  coordinator's answer states it.
+- That part's stop 2 (the delivered calls' queue's room where the program's sender holds no page of the plan): built
+  (BS), and the submissions' queue's room with it (BS-2).
+- That part's PS-1 (`program` the placement's nodes for the torch path): reversed (PG); PS-2's EINVAL stays, arising
+  only where a launcher passes fewer nodes than the plan's.
+- That part's "Replans reuse names": across a view's installation an old plan's arrival is not counted (its view, and
+  the old plan's serial, are not the installed ones); within one view, a node whose map moves while the sequencer's
+  does not can still tell an old plan's arrival before its own map moves, counted toward the sender's replan.
+- "Delivery's liveness" (an ORDER lost on the way): unchanged within a view; at a view's change the old view's
+  undelivered messages are never delivered (A7).
