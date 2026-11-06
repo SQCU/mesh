@@ -85,23 +85,26 @@ int mesh_metal_transport_create(struct mesh_ctx *context,uint64_t plan,void *dev
    first + count) of every page's row's publication (`device_input`, `device_stride`, `landed`).  Why: the landed
    records an execution are gone; a receive's state is a 2-bit phase a copy in the phase list, and its range's arrivals
    a count a copy (C3.7, D1); the first row names the range's words.  What must stay: one input a received range, as
-   byte offsets in the one buffer the recorder binds; EINVAL for a row no receive of the plan names. */
-int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  struct mesh_section operand,struct mesh_metal_input *input){
-  struct hdr *m=context->M;
-  *input=(struct mesh_metal_input){0};
-  if(!transport->state || operand.first>=mesh_rows(m))return EINVAL;
-  const struct mesh_publication *head=mesh_publication_at(m,operand.first);
-  const uint64_t at=transport->offset,bytes=transport->bytes;
-  const uint32_t pages=head->pages,copies=transport->words->copies;
-  const uint64_t group=mesh_group_bytes(pages);
-  if(!pages || head->state!=at || head->phases<at || head->count<at)
-    return EINVAL;
-  const uint64_t phases=head->phases-at,count=head->count-at;
-  if(phases%MESH_LANE_BYTES || count%sizeof(uint64_t) || phases>bytes || count>bytes ||
-     copies>(bytes-phases)/group || copies>(bytes-count)/sizeof(uint64_t))
-    return EINVAL;
-  *input=(struct mesh_metal_input){.phases=phases,.group=group,.count=count,.pages=pages,.copies=copies};
+   byte offsets in the one buffer the recorder binds; EINVAL for a row no receive of the plan names.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The
+   revisions of 14b9a757", R-1; mesh-metal.h and mesh.h struct mesh_state `transfers`, mesh_transfer_at at mesh
+   31ee5d4a), reversing the range named by its first row's publication: the range's words are entry `transfer` of the
+   transport's plan's `transfers`, the declared transfer's index among the plan's, which mesh_plan writes once ("where
+   it is the transfer's destination, `pages` the range's instructions it receives a copy (P), `phases` the region
+   offset of its copy-0 phase group ..., `count` the region offset of its copy-0 count word"), made relative to the
+   transport's offset as before.  Why: "ranges may share a block where their bytes are disjoint, so a row names no one
+   range" (mesh-metal.h).  The EINVALs go: the row past the region's rows, `pages` 0, the row's `state` against the
+   transport's `offset`, a word outside the buffer or misaligned, and the transport not made.  The entry is the plan's
+   own, at the place the plan fixed, its offsets the plan's inside its state section, and the caller names a transfer
+   its IR makes this node the destination of (K2: "Run-time bound and null tests of facts the plan fixes go").  Nothing
+   here is a device's or the system's to refuse, so it returns 0.  What must stay: one input a received range, as byte
+   offsets in the one buffer the recorder binds, `copies` the plan's u */
+int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint32_t transfer,
+  struct mesh_metal_input *input){
+  const struct mesh_publication *entry=mesh_transfer_at(context->M,transport->words,transfer);
+  const uint64_t at=transport->offset;
+  *input=(struct mesh_metal_input){.phases=entry->phases-at,.group=mesh_group_bytes(entry->pages),.count=entry->count-at,
+    .pages=entry->pages,.copies=transport->words->copies};
   return 0;
 }
 
@@ -124,18 +127,18 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
    section wrapped as `completion`.  Why: the allocator places every value and nothing is laid out at its call, the
    GPU's publication records among them (C3.2); one supplied word serves every execution and only rises (C3.7); the
    recorder's restoring counter, a value the plan places, replaces the statuses (the contract, "Publications").  What
-   must stay: one store of a range's word releases every send of the range's pages. */
-int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  struct mesh_section operand,struct mesh_metal_publication *publication){
-  struct hdr *m=context->M;
-  *publication=(struct mesh_metal_publication){0};
-  if(!transport->state || operand.first>=mesh_rows(m))return EINVAL;
-  const struct mesh_publication *head=mesh_publication_at(m,operand.first);
-  const uint64_t at=transport->offset,word=head->targets[0].word;
-  if(head->sends!=1 || head->state!=at || word<at || (word-at)%sizeof(uint64_t) ||
-     word-at>transport->bytes-sizeof(uint64_t))
-    return EINVAL;
-  publication->supplied=word-at;
+   must stay: one store of a range's word releases every send of the range's pages.
+   2026-11-06 (R-1; "The revisions of 14b9a757", R-1; mesh-metal.h, mesh.h struct mesh_state `transfers` at mesh
+   31ee5d4a), reversing the range named by its first row's publication: the supplied word is `targets[0]`'s of entry
+   `transfer` of the transport's plan's `transfers` ("where this node is the transfer's source, `sends` 1, `targets[0]`
+   {word: the region offset of its range's supplied word, count 1, stride 0}"), made relative to the transport's offset
+   as before.  Why: as mesh_metal_receive_prepare's.  The EINVALs go, as there: the row past the region's rows, `sends`
+   not 1, the row's `state`, the word outside the buffer or misaligned, the transport not made; the entry and its word
+   are the plan's, and the caller names a transfer its IR makes this node the source of (K2).  It returns 0.  What
+   must stay: one store of a range's word releases every send of the range's pages */
+int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint32_t transfer,
+  struct mesh_metal_publication *publication){
+  publication->supplied=mesh_transfer_at(context->M,transport->words,transfer)->targets[0].word-transport->offset;
   return 0;
 }
 
@@ -151,7 +154,7 @@ struct mesh_metal_waiter {
   pthread_t thread;
   void *event;
   char *words;
-  uint64_t repetitions,start;
+  uint64_t repetitions;
   uint32_t passes;
   _Atomic uint32_t stop;
   int cause;
@@ -191,23 +194,41 @@ struct mesh_metal_waiter {
    table was the run's, steps x passes x reads, though each wait is affine in t (C1, C3.3; design/disjoint-pages-
    change-request.md, D.3.7).  What must stay: each value set once every wait of that value or less is met, in order;
    the deadline MESH_PLATFORM_NS after the last value set (after the start for the first); a stop or a deadline setting
-   the final value at once. */
+   the final value at once.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7:
+   "Every wait ends at MESH_PLATFORM_NS without progress, and the first ETIMEDOUT ends the run ... e2b's step waits and
+   mesh-metal.m's waiter take one bound each, not one per unit.  The operator's bound is judged by time without
+   progress"; W10: "every wait ends at MESH_PLATFORM_NS without progress"; "The revisions of 14b9a757", R-7), reversing
+   the deadline above, MESH_PLATFORM_NS after the last value set: a wait's bound restarts at each rise of the count it
+   waits on, its progress, as mesh_transfers_start's waits end "at MESH_PLATFORM_NS after the last rise of its count it
+   read" (mesh-call.h at mesh 31ee5d4a).  `read` and `last` are the count word last read and what it read; a read of
+   another word (a wait's first) or a greater value (counts only rise) restarts `since`, and a wait ends ETIMEDOUT once
+   MESH_PLATFORM_NS has passed since with no rise.  A value set restarts nothing: setting the event is the waiter's own
+   write, not the count's progress.  The waiter's `start` goes with the first value's deadline counted from it.  The
+   first ETIMEDOUT ends the walk, as every cause does, and the event goes to the final value at once.  mesh-metal.h's
+   note on mesh_metal_waits_start ("a value not met within MESH_PLATFORM_NS of the last value set", "The first value's
+   deadline counts from this call") is the form reversed here; the header is the coordinator's.  What must stay: each
+   value set once every wait of that value or less is met, in order; a stop or a timeout setting the final value at
+   once; one bound a wait, never a multiple */
 static void *waits_run(void *argument){
   struct mesh_metal_waiter *waiter=argument;
   @autoreleasepool{
     id<MTLSharedEvent> event=(id<MTLSharedEvent>)waiter->event;
     const uint64_t passes=waiter->passes,final=waiter->repetitions*passes;
-    uint64_t since=waiter->start,set=0;
+    uint64_t since=0,set=0,last=0;
+    const _Atomic uint64_t *read=NULL;
     int cause=0;
     for(uint64_t t=0;t<waiter->repetitions && waiter->waits && !cause;t++)
       for(size_t i=0;i<waiter->waits && !cause;){
         const struct mesh_metal_wait *wait=waiter->wait+i;
         const uint64_t value=t*passes+wait->pass+1,target=(t/wait->copies+1)*wait->pages;
-        if(value-1>set){[event setSignaledValue:value-1];set=value-1;since=clock_gettime_nsec_np(CLOCK_MONOTONIC);}
+        if(value-1>set){[event setSignaledValue:value-1];set=value-1;}
         _Atomic uint64_t *word=(_Atomic uint64_t *)(waiter->words+wait->count+sizeof(uint64_t)*(t%wait->copies));
         const uint64_t seen=atomic_load_explicit(word,memory_order_acquire);
         if(seen>=target){i++;continue;}
-        const uint64_t spent=clock_gettime_nsec_np(CLOCK_MONOTONIC)-since;
+        const uint64_t now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+        if(word!=read || seen!=last){read=word;last=seen;since=now;}
+        const uint64_t spent=now-since;
         const uint64_t left=spent<MESH_PLATFORM_NS?MESH_PLATFORM_NS-spent:0;
         atomic_store_explicit(&waiter->waiting,word,memory_order_release);
         if(atomic_load_explicit(&waiter->stop,memory_order_acquire))cause=ECANCELED;
@@ -228,7 +249,8 @@ static void *waits_run(void *argument){
    below `passes` and does not decrease; the final value repetitions x passes is a uint64_t, and so is the last
    repetition's target, ((repetitions - 1) / copies + 1) x pages.  The event, an id<MTLSharedEvent>, stays the
    caller's: it is retained for the thread's life and released by mesh_metal_waits_end; the transport outlives the
-   waiter.  The first value's deadline counts from this call.  EINVAL where a wait is not of that form (`passes` 0
+   waiter.  Each wait's bound runs from its first read of its count, restarted at each rise (waits_run, 2026-11-06,
+   R-7), where the first value's deadline counted from this call.  EINVAL where a wait is not of that form (`passes` 0
    with waits given among them), the event is NULL or the transport wraps nothing; ENOMEM; or pthread_create's
    error. */
 int mesh_metal_waits_start(struct mesh_metal_transport *transport,void *event,const struct mesh_metal_wait *waits,
@@ -257,7 +279,6 @@ int mesh_metal_waits_start(struct mesh_metal_transport *transport,void *event,co
   atomic_init(&waiter->stop,0);
   atomic_init(&waiter->waiting,NULL);
   if(count)memcpy(waiter->wait,waits,count*sizeof *waits);
-  waiter->start=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   const int status=pthread_create(&waiter->thread,NULL,waits_run,waiter);
   if(status){[(id)waiter->event release];free(waiter);return status;}
   *out=waiter;
