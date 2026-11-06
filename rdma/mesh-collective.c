@@ -2,7 +2,6 @@
 #include "mesh-graph.h"
 #include <float.h>
 #include <os/os_sync_wait_on_address.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -319,21 +318,6 @@ static int plan_acyclic(const struct plan *p){
   return status;
 }
 
-static void plan_name(const struct plan *p,uint32_t v,const char *what,uint32_t lag){
-  const struct plan_value *x=p->value+v;
-  const struct plan_demand *d=p->demand+x->demand;
-  char here[48]="";
-  if(x->node==p->self){
-    if(d->mine!=MESH_ABSENT)snprintf(here,sizeof here," (values[%u] here)",d->mine);
-    else snprintf(here,sizeof here," (this node's relay)");
-  }
-  if(lag==UINT32_MAX)
-    fprintf(stderr,"mesh_plan: the value of range %u from rank %u at rank %u%s: %s (no walk)\n",d->identity,d->source,
-            x->node,here,what);
-  else fprintf(stderr,"mesh_plan: the value of range %u from rank %u at rank %u%s: %s (least lag %u)\n",d->identity,
-               d->source,x->node,here,what,lag);
-}
-
 /* M. Lam, Software Pipelining: An Effective Scheduling Technique for VLIW Machines, PLDI 1988, §2.3: "The lifetime of a
    register variable is defi[n]ed as the duration between the f[i]rst assignment into the variable and it[s] last use";
    "the minimum degree of unrolling, u, to implement the same schedule is simply max_i q_i."
@@ -367,7 +351,7 @@ static int plan_unroll(struct plan *p){
       const uint32_t lag=lags[((size_t)x->source+1+j)*values+v];
       if(lag>most)most=lag;
     }
-    if(most==UINT32_MAX){plan_name(p,v,"a read of it happens before no later write of it",most);status=ENOMEM;break;}
+    if(most==UINT32_MAX){status=ENOMEM;break;}
     if(most>p->copies)p->copies=most;
   }
   for(uint32_t a=0;!status && a<p->local;a++)for(uint32_t b=0;b<p->local;b++){
