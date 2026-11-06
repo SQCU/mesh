@@ -32,11 +32,12 @@
      own order (a host producer, D.3.3: "The program declares the host's lag, and the allocator gives them copies by it,
      as modulo variable expansion does for any value").  The
      value must be MESH_EXECUTION, wire 0, state 0, and named by no declared transfer (EINVAL otherwise); its `begin`
-     and `end` are not read.  The plan gives it k copies: `section.count` k, `stride` P, execution t's instance copy
-     t mod k at mesh_section_address(section, t mod k).  Each copy is an item of its own that interferes with every
-     other item (its write is ordered by no edge of the template, so it shares no page with anything).  The program's
-     side of the order, which the plan neither knows nor checks: copy t mod k is written for execution t only after
-     execution t - k has ended, and execution t reads it only after that write.
+     is not read, nor its `end` but where a transfer names it (design/problems-of-14b9a757-change-request.md,
+     "Appendix: the stops of 36bd7cbd", 14).  The plan gives it k copies: `section.count` k, `stride` P, execution
+     t's instance copy t mod k at mesh_section_address(section, t mod k).  Each copy is an item of its own that
+     interferes with every other item (its write is ordered by no edge of the template, so it shares no page with
+     anything).  The program's side of the order, which the plan neither knows nor checks: copy t mod k is written for
+     execution t only after execution t - k has ended, and execution t reads it only after that write.
    - Out: `section`, every field: `first` its first row, `pages` P x block (P its blocks), `bytes` as given, `count` its
      copies (u for a routed value and a MESH_EXECUTION value of `lag` 0, k for a value of `lag` k >= 1, 1 for every
      other), `stride` P.  Copy c's rows are first + c x P + i, i < P, and its first byte mesh_section_address(section,
@@ -359,9 +360,9 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
    for a MESH_EXECUTION value of lag 0 its first and last positions on this node's own program order in one
    execution, begin <= end, and lag: 0 for a value the program's own order writes (u copies: design/problems-of-
    14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14), k >= 1 for one a producer the program orders
-   by an event writes (a host input: MESH_EXECUTION, wire 0, state 0, named by no declared transfer, begin and end not
-   read; k copies, execution t's at copy t mod k, written for t only after execution t - k has ended and read by t only
-   after that write: the program's order, which the plan does not check;
+   by an event writes (a host input: MESH_EXECUTION, wire 0, state 0, named by no declared transfer, begin not read
+   and end read where a transfer names it; k copies, execution t's at copy t mod k, written for t only after execution
+   t - k has ended and read by t only after that write: the program's order, which the plan does not check;
    design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-coordination.md, R4).  Out: section,
    every field.
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 6 and 8; "The
@@ -522,9 +523,12 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    with no record and no rules of its own.  The record goes (R1)"; "The revisions of 14b9a757"): struct mesh_share and
    its tests go, and struct mesh_function's `share` and `shares` with it (64 bytes, as before 55b9cbad).  Two values'
    rows name one frame by the program's one allocation alone (the note before struct mesh_value).  What must stay:
-   `outstanding` and `plan` as their notes state them */
+   `outstanding` and `plan` as their notes state them
+   design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: In: `lead`, the program's start
+   of execution t (mesh-call.h mesh_transfers_start's raise of `executions` past t, its receives' post) at the start of
+   execution t - `lead` in this node's program order, after every read the program makes before that point */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
-                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
+                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,lead;
                        uint64_t outstanding,plan; };
 _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function,count)==32 &&
                offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56,

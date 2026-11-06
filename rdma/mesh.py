@@ -83,7 +83,7 @@ class Dependence(C.Structure):
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
                 ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
-                ('padding', U), ('outstanding', Q), ('plan', Q)]
+                ('lead', U), ('outstanding', Q), ('plan', Q)]
 
 
 class View(C.Structure):

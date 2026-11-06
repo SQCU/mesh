@@ -265,7 +265,7 @@ struct plan {
   const struct mesh_dependence *dependence;
   uint32_t dependences;
   struct plan_demand *demand;             /* the demands, by their first declared transfer (GO5) */
-  uint32_t demands,n,self,copies;         /* copies: u (plan_unroll) */
+  uint32_t demands,n,self,copies,start_lead; /* copies: u (plan_unroll); start_lead: struct mesh_function `lead` */
   struct mesh_view_id view;               /* mesh_nodes_read's: the installed view's identifier (mesh.h struct
                                              mesh_view_id; JGroups ViewId.java) */
   uint32_t *of;                           /* of[i]: declared[i]'s demand, p->demand[of[i]] */
@@ -302,7 +302,7 @@ struct plan {
   uint32_t *between;                      /* between[a x local + b]: D_ab, the largest least lag from a read of this
                                              node's routed value a to b's write (plan_unroll) */
   uint32_t *farthest;                     /* farthest[w]: E_w, the largest D_wz over this node's routed values z
-                                             (UINT32_MAX where any is; plan_unroll, plan_before) */
+                                             (UINT32_MAX where any is; plan_unroll, plan_interval) */
   /* the state section (plan_layout), offsets from its start: `hops` its entries', `words` its end (2026-11-05, "The
      revisions of 46ae8fdf", LP9: `sequences`, the sequence words', gone).  2026-11-06 (R-1; "The revisions of
      14b9a757"): `publications`, the declared transfers' entries (mesh.h struct mesh_state `transfers`).  What must stay:
@@ -640,8 +640,8 @@ static void plan_name(const struct plan *p,uint32_t v,const char *what,uint32_t 
      the largest L").  Every rank computes the same template, lags and u, so both nodes of every adjacent pair hold the
      same copies;
    - between[a x local + b] = D_ab, the largest D(r -> write b) over this node's routed value a's reads r, for every
-     pair of this node's routed values, so the order's tests (plan_before) are table reads; and farthest[a] = E_a, the
-     largest D_ab over b (UINT32_MAX where any is).
+     pair of this node's routed values; and farthest[a] = E_a, the largest D_ab over b (UINT32_MAX where any is), each
+     routed copy's last read (plan_interval).
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6; "The revisions
    of 4e78f6f4"): farthest added, the order's last clause's operand (plan_before), where between was the colouring's
    (plan_interferes, gone).  What must stay: between as it is.
@@ -828,8 +828,8 @@ static uint64_t plan_completion(const struct plan *p,const struct plan_demand *d
 /* An item of the program's one allocation (plan_place): `blocks` elements, each a block (point 6: "Every item is
    counted in blocks"; mesh-graph.h mesh_graph_chains' elements), the first `element` among the chains' elements, in
    space `space` (1 the registered window, 0 outside it: mesh-dataflow.h mesh_arena_range); `kind` the order it takes
-   part in (plan_before), of plan `function` (UINT32_MAX: the program's table), `index` its routed value here
-   (PLAN_ROUTED) or its value in `values` (PLAN_LOCAL, PLAN_ALONE), `copy` its copy */
+   part in (plan_interval, plan_alone), of plan `function` (UINT32_MAX: the program's table), `index` its routed value
+   here (PLAN_ROUTED) or its value in `values` (PLAN_LOCAL, PLAN_ALONE), `copy` its copy */
 enum { PLAN_ALONE, PLAN_LOCAL, PLAN_ROUTED };
 struct plan_item { uint64_t element,blocks; uint32_t kind,function,index,copy,space; };
 /* the program's items (`items`, the window's first, [0, split), then the rest), their blocks (mesh_graph_chains'
@@ -837,98 +837,11 @@ struct plan_item { uint64_t element,blocks; uint32_t kind,function,index,copy,sp
 struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,elements; uint32_t split,table;
                         struct mesh_range range[2]; };
 
-/* The interference order, mesh_graph_chains' operand: before(x, y) where x's every access happens before y's first
-   write at every distance their executions meet (design/plan-to-bridge-change-request.md R2, corrected: "Two items
-   may share a page exactly when one's last access happens before the other's first write.  That is C3.3's own
-   interference test, over Lamport's happens-before (L. Lamport, Time, clocks, and the ordering of events in a
-   distributed system, CACM 21(7), 1978).  That relation is a partial order"; design/disjoint-pages-change-request.md
-   C3.3, corrected: "Two items may share a page exactly when this interference test orders them").  The tests are
-   plan_interferes' as they were, each pair that shared now ordered one way (2026-11-05, design/compilation-
-   coordination.md, "The documents' corrections of 2026-11-05", point 6; "The revisions of 4e78f6f4"):
-   - items of different plans are unordered: no edge of either template orders them;
-   - PLAN_ALONE, unordered with every item, as plan_interferes had them interfering with every item: an invariant (the
-     state sections and the table among them); a copy of a value of lag k >= 1, whose write an event of the program's
-     orders, a host producer's, not an edge of the template (design/disjoint-pages-change-request.md, D.3.3;
-     design/disjoint-pages-rulings-coordination.md, R4); and a named value's blocks no range covers (point 7; mesh-
-     collective.h struct mesh_declared `first`: "no edge of the template orders their write"); and (2026-11-05, V2,
-     "The revisions of 55b9cbad") every item of a value that a struct mesh_share's `of` names, its routed copies and
-     its own item (plan_items): the shared blocks' item then lives the program's whole life, as an invariant's does,
-     which covers both values' accesses at the cost of pages (PB R2, corrected: "Those pages are one item of the
-     allocation, living until the later of the two values' last reads"; mesh-collective.h struct mesh_share: "whose
-     lifetime covers both values' accesses (mesh-collective.c's minimal form is the implementer's, recorded at the
-     code)").  The implementer's decision, recorded: every item of `of` (a superset of those its shared blocks lie in),
-     so no second walk of `of`'s covers finds them; a tighter form, adding `value`'s readers to the item's reads, would
-     need reads the template does not hold for a share.  Its premise is U1's: `value`'s reads of the shared blocks in
-     execution t precede `of`'s write in t + u where that write is this node's own (a production or a local value's);
-     a share whose `of` blocks land here is not ordered so by any edge the plan holds;
-   - PLAN_LOCAL items, and PLAN_ROUTED items of a set in a value of lag 0 here: design/problems-of-14b9a757-change-
-     request.md, "Appendix: the stops of 36bd7cbd", 14, "This replaces `plan_before` and `mesh_graph_chains` for these
-     items" (plan_interval, plan_place);
-   - two routed copies x = (v, c) and y = (w, c') of one plan (PLAN_ROUTED), D_vw = between[v x local + w], E_w =
-     farthest[w], u the copies: x before y where c <= c', c' - c >= D_vw (and, where c == c', D_vw == 0 and v != w:
-     y's write in x's execution follows x's every read), and c' + E_w <= u.  The last clause is the document's
-     (design/plan-to-bridge-change-request.md R2, "(Corrected 2026-11-05: design/compilation-coordination.md, "The
-     revisions of 4e78f6f4", PO-1.)  Over C3.3's u copies the order needs one more clause": "Copies (v, c) and (w, c′)
-     are ordered where c ≤ c′, c′ − c is at least the least lag from v to w, and c′ plus w's largest least lag to a
-     write at the node is at most u.  That keeps the relation transitive", modulo variable expansion's premise (M. Lam,
-     Software pipelining, PLDI 1988) and a lifetime wrapping the period a circular arc (L. J. Hendren, G. R. Gao, E. R.
-     Altman and C. Mukerji, A register allocation framework based on hierarchical cyclic interval graphs, CC 1992)),
-     where this note called it the coordinating implementer's (2026-11-05, design/compilation-coordination.md,
-     "Answered in the documents", PO-1's text; "The revisions of 55b9cbad").  It is the cyclic case of R2's relation
-     over one execution: a page holding a chain x_1 < ... < x_k is written again by x_1's
-     next instance, in execution c_1 + u, which must follow x_k's reads in execution c_k, and c_k + E_{x_k} <= u <=
-     c_1 + u gives it.  With it the relation is transitive: for x < y < z, every read of v reaches z's write within
-     D_vy + D_yz (through y's write, which precedes y's reads at lag 0), so D_vz <= D_vy + D_yz <= c_z - c_x, and c_z
-     + E_z <= u holds from y < z; and irreflexive (c == c' asks v != w, and x < y < x would be a lag-0 cycle, which
-     plan_acyclic refuses).  Dilworth's theorem needs both (mesh-graph.h: "a strict partial order the caller gives").
-     Within a chain each pair of neighbours is so ordered, and happens-before is transitive, so every earlier item's
-     accesses on a page precede each later write of it.
-   The least lags decide each test at every larger distance of its class (U1; plan_unroll).
-   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1: "A
-   frame's item lives from the first write to the last read over every value naming it, with C3.3's lag test"; "The
-   revisions of 14b9a757", R-1), generalizing the routed copies' clause to the frames' set items (plan_sets), where a
-   routed copy is a set of one member, a relay's: copies x = (X, c) and y = (Y, c') of one plan (PLAN_ROUTED, `index`
-   the set), X and Y sets of this node's routed values (a range's at its source, a destination or a relay), x before y
-   where all three hold:
-   - c <= c' and c' - c >= D_XY, the largest between[a x local + b] over a in X and b in Y (every read of every member of
-     X in copy c's execution precedes every write of every member of Y in c''s: the item's accesses are its members');
-   - c' + E_Y <= u, E_Y the largest farthest[b] over b in Y (`set_far`), the document's cyclic clause for the item's
-     last members;
-   - c < c' or X != Y.
-   PO-1's argument, restated for sets.  Transitive: for x < y < z, every read of a in X reaches the write of each b in
-   Y within D_ab <= D_XY, b's write precedes b's reads at lag 0 (the template's P -> F and S, W -> F and L -> C), and
-   b's read reaches the write of each z' in Z within D_bz' <= D_YZ, so D_az' <= D_ab + D_bz' and D_XZ <= D_XY + D_YZ <=
-   c_z - c_x (Y has a member); c_z + E_Z <= u holds from y < z.  And c_x < c_z or X != Z: were c_x = c_z and X = Z,
-   then c_x = c_y = c_z, D_XY = D_YX = 0, and some a in X would have D_aa <= D_ab + D_ba = 0, a lag-0 cycle, which
-   plan_acyclic refuses; that also makes it irreflexive (c == c' asks X != Y) and so a strict partial order, as
-   Dilworth's theorem and mesh-graph.h mesh_graph_chains need ("a strict partial order the caller gives").  A set of
-   one member whose blocks are its range's whole blocks is the routed copy above.  PLAN_ALONE's items of a struct
-   mesh_share's `of` go with the record (PB R2 at mesh 56ede97e: "The record goes"); a block holding bytes no
-   instruction here covers is its value's own item, PLAN_ALONE as an uncovered block was.  What must stay: PLAN_ALONE
-   and PLAN_LOCAL otherwise as above, and items of different plans or kinds unordered
-   2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the stops", item 7; ExecuTorch,
-   exir/memory_planning.py, update_tensor_lifetime and _does_not_overlap, "spec.lifetime[1] < alloc.spec.lifetime[0] or
-   spec.lifetime[0] > alloc.spec.lifetime[1]"; MPI 4.1 §3.7), reversing the notes above where a named value's own item
-   is PLAN_ALONE: the own item of a MESH_EXECUTION value of lag 0, named or local, is PLAN_LOCAL, ordered by the
-   value's `begin` and `end`; PLAN_ALONE an invariant and a copy of a value of lag k >= 1 ("Mutable buffers and device
-   resident constants keep their data across calls, so they are never freed"), the state sections and the table among
-   the invariants */
-struct plan_order { const struct plan *plans; const struct plan_item *item; const uint32_t *index; };
-static int plan_before(const void *context,uint32_t a,uint32_t b){
-  const struct plan_order *order=context;
-  const struct plan_item *x=order->item+order->index[a],*y=order->item+order->index[b];
-  if(x->kind!=PLAN_ROUTED || y->kind!=PLAN_ROUTED || x->function!=y->function)return 0;
-  const struct plan *p=order->plans+x->function;
-  const uint64_t u=p->copies,c=x->copy,later=y->copy;
-  if(c>later || later+p->set_far[y->index]>u)return 0;
-  uint64_t most=0;
-  for(uint32_t i=p->set_first[x->index];i<p->set_first[x->index+1];i++)
-    for(uint32_t k=p->set_first[y->index];k<p->set_first[y->index+1];k++){
-      const uint32_t lag=p->between[(size_t)p->member[i]*p->local+p->member[k]];
-      if(lag>most)most=lag;
-    }
-  if(later-c<most)return 0;
-  return c<later || x->index!=y->index;
+/* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: "PLAN_ALONE items stay as
+   they are", unordered with every item (mesh-graph.h mesh_graph_chains) */
+static int plan_alone(const void *context,uint32_t a,uint32_t b){
+  (void)context;(void)a;(void)b;
+  return 0;
 }
 
 /* an item appended (`item` NULL: counted alone) */
@@ -962,7 +875,7 @@ static void plan_item_put(struct plan_placement *x,uint32_t kind,uint32_t functi
      PLAN_ROUTED, in the window (a relay's routed copy, or the blocks of its values a set of ranges here covers whole);
    - a value's own item as above, in the window where a range here names it whatever its `wire` (mesh-collective.h:
      "Every value a transfer names here is placed in the registered window, whatever its `wire`"), else in its `wire`
-     space, its kind plan_before's;
+     space, its kind plan_interval's;
    - the program's table grows by mesh.h struct mesh_algo `adjacent`'s words (R-6: "Place it in the table's item, which
      grows by those words"): n + 1 uint32_t offsets and the plans' places toward each map index, `toward`'s, after the
      `count` words (plan_table).
@@ -1022,16 +935,37 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
 /* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: "G's time points are the node's
    operations, in program order, over the u executions of the unrolled template"; "Each live range is one lifetime
    interval, from its write to its last read"; "a value of lag 0 has one interval per execution, and a routed copy has
-   one"; rdma/mesh_compile.py, "every value's positions its lifetime" */
+   one.  A lifetime that crosses the end of the u executions is a cyclic interval"; rdma/mesh_compile.py, "every value's
+   positions its lifetime".  Mukerji 1994, §2.1: "we say that variable x is defined at time point t"; a received copy's
+   definition its receive's post, mesh-call.h mesh_transfers_start's raise of `executions` (MPI 4.1 §3.7: "The receiver
+   should not access any part of the receive buffer after a nonblocking receive operation is called, until the receive
+   completes"), at the start of execution t - `lead` (mesh-collective.h struct mesh_function); a copy of a value of lag
+   k written "for execution t only after execution t - k has ended" (struct mesh_value); its last read before the
+   writes of execution t + E (plan_unroll's farthest, `set_far`) */
 static int plan_interval(const struct plan *plans,const struct plan_item *x,const uint64_t *operations,uint64_t *start,
                          uint64_t *end){
   if(x->kind!=PLAN_LOCAL && x->kind!=PLAN_ROUTED)return 0;
   const struct plan *p=plans+x->function;
-  const uint32_t j=x->kind==PLAN_LOCAL?x->index:
-                   p->demand[p->value[p->here[p->member[p->set_first[x->index]]]].demand].mine;
-  if(j==MESH_ABSENT || p->given[j].lag)return 0;
-  *start=(uint64_t)x->copy*operations[x->function]+p->given[j].begin;
-  *end=(uint64_t)x->copy*operations[x->function]+p->given[j].end;
+  const uint64_t n=operations[x->function],u=p->copies,ring=u*n,c=x->copy;
+  if(x->kind==PLAN_LOCAL){
+    *start=c*n+p->given[x->index].begin;
+    *end=c*n+p->given[x->index].end;
+    return 1;
+  }
+  uint64_t back=p->start_lead,from=0,last=n-1,length;
+  const uint32_t j=p->demand[p->value[p->here[p->member[p->set_first[x->index]]]].demand].mine;
+  int received=j==MESH_ABSENT;
+  for(uint32_t k=p->set_first[x->index];k<p->set_first[x->index+1];k++)
+    received|=p->demand[p->value[p->here[p->member[k]]].demand].source!=p->self;
+  if(j!=MESH_ABSENT){
+    last=p->given[j].end;
+    if(!received){back=p->given[j].lag?p->given[j].lag-1:0;from=p->given[j].lag?0:p->given[j].begin;}
+  }
+  const uint64_t ahead=p->set_far[x->index]-1;
+  const int whole=p->set_far[x->index]==UINT32_MAX || __builtin_mul_overflow(back+ahead,n,&length) ||
+                  __builtin_add_overflow(length,last-from+1,&length) || length>=ring;
+  *start=((c+u-back%u)%u)*n+from;
+  *end=(*start+(whole?ring:length)-1)%ring;
   return 1;
 }
 static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct plan_placement *x){
@@ -1060,7 +994,7 @@ static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct pla
     operations[f]=1;
     for(uint32_t j=0;j<plans[f].givens;j++){
       const struct mesh_value *v=plans[f].given+j;
-      if(v->kind==MESH_EXECUTION && !v->lag && (uint64_t)v->end+1>operations[f])operations[f]=(uint64_t)v->end+1;
+      if(v->kind==MESH_EXECUTION && (uint64_t)v->end+1>operations[f])operations[f]=(uint64_t)v->end+1;
     }
   }
   for(uint32_t s=0;!status && s<2;s++){
@@ -1070,8 +1004,7 @@ static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct pla
     for(uint32_t i=first[s];i<first[s+1];i++)
       if(!plan_interval(plans,x->item+i,operations,start,end)){index[rest]=i;counts[rest++]=x->count[i];}
     if(rest){
-      const struct plan_order order={plans,x->item,index};
-      status=mesh_graph_chains(rest,counts,plan_before,&order,out,&blocks);
+      status=mesh_graph_chains(rest,counts,plan_alone,NULL,out,&blocks);
       for(uint64_t r=0,o=0;!status && r<rest;r++)
         for(uint64_t k=0;k<counts[r];k++)x->chain[x->item[index[r]].element+k]=out[o++];
     }
@@ -2189,9 +2122,9 @@ static int plan_cover_order(const void *a,const void *b){
      instructions touch it (their routed values here, ascending).  Where the union of those instructions' bytes is every
      byte of the block within the value's bytes, the block is an element of that set's item, one item a set and copy (u
      copies), its elements every such block of the set in (value, block) order; where any byte of it is no
-     instruction's, it stays in the value's own item (`uncovered`, its element its place among them), ordered as
-     plan_before orders it.
-   E_s, `set_far`, is the largest farthest[a] over its members (plan_before).  The union of a block's instructions is
+     instruction's, it stays in the value's own item (`uncovered`, its element its place among them), its interval
+     plan_interval's.
+   E_s, `set_far`, is the largest farthest[a] over its members (plan_interval).  The union of a block's instructions is
    counted over them by first byte (each lies within one block: plan_instructions), each adding its bytes past the
    greatest end before it.  The coordinating implementer's design ("The revisions of 14b9a757", brief C, R-1).  0;
    ENOMEM */
@@ -2379,7 +2312,7 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   if(!function->outstanding || function->outstanding>=UINT32_MAX)return ENOMEM;
   const uint32_t n=nodes->count;
   p->declared=declared;p->transfers=count;p->given=values;p->givens=given;p->weights=weights;
-  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;
+  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;p->start_lead=function->lead;
   struct plan_key *key=malloc(((size_t)count+1)*sizeof *key);
   uint32_t *root=NULL,*demand=NULL,*placed=malloc(((size_t)count+1)*sizeof *placed);
   size_t *trees=NULL;

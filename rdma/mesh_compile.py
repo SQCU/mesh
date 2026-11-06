@@ -2970,8 +2970,12 @@ def _dropped(context, state):
 # deadline: the start takes none, and each step waits on its own progress (_arrived); execution t runs its copy's
 # straight-line steps, t mod their period, and returns that copy's result (_steps).  What must stay: one execution a
 # call, the start at every node of the program
+# design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14; mesh-collective.h struct
+# mesh_function `lead` (0 here): the start of execution t after every read the program made before it
 def _execute(context, run, args, kwargs):
     t = run['executions']
+    for synchronize in run['synchronize']:
+        synchronize()
     status = mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1)
     if run['state'].executions > t:
         run['executions'] = t + 1
@@ -3472,7 +3476,9 @@ def program(block, *example_inputs):
                 for key in loaded:
                     places[key][0].copy_(host[key])
             runs = [dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
-                         plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan))
+                         plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan),
+                         synchronize=[getattr(torch, device).synchronize
+                                      for device in sorted({layout[2] for layout in ir.layouts})])
                     for ir, f, record, (places, devices, _) in zip(irs, functions, compiled, bound)]
         except BaseException:
             _retire(context, state, deadline)
