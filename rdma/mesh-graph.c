@@ -975,8 +975,7 @@ static size_t cover_find(const uint64_t *point, size_t points, uint64_t at) {
      For each interval I beginning at t, give I a free color which is not being used by any interval covering t";
      §3.2.3: "The coloring of G' is guaranteed to use only w new colors"; "the second phase simply colors the remaining
      cyclic intervals with new colors, and applies the simple left to right algorithm to color the remaining
-     intervals"; Algorithm A.0.1: "Obtain colors c_i ...
-     c_{regnum_i} that are free for the lifetime of i". */
+     intervals"; Algorithm A.0.1: "Obtain colors, c_i ... c_{regnum_i} that are free for the lifetime of i". */
 int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *start, const uint64_t *end,
                          const uint64_t *need, uint64_t *color, uint64_t *colors) {
   const size_t n = intervals, keys = 4 * n;
