@@ -184,11 +184,20 @@ int mesh_view_compose(struct mesh_ctx *c,const uint32_t *rows,size_t count,struc
   const size_t block=(size_t)m->block*m->pgsz,bytes=count*block;
   char *base=mmap(NULL,bytes,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
   if(base==MAP_FAILED)return errno;
-  for(size_t k=0;k<count;k++){
+  /* 2026-11-05 ("The revisions of 4e78f6f4", the coordinating implementer's hunk): one remap a run of rows whose
+     blocks are consecutive in the region, as ncclMeshPageTableCompose remapped each run of its physical runs
+     (1b372d09^ rdma/nccl-mesh.c: `mesh_page_run_add`, which merged a page adjacent to the run before it, then one
+     mach_vm_remap a run), where each block was remapped alone.  The allocator's chains give an item ordered with no
+     other consecutive blocks (mesh-graph.h mesh_graph_chains), so a weight's blocks are one run.  What must stay:
+     row k's block at base + k x block */
+  for(size_t k=0,run;k<count;k+=run){
     mach_vm_address_t at=(mach_vm_address_t)(uintptr_t)(base+k*block);
-    const uintptr_t source=(uintptr_t)m+atomic_load_explicit(&mesh_page(m)[rows[k]].address,memory_order_relaxed);
+    const uint64_t first=atomic_load_explicit(&mesh_page(m)[rows[k]].address,memory_order_relaxed);
+    for(run=1;k+run<count &&
+              atomic_load_explicit(&mesh_page(m)[rows[k+run]].address,memory_order_relaxed)==first+run*block;run++);
+    const uintptr_t source=(uintptr_t)m+first;
     vm_prot_t current,maximum;
-    const kern_return_t mapped=mach_vm_remap(mach_task_self(),&at,block,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,
+    const kern_return_t mapped=mach_vm_remap(mach_task_self(),&at,run*block,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,
                                              mach_task_self(),source,FALSE,&current,&maximum,VM_INHERIT_NONE);
     if(mapped!=KERN_SUCCESS){
       munmap(base,bytes);
