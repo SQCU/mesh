@@ -1970,7 +1970,10 @@ def lower(ir):
 # item (`fallbacks`, the implementer's decision recorded in design/compilation-coordination.md: the pages cannot be one
 # item of two values of unlike copies); a region with no CollectivePermute (a fill alone) gets its landing value here
 # (_halo with none); a received parts' value named by no declared transfer here (an AllReduce member's) holds no pages.
-# What must stay: no value at a node the placement maps no device, the positions as above
+# A share whose `of` run is another share's run is copied too (mesh-collective.h struct mesh_share at mesh e627f61b,
+# sub-agent C's test: "EINVAL also where `of`'s run is itself another share's run ... and where the two values' `wire`
+# differ"; every share here is of two values a declared transfer names, so both are `wire`).  What must stay: no value
+# at a node the placement maps no device, the positions as above
 def _place(ir):
     if ir.device is None:
         return
@@ -2000,9 +2003,12 @@ def _place(ir):
     for i, (base, offset) in ir.at.items():
         ir.declared[i].value = ir.homes[base][0]
         ir.declared[i].first = offset * _layout(ir, base)[0].itemsize // ir.blockbytes
+    candidates = [entry for entry in ir.shared if entry[0] in wired and entry[2] in wired]
+    runs = [(entry[0], _span(ir, entry[0], entry[1], entry[4])) for entry in candidates]
     for value, first, of, at, count, (g, target, source, narrow) in ir.shared:
-        size = _layout(ir, value)[0].itemsize
-        if value in wired and of in wired:
+        size, (a, b) = _layout(ir, value)[0].itemsize, _span(ir, of, at, count)
+        if (value, first, of, at, count, (g, target, source, narrow)) in candidates \
+                and not any(v == of and c < b and a < e for v, (c, e) in runs):
             ir.share.append(mesh.Share(ir.homes[value][0], first * size // ir.blockbytes, ir.homes[of][0],
                                        at * size // ir.blockbytes, -(-count * size // ir.blockbytes)))
         else:
