@@ -994,7 +994,8 @@ struct hdr {
      identifier of the view this node's bridge installed (mesh-records.c view_install), 0 before its first, and its
      `view_nodes` records (mesh-map.h struct mesh_record), the ones the view's first message carried, at `view_off`
      (mesh-map.h mesh_layout: room `map_room`, laid out once with the region), written under `view_map`, a seqlock as
-     `map` is (odd while the bridge parent writes, mesh_notify before and after; mesh_map_whole reads it whole).  The
+     `map` is (odd while the bridge parent writes, mesh_notify before and after; read whole as mesh_map_whole reads `map`:
+     even before the read and unchanged after it, mesh-dataflow.c mesh_nodes_read).  The
      bridge parent their one writer.  A plan is made on those records (mesh-dataflow.h mesh_nodes_read), its `serial`
      `view` (struct mesh_state), and stands while `view` is it.  What must stay: every other field in its place */
   _Atomic uint64_t view_map,view;

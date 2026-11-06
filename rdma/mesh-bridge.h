@@ -576,7 +576,11 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
    claim's.  What must stay: the declaration.
    2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
    revisions of 55b9cbad"): the operand's holder, hdr `client`, retired (mesh-dataflow.h mesh_retire) where its process
-   is `pid` and the operand (mesh.h struct mesh_algo) is published and not retired.  What must stay: the declaration */
+   is `pid` and the operand (mesh.h struct mesh_algo) is published and not retired.  What must stay: the declaration
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8; "The
+   revisions of 14b9a757"): nothing retired: where the operand's holder (mesh-holders.h mesh_algo_holder) is `pid`,
+   hdr `plans` raised and woken, so each port ends the gone holder's plans and the release reads it gone.  What must
+   stay: the declaration */
 void clients_gone(pid_t pid);
 
 /* mesh-flow.c */
@@ -596,9 +600,11 @@ void streams_cancel(const struct port *port);
    2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on
    the view's map ... A plan then stands while its view does, and its view while the sequencer's map does (D.3.6)";
    "The revisions of 14b9a757"): every standing plan whose `serial` is not the installed view's identifier (mesh.h hdr
-   `view`) cancelled, called by mesh-records.c view_install alone, after it stores the view (under `view_map`), on the
-   bridge parent's one thread; a move of this node's own map ends no plan (its link losses cancel their receives as
-   before).  What must stay: the fence before any plan or its `executions` is read; on the parent's one thread */
+   `view`) cancelled, called by mesh-records.c view_install, after it stores the view (under `view_map`), and by
+   map_adopt, after it stores no view installed (hdr `view` 0: a bridge started again is a new process, "A bridge's
+   counter is the identifier of the last view it installed, 0 before its first"), on the bridge parent's one thread; a
+   move of this node's own map ends no plan (its link losses cancel their receives as before).  What must stay: the
+   fence before any plan or its `executions` is read; on the parent's one thread */
 void plan_stale(void);
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): plan_sequences_inside's declaration
    is gone with the plan's sequence words (design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2) */

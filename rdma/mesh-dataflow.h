@@ -92,7 +92,12 @@ int mesh_detach(struct mesh_ctx *);
    raised and woken.  Its callers are the program's process (its detach, or its own retirement before it plans again)
    and the bridge parent for a holder that is gone (mesh-records.c clients_turn, mesh-link.c region_adopt: the
    failport's lifecycle, as the tag's mesh_retire retired a gone client); both store the one value `published`, so
-   `retired` only names the operand published.  What must stay: nothing let go here */
+   `retired` only names the operand published.  What must stay: nothing let go here
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8: "One
+   writer a word ... the program writes `retired`, the bridge writes only `released`, and a gone holder is read from
+   the heartbeat's words"; "The revisions of 14b9a757"): the program's process is its one caller (its detach, or its
+   retirement before it plans again); the bridge parent calls it no more, reading a gone holder by mesh-holders.h
+   mesh_algo_holder and mesh_holds.  What must stay: nothing let go here */
 void mesh_retire(struct hdr *,uint64_t client);
 /* the program's retirement of one compiled function (design/aot-compilation-change-request.md, appendix item 6: a
    function's claim released only when the program retires that function or itself; design/compilation-
@@ -172,7 +177,11 @@ void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
    kept where any port's `prepared` is its generation or its plan's struct mesh_state `held` is not 0, and released
    otherwise, its pages' bits, then its rows' bits, by the winner of the head's owner exchange; the closed claims kept.
    The bridge parent's (mesh-records.c clients_turn, mesh-link.c region_adopt); nobody waits for it
-   (design/compilation-coordination.md, "The region") */
+   (design/compilation-coordination.md, "The region")
+   2026-11-06 (R-8 and R-10; "The revisions of 14b9a757"), reversing "`retired` (acquire) is `published`": where the
+   operand is published and not yet released (mesh.h mesh_algo_unreleased) and it is retired or its holder is gone
+   (mesh-holders.h mesh_algo_holder reads {0} for a retired operand, and mesh_holds tests the holder), then as above.
+   What must stay: the fence after the retirement or the holder is read and before the ports are */
 uint32_t mesh_retired_release(struct hdr *);
 
 /* The map reader (design/page-queue-change-request.md, "What the collective decides, and what the bridge decides"): the
@@ -181,14 +190,22 @@ uint32_t mesh_retired_release(struct hdr *);
    nodes, at most MESH_NODES_MOST; `node[i]` the node id of index i, a node's index its place in ascending node-id order
    among the map's records; `self` this node's index; `capacity[i][j]` == `capacity[j][i]` the bits a second of the
    cables between i and j, summed, each a cable both records list (mesh_cables) at the lesser of its two bandwidths;
-   0 where none joins them. */
+   0 where none joins them.
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member plans on those records";
+   "The revisions of 14b9a757"), reversing the map's: the records are the installed view's (mesh.h hdr `view_off`,
+   `view_nodes`), the sequencer's map its first message carried; `serial` is the view's identifier (hdr `view`), the one
+   a plan is made on and stands by (struct mesh_state `serial`); a node's index its place in ascending node-id order
+   among the view's records.  What must stay: the struct */
 #define MESH_NODES_MOST 32
 struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NODES_MOST];
                     uint64_t capacity[MESH_NODES_MOST][MESH_NODES_MOST]; /* bits/s, a pair's cables summed; 0 none */ };
 /* 0, or an error value: ETIMEDOUT where no whole copy was read within MESH_PLATFORM_NS of its start, ESRCH where the
    bridge left its write open (its process gone), E2BIG past MESH_NODES_MOST records, EINVAL where the records lie
    outside the region, ENOENT where the map holds no record of this node (hdr `node`); read under the map seqlock
-   (mesh.h mesh_map_whole) */
+   (mesh.h mesh_map_whole)
+   2026-11-06 (A7, corrected; "The revisions of 14b9a757"): read under the view's seqlock (hdr `view_map`: even before
+   the read and unchanged after it, as mesh_map_whole reads `map`); ESTALE where no view is installed (hdr `view` 0:
+   "the program's sender TO-broadcasts nothing before its first view", A7's Initial View Event) */
 int mesh_nodes_read(struct mesh_ctx *,struct mesh_nodes *);
 /* mesh_joined, struct mesh_cable and mesh_cables, which name records and cables, are mesh-map.h's, bridge-side (review
    R1, C1) */
