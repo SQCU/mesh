@@ -174,9 +174,6 @@ gives:
       pre-allocated tensor to its out kwarg, and store the result there. This makes it easier for memory planners to
       perform tensor lifetime analysis."
     - "a memory planning pass ... assigns a memory ID to each tensor and an offset in the buffer".
-  - The offline problem the planner solves is Garey and Johnson's DYNAMIC STORAGE ALLOCATION (Computers and
-    Intractability, 1979, problem SR2; cited from memory). Each item has an arrival and a departure, and two items may
-    share storage only where one departs before the other arrives.
 - **Change:**
   - Every block's item arrives at the first write and departs at the last read of the values whose bytes it holds, in
     the program's order.
@@ -190,13 +187,7 @@ gives:
     1".
   - rdma/mesh_compile.py:2130 does the same (LOADED).
   - The value is a sentinel in the per-execution count word.
-- **Source:** loop-invariant code motion moves a computation whose operands do not change in a loop out of that loop, to
-  run once before it (Aho, Lam, Sethi and Ullman, Compilers: Principles, Techniques, and Tools, 2nd ed., §9.5, "partial
-  redundancy elimination" and loop-invariant computations; cited from memory).
-- **Change:**
-  - An invariant's transfers are moved out of the executions. They run once at make(), before execution 0, and are
-    awaited once.
-  - They have no per-execution count word and no sentinel value.
+- **Source and change:** as the second stops' item 8 below states them.
 
 ## 9. Two destination instructions may write the same bytes
 
@@ -210,7 +201,6 @@ gives:
 - **Change:**
   - At the plan, the destination intervals of each node and execution are sorted by start.
   - Any interval that begins before its predecessor ends makes the plan EINVAL.
-  - That is the sweep test for interval intersection, and the plan is made at compile time.
 
 ## 10. A view has at most eight dimensions
 
@@ -235,7 +225,6 @@ gives:
     in "Optimizing synchronization in multiprocessor DSP systems", IEEE Trans. Signal Processing 45(6), 1997, §2: "retain
     the processor assignment and actor ordering specified by the fully static schedule ... Each processor executes the
     actors assigned to it in the order specified at compile time."
-  - The plan's processors are its cables, so a lost cable is a lost processor of the schedule.
 - **Change:**
   - The loss of a cable that a plan's lists name cancels that plan by plan_cancel, as a view change does.
   - The cancellation is done before any child is spawned for the port.
@@ -353,7 +342,6 @@ lack of a quoted source. Each source is given here verbatim, with the change it 
 - **Change:**
   - **Removal:** the cancellation at a loss removes the plan from the structure the load reads, stored before any child
     is spawned for the port.
-  - **One writer:** that store is the bridge parent's alone.
   - **The load:** it reads the removal after its acquire and gains no reference to the plan.
   - **The program:** it learns of the cancellation through the raised counts, as plan_cancel already gives it.
 
@@ -380,7 +368,6 @@ The implementation of the sources above (mesh 0f48775f, c840ff2f, bce1ed90, 028b
   - That wait completes the node's whole participation: its sends, its forwards and its landings.
   - A send's source and a forwarded block are held until that node, which ends the MPI §3.7 hold. Their lifetimes are
     then item 7's, and the stop's "unordered with every item" goes.
-  - A collective whose result has no use at a node waits at the program's last node.
 
 ### 7. The u copies against one-copy items
 
@@ -407,7 +394,6 @@ The implementation of the sources above (mesh 0f48775f, c840ff2f, bce1ed90, 028b
   - torch 2.14.0 torch/export/exported_program.py, `ExportedProgram`: "It contains an torch.fx.Graph that represents
     Tensor computation, a state_dict containing tensor values of all lifted parameters and buffers, and various
     metadata."
-  - Every rank runs make() on the same exported program, so every rank holds every parameter and buffer.
   - GSPMD §4.5 (quoted at item 4): "DynamicSlice to shard replicated dimensions".
 - **Change:**
   - No transfer has an invariant as its source.
@@ -441,8 +427,6 @@ The implementation of the second sources (mesh 2155c2b8) stopped at three places
     retrieved.
   - The collective's `wait_tensor` at a node waits for its landing counts and its send-completion counters to reach
     the execution's totals.
-  - The failport file mesh-lanes.c, which retrieves the completions, is unchanged. The raise is where `struct flow`
-    already counts them, in mesh-flow.c.
   - PLAN_SENT goes once the hold has this end.
 
 ### 8. A collective over a view of an invariant
@@ -560,10 +544,6 @@ Code is cited at mesh 36bd7cbd. The two stops above are replaced by items 13 and
     completions. Line 68 only lowers `left` for each one it takes: no counter is raised.
   - rdma/mesh-flow.c:1577–1601 (`sends_complete`): on the data path, a SEND completion with a nonzero status raises
     its record's error count (`record->count+1`, the record at `wr_id`).
-- **The stop's ground:** the stop of 36bd7cbd rested on "a failport lifecycle file, reused verbatim". No published
-  source says this. The operator's words it rested on (design/page-queue-change-request.md, 2026-11-03) are:
-  "then you have to verbatim reuse that process lifecycle code since you have no alternative to present or cite which
-  sin't odious and a waste of time to test or run." The stop is withdrawn.
 - **Source:**
   - Linux v6.12, drivers/infiniband/core/verbs.c
     (https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/infiniband/core/verbs.c):
@@ -587,21 +567,6 @@ Code is cited at mesh 36bd7cbd. The two stops above are replaced by items 13 and
   - Each SEND completion that `lanes_flush` takes raises its record's error count, as `sends_complete` does for a SEND
     completion in error.
   - Nothing else in `lanes_flush` or `child_leave` changes.
-- **The record's type (2026-11-06, the implementer's stop):**
-  - **Code:** `struct prepared_send` and its `_Static_assert` ("M29") are defined only in rdma/mesh-flow.c:133–145.
-    rdma/mesh-child.c includes only `mesh-bridge.h`, and the two files are separate translation units.
-  - **Source:** ISO/IEC 9899:2011, N1570 (https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf):
-    - §6.10.2 ¶3: "A preprocessing directive of the form # include "q-char-sequence" new-line causes the replacement of
-      that directive by the entire contents of the source file identified by the specified sequence between the "
-      delimiters."
-    - §6.2.7 ¶1: "two structure, union, or enumerated types declared in separate translation units are compatible if
-      their tags and members satisfy the following requirements: If one is declared with a tag, the other shall be
-      declared with the same tag."
-    - §6.2.7 ¶2: "All declarations that refer to the same object or function shall have compatible type; otherwise, the
-      behavior is undefined."
-  - **Change:** the definition of `struct prepared_send`, with its `struct flow;` declaration, its `_Static_assert` and
-    the comment before it, moves unchanged from mesh-flow.c to mesh-bridge.h, which both files include. No other
-    definition moves.
 
 ### 14. The u copies against one-copy items
 
@@ -833,6 +798,22 @@ Code is cited at mesh 36bd7cbd. The two stops above are replaced by items 13 and
     algorithm (A.0.1) for the non-cyclic remainder. A cyclic interval with no fat cover gets new colors, as §3.2.3's
     second phase states. This replaces `plan_before` and `mesh_graph_chains` for these items.
   - PLAN_ALONE items stay as they are.
+- **A landing's definition (added 2026-11-06):**
+  - **Source:** MPI 4.1 §3.9, Persistent Communication Requests
+    (https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node83.htm):
+    - "Often a communication with the same argument list (with the exception of the buffer contents) is repeatedly
+      executed within the inner loop of a parallel computation. In such a situation, it may be possible to optimize the
+      communication by binding the list of communication arguments to a persistent communication request once and then
+      repeatedly using the request to start and complete operations."
+    - MPI_START: "The request becomes active once the call is made. [...] The communication buffer should not be
+      modified after the call, and until the operation completes."
+  - **Source:** NCCL User Guide, CUDA Stream Semantics
+    (https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/streams.html): "NCCL calls are associated to a
+    stream which is passed as the last argument of the collective communication function. The NCCL call returns when
+    the operation has been effectively enqueued to the given stream, or returns an error. The collective operation is
+    then executed asynchronously on the CUDA device."
+  - **Change:** a plan is a persistent request. Each execution's start is MPI_START, enqueued on the program's device
+    stream at its place in program order. A landing's interval begins at its execution's start.
 - **Open implementations of this kind of solver** (read 2026-11-06; each at a pinned commit):
   - **Dagor Engine daFrameGraph (BSD-3-Clause).** It places resources on a ring of frames, by arc disjointness.
     GaijinEntertainment/DagorEngine @ 2baf19472d60b96b437b2f9e549a3a6c8958cfd8,
