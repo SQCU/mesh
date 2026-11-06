@@ -264,11 +264,14 @@ struct cursor { uint64_t execution,round,at,end; uint32_t copy,padding; };
    and generation; `owner` gone.  Why: point 5, "These go: `mesh_claim_take`'s first fit and the claim's head record";
    the root's generation is minted once a program from hdr `serial` (mesh.h struct mesh_program), so (place,
    generation) names one plan of one program as (head, owner, generation) named one claim's.  What must stay: the
-   progress thread's alone */
+   progress thread's alone.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K1 and G4;
+   "The revisions of 55b9cbad"): `generation` the operand's `published` (mesh.h struct mesh_algo) as its load read it;
+   `next` gone, the port's flows held by place (struct port_plans `loaded`).  What must stay: the progress thread's
+   alone */
 enum { FLOW_SERVING, FLOW_CANCELLED };
 struct flow_set { uint32_t set,size; uint64_t first; };
 struct flow {
-  struct flow *next;
   int state,ledger;
   uint32_t function,lanes,carrying[2],copies;
   uint64_t generation,send_count,receive_count,sent,landed,posted;
@@ -314,9 +317,19 @@ struct flow {
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PQ): `at` and `joined` gone with the
    one channel for every plan, each lane's place now in each plan's own queue (struct flow `at`).  Why:
    design/aot-compilation-change-request.md, appendix item 2, "This replaces ... the one channel for every plan (the
-   implementation's CH2, with M3's room)".  What must stay: the progress thread's alone */
-static struct port_plans { struct flow *loaded; uint64_t plans,walked; int walk,ended; struct flow *current[2][MESH_LINK_LANES]; }
-  port_plans[MESH_PORTS];
+   implementation's CH2, with M3's room)".  What must stay: the progress thread's alone.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K1: "the
+   held-flow search (mesh-flow.c 1696): a flow table indexed by place"; "The revisions of 55b9cbad"), reversing
+   `loaded` as a list in load order, which the walk searched for a flow of (place, generation): `loaded` a table of
+   `places` flows indexed by place, entry k the port's flow of the plan at place k among the operand's `plans` (mesh.h
+   struct mesh_algo), NULL where it holds none, grown to the operand's `plans` where a walk meets a place past it
+   (plans_walk), in this child's memory.  One flow a place: a flow is held only while the operand of its generation is
+   published, since no release frees an operand while a port holds a plan of it (mesh-dataflow.h
+   mesh_retired_release), and the walk ends each flow that no longer stands before it loads any.  Why: K1, as
+   MSCCL-IR's steps name their dependences by index (`depid`, `deps`); A9, "searches for nothing".  What must stay: the
+   progress thread's alone */
+static struct port_plans { struct flow **loaded; uint32_t places; uint64_t plans,walked; int walk,ended;
+  struct flow *current[2][MESH_LINK_LANES]; } port_plans[MESH_PORTS];
 
 /* tag pre-return-20261103 rdma/mesh-link.c:56-65 port_halt (3f72cbde, 306b22be), verbatim but not static */
 /* design/transport.md: a port halted from any thread (a peer interface's termination heard, a provider's fault
@@ -428,10 +441,13 @@ static void count_raise(_Atomic uint64_t *count,uint64_t final){
    map's records.  2026-11-04, owner B4: and its sequence words (plan_sequences_inside), which every port reads, so a
    plan whose words lie outside the region is refused (link_prepare, EINVAL) and names no count to cancel
    (plan_cancel), as one whose entries do.  What must stay: the entries' test as it was.
-   2026-11-05 (CH): the sequence words' test gone with the words */
-static int plan_inside(const struct mesh_state *words){
-  return words->hops<=M->length && words->entries<=(M->length-words->hops)/sizeof(struct mesh_hop);
-}
+   2026-11-05 (CH): the sequence words' test gone with the words.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2: "`plan_inside`
+   and `deliveries>M->length` (mesh-flow.c 715, 719, 2053); link_prepare's room and entry tests"; "Answered in the
+   documents", "Run-time checks left"; "The revisions of 55b9cbad"): plan_inside is removed, with its tests in
+   link_prepare and plan_cancel.  Its producer, one hop up, is mesh-collective.c mesh_plan (sub-agent C's): a plan's
+   entries are laid out in its state section (plan_layout, `hops`), placed in the region's pages by the one allocation,
+   `entries` its template's entries times `copies` u.  What must stay: nothing of it */
 /* whether the plan read at claim head `head` stands there still: the head's `owner` word and generation (its page
    entry's `device`) as read before, and a plan standing at it (mesh-dataflow.h mesh_head_state: `owner` not 0,
    `closed` 0 and its publication `state` not 0, each read with acquire) in the same state section.  It is D3's head
@@ -448,9 +464,20 @@ static int plan_inside(const struct mesh_state *words){
    which a walk ends a loaded plan the program retired, alone (its `closed`) or with itself (the root's), or a
    released root's next program replaced.  Why: point 5, "Nothing walks heads to find it"; the root's generation is
    minted once a program from hdr `serial` (mesh.h struct mesh_program), so a place a later program's plan holds reads
-   another.  What must stay: the plan read again after the announcement, before the load reads it */
+   another.  What must stay: the plan read again after the announcement, before the load reads it.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"): the operand's `published` (mesh.h struct mesh_algo, acquire) `generation`, then the plan
+   standing at place `function` (mesh_algo_plan) the same state section, where the root's `generation` was read after
+   the plan.  `published` is compared first, the implementer's (sub-agent D's) order: a place a load or a walk read of
+   generation `generation` is then read only in that operand, which no release frees while this port announces it or
+   holds a plan of it (mesh-dataflow.h mesh_retired_release), where read after it a place of a next operand with fewer
+   plans would be read past its table (mesh_algo_plan tests no bound: K2).  Why: G4, the generation the ports announce
+   is `published` (mesh.h struct mesh_port_info `prepared`); "The publication's readers": the ports read nothing of an
+   operand before `published` (acquire).  What must stay: the operand read again after the announcement, before the
+   load reads the plan */
 static int plan_stands(uint32_t function,uint64_t generation,const struct mesh_state *words){
-  return mesh_program_plan(M,function)==words && mesh_program(M)->generation==generation;
+  return atomic_load_explicit(&mesh_algo(M)->published,memory_order_acquire)==generation &&
+    mesh_algo_plan(M,function)==words;
 }
 /* a lane's cursor at the next execution, on that execution's copy's records on the lane (`first` the lane's u + 1
    bounds, struct flow) */
@@ -705,21 +732,27 @@ static void flow_sets_free(struct flow *f){
    this cable's own (S7′).  Why: design/aot-compilation-change-request.md, appendix item 5, "One permutation of the
    whole set per execution"; "A draw for each cable departs from the counter."  What must stay: as above.
    2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW): no EALREADY; the refusal of a
-   load after the run began is gone (its note, below).  What must stay: the other refusals */
+   load after the run began is gone (its note, below).  What must stay: the other refusals.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
+   "`plan_inside` and `deliveries>M->length` (mesh-flow.c 715, 719, 2053); link_prepare's room and entry tests";
+   "Answered in the documents", "Run-time checks left": "mesh-flow.c link_prepare's room and entry tests check facts
+   the plan fixes at compile time, which the compile-time requirement forbids.  They go in the next unit"; "The
+   revisions of 55b9cbad"): the EINVALs go, each a test of a fact mesh_plan fixes, its producer one hop up
+   mesh-collective.c mesh_plan (sub-agent C's): `copies` u dividing `entries` (it writes `entries` as the template's
+   times u), the entries and the deliveries' queue inside the region (plan_layout lays both in the plan's state
+   section, placed in the region's pages), `room` not 0 (plan_graph's ENOMEM where a lag is 0), an entry's `bytes` 1 to
+   block x pgsz (min(block x pgsz, the range's bytes left), the range's bytes above its page's start), a field below 63
+   and even (2 x (field mod 32)) or MESH_ABSENT for a send of a supplied word, a receive's `count` its range's count
+   word and its `pages` the pages this node receives of the range (at least 1).  Kept, each run-time state or a
+   device's report: the map read and its serial (ESTALE, the reader's errors), a cable's queue pairs past the lanes a
+   link has (EPROTO, the map's and the provider's), no link of rate (EHOSTUNREACH, the map's cables), a hop past a
+   lane's room (EMSGSIZE, the device's queue), and ENOMEM.  What must stay: the kept refusals */
 static int link_prepare(struct port *port,struct flow *f,struct mesh_state *words){
   struct link *l=&port->link;
-  /* the plan's state, written before it stands and never again (mesh.h, "Several plans", steps 3 and 5): its copies
-     divide its entries, which lie inside the region */
   const uint32_t copies=words->copies;
   const uint64_t entries=words->entries;
-  if(!copies || entries%copies || !plan_inside(words))return EINVAL;
-  /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PQ): the plan's delivered calls'
-     queue, a view of its state section (struct flow `deliveries`), refused EINVAL where it lies outside the region, as
-     its entries are (plan_inside).  What must stay: nothing read outside the region */
-  if(!words->room || words->deliveries>M->length ||
-     words->room>(M->length-words->deliveries)/sizeof(struct mesh_delivery))return EINVAL;
   f->deliveries=(const struct mesh_delivery *)(const void *)((const char *)M+words->deliveries);f->room=words->room;
-  const uint64_t n=entries/copies,width=(uint64_t)copies+1,page=page_bytes();
+  const uint64_t n=entries/copies,width=(uint64_t)copies+1;
   const struct mesh_hop *list=mesh_hops(M,words);
   struct mesh_record *records=NULL;uint64_t count=0,serial=0;
   int error=map_read(&records,&count,&serial);
@@ -766,14 +799,14 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      unposted: its frames past the lane's receive room (lane_reset's frame_capacity) or past its SEND gate's
      (link_connect), EMSGSIZE.  The bytes' EINVAL is design/compilation-coordination.md, B1-1 ("a hop whose `bytes`
      is 0 or past a page is EINVAL").  2026-11-04, owner B1 (T7): every unit a page (page_bytes()) and the frames test
-     one page's for every lane before; what must stay: no hop assigned to a lane that cannot hold it */
+     one page's for every lane before; what must stay: no hop assigned to a lane that cannot hold it.
+     2026-11-05 ("Review of 4e78f6f4 against the requirement lines", K2; "The revisions of 55b9cbad"): the bytes'
+     EINVAL goes, a hop's `bytes` 1 to block x pgsz being mesh_plan's (link_prepare's note); EMSGSIZE stays, a lane's
+     room the device's.  What must stay: no hop assigned to a lane that cannot hold it */
   uint64_t lane_units[2][MESH_LINK_LANES]={{0}};
   for(int d=0;d<2;d++){
     if(!units[d])continue;
-    for(uint64_t k=0;k<units[d];k++){
-      bytes[k]=list[pick[d][k]].bytes;
-      if(!bytes[k] || bytes[k]>page){error=EINVAL;goto failed;}
-    }
+    for(uint64_t k=0;k<units[d];k++)bytes[k]=list[pick[d][k]].bytes;
     if(!(assigned[d]=malloc(units[d]*sizeof *assigned[d]))){error=ENOMEM;goto failed;}
     if(isinf(mesh_graph_list_schedule(links,rate,units[d],bytes,assigned[d],carried))){error=EHOSTUNREACH;goto failed;}
     for(uint64_t k=0;k<units[d];k++){
@@ -926,14 +959,10 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
     const uint32_t q=assigned[d][k];
     if(q==UINT32_MAX && (set_of[d][k]==UINT64_MAX || !kept[d][set_of[d][k]]))continue;
     const struct mesh_hop *hop=list+pick[d][k];
-    /* a field the shifts below cannot hold, or a receive of no pages, is none a plan writes: refused (EINVAL).
-       2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", RC): a receive with no count word
-       too, every receive naming its range's from 114 (mesh-collective.c plan_layout), the word its round rule reads
-       (link_receive_drain).  What must stay: as above */
-    if(((d==MESH_RECEIVE || hop->field!=MESH_ABSENT) && (hop->field>62 || hop->field&1)) ||
-       (d==MESH_RECEIVE && (!hop->count || !hop->pages))){
-      error=EINVAL;goto failed;
-    }
+    /* 2026-11-05 ("Review of 4e78f6f4 against the requirement lines", K2; "The revisions of 55b9cbad"): the refusal of
+       a field the shifts cannot hold and of a receive with no count word or no pages goes (link_prepare's note), and a
+       receive's `count` is its range's count word as given, every receive naming its range's from 114
+       (mesh-collective.c mesh_plan), where a 0 named none.  What must stay: each record's words its hop's */
     /* the span its hop's `bytes` from the start of its page (T7; mesh.h struct mesh_hop: "A hop moves its `bytes` from
        the start of that page or into it") */
     const struct ibv_sge span=wire_span(&port->device,(uint64_t)hop->page*M->pgsz,hop->bytes);
@@ -946,7 +975,7 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
         .send_flags=IBV_SEND_SIGNALED};
     } else {
       struct prepared_receive *record=f->receives+at;
-      *record=(struct prepared_receive){.span=span,.word=region_word(hop->word),.count=hop->count?region_word(hop->count):NULL,
+      *record=(struct prepared_receive){.span=span,.word=region_word(hop->word),.count=region_word(hop->count),
         .field=hop->field,.pages=hop->pages,.copy=(uint32_t)(pick[d][k]/n),.flow=f};
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
     }
@@ -1090,7 +1119,12 @@ failed:
    announcement is the root's `generation` in the port's `prepared`, which the root's release reads (mesh-dataflow.h
    mesh_retired_release: kept while a port's `prepared` is its generation), and step 2 reads the root again
    (plan_stands).  Why: point 5, "Release at retirement stays deferred reclamation (RCU)"; "Nothing walks heads to
-   find it".  What must stay: steps 1, 2, 4 and 5 */
+   find it".  What must stay: steps 1, 2, 4 and 5.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4 and K1; "The
+   revisions of 55b9cbad"): `generation` the operand's `published` (mesh.h struct mesh_algo), which step 1 announces
+   in the port's `prepared` and step 2 reads again (plan_stands); `loaded` the port's table entry of place `function`
+   (struct port_plans), NULL where the table could not grow to it, which is refused ENOMEM as a flow that cannot be
+   allocated is.  What must stay: steps 1, 2, 4 and 5 */
 static int plan_load(struct port *port,uint32_t function,uint64_t generation,struct mesh_state *words,
                      struct flow **loaded){
   struct mesh_port_info *info=&mesh_links(M)[port->index].port;
@@ -1099,7 +1133,7 @@ static int plan_load(struct port *port,uint32_t function,uint64_t generation,str
   atomic_thread_fence(memory_order_seq_cst);
   int error=EAGAIN;
   if(plan_stands(function,generation,words)){
-    struct flow *f=calloc(1,sizeof *f);
+    struct flow *f=loaded?calloc(1,sizeof *f):NULL;
     error=f?link_prepare(port,f,words):ENOMEM;
     if(error){
       free(f);
@@ -1226,8 +1260,9 @@ static struct flow *lane_take(struct port_plans *own,int d,uint32_t q,int *again
   const uint64_t delivered=atomic_load_explicit(&M->delivered,memory_order_acquire);
   struct flow *least=NULL;
   const struct mesh_delivery *head=NULL;
-  for(struct flow *f=own->loaded;f;f=f->next){
-    if(f->state==FLOW_CANCELLED || !(f->carrying[d]&lane))continue;
+  for(uint32_t k=0;k<own->places;k++){
+    struct flow *f=own->loaded[k];
+    if(!f || f->state==FLOW_CANCELLED || !(f->carrying[d]&lane))continue;
     const uint64_t count=atomic_load_explicit(&f->words->delivered,memory_order_acquire),n=f->cursor[d][q].execution;
     uint64_t *at=&f->at[d][q];
     while(*at<count && f->deliveries[*at%f->room].end<=n)++*at;
@@ -1329,7 +1364,11 @@ static struct flow *lane_take(struct port_plans *own,int d,uint32_t q,int *again
    page of round j − 1 has landed, its own among them.  The test holds at any distance and adds no word"; "The phase
    fields stay, for C3.7's readers" (the landing's XOR stays).  A cancellation's raise of the count (count_raise) passes
    it, and a cancelled plan is served no more (FLOW_CANCELLED).  What must stay: the XOR before the add, both after
-   the poll's acquire; the record's `round` stored as it is posted */
+   the poll's acquire; the record's `round` stored as it is posted.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2; "The
+   revisions of 55b9cbad"): the landing's add has no test of the record's `count` against NULL, which "A receive with
+   no count (a relay's own ...)" above named: every receive names its range's count word from 114 (mesh-collective.c
+   mesh_plan, sub-agent C's), as the round rule below already reads it.  What must stay: as above */
 static __attribute__((always_inline)) inline int link_receive_drain(struct port *port,uint32_t served,int traced,int *again){
   struct link *l=&port->link;
   struct port_plans *own=port_plans+port->index;
@@ -1355,7 +1394,7 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
       const uint64_t polled=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
       const uint64_t round=record->round;
       atomic_fetch_xor_explicit(record->word,UINT64_C(1)<<(record->field+(round&1)),memory_order_release);
-      if(record->count && atomic_fetch_add_explicit(record->count,1,memory_order_release)+1==(round+1)*record->pages)
+      if(atomic_fetch_add_explicit(record->count,1,memory_order_release)+1==(round+1)*record->pages)
         os_sync_wake_by_address_all(record->count,sizeof *record->count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
       struct lane_state *state=l->lane+lane;
       state->got++;state->frames_retired+=frames_of(record->span.length).n;f->landed++;
@@ -1625,7 +1664,7 @@ static void plan_end(struct port *port,struct flow *f,uint32_t served){
   for(uint64_t r=0;r<f->receive_count;r++){
     const struct prepared_receive *record=f->receives+r;
     const uint64_t serves=copy_executions(executions,f->copies,record->copy);
-    if(record->count)count_raise(record->count,(uint64_t)record->pages*serves);
+    count_raise(record->count,(uint64_t)record->pages*serves);
   }
   /* design/prepared-machine.md#M27 */
   for(int d=0;d<2;d++){
@@ -1650,12 +1689,14 @@ static void plan_end(struct port *port,struct flow *f,uint32_t served){
    of it: link_prepare).  2026-11-04, owner B1 (Q5): every plan the port holds, where it was the port's one plan; what
    must stay: no plan served on a link that serves no lane.  2026-11-05 ("The revisions of f3f7cf46", SW): no
    EALREADY; a load of a plan whose serial the loss moved is refused ESTALE (link_prepare) */
+/* 2026-11-05 ("Review of 4e78f6f4 against the requirement lines", K1; "The revisions of 55b9cbad"): every flow of the
+   port's table by place (struct port_plans `loaded`), where the list was.  What must stay: as above */
 static void link_close(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
-  while(at->loaded){
-    struct flow *f=at->loaded;
-    at->loaded=f->next;
-    plan_end(port,f,served);
+  for(uint32_t k=0;k<at->places;k++){
+    struct flow *f=at->loaded[k];
+    at->loaded[k]=NULL;
+    if(f)plan_end(port,f,served);
   }
   at->walk=1;
 }
@@ -1678,25 +1719,41 @@ static void link_close(struct port *port,uint32_t served){
    serialized operand's place is a constant the region's layout names once ... Nothing walks heads to find it";
    design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "the bridge reads the
    serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: ended plans ended
-   before any load; nothing loaded once `ended`; a refusal by an earlier child standing */
+   before any load; nothing loaded once `ended`; a refusal by an earlier child standing.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K1: "the
+   held-flow search (mesh-flow.c 1696): a flow table indexed by place", and G4; "The revisions of 55b9cbad"),
+   reversing the search of the loaded list for a flow of (k, generation): the flow at place k is the port's table entry
+   k (struct port_plans `loaded`), read by index; a plan at place k is loaded where that entry is NULL, into it
+   (place_at, which grows the table to the operand's `plans`), its generation the operand's `published` (acquire),
+   read after the plan (plan_from).  An entry left after the ending pass stands, so it is the plan at k of the operand
+   published: no release frees an operand while this port holds a plan of it (mesh-dataflow.h mesh_retired_release).
+   What must stay: ended plans ended before any load; nothing loaded once `ended`; a refusal by an earlier child
+   standing */
+/* entry k of the port's table by place, the table grown where k is past it to the operand's `plans`, at least k + 1
+   (realloc, its new entries NULL); NULL where it cannot grow (plan_load refuses the plan ENOMEM) */
+static struct flow **place_at(struct port_plans *at,uint32_t k){
+  if(k>=at->places){
+    const uint32_t plans=mesh_algo(M)->plans,places=plans>k?plans:k+1;
+    struct flow **grown=realloc(at->loaded,(size_t)places*sizeof *grown);
+    if(!grown)return NULL;
+    memset(grown+at->places,0,(size_t)(places-at->places)*sizeof *grown);
+    at->loaded=grown;at->places=places;
+  }
+  return at->loaded+k;
+}
 static void plans_walk(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
-  struct flow **tail=&at->loaded;
-  while(*tail){
-    struct flow *f=*tail;
-    if(plan_stands(f->function,f->generation,f->words)){tail=&f->next;continue;}
-    *tail=f->next;
+  for(uint32_t k=0;k<at->places;k++){
+    struct flow *f=at->loaded[k];
+    if(!f || plan_stands(f->function,f->generation,f->words))continue;
+    at->loaded[k]=NULL;
     plan_end(port,f,served);
   }
   struct mesh_state *words;
   for(uint32_t k=0;!at->ended && (words=plan_from(&k));k++){
-    const uint64_t generation=mesh_program(M)->generation;
-    if(atomic_load_explicit(&words->refused[port->index],memory_order_relaxed))continue;
-    const struct flow *held=at->loaded;
-    while(held && (held->function!=k || held->generation!=generation))held=held->next;
-    if(held)continue;
-    struct flow *f=NULL;
-    if(!plan_load(port,k,generation,words,&f)){*tail=f;tail=&f->next;}
+    if((k<at->places && at->loaded[k]) || atomic_load_explicit(&words->refused[port->index],memory_order_relaxed))continue;
+    const uint64_t generation=atomic_load_explicit(&mesh_algo(M)->published,memory_order_acquire);
+    plan_load(port,k,generation,words,place_at(at,k));
   }
 }
 
@@ -1816,7 +1873,12 @@ static int link_run(struct port *port,uint32_t served){
   if(at->ended)return 0;
   const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
   int traced=0;
-  for(struct flow *f=at->loaded;f;f=f->next){
+  /* 2026-11-05 ("Review of 4e78f6f4 against the requirement lines", K1; "The revisions of 55b9cbad"): the port's
+     flows read from its table by place (struct port_plans `loaded`), where they were a list.  What must stay: as
+     above */
+  for(uint32_t k=0;k<at->places;k++){
+    struct flow *f=at->loaded[k];
+    if(!f)continue;
     if(f->state!=FLOW_CANCELLED && f->words->serial!=serial){
       f->state=FLOW_CANCELLED;lanes_drop(at,f);
       if(f->posted!=f->sent+f->landed)plan_outstanding(port,f,f->posted-f->sent-f->landed,served);
@@ -1826,7 +1888,7 @@ static int link_run(struct port *port,uint32_t served){
   if(at->ended)return 0;
   int busy=0;
   if(!link_receive_progress(port,served,traced,&busy) || !link_send_progress(port,served,traced,&busy))return 0;
-  for(struct flow *f=at->loaded;f;f=f->next)busy|=f->posted!=f->sent+f->landed;
+  for(uint32_t k=0;k<at->places;k++)busy|=at->loaded[k] && at->loaded[k]->posted!=at->loaded[k]->sent+at->loaded[k]->landed;
   for(int d=0;d<2;d++)for(uint32_t q=0;q<MESH_LINK_LANES;q++)busy|=served>>q&1 && at->current[d][q];
   return busy;
 }
@@ -2048,10 +2110,13 @@ static void plan_cancel(struct mesh_state *words,uint32_t from){
       os_sync_wake_by_address_all(&edge[e].count,sizeof edge[e].count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
     }
   }
+  /* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
+     "`plan_inside` ... (mesh-flow.c ... 2053)"; "The revisions of 55b9cbad"): the return where `copies` was 0 or did
+     not divide `entries` or the entries lay outside the region goes, and each receive's count word is raised as given,
+     where a 0 named none: facts mesh-collective.c mesh_plan fixes (plan_inside's note; link_prepare's).  What must
+     stay: each count only raised */
   const uint32_t copies=words->copies;
-  const uint64_t entries=words->entries;
-  if(!copies || entries%copies || !plan_inside(words))return;
-  const uint64_t executions=atomic_load_explicit(&words->executions,memory_order_acquire),n=entries/copies;
+  const uint64_t executions=atomic_load_explicit(&words->executions,memory_order_acquire),n=words->entries/copies;
   const struct mesh_hop *list=mesh_hops(M,words);
   for(uint32_t c=0;c<copies;c++){
     const uint64_t serves=copy_executions(executions,copies,c);
@@ -2059,8 +2124,7 @@ static void plan_cancel(struct mesh_state *words,uint32_t from){
     for(uint64_t j=c*n;j<c*n+n;j++){
       const uint32_t direction=list[j].direction,node=list[j].node;
       if(direction!=MESH_RECEIVE || (from!=UINT32_MAX && node!=from))continue;
-      const uint64_t count=list[j].count,pages=list[j].pages;
-      if(count)count_raise(region_word(count),pages*serves);
+      count_raise(region_word(list[j].count),(uint64_t)list[j].pages*serves);
     }
   }
 }
@@ -2081,12 +2145,18 @@ static void plan_cancel(struct mesh_state *words,uint32_t from){
    or standing, each read at its place, the root's `table` word k for k below its `plans` (mesh.h struct
    mesh_program), where it was each claim head's publication `state`.  Why: point 5: the claim's head record goes, and
    "Release at retirement stays deferred reclamation (RCU)", whose release reads every plan's `held`
-   (mesh-dataflow.c mesh_holding_retained).  What must stay: on the parent's thread, the releaser's */
+   (mesh-dataflow.c mesh_holding_retained).  What must stay: on the parent's thread, the releaser's.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"): every plan of the operand (mesh.h struct mesh_algo) not yet released, its `published`
+   (acquire) not 0 and not its `released`, closed or standing, each at the operand's `table` word k for k below its
+   `plans` (mesh_algo_state), where the root's `owner` was read.  What must stay: on the parent's thread, the
+   releaser's */
 static void held_clear(uint64_t ports){
-  struct mesh_program *program=mesh_program(M);
-  if(!atomic_load_explicit(&program->owner,memory_order_acquire))return;
-  for(uint32_t k=0;k<program->plans;k++)
-    atomic_fetch_and_explicit(&mesh_program_state(M,program,k)->held,~ports,memory_order_release);
+  const struct mesh_algo *algo=mesh_algo(M);
+  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  if(!published || atomic_load_explicit(&algo->released,memory_order_relaxed)==published)return;
+  for(uint32_t k=0;k<algo->plans;k++)
+    atomic_fetch_and_explicit(&mesh_algo_state(M,algo,k)->held,~ports,memory_order_release);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:619-654 streams_open (11807bec), reduced to what it is under the page lists:
    the tag's streams made new and live for a new pairing; here the port's serving opened, as its lanes connect and
