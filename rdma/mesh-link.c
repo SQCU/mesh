@@ -362,11 +362,22 @@ static void region_adopt(void){
      does not hold the region (mesh_holds, by its pid and the root's `start`), has that owner retired (mesh-dataflow.h
      mesh_retire: the root closed); the release below is the root's.  Why: point 5, "These go: `mesh_claim_take`'s
      first fit and the claim's head record"; "Release at retirement stays deferred reclamation (RCU)".  What must
-     stay: the gone owner retired before the release below */
-  struct mesh_program *program=mesh_program(M);
-  const uint64_t owner=atomic_load_explicit(&program->owner,memory_order_acquire);
-  if(owner && !atomic_load_explicit(&program->closed,memory_order_acquire) && !mesh_holds((pid_t)(uint32_t)owner,program->start))
-    mesh_retire(M,owner);
+     stay: the gone owner retired before the release below.
+     2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+     revisions of 55b9cbad"), reversing the root's `owner`, `closed` and `start`: the operand (mesh.h struct mesh_algo),
+     where it is published and not retired (`published` not 0 and not `retired`, each acquire), has its holder retired
+     (mesh-dataflow.h mesh_retire(M, hdr `client`)) where the holder, hdr `client` (its low 32 bits the pid) and
+     `client_start`, read after the publication is acquired, does not hold the region (mesh_holds) and is not this
+     bridge.  Why: G4, "the holder the heartbeat already knows, reused as the failport's code is" (mesh-heartbeat.c
+     replace_turn reads the same words; mesh-records.c clients_turn).  What must stay: the gone holder retired before
+     the release below */
+  const struct mesh_algo *algo=mesh_algo(M);
+  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
+  if(published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published &&
+     (pid_t)(uint32_t)client!=getpid() &&
+     !mesh_holds((pid_t)(uint32_t)client,atomic_load_explicit(&M->client_start,memory_order_acquire)))
+    mesh_retire(M,client);
   /* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.4; the contract, "The program's claim and
      its sections": mesh_retired_release releases each closed claim whose generation no port's `prepared` holds, after
      a seq_cst fence): every port's `prepared` is 0 above, so every closed claim is released here, after
