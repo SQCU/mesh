@@ -159,11 +159,8 @@ uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,str
 
 int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
   struct mesh_cable cables[MESH_PORTS];
-  const uint32_t joined=mesh_cables(a,b,cables);
-  uint64_t slowest=0;
-  for(uint32_t c=0;c<joined;c++)if(cables[c].bandwidth && (!slowest || cables[c].bandwidth<slowest))slowest=cables[c].bandwidth;
-  if(joined)*beta=slowest?8e9/(double)slowest:0;
-  return (int)joined;
+  (void)beta;
+  return (int)mesh_cables(a,b,cables);
 }
 
 static int mesh_view_copy(struct mesh_ctx *c,uint64_t deadline,struct mesh_record *r,uint32_t *count,
