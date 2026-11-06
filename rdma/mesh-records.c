@@ -115,8 +115,28 @@ void map_adopt(void){
      pages-rulings-coordination.md, R2): where the serial moved, the plan made from the earlier bridge's map no longer
      stands, so its receives not landed are cancelled (mesh-flow.c plan_stale), after the write's closing
      notification, on this thread (region_adopt's, main's before the event loop).  What must stay: the call after the
-     serial's move and its closing notification */
-  if(moved)plan_stale();
+     serial's move and its closing notification
+     2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "A plan then stands while its view
+     does, and its view while the sequencer's map does (D.3.6)"; mesh-bridge.h plan_stale: "called by mesh-records.c
+     view_install alone ... a move of this node's own map ends no plan"; "The revisions of 14b9a757", A7), reversing
+     the call above on the map's move: the earlier bridge's view ends with its process (A7: "A process is one start of a
+     bridge.  A bridge started again is a new process"; "This algorithm does not tolerate the failure of the
+     sequencer"), so the view's records are taken as this bridge's, none installed, as the map's are: hdr `view_nodes`
+     and `view` 0, under `view_map` (mesh_notify before and after), `view` this bridge's counter, 0 before its first
+     view (A7: "A bridge's counter is the identifier of the last view it installed, 0 before its first").  Then
+     plan_stale, the coordinator's ruling on 1acf8b31 ("at adoption ... this process's installed view is none.  Store
+     hdr `view` = 0 and `view_nodes` = 0 under `view_map` (mesh_notify before and after), then call plan_stale(), so
+     every plan of the old process's view ends as map_adopt's serial move ended them"): every plan of the earlier view
+     has a `serial` that is not 0, so each is cancelled whole, and mesh_nodes_read reads ESTALE until this process
+     installs its first view.  This is plan_stale's one call beside view_install's (mesh-bridge.h: "view_install
+     alone"): an installation of no view, the process's start.  What must stay: the stores before plan_stale, both
+     before island_set, so the first view this bridge creates or installs starts from its own counter; on main's thread
+     before the event loop */
+  mesh_notify(&M->view_map);
+  atomic_store_explicit(&M->view_nodes,0,memory_order_relaxed);
+  atomic_store_explicit(&M->view,0,memory_order_relaxed);
+  mesh_notify(&M->view_map);
+  plan_stale();
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ2): hdr `delivered` stored 0 at the
      bridge's start, where this bridge's nextdeliver is 1 (Défago et al., Fig. 5, "Initialization: nextdeliver := 1"),
      so a port reads no count an earlier bridge left.  What must stay: before the event loop */
@@ -196,8 +216,14 @@ static void map_put(const struct mesh_record *record){
        the plan made from the map before it has its receives not landed cancelled (mesh-flow.c plan_stale), after the
        write's closing notification, on this thread (the bridge parent's one event-loop thread: every caller of map_put
        is, mesh-flow.c plan_cancel's note).  RFC 2328 section 16: routes come from one version of the database.  What
-       must stay: the call after the serial's move and its closing notification */
-    if(moved)plan_stale();
+       must stay: the call after the serial's move and its closing notification
+       2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on
+       the view's map ... A plan then stands while its view does, and its view while the sequencer's map does
+       (D.3.6)"; mesh-bridge.h plan_stale: "called by mesh-records.c view_install alone ... a move of this node's own
+       map ends no plan (its link losses cancel their receives as before)"; "The revisions of 14b9a757", A7), reversing
+       the call above: a plan is made on its view's records, not on this map, so this map's move ends none.  The
+       sequencer's map's move creates a view (island_set, view_create), whose installation ends the old view's plans
+       at every member.  What must stay: island_set after every move */
     /* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q3 and Q4): the island of the map as
        written (island_set), after the cancellation */
     /* 2026-11-05 (design/aot-compilation-change-request.md A7, "The membership service is the sequencer": "It also
@@ -272,8 +298,18 @@ static uint64_t seqnum=1;
    struct mesh_record `view`); `sequencer` and `boot` the process that created it, a bridge's node id and its start
    (hdr `boot`): "A process is one start of a bridge.  A bridge started again is a new process: "In Isis [RB91] a
    process recovering after a crash is assigned a different identifier (using a new incarnation number)"" (A7).  0 at
-   this bridge's start, a new process's.  What must stay: `view` only rising (Property 3.2, Local Monotonicity) */
-static struct installed { uint64_t view,boot; uint32_t sequencer; } installed;
+   this bridge's start, a new process's.  What must stay: `view` only rising (Property 3.2, Local Monotonicity)
+   2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06; mesh.h hdr `view`: "the
+   identifier of the view this node's bridge installed (mesh-records.c view_install), 0 before its first"; "The
+   revisions of 14b9a757", A7): `view` goes from this struct; the identifier is hdr `view`, which view_install stores
+   under `view_map` and every reader here takes (view_installed), so the bridge's counter has one store, the region's,
+   which programs and ports read too (metal-microbench AGENTS.md: "One canonical store per concept").  map_adopt sets
+   it 0 at this bridge's start on an adopted region, as a made region holds 0.  What must stay: the counter only rising
+   within this bridge's life (Property 3.2, Local Monotonicity); `sequencer` and `boot` the creating process */
+static struct installed { uint64_t boot; uint32_t sequencer; } installed;
+/* the identifier of the view installed here, this bridge's counter (hdr `view`; the parent its one writer, so a
+   relaxed load reads its own last store) */
+static uint64_t view_installed(void){ return atomic_load_explicit(&M->view,memory_order_relaxed); }
 /* the messages this node has passed through Fig. 5's delivery in every view it installed, each delivered into its
    plan's queue or discarded (§5.2.4), hdr `delivered`'s value and each queue entry's `sequence`: the message's place
    in this node's delivery order, which within a view is its sn(m)'s order and across views Local Monotonicity's.  Why:
@@ -461,7 +497,7 @@ static void order_take(const struct mesh_order *order){
      messages of the view it has installed (Sending View Delivery)", "(Sending View Delivery) If a process p receives
      message m in view V, and some process q (possibly p = q) sends m in view V′, then V = V′" (Chockler, Keidar and
      Vitenberg, Property 4.3).  What must stay: the ORDER appended in arrival order */
-  if(island.self==UINT32_MAX || order->view!=installed.view)return;
+  if(island.self==UINT32_MAX || order->view!=view_installed())return;
   if(pendings==pending_room){
     const size_t room=2*pending_room+1;
     struct pending *grown=realloc(pending,room*sizeof *grown);
@@ -539,11 +575,11 @@ static void order_relay(const struct mesh_order *order){
    sequencer's map moves, it numbers no further message of the old view"; Sending View Delivery (Property 4.3), the
    message received in the view it was sent in.  What must stay: first in, first out */
 static void order_sequence(const struct mesh_order *submission){
-  if(!installed.view || submission->view!=installed.view || installed.sequencer!=M->node || installed.boot!=M->boot){
+  if(!view_installed() || submission->view!=view_installed() || installed.sequencer!=M->node || installed.boot!=M->boot){
     mesh_say("bridge","a SUBMIT of plan (%llu, %llu), executions [%llu, %llu), discarded: sent in view %llu, this sequencer's "
              "view %llu",(unsigned long long)submission->group,(unsigned long long)submission->epoch,
              (unsigned long long)submission->first,(unsigned long long)submission->end,
-             (unsigned long long)submission->view,(unsigned long long)installed.view);
+             (unsigned long long)submission->view,(unsigned long long)view_installed());
     return;
   }
   struct mesh_order order=*submission;
@@ -636,20 +672,50 @@ static void orders_deliver(uint64_t last);
    messages this node holds, in Fig. 5's order, while each is the next and at most `last`, a message not yet arrived
    never delivered, since nothing bounds when one would; and installation moves the serial D.3.6 reads, so every
    reader of a plan's serial (the ports' loads and cancellations, the start, mesh_plan's second read) ends the old
-   view's plans by its one path.  On the bridge parent's one event-loop thread, as every caller of plan_stale is */
-static void view_install(const struct mesh_group_view *v,const uint32_t *member){
+   view's plans by its one path.  On the bridge parent's one event-loop thread, as every caller of plan_stale is
+   2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "The map a view is created from
+   is the sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates
+   the view.  Every member plans on those records"; "A plan then stands while its view does, and its view while the
+   sequencer's map does (D.3.6)"; mesh.h hdr `view_map`; mesh-bridge.h plan_stale; "The revisions of 14b9a757", A7),
+   reversing "hdr `map_serial` moved, while `map` is odd" and the decision that installation moves the serial D.3.6
+   reads: `records` (the VIEW's v->records map records, mesh-map.h struct mesh_record) stored as the installed view's at
+   hdr `view_off` (mesh-map.h mesh_view_records), with `view_nodes` their count and `view` the view's identifier, under
+   `view_map` (mesh_notify before and after, as `map` is written), the bridge's counter now that one word
+   (struct installed's note); then plan_stale, which cancels every plan whose `serial` is not hdr `view`.  A plan is
+   made on those records (mesh-dataflow.c mesh_nodes_read) with the view's identifier as its `serial`, so it stands
+   only within its view, and every member's plans of one view are computed from the same records ("So every member of
+   a view computes the same plan from the same operands", F. B. Schneider, ACM Comput. Surv. 22(4), 1990).  The flush
+   above runs before the store, so the old view's messages go to the old view's plans.  What must stay: the store under
+   `view_map` before plan_stale; the flush before the store; on the parent's one thread */
+static void view_install(const struct mesh_group_view *v,const uint32_t *member,const unsigned char *records){
   int named=0;
   for(uint32_t i=0;i<v->members;i++)named|=member[i]==M->node;
-  if(!named || v->view<=installed.view)return;
-  if(installed.view && installed.sequencer==v->sequencer && installed.boot==v->boot)orders_deliver(v->last);
+  const uint64_t counter=view_installed();
+  if(!named || v->view<=counter)return;
+  if(counter && installed.sequencer==v->sequencer && installed.boot==v->boot)orders_deliver(v->last);
   pendings=0;nextdeliver=1;arrivals_held=0;
-  installed=(struct installed){.view=v->view,.boot=v->boot,.sequencer=v->sequencer};
-  mesh_notify(&M->map);
-  atomic_fetch_add(&M->map_serial,1);
-  mesh_notify(&M->map);
+  installed=(struct installed){.boot=v->boot,.sequencer=v->sequencer};
+  mesh_notify(&M->view_map);
+  memcpy(mesh_view_records(M),records,(size_t)v->records*sizeof(struct mesh_record));
+  atomic_store_explicit(&M->view_nodes,v->records,memory_order_relaxed);
+  atomic_store_explicit(&M->view,v->view,memory_order_relaxed);
+  mesh_notify(&M->view_map);
   plan_stale();
   record_changed();
 }
+/* the VIEW's payload's bytes for `members` node ids and `records` map records (mesh-bridge.h struct mesh_group_view,
+   119: the struct, the ids padded to 8 bytes, then the records), and with `records` 0 the records' offset in it; the one
+   form of its layout, which view_create writes and view_heard reads (2026-11-06, A7 corrected; "The revisions of
+   14b9a757", A7) */
+#define VIEW_BYTES(members,records) (sizeof(struct mesh_group_view)+((size_t)(members)*sizeof(uint32_t)+7)/8*8+ \
+                                     (size_t)(records)*sizeof(struct mesh_record))
+/* The VIEW within the control socket's bound (mesh-bridge.h MESH_TOPOLOGY_MESSAGE_BYTES, the largest message a port
+   takes, mesh-ports.c: a larger one loses its link, EPROTO), checked at compile time: a VIEW's members are records the
+   sequencer's map reaches and its records are that map's, each at most the map's room, MESH_MAP_ROOM (mesh-map.h
+   mesh_layout; map_put keeps no record past `map_room`).  Why: the brief's item ("Check the VIEW's size against the
+   control socket's bound"), and "Compile-time, never runtime checks" (2026-11-06, "The revisions of 14b9a757", A7) */
+_Static_assert(VIEW_BYTES(MESH_MAP_ROOM,MESH_MAP_ROOM)<=MESH_TOPOLOGY_MESSAGE_BYTES,
+               "a VIEW of the map's whole room fits a control message");
 /* The sequencer's view of the nodes its map reaches (`reached` over the map's records r[0, n), island_set's), at its
    bridge's start and at each move of its map (A7): its identifier one more than the greatest counter among its members
    (A7: "the sequencer gives a view one more than the greatest counter among its members.  So Local Monotonicity holds
@@ -658,22 +724,29 @@ static void view_install(const struct mesh_group_view *v,const uint32_t *member)
    not this process's ("When the sequencer's map moves, it numbers no further message of the old view.  Its first
    message of the new view carries the last sequence number it gave in the old one"); then Fig. 5's "Initialization:
    seqnum := 1" ("at the view's creation at the sequencer"); its first message, the VIEW, down the tree (tree_down), and
-   installed here, the sequencer a member of its own view.  ENOMEM creates no view, said: the old view stands here */
+   installed here, the sequencer a member of its own view.  ENOMEM creates no view, said: the old view stands here
+   2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "The map a view is created from
+   is the sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates
+   the view"; mesh-bridge.h struct mesh_group_view; "The revisions of 14b9a757", A7): the VIEW carries, after its
+   members' ids padded to 8 bytes (zero, calloc), `records` = n, the map's records r[0, n) as they stand at creation, in
+   the map's order (ascending node id, map_put's), and is installed here with them as at every member.  What must
+   stay: the view made after the tree it is sent down; its records the map's as it was created */
 static void view_create(const struct mesh_record *r,uint64_t n,const unsigned char *reached){
-  uint64_t greatest=installed.view;
+  uint64_t greatest=view_installed();
   uint32_t members=0;
   for(uint64_t k=0;k<n;k++)if(reached[k]){members++;if(r[k].node!=M->node && r[k].view>greatest)greatest=r[k].view;}
-  const size_t bytes=sizeof(struct mesh_group_view)+(size_t)members*sizeof(uint32_t);
-  unsigned char *message=malloc(bytes);
+  const size_t bytes=VIEW_BYTES(members,n);
+  unsigned char *message=calloc(1,bytes);
   if(!message){mesh_say("bridge","no view of map serial %llu created (ENOMEM)",(unsigned long long)atomic_load(&M->map_serial));return;}
   const struct mesh_group_view v={.view=greatest+1,.last=installed.sequencer==M->node && installed.boot==M->boot?seqnum-1:0,
-                            .boot=M->boot,.sequencer=M->node,.members=members};
+                            .boot=M->boot,.sequencer=M->node,.members=members,.records=(uint32_t)n};
   memcpy(message,&v,sizeof v);
   uint32_t *member=(uint32_t *)(void *)(message+sizeof v);
   for(uint64_t k=0,i=0;k<n;k++)if(reached[k])member[i++]=r[k].node;
+  memcpy(message+VIEW_BYTES(members,0),r,(size_t)n*sizeof *r);
   seqnum=1;
   tree_down(VIEW,message,(uint32_t)bytes);
-  view_install(&v,member);
+  view_install(&v,member,message+VIEW_BYTES(members,0));
   free(message);
 }
 /* Whether `record`, which map_put has just written into the map, has this bridge, the island's sequencer, create a
@@ -689,21 +762,28 @@ static void view_create(const struct mesh_record *r,uint64_t n,const unsigned ch
    identifier, and creates none, nor does the sequencer's own record (record_changed writes it from `installed`).
    What must stay: 0 at every node but the sequencer */
 static int view_announced(const struct mesh_record *record){
-  return island.self!=UINT32_MAX && island.self==island.sequencer && record->view>=installed.view &&
-    (record->view!=installed.view || record->view_sequencer!=installed.sequencer || record->view_boot!=installed.boot);
+  return island.self!=UINT32_MAX && island.self==island.sequencer && record->view>=view_installed() &&
+    (record->view!=view_installed() || record->view_sequencer!=installed.sequencer || record->view_boot!=installed.boot);
 }
 /* A VIEW heard from this node's parent in the island's tree (order_heard): relayed down, as an ORDER is, then
    installed here where it may be (view_install).  A payload that is not one struct mesh_group_view and its members is let
-   be */
+   be
+   2026-11-06 (119; A7 corrected; mesh-bridge.h struct mesh_group_view; "The revisions of 14b9a757", A7): the payload's
+   one shape test, as before, of its new form (VIEW_BYTES): its members and its records each within the map's room
+   (MESH_MAP_ROOM, the view's records' area, mesh-map.h mesh_layout) and its bytes exactly the struct, the padded ids
+   and the records; the records handed to view_install in place.  The implementer's (sub-agent D2's) decision: the test
+   of a message from another process is the wire's (as the members' bound was), kept and extended to the records, so a
+   store past the view's area is no fault; no other test is added.  What must stay: the relay before the
+   installation */
 static void view_heard(const struct message *heard,const unsigned char *payload){
   struct mesh_group_view v;
   if(heard->bytes<sizeof v)return;
   memcpy(&v,payload,sizeof v);
-  if(v.members>MESH_MAP_ROOM || heard->bytes!=sizeof v+(uint64_t)v.members*sizeof(uint32_t))return;
+  if(v.members>MESH_MAP_ROOM || v.records>MESH_MAP_ROOM || heard->bytes!=VIEW_BYTES(v.members,v.records))return;
   uint32_t member[MESH_MAP_ROOM];
   memcpy(member,payload+sizeof v,(size_t)v.members*sizeof *member);
   tree_down(VIEW,payload,heard->bytes);
-  view_install(&v,member);
+  view_install(&v,member,payload+VIEW_BYTES(v.members,0));
 }
 /* a synchronization edge's count taken at its sink's node (below) */
 static void count_take(const struct mesh_count *c);
@@ -824,12 +904,19 @@ static int unsent;
    place epoch - 1 (mesh_algo_state), its `closed` (acquire) and its `serial`.  Why: a message of this operand's group
    names one of its own places, which the plan fixes at every rank (struct mesh_function: function k is named (group,
    k + 1)), and any other group's is let go before any table word is read.  What must stay: the group compared before
-   any table word is read; one reading of the publication; a plan of another map serial not matched */
+   any table word is read; one reading of the publication; a plan of another map serial not matched
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-3:
+   "every field of the published operand is read through the acquired publication, never before it (McKenney and
+   Slingwine)"; mesh.h mesh_algo_standing, "read by a caller that has acquired the publication"; aot A7, corrected
+   2026-11-06; "The revisions of 14b9a757", R-3 and A7): the plan at place epoch - 1 by mesh_algo_standing (its
+   `closed`, acquire), after mesh_algo_open's acquire and the `group` read behind it, where its `closed` was read here;
+   and matched where its `serial` is the installed view's identifier (hdr `view`, view_installed), where it was this
+   node's `map_serial`: a plan's serial is the view it was made in (mesh.h struct mesh_state).  What must stay: the
+   publication acquired first, then `group`, then the table word; a plan of another view not matched */
 static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
   if(!mesh_algo_open(M) || mesh_algo(M)->group!=group)return NULL;
-  struct mesh_state *state=mesh_algo_state(M,mesh_algo(M),(uint32_t)(epoch-1));
-  return !atomic_load_explicit(&state->closed,memory_order_acquire) &&
-    state->serial==atomic_load_explicit(&M->map_serial,memory_order_relaxed)?state:NULL;
+  struct mesh_state *state=mesh_algo_standing(M,(uint32_t)(epoch-1));
+  return state && state->serial==view_installed()?state:NULL;
 }
 /* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
    "`queues_inside` (mesh-records.c 958, 1170)"; "Answered in the documents", "Run-time checks left": "mesh-records.c
@@ -842,10 +929,18 @@ static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
    allocation; the operand is read only once published.  What must stay: no store but at a queue's entry k mod its
    room */
 /* this node's map index of node id `node` (its place in ascending node-id order among the map's records, mesh.h
-   `map_serial`), UINT32_MAX where the map holds none */
-static uint32_t map_index_of(uint32_t node){
-  const uint64_t n=atomic_load(&M->map_nodes);
-  const struct mesh_record *r=mesh_records(M);
+   `map_serial`), UINT32_MAX where the map holds none
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member plans on those records";
+   mesh-dataflow.c mesh_nodes_read: a plan's map indices are the installed view's records' places, in ascending node-id
+   order, the order the sequencer's map keeps them in, map_put's; "The revisions of 14b9a757", A7), reversing "among the
+   map's records": the place among the installed view's records (hdr `view_nodes` of them, mesh-map.h
+   mesh_view_records), the index every plan of the view names a node by (its `sender`, `nodes`, an edge's `node`), so
+   this node's map index there is view_index_of(M->node), where it was island.self, this node's index in its own map
+   (which the island's tree, a route over this node's ports, keeps).  The parent is the records' one writer
+   (view_install), so they are read here whole.  What must stay: UINT32_MAX where none */
+static uint32_t view_index_of(uint32_t node){
+  const uint64_t n=atomic_load_explicit(&M->view_nodes,memory_order_relaxed);
+  const struct mesh_record *r=mesh_view_records(M);
   for(uint64_t k=0;k<n;k++)if(r[k].node==node)return (uint32_t)k;
   return UINT32_MAX;
 }
@@ -855,13 +950,16 @@ static uint32_t map_index_of(uint32_t node){
 /* 2026-11-05 ("The revisions of 3f106747", VW): an arrival of a view other than the one installed here let go, not
    counted.  Why: A7, "Each arrival carries its view's identifier, and the program's sender counts only the arrivals of
    the view it has installed"; one of a later view is told again on its node's liveness turns.  What must stay: as
-   above */
+   above.
+   2026-11-06 ("The revisions of 14b9a757", A7): the plan's indices are its view's (view_index_of), this node's among
+   them where it was island.self.  What must stay: as above */
 static void arrivals_apply(void){
+  const uint32_t self=view_index_of(M->node);
   for(size_t k=0;k<arrivals_held;){
     struct mesh_state *s=plan_here(arrivals[k].group,arrivals[k].epoch);
-    const uint32_t at=map_index_of(arrivals[k].node);
-    if(arrivals[k].view!=installed.view){arrivals[k]=arrivals[--arrivals_held];continue;}
-    if(!s || s->sender!=island.self){k++;continue;}
+    const uint32_t at=view_index_of(arrivals[k].node);
+    if(arrivals[k].view!=view_installed()){arrivals[k]=arrivals[--arrivals_held];continue;}
+    if(!s || s->sender!=self){k++;continue;}
     if(at<64)s->arrived|=UINT64_C(1)<<at;
     arrivals[k]=arrivals[--arrivals_held];
   }
@@ -882,16 +980,21 @@ static void arrivals_apply(void){
    map's count goes.  Its producer, one hop up, is mesh-collective.c mesh_plan (sub-agent C's): `sender` the least bit
    of `program`, which holds this node's map index (its EINVAL otherwise), so it is below the count of the map the plan
    was made on, and the plan is read only on that map's serial (the test above).  What must stay: a plan of another
-   serial not announced */
+   serial not announced
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member plans on those records
+   ... A plan then stands while its view does"; "The revisions of 14b9a757", A7): the plans of the installed view (their
+   `serial` hdr `view`, view_installed), where they were this node's `map_serial`'s, and the sender's node id from the
+   view's records (mesh-map.h mesh_view_records), whose places the plan's `sender` names, where it was this node's
+   map's.  What must stay: a plan of another view not announced; none before the first view */
 static void orders_announce(int liveness){
-  if(!installed.view)return;
-  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
-  const struct mesh_record *r=mesh_records(M);
+  const uint64_t view=view_installed();
+  if(!view)return;
+  const struct mesh_record *r=mesh_view_records(M);
   struct mesh_state *state;
   for(uint32_t k=0;(state=plan_from(&k));k++){
-    if(state->serial!=serial || (state->announced && !liveness))continue;
+    if(state->serial!=view || (state->announced && !liveness))continue;
     const struct mesh_arrival a={.group=state->group,.epoch=state->epoch,.node=M->node,.sender=r[state->sender].node,
-                                 .view=installed.view};
+                                 .view=view};
     const int routed=tree_toward(ARRIVE,&a,sizeof a,a.sender);
     if(routed==2)arrival_take(&a);
     if(routed)state->announced=1;
@@ -929,7 +1032,7 @@ static void orders_announce(int liveness){
    graph the sink's computes (mesh.h struct mesh_sync: the tell's `entry` the index of its edge among the sink plan's
    waits at the sink).  What must stay: each count only rising, this thread its one writer */
 static void count_take(const struct mesh_count *c){
-  struct mesh_state *s=c->view==installed.view?plan_here(c->group,c->function):NULL;
+  struct mesh_state *s=c->view==view_installed()?plan_here(c->group,c->function):NULL;
   if(!s)return;
   _Atomic uint64_t *count=&mesh_syncs(M,s)[c->entry].count;
   if(c->count<=atomic_load_explicit(count,memory_order_relaxed))return;
@@ -957,19 +1060,23 @@ static void count_take(const struct mesh_count *c){
    2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K1; "The
    revisions of 55b9cbad"): the COUNT's `function` the tell's (the sink plan's epoch) and its `entry` the tell's (the
    index of its edge among the sink plan's waits: mesh.h struct mesh_sync), which the sink's count_take raises by
-   index.  What must stay: as above */
+   index.  What must stay: as above.
+   2026-11-06 (A7, corrected 2026-11-06; "The revisions of 14b9a757", A7): the plans of the installed view (`serial`
+   hdr `view`), where they were this node's `map_serial`'s, and the sink's node id from the view's records (mesh-map.h
+   mesh_view_records), whose places an edge's `node` names: "Every member plans on those records", so the index names
+   the same node at both ends by construction.  What must stay: as above */
 static void counts_tell(int liveness){
-  if(!installed.view)return;
-  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
-  const struct mesh_record *r=mesh_records(M);
+  const uint64_t view=view_installed();
+  if(!view)return;
+  const struct mesh_record *r=mesh_view_records(M);
   struct mesh_state *state;
   for(uint32_t k=0;(state=plan_from(&k));k++){
-    if(state->serial!=serial || !state->tells)continue;
+    if(state->serial!=view || !state->tells)continue;
     const uint64_t count=atomic_load_explicit(&state->submissions,memory_order_acquire);
     struct mesh_sync *edge=mesh_syncs(M,state)+state->waits;
     for(uint32_t e=0;e<state->tells;e++){
       if(count<=atomic_load_explicit(&edge[e].count,memory_order_relaxed) && !(liveness && count))continue;
-      const struct mesh_count c={.group=state->group,.epoch=state->epoch,.view=installed.view,.count=count,
+      const struct mesh_count c={.group=state->group,.epoch=state->epoch,.view=view,.count=count,
                                  .node=M->node,.sink=r[edge[e].node].node,.function=edge[e].function,
                                  .entry=edge[e].entry};
       const int routed=tree_toward(COUNT,&c,sizeof c,c.sink);
@@ -985,18 +1092,22 @@ static void counts_tell(int liveness){
    (view_install).  What must stay: as above.
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
    plans read at their places (mesh-bridge.h plan_from), where the claims' heads were walked.  What must stay: as
-   above */
+   above.
+   2026-11-06 (A7, corrected 2026-11-06; "The revisions of 14b9a757", A7): the plans of the installed view (`serial`
+   hdr `view`), where they were this node's `map_serial`'s, whose `sender` is this node's place among the view's
+   records (view_index_of), where it was island.self, its place in this node's own map.  What must stay: as above */
 struct program_head { struct mesh_state *state; uint64_t seen; };
 static void orders_submit(void){
-  if(!installed.view)return;
-  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
+  const uint64_t view=view_installed();
+  if(!view)return;
+  const uint32_t self=view_index_of(M->node);
   for(int sent=1;sent;){
     sent=0;
     struct program_head *heads=NULL;
     size_t count=0,room=0;
     struct mesh_state *state;
     for(uint32_t k=0;(state=plan_from(&k));k++){
-      if(state->sender!=island.self || state->serial!=serial)continue;
+      if(state->sender!=self || state->serial!=view)continue;
       if(count==room){
         struct program_head *grown=realloc(heads,(2*room+1)*sizeof *grown);
         if(!grown){free(heads);mesh_say("bridge","the programs' submissions not read (ENOMEM): read on a later turn");return;}
@@ -1022,7 +1133,7 @@ static void orders_submit(void){
       }
       if(!acquired || !least || (least->arrived&least->nodes)!=least->nodes)continue;
       if(next.end>least->submitted){
-        const struct mesh_order order={.group=least->group,.epoch=least->epoch,.view=installed.view,.first=least->submitted,
+        const struct mesh_order order={.group=least->group,.epoch=least->epoch,.view=view,.first=least->submitted,
                                        .end=next.end,.nodes=least->nodes,.sender=least->sender};
         if(!order_submit(&order)){
           if(!unsent)
@@ -1227,15 +1338,19 @@ static void order_deliver(const struct mesh_order *m){
    passed in every view, where it was nextdeliver - 1, which begins again at each view.  Why: A7, "A member that
    installed the old view from the same process delivers the old view's messages up to that number, then installs the
    new view"; the ports' merge reads `delivered` as a bound on every entry's number (mesh-flow.c lane_take).  What must
-   stay: delivery in sequence-number order, with no timeout and no skip; the entries' stores before `delivered`'s */
+   stay: delivery in sequence-number order, with no timeout and no skip; the entries' stores before `delivered`'s
+   2026-11-06 (A7, corrected 2026-11-06; "The revisions of 14b9a757", A7): Dest(m), the ORDER's `nodes`, is a set of
+   its plan's map indices, the view's records' places, so this node's place there (view_index_of) is tested, where it
+   was island.self, its place in this node's own map.  What must stay: as above */
 static void orders_deliver(uint64_t last){
   int delivered=0;
+  const uint32_t self=view_index_of(M->node);
   for(size_t i=0;i<pendings && nextdeliver<=last;){
     if(pending[i].order.sequence!=nextdeliver){i++;continue;}
     const struct mesh_order m=pending[i].order;
     memmove(pending+i,pending+i+1,(--pendings-i)*sizeof *pending);
     passed++;
-    if(island.self<64 && m.nodes>>island.self&1)order_deliver(&m);
+    if(self<64 && m.nodes>>self&1)order_deliver(&m);
     nextdeliver++;delivered=1;i=0;
   }
   if(!delivered)return;
@@ -1296,7 +1411,7 @@ struct mesh_record *record_held(uint32_t node){
    installed view as well as its counter").  What must stay: as above */
 void record_changed(void){
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=(uint64_t)mesh_arena_pages(M)*M->pgsz,.memory=memory,
-                          .view=installed.view,.view_boot=installed.boot,.view_sequencer=installed.sequencer};
+                          .view=view_installed(),.view_boot=installed.boot,.view_sequencer=installed.sequencer};
   memcpy(own.model,model,sizeof own.model);
   own.reached=record_reach(own.reach,MESH_PORTS);
   own.health=health;
@@ -1417,18 +1532,38 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    2026-11-06 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G2: "merge
    duplicated patterns"; the coordinator's review; "The revisions of 55b9cbad"): the operand's openness by mesh.h
    mesh_algo_open (mesh 52a12eb0), where this turn read `published` and `retired` itself; hdr `client` read after it.
-   What must stay: the holder read after the publication */
+   What must stay: the holder read after the publication
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8: "One
+   writer a word (W11; Lamport's single-writer registers): the program writes `retired`, the bridge writes only
+   `released`, and a gone holder is read from the heartbeat's words"; R-10: "the holder's read and gone-holder test",
+   merged; W11: "(mesh-dataflow.c 78; mesh-records.c 1430, 1493; mesh-link.c 381)"; mesh-holders.h mesh_algo_holder;
+   "The revisions of 14b9a757", R-8 and R-10), reversing the retirement above:
+   - The holder is mesh_algo_holder's one read ({0} where the operand is not open), tested by mesh_holds(pid, start)
+     alone.  A holder that holds is watched for its exit as before (EV_ADD, EV_ONESHOT, udata 0) and makes `busy` 1; a
+     watch that fails (ESRCH: the process in its exit, which mesh_holds still reads as holding) wants nothing, since
+     every turn reads the holder again, at most MESH_PAUSE_NS apart (mesh-link.c turn_due).
+   - A holder that does not hold the region is gone: hdr `plans` raised and woken (mesh.h mesh_notify, a count of many
+     raisers), so each port walks and ends the plans of a gone holder (mesh-flow.c), and this turn's release runs
+     (`plans_seen`); no `retired` is written.  It is raised once a gone holder (`gone_seen`, the last one this turn
+     raised for, as `plans_seen` is the last count it read), since each raise wakes the loop for another turn
+     (control_watch) and the operand stays open, its holder gone, until its release.
+   - The test of this bridge's own pid goes: the holder is mesh_plan's copy of a program's context (mesh.h struct
+     mesh_algo's note), never this bridge's, and a pid this bridge took again reads gone by its start.
+   What must stay: the release last, after this turn's cancellations and deliveries, on this thread; the holder read
+   after the publication */
 static uint64_t plans_seen;
+static struct mesh_algo_holder gone_seen;
 void clients_turn(int liveness){
-  const pid_t self=getpid();
   uint64_t busy=0;
-  const uint64_t open=mesh_algo_open(M);
-  const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
-  if(open && (pid_t)(uint32_t)client!=self){
-    struct kevent64_s watch;EV_SET64(&watch,(uint32_t)client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
-    if(!mesh_holds((pid_t)(uint32_t)client,atomic_load_explicit(&M->client_start,memory_order_acquire)) ||
-       (kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH))mesh_retire(M,client);
-    else busy=1;
+  const struct mesh_algo_holder holder=mesh_algo_holder(M);
+  if(holder.pid && mesh_holds(holder.pid,holder.start)){
+    struct kevent64_s watch;EV_SET64(&watch,(uint32_t)holder.pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
+    kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+    busy=1;
+  }
+  else if(holder.pid && (holder.pid!=gone_seen.pid || holder.start!=gone_seen.start)){
+    gone_seen=holder;
+    mesh_notify(&M->plans);
   }
   orders_announce(liveness);
   counts_tell(liveness);
@@ -1486,9 +1621,14 @@ void clients_turn(int liveness){
    and not retired (each acquire) and the holder's process is `pid`, where the root's `owner` and `closed` were read.
    What must stay: on main's thread.
    2026-11-06 ("Review of 4e78f6f4 against the requirement lines", G2; the coordinator's review): the operand's
-   openness by mesh.h mesh_algo_open (mesh 52a12eb0), hdr `client` read after it.  What must stay: on main's thread */
+   openness by mesh.h mesh_algo_open (mesh 52a12eb0), hdr `client` read after it.  What must stay: on main's thread
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8 and
+   R-10; mesh-holders.h mesh_algo_holder; "The revisions of 14b9a757", R-8), reversing the retirement: where the open
+   operand's holder (mesh_algo_holder, its one read) is the process `pid` whose exit the event tells, hdr `plans` raised
+   and woken (mesh.h mesh_notify), so each port walks and ends the plans of a gone holder (mesh-flow.c), and the loop's
+   next turn runs the release (clients_turn, mesh-dataflow.c mesh_retired_release, which reads the holder gone itself);
+   no `retired` is written (R-8: "the bridge writes only `released`").  What must stay: on main's thread; a holder's
+   death this event, not a poll */
 void clients_gone(pid_t pid){
-  const uint64_t open=mesh_algo_open(M);
-  const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
-  if(open && (pid_t)(uint32_t)client==pid)mesh_retire(M,client);
+  if(mesh_algo_holder(M).pid==pid)mesh_notify(&M->plans);
 }
