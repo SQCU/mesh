@@ -104,31 +104,15 @@ _Static_assert(sizeof(struct ibv_wc)==48,"M11");
 _Static_assert(offsetof(struct ibv_wc,status)==8 && offsetof(struct ibv_wc,opcode)==12 &&
   sizeof(((struct ibv_wc *)0)->status)==4 && sizeof(((struct ibv_wc *)0)->opcode)==4,"M11");
 _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
-/* design/prepared-machine.md#M29: d6dceac's prepared SEND (its span and request, one cache line's worth of what the
-   post reads), its release its entry's `word` and `field` (mesh.h struct mesh_hop; design/disjoint-pages-change-
-   request.md, C3.7): from its range's source (`field` MESH_ABSENT), execution t's send released where the range's
-   supplied word reads (acquire) at least t + 1, its producer's release of t; forwarding (a relay's, or a destination's
-   that sends the page on), where its receive's phase field, bits [field, field + 2) of `word`, reads (acquire)
-   mesh_phase(t / u + 1), that receive's landing of t; t the execution its lane's cursor serves (struct cursor).  The
-   word is the plan's state section's, the record the child's.  One record a template entry, posted once for each
-   execution of its copy (link_prepare).
-   2026-11-04, sub-assignment 6: `mask` (2026-11-03: the bits of its word its release needed, MESH_SUPPLIED or its
-   receive's bit of its execution's landed record) is `field`, the landed records and MESH_SUPPLIED gone (C4).  What
-   must stay: the word and field in the line the post reads.
-   2026-11-04, owner B1 (design/compilation-coordination.md, T7): its span its hop's `bytes` long, where it was the
-   whole page (page_bytes()), and its frames frames_of(that length), posted and retired through its lane's gate alike
-   (link_send_drain: the completion names the record, so the record knows its frames), where every SEND took a page's
-   frames.  Why: R5, each hop with its bytes.  What must stay: one 256-byte cell, its span and request where the post
-   reads them.
-   2026-11-04, owner B4 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL5: "each record
-   names its plan (struct flow), so a pass's completions are counted to their own plans while several interleave on
-   one queue pair"): `flow`, the plan whose record it is, in the cell's room after the request (offset 160: the
-   request, struct ibv_send_wr, is 128 bytes from 32), so the SEND completion, which names the record (`wr_id`),
-   counts its plan's `sent`; no field the post reads moves.  What must stay: as above
-   `count`, its hop's send-completion counter, its error count at count + 1 (mesh.h struct mesh_hop; rdma-core
-   libibverbs/man/ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION and fi_cntr_readerr;
-   design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7, and "Sources for the fourth
-   stops", 7) */
+/* ISO/IEC 9899:2011 §6.10.2 ¶3: "A preprocessing directive of the form # include "q-char-sequence" new-line causes the
+   replacement of that directive by the entire contents of the source file identified by the specified sequence between
+   the " delimiters."; §6.2.7 ¶1: "two structure, union, or enumerated types declared in separate translation units are
+   compatible if their tags and members satisfy the following requirements: If one is declared with a tag, the other
+   shall be declared with the same tag."
+   `count`: rdma-core libibverbs/man/ibv_post_send.3, NOTES: "The buffers used by a WR can only be safely reused after
+   WR the request is fully executed and a work completion has been retrieved from the corresponding completion queue
+   (CQ)."; libfabric man/fi_cntr.3.md: "Counters record the number of requested operations that have completed.";
+   "fi_cntr_readerr: Reads the number of operations which have completed in error." */
 struct flow;
 struct prepared_send {
   _Alignas(128) _Atomic uint64_t *word;
@@ -253,9 +237,8 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
    the identifier of the view the message is sent in (design/aot-compilation-change-request.md A7: "m is one
    submission: its plan's name (`group`, `epoch`), the identifier of the view it is sent in (below), and a range of its
    executions"; "Every message carries its view's identifier").  Why: "the map serial it was made on ... no receiver
-   can compare: each node's serial is its own count" (A7's correction).  What must stay: the layout
-   120 (JGroups ViewId.java): `view` the view's identifier, its Lamport time and its creator (mesh.h struct
-   mesh_view_id), where it was the Lamport time alone */
+   can compare: each node's serial is its own count" (A7's correction).  What must stay: the layout */
+/* `view`: JGroups ViewId.java, "Lamport time of the view", "Address of the creator of this view" */
 struct mesh_order { uint64_t group,epoch; struct mesh_view_id view; uint64_t first,end,sequence,nodes;
   uint32_t sender,padding; };
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ1): an ORDER's `sequence` is sn(m),
@@ -263,13 +246,13 @@ struct mesh_order { uint64_t group,epoch; struct mesh_view_id view; uint64_t fir
    ACM Comput. Surv. 36(4), 2004, Fig. 5: "Initialization: seqnum := 1"; "sn(m) := seqnum ... seqnum := seqnum + 1";
    design/aot-compilation-change-request.md A7: "One submission is one message however many executions it carries"),
    where it was the number of `first`, first + k numbered sequence + k; `sender` the program's sender (mesh.h struct
-   mesh_state `sender`).  What must stay: every field but `view` where it is */
+   mesh_state `sender`).  What must stay: the layout */
 /* the payload of an ARRIVE (`bytes` sizeof): plan (group, epoch) stands at the node whose id is `node`; `sender` the
    node id of the program's sender, the one that counts it (mesh-records.c arrival_take) */
 /* 2026-11-05 (115; "The revisions of 3f106747", VW): `view` appended, the identifier of the view the arriving node
    has installed (A7: "Each arrival carries its view's identifier, and the program's sender counts only the arrivals of
-   the view it has installed").  What must stay: an arrival names its plan, its node and the sender that counts it.
-   120 (JGroups ViewId.java): `view` the view's identifier (mesh.h struct mesh_view_id) */
+   the view it has installed").  What must stay: an arrival names its plan, its node and the sender that counts it */
+/* `view`: JGroups ViewId.java, "Lamport time of the view", "Address of the creator of this view" */
 struct mesh_arrival { uint64_t group,epoch; uint32_t node,sender; struct mesh_view_id view; };
 /* the payload of a VIEW (`bytes` sizeof plus 4 a member): view `view` (Transis's identifier: G. V. Chockler, I. Keidar
    and R. Vitenberg, ACM Comput. Surv. 33(4), 2001, §3.1.1), created by the sequencer whose node id is `sequencer` and
@@ -308,9 +291,8 @@ struct mesh_group_view { uint64_t view,last,boot; uint32_t sequencer,members,rec
    "`count_take`'s search (mesh-records.c 896): the COUNT carries the sink entry's index"; "The revisions of
    55b9cbad"): `function` 32 bits and `entry` after it, the index of the edge among the sink plan's waits at the sink
    (mesh.h struct mesh_sync `entry` of the source's tell), so the sink's bridge raises that one entry, read by index.
-   Why: K1, as MSCCL-IR's steps name their dependences by index (`depid`, `deps`).
-   120 (JGroups ViewId.java): `view` the view's identifier (mesh.h struct mesh_view_id), 24 bytes, so the struct is
-   64 */
+   Why: K1, as MSCCL-IR's steps name their dependences by index (`depid`, `deps`). */
+/* `view`: JGroups ViewId.java, "Lamport time of the view", "Address of the creator of this view" */
 struct mesh_count { uint64_t group,epoch; struct mesh_view_id view; uint64_t count;
   uint32_t node,sink,function,entry; };
 _Static_assert(sizeof(struct mesh_count)==64 && offsetof(struct mesh_count,view)==16 &&
@@ -644,13 +626,11 @@ void streams_cancel(const struct port *port);
    (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2)
    2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on
    the view's map ... A plan then stands while its view does, and its view while the sequencer's map does (D.3.6)";
-   "The revisions of 14b9a757"): every standing plan whose view (mesh.h mesh_plan_view) is not the installed view's
-   identifier (mesh.h mesh_view_installed; JGroups ViewId.equals) cancelled, called by mesh-records.c view_install,
-   after it stores the view (under `view_map`), and by map_adopt, after it stores no view installed (hdr `view` 0: a
-   bridge started again is a new process, "A bridge's counter is the identifier of the last view it installed, 0
-   before its first"), on the bridge parent's one thread; a
-   move of this node's own map ends no plan (its link losses cancel the plans whose lists name the lost cable's peer:
-   mesh-flow.c streams_cancel).  What must stay: the
+   "The revisions of 14b9a757"): every standing plan whose `serial` is not the installed view's identifier (mesh.h hdr
+   `view`) cancelled, called by mesh-records.c view_install, after it stores the view (under `view_map`), and by
+   map_adopt, after it stores no view installed (hdr `view` 0: a bridge started again is a new process, "A bridge's
+   counter is the identifier of the last view it installed, 0 before its first"), on the bridge parent's one thread; a
+   move of this node's own map ends no plan (its link losses cancel their receives as before).  What must stay: the
    fence before any plan or its `executions` is read; on the parent's one thread */
 void plan_stale(void);
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): plan_sequences_inside's declaration
