@@ -169,16 +169,31 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
                     uint32_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
                     const uint32_t *source,uint32_t targets,const uint32_t *target,uint32_t *lags);
-/* The left-edge colouring of items that each need a run of colours (T. Hashimoto and J. Stevens, DAC 1971; M. C.
-   Golumbic 1980; with sizes, greedy by size: Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020): the items in the
-   caller's order order[0 .. items), item i given colours [colour[i], colour[i] + size[i]) at the lowest colour where
-   its run overlaps no item placed before it that it interferes with (interferes(context, a, b) != 0, symmetric);
-   *used the most colour[i] + size[i].  `interferes` NULL: every pair interferes, so each item in that order takes the
-   colours just past the runs before it (colour[order[0]] 0, each next the end of the runs before it, the sum of their
-   sizes; an empty run colour 0), in O(items).  0; ENOSPC where a run would pass `capacity`; ENOMEM. */
-int mesh_graph_left_edge(uint32_t items, const uint64_t *size, const uint32_t *order,
-                         int (*interferes)(const void *context, uint32_t a, uint32_t b), const void *context,
-                         uint64_t capacity, uint64_t *colour, uint64_t *used);
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6: "Greedy by size
+   goes, with `mesh_graph_left_edge`'s colouring"; "The revisions of 4e78f6f4"): mesh_graph_left_edge is removed, the
+   left-edge colouring of items that each needed a run of colours, greedy by size (T. Hashimoto and J. Stevens, DAC
+   1971; Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020).  Why: R2, corrected: "No value is placed as one run.  So
+   greedy by size ... and the contiguous-block problem it approximates ... have no use here.  The chains replace
+   C3.3's colouring."  What must stay: placement by an operand of the caller's, here mesh_graph_chains */
+/* The fewest chains of a partial order (design/plan-to-bridge-change-request.md R2, corrected 2026-11-05: "By
+   Dilworth's theorem that number equals the largest set of items no two of which are ordered (R. P. Dilworth, A
+   decomposition theorem for partially ordered sets, Annals of Mathematics 51(1), 1950).  It is found by maximum
+   bipartite matching (D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered sets, Proc. AMS
+   7(4), 1956), exactly and in polynomial time"; design/disjoint-pages-change-request.md, A3 and C3.3, corrected).
+   The caller's items 0 .. items - 1, item i of count[i] >= 1 elements, which are mutually unordered and ordered as
+   item i is: before(context, a, b) != 0 where a precedes b, a strict partial order the caller gives (irreflexive and
+   transitive).  Fulkerson's bipartite graph has each element on both sides and an edge from x to y wherever x
+   precedes y; a maximum matching of it, by Hopcroft and Karp's phases (J. E. Hopcroft and R. M. Karp, SIAM J. Comput.
+   2(4), 1973, as rdma/mesh_graph.py `matching`), with an item's elements as one vertex of capacity count[i] on each
+   side, is a maximum flow of that network (Hopcroft and Karp's phases on a network of capacities are E. A. Dinic's
+   blocking flows, Soviet Math. Doklady 11, 1970), and the fewest chains are the elements less its value.  Out: *chains
+   their number, and chain[o_i + k] the chain of item i's element k, k < count[i], o_i the sum of count[j] over j < i:
+   each chain a matched path x_1 -> x_2 -> ... of elements, so its elements are mutually ordered; the chains numbered
+   from 0 in the order of their first elements, items in the caller's order and an item's elements in turn, so an
+   item that precedes and follows none has chains of its own, consecutive.  Every party computing from the same
+   operands numbers the chains alike.  0; ENOMEM */
+int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
+                      const void *context, uint64_t *chain, uint64_t *chains);
 /* design/plan-to-bridge-change-request.md R5 (mesh 0e56d8da), "How: the program" and "How: solving it": the completion
    times C̄ of one linear program over a directed graph, vertex j of length length[j] >= 0 on resource resource[j] (<
    `resources`), edge e running from[e] -> to[e]: variables C_j and C_max; minimize C_max with C_max >= C_j for every j

@@ -195,6 +195,11 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
   h->bridge_off=at; at+=sizeof(struct mesh_bridge_pages); at=(at+pgsz-1)/pgsz*pgsz;
+  /* 2026-11-05 (117; design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5: "the
+     serialized operand's place is a constant the region's layout names once, as the bridge's own pages are "laid out
+     once with the region" (disjoint-pages A3)"; "The revisions of 4e78f6f4"): the program's serialized operand's root
+     (mesh.h struct mesh_program), after the bridge's pages.  What must stay: every area before it where it was */
+  h->program_off=at; at+=sizeof(struct mesh_program); at=(at+pgsz-1)/pgsz*pgsz;
   atomic_store_explicit(&h->map_off,at,memory_order_relaxed); h->map_room=MESH_MAP_ROOM;
   at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;

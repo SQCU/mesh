@@ -1,8 +1,9 @@
 #ifndef MESH_CALL_H
 #define MESH_CALL_H
 #include "mesh-dataflow.h"
-
-struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
+/* struct mesh_section (2026-11-05, design/compilation-coordination.md, "The revisions of 4e78f6f4": moved to
+   mesh-section.h, which rdma/mesh-torch.mm includes too) */
+#include "mesh-section.h"
 
 /* the client's start, by the plan `plan` (its state section's region offset, mesh-collective.h mesh_plan's `*plan`;
    design/compilation-coordination.md, "The region" and "The appendix's revisions", N2; defined in mesh-dataflow.c
@@ -54,7 +55,21 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
    serial: 0, EINVAL for `plan` as above (before anything is raised), or ESTALE after the raise, with it raised; no
    port's refusal code, ETIMEDOUT or map reader's error is its now.  Why: design/aot-compilation-change-request.md,
    appendix item 2, "remove the start's wait for every port to load the plan, and the late-loading port's refusal of
-   it (`mesh_ports_held`).  Nothing requires them."  What must stay: the fence and the serial's read after the raise */
+   it (`mesh_ports_held`).  Nothing requires them."  What must stay: the fence and the serial's read after the raise.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"), reversing the notes above where they test `plan`: `plan` is a constant of the plan, mesh_plan's
+   (struct mesh_function `plan`), and is read as it is given, with no test and no walk; the EINVALs for `plan` and for a
+   queue outside the region go.  Why: point 5, "`mesh_plan_head`'s walk of every claim head in `mesh_transfers_start`
+   and `mesh_plan_retire`, a run-time check", goes; A9, "What the bridge runs": "Every address in it is fixed at compile
+   time".  And the waits: before the raise, for each of the plan's synchronization edges into this node (mesh.h struct
+   mesh_sync, `waits` of them at `syncs`) whose `at` is k mod `calls` (k this start's ordinal, the plan's `submissions`)
+   and with K = k / `calls` >= its `delay`, a wait until its `count` reaches (K - `delay`) x `every` + `position` + 1,
+   each as the one edge's wait was: acquire, os_sync_wait_on_address_with_timeout region-shared, at most
+   MESH_PLATFORM_NS from the start's first (ETIMEDOUT), ESTALE where the plan's serial is not the map's, nothing raised
+   in either case.  Why: appendix item 2, "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))"
+   (BSL (7)).  Its source raises a count that only rises ..., and its sink reads that count before its k-th start"; a
+   plan has an actor for each call of its function (mesh.h struct mesh_state `calls`).  0, ETIMEDOUT or ESTALE.  What
+   must stay: the waits before the raise; the fence and the serial's read after it */
 int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data
@@ -74,7 +89,13 @@ int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
    another's pages */
 /* design/algorithm-sources.md#programtensor */
 /* copy `index`'s first byte (mesh-collective.h struct mesh_value: copy c at mesh_section_address(section, c)); NULL
-   where its row has no page */
+   where its row has no page.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6, and "The
+   revisions of 4e78f6f4"): row `index` of the section's rows' first byte, row first + index, NULL where it has no
+   page: block k of copy c is row c x stride + k, each block placed anywhere, so a copy's bytes are one run only in
+   its value's mapping (mesh-collective.h struct mesh_value `view`).  Why: point 6, "Represent a value as its ordered
+   page-table rows"; R2, corrected: "No value is placed as one run".  What must stay: an address the row's binding
+   gives, NULL where none */
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void mesh_section_constant(struct mesh_ctx *,struct mesh_section);
 

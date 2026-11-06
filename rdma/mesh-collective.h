@@ -264,6 +264,44 @@
    (C3.2); nothing is zeroed or reset, and a new plan's state is in new pages (C3.4, C3.7).  What must stay: every rank
    the same declared transfers and dependences in the same order; every failure but ESTALE and the second map read's
    found before anything is written. */
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 4 to 8, and "The
+   revisions of 4e78f6f4"), reversing the notes above where they state one function's plan in its own claim, its part
+   of the IPC graph, greedy by size, and a range "one range's alone":
+   - The plan call takes the one IR of the whole program and writes its one serialized operand (point 5: "The plan
+     call's form for a whole program is A8 and A9.  A8: "The compilation must carry one IR from partitioning to
+     serialization, as an operand of its own" ... With the program exported whole (point 1), there is one IR of the
+     program and one serialized operand of it").  The IR is each compiled function's declared transfers, weights,
+     values and dependences (struct mesh_function, R3's task graph with R4's kinds and A2's and A3's operands) and the
+     program's calls of them in program order (`calls`, A10's graph).  The serialized operand at this node is, for
+     each function, its plan (A9: "for each adjacent node and direction, the ordered list of page instructions ...
+     the page table's bindings and the plan's state section"), with the root that names them at the layout's one
+     place (mesh.h struct mesh_program).  What the bridge runs from it is A9's self-timed schedule (A9, "What the
+     bridge runs: the self-timed schedule": "Each processor executes the actors assigned to it in the order specified
+     at compile time.  Before firing an actor, a processor waits for the data needed by that actor to become
+     available").
+   - One offline allocation places every value of every function at compile time (point 5; design/plan-to-bridge-
+     change-request.md R8, corrected: "One offline allocation over the whole exported program ... at compile time ...
+     Nothing takes pages at run time, and no handle is looked up at run time").  Every item is one block, placed
+     anywhere, by the fewest chains of the interference order (point 6; R2, corrected: "Two items may share a page
+     exactly when one's last access happens before the other's first write ... the fewest pages is the fewest chains
+     ... found by maximum bipartite matching (D. R. Fulkerson ...)"; mesh-graph.h mesh_graph_chains).  The rows and
+     pages are numbered from the region's first row and from the first block of each space: there is no claim, no
+     first fit and no ENOMEM from fragmentation.
+   - A value is its ordered page-table rows (R2, corrected; mesh-section.h).  A value typed to be seen as one run
+     (`run` 1: R4's function A's operand, or a torch MPS operator's operand, design/aot-compilation-change-request.md
+     appendix item 7) is given its run as a mapping written when the plan is made: consecutive virtual pages over its
+     pages (R2, corrected: "Such an operand's run is address translation, fixed when the plan is made"; mesh's
+     `ncclMeshPageTableCompose` view, `mach_vm_remap`, design/page-maps-2026-11-02.md at 6255e92b; mesh-dataflow.h
+     mesh_view_compose).  The program's mapped values at this node are one mapping (`*view`).
+   - A declared transfer names the blocks of this node's value it lands in or is sent from (`first`), as NCCL's
+     receives land at offsets of one result (point 7; R2, corrected: "receiving data from rank `i` at offset
+     `i*sendcount`" (NCCL, ncclAllGather) ... A range is not a value of its own").
+   - The program's whole IPC graph is built here, every function together, with each queue's room (5) in it (point
+     4; appendix item 2: "the compilation builds the program's whole IPC graph ... and each queue's room is (5) in that
+     graph"); mesh-collective.c plan_rooms' part graph goes.
+   What must stay: every rank passes the same IR but its values and `value`s, and computes the same demands, trees,
+   template, u, schedule and order of each function from them; every failure but ESTALE and the second map read's is
+   found before anything is written. */
 enum { MESH_INVARIANT, MESH_EXECUTION };
 /* a value at this node.  In: section.bytes (> 0), kind, wire, state (1 only on a local MESH_INVARIANT value, wire 0),
    for a local MESH_EXECUTION value of lag 0 its first and last positions on this node's own program order in one
@@ -272,14 +310,40 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
    declared transfer, begin and end not read; k copies, execution t's at copy t mod k, written for t only after
    execution t - k has ended and read by t only after that write: the program's order, which the plan does not check;
    design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-coordination.md, R4).  Out: section,
-   every field */
-struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag; };
+   every field.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 6 and 8; "The
+   revisions of 4e78f6f4"): `run` and `view` appended (64 bytes).  In: `run` 1 where a consumer of the value at this
+   node is typed to see it as one run (design/plan-to-bridge-change-request.md R4, corrected: "Only A's operand, and
+   an operand whose consumer needs one strided progression, is seen as one run.  That run is a mapping written when
+   the plan is made"; a torch MPS operator's operand, design/aot-compilation-change-request.md appendix item 7: "an
+   operand of a torch MPS operator is seen in one strided progression of virtual addresses"), else 0.  Out: `view`,
+   where `run` is 1, the address in this process of copy 0's first byte in the program's mapping (`*view` of
+   mesh_plan), copy c's at view + c x section.pages x pgsz and every copy's blocks consecutive there, in row order;
+   NULL where `run` is 0.  The value's rows are bound to blocks placed anywhere (mesh-section.h): no value is placed
+   as a run.  What must stay: every field before `run` where it was */
+struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag,run,padding; void *view; };
+_Static_assert(sizeof(struct mesh_value)==64 && offsetof(struct mesh_value,run)==48 &&
+               offsetof(struct mesh_value,view)==56,"mesh_value: rdma/mesh.py Value");
 /* plan-to-bridge R4: the kind of a declared transfer's consumer at its destination.  MESH_JOIN: function A, one task
    with an edge from every page of the range.  MESH_PAGES: function B, one task per page, each with an edge from its
    own page */
 enum { MESH_JOIN, MESH_PAGES };
-/* `order` (the hand priority, lower first) is gone: R5's schedule orders every cable's sends; `kind` in its place */
-struct mesh_declared { uint32_t source,destination,identity,kind,value,padding; size_t bytes; };
+/* `order` (the hand priority, lower first) is gone: R5's schedule orders every cable's sends; `kind` in its place.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7; "The revisions
+   of 4e78f6f4"): `first`, where `padding` was: the range's first block in this node's value `value` (a block one row,
+   mesh-section.h), where this node is its source (the blocks it is sent from) or a destination (the blocks it lands
+   in), so the range's P blocks are rows [first, first + P) of each copy of that value; 0 where `value` is
+   MESH_ABSENT.  Why: point 7: "name, in each declared transfer, the pages of its destination value that it lands in,
+   as NCCL's receives land at offsets of one result ... A collective's result is then the pages its parts land in, so
+   no concatenation and no copy of a part remains"; R2, corrected: "A collective's receive lands in the pages of the
+   value it belongs to, at its place in that value".  A range's every declared transfer from one source gives its
+   source one `value` and `first` (EINVAL otherwise); the value is MESH_EXECUTION and wire, the range's blocks lie
+   within its blocks, and no two ranges at this node share a block of it (EINVAL otherwise); its blocks no range
+   covers here are one item of their own, which shares no block with any other (no edge of the template orders their
+   write, as a value of `lag` k's copy).  "one range's alone" goes.  What must stay: 32 bytes, every other field where
+   it was */
+struct mesh_declared { uint32_t source,destination,identity,kind,value,first; size_t bytes; };
+_Static_assert(sizeof(struct mesh_declared)==32 && offsetof(struct mesh_declared,first)==20,"mesh_declared");
 /* aot-compilation A3: the weighting operand, one entry a declared transfer, the program's weighting function's result.
    produced: w of the range's production at its source; consumed: w of the consumption at declared[i]'s destination
    (for MESH_PAGES, of each page's task); read: w of the source's own read of the range (where a dependence names it);
@@ -308,36 +372,53 @@ struct mesh_weight { double produced,consumed,read,page; };
 #define MESH_FROM_SOURCE_READ 4u
 #define MESH_TO_SOURCE_READ 8u
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
-/* aot-compilation appendix item 6 (design/compilation-coordination.md, "The appendix's revisions", N1 to N5): the plan
-   of one compiled function, named (group, function): `group` the launcher's (MESH_GROUP), 0 EINVAL; `function` the
-   program's own ordinal of the compiled function, the same at every rank, kept by every replan of that function; held
-   in struct mesh_state `epoch`.  EEXIST where a plan of that name stands here on the same map.  *plan out: the region
-   offset of the plan's state section once it stands (untouched on any failure).  No earlier plan is closed.
-   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS and PQ): `program` and
-   `outstanding` added after `function`.  `program`: the program's nodes, a set of map indices (bit i, map index i),
-   the same at every rank and in every plan call of one program (`group`); its least is the program's one sender
-   (design/aot-compilation-change-request.md A7: "sender(m) is the program's one sender: the least of the program's
-   nodes, the program being its launcher's `group`"), held in struct mesh_state `sender`; EINVAL where it is 0, lacks
-   this node, or lacks a node of the plan's (a relay outside the program would never hold the plan, so the barrier
-   would never count it: A7, "A plan's destinations exist before its first message").  `outstanding`: A10's bound for
-   this function, "the most calls of it the analysis lets be outstanding at once in the program that submits them"
-   (A10, "Its output"), the room of the plan's submissions' queue and the first term of its delivered calls' queue's
-   room (appendix item 2, "Its room is fixed at compile time"); 0 where A10 found none, which fails ENOMEM (item 2: "A
-   plan whose bound A10 cannot find fails with `ENOMEM` when it is planned").  What must stay: every operand the same
-   at every rank.
-   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", BS and PG): `outstanding` is the delay
-   on the edge from a call's completion to the program's later submission in the program's IPC graph, and no room: each
-   queue's room is its self-timed buffer bound there, with the synchronization edges Convert-to-SC-graph adds and
-   DetermineDelays' delays (S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997,
-   §4.3 (5), §9, Figs. 6 and 8; mesh-collective.c plan_rooms); ENOMEM also where a cycle has zero delay (BSL Lemma 1).
-   `program` is the nodes the program's launcher started it at, passed by the launcher as it passes `group`
-   (design/aot-compilation-change-request.md A7, sender(m): "The program's nodes are the nodes its launcher started it
-   at, an operand of the plan call (`program`) that the launcher passes as it passes `group` (MESH_GROUP)"); every run
-   is launched on the whole collective, so `program` holds every node of the map, every relay among them.  What must
-   stay: every operand the same at every rank */
-int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t function,uint64_t program,uint64_t outstanding,
-              const struct mesh_declared *,const struct mesh_weight *,uint32_t count,struct mesh_value *,uint32_t values,
-              const struct mesh_dependence *,uint32_t dependences,uint64_t *plan);
+/* One compiled function of the program, its part of A8's IR (2026-11-05, design/compilation-coordination.md, "The
+   revisions of 4e78f6f4", where mesh_plan took one function's operands as its own arguments): its `count` declared
+   transfers and their weights, its `values` values at this node (`value`, each In and Out as struct mesh_value
+   states, a declared transfer's `value` an index among them), its dependences, and `outstanding`, A10's bound for it,
+   "the most calls of it the analysis lets be outstanding at once in the program that submits them" (A10, "Its
+   output"), the delay on the edge from a call's completion to the program's later submission of its call that many
+   calls of the function later (appendix item 2: "At each node, A10's bound is the delay on the edge from a call's
+   completion to the program's later submission"); 0 is ENOMEM ("A plan whose bound cannot be found fails with
+   `ENOMEM` when it is planned").  Out: `plan`, the region offset of its plan's state section at this node (struct
+   mesh_state), the handle mesh_transfers_start, mesh-metal.h and mesh_plan_retire take, a constant of the plan.
+   Function k (from 0) is named (group, k + 1) (struct mesh_state `epoch`; design/aot-compilation-change-request.md,
+   appendix item 6: "name each compiled function alike at every rank: (the program's group, the function's ordinal in
+   the program's order of compilation)"), the plan call's order being that order. */
+struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
+                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
+                       uint64_t outstanding,plan; };
+/* The plan call (2026-11-05, design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points
+   4 to 8; "The revisions of 4e78f6f4").  `group` the launcher's (MESH_GROUP), 0 EINVAL.  `program` the program's
+   nodes, a set of map indices (the notes on `program` above).  `functions`, `count` of them, the program's compiled
+   functions, each struct mesh_function; `calls`, `ncalls` of them, the program's calls of them in program order in
+   one execution of its traced block (A10, "The calls' graph": "each compiled function is represented by a computation
+   node in a dataflow graph"), calls[j] the index of the j-th call's function, every function called at least once
+   (EINVAL otherwise).  e2b's program is one function, called once.
+   - Each function's demands, trees, template, u, entries and schedule as before, at every rank alike.
+   - The program's IPC graph (appendix item 2, "The graph"): an actor for each node's part of each call ("The actors
+     are each node's parts of the program's calls, in program order"), for each call its program's submission σ and
+     its bridge's TO-broadcast β at the sender (the least of `program`), each sequence of the sender's in program
+     order as BSL §4.1's processor cycle (delay 1 from the last call's to the first's); each call's queues (its
+     function's), transfers (delay its function's u) and A10's edges (from each call's end at a node to the start
+     there of its function's call `outstanding` calls later, at the sender its submission; the delay the executions
+     of the block between them); each function's queues' rooms the sum of its calls' edges' bounds (5) in the graph
+     Convert-to-SC-graph and DetermineDelays make of it, over the whole graph; each added edge an entry of its plans'
+     synchronization edges (mesh.h struct mesh_sync).
+   - One allocation of every item of every function at this node, and the program's root (mesh.h struct
+     mesh_program) at the layout's place, its `table` among the items.
+   0; EINVAL (as before, and the IR's malformed `calls` or `first`); EBUSY where the root's `owner` is not 0 (another
+   program's operand, or this program's own earlier one, stands or is not yet released: struct mesh_program's note),
+   before anything is written; EHOSTUNREACH; ENOMEM (a space's chains past its blocks; a value with no unroll bound; a
+   cycle of zero delay; a queue on no cycle after the conversion; A10's bound 0; the call's own memory; a mapping
+   Mach refuses); ESTALE (the map moved while planning: plan again on the map as it is); or the map reader's error.
+   On ESTALE or the second map read's error the root is not published and the mapping is released.  There is no
+   ETIMEDOUT: nothing waits.  `*view` out: the program's one mapping of its `run` values at this node (mesh-dataflow.h
+   mesh_view_compose: every `run` value's rows, function by function and value by value in `values`' order, each
+   value's copies in order), which its holder releases with mesh_view_release once it retires the program; {NULL, 0}
+   where no value is `run`, and on any failure */
+int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
+              const uint32_t *calls,uint32_t ncalls,struct mesh_view *view);
 
 /* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's, each by its range's
    first row's publication, as before: mesh_host_publish its supplied word (`targets[0]`), mesh_host_arrived its words

@@ -31,7 +31,11 @@ struct mesh_range { uint32_t first,count; };
    system, CACM 21(7), 1978, IR1, "Each process Pi increments Ci between any two successive events"; 0 at attach.  Why:
    design/aot-compilation-change-request.md A7: sender(m) "TO-broadcasts the program's submissions in the order the
    program makes them", and the order among one program's plans reaches its sender's bridge only so (mesh-records.c
-   orders_submit).  What must stay: no rows, pages or plans in the context */
+   orders_submit).  What must stay: no rows, pages or plans in the context.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 4e78f6f4"): a program's rows and pages are its
+   one allocation's (mesh-collective.h mesh_plan), and its plans are named by its serialized operand's root at the
+   layout's place (mesh.h struct mesh_program), where the notes above name its plans' claims.  What must stay: no rows,
+   pages or plans in the context */
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; uint32_t padding; uint64_t clock; };
 _Static_assert(sizeof(struct mesh_ctx)==40 && offsetof(struct mesh_ctx,fd)==24 && offsetof(struct mesh_ctx,padding)==28 &&
   offsetof(struct mesh_ctx,clock)==32,"mesh_ctx: rdma/mesh.py Context");
@@ -66,61 +70,71 @@ int mesh_detach(struct mesh_ctx *);
    port holds it (mesh_retired_release).
    2026-11-04, owner L: reversing the 109 form, the retirer's compare-and-swap of hdr `client`, hdr `hops` and `state`
    stored 0 before the claims closed, and `client` cleared after.  Why: those words are vacant (mesh.h 110); a plan's
-   unpublishing is its claim's close, which the ports read through `plans`.  What must stay: nothing let go here */
+   unpublishing is its claim's close, which the ports read through `plans`.  What must stay: nothing let go here.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): the program's root (mesh.h struct mesh_program) closed (`closed` 1, release) where its
+   `owner` is `client`, then hdr `plans` raised and woken; nothing is let go here, the bridge releasing the root once
+   no port holds a plan of it (mesh_retired_release).  Why: point 5, "These go: `mesh_claim_take`'s first fit and the
+   claim's head record ... Release at retirement stays deferred reclamation"; one program's operand at the layout's
+   place.  What must stay: nothing let go here */
 void mesh_retire(struct hdr *,uint64_t client);
 /* the program's retirement of one compiled function (design/aot-compilation-change-request.md, appendix item 6: a
    function's claim released only when the program retires that function or itself; design/compilation-
    coordination.md, "The appendix's revisions", N3, as NVIDIA, CUDA Programming Guide §4.2.3.1, cudaGraphExecDestroy(),
-   destroys one instantiated graph): the claim of this client whose head's publication `state` (acquire) is `plan`
-   closed (struct mesh_buffer `closed`, release), then hdr `plans` raised and woken (mesh.h mesh_notify); nothing is let
-   go here, the bridge releasing the claim once no port holds it (mesh_retired_release; C3.4).  0, or ENOENT where no
-   claim of this client holds that plan standing (mesh_head_state: a closed claim holds none, so a second retire of
-   one plan is ENOENT; 2026-11-04, owner L2, the coordinator's ruling on review W1's finding 4) */
-int mesh_plan_retire(struct mesh_ctx *,uint64_t plan);
-/* the first claim head row after `row` (row UINT32_MAX: the first in the region), UINT32_MAX where none: a row of
-   MESH_ROW_OWN whose struct mesh_buffer `owner` reads (acquire) not 0, past `row`'s own claim where `row` is a head (its
-   `pages`, stored before its owner word).  A walk of the heads (e6bd7db2's section 6, "Discovery"; design/compilation-
-   coordination.md, Q5) reads a moving set: a claim taken or released during the walk may be met or missed, and the
-   walk ends within one pass over the rows */
-uint32_t mesh_head_after(const struct hdr *,uint32_t row);
-/* the state section of the plan standing at claim head `head` (struct mesh_buffer's note: `owner` != 0, `closed` 0 and
-   the head's publication `state` != 0, each read with acquire), NULL where none stands (design/compilation-
-   coordination.md, "The region") */
-struct mesh_state *mesh_head_state(struct hdr *,uint32_t head);
-
-/* A plan's claim (design/disjoint-pages-change-request.md, Appendix C, C3.4; design/disjoint-pages-revision-
-   coordination.md, "The program's claim and its sections"): the only place rows and pages are taken, mesh_plan's one
-   call, for exactly the rows and pages that plan places.  Any number of claims coexist, each its own: a retired plan's
-   with the next plan's, until the bridge releases it. */
-struct mesh_claim { struct mesh_range rows,window,local; };
-/* rows: `rows` free page-table rows (MESH_ROW_OWN), one run; window: `window` free arena pages inside the registered
-   window, local: `local` outside it (inside it where the window is the whole arena), each one block-aligned run, first
-   fit; recorded in the rows' first row (its head, mesh.h struct mesh_buffer's note: the three runs, `generation`, the
-   head's publication 0, `start` mesh_started(getpid()), then the client its owner, last, release) for the bridge's
-   release.  Taken whole or not at all: 0, or ENOMEM with nothing taken.  rows >= 1 (the head)
-   The head row is the claim's record alone (mesh-dataflow.c, "The claim's record"): its struct mesh_buffer and struct
-   mesh_page_entry are written by the claim, its close and its release, and no value's rows include it, so a plan's
-   values' rows are [rows.first + 1, rows.first + rows.count) */
-int mesh_claim_take(struct mesh_ctx *,uint64_t generation,uint32_t rows,uint32_t window,uint32_t local,
-                    struct mesh_claim *);
-/* this client's claim of `generation` closed (release); hdr `plans` raised and woken (mesh.h mesh_notify), so the
-   bridge's ports look again (2026-11-04, owner L: where hdr `plan` was woken, vacant from 110).
-   2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N3, N5): the `others` form
-   (every claim of this client but `generation`'s closed) gone, with mesh_plan's step 6.  Why: compiled functions
-   coexist (design/aot-compilation-change-request.md, appendix item 6), a function's claim closed only by its
-   retirement, the program's, or its own plan call's failure.  What must stay: the close a release, `plans` raised and
-   woken after it */
-void mesh_claim_close(struct mesh_ctx *,uint64_t generation);
-
+   destroys one instantiated graph).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"), reversing the claim's close and its walk of the claims' heads (mesh_plan_head, ENOENT):
+   the plan's state section at `plan` (mesh_plan's, a constant of the plan) `closed` 1 (release), then hdr `plans`
+   raised and woken (mesh.h mesh_notify), so the ports let it go; its pages stay the program's, as every page of the
+   program is placed once at compile time and nothing takes pages at run time, until the program's root is released
+   (mesh_retired_release).  Why: point 5: "`mesh_plan_head`'s walk of every claim head in `mesh_transfers_start` and
+   `mesh_plan_retire`, a run-time check", goes; appendix item 6 as corrected: "A function's pages are released when
+   the program retires it or itself, by deferred reclamation".  What must stay: nothing let go here */
+void mesh_plan_retire(struct mesh_ctx *,uint64_t plan);
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): mesh_head_after, mesh_head_state, struct mesh_claim, mesh_claim_take and mesh_claim_close
+   are removed: the claims' heads, their walk, the first fit over the rows' and pages' bitmaps (Knuth vol. 1 §2.5) and
+   ENOMEM from fragmentation.  Why: point 5, "place the whole program's values in one offline allocation at compile
+   time.  These go: `mesh_claim_take`'s first fit and the claim's head record; `mesh_plan_head`'s walk of every claim
+   head ...; `ENOMEM` from fragmentation"; the bridge reads the program's operand at the layout's one place (mesh.h
+   struct mesh_program, mesh_program_plan).  What must stay: no call site but mesh_plan names rows or pages */
 /* rows [first, first + pages / block) of a claim bound to arena pages [page, page + pages), block by block, with
    `index` the copy (an entry's `mapping` high half): mesh_plan's binding of the rows and pages it placed; nothing is
+   taken here, only named.
+   2026-11-05 ("The revisions of 4e78f6f4"): the rows the program's allocation numbered, where they were a claim's;
+   mesh_plan binds each row alone (`pages` one block), its block placed anywhere (point 6).  What must stay: nothing
    taken here, only named */
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
+/* The mapping of a value typed to be seen as one run (2026-11-05; design/compilation-coordination.md, "The documents'
+   corrections of 2026-11-05", point 6: "Give an operand typed as one run its run as a mapping written when the plan is
+   made ... consecutive virtual pages over its pages, as `ncclMeshPageTableCompose`'s `mach_vm_remap` view was on
+   2026-11-02 (PB R2)"; design/plan-to-bridge-change-request.md R2, corrected; restored from mesh 1b372d09^
+   rdma/nccl-mesh.c ncclMeshPageTableCompose, its reservation and its remap a run, as it was): an effector, given rows
+   and deciding nothing (the operator, 2026-11-02, design/page-maps-2026-11-02.md: "effectors know about pointers and
+   pages but never make any decisions ever").  Out: `*view`, a reservation of `count` blocks (`address` its first byte,
+   `bytes` count x block x pgsz: mmap of PROT_NONE anonymous memory, ncclMeshPageTableCompose's), then rows[k]'s
+   block of pages remapped at address + k x block x pgsz for k < `count` (mach_vm_remap of this task's mapping of the
+   region, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, copy FALSE, VM_INHERIT_NONE, as ncclMeshPageTableCompose's), each row's
+   block read from its page-table binding (struct mesh_page_entry `address`); {NULL, 0} where `count` is 0.  0; ENOMEM
+   where Mach gives KERN_NO_SPACE or KERN_RESOURCE_SHORTAGE; EINVAL for any other refusal (ncclMeshPageTableCompose's
+   mapping of its codes); the reservation's errno.  Nothing stays mapped on a failure, and `*view` is {NULL, 0} */
+struct mesh_view { void *address; size_t bytes; };
+int mesh_view_compose(struct mesh_ctx *,const uint32_t *rows,size_t count,struct mesh_view *view);
+/* the program's mapping released (munmap of `address`, `bytes`), once its holder retires the program and no kernel
+   reads it; nothing where `address` is NULL */
+void mesh_view_release(struct mesh_view);
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 /* 2026-11-04, sub-assignment 5: mesh_publication_prepare is removed (the GPU's publication records went with layout
    109, mesh.h; its one caller, mesh-metal.m, reads a range's first row's publication itself).  What must stay: a
    range's release is its supplied word, which its first row's publication names */
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5: "Release at
+   retirement stays deferred reclamation (RCU)"; "The revisions of 4e78f6f4"), reversing the claims of the note below:
+   the program's root (mesh.h struct mesh_program) released where it is closed: a seq_cst fence, then kept where any
+   port's `prepared` is its `generation` or any of its plans' struct mesh_state `held` is not 0, else its `owner` 0
+   (release), so a next program may plan; 1 kept, else 0.  The bridge parent its one caller and its root's one
+   releaser.  What must stay: the fence after the close is read and before the ports are; nobody waits for it.
+   The note before 4e78f6f4: */
 /* the bridge's release of closed claims (deferred reclamation: RCU's call_rcu, P. E. McKenney and J. D. Slingwine,
    Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004; the contract's D10; the hazard pointer's announcement
    read before reclamation, M. M. Michael, IEEE TPDS 15(6), 2004): for each closed claim, a seq_cst fence, then the claim

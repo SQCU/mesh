@@ -55,8 +55,14 @@
    item 2; design/compilation-coordination.md, "The revisions of 3f106747").  116: struct mesh_record `view_boot`,
    `view_sequencer` and `padding` appended, the process that created the record's bridge's installed view (mesh-map.h)
    (design/aot-compilation-change-request.md at mesh b5a3c6e6, A7, "The membership service is the sequencer";
-   design/compilation-coordination.md, "The revisions of b5a3c6e6") */
-#define MESH_VERSION 116u
+   design/compilation-coordination.md, "The revisions of b5a3c6e6").  117: the program's serialized operand found at the
+   layout's one place (hdr `program_off`, where `vacant21` was; struct mesh_program, laid out after the bridge's pages),
+   no claim's head row (struct mesh_buffer's note); struct mesh_state's words from byte 232 the plan's synchronization
+   edges (`waits` and `tells` their numbers, `syncs` their struct mesh_sync entries), `calls` and `closed`, where they
+   were one edge's (`wait_delay`, `wait_count`, `told`) (design/aot-compilation-change-request.md at mesh f715c249, A9,
+   "What the bridge runs: the self-timed schedule", and appendix item 2; design/compilation-coordination.md, "The
+   documents' corrections of 2026-11-05", points 4 and 5, and "The revisions of 4e78f6f4") */
+#define MESH_VERSION 117u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -69,7 +75,13 @@ enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* 2026-11-03, sub-assignment 1 (design/disjoint-pages-change-request.md, Appendix A, A4): the row planes MESH_ROW_HOT
    and MESH_FREE went with the call-site allocators and their reclaim, which alone read and wrote them; the layout sizes
    the one plane left (MESH_PLANES).  What must stay: MESH_ROW_OWN holds the rows of every claim (each plan's, any number
-   at once: 2026-11-04, owner L, where it said each program's one claim) */
+   at once: 2026-11-04, owner L, where it said each program's one claim).
+   2026-11-05 (117; design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): MESH_ROW_OWN and the arena's bits (hdr `arena_off`) are read and written no more, and kept
+   in the layout by name, as every vacant field is.  Why: point 5, "place the whole program's values in one offline
+   allocation at compile time.  These go: `mesh_claim_take`'s first fit and the claim's head record"; they were that
+   first fit's bitmaps (Knuth vol. 1 §2.5).  The program's rows and pages are numbered by its one allocation
+   (mesh-collective.h mesh_plan).  What must stay: the layout's areas where they are */
 enum { MESH_ROW_OWN, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M01 */
@@ -86,7 +98,15 @@ enum { MESH_ROW_OWN, MESH_PLANES };
    mesh_head_state).  No row but a head holds an owner word.
    2026-11-04, owner L (design/compilation-coordination.md, "The region"): `start` in the 8 bytes that were padding,
    where hdr `client_start` held the one client's start; any number of claims, each its claimer's.  What must stay:
-   32 bytes, no field moves (the assert below) */
+   32 bytes, no field moves (the assert below).
+   2026-11-05 (117; design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): no row is a claim's head, and the note above is the 116 form's.  A row's struct
+   mesh_buffer holds `constant` alone (mesh-call.h mesh_section_constant); `owner`, `closed`, `pages` and `start` are
+   read and written no more, kept by name.  The program's record is its serialized operand's root at the layout's one
+   place (struct mesh_program, hdr `program_off`).  Why: point 5: "These go: `mesh_claim_take`'s first fit and the
+   claim's head record; `mesh_plan_head`'s walk of every claim head"; the bridge reads the serialized operand "at a
+   place its compilation fixed, and searches for nothing" (design/aot-compilation-change-request.md A9, "What the
+   bridge runs").  What must stay: 32 bytes, no field moves */
 struct mesh_buffer {
   _Alignas(32) _Atomic uint64_t owner;
   _Atomic uint32_t closed;
@@ -124,7 +144,7 @@ _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
    - a source range's first row: `sends` 1; `targets[0]` {word: the region offset of its supplied word, count 1,
      stride 0}; `state` the region offset of its plan's state section;
    - a claim's head row: `state` as struct mesh_buffer's note states it (stored with release, read with acquire), every
-     other field 0.
+     other field 0 (until 117: no row is a head now, struct mesh_buffer's note).
    2026-11-04, owner L (design/compilation-coordination.md, "The region"): a row's `state` its own plan's state
    section, where it was hdr `state`, the one plan's; any number of plans stand at once.  What must stay: a row of a
    plan names that plan's state section.
@@ -145,7 +165,11 @@ _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publi
    ruling 1 and Q5).  A port that holds a plan says so in the plan's state section (struct mesh_state `held`).
    2026-11-04, owner L: reversing the 109 form, where `prepared` held the one plan's generation while the port served
    it.  Why: any number of plans stand, so a port's holding is per plan, in each plan's words.  What must stay: the
-   announcement, a seq_cst fence, then the head read again (design/disjoint-pages-revision-coordination.md, D10). */
+   announcement, a seq_cst fence, then the head read again (design/disjoint-pages-revision-coordination.md, D10).
+   2026-11-05 (117; design/compilation-coordination.md, "The revisions of 4e78f6f4"): `prepared` the generation of the
+   program's serialized operand the port is loading (struct mesh_program `generation`), where it was a claim's, and
+   the root read again after the fence, where the head was.  What must stay: the announcement, a seq_cst fence, then
+   the record read again */
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
 /* the bridge-side region types (the map's records and cables, the link table, the layout) are mesh-map.h's, which no
    client includes (reviews R1, C1 and R2, B2; design/page-queue-change-request.md, "Queue pairs and links belong to the
@@ -649,13 +673,30 @@ _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahe
    Why: "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" (BSL (7)).  Its source raises a
    count that only rises (C3's counted completion: Portals 4 counting events), and its sink reads that count before
    its k-th start.  The bridge carries the count from source to sink, as it carries an arrival."  What must stay:
-   bytes 0-231 where they are */
+   bytes 0-231 where they are.
+   2026-11-05 (117; design/aot-compilation-change-request.md, appendix item 2, "Each plan builds its own part of that
+   graph" withdrawn: "the compilation builds the program's whole IPC graph ... and each queue's room is (5) in that
+   graph"; design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 4, and "The revisions
+   of 4e78f6f4"), the plan's synchronization edges at this node, where it had one into it and one out of it:
+   - the program's IPC graph has an actor for each node's part of each of the program's calls ("The actors are each
+     node's parts of the program's calls, in program order"), so a plan whose function the program calls `calls`
+     times in one execution of its traced block (A10, "The calls' graph") has `calls` actors at a node, and
+     Convert-to-SC-graph adds at most one edge into each actor and one out of it (BSL §9, Fig. 6: each SCC's chosen
+     vertex);
+   - `waits` the edges into this plan's actors here and `tells` those out of them, `syncs` the region offset of their
+     struct mesh_sync entries, the `waits` first, in the state section (mesh-collective.c plan_layout);
+   - `calls` the program's calls of the plan's function in one execution of the block (A10), at least 1: the plan's
+     k-th start here (its `submissions` before it) is its function's call at place k mod `calls` among them, in the
+     block's k / `calls`-th execution;
+   - `closed` 1 (release) once the program retires the plan alone (mesh-dataflow.h mesh_plan_retire), 0 else.
+   `wait_delay`, `wait_count` and `told` go, their bytes these.  What must stay: bytes 0-231 where they are */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
   uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
   _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced;
-  uint32_t waits,tells; uint64_t wait_delay; _Atomic uint64_t wait_count; uint64_t told,submit_room,padding3[6]; };
+  uint32_t waits,tells; uint64_t syncs; uint32_t calls; _Atomic uint32_t closed; uint64_t padding5,submit_room,
+  padding3[6]; };
 _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
@@ -670,8 +711,62 @@ _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,room)==200 && offsetof(struct mesh_state,deliveries)==208 &&
   offsetof(struct mesh_state,submits)==216 && offsetof(struct mesh_state,announced)==224 &&
   offsetof(struct mesh_state,waits)==232 && offsetof(struct mesh_state,tells)==236 &&
-  offsetof(struct mesh_state,wait_delay)==240 && offsetof(struct mesh_state,wait_count)==248 &&
-  offsetof(struct mesh_state,told)==256 && offsetof(struct mesh_state,submit_room)==264,"mesh_state");
+  offsetof(struct mesh_state,syncs)==240 && offsetof(struct mesh_state,calls)==248 &&
+  offsetof(struct mesh_state,closed)==252 && offsetof(struct mesh_state,padding5)==256 &&
+  offsetof(struct mesh_state,submit_room)==264,"mesh_state");
+/* One synchronization edge of the program's IPC graph at a plan's actor at this node (117; design/aot-compilation-
+   change-request.md, appendix item 2: "The compilation adds synchronization edges by BSL's Convert-to-SC-graph (§9,
+   Fig. 6) and sets their delays by DetermineDelays (Fig. 8)"; "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k −
+   delay((vj, vi)))" (BSL (7)).  Its source raises a count that only rises (C3's counted completion: Portals 4 counting
+   events), and its sink reads that count before its k-th start.  The bridge carries the count from source to sink, as
+   it carries an arrival"; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, here
+   BSL).  The count is the source plan's starts at the source's node (its `submissions`), "the program's starts of the
+   plan at that node" (item 2), which only rise.  Every delay counts executions of the program's traced block, BSL's
+   iterations (one firing of every actor).
+   - An edge into this plan here (struct mesh_state `waits` of them, first at `syncs`): `node` its source's map index,
+     `function` the source plan's (its struct mesh_state `epoch`), `every` the source's `calls`, `position` the place
+     among them of the call whose start the count must reach, `at` the place among this plan's `calls` of the call it
+     enters, `delay` DetermineDelays' delay; `count` the source's starts the bridge parent here has carried (its one
+     writer, only rising; UINT64_MAX once the plan is cancelled).  This plan's k-th start here, where k mod `calls` is
+     `at` and K = k / `calls` >= `delay`, waits until `count` >= (K - `delay`) x `every` + `position` + 1 (mesh-call.h
+     mesh_transfers_start).
+   - An edge out of this plan here (`tells` of them, after the waits): `node` its sink's map index, `function` the sink
+     plan's, `count` the starts here the bridge parent last carried toward it (mesh-records.c counts_tell); `every`,
+     `position`, `at` and `delay` 0.
+   What must stay: 40 bytes; written once where mesh_plan places the plan, `count` the bridge's after */
+struct mesh_sync { uint32_t node,function,position,every,at,padding; uint64_t delay; _Atomic uint64_t count; };
+_Static_assert(sizeof(struct mesh_sync)==40 && offsetof(struct mesh_sync,at)==16 && offsetof(struct mesh_sync,delay)==24 &&
+  offsetof(struct mesh_sync,count)==32,"mesh_sync");
+/* The root of the program's serialized operand, at the layout's one place, hdr `program_off` (117; mesh-map.h
+   mesh_layout).  design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "Every
+   address in it is fixed at compile time, as memory planning fixes them ... So the bridge reads the serialized operand
+   at a place its compilation fixed, and searches for nothing"; design/compilation-coordination.md, "The documents'
+   corrections of 2026-11-05", point 5: "R1's method is U-Net's and VIA's queues of descriptors over registered memory,
+   which the interface knows from the endpoint's creation; it does not search for them.  So the serialized operand's
+   place is a constant the region's layout names once, as the bridge's own pages are "laid out once with the region"
+   (disjoint-pages A3).  Nothing walks heads to find it."  The run is one program on the whole collective (A7,
+   corrected 2026-11-05), so the region holds one program's operand at a time.
+   - `owner`: the client word of the program whose operand it is (mesh-dataflow.h mesh_attach), 0 none.  mesh_plan
+     stores it last (release), once every plan of the program is written, and the bridge parent stores 0 (release)
+     where it releases a closed program no port holds (mesh-dataflow.h mesh_retired_release, deferred reclamation).
+     mesh_plan is EBUSY where it reads it not 0 (mesh-collective.h);
+   - `closed`: 1 (release) once the program retires (mesh-dataflow.h mesh_retire: its detach, or the bridge's
+     retirement of a gone process), 0 where mesh_plan writes the root;
+   - `plans`: the program's plans, one a compiled function, in the plan call's order (mesh-collective.h struct
+     mesh_function); `table` the region offset of `plans` uint64_t words, word k the region offset of function k + 1's
+     state section (struct mesh_state, its `epoch` k + 1), placed by the program's one allocation;
+   - `start`: mesh_started(getpid()) of the planning process (mesh-holders.h), with `owner`'s low 32 bits its identity
+     as a holder of the region; `group` the program's (MESH_GROUP); `generation` minted from hdr `serial`
+     (atomic_fetch_add + 1, never 0), the ports' announcement while they load a plan of it (struct mesh_port_info
+     `prepared`).
+   A plan of the program stands where `owner` is not 0, `closed` is 0 and its state section's `closed` is 0
+   (mesh_program_plan).  What must stay: 64 bytes, every field in its place */
+struct mesh_program { _Alignas(64) _Atomic uint64_t owner; _Atomic uint32_t closed; uint32_t plans;
+  uint64_t start,group,generation,table,padding[2]; };
+_Static_assert(sizeof(struct mesh_program)==64 && offsetof(struct mesh_program,closed)==8 &&
+  offsetof(struct mesh_program,plans)==12 && offsetof(struct mesh_program,start)==16 &&
+  offsetof(struct mesh_program,group)==24 && offsetof(struct mesh_program,generation)==32 &&
+  offsetof(struct mesh_program,table)==40,"mesh_program");
 
 /* The deliveries' channel (design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "Delivery at a
    node"; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH and M3 to M6): the calls this node's bridge
@@ -788,8 +883,13 @@ struct hdr {
      note), never read or written; the map's room, `map_room` records at `map_off` (mesh-map.h mesh_layout) */
   uint64_t vacant9,vacant10,vacant11,vacant12,vacant13,map_room;
   /* the one plan's state section's region offset until 110 (`state`; struct mesh_hop's note, "Several plans"), never
-     read or written: each plan's is its claim head's publication `state` */
-  uint64_t vacant21;
+     read or written: each plan's is its claim head's publication `state`.
+     2026-11-05 (117; design/compilation-coordination.md, "The revisions of 4e78f6f4"): `program_off`, where `vacant21`
+     was: the region offset of the program's serialized operand's root (struct mesh_program), the layout's (mesh-map.h
+     mesh_layout), set once with the region.  Why: design/compilation-coordination.md, "The documents' corrections of
+     2026-11-05", point 5: "the serialized operand's place is a constant the region's layout names once".  What must
+     stay: every field in its place */
+  uint64_t program_off;
   /* 110 (design/compilation-coordination.md, "The region"): a count that only rises.  Every publication of a plan
      (mesh_plan), every close of a claim (mesh-dataflow.h mesh_claim_close, mesh_plan_retire, mesh_retire), every
      start (mesh-call.h mesh_transfers_start) and the bridge parent's first publication of a plan's sequence numbers
@@ -843,7 +943,7 @@ _Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)
   offsetof(struct hdr,vacant7)==40 && offsetof(struct hdr,vacant14)==44 && offsetof(struct hdr,vacant8)==240 &&
   offsetof(struct hdr,vacant18)==248 && offsetof(struct hdr,vacant19)==256 && offsetof(struct hdr,map_off)==272 &&
   offsetof(struct hdr,vacant9)==352 && offsetof(struct hdr,vacant13)==384 && offsetof(struct hdr,map_room)==392 &&
-  offsetof(struct hdr,vacant21)==400 && offsetof(struct hdr,plans)==408 && offsetof(struct hdr,deliveries_off)==416 &&
+  offsetof(struct hdr,program_off)==400 && offsetof(struct hdr,plans)==408 && offsetof(struct hdr,deliveries_off)==416 &&
   offsetof(struct hdr,delivered)==432 && offsetof(struct hdr,delivery_read)==440 && sizeof(struct hdr)==504,
   "struct hdr: no field moves");
 /* design/prepared-machine.md#M26 */
@@ -898,6 +998,22 @@ static inline struct mesh_hop *mesh_hops(struct hdr *m,const struct mesh_state *
    context's `state`, gone.  What must stay: a state section read at the offset its plan published */
 static inline struct mesh_state *mesh_state_at(struct hdr *m,uint64_t at){
   return at?(struct mesh_state *)((char *)m+at):NULL;
+}
+/* the program's serialized operand's root, at the layout's one place (struct mesh_program's note) */
+static inline struct mesh_program *mesh_program(struct hdr *m){ return (struct mesh_program *)((char *)m+m->program_off); }
+/* function k + 1's plan (struct mesh_program `table` word k), NULL where it does not stand: the root's `owner` 0
+   (acquire) or `closed` 1 (acquire), k not below its `plans`, or the plan's `closed` 1 (acquire).  The bridge's one
+   reading of the program's plans, each at its compile-time place (A9, "What the bridge runs") */
+static inline struct mesh_state *mesh_program_plan(struct hdr *m,uint32_t k){
+  struct mesh_program *program=mesh_program(m);
+  if(!atomic_load_explicit(&program->owner,memory_order_acquire) ||
+     atomic_load_explicit(&program->closed,memory_order_acquire) || k>=program->plans)return NULL;
+  struct mesh_state *state=mesh_state_at(m,((const uint64_t *)(const void *)((char *)m+program->table))[k]);
+  return state && !atomic_load_explicit(&state->closed,memory_order_acquire)?state:NULL;
+}
+/* the synchronization edges of plan `state` here, `waits` into it then `tells` out of it (struct mesh_sync's note) */
+static inline struct mesh_sync *mesh_syncs(struct hdr *m,const struct mesh_state *state){
+  return (struct mesh_sync *)(void *)((char *)m+state->syncs);
 }
 /* tag pre-return-20261103 rdma/mesh.h mesh_records and mesh_map_whole, verbatim; mesh_records moved to mesh-map.h
    (review R1, C1) */
