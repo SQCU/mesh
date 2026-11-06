@@ -516,8 +516,7 @@ static int mesh_view_copy(struct mesh_ctx *c,uint64_t deadline,struct mesh_recor
     *serial=atomic_load_explicit(&m->view,memory_order_relaxed);
     const int fits=at>=sizeof *m && at<=c->len && nodes<=(c->len-at)/sizeof *r;
     if(fits && nodes<=MESH_NODES_MOST)memcpy(r,(char *)m+at,nodes*sizeof *r);
-    atomic_thread_fence(memory_order_acquire);
-    if(atomic_load_explicit(&m->view_map,memory_order_relaxed)!=before)continue;
+    if(!mesh_seqlock_whole(&m->view_map,before))continue;
     if(!fits)return EINVAL;
     if(nodes>MESH_NODES_MOST)return E2BIG;
     if(!*serial)return ESTALE;

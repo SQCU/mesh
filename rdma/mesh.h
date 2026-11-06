@@ -1225,10 +1225,17 @@ static inline struct mesh_sync *mesh_syncs(struct hdr *m,const struct mesh_state
    serial, before and after each change (odd while it writes; its own record is in before the region opens, so a
    client never reads 0), and a reader's copy is whole where `map` read (acquired) before it was even and is unchanged
    after it */
-static inline int mesh_map_whole(struct hdr *m,uint64_t before){
+/* 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-10 and
+   W13: "Duplicated patterns, each to be merged"; "The revisions of 14b9a757", sub-agent D1's finding): the seqlock
+   reader's test over its sequence word `lock` (an acquire fence, then `before` even and `lock` unchanged), the one form
+   mesh_map_whole reads `map` by and the installed view's readers read `view_map` by (mesh-flow.c records_read,
+   mesh-dataflow.c mesh_view_copy), where each wrote the two steps itself.  What must stay: the fence before the second
+   read */
+static inline int mesh_seqlock_whole(const _Atomic uint64_t *lock,uint64_t before){
   atomic_thread_fence(memory_order_acquire);
-  return !(before&1) && atomic_load_explicit(&m->map,memory_order_relaxed)==before;
+  return !(before&1) && atomic_load_explicit(lock,memory_order_relaxed)==before;
 }
+static inline int mesh_map_whole(struct hdr *m,uint64_t before){ return mesh_seqlock_whole(&m->map,before); }
 /* tag pre-return-20261103 rdma/mesh-observe.h mesh_bridge_pages, at the layout's bridge area (`bridge_off`), no link
    infos before it */
 static inline struct mesh_bridge_pages *mesh_bridge_pages(struct hdr *m){

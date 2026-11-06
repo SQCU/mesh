@@ -221,8 +221,8 @@ struct cursor { uint64_t execution,round,at,end; uint32_t copy,padding; };
    cable's place in the pair's key order, the counter's fourth word (S7'); `sets[d]` each set's `set`, its size m on
    this cable and the index in `members[d]` of its first member (struct flow_set); `members[d]` each set's members on
    this cable, their records in list order, X_1 .. X_m (S5, S7': the members whose positions the deal gave this
-   cable); `slot_set[d][r]` the set whose position
-   record r is (UINT32_MAX: a sequence's position) and `slot_position[d][r]` its index in that set, from 0 (NULL both
+   cable); `position_set[d][r]` the set whose position
+   record r is (UINT32_MAX: a sequence's position) and `position_index[d][r]` its index in that set, from 0 (NULL both
    where the direction has no set); and per lane, `drawn[d][q]` the permutation of (`drawn_execution`, `drawn_set`)
    its cursor last met, room for the largest set the lane carries a position of, taken at the load (S7: nothing
    allocated at run time).  Why: each execution of a set is posted in a uniformly random permutation of its members,
@@ -251,7 +251,7 @@ struct cursor { uint64_t execution,round,at,end; uint32_t copy,padding; };
    key, counter and size.
    2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): `members[d]` each set's every
    member on the pair, M records from its `first`, a record of each whose own position the deal gave another cable
-   among them (after every lane's records), and `slot_position` a position's index among the set's M positions;
+   among them (after every lane's records), and `position_index` a position's index among the set's M positions;
    struct flow_set's `local` and `ranks`, and `ranks[d]`, gone.  Why: appendix item 5, "Each port holds a record for
    every member of every set it carries a position of".  What must stay: both ends drawing from the same key, counter
    and size.
@@ -293,7 +293,13 @@ struct flow {
   size_t traced[2],trace_capacity[2];
   uint64_t key[4];
   struct flow_set *sets[2];
-  uint32_t *slot_set[2],*slot_position[2];
+  /* 2026-11-06 ("The revisions of 14b9a757", the coordinating implementer, on sub-agent D1's finding): `position_set`
+     and `position_index`, where they were `slot_set` and `slot_position`, and link_prepare's `record_of`, where it was
+     `slot`: a position record's set and its index among the set's positions (Fisher and Yates's shuffle draws a
+     permutation of a set's positions, Knuth vol. 2, §3.4.2, Algorithm P), and each pick's record.  Why: the operator's
+     "Canonical names, not inherited idiom: no 'lease', 'claim' or 'slot' from old code without the canonical structure
+     and citation".  What must stay: every use as before; a rename alone */
+  uint32_t *position_set[2],*position_index[2];
   uint64_t *members[2];
   uint64_t *drawn[2][MESH_LINK_LANES],drawn_execution[2][MESH_LINK_LANES];
   uint32_t drawn_set[2][MESH_LINK_LANES];
@@ -428,8 +434,7 @@ static int records_read(_Atomic uint64_t *lock,const _Atomic uint64_t *nodes,uin
     struct mesh_record *copy=fits?malloc((n?n:1)*sizeof *copy):NULL;
     if(copy)memcpy(copy,(char *)M+off,n*sizeof *copy);
     const uint64_t s=atomic_load_explicit(identity,memory_order_relaxed);
-    atomic_thread_fence(memory_order_acquire);
-    if(atomic_load_explicit(lock,memory_order_relaxed)==before){
+    if(mesh_seqlock_whole(lock,before)){
       if(!copy)return fits?ENOMEM:EINVAL;
       *out=copy;*count=n;*serial=s;return 0;
     }
@@ -664,32 +669,32 @@ static void set_draw(const uint64_t key[4],uint64_t execution,uint32_t set,uint3
    2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", OP): the set's one permutation of its
    M positions on the pair (set_draw), then this cable's members in its order: x walked from its first, each index
    whose position the deal gave this cable (`ranks`, its index among this cable's members) taken in turn, so position
-   r of this cable (its r-th member in list order, `slot_position`) carries the r-th of this cable's members in the
+   r of this cable (its r-th member in list order, `position_index`) carries the r-th of this cable's members in the
    permutation; x is compacted in place, each index read before its word is written (r <= i).  Where it was the
    permutation of this cable's members alone, drawn on a stream of its own.  Why: appendix item 5, "Every edge and
    every cable of the set's tree carries its share of the set's pages in that one permutation's order"; the share is
    the members the deal gave the cable, whose records this port's child holds (design/compilation-coordination.md,
    "The revisions of 46ae8fdf", M1).  What must stay: as above.
    2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM), reversing M1's share: position j
-   of the set on the pair (this cable's position record's `slot_position`) posts member x[j] of σ, its record among
+   of the set on the pair (this cable's position record's `position_index`) posts member x[j] of σ, its record among
    the set's every member (`members`), whichever cable the deal gave that member's own position.  Why: appendix item 5,
    "So the deal fixes positions, not members ... So any member can be posted at any of the set's positions on its
    cables."  What must stay: the member each position carries in an execution the same at every draw, at both ends */
 static inline uint64_t position_record(struct flow *f,int d,uint32_t q,const struct cursor *at){
-  const uint32_t s=f->slot_set[d][at->at];
+  const uint32_t s=f->position_set[d][at->at];
   if(s==UINT32_MAX)return at->at;
   const struct flow_set *set=f->sets[d]+s;
   if(f->drawn_set[d][q]!=s || f->drawn_execution[d][q]!=at->execution){
     set_draw(f->key,at->execution,set->set,set->size,f->drawn[d][q]);
     f->drawn_set[d][q]=s;f->drawn_execution[d][q]=at->execution;
   }
-  return f->members[d][set->first+f->drawn[d][q][f->slot_position[d][at->at]]];
+  return f->members[d][set->first+f->drawn[d][q][f->position_index[d][at->at]]];
 }
 /* every table of a flow's sets freed (link_prepare's failure, plan_end) */
 static void flow_sets_free(struct flow *f){
   for(int d=0;d<2;d++){
-    free(f->sets[d]);free(f->slot_set[d]);free(f->slot_position[d]);free(f->members[d]);
-    f->sets[d]=NULL;f->slot_set[d]=f->slot_position[d]=NULL;f->members[d]=NULL;
+    free(f->sets[d]);free(f->position_set[d]);free(f->position_index[d]);free(f->members[d]);
+    f->sets[d]=NULL;f->position_set[d]=f->position_index[d]=NULL;f->members[d]=NULL;
     for(uint32_t q=0;q<MESH_LINK_LANES;q++){free(f->drawn[d][q]);f->drawn[d][q]=NULL;}
   }
 }
@@ -856,9 +861,9 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
   /* each direction's sets (S7, below; 2026-11-05, "The revisions of 67ca86f8", SP): set r's picks
      member[d][bound[d][r] .. bound[d][r + 1]) in list order, `runs` of them, `local` of them with positions on this
      cable; each pick's set (`set_of`, UINT64_MAX for a sequence's), each set's first pick while they are found
-     (`lead`); and each pick's record (`slot`), where the direction has such a set */
+     (`lead`); and each pick's record (`record_of`), where the direction has such a set */
   uint64_t *member[2]={NULL,NULL},*bound[2]={NULL,NULL},*set_of[2]={NULL,NULL},*lead[2]={NULL,NULL},runs[2]={0,0},
-           local[2]={0,0},*slot[2]={NULL,NULL},*kept[2]={NULL,NULL},extra[2]={0,0};
+           local[2]={0,0},*record_of[2]={NULL,NULL},*kept[2]={NULL,NULL},extra[2]={0,0};
   for(int d=0;d<2;d++){
     if(!(pick[d]=malloc((entries?entries:1)*sizeof *pick[d]))){error=ENOMEM;goto failed;}
     for(uint64_t j=0;j<entries;j++)
@@ -963,7 +968,7 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
       local[d]++;
       extra[d]+=bound[d][r+1]-bound[d][r]-kept[d][r];
     }
-    if(local[d] && !(slot[d]=malloc(units[d]*sizeof *slot[d]))){error=ENOMEM;goto failed;}
+    if(local[d] && !(record_of[d]=malloc(units[d]*sizeof *record_of[d]))){error=ENOMEM;goto failed;}
   }
   /* 2026-11-04, the coordinator's ruling on sub-assignment 6's finding 2 (a re-paired child loading the plan again):
      a plan whose run has begun, its state's `executions` (acquire) above 0 at this load, is refused (EALREADY, by
@@ -1059,7 +1064,7 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
        the span's length its hop's `bytes`, which the landing's length test reads */
     const struct ibv_sge span=wire_span(&port->device,(uint64_t)hop->page*M->pgsz+hop->offset,hop->bytes);
     const uint64_t at=q!=UINT32_MAX?fill[d][q]++:next[d]++;
-    if(slot[d])slot[d][k]=at;
+    if(record_of[d])record_of[d][k]=at;
     if(d==MESH_SEND){
       struct prepared_send *record=f->sends+at;
       *record=(struct prepared_send){.word=region_word(hop->word),.field=hop->field,.span=span,.flow=f};
@@ -1095,7 +1100,7 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      members' alone): each set with a position on this cable has its every member on the pair, X_0 .. X_{M-1} in list
      order, at `members` from its `first`, each member's record the one built above (a position's own where the deal
      gave it this cable, else one of `extra`), each a view of that member's page (R1); each position record of this
-     cable its set (`slot_set`) and its index j among the set's M positions on the pair (`slot_position`); `ranks`
+     cable its set (`position_set`) and its index j among the set's M positions on the pair (`position_index`); `ranks`
      gone.  Why: design/aot-compilation-change-request.md, appendix item 5: "So the deal fixes positions, not members.
      Each lane keeps the positions the deal gives it.  In each execution, the member at each position is the one σ
      puts there.  Each port holds a record for every member of every set it carries a position of, each record a view
@@ -1103,24 +1108,24 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      positions the deal's; each lane's room for one permutation of the largest set it carries a position of */
   for(int d=0;d<2;d++){
     for(uint32_t q=0;q<MESH_LINK_LANES;q++){f->drawn_set[d][q]=UINT32_MAX;f->drawn_execution[d][q]=0;}
-    if(!slot[d])continue;
+    if(!record_of[d])continue;
     const uint64_t records=d==MESH_SEND?f->send_count:f->receive_count;
     uint64_t whole=0,room[MESH_LINK_LANES]={0};
     for(uint64_t r=0;r<runs[d];r++)if(kept[d][r])whole+=bound[d][r+1]-bound[d][r];
     f->sets[d]=malloc(local[d]*sizeof *f->sets[d]);f->members[d]=malloc(whole*sizeof *f->members[d]);
-    f->slot_set[d]=malloc(records*sizeof *f->slot_set[d]);f->slot_position[d]=malloc(records*sizeof *f->slot_position[d]);
-    if(!f->sets[d] || !f->members[d] || !f->slot_set[d] || !f->slot_position[d]){error=ENOMEM;goto failed;}
-    for(uint64_t r=0;r<records;r++){f->slot_set[d][r]=UINT32_MAX;f->slot_position[d][r]=0;}
+    f->position_set[d]=malloc(records*sizeof *f->position_set[d]);f->position_index[d]=malloc(records*sizeof *f->position_index[d]);
+    if(!f->sets[d] || !f->members[d] || !f->position_set[d] || !f->position_index[d]){error=ENOMEM;goto failed;}
+    for(uint64_t r=0;r<records;r++){f->position_set[d][r]=UINT32_MAX;f->position_index[d][r]=0;}
     uint32_t sets=0;uint64_t m=0;
     for(uint64_t r=0;r<runs[d];r++){
       const uint64_t a=bound[d][r],e=bound[d][r+1];
       if(!kept[d][r])continue;
       for(uint64_t i=a;i<e;i++){
-        const uint64_t k=member[d][i],at=slot[d][k];
+        const uint64_t k=member[d][i],at=record_of[d][k];
         const uint32_t q=assigned[d][k];
         f->members[d][m+i-a]=at;
         if(q==UINT32_MAX)continue;
-        f->slot_set[d][at]=sets;f->slot_position[d][at]=(uint32_t)(i-a);
+        f->position_set[d][at]=sets;f->position_index[d][at]=(uint32_t)(i-a);
         if(e-a>room[q])room[q]=e-a;
       }
       f->sets[d][sets]=(struct flow_set){.set=list[pick[d][member[d][a]]].set,.size=(uint32_t)(e-a),.first=m};
@@ -1162,12 +1167,12 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      a batch; the batch's bound and totals gone; `told` is plan_load's */
   f->words=words;f->copies=copies;f->state=FLOW_SERVING;
   f->sent=f->landed=f->posted=0;
-  for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);free(member[d]);free(bound[d]);free(set_of[d]);free(lead[d]);free(slot[d]);free(kept[d]);}
+  for(int d=0;d<2;d++){free(pick[d]);free(assigned[d]);free(member[d]);free(bound[d]);free(set_of[d]);free(lead[d]);free(record_of[d]);free(kept[d]);}
   free(bytes);free(carried);
   return 0;
 failed:
   for(int d=0;d<2;d++){
-    free(pick[d]);free(assigned[d]);free(member[d]);free(bound[d]);free(set_of[d]);free(lead[d]);free(slot[d]);free(kept[d]);
+    free(pick[d]);free(assigned[d]);free(member[d]);free(bound[d]);free(set_of[d]);free(lead[d]);free(record_of[d]);free(kept[d]);
     free(f->trace[d]);f->trace[d]=NULL;free(f->first[d]);f->first[d]=NULL;
   }
   flow_sets_free(f);
@@ -1531,7 +1536,7 @@ static __attribute__((always_inline)) inline int link_receive_drain(struct port 
         f->cursor[MESH_RECEIVE][k]=at;f=NULL;
         continue;
       }
-      struct prepared_receive *record=f->receives+(f->slot_set[MESH_RECEIVE]?position_record(f,MESH_RECEIVE,k,&at):at.at);
+      struct prepared_receive *record=f->receives+(f->position_set[MESH_RECEIVE]?position_record(f,MESH_RECEIVE,k,&at):at.at);
       if(atomic_load_explicit(record->count,memory_order_acquire)<at.round*record->pages)break;
       const uint64_t each=frames_of(record->span.length).n;
       if(state->posted-state->got>=MESH_LANE_UNITS || state->frames_posted-state->frames_retired+each>state->frame_capacity)break;
@@ -1641,7 +1646,7 @@ static __attribute__((always_inline)) inline int link_send_drain(struct port *po
         f->cursor[MESH_SEND][k]=at;f=NULL;
         continue;
       }
-      struct prepared_send *record=f->sends+(f->slot_set[MESH_SEND]?position_record(f,MESH_SEND,k,&at):at.at);
+      struct prepared_send *record=f->sends+(f->position_set[MESH_SEND]?position_record(f,MESH_SEND,k,&at):at.at);
       const uint64_t word=atomic_load_explicit(record->word,memory_order_acquire);
       if(record->field==MESH_ABSENT?word<=at.execution:((word>>record->field)&3)!=mesh_phase(at.round+1))break;
       const struct frames each=frames_of(record->span.length);
