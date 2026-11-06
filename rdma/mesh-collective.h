@@ -324,7 +324,17 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    (A10, "Its output"), the room of the plan's submissions' queue and the first term of its delivered calls' queue's
    room (appendix item 2, "Its room is fixed at compile time"); 0 where A10 found none, which fails ENOMEM (item 2: "A
    plan whose bound A10 cannot find fails with `ENOMEM` when it is planned").  What must stay: every operand the same
-   at every rank */
+   at every rank.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", BS and PG): `outstanding` is the delay
+   on the edge from a call's completion to the program's later submission in the program's IPC graph, and no room: each
+   queue's room is its self-timed buffer bound there, with the synchronization edges Convert-to-SC-graph adds and
+   DetermineDelays' delays (S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997,
+   §4.3 (5), §9, Figs. 6 and 8; mesh-collective.c plan_rooms); ENOMEM also where a cycle has zero delay (BSL Lemma 1).
+   `program` is the nodes the program's launcher started it at, passed by the launcher as it passes `group`
+   (design/aot-compilation-change-request.md A7, sender(m): "The program's nodes are the nodes its launcher started it
+   at, an operand of the plan call (`program`) that the launcher passes as it passes `group` (MESH_GROUP)"); every run
+   is launched on the whole collective, so `program` holds every node of the map, every relay among them.  What must
+   stay: every operand the same at every rank */
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t function,uint64_t program,uint64_t outstanding,
               const struct mesh_declared *,const struct mesh_weight *,uint32_t count,struct mesh_value *,uint32_t values,
               const struct mesh_dependence *,uint32_t dependences,uint64_t *plan);

@@ -609,7 +609,21 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
    design/aot-compilation-change-request.md A7: "It TO-broadcasts the program's submissions in the order the program
    makes them"; "With one sender, whose messages reach the sequencer first in, first out, Fig. 5's sequencer numbers
    them in the order they were sent".  What must stay: the raise before the fence, the serial's read after it; EINVAL
-   before anything is raised */
+   before anything is raised.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", BS): the queue's room `submit_room`,
+   its self-timed buffer bound (mesh.h struct mesh_state's note), where it was `outstanding`; and, where the plan has a
+   synchronization edge into this node (`waits`), the start that submits waits first, as the edge's sink, until the
+   count its source raises reaches k - `wait_delay` (k this start's ordinal, the plan's `submissions` + 1), reading
+   `wait_count` (acquire) and waiting on it (os_sync_wait_on_address_with_timeout, region-shared, woken where the bridge
+   parent stores it: mesh-records.c count_take), for at most MESH_PLATFORM_NS (ETIMEDOUT), and ESTALE where the
+   plan's serial is not the map's (its view or map has moved: the cancellation raises the count to UINT64_MAX and wakes
+   it, mesh-flow.c plan_cancel), nothing raised in either case.  Why: design/aot-compilation-change-request.md, appendix
+   item 2: "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" (BSL (7)).  Its source raises a
+   count that only rises ... and its sink reads that count before its k-th start"; "The only waits are at the sinks of
+   the added synchronization edges, on a count that only rises.  Each ends when its source moves on, or when the view
+   ends and the plan with it (`ESTALE`)"; the program's start is the sink's start, the sender's submission (A7) or a
+   node's part of the call.  The bound is the rules' ("Every remaining wait ends in bounded time").  What must stay:
+   the wait before the raise; nothing raised where it fails */
 int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions){
   struct hdr *m=context->M;
   const uint64_t at=plan,page=m->pgsz,len=context->len;
@@ -617,15 +631,25 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
      mesh_plan_head(context,plan)==UINT32_MAX)
     return EINVAL;
   struct mesh_state *state=mesh_state_at(m,at);
-  if(!state->outstanding || state->submits>len || state->outstanding>(len-state->submits)/sizeof(struct mesh_submission))
+  if(!state->submit_room || state->submits>len || state->submit_room>(len-state->submits)/sizeof(struct mesh_submission))
     return EINVAL;
   uint64_t served=atomic_load_explicit(&state->executions,memory_order_relaxed);
+  const uint64_t k=atomic_load_explicit(&state->submissions,memory_order_relaxed);
+  if(served<executions && state->waits!=MESH_ABSENT && k+1>state->wait_delay){
+    const uint64_t need=k+1-state->wait_delay,deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
+    for(uint64_t seen;(seen=atomic_load_explicit(&state->wait_count,memory_order_acquire))<need;){
+      const uint64_t now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+      if(atomic_load_explicit(&m->map_serial,memory_order_acquire)!=state->serial)return ESTALE;
+      if(now>=deadline)return ETIMEDOUT;
+      os_sync_wait_on_address_with_timeout(&state->wait_count,seen,sizeof state->wait_count,
+                                           OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,deadline-now);
+    }
+  }
   while(served<executions && !atomic_compare_exchange_strong_explicit(&state->executions,&served,executions,
                                                                       memory_order_release,memory_order_relaxed));
   if(served<executions){
-    const uint64_t k=atomic_load_explicit(&state->submissions,memory_order_relaxed);
     struct mesh_submission *queue=(struct mesh_submission *)(void *)((char *)m+state->submits);
-    queue[k%state->outstanding]=(struct mesh_submission){.end=executions,.clock=++context->clock};
+    queue[k%state->submit_room]=(struct mesh_submission){.end=executions,.clock=++context->clock};
     atomic_store_explicit(&state->submissions,k+1,memory_order_release);
   }
   mesh_notify(&m->plans);

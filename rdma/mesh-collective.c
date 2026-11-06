@@ -183,8 +183,12 @@ struct plan {
   uint64_t phases,counts,supplied,status,hops,words;
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS and PQ): the plan's two queues in
      the section, `deliveries` (room `room` struct mesh_delivery) and `submits` (room `outstanding` struct
-     mesh_submission), between the status and the entries */
-  uint64_t deliveries,submits,room,outstanding;
+     mesh_submission), between the status and the entries.
+     2026-11-05 ("The revisions of 3f106747", BS): the submissions' queue's room `submit_room`, and `room` and it the
+     queues' self-timed buffer bounds (plan_rooms), `outstanding` A10's bound alone; the synchronization edge into this
+     node (`waits` its source's map index, `wait_delay` its delay) and out of it (`tells` its sink's), MESH_ABSENT none */
+  uint64_t deliveries,submits,room,outstanding,submit_room,wait_delay;
+  uint32_t waits,tells;
   /* the items (plan_place): routed copies (a, c) at item a x u + c, then this node's other values (others[k] the index
      in `values` of item local x u + k; a value of lag k >= 1 k consecutive items, its copies in order), then the state
      section, item `state` */
@@ -594,7 +598,7 @@ static void plan_layout(struct plan *p){
   p->status=plan_align(p->supplied+p->releases*sizeof(uint64_t));
   p->deliveries=plan_align(p->status+sizeof(struct mesh_status));
   p->submits=plan_align(p->deliveries+p->room*sizeof(struct mesh_delivery));
-  p->hops=plan_align(p->submits+p->outstanding*sizeof(struct mesh_submission));
+  p->hops=plan_align(p->submits+p->submit_room*sizeof(struct mesh_submission));
   p->words=p->hops+p->entries*p->copies*sizeof(struct mesh_hop);
 }
 
@@ -1164,6 +1168,153 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
   return status;
 }
 
+/* The queues' rooms and the plan's synchronization edges, fixed at compile time by the self-timed buffer bound
+   (design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the self-timed
+   buffer bound"; S. S. Bhattacharyya, S. Sriram and E. A. Lee, Optimizing synchronization in multiprocessor DSP
+   systems, IEEE Trans. Signal Processing 45(6), 1997, here BSL; design/compilation-coordination.md, "The revisions of
+   3f106747", BS).  The graph is the plan's part of the program's IPC graph, built as BSL §4.1 builds one ("if actors v1,
+   v2, …, vn are assigned to the same processor in that order, then Gipc would have a cycle ((v1, v2), (v2, v3), …, (vn −
+   1, vn), (vn, v1)), with delay((vn, v1)) = 1"), the processors the program's nodes (`program`, its least s the
+   sender):
+   - its actors: the program's submission at s, σ (vertex 0); s's bridge's TO-broadcast of the plan's calls, β (vertex
+     1: item 2, "Its source is the sender's TO-broadcast of the plan's calls, and its sink is the bridge's taking of them
+     at the node"); and node v's part of the plan's call, x_v, for each node v of the plan, `nodes` (vertex 2 + v's rank
+     in it; "The actors are each node's parts of the program's calls, in program order");
+   - its edges: σ -> β, delay 0, the submissions' queue; β -> x_v, delay 0, the delivered calls' queue at v ("these
+     queues"); at s, σ -> x_s, delay 0, and x_s -> σ, delay `outstanding` (s's cycle in program order: "At each node,
+     A10's bound is the delay on the edge from a call's completion to the program's later submission"), or, where s is
+     no node of the plan, σ -> σ of that delay; x_v -> x_v of that delay at every other node; and each transfer, a tree
+     edge y -> c carrying pages of a demand (`child`), as x_y -> x_c and x_c -> x_y, each of delay u ("The IPC edges are
+     the plans' transfers, each with C3.3's u copies as its delay");
+   - its times: x_v's t(x_v) the weighting operand's weights of v's tasks in one execution (each production at its
+     source, each source read, each consumption at a destination, a page's task each for MESH_PAGES) and of its hops'
+     pages, sent or received (BSL §4.1: "t(v) includes the time taken to execute all IPC operations (sends and
+     receives) that the actor v performs"; "Execution times t(x) are A3's weighting operand"), a demand's page weight
+     the greatest of its transfers' (GO2's); t(σ) = t(β) = 0.
+   Then: ENOMEM where a cycle has zero total delay (BSL Lemma 1, "Every cycle C in the IPC graph has a path delay of at
+   least one if and only if the static schedule it is constructed from is free of deadlock"; item 2: "or where a cycle
+   has no delay"); the edges Convert-to-SC-graph adds (§9, Fig. 6; mesh-graph.h mesh_graph_convert_sc) with their
+   delays from DetermineDelays (Fig. 8; mesh_graph_determine_delays), so that every queue "becomes encapsulated in an
+   SCC" (§9); and each queue's room its edge's bound in the converted graph, Theorem 2's "Bfb(e) = ρ_Gs(snk(e), src(e))
+   + delay(e)", ρ the least total delay over walks from snk(e) to src(e) (BSL §3; mesh-graph.h mesh_graph_lags,
+   Dijkstra's, as the theorem's "Dijkstra's algorithm"): `room` ρ(x_self, β), `submit_room` ρ(β, σ); a node of the
+   program that is no node of the plan, whose queue no message reaches (Dest(m) is `nodes`), `room` 1.  ENOMEM where a
+   queue lies on no cycle after the conversion, or a room passes its words.
+   Decisions where the documents are silent (design/compilation-coordination.md, "The revisions of 3f106747"):
+   - BS-2: the program's submission σ and its bridge's TO-broadcast β are two actors, so the submissions' queue between
+     them, of PS-3, is an IPC edge with its own bound; t(σ) = t(β) = 0, A3 weighing neither, so σ, lowest of the least,
+     is the source SCC's link, and the sink-source edge's sink is the program's start at s;
+   - BS-3: the graph's part of the program's IPC graph is the plan's own, which is what its compilation holds when it
+     is planned (each function is compiled at its first call); every cycle C containing e bounds the tokens on e by
+     Delay(C) ("The number of tokens in any cycle of the IPC graph is always conserved", Lemma 2), so (5) over a
+     subgraph's cycles bounds it over the program's;
+   - BS-4: each added edge's source count is its node's program's starts of the plan (`submissions`), which trail that
+     node's part's ends by the delay `outstanding` on its own edge, so in the rooms each added edge's delay is
+     DetermineDelays' plus `outstanding`, the constraint the bridge's count implements (mesh-records.c counts_tell);
+   - BS-5: a plan with no declared transfer has `nodes` {s} in the graph at every rank, where its `nodes` is each
+     rank's own (mesh_plan), so every rank builds one graph.
+   At most one added edge enters and one leaves each node's vertices: σ reaches every vertex, so σ's SCC is the one
+   source SCC and Convert-to-SC-graph chains the sink SCCs alone, each link the one vertex x_v of its node, and its
+   sink-source edge enters σ, its SCC's least time and lowest vertex.  So `waits` and `tells` name at most one each.
+   Every rank computes the same graph, delays and edges from the same trees, u, weights and operands, the graph module's
+   arithmetic IEEE-exact.  Allocations before any output; ENOMEM */
+static uint32_t plan_room_tail(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
+/* an edge of the IPC graph, a -> b of delay d, appended */
+struct plan_room_edges { uint32_t *from,*to; uint64_t *delay; size_t edges; };
+static void plan_room_edge(struct plan_room_edges *graph,uint32_t a,uint32_t b,uint64_t d){
+  graph->from[graph->edges]=a;graph->to[graph->edges]=b;graph->delay[graph->edges]=d;graph->edges++;
+}
+struct plan_room_rows { const size_t *order; const uint32_t *to; const uint64_t *delay; };
+static uint32_t plan_room_head(const void *context,size_t k){
+  const struct plan_room_rows *rows=context;
+  return rows->to[rows->order[k]];
+}
+static uint32_t plan_room_lag(const void *context,size_t k){
+  const struct plan_room_rows *rows=context;
+  const uint64_t delay=rows->delay[rows->order[k]];
+  return delay>=UINT32_MAX?UINT32_MAX:(uint32_t)delay;
+}
+static int plan_rooms(struct plan *p,const struct mesh_weight *weight,uint64_t program,uint64_t outstanding,
+                      uint64_t spanned){
+  const uint32_t n=p->n,s=(uint32_t)__builtin_ctzll(program),u=p->copies;
+  const uint64_t nodes=p->demands?spanned:UINT64_C(1)<<s;
+  const uint32_t members=(uint32_t)__builtin_popcountll(nodes),V=2+members;
+  uint64_t hops=0;
+  for(uint32_t i=0;i<p->demands;i++)hops+=p->demand[i].forwards;
+  const size_t room=3+2*(size_t)members+2*(size_t)hops;
+  double *t=calloc(V,sizeof *t),*page=calloc((size_t)p->demands+1,sizeof *page);
+  uint32_t *from=malloc((room+V)*sizeof *from),*to=malloc((room+V)*sizeof *to),*vertex=malloc(((size_t)n+1)*sizeof *vertex);
+  uint64_t *delay=malloc((room+V)*sizeof *delay);
+  uint32_t *added_from=malloc(((size_t)V+1)*sizeof *added_from),*added_to=malloc(((size_t)V+1)*sizeof *added_to);
+  uint64_t *added_delay=malloc(((size_t)V+1)*sizeof *added_delay);
+  size_t *first=malloc(((size_t)V+2)*sizeof *first),*order=malloc((room+V+1)*sizeof *order);
+  int status=!t || !page || !from || !to || !vertex || !delay || !added_from || !added_to || !added_delay || !first ||
+             !order?ENOMEM:0;
+  if(status)goto done;
+  for(uint32_t v=0,k=2;v<n;v++)vertex[v]=nodes>>v&1?k++:UINT32_MAX;
+  struct plan_room_edges graph={from,to,delay,0};
+  plan_room_edge(&graph,0,1,0);
+  for(uint32_t v=0;v<n;v++)if(vertex[v]!=UINT32_MAX){
+    plan_room_edge(&graph,1,vertex[v],0);
+    if(v!=s)plan_room_edge(&graph,vertex[v],vertex[v],outstanding);
+  }
+  if(vertex[s]!=UINT32_MAX){plan_room_edge(&graph,0,vertex[s],0);plan_room_edge(&graph,vertex[s],0,outstanding);}
+  else plan_room_edge(&graph,0,0,outstanding);
+  for(uint32_t i=0;i<p->demands;i++)for(uint32_t y=0;y<n;y++)
+    for(uint64_t below=p->child[(size_t)i*n+y];below;below&=below-1){
+      const uint32_t c=(uint32_t)__builtin_ctzll(below);
+      plan_room_edge(&graph,vertex[y],vertex[c],u);plan_room_edge(&graph,vertex[c],vertex[y],u);
+    }
+  size_t edges=graph.edges;
+  for(uint32_t i=0;i<p->transfers;i++){
+    const uint32_t d=p->of[i];
+    if(weight[i].page>page[d])page[d]=weight[i].page;
+    t[vertex[p->declared[i].destination]]+=weight[i].consumed*(p->declared[i].kind==MESH_PAGES?(double)p->demand[d].pages:1.0);
+  }
+  for(uint32_t i=0;i<p->demands;i++){
+    const struct plan_demand *d=p->demand+i;
+    t[vertex[d->source]]+=weight[d->first].produced+(d->own?weight[d->first].read:0.0);
+    for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
+      const uint32_t *parent=p->parent+(size_t)p->tree[j]*n;
+      for(uint32_t c=0;c<n && p->run[j];c++)
+        if(c!=d->source && parent[c]<n && parent[c]!=c){
+          t[vertex[parent[c]]]+=(double)p->run[j]*page[i];
+          t[vertex[c]]+=(double)p->run[j]*page[i];
+        }
+    }
+  }
+  double mean;
+  uint32_t added;
+  if((status=mesh_graph_cycle_mean(V,t,edges,from,to,delay,&mean)))goto done;
+  if(mean==INFINITY){status=ENOMEM;goto done;}
+  if((status=mesh_graph_convert_sc(V,t,edges,from,to,&added,added_from,added_to)) ||
+     (status=mesh_graph_determine_delays(V,t,edges,from,to,delay,added,added_from,added_to,added_delay))){
+    if(status==EDEADLK || status==ERANGE)status=ENOMEM;
+    goto done;
+  }
+  p->waits=p->tells=MESH_ABSENT;p->wait_delay=0;
+  for(uint32_t a=0;a<added;a++){
+    uint32_t tail=s,head=s;
+    for(uint32_t v=0;v<n;v++){if(vertex[v]==added_from[a])tail=v;if(vertex[v]==added_to[a])head=v;}
+    if(head==p->self){p->waits=tail;p->wait_delay=added_delay[a];}
+    if(tail==p->self)p->tells=head;
+    if(__builtin_add_overflow(added_delay[a],outstanding,&delay[edges])){status=ENOMEM;goto done;}
+    from[edges]=added_from[a];to[edges]=added_to[a];edges++;
+  }
+  mesh_graph_rows(V,edges,plan_room_tail,from,first,order);
+  const struct plan_room_rows rows={order,to,delay};
+  const uint32_t source[2]={1,vertex[p->self]==UINT32_MAX?1:vertex[p->self]},target[2]={0,1};
+  uint32_t lags[4];
+  if((status=mesh_graph_lags(V,first,plan_room_head,plan_room_lag,&rows,2,source,2,target,lags)))goto done;
+  p->submit_room=lags[0*2+0];
+  p->room=vertex[p->self]==UINT32_MAX?1:lags[1*2+1];
+  if(p->submit_room==UINT32_MAX || p->room==UINT32_MAX || !p->submit_room || !p->room ||
+     p->room>=UINT64_MAX/(4*sizeof(struct mesh_delivery)))status=ENOMEM;
+done:
+  free(t);free(page);free(from);free(to);free(vertex);free(delay);free(added_from);free(added_to);free(added_delay);
+  free(first);free(order);
+  return status;
+}
 /* mesh-collective.h mesh_plan.  The demands: the declared transfers grouped by source and identity, a range to each of
    its destinations, numbered by their first declared transfer (design/compilation-coordination.md, "The documents'
    revisions of edd4b583", GO5: "The demands stay numbered by their first declared transfer (T6's other half, not an
@@ -1466,15 +1617,25 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t
      entries>=UINT64_MAX/(2*sizeof(struct mesh_hop))){
     status=ENOMEM;goto done;
   }
-  /* the delivered calls' queue's room: A10's bound plus u copies on each hop of the plan's routes (appendix item 2,
-     "This number is this document's derivation"), every rank's the same from the same trees */
-  uint64_t routed=0;
-  for(uint32_t i=0;i<p.demands;i++)routed+=p.demand[i].forwards;
-  if(__builtin_mul_overflow(routed,(uint64_t)u,&p.room) || __builtin_add_overflow(p.room,outstanding,&p.room) ||
-     p.room>=UINT64_MAX/(4*sizeof(struct mesh_delivery))){
-    status=ENOMEM;goto done;
-  }
+  /* the plan's nodes (a set of map indices) and its sender, the least of them (design/compilation-coordination.md,
+     "The region", struct mesh_state `nodes` and `sender`; Q2), the same at every rank: every source and destination of
+     a declared transfer and every node a tree the fill gave pages reaches (its `on`), this node's own where none.
+     2026-11-05 ("The revisions of 3f106747", BS): computed here, before the rooms, where it followed the schedule.
+     What must stay: as above */
+  uint64_t spanned=0;
+  for(uint32_t i=0;i<p.demands;i++)spanned|=UINT64_C(1)<<p.demand[i].source|p.demand[i].leaves|p.demand[i].on;
+  if(!spanned)spanned=UINT64_C(1)<<p.self;
+  if(spanned&~program){status=EINVAL;goto done;}
+  /* the queues' rooms and the synchronization edges, each queue's self-timed buffer bound in the plan's part of the
+     program's IPC graph (plan_rooms), every rank's the same from the same trees, u, weights and operands.
+     2026-11-05 (design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the
+     self-timed buffer bound"; design/compilation-coordination.md, "The revisions of 3f106747", BS), reversing the
+     abecd389 form, the delivered calls' queue's room A10's bound plus u copies on each hop of the plan's routes and
+     the submissions' queue's room A10's bound.  Why: item 2's correction: "It holds only where the queue lies on a
+     cycle through the sender.  A7's program sender may hold no page of a plan, and then the queue is BSL's feedforward
+     edge with no bound".  What must stay: ENOMEM where no bound is found, before anything is written */
   p.outstanding=outstanding;
+  if((status=plan_rooms(&p,weights,program,outstanding,spanned)))goto done;
   /* every value's rows: count x P, count u for a routed value, k for a value of lag k >= 1 and 1 for every other, after
      the claim's head (each term below 2^64 - 2^32, P below UINT32_MAX / block, so no sum wraps before the test) */
   for(uint32_t j=0;j<given && rows<UINT32_MAX;j++){
@@ -1488,13 +1649,6 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t
   if(!(p.entry=malloc((p.entries+1)*sizeof *p.entry))){status=ENOMEM;goto done;}
   plan_walk(&p);
   if(p.demands && (status=plan_schedule(&p,weights,dependence,dependences)))goto done;
-  /* the plan's nodes (a set of map indices) and its sender, the least of them (design/compilation-coordination.md,
-     "The region", struct mesh_state `nodes` and `sender`; Q2), the same at every rank: every source and destination of
-     a declared transfer and every node a tree the fill gave pages reaches (its `on`), this node's own where none */
-  uint64_t spanned=0;
-  for(uint32_t i=0;i<p.demands;i++)spanned|=UINT64_C(1)<<p.demand[i].source|p.demand[i].leaves|p.demand[i].on;
-  if(!spanned)spanned=UINT64_C(1)<<p.self;
-  if(spanned&~program){status=EINVAL;goto done;}
   /* a plan standing at this node already (group, function) on the map this call plans on: EEXIST until the program
      retires it (design/compilation-coordination.md, N1: "A replan of a function on the same map is EEXIST until the
      program retires the standing one"; one whose `serial` is not that map's is cancelled, D.3.6, and ignored), every
@@ -1537,6 +1691,10 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t
   state->sender=(uint32_t)__builtin_ctzll(program);
   state->outstanding=(uint32_t)p.outstanding;
   state->room=p.room;
+  state->submit_room=p.submit_room;
+  state->waits=p.waits;
+  state->tells=p.tells;
+  state->wait_delay=p.wait_delay;
   state->deliveries=base+p.deliveries;
   state->submits=base+p.submits;
   /* every value's rows, from the head's next, copy c's rows first + c x P + k bound to its copy's pages (an item's
