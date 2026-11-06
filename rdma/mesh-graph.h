@@ -250,8 +250,9 @@ int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, co
    ordering").  BSL §3: "An SCC V′ of a DFG (V, E) is a source SCC if ∀e ∈ E, (snk(e) ∈ V′) ⇒ (src(e) ∈ V′); V′ is a
    sink SCC if (src(e) ∈ V′) ⇒ (snk(e) ∈ V′)".  Out, in the order DetermineDelays takes them (BSL §9: "(e_0, e_1, …,
    e_m – 1) ≡ (e_s, a_1, a_2, …, a_k, b_l, b_l – 1, …, b_1), where e_s is the sink-source edge"): added_from[i] ->
-   added_to[i], *added of them (room for `vertices`); 0 added where the graph is strongly connected.  0; EINVAL;
-   ENOMEM */
+   added_to[i], *added of them (room for 2 x `vertices`: "(n src + n snk – 1)", Theorem 4's proof, reaches 2 |V| - 1
+   where SCCs of one vertex are both source and sink; 2026-11-05, "The revisions of 3f106747", G-3, where it said
+   `vertices`); 0 added where the graph is strongly connected.  0; EINVAL; ENOMEM */
 int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
                           uint32_t *added, uint32_t *added_from, uint32_t *added_to);
 /* BSL §9, Fig. 8, Function DetermineDelays, over the operands' graph Gs and the `added` edges mesh_graph_convert_sc

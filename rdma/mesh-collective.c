@@ -1243,11 +1243,12 @@ static int plan_rooms(struct plan *p,const struct mesh_weight *weight,uint64_t p
   for(uint32_t i=0;i<p->demands;i++)hops+=p->demand[i].forwards;
   const size_t room=3+2*(size_t)members+2*(size_t)hops;
   double *t=calloc(V,sizeof *t),*page=calloc((size_t)p->demands+1,sizeof *page);
-  uint32_t *from=malloc((room+V)*sizeof *from),*to=malloc((room+V)*sizeof *to),*vertex=malloc(((size_t)n+1)*sizeof *vertex);
-  uint64_t *delay=malloc((room+V)*sizeof *delay);
-  uint32_t *added_from=malloc(((size_t)V+1)*sizeof *added_from),*added_to=malloc(((size_t)V+1)*sizeof *added_to);
-  uint64_t *added_delay=malloc(((size_t)V+1)*sizeof *added_delay);
-  size_t *first=malloc(((size_t)V+2)*sizeof *first),*order=malloc((room+V+1)*sizeof *order);
+  uint32_t *from=malloc((room+2*(size_t)V)*sizeof *from),*to=malloc((room+2*(size_t)V)*sizeof *to),
+           *vertex=malloc(((size_t)n+1)*sizeof *vertex);
+  uint64_t *delay=malloc((room+2*(size_t)V)*sizeof *delay);
+  uint32_t *added_from=malloc(2*(size_t)V*sizeof *added_from),*added_to=malloc(2*(size_t)V*sizeof *added_to);
+  uint64_t *added_delay=malloc(2*(size_t)V*sizeof *added_delay);
+  size_t *first=malloc(((size_t)V+2)*sizeof *first),*order=malloc((room+2*(size_t)V+1)*sizeof *order);
   int status=!t || !page || !from || !to || !vertex || !delay || !added_from || !added_to || !added_delay || !first ||
              !order?ENOMEM:0;
   if(status)goto done;

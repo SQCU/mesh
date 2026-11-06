@@ -1269,7 +1269,10 @@ int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, co
      b_1), where e_s is the sink-source edge"): e_s from the last sink SCC's link to the first source SCC's (step 6),
      a_i from C_i's link to C_i+1's (step 3), b_i from D_i's link to D_i+1's (step 5).  Their number is "(n src + n snk
      – 1), where n src is the number of source SCCs, and n snk is the number of sink SCCs" (Theorem 4's proof), up to
-     2|V| - 1 where SCCs of one vertex are both: ENOMEM where it passes the room `vertices`, before anything is written.
+     2|V| - 1 where SCCs of one vertex are both, within the header's room of 2 `vertices`.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", G-3, the coordinating implementer's
+   ruling): the room 2 `vertices`, where it was `vertices` with ENOMEM past it, so no count passes it (m + k - 1 <=
+   2 x the SCCs - 1 < 2 |V|) and the test goes.  What must stay: every allocation before the first output.
    Every allocation precedes the first output written.  Cost: O(V + E). */
 int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
                           uint32_t *added, uint32_t *added_from, uint32_t *added_to) {
@@ -1300,7 +1303,6 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
       if (!entered[c]) sources[m++] = link[c];
       if (!left[c]) sinks[k++] = link[c];
     }
-    if (count > 1 && (uint64_t)m + k - 1 > vertices) result = ENOMEM;
   }
   if (!result) {
     const uint32_t made = count > 1 ? m + k - 1 : 0;
