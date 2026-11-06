@@ -131,12 +131,11 @@ memory plan, memory schedule and static link schedule, and the AOT allocated pag
   - MTLResource.h:196–198: `MTLSparsePageSize16`, `MTLSparsePageSize64`, `MTLSparsePageSize256`.
   - PagedAttention: "block tables—the mapping between logical and physical KV blocks of each request".
 - **Change:**
+  - Every page is named by its index in the AOT allocated page table. The compute side maps and binds pages by those
+    indices alone, and never reads the transport's registration, its DMA addresses or any firmware pointer.
   - Each value is one range of a placement sparse buffer. That range's tiles alias the value's pages, mapped once at
-    make() from the AOT allocated page table by `updateBufferMappings:`.
+    make() from the page table's indices by `updateBufferMappings:`.
   - A kernel reads the value as one buffer with an offset and strides. No bytes are copied.
-- **What the implementer reads from these headers and the RDMA headers before writing:**
-  - whether the region the transport registers can be the placement heap whose tiles are aliased;
-  - which `placementSparsePageSize` matches the region's page size.
 
 ## 5. Starts and waits in the replayed stream
 
