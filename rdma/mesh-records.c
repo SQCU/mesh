@@ -637,7 +637,7 @@ static void orders_deliver(uint64_t last);
    never delivered, since nothing bounds when one would; and installation moves the serial D.3.6 reads, so every
    reader of a plan's serial (the ports' loads and cancellations, the start, mesh_plan's second read) ends the old
    view's plans by its one path.  On the bridge parent's one event-loop thread, as every caller of plan_stale is */
-static void view_install(const struct mesh_view *v,const uint32_t *member){
+static void view_install(const struct mesh_group_view *v,const uint32_t *member){
   int named=0;
   for(uint32_t i=0;i<v->members;i++)named|=member[i]==M->node;
   if(!named || v->view<=installed.view)return;
@@ -663,10 +663,10 @@ static void view_create(const struct mesh_record *r,uint64_t n,const unsigned ch
   uint64_t greatest=installed.view;
   uint32_t members=0;
   for(uint64_t k=0;k<n;k++)if(reached[k]){members++;if(r[k].node!=M->node && r[k].view>greatest)greatest=r[k].view;}
-  const size_t bytes=sizeof(struct mesh_view)+(size_t)members*sizeof(uint32_t);
+  const size_t bytes=sizeof(struct mesh_group_view)+(size_t)members*sizeof(uint32_t);
   unsigned char *message=malloc(bytes);
   if(!message){mesh_say("bridge","no view of map serial %llu created (ENOMEM)",(unsigned long long)atomic_load(&M->map_serial));return;}
-  const struct mesh_view v={.view=greatest+1,.last=installed.sequencer==M->node && installed.boot==M->boot?seqnum-1:0,
+  const struct mesh_group_view v={.view=greatest+1,.last=installed.sequencer==M->node && installed.boot==M->boot?seqnum-1:0,
                             .boot=M->boot,.sequencer=M->node,.members=members};
   memcpy(message,&v,sizeof v);
   uint32_t *member=(uint32_t *)(void *)(message+sizeof v);
@@ -693,10 +693,10 @@ static int view_announced(const struct mesh_record *record){
     (record->view!=installed.view || record->view_sequencer!=installed.sequencer || record->view_boot!=installed.boot);
 }
 /* A VIEW heard from this node's parent in the island's tree (order_heard): relayed down, as an ORDER is, then
-   installed here where it may be (view_install).  A payload that is not one struct mesh_view and its members is let
+   installed here where it may be (view_install).  A payload that is not one struct mesh_group_view and its members is let
    be */
 static void view_heard(const struct message *heard,const unsigned char *payload){
-  struct mesh_view v;
+  struct mesh_group_view v;
   if(heard->bytes<sizeof v)return;
   memcpy(&v,payload,sizeof v);
   if(v.members>MESH_MAP_ROOM || heard->bytes!=sizeof v+(uint64_t)v.members*sizeof(uint32_t))return;
@@ -796,14 +796,19 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
    What must stay: `submitted` the executions sent, never more; nothing sent twice that was sent once */
 static int unsent;
 /* the plan standing here named (group, epoch) on this node's map serial, NULL where none: the claims' heads walked
-   (mesh-dataflow.h mesh_head_after, mesh_head_state), at most one such plan standing (mesh_plan's EEXIST) */
+   (mesh-dataflow.h mesh_head_after, mesh_head_state), at most one such plan standing (mesh_plan's EEXIST).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): the plan at place epoch - 1 among the program's plans (mesh.h mesh_program_plan: function
+   k + 1 is named (group, k + 1), mesh-collective.h struct mesh_function), epoch at least 1, where the program's root
+   names `group` and the plan's `serial` is this node's map serial; no search.  Why: point 5, "The program's group
+   still names its plans, as NCCL's `ncclUniqueId` names a communicator"; "Nothing walks heads to find it";
+   design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "the bridge reads the
+   serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: a plan of another
+   map serial not matched */
 static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
-  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
-  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
-    struct mesh_state *state=mesh_head_state(M,head);
-    if(state && state->group==group && state->epoch==epoch && state->serial==serial)return state;
-  }
-  return NULL;
+  struct mesh_state *state=epoch?mesh_program_plan(M,(uint32_t)(epoch-1)):NULL;
+  return state && mesh_program(M)->group==group &&
+    state->serial==atomic_load_explicit(&M->map_serial,memory_order_relaxed)?state:NULL;
 }
 /* whether a plan's queues lie inside the region, as plan_inside (mesh-flow.c) judges its entries: a store outside it
    would be a fault, not an error value */
@@ -846,14 +851,17 @@ static void arrivals_apply(void){
    2026-11-05 ("The revisions of 3f106747", VW and BS): none before this bridge's first view, and each carrying the
    view installed here, its route tree_toward's.  Why: A7, Initial View Event (Property 3.3: "no send events occur
    before the first view_chng event"); "Each arrival carries its view's identifier".  A plan standing on this node's
-   map serial was made in that view, since installing one moves the serial (view_install).  What must stay: as above */
+   map serial was made in that view, since installing one moves the serial (view_install).  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
+   plans read at their places (mesh-bridge.h plan_from), where the claims' heads were walked.  What must stay: as
+   above */
 static void orders_announce(int liveness){
   if(!installed.view)return;
   const uint64_t n=atomic_load(&M->map_nodes),serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
   const struct mesh_record *r=mesh_records(M);
-  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
-    struct mesh_state *state=mesh_head_state(M,head);
-    if(!state || state->serial!=serial || (state->announced && !liveness) || state->sender>=n)continue;
+  struct mesh_state *state;
+  for(uint32_t k=0;(state=plan_from(&k));k++){
+    if(state->serial!=serial || (state->announced && !liveness) || state->sender>=n)continue;
     const struct mesh_arrival a={.group=state->group,.epoch=state->epoch,.node=M->node,.sender=r[state->sender].node,
                                  .view=installed.view};
     const int routed=tree_toward(ARRIVE,&a,sizeof a,a.sender);
@@ -869,14 +877,28 @@ static void orders_announce(int liveness){
    here that names the COUNT's node as its edge's source (mesh.h struct mesh_state `waits`), of the view installed here,
    stored in its `wait_count` where it rises (release), its waiter woken (os_sync_wake_by_address_all, region-shared,
    as mesh-call.h mesh_transfers_start waits on it); any other let be (a plan not standing here yet hears it again on its
-   source's liveness turn) */
+   source's liveness turn).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 4, and "The
+   revisions of 4e78f6f4"): the sink plan the COUNT's `function` names, at its place (plan_here), and each of its edges
+   into it here (mesh.h struct mesh_sync, its `waits` entries at `syncs`) whose `node` is the COUNT's source's map index
+   and whose `function` is the source plan's epoch (the COUNT's `epoch`) raised to the count where it rises (release),
+   its waiter woken (os_sync_wake_by_address_all on that entry's `count`, region-shared), where the plan's one edge's
+   `wait_count` was.  Why: point 4, the program's whole IPC graph, a plan an actor a call, so an edge may join two
+   plans' actors and a plan has as many edges into it as Convert-to-SC-graph added (BSL §9, Fig. 6); appendix item 2:
+   "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" (BSL (7)).  Its source raises a count
+   that only rises ..., and its sink reads that count before its k-th start.  The bridge carries the count from source
+   to sink, as it carries an arrival".  What must stay: each count only rising, this thread its one writer */
 static void count_take(const struct mesh_count *c){
-  struct mesh_state *s=plan_here(c->group,c->epoch);
+  struct mesh_state *s=plan_here(c->group,c->function);
   const uint32_t from=map_index_of(c->node);
-  if(!s || c->view!=installed.view || from==UINT32_MAX || s->waits!=from ||
-     c->count<=atomic_load_explicit(&s->wait_count,memory_order_relaxed))return;
-  atomic_store_explicit(&s->wait_count,c->count,memory_order_release);
-  os_sync_wake_by_address_all(&s->wait_count,sizeof s->wait_count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  if(!s || c->view!=installed.view || from==UINT32_MAX)return;
+  struct mesh_sync *edge=mesh_syncs(M,s);
+  for(uint32_t e=0;e<s->waits;e++){
+    if(edge[e].node!=from || edge[e].function!=c->epoch ||
+       c->count<=atomic_load_explicit(&edge[e].count,memory_order_relaxed))continue;
+    atomic_store_explicit(&edge[e].count,c->count,memory_order_release);
+    os_sync_wake_by_address_all(&edge[e].count,sizeof edge[e].count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  }
 }
 /* At the source: each plan standing here on this node's map serial with an edge out of this node (`tells`), its count
    told toward its sink's node (tree_toward, as orders_announce tells an arrival) where it rose past `told`, and again
@@ -884,28 +906,45 @@ static void count_take(const struct mesh_count *c){
    bridge its one writer).  The count is the plan's `submissions` here (acquire), its program's starts: the source's
    ends trail them by A10's bound, the delay on its own edge from a call's completion to the program's later
    submission, which mesh_plan adds to the edge's delay in the queues' rooms (design/compilation-coordination.md, "The
-   revisions of 3f106747", BS-4).  None before this bridge's first view (Initial View Event) */
+   revisions of 3f106747", BS-4).  None before this bridge's first view (Initial View Event).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 4 and 5, and "The
+   revisions of 4e78f6f4"): each plan standing here on this node's map serial, read at its place (mesh-bridge.h
+   plan_from), and each of its edges out of it here (mesh.h struct mesh_sync, its `tells` entries after its `waits`
+   at `syncs`): its `submissions` (acquire) told toward the entry's node (its `node`, the sink's map index), the COUNT
+   naming the source plan's epoch (`epoch`) and the sink plan's (`function`, the entry's), where it rose past the
+   entry's `count`, and again on every liveness turn, as before; the entry's `count` the told value once routed, where
+   the plan's one edge out was `tells` and its `told`.  The entry's `node` is a map index of the plan's map (mesh_plan
+   made the plan against the map whose serial it carries, and the plan is read only on that serial), so it names a
+   record of the map as it stands, with no test of its bound.  Why: point 4, the program's whole IPC graph, a plan an
+   actor a call; appendix item 2: "The bridge carries the count from source to sink, as it carries an arrival".  What
+   must stay: a count told only where it rose or on a liveness turn; none before the first view */
 static void counts_tell(int liveness){
   if(!installed.view)return;
-  const uint64_t n=atomic_load(&M->map_nodes),serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
+  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
   const struct mesh_record *r=mesh_records(M);
-  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
-    struct mesh_state *state=mesh_head_state(M,head);
-    if(!state || state->serial!=serial || state->tells>=n)continue;
+  struct mesh_state *state;
+  for(uint32_t k=0;(state=plan_from(&k));k++){
+    if(state->serial!=serial || !state->tells)continue;
     const uint64_t count=atomic_load_explicit(&state->submissions,memory_order_acquire);
-    if(count<=state->told && !(liveness && count))continue;
-    const struct mesh_count c={.group=state->group,.epoch=state->epoch,.view=installed.view,.count=count,
-                               .node=M->node,.sink=r[state->tells].node};
-    const int routed=tree_toward(COUNT,&c,sizeof c,c.sink);
-    if(routed==2)count_take(&c);
-    if(routed)state->told=count;
+    struct mesh_sync *edge=mesh_syncs(M,state)+state->waits;
+    for(uint32_t e=0;e<state->tells;e++){
+      if(count<=atomic_load_explicit(&edge[e].count,memory_order_relaxed) && !(liveness && count))continue;
+      const struct mesh_count c={.group=state->group,.epoch=state->epoch,.view=installed.view,.count=count,
+                                 .node=M->node,.sink=r[edge[e].node].node,.function=edge[e].function};
+      const int routed=tree_toward(COUNT,&c,sizeof c,c.sink);
+      if(routed==2)count_take(&c);
+      if(routed)atomic_store_explicit(&edge[e].count,count,memory_order_relaxed);
+    }
   }
 }
 /* 2026-11-05 ("The revisions of 3f106747", VW and BS): nothing before this bridge's first view, each message carrying
    the view installed here where it carried this node's map serial, and the queues' room `submit_room`.  Why: A7, "the
    program's sender TO-broadcasts nothing before its first view (Initial View Event)"; "Every message carries its view's
    identifier, which replaces the map serial"; a plan standing on this node's serial was made in that view
-   (view_install).  What must stay: as above */
+   (view_install).  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
+   plans read at their places (mesh-bridge.h plan_from), where the claims' heads were walked.  What must stay: as
+   above */
 struct program_head { struct mesh_state *state; uint64_t seen; };
 static void orders_submit(void){
   if(!installed.view)return;
@@ -914,9 +953,9 @@ static void orders_submit(void){
     sent=0;
     struct program_head *heads=NULL;
     size_t count=0,room=0;
-    for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
-      struct mesh_state *state=mesh_head_state(M,head);
-      if(!state || state->sender!=island.self || state->serial!=serial || !queues_inside(state))continue;
+    struct mesh_state *state;
+    for(uint32_t k=0;(state=plan_from(&k));k++){
+      if(state->sender!=island.self || state->serial!=serial || !queues_inside(state))continue;
       if(count==room){
         struct program_head *grown=realloc(heads,(2*room+1)*sizeof *grown);
         if(!grown){free(heads);mesh_say("bridge","the programs' submissions not read (ENOMEM): read on a later turn");return;}
@@ -1310,17 +1349,27 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    its plans (mesh-flow.c).  The turn then submits and delivers the sequencer's work (orders_submit, orders_deliver),
    and the release runs where hdr `plans` moved since the last turn (a claim closed or a plan published: `plans_seen`,
    in `owners[0]`'s place) or on a liveness turn, as before.  What must stay: the release last, after this turn's
-   cancellations and deliveries, on this thread */
+   cancellations and deliveries, on this thread.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"), reversing the walk of the claims' heads above: the program's root (mesh.h struct
+   mesh_program, at the layout's one place), where it is open (`owner` not 0, `closed` 0, each acquire) and its owner
+   a process other than this bridge: retired at once (mesh-dataflow.h mesh_retire: the root closed, `plans` raised)
+   where that process does not hold the region (mesh-holders.h mesh_holds, by its pid and the root's `start`: a pid a
+   later process reuses reads gone), else its exit watched as before (EV_ADD, udata 0; ESRCH retires it at once).  The
+   release (mesh_retired_release) is the root's.  Why: point 5, the claim's head record goes, and "Release at
+   retirement stays deferred reclamation (RCU)"; the root is the program's one record (A9, "What the bridge runs":
+   "searches for nothing").  What must stay: the release last, after this turn's cancellations and deliveries, on
+   this thread */
 static uint64_t plans_seen;
 void clients_turn(int liveness){
   const pid_t self=getpid();
   uint64_t busy=0;
-  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
-    struct mesh_buffer *claim=mesh_buffers(M)+head;
-    const uint64_t owner=atomic_load_explicit(&claim->owner,memory_order_acquire);
-    if(!owner || atomic_load_explicit(&claim->closed,memory_order_acquire) || (pid_t)(uint32_t)owner==self)continue;
+  struct mesh_program *program=mesh_program(M);
+  const uint64_t owner=atomic_load_explicit(&program->owner,memory_order_acquire);
+  if(owner && !atomic_load_explicit(&program->closed,memory_order_acquire) && (pid_t)(uint32_t)owner!=self){
     struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
-    if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH)mesh_retire(M,owner);
+    if(!mesh_holds((pid_t)(uint32_t)owner,program->start) ||
+       (kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH))mesh_retire(M,owner);
     else busy=1;
   }
   orders_announce(liveness);
@@ -1370,11 +1419,12 @@ void clients_turn(int liveness){
 /* not the tag's (2026-11-04, owner B2: e6bd7db2's section 6, "Holders and clients", as design/compilation-
    coordination.md ruling 1 and Q5 take it: "The event loop's EVFILT_PROC retires every owner of the event's pid"): each
    open claim whose owner's process is `pid` has that owner retired (mesh-dataflow.h mesh_retire: every claim it owns
-   closed, `plans` raised and woken); mesh-link.c's event loop, on main's thread */
+   closed, `plans` raised and woken); mesh-link.c's event loop, on main's thread.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
+   root's owner retired where the root is open and its owner's process is `pid`, where every open claim's was.  What
+   must stay: on main's thread */
 void clients_gone(pid_t pid){
-  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
-    const struct mesh_buffer *claim=mesh_buffers(M)+head;
-    const uint64_t owner=atomic_load_explicit(&claim->owner,memory_order_acquire);
-    if(owner && !atomic_load_explicit(&claim->closed,memory_order_acquire) && (pid_t)(uint32_t)owner==pid)mesh_retire(M,owner);
-  }
+  struct mesh_program *program=mesh_program(M);
+  const uint64_t owner=atomic_load_explicit(&program->owner,memory_order_acquire);
+  if(owner && !atomic_load_explicit(&program->closed,memory_order_acquire) && (pid_t)(uint32_t)owner==pid)mesh_retire(M,owner);
 }

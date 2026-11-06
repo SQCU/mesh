@@ -198,7 +198,7 @@ struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,f
    updates a small amount of shared state to indicate its arrival"" (J. M. Mellor-Crummey and M. L. Scott, ACM TOCS
    9(1), 1991, §3.1); the bridges share no memory but the control sockets.  What must stay: the kinds' values.
    2026-11-05 (115; design/compilation-coordination.md, "The revisions of 3f106747", VW and BS): VIEW and COUNT join
-   them.  A VIEW (struct mesh_view and its members) is the island's sequencer's first message of a view it creates,
+   them.  A VIEW (struct mesh_group_view and its members) is the island's sequencer's first message of a view it creates,
    relayed down the island's tree as an ORDER is (design/aot-compilation-change-request.md A7, "The island is a dynamic
    group, and each of its views is a static system": "The sequencer creates a view at its bridge's start and at each
    move of its map"; "A bridge installs a view when the view's first message reaches it").  A COUNT (struct mesh_count)
@@ -234,7 +234,12 @@ struct mesh_arrival { uint64_t group,epoch; uint32_t node,sender; uint64_t view;
    sequence number that process gave in the view it created before (0 none: A7's flush, "Its first message of the new
    view carries the last sequence number it gave in the old one"), then `members` uint32_t node ids, the nodes the
    sequencer's map reaches (A7: "A view's members are the nodes the sequencer's map reaches") */
-struct mesh_view { uint64_t view,last,boot; uint32_t sequencer,members; };
+/* 2026-11-05 (design/compilation-coordination.md, "The revisions of 4e78f6f4"): named struct mesh_group_view, where it
+   was struct mesh_view, which mesh-dataflow.h names from mesh dd215cbe (a value's mapping, mesh_view_compose), and
+   mesh-flow.c, mesh-records.c and mesh-link.c include both headers.  The name is the group membership service's
+   "view" (Chockler, Keidar and Vitenberg, above), the island's group (A7).  What must stay: the layout, every field
+   where it is */
+struct mesh_group_view { uint64_t view,last,boot; uint32_t sequencer,members; };
 /* the payload of a COUNT (`bytes` sizeof): plan (group, epoch)'s synchronization edge from the node whose id is
    `node` to the node whose id is `sink`, its source's count `count` in view `view` (mesh.h struct mesh_state `tells`,
    `waits`, `wait_count`) */
