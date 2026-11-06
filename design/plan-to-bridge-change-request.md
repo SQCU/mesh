@@ -2000,6 +2000,23 @@ code, and each method is used as its source states it.
         and the programs and registered for transfers, and no header read here makes a heap over existing memory.
         Where the run is virtual, every value is placed as pages anywhere, and the interval-order question does not
         arise.
+      - (2026-11-05, later.) **A virtual run is address translation fixed ahead of time, and needs no kernel of its
+        own.**
+        > does this really require special kernels or is it an address translation problem that can be solved aot and
+        > be effectively zero marginal latency at runtime...?
+        - Every page's place is a constant of the plan (C3.3: "every address is a constant in the plan"). So the map
+          from a typed operand's consecutive virtual pages to its frames is written once, when the plan is made.
+        - The GPU then translates through its page tables, as it does for every buffer. A buffer is already virtual
+          memory over frames placed anywhere (Kilburn et al.; Denning), so a torch kernel reads the operand as any
+          strided buffer.
+        - mesh ran this form on these machines: on 2026-11-02 "`compose` maps all their pages into one remapped view
+          (`ncclMeshPageTableCompose`, `mach_vm_remap`). So a kernel reads `mesh_effects + 3272ul`, a word's place in a
+          composed view of foreign pages, fixed at preparation" (design/page-maps-2026-11-02.md at 6255e92b).
+        - That design replaced the composed view only for mesh's own generated kernels' fields. Its reason was
+          "Metal 4 binds by GPU address (`MTL4ArgumentTable setAddress:atIndex:`), so no composed view is needed",
+          not a limit of the remap. A table read by the kernel is needed only by a kernel written to read one.
+        - The run-time cost is the translation every access already has. Whether TLB reach differs with the mapping's
+          page size is a measurement, not shown here.
     - C3.3's text above applied greedy by size to every value, because it gave every value one run. The typing
       confines that to the operands that need it.
   - **A received range is pages of its destination value.** A collective's receive lands in the pages of the value it

@@ -3145,6 +3145,7 @@ Open, outside these points:
   who cares...?"
 - The typed values' placement, as PB R2 now states it canonically. The order of first writes and last accesses under
   happens-before (Lamport 1978) is an interval order exactly when it has no induced 2 + 2 (Fishburn 1970); then
-  placement is SR2. A landing can make a 2 + 2. The question goes away if the run is virtual, by a Metal 4 placement
-  sparse buffer over a placement heap. Whether the region's pages can be such a heap's tiles is unproven, and proving
-  it is a run.
+  placement is SR2. A landing can make a 2 + 2. The question goes away where the run is virtual: address translation
+  fixed when the plan is made, read by any kernel, as mesh's `mach_vm_remap` composed views were on 2026-11-02 (PB R2).
+  So every value is pages anywhere, placed by Dilworth's chains. The Metal 4 placement-heap form is unproven, and
+  nothing needs it.
