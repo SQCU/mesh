@@ -976,7 +976,9 @@ static size_t cover_find(const uint64_t *point, size_t points, uint64_t at) {
      (reg_{number}(i)) new colors, c_i".
    - Theorem 2.3.1's proof: "For each interval, I, which ends at t, release its color back to the pool of free colors.
      For each interval I beginning at t, give I a free color which is not being used by any interval covering t";
-     §3.2.3: "The coloring of G' is guaranteed to use only w new colors"; Algorithm A.0.1: "Obtain colors c_i ...
+     §3.2.3: "The coloring of G' is guaranteed to use only w new colors"; "the second phase simply colors the remaining
+     cyclic intervals with new colors, and applies the simple left to right algorithm to color the remaining
+     intervals"; Algorithm A.0.1: "Obtain colors c_i ...
      c_{regnum_i} that are free for the lifetime of i". */
 int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *start, const uint64_t *end,
                          const uint64_t *need, uint64_t *color, uint64_t *colors) {
@@ -988,11 +990,11 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
   struct cover_key *key = malloc((keys + 1) * sizeof *key), *by_end = malloc((n + 1) * sizeof *by_end);
   uint64_t *point = malloc((keys + 1) * sizeof *point), *width = malloc((keys + 1) * sizeof *width);
   uint64_t *spot = malloc((keys + 1) * sizeof *spot), *place = malloc((n + 1) * sizeof *place);
-  uint64_t *idle = malloc(((size_t)elements + 1) * sizeof *idle);
+  uint64_t *idle = malloc(((size_t)elements + 1) * sizeof *idle), *taken = calloc(n + 1, sizeof *taken);
   unsigned char *colored = calloc(n + 1, 1), *chosen = calloc(n + 1, 1);
   size_t *row = NULL, *first = NULL, *parent = NULL, *prev = NULL, *next = NULL, *cur = NULL;
   uint32_t *live = NULL, *node_of = NULL, *picked = NULL;
-  int result = key && by_end && point && width && spot && place && idle && colored && chosen ? 0 : ENOMEM;
+  int result = key && by_end && point && width && spot && place && idle && taken && colored && chosen ? 0 : ENOMEM;
   size_t points = 0, fatspots = 0, cyclic = 0, most_row = 0;
   if (!result) {
     uint64_t o = 0;
@@ -1116,11 +1118,11 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
     }
     for (size_t q = 0; q < walked; q++) {
       const uint32_t m = picked[q];
-      for (uint64_t k = 0; k < need[m] && k < need[c]; k++) color[place[m] + k] = made + k;
+      for (; taken[m] < need[m] && taken[m] < need[c]; taken[m]++) color[place[m] + taken[m]] = made + taken[m];
       colored[m] = 1; chosen[m] = 0;
     }
     if (!kept) {
-      for (uint64_t k = 0; k < need[c]; k++) color[place[c] + k] = made + k;
+      for (; taken[c] < need[c]; taken[c]++) color[place[c] + taken[c]] = made + taken[c];
       colored[c] = 1;
     }
     made += need[c];
@@ -1128,18 +1130,19 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
   if (!result) {
     size_t rest = 0, idled = 0, released = 0;
     for (uint32_t i = 0; i < intervals; i++)
-      if (!colored[i]) { key[rest] = (struct cover_key){start[i], i}; by_end[rest++] = (struct cover_key){end[i], i}; }
+      if (taken[i] < need[i]) { key[rest] = (struct cover_key){start[i], i}; by_end[rest++] = (struct cover_key){end[i], i}; }
     qsort(key, rest, sizeof *key, cover_key_before);
     qsort(by_end, rest, sizeof *by_end, cover_key_before);
     for (size_t q = 0; q < rest; q++) {
       const uint32_t i = key[q].interval;
       for (; released < rest && by_end[released].at < start[i]; released++)
-        for (uint64_t k = need[by_end[released].interval]; k--;) idle[idled++] = color[place[by_end[released].interval] + k];
-      for (uint64_t k = 0; k < need[i]; k++) color[place[i] + k] = idled ? idle[--idled] : made++;
+        for (uint64_t k = need[by_end[released].interval]; k-- > taken[by_end[released].interval];)
+          idle[idled++] = color[place[by_end[released].interval] + k];
+      for (uint64_t k = taken[i]; k < need[i]; k++) color[place[i] + k] = idled ? idle[--idled] : made++;
     }
     *colors = made;
   }
-  free(key); free(by_end); free(point); free(width); free(spot); free(place); free(idle); free(colored); free(chosen);
+  free(key); free(by_end); free(point); free(width); free(spot); free(place); free(idle); free(taken); free(colored); free(chosen);
   free(row); free(first); free(parent); free(prev); free(next); free(cur); free(live); free(node_of); free(picked);
   return result;
 }
