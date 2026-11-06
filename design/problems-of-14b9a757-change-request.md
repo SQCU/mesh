@@ -677,14 +677,160 @@ Code is cited at mesh 36bd7cbd. The two stops above are replaced by items 13 and
        this case, the resultant coloring may or may not be optimal."
   - M. Lam, PLDI 1988, §2.3, as quoted in the second stops' item 7: "the minimum degree of unrolling, u, to implement
     the same schedule is simply max_i q_i."
+  - L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, "A Register Allocation Framework Based on Hierarchical Cyclic
+    Interval Graphs", ACAPS Technical Memo 33 (Revised), McGill, February 26, 1993 (original version November 25,
+    1991) (https://www.sable.mcgill.ca/~hendren/ftp/acaps/memo33.ps.gz, linked from
+    https://www.sable.mcgill.ca/~hendren/acaps.html). This is the CC 1992 paper's title, by its authors.
+    - §2.2, p. 5: "We should note that cyclic intervals can also be used to represent live ranges of variables in loops
+      which are first unrolled. Of course, each variable in the original loop will be split into several variables
+      depending the unrolling factor. Then, the interval graph can be constructed where each new variable in the
+      unrolled loop is associated with a cyclic interval. We should also note that the period of a cyclic interval
+      graph may be greater than 1 iteration."
+    - Its reference [9], on software pipelining's buffers as cyclic intervals, is Q. Ning and G. R. Gao, "A novel
+      framework of register allocation for software pipelining", POPL 1993, pp. 29–42. Not read.
+  - Mukerji 1994, Algorithm 3.2.1's input, p. 43: "The number of registers, reg_num, needed by each interval of the
+    cyclic interval graph. Recall that we use registers and colors interchangeably."
+  - Mukerji 1994, §3.2.6, pp. 44–46, as printed (`fs[t])` and "IF int was before and s in chosen_fc[]" included):
+
+    ```text
+    Procedure Main Fatcover :
+
+    FOR each subgraph, G',
+      Identify all the fatspots (fs[]) of G'
+      Record the number of fatspots in num_fs
+      FOR every fatspot, fs[t]),
+        Find all non cyclic intervals, NC_{i_1}, . . . , NC_{i_k},
+        live at time t
+      FOR every cyclic interval, C_i,
+        Establish All Covers Of C_i, FC_{C_i}[], by a left to right traversal of G'
+        IF FC_{C_i}[] ≥ 1 THEN
+          successful = Choose A Cover For C_i from
+          FC_{C_i}[] by a right to left traversal of G'
+          IF successful THEN
+            Assign FC_{C_i}[chosen] (reg_{number}(C_i)) new colors to FC_{C_i}[chosen]
+          ELSE
+            Mark C_i to be a chameleon interval (These are
+            special intervals and will be discussed in Chapter 4).
+        ELSIF FC_{C_i}[] = ∅ THEN
+          Assign C_i (reg_{number}(i)) new colors, c_i
+      Use Left-Edge-Algorithm to color the subgraph (G' − F_{C_{1 [illegible] m}}),
+      which has only non cyclic intervals
+    DONE
+    ```
+
+    ```text
+    Procedure Establish All Covers Of C_i
+
+    cur_fspot = 1
+    parent[]=children[]= roots = NULL
+    front_end_live = FALSE
+    tail_end_live = FALSE
+    WHILE cur_fspot < num_fs
+      ( If the front end of the cyclic interval is live )
+      ( then it is the root interval of all possible fatcovers )
+      IF front-end of C_{front−i} is live THEN
+        Choose C_i to be a part of the fatcover
+        Insert C_i into children[]
+        parents[] = children[] ( in preparation for cur_fspot +1 )
+        Increment cur_fspot
+        IF cur_fspot == 1 THEN
+          Set parent of C_i = NULL ( as this has to be the first interval in all possible fatcovers )
+          roots[] = children[] ( to keep track of the first interval of the fatcovers )
+          front_end_live = TRUE
+          ELSE
+            Set parent of C_i
+          CONTINUE with next iteration of loop
+        ( If the front end of the cyclic interval is not live at the first )
+        ( fatspot, include it in FC_{C_i}[] anyhow, as it must be a part )
+        ( of the fatcover )
+        IF (cur_fspot == 1 && !front_end_live) THEN
+          Set parent of C_i = NULL ( as this has to be the first interval in all possible fatcovers )
+          roots[] = children[] ( to keep track of the first interval of the fatcovers )
+          parents[] = children[] ( in preparation for the next fatspot )
+          front_end_live = TRUE
+          Increment cur_fspot
+          CONTINUE with next iteration of loop
+        FOR each non-cyclic interval, NC_i, live at cur_fspot
+          FOR each int in parent[]
+            IF NC_i and int do not conflict
+              Insert NC_i into children[]
+              Record parent of NC_i to be int
+              Record child of int to be NC_i
+        IF tail-end of C_{tail−i} is live at cur_fspot
+          tail_end_live = TRUE
+          Insert tail-end of C_{tail−i} in children[] so that it
+          is chosen to be a part of the fatcover
+          Eliminate all parent[] intervals which conflict with C_{tail−i}
+          IF parent[] = ∅ THEN
+            RETURN FALSE ( No fatcover can be found )
+          ELSE
+            RETURN TRUE ( Fatcover can be found )
+        parent[] = children[]
+        Increment cur_fspot
+      ( If C_{tail−i} was not live at any of the fat spots then insert it )
+      ( in the fatcover array to make it the last interval to be seen by all )
+      ( fatcovers )
+      IF !tail_end_live THEN
+        Insert tail-end of C_{tail−i} in children[] so that it
+        is chosen to be a part of the fatcover
+        Eliminate all parent[] intervals which conflict with C_{tail−i}
+        IF parent[] = ∅ THEN
+          RETURN FALSE ( No fatcover can be found )
+    RETURN TRUE ( Fatcover can be found )
+    DONE
+    ```
+
+    ```text
+    Choose A Cover For C_i :
+
+    chosen_fc[] = NULL
+    earliest_start_time = LARGE_NUM
+    WHILE parent[0] != NULL
+      FOR each int in parent[]
+        IF int was before and s in chosen_fc[] THEN
+          int_num = int
+        ELSIF start_time(int) < earliest_start_time THEN
+          int_num = int
+          earliest_start_time = start_time(int)
+      chosen_fc[] = int_num
+      parent[] = parents of int_num
+    DONE
+    ```
+
+    Its prose for the choice, p. 42: "Our heuristics favor : - Intervals which have earlier start times. - When two
+    intervals have the same start time then the interval which is live longer is chosen."
+  - Mukerji 1994, Appendix A, Algorithm A.0.1, p. 131, the left edge algorithm [HS71]:
+
+    ```text
+    Main Left Edge Algorithm:
+
+    FOR each reg_{class}
+      Subgraphs,(G'), are created
+      where all the intervals, i, of G' are such that :
+        reg_{pref}(i) = reg_{class}
+      Initialize state of all colors of reg_{class} to be free
+      at all times, t_1 ... t_n
+      FOR every G'
+        FOR every time, t, in t_1 ... t_n of G'
+          FOR each interval, i defined at t
+            Obtain colors, c_i ... c_{regnum_i} that are free for the lifetime of i
+            Assign c_i ... c_{regnum_i} to i
+            Mark c_i ... c_{regnum_i} to i to be busy for the lifetime of i
+    DONE
+    ```
+  - The thesis's full text, OCR'd page by page and checked against the page images, is at
+    /private/tmp/claude-501/-Users-mdot-metal-microbench/66e06aa7-8a9f-469f-a879-1939b883b550/scratchpad/hendren/mukerji-ocr.txt
+    (PDF page = printed page + 14).
 - **Change:**
   - The PLAN_LOCAL and PLAN_ROUTED items of one plan at a node are the intervals of one cyclic interval graph G.
   - G's time points are the node's operations, in program order, over the u executions of the unrolled template.
-  - Each live range is one lifetime interval, from its write to its last read. A value of lag 0 has one per execution;
-    a routed copy has one. A lifetime that crosses the end of the u executions is a cyclic interval.
-  - An item of b blocks is b intervals of the same lifetime. Each color is a block of the space.
-  - G is colored by the fat cover algorithm (§3.2.3), with the left edge algorithm for the non-cyclic remainder. This
-    replaces `plan_before` and `mesh_graph_chains` for these items.
+  - Each live range is one lifetime interval, from its write to its last read. As the memo's §2.2 has it, each
+    variable is "split into several variables depending the unrolling factor": a value of lag 0 has one interval per
+    execution, and a routed copy has one. A lifetime that crosses the end of the u executions is a cyclic interval.
+  - An item of b blocks is one interval needing b colors (Algorithm 3.2.1's reg_num). Each color is a block of the
+    space. There is one register class.
+  - G is colored by Main Fatcover, Establish All Covers Of C_i and Choose A Cover For C_i as printed, with the left edge
+    algorithm (A.0.1) for the non-cyclic remainder. A cyclic interval with no fat cover gets new colors, as §3.2.3's
+    second phase states. This replaces `plan_before` and `mesh_graph_chains` for these items.
   - PLAN_ALONE items stay as they are.
-  - The algorithm's text in §3.2.6 and Appendix A, and the open implementations of this kind of solver, are appended
-    below once read. They are the implementer's reference for the steps the quotes above leave open.
+  - The open implementations of this kind of solver are appended below once read.
