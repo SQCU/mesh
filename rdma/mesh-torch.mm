@@ -12,22 +12,27 @@
 #include <ATen/mps/MPSStream.h>
 #include <atomic>
 #include <cerrno>
-#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
-// rdma/mesh-call.h struct mesh_section, field for field, as rdma/mesh.py Section binds it: mesh's C headers are C, and
-// C++ cannot include them (mesh.h's stdatomic.h and infiniband/verbs.h)
-struct mesh_section { uint32_t first, pages; size_t bytes; uint32_t count, stride; };
-static_assert(sizeof(mesh_section) == 24 && offsetof(mesh_section, bytes) == 8 && offsetof(mesh_section, stride) == 20,
-              "mesh_section: rdma/mesh-call.h struct mesh_section");
+// rdma/mesh-section.h struct mesh_section, as rdma/mesh.py Section binds it.
+// 2026-11-05 (design/compilation-coordination.md, "The revisions of 4e78f6f4", the coordinator's finding on "The
+// revisions of e4a7398e": "rdma/mesh-torch.mm declares its own `struct mesh_section` with a static_assert, instead of
+// including rdma/mesh-call.h. That is a duplicated pattern: merge it"): the header is included, where this file
+// declared a copy of the struct and asserted its layout; mesh-section.h holds the one declaration, with stddef.h and
+// stdint.h alone, so C++ includes it (mesh.h's stdatomic.h and infiniband/verbs.h, which mesh-call.h includes, do not
+// compile as C++: TP-1), and asserts the layout itself.  What must stay: no struct mesh_section declared here
+#include "mesh-section.h"
 // rdma/mesh-collective.h mesh_host_publish, whose address the caller passes (rdma/mesh_compile.py), with the context it
 // takes, so this library binds no mesh symbol of its own
 typedef void (*mesh_publish)(void *, struct mesh_section, uint64_t);
 
 // the notifications scheduled and not yet run, which a plan's retirement waits out before its claim is closed
-// (rdma/mesh_compile.py _retire: deferred reclamation, design/disjoint-pages-change-request.md C3.4)
+// (rdma/mesh_compile.py _retire: deferred reclamation, design/disjoint-pages-change-request.md C3.4).
+// 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+// revisions of 4e78f6f4"): the program's retirement waits them out before its root is closed (mesh-dataflow.h
+// mesh_retire) and its mapping released, where a plan's claim was closed.  What must stay: the count's release order
 static std::atomic<uint64_t> notifying{0};
 
 // execution `execution` of each of `count` sections published by `publish(context, section, execution)` in the
