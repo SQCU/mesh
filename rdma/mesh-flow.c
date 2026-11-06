@@ -2439,6 +2439,11 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    only where the operand's view is that one.  Every child of the port is spawned after this call (mesh-ports.c
    port_lost and mesh-children.c child_reaped call it before mesh-ports.c port_open's child_spawn) */
 static struct cancelled { uint32_t node,index,every; struct mesh_view_id view; } cancelled[MESH_PORTS];
+static void plan_cancel_at(void *context,uint32_t k){
+  (void)context;
+  struct mesh_state *words=mesh_algo_standing(M,k);
+  if(words)plan_cancel(words);
+}
 void streams_cancel(const struct port *port){
   struct mesh_state *words;
   if(!port){
@@ -2465,7 +2470,7 @@ void streams_cancel(const struct port *port){
           !mesh_view_compare(mesh_plan_view(mesh_algo_state(M,mesh_algo(M),0)),last->view)){
     uint32_t listed;
     const uint32_t *adjacent=mesh_algo_adjacent(M,last->index,&listed);
-    for(uint32_t j=0;j<listed;j++)if((words=mesh_algo_standing(M,adjacent[j])))plan_cancel(words);
+    mesh_graph_row_visit(adjacent,listed,plan_cancel_at,NULL);
   }
   if(!port->child){
     atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);

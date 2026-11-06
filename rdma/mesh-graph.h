@@ -289,6 +289,9 @@ int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t ed
 struct mesh_graph_interval { uint64_t key, start, end; };
 int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval);
 
+/* A vertex's adjacency row, row[0 .. count) (mesh_graph_rows), visited in order: visit(context, row[j]) */
+void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context);
+
 #ifdef __cplusplus
 }
 #endif

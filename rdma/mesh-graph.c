@@ -1539,3 +1539,8 @@ int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval) {
     if (interval[k].key == interval[k - 1].key && interval[k].start < interval[k - 1].end) return 1;
   return 0;
 }
+
+/* mesh-graph.h mesh_graph_row_visit */
+void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context) {
+  for (uint32_t j = 0; j < count; j++) visit(context, row[j]);
+}
