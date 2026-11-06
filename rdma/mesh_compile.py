@@ -1373,19 +1373,20 @@ def _claim(ir, key, d, m):
     return form[0] == d and m * form[1] % _block(ir, key) == 0
 
 
-def _within(ir, base, d, first, length):
+def _within(ir, base, d, firsts, length):
     shape, (e, s) = list(_layout(ir, base)[1]), _form(ir, base)
-    offset, extent = (0, _size(ir, base)) if d is None else (first * s, length * s)
     if d is not None:
         shape[d] = length
-    span = _span(ir, base, offset, extent)
-    if any(a < span[1] and span[0] < b for a, b in ir.blocks.get(base, ())):
+    places = [(0, _size(ir, base)) if d is None else (first * s, length * s) for first in firsts]
+    spans = [_span(ir, base, offset, extent) for offset, extent in places]
+    if any(a < b2 and a2 < b for a, b in spans for a2, b2 in ir.blocks.get(base, ())):
         return None
-    ir.blocks.setdefault(base, []).append(span)
-    return Run(base, offset, extent, tuple(shape), _strides(_layout(ir, base)[1], e, s), None)
+    ir.blocks.setdefault(base, []).extend(spans)
+    strides = _strides(_layout(ir, base)[1], e, s)
+    return [Run(base, offset, extent, tuple(shape), strides, None) for offset, extent in places]
 
 
-def _run_of(ir, key, dim, start, length, m):
+def _run_of(ir, key, dim, starts, length, m):
     base = ir.bases.get(key)
     if base is None or base[0] in ir.inside or dim is not None and base[1] not in (None, dim):
         return None
@@ -1393,12 +1394,12 @@ def _run_of(ir, key, dim, start, length, m):
     d = dim if dim is not None else along
     if d is None:
         ir.fixed.add(value)
-        return _within(ir, value, None, 0, 0)
-    first = at + (start if dim is not None else 0)
+        return _within(ir, value, None, [0], 0)
+    firsts = [at + start for start in starts] if dim is not None else [at]
     length = length if dim is not None else _layout(ir, key)[1][d]
-    if not _claim(ir, value, d, math.gcd(m, first)):
+    if not _claim(ir, value, d, math.gcd(m, *firsts)):
         return None
-    return _within(ir, value, d, first, length)
+    return _within(ir, value, d, firsts, length)
 
 
 def _laid(ir, c, key, d, m, s=None):
@@ -1412,11 +1413,15 @@ def _laid(ir, c, key, d, m, s=None):
     return own
 
 
-def _sent(ir, c, key, dim, start, length, m):
-    run = _run_of(ir, key, dim, start, length, m)
-    if run is None:
-        run = _within(ir, _laid(ir, c, key, dim, m), dim, start, length)._replace(at=c.position)
-    return run
+# the runs of `key`'s parts [start, start + length) along `dim` for each of `starts` (dim None: the key whole), all
+# from one value, so every part has one layout and its receivers one view of it: its producer's (_run_of) where every
+# part fits, else its one layout change (_laid)
+def _sent(ir, c, key, dim, starts, length, m):
+    runs = _run_of(ir, key, dim, starts, length, m)
+    if runs is None:
+        runs = [run._replace(at=c.position) for run in
+                _within(ir, _laid(ir, c, key, dim, m), dim, starts if dim is not None else [0], length)]
+    return runs
 
 
 # a sent range's events: its production where its run is written (its producer's third step, or the sends of the item
@@ -1520,9 +1525,9 @@ def _directed(ir, key):
 # events as before, a member's production where its partial is laid out at the item's sends
 def _all_reduce(ir, c, groups, key, made):
     arrive, k = 3 * c.position + 1, len(groups[0])
-    readers, run = _readers(ir, {made}, arrive + 1), _sent(ir, c, key, None, 0, 0, 1)
+    readers, (run,) = _readers(ir, {made}, arrive + 1), _sent(ir, c, key, None, [0], 0, 1)
     ir.fixed.add(made)
-    total, (buffer, part) = _within(ir, made, None, 0, 0), _buffer(ir, c, run, k - 1)
+    (total,), (buffer, part) = _within(ir, made, None, [0], 0), _buffer(ir, c, run, k - 1)
     size = _layout(ir, key)[0].itemsize
     for group in groups:
         root, members = group[0], group[1:]
@@ -1583,15 +1588,14 @@ def _all_gather(ir, c, groups, key, made):
     d, k, received = c.dim, len(groups[0]), 3 * c.position + 1
     n = _shape(ir, key)[d]
     own = _directed(ir, key)
-    run = Run(key, None, None, None, None, None) if own else _sent(ir, c, key, d, 0, n, n)
+    run = Run(key, None, None, None, None, None) if own else _sent(ir, c, key, d, [0], n, n)[0]
     ir.form[made] = (d, _grain(ir, made, d, n) if own else run.strides[d])
     ir.fixed.add(made)
     s, size = ir.form[made][1], _layout(ir, made)[0].itemsize
     if own:
         ir.inside[key] = (made, None)
         ir.fixed.add(key)
-    for p in range(k):
-        _within(ir, made, d, p * n, n)
+    _within(ir, made, d, [p * n for p in range(k)], n)
     last = max(received, _readers(ir, {made}, received)[1])
     for group in groups:
         ranges = [ir.transfer(n * s * size, e, [f for f in group if f != e], mesh.JOIN) for e in group]
@@ -1675,7 +1679,7 @@ def _exchange(ir, c, groups, pairs, runs, lands, kind, last):
 def _all_to_all(ir, c, groups, key, made):
     (_, j), k = c.dim, len(groups[0])
     nj = _shape(ir, key)[j] // k
-    runs = [_sent(ir, c, key, j, q * nj, nj, nj) for q in range(k)]
+    runs = _sent(ir, c, key, j, [q * nj for q in range(k)], nj, nj)
     buffer, part = _buffer(ir, c, runs[0], k)
     _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], runs,
               lambda p, me: (buffer, p * part, (buffer, p)), mesh.JOIN, 3 * c.position + 1)
@@ -1722,7 +1726,7 @@ def _all_to_all(ir, c, groups, key, made):
 def _reduce_scatter(ir, c, groups, key, made):
     dim, k = c.dim, len(groups[0])
     n = _shape(ir, key)[dim] // k
-    runs = [_sent(ir, c, key, dim, q * n, n, n) for q in range(k)]
+    runs = _sent(ir, c, key, dim, [q * n for q in range(k)], n, n)
     buffer, part = _buffer(ir, c, runs[0], k - 1)
     _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], runs,
               lambda p, me: (buffer, (p - (p > me)) * part, (buffer, p - (p > me))), mesh.PAGES,
@@ -1791,9 +1795,9 @@ def _collective_permute(ir, c, groups, key, made):
     landed, at = ir.landing[made]
     (source, first, laid), (_, d, _, _, _) = _halo(ir, landed, c), ir.regions[landed]
     _, start, length = ir.program[ir.producer[key]][3]
-    run = _within(ir, source, d, first + start, length)
-    run = run._replace(at=laid) if run is not None else \
-        _within(ir, _laid(ir, c, key, d, 1, _form(ir, landed)[1]), d, 0, length)._replace(at=c.position)
+    run = _within(ir, source, d, [first + start], length)
+    run = run[0]._replace(at=laid) if run is not None else \
+        _within(ir, _laid(ir, c, key, d, 1, _form(ir, landed)[1]), d, [0], length)[0]._replace(at=c.position)
     s = _form(ir, landed)[1]
     ir.views[made] = (landed, at * s, run.sizes, _strides(_layout(ir, landed)[1], d, s))
     _exchange(ir, c, groups, pairs, [run] * k, lambda p, me: (landed, at * s, made), mesh.JOIN,
