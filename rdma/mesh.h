@@ -73,10 +73,7 @@
    `view_off` and `view_nodes`, the installed view's identifier and the sequencer's map records its first message
    carried, which plans are made on and stand by; the wire's VIEW carrying those records (mesh-bridge.h struct
    mesh_group_view) (design/compilation-coordination.md, "The root cause of the copies, and the revised work list",
-   R-1 and R-6; design/aot-compilation-change-request.md A7, corrected 2026-11-06; "The revisions of 14b9a757").  120:
-   hdr `view_sequencer` and `view_boot` appended and struct mesh_state `sequencer` and `boot` where `padding3[0]` and
-   `padding3[1]` were, the installed view's creator and a plan's view's; struct mesh_view_id, the view's identifier,
-   in the wire's ORDER, SUBMIT, ARRIVE and COUNT (mesh-bridge.h) (JGroups ViewId.java) */
+   R-1 and R-6; design/aot-compilation-change-request.md A7, corrected 2026-11-06; "The revisions of 14b9a757") */
 #define MESH_VERSION 120u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
@@ -167,8 +164,10 @@ _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
    `argument` (MESH_SUPPLIED), `device_input` and `device_stride` (hdr `landed_off`, `landed_stride`) became `pages`,
    `phases`, `count` and `state` at the same offsets, since the landed records and per-execution supplied words are
    gone.  What must stay: no field moves (the assert below) */
-/* `completion` (design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7; struct mesh_state
-   `transfers`) */
+/* `completion`: rdma-core libibverbs/man/ibv_post_send.3, NOTES: "The buffers used by a WR can only be safely reused
+   after WR the request is fully executed and a work completion has been retrieved from the corresponding completion
+   queue (CQ)."  libfabric man/fi_cntr.3.md, DESCRIPTION: "Counters record the number of requested operations that have
+   completed." */
 struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t pages; uint64_t phases,count,state;
   struct mesh_target targets[1]; uint64_t completion,padding; };
 _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 &&
@@ -329,14 +328,15 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    C3.3's text (item 1).  What must stay: u the largest least lag, the same at every rank; ENOMEM only for a value with
    no such L.
    - A send from its range's source: `word` the region offset of the range's supplied word; `field` MESH_ABSENT;
-     `count` the region offset of its range's send-completion counter for this copy; `pages` 0.  Execution t's send
-     is released once the word reads (acquire) at least t + 1.
+     `pages` 0.  Execution t's send is released once the word reads (acquire) at least t + 1.
    - A forwarding send (a relay's, or a destination's that sends the page on): `word` and `field` those of its node's
-     receive of the same page in the same copy; `count` as a send's; `pages` 0.  Execution t's send is released once
-     that field reads (acquire) mesh_phase(t / u + 1), its receive's landing in execution t.
-   - A send's work completion, once retrieved, adds 1 to its `count` (release), or to the error count 8 bytes after
-     it where it completed in error (rdma-core libibverbs/man/ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md,
-     DESCRIPTION and fi_cntr_readerr).
+     receive of the same page in the same copy; `pages` 0.  Execution t's send is released once that field
+     reads (acquire) mesh_phase(t / u + 1), its receive's landing in execution t.
+   - A send's `count`, and its error count at `count` + 8: rdma-core libibverbs/man/ibv_post_send.3, NOTES: "The
+     buffers used by a WR can only be safely reused after WR the request is fully executed and a work completion has
+     been retrieved from the corresponding completion queue (CQ)."  libfabric man/fi_cntr.3.md: "Counters record the
+     number of requested operations that have completed"; "fi_cntr_readerr: Reads the number of operations which have
+     completed in error."
    - A receive: `page` its page; `word` the region offset of the uint64 holding its phase field and `field` the
      field's low bit (even, < 64); `count` the region offset of its range's count word for this copy, or 0 where this
      node does not consume the range (a relay's own receive: its forwards are released by its phase, nobody waits on a
@@ -361,10 +361,9 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    mesh_plan's `*plan`, the plan's handle, mesh_state_at; design/compilation-coordination.md, "The appendix's
    revisions", N2): the plan's state, the landed list's own section, which mesh_plan
    places with the plan's values in its claim (an invariant of the plan, no page-table row naming it), in new pages for
-   every plan, apart from the data pages it tells of.  Its layout: the struct; the phases, counts, send-completion
-   counters, supplied words and status; the delivered calls' queue, `room` struct mesh_delivery at `deliveries`; the
-   submissions' queue, `submit_room` struct mesh_submission at `submits` (`outstanding` of them at 114); the entries;
-   each 64-aligned
+   every plan, apart from the data pages it tells of.  Its layout: the struct; the phases, counts, supplied words and
+   status; the delivered calls' queue, `room` struct mesh_delivery at `deliveries`; the submissions' queue,
+   `submit_room` struct mesh_submission at `submits` (`outstanding` of them at 114); the entries; each 64-aligned
    (2026-11-05, "The revisions of abecd389", PQ: the two queues where the sequence words were before 113; "The
    revisions of 3f106747", BS: `submit_room`) (mesh-collective.c plan_layout; design/compilation-coordination.md, "The documents' revisions of
    edd4b583", "The region").  Each word has one writer:
@@ -389,14 +388,11 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      own reads, and every pass would be held to its deadline; Portals 4's counting events (one counter an operation set)
      and PTX's mbarrier (one a tile) count once a unit of work.  Per copy, since with u >= 2 execution t + 1's
      landings into the other copy can arrive before t's are all in.
-   - `completions`: S x `copies` pairs of uint64 words, S every range this node sends or forwards, in the plan's
-     demand order; range g's copy c the pair at index g x copies + c, its count, which each of its sends' work
-     completions raises by 1, then its error count, which each that completed in error raises by 1 and each send of a
-     cancelled plan its port did not post raises by 1 (mesh-flow.c); execution t of range g is complete at (t / u + 1)
-     x its sends a copy over the two together (rdma-core libibverbs/man/ibv_post_send.3, NOTES; libfabric
-     man/fi_cntr.3.md, DESCRIPTION and fi_cntr_readerr; man/fi_endpoint.3.md, fi_cancel;
-     design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7, and "Sources for the fourth
-     stops", 7).
+   - `completions`: S x `copies` pairs of uint64 words (count, error count), S the ranges this node sends or forwards
+     in the plan's demand order, range g's copy c the pair at index g x copies + c; execution t of range g is complete
+     where count + error count = (t / u + 1) x its sends a copy.  libfabric man/fi_endpoint.3.md, fi_cancel:
+     "Canceling an operation causes the fabric provider to search for the operation and, if it is still pending,
+     complete it as having been canceled."
    - `supplied`: `releases` uint64 words, release r this node's r-th source range in the plan's demand order.  Its
      one writer is the range's producer, which raises it to t + 1 after its last write in execution t (release): a
      host producer stores t + 1 (mesh_host_publish), a GPU producer adds 1, its executions running in order (D9).  One
@@ -674,16 +670,17 @@ static inline uint64_t mesh_group_bytes(uint32_t pages){ return ((uint64_t)pages
 struct mesh_status { _Atomic uint32_t behind,ahead,first,padding; };
 _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahead)==4 &&
   offsetof(struct mesh_status,first)==8,"mesh_status");
-/* JGroups ViewId (https://raw.githubusercontent.com/belaban/JGroups/master/src/org/jgroups/ViewId.java): `id` "Lamport
-   time of the view"; `sequencer` and `boot` the "Address of the creator of this view", a sequencer's node id and its
-   bridge's start (hdr `boot`), as JGroups' UUID (src/org/jgroups/util/UUID.java): "Logical address which is unique
-   over space and time" */
+/* JGroups (https://raw.githubusercontent.com/belaban/JGroups/master/src/org/jgroups/ViewId.java): "ViewIds are used
+   for ordering views (each view has a ViewId and a list of members)"; `id` its "Lamport time of the view", (`sequencer`,
+   `boot`) its "Address of the creator of this view"; src/org/jgroups/util/UUID.java: "Logical address which is unique
+   over space and time." */
 struct mesh_view_id { uint64_t id; uint32_t sequencer,padding; uint64_t boot; };
 _Static_assert(sizeof(struct mesh_view_id)==24 && offsetof(struct mesh_view_id,sequencer)==8 &&
   offsetof(struct mesh_view_id,boot)==16,"mesh_view_id");
-/* ViewId.compareTo: "The comparison is done on the IDs, if they are equal, we use the creator", `id > other.id ? 1 :
-   id < other.id ? -1 : creator.compareTo(other.creator)`; the creator's as UUID.compareTo, its first word, then its
-   second.  ViewId.equals: compareTo == 0 */
+/* ViewId.java: "The comparison is done on the IDs, if they are equal, we use the creator.", `return id > other.id ? 1 :
+   id < other.id ? -1 : creator.compareTo(other.creator);`; UUID.java: `int most=Long.compare(this.mostSigBits,
+   val.mostSigBits); return most != 0? most : Long.compare(this.leastSigBits, val.leastSigBits);`, `sequencer` the most
+   significant, `boot` the least; ViewId.equals: `compareTo((ViewId)other) == 0` */
 static inline int mesh_view_compare(struct mesh_view_id a,struct mesh_view_id b){
   return a.id>b.id?1:a.id<b.id?-1:a.sequencer>b.sequencer?1:a.sequencer<b.sequencer?-1:
     a.boot>b.boot?1:a.boot<b.boot?-1:0;
@@ -762,27 +759,26 @@ static inline int mesh_view_compare(struct mesh_view_id a,struct mesh_view_id b)
    R-1; "The revisions of 14b9a757"):
    - `transfers`, where `padding3[0]` was: the region offset of one struct mesh_publication (64 bytes) for each of the
      function's declared transfers, in their order (mesh_transfer_at), each written once by mesh_plan, read by index:
-     where this node is the transfer's source, `targets[0]` {word: the region offset of its range's supplied word,
-     count 1, stride 0}; where it is the transfer's destination, `pages` the range's instructions it receives a copy
-     (P), `phases` the region offset of its copy-0 phase group (copy c's at phases + c x mesh_group_bytes(P)), `count`
-     the region offset of its copy-0 count word (copy c's at count + 8 c); where this node sends or forwards the
-     transfer's range, `sends` its sends of the range a copy and `completion` the region offset of its copy-0
-     send-completion counter (copy c's at completion + 16 c, its error count 8 bytes after it; `completions`); `state`
-     this section's region offset where any holds; every other field 0.  Why: ranges may share a block where their
-     bytes are disjoint (PB R2, corrected 2026-11-06), so several begin in one row and a row's publication names none
-     of them alone; the declared transfer's index is the IR's own name of it.  Every row's publication
-     (mesh_publication_at) is written by nothing now and read by nothing.
+     where this node is the transfer's source, `targets[0]` {word: the region offset of its range's supplied
+     word, count 1, stride 0}; where it is the transfer's destination, `pages` the range's instructions it receives a
+     copy (P), `phases` the region offset of its copy-0 phase group (copy c's at phases + c x mesh_group_bytes(P)),
+     `count` the region offset of its copy-0 count word (copy c's at count + 8 c); `state` this section's region offset
+     where either holds; every other field 0.  Why: ranges may share a block where their bytes are disjoint (PB R2,
+     corrected 2026-11-06), so several begin in one row and a row's publication names none of them alone; the
+     declared transfer's index is the IR's own name of it.  Every row's publication (mesh_publication_at) is written by
+     nothing now and read by nothing.
    - `serial` is the Lamport time of the installed view whose map the plan was made on (hdr `view`), every entry's
      `serial` the same, where it was the map serial; the plan stands while that view is installed (A7, corrected
      2026-11-06: "A plan then stands while its view does, and its view while the sequencer's map does").
-   - `sequencer` and `boot`, where `padding3[0]` and `padding3[1]` were: that view's creator (hdr `view_sequencer`,
-     `view_boot`), so the plan's view is struct mesh_view_id (`serial`, `sequencer`, `boot`), mesh_plan_view.
-   What must stay: every other field where it is, the struct 320 bytes.
-   `removed`, where `padding4` was, the bridge parent its one writer (design/problems-of-14b9a757-change-request.md,
-   "Sources for the stops", 11; Documentation/RCU/whatisRCU.rst: "The removal phase removes references to data items
-   within a data structure").
-   `completions`, where `padding` was, the region offset of the send-completion counters (design/problems-of-
-   14b9a757-change-request.md, "Sources for the third stops", 7) */
+   - `sequencer` and `boot`: JGroups ViewId.java, "Address of the creator of this view".
+   - `removed`: Documentation/RCU/whatisRCU.rst
+     (https://raw.githubusercontent.com/torvalds/linux/master/Documentation/RCU/whatisRCU.rst): "The removal phase
+     removes references to data items within a data structure (possibly by replacing them with references to new
+     versions of these data items), and can run concurrently with readers"; "any reader starting after the removal
+     phase will be unable to gain a reference to the removed data items".
+   - `completions`: libfabric man/fi_cntr.3.md, "Counters record the number of requested operations that have
+     completed."
+   What must stay: every other field where it is, the struct 320 bytes */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t completions;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
@@ -809,7 +805,7 @@ _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,submit_room)==264 && offsetof(struct mesh_state,transfers)==272 &&
   offsetof(struct mesh_state,sequencer)==280 && offsetof(struct mesh_state,removed)==284 &&
   offsetof(struct mesh_state,boot)==288,"mesh_state");
-/* the view a plan was made in (struct mesh_view_id) */
+/* JGroups ViewId.java: "each view has a ViewId and a list of members" */
 static inline struct mesh_view_id mesh_plan_view(const struct mesh_state *s){
   return (struct mesh_view_id){.id=s->serial,.sequencer=s->sequencer,.boot=s->boot};
 }
@@ -1044,11 +1040,8 @@ struct hdr {
      (mesh-map.h mesh_layout: room `map_room`, laid out once with the region), written under `view_map`, a seqlock as
      `map` is (odd while the bridge parent writes, mesh_notify before and after; read whole as mesh_map_whole reads `map`:
      even before the read and unchanged after it, mesh-dataflow.c mesh_nodes_read).  The
-     bridge parent their one writer.  `view_sequencer` and `view_boot` (appended) the view's creator, written with
-     `view` under `view_map`: the view's identifier is struct mesh_view_id (mesh_view_installed).  A plan is made on
-     those records (mesh-dataflow.h mesh_nodes_read), its view that identifier (struct mesh_state `serial`,
-     `sequencer`, `boot`), and stands while the installed view is it.  What must stay: every other field in its
-     place */
+     bridge parent their one writer.  A plan is made on those records (mesh-dataflow.h mesh_nodes_read), its `serial`
+     `view` (struct mesh_state), and stands while `view` is it.  What must stay: every other field in its place */
   _Atomic uint64_t view_map,view;
   uint64_t vacant8;
   uint64_t view_off;
@@ -1130,6 +1123,7 @@ struct hdr {
   uint64_t deliveries_off,deliveries_room;
   _Atomic uint64_t delivered;
   _Atomic uint64_t delivery_read[MESH_PORTS];
+  /* JGroups ViewId.java: "Address of the creator of this view" */
   _Atomic uint32_t view_sequencer;
   uint32_t vacant22;
   _Atomic uint64_t view_boot;
@@ -1148,7 +1142,7 @@ _Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)
   offsetof(struct hdr,delivered)==432 && offsetof(struct hdr,delivery_read)==440 &&
   offsetof(struct hdr,view_sequencer)==504 && offsetof(struct hdr,view_boot)==512 && sizeof(struct hdr)==520,
   "struct hdr: no field moves");
-/* the installed view's identifier (struct mesh_view_id: hdr `view`, `view_sequencer`, `view_boot`) */
+/* JGroups ViewId.java: "each view has a ViewId and a list of members" */
 static inline struct mesh_view_id mesh_view_installed(struct hdr *m,memory_order order){
   return (struct mesh_view_id){.id=atomic_load_explicit(&m->view,order),
                                .sequencer=atomic_load_explicit(&m->view_sequencer,order),
