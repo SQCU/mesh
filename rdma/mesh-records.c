@@ -815,10 +815,20 @@ static int unsent;
    `plans`); `group` is read after mesh_algo_plan's acquire of `published`, which orders it behind the publication.
    The coordinator's ruling on d61df2a9 (one reading of the publication), reversing this unit's first form, which read
    `published` and `retired` again before `group`.  What must stay: one reading of the publication; a plan of another
-   map serial not matched */
+   map serial not matched.
+   2026-11-06 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2 and G2; the
+   coordinator's ruling on sub-agent D's finding; "The revisions of 55b9cbad"), reversing the order above, in which
+   mesh_algo_plan read the table word at place epoch - 1 before `group` was compared, so a message of another launch's
+   group with an epoch past this operand's `plans` was read past its table: the operand's openness by mesh.h
+   mesh_algo_open (the one reading of the publication, mesh 52a12eb0), then its `group` compared, then the plan at
+   place epoch - 1 (mesh_algo_state), its `closed` (acquire) and its `serial`.  Why: a message of this operand's group
+   names one of its own places, which the plan fixes at every rank (struct mesh_function: function k is named (group,
+   k + 1)), and any other group's is let go before any table word is read.  What must stay: the group compared before
+   any table word is read; one reading of the publication; a plan of another map serial not matched */
 static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
-  struct mesh_state *state=mesh_algo_plan(M,(uint32_t)(epoch-1));
-  return state && mesh_algo(M)->group==group &&
+  if(!mesh_algo_open(M) || mesh_algo(M)->group!=group)return NULL;
+  struct mesh_state *state=mesh_algo_state(M,mesh_algo(M),(uint32_t)(epoch-1));
+  return !atomic_load_explicit(&state->closed,memory_order_acquire) &&
     state->serial==atomic_load_explicit(&M->map_serial,memory_order_relaxed)?state:NULL;
 }
 /* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
