@@ -3472,3 +3472,93 @@ Three read-only reviews of the diff against the requirement lines are recorded b
   unit.
 - **Still open, needing a run:** whether Metal keeps aliased virtual addresses of one page consistent within an
   encoder, and under torch's MPS work over the one buffer (MTL4VisibilityOptionResourceAlias, dc862ecb).
+
+### Review of 4e78f6f4 against the requirement lines (2026-11-05, three read-only reviewers; the coordinator's answers)
+
+Each finding is at d28b18e4, merged where two reviewers found the same thing. Each names the requirement line it fails
+and what the code must do. Where a finding needs a method, the method is cited.
+
+**Transport by view and region-only memory**
+- V1. `_part`/`_send` (mesh_compile.py 1264–1292, the copy at 2152) copy a sent part into a value of its own in four
+  cases: a slice along an inner dimension; an offset that is not block-aligned or a part overlapping another range's
+  blocks; a CollectivePermute result; a program input. Item 7 allows one copy only for "an operator with no out
+  variant". The code must send each part as a view of its producer's pages at their places, and lay parts that are not
+  whole blocks out by PB R2's layout answer (the collective's dimension most-major, parts padded to whole blocks).
+- V2. AllToAll's own piece (1447) and AllGather's own shard where `_directed` is false (1401) are copied. The code must
+  make the result's rows for the own part name the operand's own pages (PB R2: sharing by reference through the page
+  table). Only the no-out-variant case keeps its one copy.
+- V3. The halo window concatenates its received pieces, `torch.cat(parts, dim, out=target)` (2192). The pieces must land
+  at their places in the window region's value (point 7), so no concatenation remains.
+- V4. The exported module's parameters and buffers are read from torch's allocations (2170, `_over`'s empty set for a
+  constant). That fails region-only memory. C3.2: "Weights, the KV cache, pooled intermediates, exchanges … are all
+  placed by `mesh_plan`'s allocator". The code must place them as invariants, as e2b does.
+- V5. A program input is the caller's tensor, outside the region. Region-only memory makes every program value region
+  pages, so the plan places each input. The caller writes into the input placed for it, as a host producer, ordered
+  by the event (C3.1: "A host producer is ordered by the event"). ExecuTorch's memory planning can likewise plan the
+  graph's inputs; the coordinator cites that from memory, not from a page read.
+
+**Compile-time, never run-time checks**
+- K1. Run-time searches where the plan knows the index. Each is to be read by index, as MSCCL-IR's steps name their
+  dependences by index (`depid`, `deps`):
+  - the start's scan of every wait entry (mesh-dataflow.c 562): the waits are stored in rows keyed by call place, and
+    each edge's delay is folded into its threshold;
+  - `count_take`'s search (mesh-records.c 896): the COUNT carries the sink entry's index;
+  - the held-flow search (mesh-flow.c 1696): a flow table indexed by place.
+- K2. Run-time bound and null tests of facts the plan fixes go:
+  - mesh.h 1017 and 1019;
+  - `state->sender>=n` (mesh-records.c 864);
+  - `queues_inside` (mesh-records.c 958, 1170);
+  - `plan_inside` and `deliveries>M->length` (mesh-flow.c 715, 719, 2053);
+  - link_prepare's room and entry tests.
+- K3. Values recomputed every execution from make()-time facts become constants of the plan (mesh_compile.py 2167,
+  2220–2221, 2320, 2323): `ir.sends`' release lists, `own`, `ir.device`, and the received parts' landing order, which
+  lowering records in `ir.at` and the runner re-derives (2215, 2219).
+- K4. The alias flush on every encoder (metal_recording.m 207, dc862ecb) is paid by all, though the plan knows which
+  blocks two values share and where one hands over to the next. The flush goes on those barriers alone.
+
+**The eight-second bound and bounded waits**
+- B1. An execution's waits each take a fresh MESH_PLATFORM_NS deadline: the start's edges, then each `_arrived`. So one
+  execution is bounded by 5 s × (1 + arrivals). The code must give one execution one absolute deadline, shared by all
+  its waits.
+- B2. The program record's `owner` test (mesh-collective.c 1964) returns EBUSY on almost every replan after ESTALE,
+  because the bridge releases the record a turn later. It is also a load then a later store, so two planners pass it.
+  The replan must wait for the release, bounded by MESH_PLATFORM_NS, as RCU's writer waits out a grace period
+  (`synchronize_rcu`), with ETIMEDOUT past it. The record has one writer by construction, the program's process, since
+  a run is one program on the whole collective (A7, corrected), so it needs no exchange and no lock: a single-writer
+  register (L. Lamport, On interprocess communication, Distributed Computing 1(2), 1986).
+- B3. `_retire`'s device synchronization (mesh_compile.py 2268) is an unbounded device wait, and it runs on every
+  replan. The record's release must follow torch's work in an MPSEvent notification, as torch_mesh's allocator.mm did
+  its release (fba41159's event form, item 7). It is then bounded by the notification wait already there.
+- B4. `mesh_graph_chains` (mesh-graph.c 864–885) makes items² comparisons and runs Dinic's maximum flow over the whole
+  program's items, with nothing bounding its time. The matching is Hopcroft and Karp's where capacities are 1 (J. E.
+  Hopcroft and R. M. Karp, An n^5/2 algorithm for maximum matchings in bipartite graphs, SIAM J. Comput. 2(4), 1973),
+  Fulkerson's reduction. Its time on the largest program is a measurement for when runs are authorized.
+- B5. The microbench Makefile's network fetches (git clone, uv pip install) are unbounded. They are rarer now, and open
+  like HiGHS's build.
+
+**The graph module, duplication, deciders and effectors, and names**
+- G1. `mesh_graph_chains` orders its items by its own predecessor count (mesh-graph.c 875–894) where `mesh_graph_order`
+  computes that order. The added edges' grouping by plan is a hand-written count and fill (mesh-collective.c 1500–1515)
+  where `mesh_graph_rows` does it. Both are to call the module's own functions.
+- G2. Duplicated patterns, each to be merged:
+  - the two walks of a value's ranges (mesh-collective.c 770, 2039);
+  - the copies expression (1947, 2026);
+  - the second walk for a run value's place (2123), which `runs_at` already holds;
+  - AllToAll's and ReduceScatter's one pairwise-exchange body, with CollectivePermute's send branch (mesh_compile.py
+    1430–1502).
+- G3. The planner calls `mach_vm_remap` and writes virtual addresses into the IR, and reads `getpid()`
+  (mesh-collective.c 2111–2129; mesh-collective.h `void *view`). Deciders see pages. The plan writes rows, and the
+  program's effector maps them.
+- G4. `struct mesh_program`, "the root" (mesh.h 740–764), keeps the claim head record's `owner`, `closed` and `start`
+  under a new name, which point 5 removes.
+  - Its name is A9's: the serialized operand in MSCCL-IR's shape, whose top level is the `<algo>` element with one
+    `<gpu>` per rank.
+  - Its fields are what A9 and the failport's lifecycle need: the operand's publication (B2's single writer) and the
+    holder the heartbeat already knows, reused as the failport's code is.
+  - "Root" also names the trees' roots (mesh-collective.c 1749), and goes from this record.
+
+**Answered earlier today, to be built in the same unit** (above):
+- IG-5's submissions cycle;
+- PO-1's text;
+- the publication rule in mesh-collective.h's note;
+- EB-1, which is B2.
