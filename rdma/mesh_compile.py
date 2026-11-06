@@ -212,12 +212,10 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # `fixed`, `views`, `shared`, `share`, `fallbacks`, `regions`, `halos`, `blocks`, `bases`, `sends` and `blockbytes`
 # go.  Every rank's: `places`, by device, each key's Place (its strided view of the value holding its bytes, _places);
 # `inside`, by key, the value its producer writes it into (owner, dimension, its start there by device: an AllGather's
-# own part, a window's middle, a halo's arrival and region, _reshard, _inside and _region); `results`, by the result of
-# an operator of several, that operator's key, and `taken`, by an operator.getitem of one, the result it takes (R-2,
-# _forms); `sent`, the keys a collective reads and the reads of the slices, narrows and viewed windows among them;
-# `contiguous`, the view nodes for which "it will not be possible to view self tensor as shape without copying it (e.g.,
-# via contiguous())" (torch 2.14.0 torch/_tensor_docs.py, view; _view).  This node's: `owned`, each value's index by the
-# key that owns it.  What must stay: every operand of mesh_plan the same at every rank
+# own part, a window's middle, a halo's arrival and region, _inside and _region); `results`, by the result of an
+# operator of several, that operator's key, and `taken`, by an operator.getitem of one, the result it takes (R-2,
+# _forms); `sent`, the keys a collective reads.  This node's: `owned`, each value's index by the key that owns it.  What
+# must stay: every operand of mesh_plan the same at every rank
 class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
@@ -272,7 +270,7 @@ class IR:
         return transfers
 
     # one value of this node (mesh-collective.h struct mesh_value), MESH_EXECUTION: a routed one in the window (`wire`
-    # 1), a local one outside it (0), each with its first and last positions on this node's program order, its layout,
+    # 1), a local one outside it (0) with its first and last positions on this node's program order, and its layout,
     # the element type, the shape and the device of `node`'s tensors, which its copies' tensors are bound on (K1).  Its
     # index in `values`.  A tensor on the meta device has no binding (_bind), and only a node the placement operand maps
     # no device takes meta tensors (A4), where no value is made: refused, naming it
@@ -775,9 +773,9 @@ def _complete(ir, operators, annotated):
 # since torch passes the whole input, so its reshard starts from it and is slices alone (the coordinator's ruling on
 # review V2's finding 7); so is a get_attr's, the module's attribute at every node (T4-20).  Each step an item of this
 # node's program: (kind, the keys it reads, the key it makes, its operand), none repeated whose key an earlier one made
-# (that value stands through the execution).  The key of `node`'s local value in `want`.  Before an AllGather and an
-# AllToAll, its member's own part ('copy'): MPICH allgather_intra_ring.c, "First, load the "local" version in the
-# recvbuf", and alltoall_intra_pairwise.c, "Make local copy first" (MPIR_Localcopy; _copied)
+# (that value stands through the execution).  The key of `node`'s local value in `want`
+# MPICH allgather_intra_ring.c: "First, load the "local" version in the recvbuf."; alltoall_intra_pairwise.c: "Make
+# local copy first", MPIR_Localcopy
 # 2026-11-05 (design/aot-compilation-change-request.md, appendix item 7: "A view (a narrow, a slice) is its base's
 # pages, and its base lives as long as it does"; design/compilation-coordination.md, "The revisions of e4a7398e", OV):
 # a slice no longer adds its key to `placed`; _over gives every view its base's pages.  What must stay: the steps
@@ -881,10 +879,9 @@ def _extent(window, parts, n, o):
 # landing value is its reads laid end to end along the dimension in its own row-major layout (ir.shapes, a value of no
 # key, `added`), each arrival and the region lying in it (`inside`: the arrival at its start, the region at this
 # partition's offset, every rank's by device).  What must stay: the steps (1), (3) and (4) as before, every rank's
-# GSPMD section 4.5, "DynamicSlice to shard replicated dimensions": an operand `whole` along the dimension at every
-# partition has no halo exchange, its region the DynamicSlice of its value at the partition's start, its landing value
-# padded where a window lies outside it; the middle ('copy') in place where its producer writes through its view
-# (_inside), one local copy otherwise (MPICH MPIR_Localcopy; _copied)
+# GSPMD section 4.5: "DynamicSlice to shard replicated dimensions"; Appendix A.2: "some partitions may include garbage
+# values (e.g., halos from out-of-range input data), so we apply masking as described in Section 4.1".  MPICH
+# allgather_intra_ring.c: "if (sendbuf != MPI_IN_PLACE) {", MPIR_Localcopy
 def _region(ir, consumer, key, window, m, o, whole):
     node, shape = key[0], _shape(ir, key)
     dim, parts, size = window.dim, ir.shape[m], _value(key[0]).shape[window.dim]
@@ -971,7 +968,8 @@ def _region(ir, consumer, key, window, m, o, whole):
 # AllReduce's record is its item's alone (`reduced` goes: _place reads the item).  What must stay: the program's items
 # as before
 # XLA spmd_partitioner.cc, PartitionedHlo::ReshardAsWindowedInput: "for (int dim = 0; dim <
-# base_shape_.dimensions().size(); ++dim)", "if (shard_count == 1 ...) continue", "visiting_hlo = *resharded"
+# base_shape_.dimensions().size(); ++dim) {", "if (shard_count == 1 || can_leave_dimension_partitioned[dim]) {",
+# "continue;", "visiting_hlo = *resharded;".  GSPMD section 4.5: "DynamicSlice to shard replicated dimensions"
 def _partition(ir, operators):
     inputs = 0
     for node in ir.order:
@@ -1084,10 +1082,9 @@ def _partition(ir, operators):
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The
 # revisions of 14b9a757"), reversing the block's bytes: no block enters the compilation, since a transfer's ends are
 # byte views (_strided), not runs of blocks.  After the partitioning, each key's producer and the keys collectives
-# read with the reads of their slices, narrows and viewed windows (`producer`, `sent`), the forms (_forms), the values
-# an own part lies in (_inside), every device's places (_places) and the pages each key may lie over (_over), every
-# rank's.  What must stay: the placement operand's checks
-# and the refusal of an undivided dimension
+# read (`producer`, `sent`), the forms (_forms), the values an own part lies in (_inside), the pages each key may lie
+# over (_over), and every device's places (_places), every rank's.  What must stay: the placement operand's checks and
+# the refusal of an undivided dimension
 def partition(gm, placement, nodes):
     if not isinstance(placement, Placement):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
@@ -1112,9 +1109,8 @@ def partition(gm, placement, nodes):
                              'most once (GSPMD section 3.1)' % (name, mapping, len(ir.shape)))
         ir.sharding[node] = tuple(m if m >= 0 and ir.shape[m] > 1 else -1 for m in mapping)
         annotated.add(node)
-    # GSPMD section 4.5, "DynamicSlice to shard replicated dimensions"; torch 2.14.0 torch/export/exported_program.py,
-    # ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers";
-    # design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 8
+    # GSPMD section 4.5: "DynamicSlice to shard replicated dimensions".  torch 2.14.0 torch/export/exported_program.py,
+    # ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers"
     replicated = mesh_graph.forward(ir.order, lambda node: node.all_input_nodes,
                                     lambda node, operands: node.op == 'get_attr' or node.op == 'call_function'
                                     and bool(operands) and all(operands) and _aliases(ir.locals[node]))
@@ -1131,8 +1127,7 @@ def partition(gm, placement, nodes):
     ir.sent = mesh_graph.reach([item[1][0] for item in ir.program if item[0] == 'collective'],
                                lambda key: items[key][1][:1] if _sliced(items[key]) else ())
     _forms(ir)
-    # GSPMD section 4.5, as above: "Sources for the third stops", 8, "Loading only the slices a node reads", and
-    # "Sources for the fourth stops", 8
+    # GSPMD section 4.5: "DynamicSlice to shard replicated dimensions"
     bases = mesh_graph.forward(list(items), lambda key: items[key][1],
                                lambda key, reads: _bases(ir, items[key], reads))
     ir.attributes = {key: items[key] for key, base in bases.items() if base is not None}
@@ -1283,8 +1278,8 @@ def _sliced(item):
     return item[0] in ('slice', 'narrow') or _viewed(item)
 
 
-# GSPMD section 4.5, "DynamicSlice to shard replicated dimensions"; design/problems-of-14b9a757-change-request.md,
-# "Sources for the fourth stops", 8: "a value made from an attribute by views alone"
+# GSPMD section 4.5: "DynamicSlice to shard replicated dimensions".  torch 2.14.0 torch/export/exported_program.py,
+# ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers"
 def _bases(ir, item, reads):
     kind, _, key, operand = item
     if kind == 'constant':
@@ -1312,8 +1307,9 @@ def _bases(ir, item, reads):
 # R-2; "The revisions of 14b9a757"), reversing `bases` and `landing`'s sets: a key its producer writes inside another
 # value (`inside`: an AllGather's own part, a window's middle, a halo's arrival and region) lies over that value, a
 # region over its reads' pages as well; an operator of an out variant over its results' values (each its own, or the
-# value it lies inside); a key whose place is its own value (_places) over that value; any other over none.  `producer`
-# is partition's.  What must stay: each other key's set as above
+# value it lies inside); one with none over pages of its own only where a collective reads it ("an operator with no out
+# variant, whose result is copied once into its placed pages where it must be there", appendix item 7, "What stays"),
+# else over none.  `producer` is partition's.  What must stay: each other key's set as above
 def _over(ir):
     items, places = {item[2]: item for item in ir.program if item[0] != 'output'}, ir.places[min(ir.coords)]
 
@@ -1405,23 +1401,16 @@ def _consumer(ir, roots):
 # - _places gives every key's place at every device, every rank's, a forward data-flow problem over the program's keys
 #   (rdma/mesh_graph.py forward, as `over`): a key inside another value (`inside`) its narrow there at that device's
 #   start; a slice, a narrow and a viewed window its read's view narrowed at that device's offset (_cut; "A view (a
-#   narrow, a slice) is its base's pages", design/aot-compilation-change-request.md appendix item 7); a view an
-#   operator makes its base's place, at the offset, sizes and strides torch's own view gives it over that place (_view),
-#   or its own value where torch copies (`contiguous`); a key with pages of its own (a call's result a collective reads,
-#   `sent`: "an operator with no out variant, whose result is copied once into its placed pages where it must be
-#   there", appendix item 7), and a value of no key, its own value whole; a local copy's ('copy') its destination, or
-#   its source where that is the destination's view (MPI 4.1 section 7.8, in place: "Data sent and received must have
-#   the same type map"); any other none (an input, a result torch allocates), never a transfer's end.
+#   narrow, a slice) is its base's pages", design/aot-compilation-change-request.md appendix item 7); a key with pages
+#   of its own, and a value of no key, its own value whole; any other none (an input, a result torch allocates), never
+#   a transfer's end.
 # - _strided gives a place's mesh.Strided (mesh-collective.h struct mesh_strided): its offset and strides in bytes,
 #   `element` the element's bytes, its dimensions of size 1 dropped and adjacent ones merged where they nest, as torch's
 #   own collapse merges them ("The dimensions can be merged if and only if they are all "nested" with each other.  That
 #   is, they all have the property that stride[i] = stride[i+1] * shape[i+1]", torch 2.14.0 torch/_prims/__init__.py
-#   collapse_view, whose _collapse_view_helper takes `shape[idx] == 1` alike), which keeps the bytes' C order, its
-#   `dims` (size, stride) pairs at `pairs` (MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY's ndims).
+#   collapse_view, whose _collapse_view_helper takes `shape[idx] == 1` alike), which keeps the bytes' C order.
 # - _produced and _send: a sent range's production at its writer's third step, its source read the span of the reads of
-#   its key and its value (_readers), and this node's release of it after that writer (`publishes`); "The plan refuses
-#   a transfer whose source is MESH_INVARIANT (EINVAL at the plan)" (design/problems-of-14b9a757-change-request.md,
-#   "Sources for the second stops", 8).
+#   its key and its value (_readers), and this node's release of it after that writer (`publishes`).
 # What must stay: every rank's places and views the same; no part copied, laid out or shared for a transfer
 Place = collections.namedtuple('Place', 'owner offset sizes strides writer')
 
@@ -1465,6 +1454,8 @@ def _inside_of(ir, key, device):
         writer=ir.results.get(key, key))
 
 
+# MPI 4.1 section 7.8, in place: "Data sent and received must have the same type map as specified by recvcount and
+# recvtype."  torch 2.14.0 torch/_tensor_docs.py, view: "The returned tensor shares the same data"
 def _placement(ir, item, reads, device, added):
     kind, _, key, operand = item
     if key in ir.inside:
@@ -1538,6 +1529,8 @@ def _places(ir, device):
                                  lambda key, reads: _placement(ir, items[key], reads, device, added)), **added}
 
 
+# MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY: "The ndims parameter specifies the number of dimensions in the full
+# data array and gives the number of elements in array_of_sizes, array_of_subsizes, and array_of_starts."
 def _strided(ir, place):
     size, dims = _layout(ir, place.owner)[0].itemsize, []
     for n, s in zip(place.sizes, place.strides):
@@ -1564,9 +1557,7 @@ def _send(ir, i, key):
 # NCCL User Guide, In-place Operations: "For ncclReduceScatter and ncclAllGather, in place operations are done when the
 # per-rank pointer is located at the rank offset of the global buffer"; MPI 4.1 section 7.7, in place: "the input data
 # of each MPI process is assumed to be in the area where that MPI process would receive its own contribution to the
-# receive buffer".  A whole own part's ('copy' of no cut: an AllGather's, a window's middle) producer writing through
-# an `out` tensor (an out variant, a result of an operator of several, a ReduceScatter's torch.add) writes it at its
-# view in the result (`inside`), where it lies in no other value already
+# receive buffer."
 def _inside(ir):
     for kind, reads, key, operand in ir.program:
         if kind == 'copy' and operand is None:
@@ -1687,10 +1678,10 @@ def _all_reduce(ir, c, groups, key, made):
 # design/plan-to-bridge-change-request.md R2 at mesh 56ede97e, withdrawn: "With transfers as flattened lists of
 # blocks, a part lands at its byte ranges in the result's own layout, whatever its dimension.  No layout is chosen for a
 # transfer, and no part is padded"; "The revisions of 14b9a757"), reversing the padded most-major layout, _sent and the
-# own shard's share: the result is row-major in its logical shape, torch's own; member p's shard (`key`, its 'copy')
-# is the result's view at p x its extent along the gathered dimension, sent from there and landing at the same view of
-# every other member's result, so `from` and each `to` are one view.  What must stay: each member's range to every
-# other member, MESH_JOIN
+# own shard's share: the result is row-major in its logical shape, torch's own; member p's shard is its producer's view
+# of the result at p x its extent along the gathered dimension, sent from there and landing at the same view of every
+# other member's result, so `from` and each `to` are one view.  What must stay: each member's range to every other
+# member, MESH_JOIN
 def _all_gather(ir, c, groups, key, made):
     d, received = c.dim, 3 * c.position + 1
     n = _shape(ir, key)[d]
@@ -1741,9 +1732,7 @@ def _exchange(ir, c, groups, pairs, key, sent, landed, kind, last):
 
 
 # MPI 4.1 section 7.8, MPI_ALLTOALL: "The j-th block sent from MPI process i is received by MPI process j and is placed
-# in the i-th block of recvbuf": block q of member p's operand along the dimension the mesh dimension moves to (`j`) to
-# block p of member q's result along the one it leaves (`i`), MESH_JOIN as an AllGather's part; block p itself the
-# 'copy' before it (_reshard)
+# in the i-th block of recvbuf."
 def _all_to_all(ir, c, groups, key, made):
     (i, j), k = c.dim, len(groups[0])
     ni, nj, received = _shape(ir, key)[i], _shape(ir, key)[j] // k, 3 * c.position + 1
@@ -1861,7 +1850,7 @@ def _reduce_scatter(ir, c, groups, key, made):
 # window's middle in the landing value, `from`, and lands at its arrival's place there, `to`.  What must stay: one
 # transfer a pair, XLA's pairs refused at compile time where malformed
 # OpenXLA operation semantics, CollectivePermute: "For each pair, the operand is sent from source replica to target
-# replica"; a pair (p, p) the local copy at p (_collected)
+# replica."
 def _collective_permute(ir, c, groups, key, made):
     pairs = tuple(tuple(pair) for pair in c.dim)
     places, k = [p for pair in pairs for p in pair], len(groups[0])
@@ -1946,9 +1935,7 @@ LOWERINGS = {'all-reduce': _all_reduce, 'all-gather': _all_gather, 'all-to-all':
 
 
 # torch 2.14.0 torch/distributed/_functional_collectives.py, AsyncCollectiveTensor: "A Tensor wrapper subclass that is
-# used to trigger a call to wait prior to first use of the underlying tensor"; design/problems-of-14b9a757-change-
-# request.md, "Sources for the second stops", 7: "A collective whose result has no use at a node waits at the program's
-# last node"
+# used to trigger a call to wait prior to first use of the underlying tensor."
 def lower(ir):
     for item in ir.program:
         if item[0] == 'collective':
@@ -2033,12 +2020,12 @@ def lower(ir):
 # whose writer is that key) and its last its last reader's; every placed key's home (value, offset, sizes, strides) its
 # place; each declared transfer's `value` its end's value here.  No struct mesh_share is made, and nothing falls back to
 # a copy.  What must stay: no value at a node the placement maps no device, the positions as above
-# 2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the stops", item 7), reversing the note above
-# where a routed value has no positions: every value's positions its lifetime, "the index of the first and last node
-# referring that tensor in its inputs/outputs" (ExecuTorch, exir/memory_planning.py, update_tensor_lifetime); a value a
-# range lands in here from the call's start, the execution's receives' start (mesh_transfers_start), to the item that
-# waits for the landing (MPI 4.1 section 3.7: "The receiver should not access any part of the receive buffer after a
-# nonblocking receive operation is called, until the receive completes")
+# ExecuTorch exir/memory_planning.py, update_tensor_lifetime: "A tensor's lifetime are represented by the index of the
+# first and last node referring that tensor in its inputs/outputs."; "Mutable buffers and device resident constants keep
+# their data across calls, so they are never freed."  MPI 4.1 section 3.7: "The sender should not modify any part of
+# the send buffer after a nonblocking send operation is called, until the send completes."; "The receiver should not
+# access any part of the receive buffer after a nonblocking receive operation is called, until the receive completes."
+# MPI 4.1 section 3.9, MPI_START: "The request becomes active once the call is made."
 def _place(ir):
     if ir.device is None:
         return
@@ -2630,14 +2617,11 @@ def _bind(context, ir, values, addresses, buffer, mapping):
 #   (_bound): partial evaluation's division of a program's values into static and dynamic.  No step tests a
 #   make()-time fact: each such fact chooses which steps are made.
 # - An operator of an out variant writes its results' places; one with none, placed because a collective reads it or it
-#   lies in another value, is copied once into its place (appendix item 7, "What stays"); a placed view is its place;
-#   a view node in `contiguous` is torch's contiguous into its place by copy_, its view of it; any other makes its
-#   result.  A window's region is its place in its landing value, filled where it lies outside the operand.  An
-#   AllReduce root's and a ReduceScatter keeper's combine waits for each received part in the group's order and adds
-#   it in, its own first (MSCCLang's receive-reduce-copy, torch.add's out variant); every other collective waits for
-#   its receives; a CollectivePermute member no pair targets writes XLA's zeros at its place, one of a pair (p, p) its
-#   local copy.  A 'copy' is torch's copy_ of its source's view into its place, none where that is its source's
-#   (_copied).  Each item's publishes follow its work.
+#   lies in another value, is copied once into its place (appendix item 7, "What stays"); any other makes its result.
+#   A window's region is its place in its landing value, filled where it lies outside the operand.  An AllReduce root's
+#   and a ReduceScatter keeper's combine waits for each received part in the group's order and adds it in, its own
+#   first (MSCCLang's receive-reduce-copy, torch.add's out variant); every other collective waits for its receives; a
+#   CollectivePermute member no pair targets writes XLA's zeros at its place.  Each item's publishes follow its work.
 # - Each receive's wait (_arrived) ends at MESH_PLATFORM_NS without a rise of its range's count word of copy c (R-7),
 #   that word found once from its declared transfer's entry (mesh.h mesh_transfer_at; rdma/mesh.py Publication).
 # What must stay: one execution a call, every read of a received range after its arrival, a release after its range's
@@ -2679,6 +2663,8 @@ def _count(context, state, word, c):
     return C.c_uint64.from_address(context.M + word + 8 * (c % state.copies))
 
 
+# torch 2.14.0 torch/_tensor_docs.py, view: "Otherwise, it will not be possible to view self tensor as shape without
+# copying it (e.g., via contiguous())."; copy_: "Copies the elements from src into self tensor and returns self"
 def _called(ir, key, operands, local, form, placed):
     given = iter(operands)
     arguments, dynamic = _bound((local.args, local.kwargs), lambda n: next(given))
@@ -2700,6 +2686,9 @@ def _called(ir, key, operands, local, form, placed):
     return _Dynamic(key), [lambda env, inputs, t: env.__setitem__(key, _apply(local.target, arguments, env, {}))]
 
 
+# OpenXLA operation semantics, CollectivePermute: "For each pair, the operand is sent from source replica to target
+# replica."; "If a replica id is not a target in any pair, then the output on that replica is a tensor consisting of
+# 0(s) with the same shape as the input."  MPICH alltoall_intra_pairwise.c: "Make local copy first", MPIR_Localcopy
 def _collected(ir, context, plan, state, placed, c, item, operands):
     _, reads, key, collective = item
     me, receives = ir.roles[collective]
@@ -2725,10 +2714,11 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
 
 
 # torch 2.14.0 torch/distributed/_functional_collectives.py, wait_tensor: "Wait on a tensor returned by the collectives
-# ops"; design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7: "The collective's `wait_tensor`
-# at a node waits for its landing counts and its send-completion counters to reach the execution's totals", and
-# "Sources for the fourth stops", 7: "The program's wait returns ECANCELED once the error count is nonzero, after the
-# count and the error count together reach the execution's total"
+# ops."  MPI 4.1 section 7.1: "The completion of a collective operation indicates that the caller is free to modify
+# locations in the communication buffer."  libfabric man/fi_cntr.3.md: "Counters record the number of requested
+# operations that have completed."; "fi_cntr_readerr: Reads the number of operations which have completed in error."
+# man/fi_endpoint.3.md, fi_cancel: "An error queue entry will be available in the associated error queue with error
+# code FI_ECANCELED."
 def _sent(context, plan, transfer, t, counter):
     def ready():
         status = mesh.LIB.mesh_host_sent(C.byref(context), plan, transfer, t)
@@ -2753,9 +2743,8 @@ def _completed(ir, context, plan, state, c, collective):
     return steps
 
 
-# GSPMD section 4.5, "DynamicSlice to shard replicated dimensions"; torch 2.14.0 torch/export/exported_program.py,
-# ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers";
-# design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 8, and "Sources for the fourth stops", 8
+# GSPMD section 4.5: "DynamicSlice to shard replicated dimensions".  torch 2.14.0 torch/export/exported_program.py,
+# ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers"
 def _hosted(ir, item, values):
     kind, reads, _, operand = item
     if kind == 'constant':
@@ -2766,8 +2755,8 @@ def _hosted(ir, item, values):
     return values[0].narrow(*_cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device))
 
 
-# MPICH MPIR_Localcopy, torch 2.14.0 torch/_tensor_docs.py copy_: "Copies the elements from src into self tensor and
-# returns self"; none where the source is the destination's view (MPI_IN_PLACE, _placement)
+# MPICH allgather_intra_ring.c: "if (sendbuf != MPI_IN_PLACE) {", MPIR_Localcopy.  torch 2.14.0 torch/_tensor_docs.py,
+# copy_: "Copies the elements from src into self tensor and returns self"
 def _copied(ir, read, key, cut, source, target):
     if ir.places[ir.device][key].writer != key:
         return []
@@ -2971,9 +2960,11 @@ def _dropped(context, state):
 # deadline: the start takes none, and each step waits on its own progress (_arrived); execution t runs its copy's
 # straight-line steps, t mod their period, and returns that copy's result (_steps).  What must stay: one execution a
 # call, the start at every node of the program
-# design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14; mesh-collective.h struct
-# mesh_function `lead` (0 here); mesh-call.h mesh_host_started: execution t's raise of `executions` issued at its
-# start, a publish's notification on torch's stream where any of the plan's values is on MPS (_publishes), else at once
+# MPI 4.1 section 3.9, MPI_START: "The request becomes active once the call is made. [...] The communication buffer
+# should not be modified after the call, and until the operation completes."  NCCL User Guide, CUDA Stream Semantics:
+# "NCCL calls are associated to a stream which is passed as the last argument of the collective communication
+# function. The NCCL call returns when the operation has been effectively enqueued to the given stream, or returns an
+# error."
 def _started(context, plan, metal):
     if metal:
         array = (mesh.U * 1)(0)
@@ -3322,10 +3313,9 @@ class _Export(torch.fx.Interpreter):
 # - one mesh_plan call for the whole program (point 5: "The plan call's form for a whole program is A8 and A9 ... there
 #   is one IR of the program and one serialized operand of it"): every function's declared transfers, weights, values,
 #   dependences and A10 bound as its struct mesh_function, the block's calls in program order as `calls`, the
-#   program's one mapping out (`*view`); every plan's view (`serial`, `sequencer`, `boot`) then compared with the map
-#   read's, ESTALE where they differ (JGroups ViewId.java: "The comparison is done on the IDs, if they are equal, we use
-#   the creator"), every value bound over the mapping (_bind), MPS values over one buffer of it (_placed_buffer); a
-#   failure after mesh_plan retires the program;
+#   program's one mapping out (`*view`); every plan's map serial then compared with the IR's (ESTALE, the coordinator's
+#   ruling on review V2's finding 6), every value bound over the mapping (_bind), MPS values over one buffer of it
+#   (_placed_buffer); a failure after mesh_plan retires the program;
 # - after an ESTALE or a cancelled range (ECANCELED) the next run plans again: the program retired (_retire), then
 #   planned whole on the map as it is; mesh_plan is EBUSY until the bridge has released the root (mesh-collective.h:
 #   "EBUSY where the root's `owner` is not 0 ... before anything is written"), raised as any failure, and the next
@@ -3399,11 +3389,6 @@ class _Export(torch.fx.Interpreter):
 #   kept (`timeout`), and every later call of `inputs` or `run` raises ETIMEDOUT at once, waiting for nothing; `inputs`'
 #   wait for execution b - HOST_LAG's end ends at MESH_PLATFORM_NS without a rise of the ended count (_wait).
 # - R-1: the plan call's functions carry no share.
-# - design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8 (torch 2.14.0
-#   torch/export/exported_program.py, ExportedProgram: "a state_dict containing tensor values of all lifted parameters
-#   and buffers"): each node loads, from the state_dict tensor by copy_, each DynamicSlice its program reads of an
-#   attribute or of a value made from one by views alone, and an attribute whole only where it reads it whole
-#   ("Sources for the third stops", 8, and "Sources for the fourth stops", 8; _hosted).
 # - R-10: the program's mapping is mesh_view_values' (_mapped).
 # - R-4: each compiled function's steps are made once a copy (_steps), inside the plan's failure handling.
 # What must stay: no placement and no weight chosen here; every operand of mesh_plan the same at every rank but this
@@ -3463,6 +3448,7 @@ def program(block, *example_inputs):
                                       (mesh.U * len(calls))(*calls), len(calls), deadline))
         state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
         try:
+            # JGroups ViewId.java: "The comparison is done on the IDs, if they are equal, we use the creator."
             views = [mesh.State.from_address(context.M + f.plan) for f in functions]
             if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
                 raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
@@ -3475,6 +3461,8 @@ def program(block, *example_inputs):
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
+            # torch 2.14.0 torch/export/exported_program.py, ExportedProgram: "a state_dict containing tensor values of
+            # all lifted parameters and buffers".  GSPMD section 4.5: "DynamicSlice to shard replicated dimensions"
             for ir, (places, _, _) in zip(irs, bound):
                 loaded = ir.loads & places.keys()
                 needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
