@@ -201,6 +201,7 @@ for name, result, arguments in (
         ('mesh_retire', None, [C.c_void_p, Q]),
         ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q]),
         ('mesh_host_publish', None, [CONTEXT, Q, U, Q]),
+        ('mesh_host_started', None, [CONTEXT, Q, U, Q]),
         ('mesh_host_arrived', Q, [CONTEXT, Q, U, Q]),
         ('mesh_host_sent', Q, [CONTEXT, Q, U, Q])):
     function = getattr(LIB, name)

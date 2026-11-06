@@ -721,8 +721,9 @@ static inline const uint32_t *mesh_wait_row(struct hdr *m,const struct mesh_stat
 int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions){
   struct hdr *m=context->M;
   struct mesh_state *state=mesh_state_at(m,plan);
-  uint64_t served=atomic_load_explicit(&state->executions,memory_order_relaxed);
-  const uint64_t k=atomic_load_explicit(&state->submissions,memory_order_relaxed),K=k/state->calls;
+  struct mesh_submission *queue=(struct mesh_submission *)(void *)((char *)m+state->submits);
+  const uint64_t k=atomic_load_explicit(&state->submissions,memory_order_relaxed),K=k/state->calls,
+                 served=k?queue[(k-1)%state->submit_room].end:0;
   if(served<executions){
     struct mesh_sync *edge=mesh_syncs(m,state);
     const uint32_t *row=mesh_wait_row(m,state,k%state->calls);
@@ -741,16 +742,24 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
       }
     }
   }
-  while(served<executions && !atomic_compare_exchange_strong_explicit(&state->executions,&served,executions,
-                                                                      memory_order_release,memory_order_relaxed));
   if(served<executions){
-    struct mesh_submission *queue=(struct mesh_submission *)(void *)((char *)m+state->submits);
     queue[k%state->submit_room]=(struct mesh_submission){.end=executions,.clock=++context->clock};
     atomic_store_explicit(&state->submissions,k+1,memory_order_release);
   }
   mesh_notify(&m->plans);
   atomic_thread_fence(memory_order_seq_cst);
   return mesh_view_compare(mesh_view_installed(m,memory_order_relaxed),mesh_plan_view(state))?ESTALE:0;
+}
+/* mesh-call.h mesh_host_started */
+void mesh_host_started(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+  struct hdr *m=context->M;
+  struct mesh_state *state=mesh_state_at(m,plan);
+  uint64_t seen=atomic_load_explicit(&state->executions,memory_order_relaxed);
+  (void)transfer;
+  while(seen<execution+1 && !atomic_compare_exchange_weak_explicit(&state->executions,&seen,execution+1,
+                                                                   memory_order_release,memory_order_relaxed));
+  mesh_notify(&m->plans);
+  atomic_thread_fence(memory_order_seq_cst);
 }
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed (sub-assignment 7's 2026-11-03 wait, bounded by

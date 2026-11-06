@@ -2199,6 +2199,7 @@ TORCH.mesh_torch_publish.restype, TORCH.mesh_torch_publish.argtypes = C.c_int, [
                                                                                 C.POINTER(mesh.U), mesh.U, mesh.Q]
 TORCH.mesh_torch_notifying.restype, TORCH.mesh_torch_notifying.argtypes = mesh.Q, []
 PUBLISH = C.cast(mesh.LIB.mesh_host_publish, C.c_void_p)
+STARTED = C.cast(mesh.LIB.mesh_host_started, C.c_void_p)
 # 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B3 and V5; "The
 # revisions of 55b9cbad"): rdma/mesh-torch.mm mesh_torch_retire, the program's retirement after torch's work in an
 # MPSEvent's notification, given mesh_retire's address as the publish is given mesh_host_publish's (RETIRE); and
@@ -2971,15 +2972,22 @@ def _dropped(context, state):
 # straight-line steps, t mod their period, and returns that copy's result (_steps).  What must stay: one execution a
 # call, the start at every node of the program
 # design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14; mesh-collective.h struct
-# mesh_function `lead` (0 here): the start of execution t after every read the program made before it
+# mesh_function `lead` (0 here); mesh-call.h mesh_host_started: execution t's raise of `executions` issued at its
+# start, a publish's notification on torch's stream where any of the plan's values is on MPS (_publishes), else at once
+def _started(context, plan, metal):
+    if metal:
+        array = (mesh.U * 1)(0)
+        return lambda t: mesh.check(TORCH.mesh_torch_publish(STARTED, C.addressof(context), plan, array, 1, t))
+    return lambda t: mesh.LIB.mesh_host_started(C.byref(context), plan, 0, t)
+
+
 def _execute(context, run, args, kwargs):
-    t = run['executions']
-    for synchronize in run['synchronize']:
-        synchronize()
+    t, k = run['executions'], run['state'].submissions
     status = mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1)
-    if run['state'].executions > t:
+    if run['state'].submissions > k:
         run['executions'] = t + 1
     mesh.check(status)
+    run['started'](t)
     c, env, inputs = t % len(run['steps']), {}, pytree.arg_tree_leaves(*args, **kwargs)
     for step in run['steps'][c]:
         step(env, inputs, t)
@@ -3477,8 +3485,7 @@ def program(block, *example_inputs):
                     places[key][0].copy_(host[key])
             runs = [dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
                          plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan),
-                         synchronize=[getattr(torch, device).synchronize
-                                      for device in sorted({layout[2] for layout in ir.layouts})])
+                         started=_started(context, f.plan, any(layout[2] == 'mps' for layout in ir.layouts)))
                     for ir, f, record, (places, devices, _) in zip(irs, functions, compiled, bound)]
         except BaseException:
             _retire(context, state, deadline)
