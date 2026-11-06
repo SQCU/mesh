@@ -69,8 +69,22 @@
    in either case.  Why: appendix item 2, "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))"
    (BSL (7)).  Its source raises a count that only rises ..., and its sink reads that count before its k-th start"; a
    plan has an actor for each call of its function (mesh.h struct mesh_state `calls`).  0, ETIMEDOUT or ESTALE.  What
-   must stay: the waits before the raise; the fence and the serial's read after it */
-int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
+   must stay: the waits before the raise; the fence and the serial's read after it.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B1 and K1;
+   "The revisions of 55b9cbad"), reversing the note above where the waits scan every entry and take a deadline of
+   their own:
+   - `deadline` the execution's one absolute deadline, clock_gettime_nsec_np(CLOCK_MONOTONIC) nanoseconds (time.h),
+     which the caller takes once where the execution begins (its MESH_PLATFORM_NS bound) and gives every wait of that
+     execution, these and its own later ones (mesh-collective.h mesh_host_arrived's callers): ETIMEDOUT where a wait
+     here reaches it.  Why: B1, "The code must give one execution one absolute deadline, shared by all its waits",
+     where each wait took a fresh MESH_PLATFORM_NS and one execution was bounded by 5 s x (1 + arrivals).
+   - The waits of this start are the plan's row k mod `calls` alone (mesh.h struct mesh_state `rows`: entries rows[a]
+     .. rows[a + 1] - 1 at `syncs`), each until its `count` (acquire) >= K x `every` + `base` (struct mesh_sync), K = k
+     / `calls`, at once where that bound is 0 or below; no entry of another place is read.  Why: K1, "the waits are
+     stored in rows keyed by call place, and each edge's delay is folded into its threshold".
+   What must stay: the waits before the raise, nothing raised where one fails; ESTALE where the plan's serial is not
+   the map's; the raise before the fence, the serial's read after it */
+int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions,uint64_t deadline);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data
    path (design/disjoint-pages-change-request.md, Appendix C, C4): a new plan's state is in new pages, never the

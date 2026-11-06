@@ -35,10 +35,17 @@ struct mesh_range { uint32_t first,count; };
    2026-11-05 (design/compilation-coordination.md, "The revisions of 4e78f6f4"): a program's rows and pages are its
    one allocation's (mesh-collective.h mesh_plan), and its plans are named by its serialized operand's root at the
    layout's place (mesh.h struct mesh_program), where the notes above name its plans' claims.  What must stay: no rows,
-   pages or plans in the context */
-struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; uint32_t padding; uint64_t clock; };
-_Static_assert(sizeof(struct mesh_ctx)==40 && offsetof(struct mesh_ctx,fd)==24 && offsetof(struct mesh_ctx,padding)==28 &&
-  offsetof(struct mesh_ctx,clock)==32,"mesh_ctx: rdma/mesh.py Context");
+   pages or plans in the context.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3 and G4; "The
+   revisions of 55b9cbad"): `start` appended (48 bytes), this process's start (mesh-holders.h mesh_started(getpid())),
+   read by mesh_attach beside the client word it mints; with `client` the holder of the program's operand, which
+   mesh_plan copies into hdr `client` and `client_start` as it publishes (mesh.h struct mesh_algo's note).  Why: G3,
+   "The planner ... reads `getpid()` ... Deciders see pages", so the process's identity is read where the region is
+   mapped, an effector's work, and the planner copies words; G4, "the holder the heartbeat already knows".  What must
+   stay: no rows, pages or plans in the context */
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; uint32_t padding; uint64_t clock,start; };
+_Static_assert(sizeof(struct mesh_ctx)==48 && offsetof(struct mesh_ctx,fd)==24 && offsetof(struct mesh_ctx,padding)==28 &&
+  offsetof(struct mesh_ctx,clock)==32 && offsetof(struct mesh_ctx,start)==40,"mesh_ctx: rdma/mesh.py Context");
 /* design/prepared-machine.md#M09 */
 /* The two arena ranges.  [0,wire_pages) is the registered window and the only memory an SGE may
    name; [wire_pages,arena) is addressable and never registered.  An undeclared window is the whole
@@ -60,7 +67,9 @@ static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return 
    program joins or leaves because a program is a sequence of like, function calls"; a program holds its plans'
    claims and nothing else.  What must stay: the version read again after the client word is minted.
    2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N5): no `epoch` or `state`
-   set, the context holding neither.  What must stay: nothing held at attach */
+   set, the context holding neither.  What must stay: nothing held at attach.
+   2026-11-05 ("The revisions of 55b9cbad", G3 and G4): the context's `start` set to mesh_started(getpid()) beside the
+   client word, nothing written in the region for it.  What must stay: nothing held at attach */
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 /* design/algorithm-sources.md#programtensor */
@@ -76,7 +85,14 @@ int mesh_detach(struct mesh_ctx *);
    `owner` is `client`, then hdr `plans` raised and woken; nothing is let go here, the bridge releasing the root once
    no port holds a plan of it (mesh_retired_release).  Why: point 5, "These go: `mesh_claim_take`'s first fit and the
    claim's head record ... Release at retirement stays deferred reclamation"; one program's operand at the layout's
-   place.  What must stay: nothing let go here */
+   place.  What must stay: nothing let go here.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"): the program's operand (mesh.h struct mesh_algo) retired where hdr `client` (its holder,
+   acquire) is `client` and its `published` (acquire) is not 0: `retired` = `published` (release), then hdr `plans`
+   raised and woken.  Its callers are the program's process (its detach, or its own retirement before it plans again)
+   and the bridge parent for a holder that is gone (mesh-records.c clients_turn, mesh-link.c region_adopt: the
+   failport's lifecycle, as the tag's mesh_retire retired a gone client); both store the one value `published`, so
+   `retired` only names the operand published.  What must stay: nothing let go here */
 void mesh_retire(struct hdr *,uint64_t client);
 /* the program's retirement of one compiled function (design/aot-compilation-change-request.md, appendix item 6: a
    function's claim released only when the program retires that function or itself; design/compilation-
@@ -117,7 +133,13 @@ void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t 
    region, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, copy FALSE, VM_INHERIT_NONE, as ncclMeshPageTableCompose's), each row's
    block read from its page-table binding (struct mesh_page_entry `address`); {NULL, 0} where `count` is 0.  0; ENOMEM
    where Mach gives KERN_NO_SPACE or KERN_RESOURCE_SHORTAGE; EINVAL for any other refusal (ncclMeshPageTableCompose's
-   mapping of its codes); the reservation's errno.  Nothing stays mapped on a failure, and `*view` is {NULL, 0} */
+   mapping of its codes); the reservation's errno.  Nothing stays mapped on a failure, and `*view` is {NULL, 0}.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3: "The
+   planner calls `mach_vm_remap` and writes virtual addresses into the IR ... Deciders see pages.  The plan writes
+   rows, and the program's effector maps them"; "The revisions of 55b9cbad"): called by the program's effector
+   (tools/e2b_replay.m, rdma/mesh_compile.py through rdma/mesh.py) over its `run` values' rows once mesh_plan has
+   written them, where mesh_plan called it; mesh_plan neither maps nor names an address.  What must stay: an effector,
+   given rows and deciding nothing */
 struct mesh_view { void *address; size_t bytes; };
 int mesh_view_compose(struct mesh_ctx *,const uint32_t *rows,size_t count,struct mesh_view *view);
 /* the program's mapping released (munmap of `address`, `bytes`), once its holder retires the program and no kernel
@@ -134,6 +156,15 @@ void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
    port's `prepared` is its `generation` or any of its plans' struct mesh_state `held` is not 0, else its `owner` 0
    (release), so a next program may plan; 1 kept, else 0.  The bridge parent its one caller and its root's one
    releaser.  What must stay: the fence after the close is read and before the ports are; nobody waits for it.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B2 and G4, and
+   "Answered in the documents", EB-1; "The revisions of 55b9cbad"), reversing "its `owner` 0" and "nobody waits for
+   it": where struct mesh_algo `published` (acquire) is not 0, `retired` (acquire) is `published` and `released` is
+   not, a seq_cst fence, then kept where any port's `prepared` is `published` or any of its plans' `held` is not 0,
+   else `released` = `published` (release) and woken (os_sync_wake_by_address_all, region-shared); 1 kept, else 0.
+   The bridge parent its one caller and `released`'s one writer.  mesh_plan waits for that store before it writes a
+   next operand (mesh-collective.h), as RCU's writer waits for the grace period to end (`synchronize_rcu`; EB-1: "In
+   RCU's form the writer waits for the grace period to end (`synchronize_rcu`), here the bridge's release of the old
+   root").  What must stay: the fence after the retirement is read and before the ports are.
    The note before 4e78f6f4: */
 /* the bridge's release of closed claims (deferred reclamation: RCU's call_rcu, P. E. McKenney and J. D. Slingwine,
    Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004; the contract's D10; the hazard pointer's announcement

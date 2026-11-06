@@ -199,7 +199,10 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
      serialized operand's place is a constant the region's layout names once, as the bridge's own pages are "laid out
      once with the region" (disjoint-pages A3)"; "The revisions of 4e78f6f4"): the program's serialized operand's root
      (mesh.h struct mesh_program), after the bridge's pages.  What must stay: every area before it where it was */
-  h->program_off=at; at+=sizeof(struct mesh_program); at=(at+pgsz-1)/pgsz*pgsz;
+  /* 2026-11-05 (118; design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4;
+     "The revisions of 55b9cbad"): struct mesh_algo at hdr `algo_off`, where it was struct mesh_program at
+     `program_off`.  What must stay: its place after the bridge's pages */
+  h->algo_off=at; at+=sizeof(struct mesh_algo); at=(at+pgsz-1)/pgsz*pgsz;
   atomic_store_explicit(&h->map_off,at,memory_order_relaxed); h->map_room=MESH_MAP_ROOM;
   at+=(uint64_t)MESH_MAP_ROOM*sizeof(struct mesh_record); at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;

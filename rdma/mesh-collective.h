@@ -320,10 +320,25 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
    where `run` is 1, the address in this process of copy 0's first byte in the program's mapping (`*view` of
    mesh_plan), copy c's at view + c x section.pages x pgsz and every copy's blocks consecutive there, in row order;
    NULL where `run` is 0.  The value's rows are bound to blocks placed anywhere (mesh-section.h): no value is placed
-   as a run.  What must stay: every field before `run` where it was */
-struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag,run,padding; void *view; };
+   as a run.  What must stay: every field before `run` where it was.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3 and K4; "The
+   revisions of 55b9cbad"), reversing `view`:
+   - `view` goes (`padding1` in its bytes): the plan writes no address.  The program's effector maps its `run` values'
+     rows itself (mesh-dataflow.h mesh_view_compose) once the plan is written, and binds each value at its place in its
+     mapping.  Why: G3, "The planner calls `mach_vm_remap` and writes virtual addresses into the IR, and reads
+     `getpid()` ... Deciders see pages.  The plan writes rows, and the program's effector maps them."
+   - `shares` out, where `padding` was: 1 where a block of some copy of the value is also a block of another value at
+     this node (two values' items on one chain of the one allocation, or a struct mesh_share), else 0.  Why: K4, "the
+     plan knows which blocks two values share and where one hands over to the next.  The flush goes on those barriers
+     alone": a program that reads its values through a mapping reads two such values at two virtual addresses of one
+     page, and only a barrier between their accesses needs the alias flush (metal-microbench metal_recording.m
+     MetalEncoder; MTL4CommandEncoder.h, MTL4VisibilityOptionResourceAlias: "Flushes caches to ensure that aliased
+     virtual addresses are memory consistent").
+   What must stay: 64 bytes, every field before `shares` where it was */
+struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag,run,shares; uint64_t padding1; };
 _Static_assert(sizeof(struct mesh_value)==64 && offsetof(struct mesh_value,run)==48 &&
-               offsetof(struct mesh_value,view)==56,"mesh_value: rdma/mesh.py Value");
+               offsetof(struct mesh_value,shares)==52 && offsetof(struct mesh_value,padding1)==56,
+               "mesh_value: rdma/mesh.py Value");
 /* plan-to-bridge R4: the kind of a declared transfer's consumer at its destination.  MESH_JOIN: function A, one task
    with an edge from every page of the range.  MESH_PAGES: function B, one task per page, each with an edge from its
    own page */
@@ -385,9 +400,32 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    Function k (from 0) is named (group, k + 1) (struct mesh_state `epoch`; design/aot-compilation-change-request.md,
    appendix item 6: "name each compiled function alike at every rank: (the program's group, the function's ordinal in
    the program's order of compilation)"), the plan call's order being that order. */
+/* A value's blocks that are another value's (2026-11-05, design/compilation-coordination.md, "Review of 4e78f6f4
+   against the requirement lines", V2, and "Answered in the documents", a rank's own part; design/plan-to-bridge-
+   change-request.md R2, corrected: "A rank's own part is shared, not copied.  A value is its page-table rows, so the
+   result's rows for the rank's own part name the operand's own pages.  This is sharing by reference through the page
+   table, as fbufs (P. Druschel and L. L. Peterson, Fbufs: a high-bandwidth cross-domain transfer facility, SOSP 1993)
+   and IO-Lite (V. S. Pai, P. Druschel and W. Zwaenepoel, IO-Lite: a unified I/O buffering and caching system, ACM TOCS
+   18(1), 2000) pass buffers without copying them.  Those pages are one item of the allocation, living until the later
+   of the two values' last reads"; "The revisions of 55b9cbad").  In: values[`value`]'s blocks [`first`, `first` +
+   `blocks`) of each copy c are values[`of`]'s blocks [`at`, `at` + `blocks`) of copy c: the rows of both are bound to
+   the same pages, so nothing copies the part (AllGather's or AllToAll's own part: `value` the result, `of` the
+   operand).  `value` != `of`, both indices of the function's values here, of the same copies (both named by a declared
+   transfer here, or both of the same `lag`), `blocks` >= 1, each run within its value's blocks, `value`'s run covered
+   by no declared transfer here and by no other share; EINVAL otherwise.  The shared blocks are one item of the one
+   allocation, whose lifetime covers both values' accesses (mesh-collective.c's minimal form is the implementer's,
+   recorded at the code). */
+struct mesh_share { uint32_t value,first,of,at,blocks,padding; };
+_Static_assert(sizeof(struct mesh_share)==24,"mesh_share: rdma/mesh.py Share");
+/* 2026-11-05 ("The revisions of 55b9cbad", V2): `share` after `dependence`, `shares` of them (struct mesh_share)
+   where `padding` was; 72 bytes.  What must stay: `outstanding` and `plan` as their notes state them */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
-                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
-                       uint64_t outstanding,plan; };
+                       const struct mesh_dependence *dependence; const struct mesh_share *share;
+                       uint32_t count,values,dependences,shares; uint64_t outstanding,plan; };
+_Static_assert(sizeof(struct mesh_function)==72 && offsetof(struct mesh_function,share)==32 &&
+               offsetof(struct mesh_function,count)==40 && offsetof(struct mesh_function,shares)==52 &&
+               offsetof(struct mesh_function,outstanding)==56 && offsetof(struct mesh_function,plan)==64,
+               "mesh_function: rdma/mesh.py Function");
 /* The 116 plan call's notes on its operands, kept (2026-11-05, "The revisions of 4e78f6f4": restored where dd215cbe
    dropped them; sub-agent C's finding).  aot-compilation appendix item 6 (design/compilation-coordination.md, "The
    appendix's revisions", N1 to N5): the plan of one compiled function, named (group, function): `group` the
@@ -449,9 +487,58 @@ struct mesh_function { const struct mesh_declared *declared; const struct mesh_w
    ETIMEDOUT: nothing waits.  `*view` out: the program's one mapping of its `run` values at this node (mesh-dataflow.h
    mesh_view_compose: every `run` value's rows, function by function and value by value in `values`' order, each
    value's copies in order), which its holder releases with mesh_view_release once it retires the program; {NULL, 0}
-   where no value is `run`, and on any failure */
+   where no value is `run`, and on any failure.
+   2026-11-05 (design/compilation-coordination.md, "Answered in the documents (2026-11-05, the coordinator, on this
+   part's record)" and "Review of 4e78f6f4 against the requirement lines"; "The revisions of 55b9cbad"), reversing the
+   notes above where they differ:
+   - No mapping and no address (G3: "The planner calls `mach_vm_remap` and writes virtual addresses into the IR, and
+     reads `getpid()` ... Deciders see pages.  The plan writes rows, and the program's effector maps them"): `*view`
+     goes, with struct mesh_value `view`; the program maps its `run` values' rows itself once the plan returns
+     (mesh-dataflow.h mesh_view_compose) and releases its mapping (mesh_view_release).  A mapping Mach refuses is the
+     program's error, after a plan that stands.
+   - The program's IPC graph's processors at each node (IG-5; design/aot-compilation-change-request.md appendix item 2,
+     corrected: "The program-order cycle is each node's submissions, not its calls' parts ... the submissions σ_1 …
+     σ_n of the block's calls are one processor's actors, in that order, each of time 0 ... Call k's part at the node,
+     x_k, follows its submission (σ_k → x_k, delay 0).  A10's bound b is the edge from x_k to the submission b calls
+     later ... no edge orders the parts themselves"): at each node of each call's plan, a submission actor of time 0
+     for the call, the node's submissions in program order as BSL §4.1's cycle (delay 1 from the last to the first),
+     each followed by the node's part (delay 0), and A10's edge from the part to the node's submission of its
+     function's call `outstanding` calls later; the sender's submissions are its node's, followed by its bridge's
+     TO-broadcasts as before.
+   - The interference order over the u copies is design/plan-to-bridge-change-request.md R2's, as corrected for PO-1:
+     "Copies (v, c) and (w, c′) are ordered where c ≤ c′, c′ − c is at least the least lag from v to w, and c′ plus
+     w's largest least lag to a write at the node is at most u" (Lam's modulo variable expansion; Hendren, Gao, Altman
+     and Mukerji's cyclic interval graphs).
+   - A struct mesh_share's blocks are one item of the allocation, bound in both values' rows (V2; struct mesh_share).
+   - The waits of each plan's synchronization edges into this node in rows by call place, each delay folded into its
+     `base`, and each tell naming its sink's wait (mesh.h struct mesh_state `rows`, struct mesh_sync; K1).
+   - Each value's `shares` (struct mesh_value; K4).
+   - The publication rule ("Answered in the documents": "The rule is that nothing is visible before the root's
+     publication: one release store after every write, in C3's writing order, as RCU publishes a structure only once
+     it is initialized (McKenney and Slingwine)"), in place of "Every failure but ESTALE and the second map read's is
+     found before anything is written": mesh_plan writes every word of the operand (each plan's state section, its
+     synchronization edges and rows, every value's rows and bindings, each range's words, the entries, the table),
+     then reads the map again, then writes struct mesh_algo `plans`, `group`, `table` and the holder (hdr `client` and
+     `client_start`, from the context's `client` and `start`), then stores `published` last (release).  A failure
+     before that store (ESTALE where the map moved, or the map reader's error) leaves nothing published: the pages it
+     wrote belong to no published operand, and the next plan writes them again.  Every other failure is found before
+     anything is written.
+   - The previous operand's release waited for, bounded (B2, EB-1: "In RCU's form the writer waits for the grace period
+     to end (`synchronize_rcu`), here the bridge's release of the old root.  So mesh_plan waits for it, bounded by
+     MESH_PLATFORM_NS, and returns ETIMEDOUT past the bound"): after everything is computed and before anything is
+     written, while struct mesh_algo `published` (acquire) is not 0 and `released` (acquire) is not `published`, a
+     wait on `released` (os_sync_wait_on_address_with_timeout, region-shared, woken by the bridge parent's release:
+     mesh-dataflow.h mesh_retired_release), at most MESH_PLATFORM_NS from its start, ETIMEDOUT past it with nothing
+     written.  The program retires its own earlier operand first (mesh-dataflow.h mesh_retire), and the bridge retires
+     a gone holder's.  The record has one writer by construction, the program's process (B2: "since a run is one
+     program on the whole collective (A7, corrected), so it needs no exchange and no lock: a single-writer register (L.
+     Lamport, On interprocess communication, Distributed Computing 1(2), 1986)"): no compare-and-swap.  EBUSY goes.
+   0; EINVAL (as before, and a malformed struct mesh_share); EHOSTUNREACH; ENOMEM (as before, but a mapping);
+   ETIMEDOUT (the previous operand not released within MESH_PLATFORM_NS); ESTALE (the map moved while planning: plan
+   again on the map as it is); or the map reader's error.  What must stay: every rank passes the same IR but its values
+   and `value`s, and computes the same demands, trees, template, u, schedule, order, IPC graph and allocation */
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
-              const uint32_t *calls,uint32_t ncalls,struct mesh_view *view);
+              const uint32_t *calls,uint32_t ncalls);
 
 /* A host (CPU) program's side of the plan's words (mesh_plan), as mesh-metal.m is a GPU program's, each by its range's
    first row's publication, as before: mesh_host_publish its supplied word (`targets[0]`), mesh_host_arrived its words

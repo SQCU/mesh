@@ -253,10 +253,17 @@ struct mesh_group_view { uint64_t view,last,boot; uint32_t sequencer,members; };
    (design/aot-compilation-change-request.md, appendix item 2: "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj,
    k − delay((vj, vi)))" (BSL (7)) ... The bridge carries the count from source to sink, as it carries an arrival");
    A9, "What the bridge runs: the self-timed schedule": "the bridge reads the serialized operand at a place its
-   compilation fixed, and searches for nothing".  What must stay: every field before `function` where it is */
-struct mesh_count { uint64_t group,epoch,view,count; uint32_t node,sink; uint64_t function; };
+   compilation fixed, and searches for nothing".  What must stay: every field before `function` where it is.
+   2026-11-05 (118; design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K1:
+   "`count_take`'s search (mesh-records.c 896): the COUNT carries the sink entry's index"; "The revisions of
+   55b9cbad"): `function` 32 bits and `entry` after it, the index of the edge among the sink plan's waits at the sink
+   (mesh.h struct mesh_sync `entry` of the source's tell), so the sink's bridge raises that one entry, read by index.
+   Why: K1, as MSCCL-IR's steps name their dependences by index (`depid`, `deps`).  What must stay: 48 bytes, every
+   field before `function` where it is */
+struct mesh_count { uint64_t group,epoch,view,count; uint32_t node,sink,function,entry; };
 _Static_assert(sizeof(struct mesh_count)==48 && offsetof(struct mesh_count,count)==24 &&
-  offsetof(struct mesh_count,node)==32 && offsetof(struct mesh_count,function)==40,"mesh_count");
+  offsetof(struct mesh_count,node)==32 && offsetof(struct mesh_count,function)==40 &&
+  offsetof(struct mesh_count,entry)==44,"mesh_count");
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:0; }
 
 /* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: each stream's
@@ -421,10 +428,13 @@ extern uint32_t ones;
    operand's place is a constant the region's layout names once ... Nothing walks heads to find it";
    design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "So the bridge reads
    the serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: every plan read
-   at its place and none searched for */
+   at its place and none searched for.
+   2026-11-05 (118; design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4 and
+   K2; "The revisions of 55b9cbad"): the places below struct mesh_algo `plans` (mesh.h mesh_algo_plan, which tests no
+   bound now), where it read the root's.  What must stay: as above */
 static inline struct mesh_state *plan_from(uint32_t *k){
-  for(;*k<mesh_program(M)->plans;++*k){
-    struct mesh_state *state=mesh_program_plan(M,*k);
+  for(;*k<mesh_algo(M)->plans;++*k){
+    struct mesh_state *state=mesh_algo_plan(M,*k);
     if(state)return state;
   }
   return NULL;

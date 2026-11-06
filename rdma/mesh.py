@@ -13,8 +13,12 @@ U, Q, Z, D = C.c_uint32, C.c_uint64, C.c_size_t, C.c_double
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS): `clock` appended, the program's
 # Lamport clock (mesh-dataflow.h struct mesh_ctx), which mesh_transfers_start increments.  What must stay: the fields
 # in the header's order
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3 and G4; "The
+# revisions of 55b9cbad"): `start` appended, the process's start mesh_attach reads, which mesh_plan copies into the
+# operand's holder (48 bytes).  What must stay: the fields in the header's order
 class Context(C.Structure):
-    _fields_ = [('M', C.c_void_p), ('len', Z), ('client', Q), ('fd', C.c_int), ('padding', U), ('clock', Q)]
+    _fields_ = [('M', C.c_void_p), ('len', Z), ('client', Q), ('fd', C.c_int), ('padding', U), ('clock', Q),
+                ('start', Q)]
 
 
 # mesh.h struct hdr, its first words (magic, version, pgsz, block, in the header's order): the region's page size, the
@@ -40,9 +44,13 @@ class Section(C.Structure):
 # assert), Declared's `first` where `padding` was (32 bytes), and struct mesh_function (Function), the plan call's one
 # compiled function, and mesh-dataflow.h struct mesh_view (View), the program's one mapping, mirrored.  What must stay:
 # the fields in the headers' order and of their types
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3, K4 and V2;
+# "The revisions of 55b9cbad"): Value's `view` gone (`padding1`) and `shares` out where `padding` was; struct
+# mesh_share (Share) mirrored, and Function's `share` and `shares` (72 bytes).  What must stay: the fields in the
+# headers' order and of their types
 class Value(C.Structure):
     _fields_ = [('section', Section), ('kind', U), ('wire', U), ('state', U), ('begin', U), ('end', U), ('lag', U),
-                ('run', U), ('padding', U), ('view', C.c_void_p)]
+                ('run', U), ('shares', U), ('padding1', Q)]
 
 
 class Declared(C.Structure):
@@ -58,10 +66,14 @@ class Dependence(C.Structure):
     _fields_ = [('from', U), ('to', U), ('lag', U), ('kinds', U)]
 
 
+class Share(C.Structure):
+    _fields_ = [('value', U), ('first', U), ('of', U), ('at', U), ('blocks', U), ('padding', U)]
+
+
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
-                ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
-                ('padding', U), ('outstanding', Q), ('plan', Q)]
+                ('dependence', C.POINTER(Dependence)), ('share', C.POINTER(Share)), ('count', U), ('values', U),
+                ('dependences', U), ('shares', U), ('outstanding', Q), ('plan', Q)]
 
 
 class View(C.Structure):
@@ -94,7 +106,7 @@ class State(C.Structure):
                 ('serial', Q), ('hops', Q), ('entries', Q), ('held', Q), ('refused', C.c_int32 * 8), ('nodes', Q),
                 ('sender', U), ('outstanding', U), ('submitted', Q), ('delivered', Q), ('submissions', Q),
                 ('broadcast', Q), ('arrived', Q), ('room', Q), ('deliveries', Q), ('submits', Q), ('announced', Q),
-                ('waits', U), ('tells', U), ('syncs', Q), ('calls', U), ('closed', U), ('padding5', Q),
+                ('waits', U), ('tells', U), ('syncs', Q), ('calls', U), ('closed', U), ('rows', Q),
                 ('submit_room', Q), ('padding3', Q * 6)]
 
 
@@ -128,15 +140,20 @@ CONTEXT = C.POINTER(Context)
 # the client), takes the region and the client word.  mesh_section_address's binding goes: a value's copies are bound
 # at their places in the mapping (mesh-collective.h struct mesh_value `view`), and nothing here reads one row.  What
 # must stay: each binding the header's declaration
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3 and B1; "The
+# revisions of 55b9cbad"): mesh_plan gives no mapping (the program maps its `run` values' rows by mesh_view_compose);
+# mesh_transfers_start takes the execution's one absolute deadline, CLOCK_MONOTONIC nanoseconds
+# (time.clock_gettime_ns(time.CLOCK_MONOTONIC)).  What must stay: each binding the header's declaration
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_nodes_read', C.c_int, [CONTEXT, C.POINTER(Nodes)]),
-        ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(View)]),
+        ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
+        ('mesh_view_compose', C.c_int, [CONTEXT, C.POINTER(U), Z, C.POINTER(View)]),
         ('mesh_view_release', None, [View]),
         ('mesh_retire', None, [C.c_void_p, Q]),
-        ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q]),
+        ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q, Q]),
         ('mesh_host_publish', None, [CONTEXT, Section, Q]),
         ('mesh_host_arrived', Q, [CONTEXT, Section, Q])):
     function = getattr(LIB, name)
