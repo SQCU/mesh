@@ -246,8 +246,8 @@ struct plan {
   uint32_t dependences;
   struct plan_demand *demand;             /* the demands, by their first declared transfer (GO5) */
   uint32_t demands,n,self,copies;         /* copies: u (plan_unroll) */
-  uint64_t serial;                        /* mesh_nodes_read's: the installed view's identifier (2026-11-06, aot A7,
-                                             corrected; "The revisions of 14b9a757", A7), where it was the map serial */
+  struct mesh_view_id view;               /* mesh_nodes_read's: the installed view's identifier (mesh.h struct
+                                             mesh_view_id; JGroups ViewId.java) */
   uint32_t *of;                           /* of[i]: declared[i]'s demand, p->demand[of[i]] */
   /* the node graph (design/compilation-coordination.md, T2): pair e joins from[e] < to[e], of capacity[e], the lesser
      of the two directions' map capacities; `pairs` of them */
@@ -2708,12 +2708,13 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
      (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "The map a view is created from is the
      sequencer's, and the view's first message carries it ... Every member plans on those records"; mesh.h struct
      mesh_state `serial`, "the identifier of the installed view whose map the plan was made on (hdr `view`)"; "The
-     revisions of 14b9a757", A7): each plan's `serial` is mesh_nodes_read's, the installed view's identifier, where it
+     revisions of 14b9a757", A7): each plan's view is mesh_nodes_read's, the installed view's identifier, where it
      was the map serial, and the map is that view's records (mesh-dataflow.h mesh_nodes_read).  What must stay: every
      plan of the call made on one read */
   for(uint32_t f=0;f<count;f++){
     struct plan *p=plans+f;
-    p->context=context;p->n=nodes.count;p->self=nodes.self;p->serial=nodes.serial;
+    p->context=context;p->n=nodes.count;p->self=nodes.self;
+    p->view=(struct mesh_view_id){.id=nodes.serial,.sequencer=nodes.sequencer,.boot=nodes.boot};
     if((status=plan_function(p,functions+f,&nodes,program)))goto done;
   }
   if((status=plan_graph(plans,count,calls,ncalls,program,nodes.self,row,order)))goto done;
@@ -2791,7 +2792,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     state->status=base+p->status;
     state->group=group;
     state->epoch=(uint64_t)f+1;
-    state->serial=p->serial;
+    state->serial=p->view.id;state->sequencer=p->view.sequencer;state->boot=p->view.boot;
     state->hops=base+p->hops;
     state->entries=p->entries*u;
     state->nodes=p->spanned;
@@ -2910,7 +2911,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
         frame=page[x.first+(size_t)(c%x.count)*x.stride+byte/block];
       }
       struct mesh_hop h={.page=frame,.node=e->node,.direction=e->direction,.field=MESH_ABSENT,
-                         .bytes=(uint32_t)(cut[1]-cut[0]),.serial=p->serial,.set=e->set,
+                         .bytes=(uint32_t)(cut[1]-cut[0]),.serial=p->view.id,.set=e->set,
                          .offset=(uint32_t)(byte%block)};
       if(e->field==MESH_ABSENT)h.word=plan_supplied(p,d);
       else{
@@ -2935,9 +2936,13 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
      refuses a plan whose `serial` is not `map_serial` as it loads it, and cancels one that stands where the serial
      moves: mesh.h, "Cancellation").  2026-11-06 (A7, corrected 2026-11-06; "The revisions of 14b9a757", A7): the
      serial the installed view's identifier (mesh-dataflow.h mesh_nodes_read), so ESTALE where the installed view moved
-     while planning, as written; a bridge cancels a plan whose `serial` is not hdr `view` (mesh-bridge.h plan_stale).
+     while planning, as written; a bridge cancels a plan whose view (mesh.h mesh_plan_view) is not the installed view's
+     identifier (mesh.h mesh_view_compare; mesh-bridge.h plan_stale).
      What must stay: the second read after every write, ESTALE as written */
-  if(!(status=mesh_nodes_read(context,&after)) && after.serial!=nodes.serial)status=ESTALE;
+  if(!(status=mesh_nodes_read(context,&after)) &&
+     mesh_view_compare((struct mesh_view_id){.id=after.serial,.sequencer=after.sequencer,.boot=after.boot},
+                       (struct mesh_view_id){.id=nodes.serial,.sequencer=nodes.sequencer,.boot=nodes.boot}))
+    status=ESTALE;
   if(status)goto done;
   /* 5. the record's words and the holder, then `published` last (release), so the bridge reads every plan of it
      written (mesh.h struct mesh_algo, mesh_algo_plan; the publication rule, "one release store after every write";
