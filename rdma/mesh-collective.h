@@ -676,13 +676,15 @@ int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_func
    lowered, so publishes run in any order (a torch MPSEvent's notification, rdma/mesh-torch.mm) leave it at the
    greatest (2026-11-05, design/compilation-coordination.md, "The revisions of e4a7398e", TP-3, where it was stored).
    A range sent from a MESH_INVARIANT value is released once, after its load, with `execution` UINT64_MAX - 1, so every
-   execution's send reads its one copy (PB R2, corrected 2026-11-06: "its supplied word is raised once").  Nothing
-   where this node is not the transfer's source */
+   execution's send reads its one copy (PB R2, corrected 2026-11-06: "its supplied word is raised once").  The caller
+   names a transfer this node is the source of, which its compilation knows; no entry is tested here ("Compile-time,
+   never runtime checks"; sub-agent C's finding on this note's first text, "Nothing where this node is not the
+   transfer's source") */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 /* execution t of a received range: 1 where every field of its copy t mod u reads mesh_phase(t / u + 1) (acquire);
    UINT64_MAX where a field reads neither that nor mesh_phase(t / u) (ahead), or where its count has reached
-   (t / u + 1) x P with a field still behind (cancelled); else 0 (not yet); 0 where this node is not the transfer's
-   destination */
+   (t / u + 1) x P with a field still behind (cancelled); else 0 (not yet).  The caller names a transfer this node is a
+   destination of, which its compilation knows; no entry is tested here (as mesh_host_publish's note) */
 uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 /* The program's one mapping of its values (2026-11-06, "The root cause of the copies, and the revised work list", R-10:
    "the mapping's row list in one mesh-dataflow helper over the plan's rows"; W13: "the mapping's row list in two
