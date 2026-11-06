@@ -342,13 +342,13 @@
      life.
    - Any value a transfer names is sent from its own pages, whatever its copies (PB R2, corrected 2026-11-06): the plan
      call's rules that a lag-k value is "named by no declared transfer" and that a transfer's value is "MESH_EXECUTION
-     and wire" go.  A source may be a MESH_INVARIANT value, one copy for the plan's life, which every copy's send reads,
-     its supplied word raised once (C3.2); or a value of `lag` k >= 1, a host producer's (C3.1), whose copies are then
-     the plan's u, written for execution t into copy t mod u after execution t - k has ended, the program's dependences
-     declaring that order (struct mesh_dependence's premise).  A destination is a MESH_EXECUTION value of `lag` 0, its
-     landing that execution's write (EINVAL otherwise: a landing writes its bytes each execution, C3.7).  Every value a
-     transfer names here is placed in the registered window, whatever its `wire` ("is placed in the registered window
-     when a transfer names it").
+     and wire" go.  A source is a MESH_EXECUTION value (EINVAL otherwise: design/problems-of-14b9a757-change-request.md,
+     "Sources for the second stops", 8), a value of `lag` k >= 1, a host producer's (C3.1), among them, whose copies
+     are then the plan's u, written for execution t into copy t mod u after execution t - k has ended, the program's
+     dependences declaring that order (struct mesh_dependence's premise).  A destination is a MESH_EXECUTION value of
+     `lag` 0, its landing that execution's write (EINVAL otherwise: a landing writes its bytes each execution, C3.7).
+     Every value a transfer names here is placed in the registered window, whatever its `wire` ("is placed in the
+     registered window when a transfer names it").
    - A range's words at this node are named by its declared transfer's index, not by a row: ranges sharing a block
      begin in one row (mesh.h struct mesh_state `transfers`; mesh_host_publish, mesh_host_arrived and mesh-metal.h).
    What must stay: every rank passes the same IR but its values and `value`s, and computes the same demands, trees,
@@ -389,8 +389,8 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
    What must stay: 64 bytes, every field before `shares` where it was
    2026-11-06 ("The root cause of the copies, and the revised work list", R-1 and R-5; "The revisions of 14b9a757"):
    - A value a declared transfer names here (its source's or a destination's `value`) is placed in the registered
-     window whatever its `wire`; its copies are 1 where it is MESH_INVARIANT and u otherwise, a value of `lag` k >= 1
-     among them (the note before this struct).  `wire` is read for every other value.
+     window whatever its `wire`; its copies are u, a value of `lag` k >= 1 among them (the note before this struct).
+     `wire` is read for every other value.
    - `shares` (out) is 1 where a frame bound in one of the value's rows is bound in another row at this node (another
      value's or another copy's, by the program's one allocation: no record makes one), as above.  R-5: "The plan knows
      each frame's virtual names through R-1's rows.  Metal 4's `MTL4VisibilityOptionResourceAlias` ... goes on the
@@ -658,8 +658,9 @@ _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function
    - The release waited for is "published and not yet released" (mesh.h mesh_algo_unreleased; R-10), and nothing here
      writes `retired` or `released` (R-8: "the program writes `retired`, the bridge writes only `released`").
    0; EINVAL (as before but struct mesh_share's; a malformed view, two views of one transfer naming different bytes,
-   one range's transfers with different `from`, a destination's value not MESH_EXECUTION of `lag` 0, two of this node's
-   destination instructions naming one byte of a value: MPI 4.1 §6.1.11); EHOSTUNREACH;
+   one range's transfers with different `from`, a source's value MESH_INVARIANT (design/problems-of-14b9a757-change-
+   request.md, "Sources for the second stops", 8), a destination's value not MESH_EXECUTION of `lag` 0, two of this
+   node's destination instructions naming one byte of a value: MPI 4.1 §6.1.11); EHOSTUNREACH;
    ENOMEM; ETIMEDOUT (the previous operand not released by `deadline`); ESTALE (the installed view moved while planning:
    plan again); or the map reader's error.  What must stay: every rank passes the same IR but its values and `value`s,
    and computes the same demands, trees, instructions, template, u, schedule, order, IPC graph and allocation */
@@ -683,11 +684,9 @@ int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_func
 /* a host producer's release of execution t of a source range: its supplied word raised to t + 1 (release), never
    lowered, so publishes run in any order (a torch MPSEvent's notification, rdma/mesh-torch.mm) leave it at the
    greatest (2026-11-05, design/compilation-coordination.md, "The revisions of e4a7398e", TP-3, where it was stored).
-   A range sent from a MESH_INVARIANT value is released once, after its load, with `execution` UINT64_MAX - 1, so every
-   execution's send reads its one copy (PB R2, corrected 2026-11-06: "its supplied word is raised once").  The caller
-   names a transfer this node is the source of, which its compilation knows; no entry is tested here ("Compile-time,
-   never runtime checks"; sub-agent C's finding on this note's first text, "Nothing where this node is not the
-   transfer's source") */
+   The caller names a transfer this node is the source of, which its compilation knows; no entry is tested here
+   ("Compile-time, never runtime checks"; sub-agent C's finding on this note's first text, "Nothing where this node is
+   not the transfer's source") */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 /* execution t of a received range: 1 where every field of its copy t mod u reads mesh_phase(t / u + 1) (acquire);
    UINT64_MAX where a field reads neither that nor mesh_phase(t / u) (ahead), or where its count has reached

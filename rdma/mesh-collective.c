@@ -373,12 +373,11 @@ static uint64_t plan_blocks(const struct hdr *m,uint64_t bytes){
    (1947, 2026)", one function where mesh_plan wrote it twice and plan_items once more; "The revisions of 55b9cbad").
    2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1;
    design/plan-to-bridge-change-request.md R2, corrected 2026-11-06: "Any value a transfer names is sent from its own
-   pages, whatever its copies"; "The revisions of 14b9a757", R-1): a value a range names here 1 where it is
-   MESH_INVARIANT (C3.2: "placed once, for the plan's whole life"; mesh-collective.h: "one copy for the plan's life,
-   which every copy's send reads") and u otherwise, a value of `lag` k >= 1 among them ("whose copies are then the plan's
-   u").  What must stay: one function */
+   pages, whatever its copies"; "The revisions of 14b9a757", R-1): a value a range names here u, a value of `lag` k >= 1
+   among them ("whose copies are then the plan's u"), no MESH_INVARIANT value being named (plan_function;
+   design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8).  What must stay: one function */
 static uint32_t plan_copies(const struct plan *p,uint32_t j){
-  if(p->named[j])return p->given[j].kind==MESH_INVARIANT?1:p->copies;
+  if(p->named[j])return p->copies;
   return p->given[j].lag?p->given[j].lag:1;
 }
 
@@ -2109,14 +2108,12 @@ static int plan_cover_order(const void *a,const void *b){
      set of one member, ceil(B / Q) blocks a copy, its instruction k's bytes at block cut[k] / Q, offset cut[k] mod Q
      (plan_instructions), as before;
    - at a source or a destination a range has no blocks of its own: its instructions lie in its value's blocks.  For each
-     block of a MESH_EXECUTION value a range here names, the set of this node's ranges whose instructions touch it (their
-     routed values here, ascending).  Where the union of those instructions' bytes is every byte of the block within the
-     value's bytes, the block is an element of that set's item, one item a set and copy (u copies), its elements every
-     such block of the set in (value, block) order; where any byte of it is no instruction's, it stays in the value's own
-     item (`uncovered`, its element its place among them), ordered as plan_before orders it;
-   - a MESH_INVARIANT source has one copy for the plan's life, every block of it its own item, PLAN_ALONE (mesh-
-     collective.h: "one copy for the plan's life, which every copy's send reads"), and every copy's sends name copy 0's
-     frames (mesh_plan).
+     block of a value a range here names (a MESH_EXECUTION value: plan_function), the set of this node's ranges whose
+     instructions touch it (their routed values here, ascending).  Where the union of those instructions' bytes is every
+     byte of the block within the value's bytes, the block is an element of that set's item, one item a set and copy (u
+     copies), its elements every such block of the set in (value, block) order; where any byte of it is no
+     instruction's, it stays in the value's own item (`uncovered`, its element its place among them), ordered as
+     plan_before orders it.
    E_s, `set_far`, is the largest farthest[a] over its members (plan_before).  The union of a block's instructions is
    counted over them by first byte (each lies within one block: plan_instructions), each adding its bytes past the
    greatest end before it.  The coordinating implementer's design ("The revisions of 14b9a757", brief C, R-1).  0;
@@ -2127,7 +2124,7 @@ static int plan_sets(struct plan *p,const struct hdr *m){
   if(!(p->block_first=malloc(((size_t)p->givens+1)*sizeof *p->block_first)))return ENOMEM;
   for(uint32_t j=0;j<p->givens;j++){
     p->block_first[j]=MESH_ABSENT;
-    if(!p->named[j] || p->given[j].kind!=MESH_EXECUTION)continue;
+    if(!p->named[j])continue;
     p->block_first[j]=(uint32_t)blocks;
     if((blocks+=plan_blocks(m,p->given[j].section.bytes))>=UINT32_MAX)return ENOMEM;
   }
@@ -2135,7 +2132,7 @@ static int plan_sets(struct plan *p,const struct hdr *m){
     const struct plan_demand *d=p->demand+i;
     if(d->value==MESH_ABSENT)continue;
     if(d->mine==MESH_ABSENT)relays++;
-    else if(p->block_first[d->mine]!=MESH_ABSENT)touches+=d->instructions;
+    else touches+=d->instructions;
     if(d->mine!=MESH_ABSENT && (d->source==p->self || p->child[(size_t)i*p->n+p->self]))p->named[d->mine]|=PLAN_SENT;
   }
   struct plan_touch *touch=malloc((touches+1)*sizeof *touch);
@@ -2148,7 +2145,7 @@ static int plan_sets(struct plan *p,const struct hdr *m){
   uint64_t t=0,covers=0,members=0;
   for(uint32_t i=0;i<p->demands;i++){
     const struct plan_demand *d=p->demand+i;
-    if(d->mine==MESH_ABSENT || p->block_first[d->mine]==MESH_ABSENT)continue;
+    if(d->mine==MESH_ABSENT)continue;
     for(uint64_t k=0;k<d->instructions;k++){
       const uint64_t at=p->at[d->at+k];
       touch[t++]=(struct plan_touch){at,at+p->cut[d->cut+k+1]-p->cut[d->cut+k],d->mine,d->value};
@@ -2385,12 +2382,15 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
        14b9a757", R-1), reversing "an execution value in the window of lag 0" and `first`: the view at this node (`from`
        at the source, `to` at the destination) within its value's bytes (struct mesh_strided: "every extent within the
        value's bytes ... EINVAL otherwise"); a destination's value MESH_EXECUTION of `lag` 0 (struct mesh_declared:
-       "EINVAL otherwise"); the source's one value of every transfer of the range, as before; any value a source (a
-       MESH_INVARIANT one, or one of `lag` k >= 1, among them), placed in the window whatever its `wire` (plan_items).
+       "EINVAL otherwise"); the source's one value of every transfer of the range, as before; any MESH_EXECUTION value
+       a source (one of `lag` k >= 1 among them), placed in the window whatever its `wire` (plan_items).
        The implementer's decision, recorded: a value of `state` 1 a transfer names stays EINVAL, as the plan call's
        notes on `state` state it ("EINVAL but on a local MESH_INVARIANT value outside the window (wire 0, named by no
        declared transfer)"), which the 2026-11-06 notes do not reverse.  What must stay: MESH_ABSENT away from the
-       range's ends */
+       range's ends
+       2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8: "The plan refuses
+       a transfer whose source is MESH_INVARIANT (EINVAL at the plan)"; torch 2.14.0 torch/export/exported_program.py,
+       ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers") */
     if(t->source!=p->self && t->destination!=p->self){
       if(t->value!=MESH_ABSENT){status=EINVAL;goto done;}
       continue;
@@ -2399,7 +2399,7 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     const struct mesh_value *v=values+t->value;
     const struct mesh_strided *view=t->source==p->self?&t->from:&t->to;
     plan_view(view,&bytes,&end);
-    if(end>v->section.bytes || v->state || (t->destination==p->self && (v->kind!=MESH_EXECUTION || v->lag)) ||
+    if(end>v->section.bytes || v->state || v->kind!=MESH_EXECUTION || (t->destination==p->self && v->lag) ||
        (t->source==p->self && d->mine!=MESH_ABSENT && d->mine!=t->value)){
       status=EINVAL;goto done;
     }
@@ -2904,10 +2904,10 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
        cut[k], its `page` the frame of the block holding the instruction at this node and its `offset` the byte within
        that block.  At a relay that is byte cut[k] of its routed value, laid out in the range's order, block cut[k] / Q
        of copy c of its set (plan_sets); at the source or a destination, byte at[k] of its value, the row of block
-       at[k] / Q of its copy c mod its copies (a MESH_INVARIANT source's copy 0 in every copy, mesh-collective.h: "every
-       copy's send reads its one copy"), the frame plan_rows bound to it.  Why: R-1, "The bridge's instructions are
-       those blocks (aot A9: MSCCL-IR's steps with offset and count)"; PB R2, corrected 2026-11-06, "A page instruction
-       names its bytes at their offset in its page".  What must stay: the words, fields, counts and sets as above */
+       at[k] / Q of its copy c mod its copies, the frame plan_rows bound to it.  Why: R-1, "The bridge's instructions
+       are those blocks (aot A9: MSCCL-IR's steps with offset and count)"; PB R2, corrected 2026-11-06, "A page
+       instruction names its bytes at their offset in its page".  What must stay: the words, fields, counts and sets as
+       above */
     struct mesh_hop *hop=mesh_hops(m,state);
     for(uint32_t c=0;c<u;c++)for(uint64_t j=0;j<p->entries;j++){
       const struct plan_entry *e=p->entry+j;

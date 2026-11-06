@@ -217,8 +217,7 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # _forms); `sent`, the keys a collective reads and the reads of the slices, narrows and viewed windows among them;
 # `contiguous`, the view nodes for which "it will not be possible to view self tensor as shape without copying it (e.g.,
 # via contiguous())" (torch 2.14.0 torch/_tensor_docs.py, view; _view).  This node's: `owned`, each value's index by the
-# key that owns it; `loaded`, the ranges sent from an invariant, released once after its load.  What must stay: every
-# operand of mesh_plan the same at every rank
+# key that owns it.  What must stay: every operand of mesh_plan the same at every rank
 class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
@@ -231,7 +230,7 @@ class IR:
         self.made, self.calls, self.locals, self.shapes = set(), None, {}, {}
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
-        self.publishes, self.loaded, self.inputs = {}, [], {}
+        self.publishes, self.inputs = {}, {}
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
@@ -1389,9 +1388,9 @@ def _consumer(ir, roots):
 #   collapse_view, whose _collapse_view_helper takes `shape[idx] == 1` alike), which keeps the bytes' C order, its
 #   `dims` (size, stride) pairs at `pairs` (MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY's ndims).
 # - _produced and _send: a sent range's production at its writer's third step, its source read the span of the reads of
-#   its key and its value (_readers), and this node's release of it after that writer (`publishes`), or once after the
-#   load where the writer is a module attribute, an invariant (`loaded`: "A range sent from a MESH_INVARIANT value is
-#   released once, after its load", mesh-collective.h mesh_host_publish).
+#   its key and its value (_readers), and this node's release of it after that writer (`publishes`); "The plan refuses
+#   a transfer whose source is MESH_INVARIANT (EINVAL at the plan)" (design/problems-of-14b9a757-change-request.md,
+#   "Sources for the second stops", 8).
 # What must stay: every rank's places and views the same; no part copied, laid out or shared for a transfer
 Place = collections.namedtuple('Place', 'owner offset sizes strides writer')
 
@@ -1527,11 +1526,7 @@ def _produced(ir, d, i, key, received):
 
 
 def _send(ir, i, key):
-    g = ir.producer[ir.places[ir.device][key].writer]
-    if ir.program[g][0] == 'constant':
-        ir.loaded.append(i)
-    else:
-        ir.publishes.setdefault(g, []).append(i)
+    ir.publishes.setdefault(ir.producer[ir.places[ir.device][key].writer], []).append(i)
 
 
 # NCCL User Guide, In-place Operations: "For ncclReduceScatter and ncclAllGather, in place operations are done when the
@@ -2186,12 +2181,7 @@ RETIRE = C.cast(mesh.LIB.mesh_retire, C.c_void_p)
 # and no test of a make()-time fact"; W6, the branch at 2156; "The revisions of 14b9a757"), reversing the sections and
 # the test of the MPS array: the publishes of `transfers`, declared transfers of plan `plan` this node sends, as steps
 # (_steps), one mesh_host_publish a CPU range and one mesh_torch_publish of every MPS range, made only where there are
-# some.  LOADED, the execution a range sent from an invariant is published with once, after its load: "A range sent
-# from a MESH_INVARIANT value is released once, after its load, with `execution` UINT64_MAX - 1" (mesh-collective.h
-# mesh_host_publish at mesh 31ee5d4a).  What must stay: a publish after its range's last write, no wait
-LOADED = 2 ** 64 - 2
-
-
+# some.  What must stay: a publish after its range's last write, no wait
 def _publishes(context, plan, devices, transfers):
     metal = [i for i in transfers if devices[i] == 'mps']
     steps = [lambda env, inputs, t, i=i: mesh.LIB.mesh_host_publish(C.byref(context), plan, i, t)
@@ -3305,8 +3295,10 @@ class _Export(torch.fx.Interpreter):
 # - R-7, "The first ETIMEDOUT ends the run: no later wait runs": the first ETIMEDOUT of `make`, `inputs` or `run` is
 #   kept (`timeout`), and every later call of `inputs` or `run` raises ETIMEDOUT at once, waiting for nothing; `inputs`'
 #   wait for execution b - HOST_LAG's end ends at MESH_PLATFORM_NS without a rise of the ended count (_wait).
-# - R-1: the plan call's functions carry no share; each range sent from an invariant is published once after its load
-#   (`loaded`, LOADED), on MPS after torch's work, the load's copy_ among it.
+# - R-1: the plan call's functions carry no share.
+# - design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8 (torch 2.14.0
+#   torch/export/exported_program.py, ExportedProgram: "a state_dict containing tensor values of all lifted parameters
+#   and buffers"): each node loads its own copy of every invariant.
 # - R-10: the program's mapping is mesh_view_values' (_mapped).
 # - R-4: each compiled function's steps are made once a copy (_steps), inside the plan's failure handling.
 # What must stay: no placement and no weight chosen here; every operand of mesh_plan the same at every rank but this
@@ -3378,12 +3370,10 @@ def program(block, *example_inputs):
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
-            for ir, f, (places, devices, _) in zip(irs, functions, bound):
+            for ir, (places, _, _) in zip(irs, bound):
                 for kind, _, key, target in ir.program:
                     if kind == 'constant' and key in places:
                         places[key][0].copy_(operator.attrgetter(target)(ir.gm))
-                for publish in _publishes(context, f.plan, devices, ir.loaded):
-                    publish(None, None, LOADED)
             runs = [dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
                          plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan))
                     for ir, f, record, (places, devices, _) in zip(irs, functions, compiled, bound)]
