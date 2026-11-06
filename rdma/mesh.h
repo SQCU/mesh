@@ -671,9 +671,9 @@ struct mesh_status { _Atomic uint32_t behind,ahead,first,padding; };
 _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahead)==4 &&
   offsetof(struct mesh_status,first)==8,"mesh_status");
 /* JGroups (https://raw.githubusercontent.com/belaban/JGroups/master/src/org/jgroups/ViewId.java): "ViewIds are used
-   for ordering views (each view has a ViewId and a list of members)"; `id` its "Lamport time of the view", (`sequencer`,
-   `boot`) its "Address of the creator of this view"; src/org/jgroups/util/UUID.java: "Logical address which is unique
-   over space and time." */
+   for ordering views (each view has a ViewId and a list of members)"; `id` its "Lamport time of the view",
+   (`sequencer`, `boot`) its "Address of the creator of this view"; src/org/jgroups/util/UUID.java: "Logical address
+   which is unique over space and time." */
 struct mesh_view_id { uint64_t id; uint32_t sequencer,padding; uint64_t boot; };
 _Static_assert(sizeof(struct mesh_view_id)==24 && offsetof(struct mesh_view_id,sequencer)==8 &&
   offsetof(struct mesh_view_id,boot)==16,"mesh_view_id");
