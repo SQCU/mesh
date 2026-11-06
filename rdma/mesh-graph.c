@@ -51,130 +51,6 @@ int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(co
   return 0;
 }
 
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_arborescence_within and its search, 9bb6972a */
-/* mesh_graph_arborescence_within's search: node order[at] given each of its edges in (into[v] the edge list by
-   weight, its first in[v] to in[v + 1]), the rest each its lightest in rest[at + 1] */
-struct within { uint32_t N,root,depth; const uint32_t *from,*order,*into; const uint32_t *in; const double *weight,*rest;
-                int32_t *now,*best; double cost; };
-/* where node v's walk up the parents now chosen reaches the root within `depth` edges: 1; it meets a node not yet
-   given a parent: 1 (decided later); a cycle or past depth: 0 */
-static int within_walk(const struct within *s,uint32_t v){
-  for(uint32_t k=0;k<=s->depth;k++){
-    if(v==s->root)return 1;
-    if(s->now[v]<0)return 1;
-    v=s->from[s->now[v]];
-  }
-  return 0;
-}
-static void within_search(struct within *s,uint32_t at,double cost){
-  if(cost+s->rest[at]>=s->cost)return;
-  if(at==s->N-1){
-    /* every node given: each one's walk ends at the root within depth (no node left undecided) */
-    for(uint32_t k=0;k+1<s->N;k++)if(!within_walk(s,s->order[k]))return;
-    s->cost=cost;
-    memcpy(s->best,s->now,s->N*sizeof *s->now);
-    return;
-  }
-  const uint32_t v=s->order[at];
-  for(uint32_t i=s->in[v];i<s->in[v+1];i++){
-    const uint32_t e=s->into[i];
-    if(cost+s->weight[e]+s->rest[at+1]>=s->cost)break;
-    s->now[v]=(int32_t)e;
-    /* this node's walk, and every chosen node's whose walk now runs through it */
-    int ok=within_walk(s,v);
-    for(uint32_t k=0;ok && k<at;k++)ok=within_walk(s,s->order[k]);
-    if(ok)within_search(s,at+1,cost+s->weight[e]);
-  }
-  s->now[v]=-1;
-}
-/* mesh-graph.h mesh_graph_arborescence_within */
-int mesh_graph_arborescence_within(uint32_t N,uint32_t root,uint32_t E,const uint32_t *from,const uint32_t *to,
-                                   const double *weight,uint32_t depth,int32_t *chosen){
-  uint32_t *in=calloc((size_t)N+2,sizeof *in),*into=malloc(((size_t)E+1)*sizeof *into),*order=malloc(((size_t)N+1)*sizeof *order);
-  uint32_t *layer=malloc(((size_t)N+1)*sizeof *layer);
-  double *rest=calloc((size_t)N+1,sizeof *rest);
-  int32_t *now=malloc(((size_t)N+1)*sizeof *now),*best=malloc(((size_t)N+1)*sizeof *best);
-  int status=-1;
-  if(!in || !into || !order || !layer || !rest || !now || !best || root>=N)goto done;
-  /* each node's edges in, lightest first */
-  for(uint32_t e=0;e<E;e++)if(from[e]!=to[e] && to[e]!=root)in[to[e]+1]++;
-  for(uint32_t v=0;v<N;v++)in[v+1]+=in[v];
-  {
-    uint32_t *fill=calloc((size_t)N+1,sizeof *fill);
-    if(!fill)goto done;
-    for(uint32_t e=0;e<E;e++)if(from[e]!=to[e] && to[e]!=root)into[in[to[e]]+fill[to[e]]++]=e;
-    free(fill);
-  }
-  for(uint32_t v=0;v<N;v++)for(uint32_t i=in[v]+1;i<in[v+1];i++)
-    for(uint32_t j=i;j>in[v] && weight[into[j]]<weight[into[j-1]];j--){const uint32_t t=into[j];into[j]=into[j-1];into[j-1]=t;}
-  /* the nodes in breadth-first order from the root (a near node's parent decided first cuts the most) */
-  for(uint32_t v=0;v<N;v++){layer[v]=UINT32_MAX;now[v]=-1;}
-  layer[root]=0;
-  uint32_t placed=0;
-  for(uint32_t d=0,grew=1;grew;d++){
-    grew=0;
-    for(uint32_t e=0;e<E;e++)if(layer[from[e]]==d && layer[to[e]]==UINT32_MAX){layer[to[e]]=d+1;grew=1;}
-  }
-  for(uint32_t d=1;placed+1<N && d<=N;d++)for(uint32_t v=0;v<N;v++)if(v!=root && layer[v]==d)order[placed++]=v;
-  if(placed+1!=N)goto done; /* a node the root reaches by no edges */
-  for(uint32_t at=N-1;at-->0;)rest[at]=rest[at+1]+weight[into[in[order[at]]]];
-  struct within s={N,root,depth,from,order,into,in,weight,rest,now,best,INFINITY};
-  within_search(&s,0,0);
-  if(s.cost==INFINITY)goto done;
-  for(uint32_t v=0;v<N;v++)chosen[v]=v==root?-1:best[v];
-  status=0;
-done:
-  free(in);free(into);free(order);free(layer);free(rest);free(now);free(best);
-  return status;
-}
-
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_arborescence, ab823357 */
-/* mesh-graph.h */
-int mesh_graph_arborescence(uint32_t N,uint32_t root,uint32_t E,const uint32_t *from,const uint32_t *to,const double *weight,int32_t *chosen){
-  int32_t *best=malloc(N*sizeof *best),*id=malloc(N*sizeof *id),*seen=malloc(N*sizeof *seen);
-  uint32_t *nfrom=malloc((E+1)*sizeof *nfrom),*nto=malloc((E+1)*sizeof *nto),*origin=malloc((E+1)*sizeof *origin);
-  double *nweight=malloc((E+1)*sizeof *nweight);
-  int32_t *nchosen=malloc(N*sizeof *nchosen);
-  unsigned char *cyclic=calloc(N,1);
-  int status=-1;
-  if(!best || !id || !seen || !nfrom || !nto || !origin || !nweight || !nchosen || !cyclic)goto done;
-  for(uint32_t v=0;v<N;v++){best[v]=-1;id[v]=-1;seen[v]=-1;}
-  for(uint32_t e=0;e<E;e++)
-    if(from[e]!=to[e] && to[e]!=root && (best[to[e]]<0 || weight[e]<weight[best[to[e]]]))best[to[e]]=(int32_t)e;
-  for(uint32_t v=0;v<N;v++)if(v!=root && best[v]<0)goto done;
-  uint32_t components=0;
-  for(uint32_t v=0;v<N;v++){
-    uint32_t at=v;
-    while(at!=root && seen[at]<0 && id[at]<0){seen[at]=(int32_t)v;at=from[best[at]];}
-    if(at!=root && id[at]<0 && seen[at]==(int32_t)v){
-      uint32_t x=at;
-      do{id[x]=(int32_t)components;x=from[best[x]];}while(x!=at);
-      cyclic[components++]=1;
-    }
-  }
-  if(!components){
-    for(uint32_t v=0;v<N;v++)chosen[v]=v==root?-1:best[v];
-    status=0;goto done;
-  }
-  for(uint32_t v=0;v<N;v++)if(id[v]<0)id[v]=(int32_t)components++;
-  uint32_t m=0;
-  for(uint32_t e=0;e<E;e++){
-    const uint32_t u=(uint32_t)id[from[e]],w=(uint32_t)id[to[e]];
-    if(u==w)continue;
-    nfrom[m]=u;nto[m]=w;origin[m]=e;
-    nweight[m]=cyclic[w]?weight[e]-weight[best[to[e]]]:weight[e];
-    m++;
-  }
-  if(mesh_graph_arborescence(components,(uint32_t)id[root],m,nfrom,nto,nweight,nchosen))goto done;
-  for(uint32_t v=0;v<N;v++)chosen[v]=v==root?-1:best[v];
-  for(uint32_t x=0;x<components;x++)
-    if(x!=(uint32_t)id[root]){const uint32_t e=origin[nchosen[x]];chosen[to[e]]=(int32_t)e;}
-  status=0;
-done:
-  free(best);free(id);free(seen);free(nfrom);free(nto);free(origin);free(nweight);free(nchosen);free(cyclic);
-  return status;
-}
-
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_climb, 7e7f8726 */
 /* mesh-graph.h */
 uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t root, uint32_t from,
@@ -188,41 +64,7 @@ uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t ro
   return UINT32_MAX;
 }
 
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_cycle_length with climb_return, f21a4d24 */
-/* mesh-graph.h: the climb's visits, a cycle's return (the tag's comment here names the level's height and the mark
-   too, whose functions are not brought) */
-static void climb_return(void *consumer, uint32_t at, uint32_t step) {
-  uint32_t *found = consumer;
-  if (step && at == found[0] && !found[1]) found[1] = step;
-}
-uint32_t mesh_graph_cycle_length(const uint32_t *parent, uint32_t vertices, uint32_t from) {
-  uint32_t found[2] = {from, 0};
-  mesh_graph_climb(parent, vertices, UINT32_MAX, from, climb_return, found);
-  return found[1];
-}
-
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_depth with depth_head, 8cd0c480 */
-/* mesh-graph.h mesh_graph_depth */
-static uint32_t depth_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
-int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth) {
-  size_t *out = calloc((size_t)vertices + 2, sizeof *out), *at = calloc((size_t)vertices + 1, sizeof *at);
-  uint32_t *heads = malloc((first[vertices] + 1) * sizeof *heads), *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
-  uint32_t *ordinal = malloc(((size_t)vertices + 1) * sizeof *ordinal), *order = malloc(((size_t)vertices + 1) * sizeof *order);
-  int result = !out || !at || !heads || !indegree || !ordinal || !order ? ENOMEM : 0;
-  for (uint32_t v = 0; !result && v < vertices; v++) for (size_t k = first[v]; k < first[v + 1]; k++) out[head[k] + 1]++;
-  for (uint32_t v = 0; !result && v < vertices; v++) out[v + 1] += out[v];
-  for (uint32_t v = 0; !result && v < vertices; v++) for (size_t k = first[v]; k < first[v + 1]; k++) heads[out[head[k]] + at[head[k]]++] = v;
-  if (!result) result = mesh_graph_order(vertices, out, depth_head, heads, indegree, ordinal);
-  for (uint32_t v = 0; !result && v < vertices; v++) order[ordinal[v]] = v;
-  for (uint32_t p = 0; !result && p < vertices; p++) {
-    const uint32_t v = order[p];
-    depth[v] = 0;
-    for (size_t k = first[v]; k < first[v + 1]; k++)
-      if (marked[head[k]] && depth[head[k]] + 1 > depth[v]) depth[v] = depth[head[k]] + 1;
-  }
-  free(out); free(at); free(heads); free(indegree); free(ordinal); free(order);
-  return result;
-}
+static uint32_t word_at(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
 
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_rows, d8d861b5 */
 /* mesh-graph.h mesh_graph_rows */
@@ -350,130 +192,6 @@ uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uin
   return failed?UINT32_MAX:made;
 }
 
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_pack with mesh_packed_heavier and pack_same, 9bb6972a */
-/* a packed tree (mesh_graph_pack): its root, its flow and its parents; ordered root by root, heaviest first */
-struct mesh_packed { uint32_t root; double flow; uint32_t *parent; };
-static int mesh_packed_heavier(const void *a,const void *b){
-  const struct mesh_packed *x=a,*y=b;
-  if(x->root!=y->root)return x->root<y->root?-1:1;
-  return x->flow>y->flow?-1:x->flow<y->flow;
-}
-
-/* a packed tree equal to the arborescence just chosen, among its root's alone (mesh_graph_keyed_find) */
-struct pack_same { const struct mesh_packed *packed; const uint32_t *from; const int32_t *chosen; uint32_t r,n; };
-static int pack_same(const void *context,uint32_t t){
-  const struct pack_same *s=context;
-  uint32_t v=0;
-  while(v<s->n && (v==s->r || s->packed[t].parent[v]==s->from[s->chosen[v]]))v++;
-  return v==s->n;
-}
-
-/* mesh-graph.h mesh_graph_pack (mesh-collective.c mesh_trees_pack's rounds, moved) */
-uint32_t mesh_graph_pack(uint32_t n, uint32_t m, const uint32_t *from, const uint32_t *to, const uint32_t *through,
-                         const uint32_t *crossing, uint32_t P, const double *capacity,
-                         int (*rooted)(const void *context, uint32_t r), const void *context, double eps, uint32_t most,
-                         int shallow, uint32_t *root, uint32_t *parent, double *log_weight){
-  uint32_t *uses=calloc((size_t)P+1,sizeof *uses);
-  /* shallow: root r's arborescences those within its eccentricity's depth (eccentricity[r], the last layer of its
-     breadth-first layering), searched over every edge (mesh_graph_arborescence_within).
-     Changed from the layering's edges alone (an edge from layer d to d + 1, so a tree its root's shortest paths),
-     which left out trees as shallow that cross a layer's own edges (m5ult3 -> Mini -> m5ult2, depth 2): its packing
-     carried 26.7 GB/s into a rank where trees within depth 2 carry 30, the whole capacity of the cut around the Mini
-     (9bb6972a, the trees' linear program, 2026-11-03). What must stay: every tree
-     as shallow as one from its root can be (a small segment's units on a tree of its root's eccentricity, run-23).
-     Changed from the tag in this comment alone: the measurement is cited as 9bb6972a's message, which records it,
-     where the tag cited a document deleted with everything citing it (mesh 90677543, metal-microbench 7aa6491a). */
-  uint32_t *eccentricity=shallow?calloc((size_t)n+1,sizeof *eccentricity):NULL,*layer=shallow?malloc(((size_t)n+1)*sizeof *layer):NULL;
-  double *length=malloc(((size_t)P+1)*sizeof *length),*weight=malloc(((size_t)m+1)*sizeof *weight);
-  int32_t *chosen=malloc(((size_t)n+1)*sizeof *chosen);
-  struct mesh_packed *packed=NULL;
-  uint32_t *head=malloc(((size_t)n+1)*sizeof *head),*next=NULL;
-  size_t trees=0,room=0;
-  uint32_t written=0;
-  if(!uses || !length || !weight || !chosen || !head)goto done;
-  if(shallow && (!eccentricity || !layer))goto done;
-  for(uint32_t r=0;shallow && r<n;r++){
-    for(uint32_t v=0;v<n;v++)layer[v]=UINT32_MAX;
-    layer[r]=0;
-    for(uint32_t d=0,grew=1;grew;d++){
-      grew=0;
-      for(uint32_t e=0;e<m;e++)if(layer[from[e]]==d && layer[to[e]]==UINT32_MAX){layer[to[e]]=d+1;grew=1;}
-    }
-    for(uint32_t v=0;v<n;v++)if(layer[v]!=UINT32_MAX && layer[v]>eccentricity[r])eccentricity[r]=layer[v];
-  }
-  for(uint32_t r=0;r<n;r++)head[r]=UINT32_MAX;
-  const double delta=mesh_graph_exp(-mesh_graph_log(P/(1-eps))/eps);
-  double D=0;
-  for(uint32_t k=0;k<P;k++){length[k]=delta/capacity[k];D+=length[k]*capacity[k];}
-  while(D<1)for(uint32_t r=0;r<n && D<1;r++)for(double demand=rooted(context,r);demand>0 && D<1;){
-    for(uint32_t e=0;e<m;e++){weight[e]=0;for(uint32_t i=through[e];i<through[e+1];i++)weight[e]+=length[crossing[i]];}
-    if(shallow){if(mesh_graph_arborescence_within(n,r,m,from,to,weight,eccentricity[r],chosen))goto done;}
-    else if(mesh_graph_arborescence(n,r,m,from,to,weight,chosen))goto done;
-    /* the tree's flow: its demand, at most each directed hop's capacity over the tree's edges crossing it */
-    for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++)uses[crossing[i]]++;
-    double f=demand;
-    for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++)
-      if(capacity[crossing[i]]/uses[crossing[i]]<f)f=capacity[crossing[i]]/uses[crossing[i]];
-    demand-=f;
-    const struct pack_same same={packed,from,chosen,r,n};
-    const uint32_t found=mesh_graph_keyed_find(head,next,r,pack_same,&same);
-    size_t t=found==UINT32_MAX?trees:found;
-    if(t==trees){
-      if(trees==room){
-        struct mesh_packed *grown=realloc(packed,(room?2*room:64)*sizeof *grown);
-        if(!grown)goto done;
-        packed=grown;
-        uint32_t *chained=realloc(next,(room?2*room:64)*sizeof *chained);
-        if(!chained)goto done;
-        next=chained;room=room?2*room:64;
-      }
-      if(!(packed[t].parent=malloc(n*sizeof *packed[t].parent)))goto done;
-      packed[t].root=r;packed[t].flow=0;
-      for(uint32_t v=0;v<n;v++)packed[t].parent[v]=v==r?r:from[chosen[v]];
-      mesh_graph_keyed_add(head,next,r,(uint32_t)t);
-      trees++;
-    }
-    packed[t].flow+=f;
-    for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++){
-      const uint32_t k=crossing[i];
-      if(!uses[k])continue;
-      D+=length[k]*eps*f*uses[k];
-      length[k]*=1+eps*f*uses[k]/capacity[k];
-      uses[k]=0;
-    }
-  }
-  qsort(packed,trees,sizeof *packed,mesh_packed_heavier);
-  for(size_t t=0;t<trees;){
-    size_t end=t,keep;
-    double total=0;
-    while(end<trees && packed[end].root==packed[t].root)end++;
-    keep=end-t<most?end-t:most;
-    for(size_t u=t;u<t+keep;u++)total+=packed[u].flow;
-    for(size_t u=t;u<t+keep;u++){
-      root[written]=packed[u].root;
-      memcpy(parent+(size_t)written*n,packed[u].parent,n*sizeof *parent);
-      log_weight[written++]=mesh_graph_log(packed[u].flow/total);
-    }
-    t=end;
-  }
-done:
-  for(size_t t=0;t<trees;t++)free(packed[t].parent);
-  free(packed);free(uses);free(length);free(weight);free(chosen);free(head);free(next);
-  free(eccentricity);free(layer);
-  return written;
-}
-
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_tree_loads, feef1156 */
-/* mesh-graph.h mesh_graph_tree_loads */
-void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
-                           const double *weight, double *load){
-  for(uint32_t k=0;k<trees;k++)
-    for(uint32_t v=0;v<vertices;v++){
-      const uint32_t u=parent[(size_t)k*vertices+v];
-      if(v!=root[k] && u!=UINT32_MAX)load[(size_t)u*vertices+v]+=weight[k];
-    }
-}
-
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_grid_cut, ea247333 (the form ea247333 left) */
 /* mesh-graph.h mesh_graph_grid_cut */
 uint32_t mesh_graph_grid_cut(uint64_t first, uint64_t length, uint64_t cell, uint64_t *start, uint64_t *count, uint64_t *index){
@@ -484,39 +202,6 @@ uint32_t mesh_graph_grid_cut(uint64_t first, uint64_t length, uint64_t cell, uin
     start[made]=at;count[made]=edge-at;index[made++]=k;at=edge;
   }
   return made;
-}
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_tree_depth, d30f02f5 */
-/* mesh-graph.h mesh_graph_tree_depth */
-uint32_t mesh_graph_tree_depth(uint32_t vertices, uint32_t root, const uint32_t *parent){
-  size_t *first=calloc((size_t)vertices+1,sizeof *first);
-  uint32_t *head=malloc(((size_t)vertices+1)*sizeof *head),*depth=malloc(((size_t)vertices+1)*sizeof *depth),most=UINT32_MAX;
-  unsigned char *marked=malloc((size_t)vertices+1);
-  if(first && head && depth && marked){
-    for(uint32_t v=0;v<vertices;v++){
-      first[v+1]=first[v];marked[v]=parent[v]!=UINT32_MAX;
-      if(v!=root && parent[v]!=UINT32_MAX)head[first[v+1]++]=parent[v];
-    }
-    if(!mesh_graph_depth(vertices,first,head,marked,depth)){
-      most=0;
-      for(uint32_t v=0;v<vertices;v++)if(marked[v] && depth[v]>most)most=depth[v];
-    }
-  }
-  free(first);free(head);free(depth);free(marked);
-  return most;
-}
-/* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_trees_rate, d30f02f5 */
-/* mesh-graph.h mesh_graph_trees_rate */
-double mesh_graph_trees_rate(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
-                             const double *weight, const double *capacity){
-  double *load=calloc((size_t)vertices*vertices+1,sizeof *load),rate=INFINITY;
-  if(!load)return 0;
-  mesh_graph_tree_loads(vertices,trees,root,parent,weight,load);
-  for(size_t e=0;e<(size_t)vertices*vertices;e++)if(load[e]>0){
-    if(!(capacity[e]>0)){rate=0;break;}
-    if(capacity[e]/load[e]<rate)rate=capacity[e]/load[e];
-  }
-  free(load);
-  return isfinite(rate)?rate:0;
 }
 /* Source: pre-return-20261103 rdma/mesh-graph.c mesh_graph_fill, d30f02f5 */
 /* mesh-graph.h mesh_graph_fill: the least time T at which the parts' units by T, floor((T - latency) rate) each,
@@ -830,7 +515,7 @@ static void chains_block(struct chains_net *n, const size_t *level, size_t *at, 
      first, give their chains to the next f(i, j) of item j's, from its first, in turn.  An item's predecessors all
      come before it in the extension, so each element's chain is set before it is given.  The extension: the items by
      their number of predecessors, ascending, a tie in the caller's order (mesh_graph_rows, a stable counting sort, with
-     depth_head over the counts, its rows in queue's words); a before b makes every predecessor of a one of b
+     word_at over the counts, its rows in queue's words); a before b makes every predecessor of a one of b
      (transitivity), and a one of b but not of a (irreflexivity), so b has more.
      2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G1:
      "`mesh_graph_chains` orders its items by its own predecessor count (mesh-graph.c 875–894) where
@@ -893,9 +578,9 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
     into = malloc((edges + 1) * sizeof *into);
     if (!flow || !into) result = ENOMEM;
   }
-  if (!result) result = mesh_graph_order(items, first, depth_head, head, indegree, ordinal);
+  if (!result) result = mesh_graph_order(items, first, word_at, head, indegree, ordinal);
   if (!result) {
-    mesh_graph_rows(items, edges, depth_head, head, into_first, into);
+    mesh_graph_rows(items, edges, word_at, head, into_first, into);
     struct chains_net net = {items, count, first, into_first, into, head, tail, flow, out, in};
     while (chains_layer(&net, level, queue)) chains_block(&net, level, at, path);
     uint64_t next = 0, o = 0;
@@ -1267,7 +952,7 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
       index[nonzeros] = (HighsInt)i; value[nonzeros++] = -1;
     }
     if (Highs_addRows(highs, total, lower, upper, nonzeros, start, index, value) == kHighsStatusError) result = EDOM;
-    mesh_graph_rows(resources, vertices, depth_head, resource, first, member);
+    mesh_graph_rows(resources, vertices, word_at, resource, first, member);
   }
   int second = 0;
   while (!result) {
@@ -1336,7 +1021,7 @@ static int order_before(const void *context, uint32_t a, uint32_t b) {
    2023, §5.2, step 3: "Sort instructions into a global topological order with respect to their dependencies with a
    heap using the priority to order instructions."
    - Each vertex's count of the edges into it (an edge given twice counted twice), and the edges out of each vertex as
-     compressed rows (mesh_graph_rows keyed by from[e]; depth_head reads the e-th word).
+     compressed rows (mesh_graph_rows keyed by from[e]; word_at reads the e-th word).
    - The vertices with no edge in enter the heap (heap_up, ordered by order_before).  While the heap holds any, its
      first leaves it (heap_down) and takes the next place, and each edge out of it lowers its head's count once (an
      edge given twice lowers it twice), the head entering the heap where its count reaches 0.  So a vertex is placed
@@ -1371,7 +1056,7 @@ int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edge
   uint32_t *position = malloc(((size_t)vertices + 1) * sizeof *position);
   int result = !first || !order || !indegree || !heap || !position ? ENOMEM : 0;
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
+    mesh_graph_rows(vertices, edges, word_at, from, first, order);
     for (uint32_t v = 0; v < vertices; v++) { indegree[v] = 0; position[v] = UINT32_MAX; place[v] = UINT32_MAX; }
     for (size_t e = 0; e < edges; e++) indegree[to[e]]++;
     size_t count = 0;
@@ -1537,23 +1222,6 @@ static int delays_pass(const struct graph_scratch *s, uint32_t vertices, const d
   return !zero_delay_cycle(s, vertices, edges, from, to, delay) &&
          !positive_cycle(s->distance, vertices, time, edges, from, to, delay, lambda, tolerance);
 }
-/* mesh-graph.h mesh_graph_components.  BSL §3's SCCs, by components_search over every edge, whatever its delay, in rows
-   by its tail (mesh_graph_rows keyed by from[e]; depth_head reads the e-th word).  An edge naming no vertex is EINVAL
-   before anything is written; every allocation precedes the first component written, so ENOMEM writes none.  Cost:
-   O(V + E). */
-int mesh_graph_components(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
-                          uint32_t *component, uint32_t *count) {
-  int result = graph_check(vertices, NULL, edges, from, to);
-  if (result) return result;
-  struct graph_scratch s;
-  result = scratch_alloc(&s, vertices, edges);
-  if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, s.first, s.order);
-    *count = components_search(&s, vertices, to, component);
-  }
-  scratch_free(&s);
-  return result;
-}
 /* mesh-graph.h mesh_graph_cycle_mean.  BSL §9's BellmanFord, by "the Bellman-Ford algorithm discussed in pp. 94-97 of
    [15]" (E. L. Lawler, Combinatorial Optimization: Networks and Matroids, 1976): a binary search on λ, each step the
    test for a cycle of positive length under the lengths time[from[e]] - λ delay[e] (positive_cycle, at τ =
@@ -1674,7 +1342,7 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
   if (!result && (!least || !link || !sources || !sinks || !entered || !left)) result = ENOMEM;
   uint32_t count = 0, m = 0, k = 0;
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, s.first, s.order);
+    mesh_graph_rows(vertices, edges, word_at, from, s.first, s.order);
     count = components_search(&s, vertices, to, s.component);
     for (uint32_t c = 0; c < count; c++) { least[c] = UINT32_MAX; entered[c] = 0; left[c] = 0; }
     for (size_t e = 0; e < edges; e++)
