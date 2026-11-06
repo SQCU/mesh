@@ -197,6 +197,18 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
    a cycle, which a strict partial order cannot (nothing written).  What must stay: the chains' numbering */
 int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
                       const void *context, uint64_t *chain, uint64_t *chains);
+/* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14.  C. Mukerji, Register
+   allocation using cyclic interval graphs, M.Sc. thesis, McGill University, 1994:
+   - Definition 2.1.1: "A time t is covered by ... an interval I1' : [t1, t1'] if (t1 ≤ t ≤ t1'), or by a cyclic
+     interval I2 : ([t1, t1'), [t2, t2'])"; §3.1: "Cyclic intervals wrap around from one iteration to the next";
+     interval i is [start[i], end[i]] on the times 0 .. length - 1, cyclic where end[i] < start[i].
+   - Algorithm 3.2.1's input: "The number of registers, reg_num, needed by each interval"; need[i].  Its output: "every
+     interval, i, of the graph has been assigned colors, c1..regnum(i)"; color[o_i + k], k < need[i], o_i the sum of
+     need[j] over j < i; *colors the colors used.
+   - §3.2.6, Main Fatcover, Establish All Covers Of C_i and Choose A Cover For C_i; Appendix A, Algorithm A.0.1.
+   0; ENOMEM */
+int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *start, const uint64_t *end,
+                         const uint64_t *need, uint64_t *color, uint64_t *colors);
 /* design/plan-to-bridge-change-request.md R5 (mesh 0e56d8da), "How: the program" and "How: solving it": the completion
    times C̄ of one linear program over a directed graph, vertex j of length length[j] >= 0 on resource resource[j] (<
    `resources`), edge e running from[e] -> to[e]: variables C_j and C_max; minimize C_max with C_max >= C_j for every j
