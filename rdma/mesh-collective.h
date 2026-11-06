@@ -345,7 +345,9 @@ int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t function,uint64_t progra
    2026-11-04, sub-assignment 3: mesh_host_inputs is removed (it did nothing: mesh_plan places and starts every word),
    and `invocation` is `execution`, a uint64_t, since a plan runs any number of executions.  What must stay: a host
    producer releases a range by one store, and a host reader reads a range's state, never a word a page. */
-/* a host producer's release of execution t of a source range: its supplied word stored t + 1 (release) */
+/* a host producer's release of execution t of a source range: its supplied word raised to t + 1 (release), never
+   lowered, so publishes run in any order (a torch MPSEvent's notification, rdma/mesh-torch.mm) leave it at the
+   greatest (2026-11-05, design/compilation-coordination.md, "The revisions of e4a7398e", TP-3, where it was stored) */
 void mesh_host_publish(struct mesh_ctx *,struct mesh_section,uint64_t execution);
 /* execution t of a received range: 1 where every field of its copy t mod u reads mesh_phase(t / u + 1) (acquire);
    UINT64_MAX where a field reads neither that nor mesh_phase(t / u) (ahead), or where its count has reached

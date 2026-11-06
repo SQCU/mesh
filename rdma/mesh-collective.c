@@ -21,12 +21,23 @@ _Static_assert(MESH_NODES_MOST<=64,"a demand's destinations are one 64-bit set o
    stored.
    2026-11-04, sub-assignment 3: reversing 2026-11-03's form (sub-assignment 5), MESH_SUPPLIED stored into execution t's
    own word at the target's word + t x MESH_WORD_STRIDE.  Why: one word serves every execution, its value saying which,
-   and no word is reset while its plan stands (C3.7).  What must stay: one store, release, after the range's last write. */
+   and no word is reset while its plan stands (C3.7).  What must stay: one store, release, after the range's last write.
+   2026-11-05 (design/aot-compilation-change-request.md, appendix item 7, "A publish waits for nothing": "the publish
+   is done in that event's notification"; design/compilation-coordination.md, "The revisions of e4a7398e", TP-3): the
+   word raised to execution + 1 where it is below it (a compare-and-swap loop, release, that never lowers it), where it
+   was stored.  Why: a torch program's publishes run in torch MPSEvents' notifications (rdma/mesh-torch.mm), and
+   "Notifications may come in any order, so the count only rises" (mesh fba41159), so execution t's may run after t + 1's;
+   C3.7: "supplied words ... only rise".  The loop retries only where another publish of the range raised the word
+   meanwhile, and ends once the word is at least execution + 1.  What must stay: one release store raising the word,
+   after the range's last write. */
 void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint64_t execution){
   struct hdr *m=context->M;
   const struct mesh_publication *publication=mesh_publication_at(m,section.first);
   if(!publication->sends)return;
-  atomic_store_explicit((_Atomic uint64_t *)((char *)m+publication->targets[0].word),execution+1,memory_order_release);
+  _Atomic uint64_t *word=(_Atomic uint64_t *)((char *)m+publication->targets[0].word);
+  uint64_t seen=atomic_load_explicit(word,memory_order_relaxed);
+  while(seen<execution+1 &&
+        !atomic_compare_exchange_weak_explicit(word,&seen,execution+1,memory_order_release,memory_order_relaxed));
 }
 
 /* mesh-collective.h mesh_host_arrived (C3.1, C3.7; the contract's "The region", the phases and `counts`, and D1):
