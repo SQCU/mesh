@@ -1897,26 +1897,25 @@ done:
 
 /* A view's bytes and its last extent's end (mesh-collective.h struct mesh_strided): *bytes its element x its sizes'
    product, *end its offset plus each dimension's last index x its stride plus its element, past which none of its
-   extents ends (every stride nonnegative).  0; EINVAL where it is malformed (mesh-collective.h: "`element` >= 1, `dims`
-   <= MESH_STRIDED_DIMS, every size[d] >= 1 ... EINVAL otherwise, at the plan") or a product or sum passes 64 bits,
-   before anything is written */
+   extents ends (every stride nonnegative).  0; EINVAL where it is malformed (mesh-collective.h: "`element` >= 1, every
+   size[d] >= 1 ... EINVAL otherwise, at the plan") or a product or sum passes 64 bits, before anything is written */
 static int plan_view(const struct mesh_strided *v,uint64_t *bytes,uint64_t *end){
   uint64_t b=v->element,e;
-  if(!b || v->dims>MESH_STRIDED_DIMS || __builtin_add_overflow(v->offset,v->element,&e))return EINVAL;
-  for(uint32_t d=0;d<v->dims;d++){
+  if(!b || __builtin_add_overflow(v->offset,v->element,&e))return EINVAL;
+  for(uint64_t d=0;d<v->dims;d++){
+    const uint64_t size=v->pairs[2*d],stride=v->pairs[2*d+1];
     uint64_t step;
-    if(!v->size[d] || __builtin_mul_overflow(b,v->size[d],&b) ||
-       __builtin_mul_overflow(v->size[d]-1,v->stride[d],&step) || __builtin_add_overflow(e,step,&e))return EINVAL;
+    if(!size || __builtin_mul_overflow(b,size,&b) || __builtin_mul_overflow(size-1,stride,&step) ||
+       __builtin_add_overflow(e,step,&e))return EINVAL;
   }
   *bytes=b;*end=e;
   return 0;
 }
 /* two views alike (mesh-collective.h struct mesh_declared: `from` "the same in every declared transfer of one range"):
-   their offsets, elements and dims, and each size and stride below dims ("size[d] and stride[d] for d >= dims are not
-   read") */
+   their offsets, elements and dims, and their `dims` (size, stride) pairs (struct mesh_strided `pairs`) */
 static int plan_alike(const struct mesh_strided *a,const struct mesh_strided *b){
   if(a->offset!=b->offset || a->element!=b->element || a->dims!=b->dims)return 0;
-  for(uint32_t d=0;d<a->dims;d++)if(a->size[d]!=b->size[d] || a->stride[d]!=b->stride[d])return 0;
+  for(uint64_t k=0;k<2*(uint64_t)a->dims;k++)if(a->pairs[k]!=b->pairs[k])return 0;
   return 1;
 }
 /* A view flattened (R-1: "The compilation flattens each view into its list of (row, offset, bytes) blocks, adjacent
@@ -1929,20 +1928,22 @@ static int plan_alike(const struct mesh_strided *a,const struct mesh_strided *b)
    a run at its offset, and a run that begins where the extent before it ends is merged into it.  The view is well
    formed (plan_view), so no sum passes its end */
 static void plan_extents(const struct mesh_strided *v,void (*visit)(void *,uint64_t,uint64_t),void *context){
-  int d=(int)v->dims-1;
+  const uint64_t *pair=v->pairs;
+  int64_t d=(int64_t)v->dims-1;
   uint64_t run=v->element;
-  for(;d>=0 && (v->size[d]==1 || v->stride[d]==run);d--)run*=v->size[d];
-  uint64_t index[MESH_STRIDED_DIMS]={0},at=v->offset,start=at,length=0;
+  for(;d>=0 && (pair[2*d]==1 || pair[2*d+1]==run);d--)run*=pair[2*d];
+  uint64_t index[(size_t)v->dims+1],at=v->offset,start=at,length=0;
+  memset(index,0,sizeof index);
   for(;;){
     if(length && start+length==at)length+=run;
     else{
       if(length)visit(context,start,length);
       start=at;length=run;
     }
-    int e=d;
-    for(;e>=0 && ++index[e]==v->size[e];e--){at-=(v->size[e]-1)*v->stride[e];index[e]=0;}
+    int64_t e=d;
+    for(;e>=0 && ++index[e]==pair[2*e];e--){at-=(pair[2*e]-1)*pair[2*e+1];index[e]=0;}
     if(e<0)break;
-    at+=v->stride[e];
+    at+=pair[2*e+1];
   }
   visit(context,start,length);
 }
@@ -2289,8 +2290,8 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   for(uint32_t j=0;j<given;j++)p->uncovered[j]=(uint32_t)plan_blocks(m,values[j].section.bytes);
   /* 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1;
      mesh-collective.h struct mesh_strided and struct mesh_declared; "The revisions of 14b9a757", R-1), reversing the
-     test of `bytes`: each declared transfer's two views well formed (plan_view: "`element` >= 1, `dims` <=
-     MESH_STRIDED_DIMS, every size[d] >= 1"), naming as many bytes ("The two name as many bytes (EINVAL otherwise)"),
+     test of `bytes`: each declared transfer's two views well formed (plan_view: "`element` >= 1, every size[d] >=
+     1"), naming as many bytes ("The two name as many bytes (EINVAL otherwise)"),
      at every rank, before anything is written.  What must stay: EHOSTUNREACH for an end outside the map; EINVAL for a
      transfer to its own source; ENOMEM for a range whose blocks pass 32 bits */
   for(uint32_t i=0;i<count;i++){

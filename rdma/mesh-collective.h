@@ -424,15 +424,15 @@ enum { MESH_JOIN, MESH_PAGES };
    bytes of one element.  Its bytes are, for every index (i_0 .. i_{dims-1}) with i_d < size[d], the extent
    [offset + sum_d i_d x stride[d], + element) of each copy of the value, in the order of the index with the last
    dimension fastest (C order, the order in which torch's copy_ matches two tensors' elements); `dims` 0 is the one
-   extent [offset, offset + element).  `element` >= 1, `dims` <= MESH_STRIDED_DIMS, every size[d] >= 1, and every extent
-   within the value's bytes (struct mesh_section `bytes`): EINVAL otherwise, at the plan.  size[d] and stride[d] for d
-   >= dims are not read.  What must stay: 152 bytes, every field where it is (rdma/mesh.py Strided) */
-#define MESH_STRIDED_DIMS 8u
-struct mesh_strided { uint64_t offset,element; uint32_t dims,padding; uint64_t size[MESH_STRIDED_DIMS],
-                      stride[MESH_STRIDED_DIMS]; };
-_Static_assert(sizeof(struct mesh_strided)==152 && offsetof(struct mesh_strided,dims)==16 &&
-               offsetof(struct mesh_strided,size)==24 && offsetof(struct mesh_strided,stride)==88,
-               "mesh_strided: rdma/mesh.py Strided");
+   extent [offset, offset + element).  `pairs`: the view's `dims` (size, stride) pairs, size[d] at pairs[2 d] and
+   stride[d] at pairs[2 d + 1], read for d < dims alone (MPI 4.1 §6.1.3, MPI_TYPE_CREATE_SUBARRAY: "The ndims parameter
+   specifies the number of dimensions in the full data array and gives the number of elements in array_of_sizes,
+   array_of_subsizes, and array_of_starts").  `element` >= 1, every size[d] >= 1, and every extent within the value's
+   bytes (struct mesh_section `bytes`): EINVAL otherwise, at the plan.  What must stay: every field where it is
+   (rdma/mesh.py Strided) */
+struct mesh_strided { uint64_t offset,element; uint32_t dims,padding; const uint64_t *pairs; };
+_Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,dims)==16 &&
+               offsetof(struct mesh_strided,pairs)==24,"mesh_strided: rdma/mesh.py Strided");
 /* 2026-11-06 (R-1; "The revisions of 14b9a757"), reversing `first` and `bytes`: a declared transfer's range is the bytes
    its source's value shows through `from`, landing in the bytes its destination's value shows through `to`, both every
    rank's alike (a node plans every end's instructions from them: the note before struct mesh_value).
@@ -445,8 +445,8 @@ _Static_assert(sizeof(struct mesh_strided)==152 && offsetof(struct mesh_strided,
    `first` and `bytes` go: a range's place is its views, and its bytes theirs.  What must stay: `source`,
    `destination`, `identity`, `kind` and `value` where they were */
 struct mesh_declared { uint32_t source,destination,identity,kind,value,padding; struct mesh_strided from,to; };
-_Static_assert(sizeof(struct mesh_declared)==328 && offsetof(struct mesh_declared,from)==24 &&
-               offsetof(struct mesh_declared,to)==176,"mesh_declared: rdma/mesh.py Declared");
+_Static_assert(sizeof(struct mesh_declared)==88 && offsetof(struct mesh_declared,from)==24 &&
+               offsetof(struct mesh_declared,to)==56,"mesh_declared: rdma/mesh.py Declared");
 /* aot-compilation A3: the weighting operand, one entry a declared transfer, the program's weighting function's result.
    produced: w of the range's production at its source; consumed: w of the consumption at declared[i]'s destination
    (for MESH_PAGES, of each page's task); read: w of the source's own read of the range (where a dependence names it);
