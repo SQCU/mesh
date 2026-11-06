@@ -514,3 +514,16 @@ The implementation of the third sources (mesh 6a8a8524, 60f43ddb) raised two poi
   - Each distinct DynamicSlice a node reads of a value made from an attribute by views alone is its own never-freed
     value.
   - It is loaded once in make() by torch's `copy_` from that view of the state_dict tensor.
+
+## Stops that remain (2026-11-06, at mesh de70486f)
+
+- **Sends pending when a link ends.** A send that is posted but still pending when its plan is cancelled by a link loss
+  is never counted.
+  - Its completion is flushed by rdma/mesh-child.c `lanes_flush`. That is a failport lifecycle file, reused verbatim,
+    and it raises no count.
+  - So that execution's wait ends with ETIMEDOUT after MESH_PLATFORM_NS without progress, not with ECANCELED. The wait
+    is bounded.
+  - **Missing source:** how those completions reach the counter without changing mesh-child.c.
+- **The u copies against one-copy items** (the second stops' item 7). They stay unordered with each other, costing pages
+  only.
+  - **Missing source:** Hendren, Gao, Altman and Mukerji's cyclic interval graphs (1992), named and not yet read.
