@@ -610,7 +610,8 @@ void streams_cancel(const struct port *port);
    after it stores the view (under `view_map`), and by map_adopt, after it stores no view installed (hdr `view` 0: a
    bridge started again is a new process, "A bridge's counter is the identifier of the last view it installed, 0
    before its first"), on the bridge parent's one thread; a
-   move of this node's own map ends no plan (its link losses cancel their receives as before).  What must stay: the
+   move of this node's own map ends no plan (its link losses cancel the plans whose lists name the lost cable's peer:
+   mesh-flow.c streams_cancel).  What must stay: the
    fence before any plan or its `executions` is read; on the parent's one thread */
 void plan_stale(void);
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): plan_sequences_inside's declaration

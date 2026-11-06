@@ -2258,18 +2258,17 @@ int guard_raise(struct port *port){
   return 1;
 }
 
-/* this node's receives of one standing plan (its state section `words`, which its caller found standing at a claim
-   head: plan_after) from the node of map index `from` (UINT32_MAX: every receive) cancelled in the bridge parent
-   (streams_cancel, plan_stale), as plan_end cancels its child's: for each such entry of the
-   list (copy c's at [c n, c n + n)), its range's count of copy c raised to its final value, the entry's `pages` x the
-   executions t < `executions` (the plan's word, read once) with t mod u == c, never lowered, and woken (count_raise;
-   design/disjoint-pages-change-request.md, C3.1; design/disjoint-pages-revision-coordination.md, "The bridge"); no
-   phase is written.  The parent keeps no record of which receives landed (the children's `landings`), so it raises
-   every such count: one already at its final value (every arrival in, or an earlier cancellation) is left as it is,
-   and the entries of one range raise its word once.  A plan whose copies are 0 or do not divide its entries, or whose
-   entries lie outside the region (plan_inside), which every port refuses (link_prepare, EINVAL), names no count to
-   raise; nor does a receive entry whose `count` is
-   0 (a relay's own receive, which nobody waits on: 2026-11-04, the coordinator's ruling on review 15's finding 1).
+/* one standing plan here cancelled whole in the bridge parent (its state section `words`, which its caller found
+   standing: plan_from, mesh_algo_standing), every receive of it and every synchronization edge into it (streams_cancel,
+   plan_stale), as plan_end cancels its child's: for each receive entry of the list (copy c's at [c n, c n + n)), its
+   range's count of copy c raised to its final value, the entry's `pages` x the executions t < `executions` (the plan's
+   word, read once) with t mod u == c, never lowered, and woken (count_raise; design/disjoint-pages-change-request.md,
+   C3.1; design/disjoint-pages-revision-coordination.md, "The bridge"); no phase is written.  The parent keeps no record
+   of which receives landed (the children's `landings`), so it raises every such count: one already at its final value
+   (every arrival in, or an earlier cancellation) is left as it is, and the entries of one range raise its word once.  A
+   plan whose copies are 0 or do not divide its entries, or whose entries lie outside the region (plan_inside), which
+   every port refuses (link_prepare, EINVAL), names no count to raise; nor does a receive entry whose `count` is 0 (a
+   relay's own receive, which nobody waits on: 2026-11-04, the coordinator's ruling on review 15's finding 1).
    2026-11-04, sub-assignment 6: reversing 2026-11-03's cancellation, UINT64_MAX stored into the cancel word of each
    not-landed entry's execution (C4: the cancel word); what must stay: a count only raised, and no phase written.
    2026-11-04, owner B1 (design/compilation-coordination.md, Q5; e6bd7db2's section 6, "Cancellations, over every
@@ -2303,7 +2302,7 @@ int guard_raise(struct port *port){
    a release that runs later on this thread, closed or not, and every count word computed from its entries is stored
    while they are held.  What must stay: this walk and the release on one thread.
    2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", BS and VW): where the whole plan is
-   cancelled (`from` UINT32_MAX: plan_stale, a map's move or a view's installation), its synchronization edge's count
+   cancelled (plan_stale, a map's move or a view's installation), its synchronization edge's count
    into this node (mesh.h struct mesh_state `wait_count`, this thread its one writer) raised to UINT64_MAX and its
    waiter woken, so the program's start that waits on it ends at once and reads the moved serial (mesh-call.h
    mesh_transfers_start: ESTALE).  Why: design/aot-compilation-change-request.md, appendix item 2, "The only waits are
@@ -2316,14 +2315,16 @@ int guard_raise(struct port *port){
    region-shared), where the one edge's `wait_count` was.  Why: point 4, the program's whole IPC graph, a plan an actor
    a call, so a plan has as many edges into it here as Convert-to-SC-graph added (BSL §9, Fig. 6); appendix item 2:
    "Each ends when its source moves on, or when the view ends and the plan with it (`ESTALE`)".  What must stay: each
-   count only raised, this thread its one writer */
-static void plan_cancel(struct mesh_state *words,uint32_t from){
-  if(from==UINT32_MAX){
-    struct mesh_sync *edge=mesh_syncs(M,words);
-    for(uint32_t e=0;e<words->waits;e++){
-      atomic_store_explicit(&edge[e].count,UINT64_MAX,memory_order_release);
-      os_sync_wake_by_address_all(&edge[e].count,sizeof edge[e].count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-    }
+   count only raised, this thread its one writer.
+   design/problems-of-14b9a757-change-request.md item 11 (E. A. Lee and S. Ha's self-timed strategy, as S. S.
+   Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §2, state it: "retain the
+   processor assignment and actor ordering specified by the fully static schedule"): every caller cancels the plan
+   whole, a link loss as a view change does, so `from` goes */
+static void plan_cancel(struct mesh_state *words){
+  struct mesh_sync *edge=mesh_syncs(M,words);
+  for(uint32_t e=0;e<words->waits;e++){
+    atomic_store_explicit(&edge[e].count,UINT64_MAX,memory_order_release);
+    os_sync_wake_by_address_all(&edge[e].count,sizeof edge[e].count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   }
   /* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
      "`plan_inside` ... (mesh-flow.c ... 2053)"; "The revisions of 55b9cbad"): the return where `copies` was 0 or did
@@ -2336,11 +2337,8 @@ static void plan_cancel(struct mesh_state *words,uint32_t from){
   for(uint32_t c=0;c<copies;c++){
     const uint64_t serves=copy_executions(executions,copies,c);
     if(!serves)continue;
-    for(uint64_t j=c*n;j<c*n+n;j++){
-      const uint32_t direction=list[j].direction,node=list[j].node;
-      if(direction!=MESH_RECEIVE || (from!=UINT32_MAX && node!=from))continue;
-      count_raise(region_word(list[j].count),(uint64_t)list[j].pages*serves);
-    }
+    for(uint64_t j=c*n;j<c*n+n;j++)
+      if(list[j].direction==MESH_RECEIVE)count_raise(region_word(list[j].count),(uint64_t)list[j].pages*serves);
   }
 }
 /* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
@@ -2396,9 +2394,9 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:699-711 streams_cancel (11807bec), reduced to what it is under the page
    lists: the tag's streams of a port live no more and their words ~0; here, as its link is lost or the bridge stops
-   (mesh-ports.c port_lost, mesh-children.c child_reaped, the stop), this node's receives not landed from the port's
-   peer (its index in the map; none where the map holds no record of it), every one where `port` is NULL, cancelled
-   (plan_cancel of the plan written, its generation hdr `plan` read at the call, review 8's finding 7: each one's
+   (mesh-ports.c port_lost, mesh-children.c child_reaped, the stop), each plan whose lists name the port's peer (none
+   where the view holds no record of it), every plan where `port` is NULL, cancelled whole (plan_cancel of the plan
+   written, its generation hdr `plan` read at the call, review 8's finding 7: each one's
    count raised to its final value, no phase written; design/disjoint-pages-change-request.md, C3.1: "A link loss is
    such a cancellation"), and the port's (every port's) plan no longer loaded (`prepared` 0) where
    no child of it lives: a live child's requests may still name the plan's pages, so its `prepared` is its own to clear
@@ -2408,7 +2406,8 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    raises the counts of the executions the plan's `executions` asks by then (2026-11-04, sub-assignment 6: the cancel
    word, UINT64_MAX and never cleared, gone: C4).  A cancel again comes after the loss has zeroed `port->peer` (mesh-ports.c
    port_lost, which cancels first), so each port's peer at its last cancel with one is kept (`cancelled`, the parent's,
-   its node, its map index then, or every receive where the map was not read) and a cancel with no peer cancels by it,
+   its node, its map index then and the view that index was read in, or every plan where the view was not read) and a
+   cancel with no peer cancels by it,
    as at the tag (review R2, C1).  The parent never sees its child load a plan, so the peer is kept at that first cancel,
    where the loss's own cancel reads it.
    2026-11-04, owner B1 (design/compilation-coordination.md, Q5; e6bd7db2's section 6, "Cancellations, over every
@@ -2427,14 +2426,23 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on the
    view's map"; "The revisions of 14b9a757", A7): the lost peer's map index its place in ascending node-id order among
    the installed view's records (view_read: mesh-map.h mesh_view_records, hdr `view_nodes`), the index the plans'
-   entries name, where it was its place in this node's own map; every receive where the view is not read, as where the
+   entries name, where it was its place in this node's own map; every plan where the view is not read, as where the
    map was not.  A plan of another view was cancelled whole as the view was installed (plan_stale), and a raise of a
-   count at its final value leaves it there (count_raise).  What must stay: as above */
-static struct cancelled { uint32_t node,index,every; } cancelled[MESH_PORTS];
+   count at its final value leaves it there (count_raise).  What must stay: as above.
+   design/problems-of-14b9a757-change-request.md item 11 (E. A. Lee and S. Ha's self-timed strategy, as S. S.
+   Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §2, state it: "retain the
+   processor assignment and actor ordering specified by the fully static schedule ... Each processor executes the
+   actors assigned to it in the order specified at compile time"; the plan's processors are its cables): each plan
+   whose lists name the lost cable's peer, the places toward its index (mesh.h mesh_algo_adjacent), cancelled whole
+   (plan_cancel), as a view change cancels it (plan_stale), where its receives from the peer alone were.  The index
+   names the operand's entries only in the view it was read in (plans_load), so the operand's plans are cancelled by it
+   only where the operand's view is that one.  Every child of the port is spawned after this call (mesh-ports.c
+   port_lost and mesh-children.c child_reaped call it before mesh-ports.c port_open's child_spawn) */
+static struct cancelled { uint32_t node,index,every; struct mesh_view_id view; } cancelled[MESH_PORTS];
 void streams_cancel(const struct port *port){
   struct mesh_state *words;
   if(!port){
-    for(uint32_t k=0;(words=plan_from(&k));k++)plan_cancel(words,UINT32_MAX);
+    for(uint32_t k=0;(words=plan_from(&k));k++)plan_cancel(words);
     uint64_t live=0;
     for(uint32_t p=0;p<port_count;p++){
       if(ports[p].child)live|=UINT64_C(1)<<ports[p].index;
@@ -2446,13 +2454,19 @@ void streams_cancel(const struct port *port){
   struct cancelled *last=cancelled+port->index;
   if(port->peer){
     struct mesh_record *records=NULL;uint64_t count=0;
-    struct mesh_view_id view;
+    struct mesh_view_id view={0};
     const int error=view_read(&records,&count,&view);
-    *last=(struct cancelled){.node=port->peer,.index=error?UINT32_MAX:map_index(records,count,port->peer),.every=error!=0};
+    *last=(struct cancelled){.node=port->peer,.index=error?UINT32_MAX:map_index(records,count,port->peer),
+                             .every=error!=0,.view=view};
     free(records);
   }
-  if(last->node && (last->every || last->index!=UINT32_MAX))
-    for(uint32_t k=0;(words=plan_from(&k));k++)plan_cancel(words,last->every?UINT32_MAX:last->index);
+  if(last->node && last->every)for(uint32_t k=0;(words=plan_from(&k));k++)plan_cancel(words);
+  else if(last->node && last->index!=UINT32_MAX && mesh_algo_open(M) &&
+          !mesh_view_compare(mesh_plan_view(mesh_algo_state(M,mesh_algo(M),0)),last->view)){
+    uint32_t listed;
+    const uint32_t *adjacent=mesh_algo_adjacent(M,last->index,&listed);
+    for(uint32_t j=0;j<listed;j++)if((words=mesh_algo_standing(M,adjacent[j])))plan_cancel(words);
+  }
   if(!port->child){
     atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
     held_clear(UINT64_C(1)<<port->index);
@@ -2527,5 +2541,5 @@ void plan_stale(void){
   const struct mesh_view_id view=mesh_view_installed(M,memory_order_relaxed);
   struct mesh_state *words;
   for(uint32_t k=0;(words=plan_from(&k));k++)
-    if(mesh_view_compare(mesh_plan_view(words),view))plan_cancel(words,UINT32_MAX);
+    if(mesh_view_compare(mesh_plan_view(words),view))plan_cancel(words);
 }
