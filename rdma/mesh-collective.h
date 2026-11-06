@@ -327,8 +327,9 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
      rows itself (mesh-dataflow.h mesh_view_compose) once the plan is written, and binds each value at its place in its
      mapping.  Why: G3, "The planner calls `mach_vm_remap` and writes virtual addresses into the IR, and reads
      `getpid()` ... Deciders see pages.  The plan writes rows, and the program's effector maps them."
-   - `shares` out, where `padding` was: 1 where a block of some copy of the value is also a block of another value at
-     this node (two values' items on one chain of the one allocation, or a struct mesh_share), else 0.  Why: K4, "the
+   - `shares` out, where `padding` was: 1 where a page bound in one of the value's rows is bound in another row at this
+     node (another value's, or another copy's of the same value: items on one chain of the one allocation, or a struct
+     mesh_share), else 0; a mapping of every copy puts two such rows at two virtual addresses of one page.  Why: K4, "the
      plan knows which blocks two values share and where one hands over to the next.  The flush goes on those barriers
      alone": a program that reads its values through a mapping reads two such values at two virtual addresses of one
      page, and only a barrier between their accesses needs the alias flush (metal-microbench metal_recording.m
