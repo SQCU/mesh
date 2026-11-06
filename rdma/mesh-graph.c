@@ -1,6 +1,5 @@
 #include "mesh-graph.h"
 #include <errno.h>
-#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,7 +130,7 @@ uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uin
            *treel=calloc((size_t)n+1,sizeof *treel),*hits=calloc((size_t)room+1,sizeof *hits),made=0;
   uint32_t *head=malloc(((size_t)count+1)*sizeof *head),*next=malloc(((size_t)room+1)*sizeof *next);
   unsigned char *done=calloc((size_t)n+1,1);
-  int failed=!load || !add || !len || !dist || !up || !upl || !tree || !treel || !hits || !done || !head || !next || !(eps>0);
+  const int failed=!load || !add || !len || !dist || !up || !upl || !tree || !treel || !hits || !done || !head || !next;
   for(uint32_t d=0;!failed && d<count;d++)head[d]=UINT32_MAX;
   double least=0,total=0;
   for(uint32_t e=0;!failed && e<E;e++)if(!least || cap[e]<least)least=cap[e];
@@ -141,10 +140,9 @@ uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uin
     double most=0;
     for(size_t e=0;e<2*(size_t)E;e++)if(load[e]/cap[e/2]>most)most=load[e]/cap[e/2];
     for(size_t e=0;e<2*(size_t)E;e++){len[e]=mesh_graph_exp(eps*(load[e]/cap[e/2]-most)/width)/cap[e/2];add[e]=0;}
-    for(uint32_t d=0;!failed && d<count;d++){
+    for(uint32_t d=0;d<count;d++){
       const double u=upward[d],w=downward[d];
       for(uint32_t v=0;v<n;v++){dist[v]=INFINITY;up[v]=UINT32_MAX;upl[v]=UINT32_MAX;done[v]=0;tree[v]=UINT32_MAX;treel[v]=UINT32_MAX;}
-      if(root[d]>=n){failed=1;break;}
       dist[root[d]]=0;up[root[d]]=root[d];
       /* the least-length tree toward the root: a direction's length weighed by the bytes that cross it, up toward the
          root (from the leaf's side) and down from it */
@@ -162,16 +160,13 @@ uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uin
         }
       }
       tree[root[d]]=root[d];
-      for(uint32_t v=0;v<n && !failed;v++){
+      for(uint32_t v=0;v<n;v++){
         if(v==root[d] || !leaf(context,d,v))continue;
-        if(up[v]==UINT32_MAX){failed=1;break;}
         for(uint32_t at=v;tree[at]==UINT32_MAX;at=up[at]){tree[at]=up[at];treel[at]=upl[at];}
       }
-      if(failed)break;
       const struct flow_same same={parent,tree,n};
       uint32_t k=mesh_graph_keyed_find(head,next,d,flow_same,&same);
       if(k==UINT32_MAX){
-        if(made>=room){failed=1;break;}
         demand[made]=d;
         memcpy(parent+(size_t)made*n,tree,n*sizeof *tree);
         mesh_graph_keyed_add(head,next,d,made);
@@ -254,7 +249,6 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
   for(uint64_t k=0;k<units;k++){
     uint32_t best=UINT32_MAX;double soon=INFINITY;
     for(uint32_t l=0;l<machines;l++){
-      if(!(rate[l]>0))continue;
       const double at=(double)(carried[l]+bytes[k])/rate[l];
       if(best==UINT32_MAX || at<soon){soon=at;best=l;}
     }
@@ -348,34 +342,30 @@ static size_t lags_relax(uint32_t *heap, uint32_t *place, uint32_t *distance, si
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
                     uint32_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
                     const uint32_t *source,uint32_t targets,const uint32_t *target,uint32_t *lags) {
-  const size_t edges = first[vertices];
-  if (edges >= SIZE_MAX / sizeof(uint32_t)) return ENOMEM;
-  uint32_t *heads = malloc((edges + 1) * sizeof *heads), *weights = malloc((edges + 1) * sizeof *weights);
   uint32_t *distance = malloc(((size_t)vertices + 1) * sizeof *distance);
   uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap), *place = malloc(((size_t)vertices + 1) * sizeof *place);
   unsigned char *wanted = calloc((size_t)vertices + 1, 1);
-  const int result = !heads || !weights || !distance || !heap || !place || !wanted ? ENOMEM : 0;
+  const int result = !distance || !heap || !place || !wanted ? ENOMEM : 0;
   uint32_t distinct = 0;
-  for (size_t k = 0; !result && k < edges; k++) { heads[k] = head(context, k); weights[k] = lag(context, k); }
   for (uint32_t x = 0; !result && x < targets; x++)
     if (!wanted[target[x]]) { wanted[target[x]] = 1; distinct++; }
-  for (uint32_t s = 0; !result && distinct && s < sources; s++) {
+  for (uint32_t s = 0; !result && s < sources; s++) {
     for (uint32_t v = 0; v < vertices; v++) { distance[v] = UINT32_MAX; place[v] = UINT32_MAX; }
     const uint32_t from = source[s];
     size_t count = 0;
     for (size_t k = first[from]; k < first[from + 1]; k++)
-      count = lags_relax(heap, place, distance, count, heads[k], weights[k]);
+      count = lags_relax(heap, place, distance, count, head(context, k), lag(context, k));
     for (uint32_t left = distinct; count;) {
       const uint32_t at = heap[0];
       place[at] = UINT32_MAX;
       if (--count) { heap[0] = heap[count]; heap_down(heap, place, lags_before, distance, count, 0); }
       if (wanted[at] && !--left) break;
       for (size_t k = first[at]; k < first[at + 1]; k++)
-        count = lags_relax(heap, place, distance, count, heads[k], (uint64_t)distance[at] + weights[k]);
+        count = lags_relax(heap, place, distance, count, head(context, k), (uint64_t)distance[at] + lag(context, k));
     }
     for (uint32_t x = 0; x < targets; x++) lags[(size_t)s * targets + x] = distance[target[x]];
   }
-  free(heads); free(weights); free(distance); free(heap); free(place); free(wanted);
+  free(distance); free(heap); free(place); free(wanted);
   return result;
 }
 
@@ -669,9 +659,7 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
                          const uint64_t *need, uint64_t *color, uint64_t *colors) {
   const size_t n = intervals, keys = 4 * n;
   uint64_t elements = 0;
-  for (uint32_t i = 0; i < intervals; i++)
-    if (__builtin_add_overflow(elements, need[i], &elements)) return ENOMEM;
-  if (elements >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
+  for (uint32_t i = 0; i < intervals; i++) elements += need[i];
   struct cover_key *key = malloc((keys + 1) * sizeof *key), *by_end = malloc((n + 1) * sizeof *by_end);
   uint64_t *point = malloc((keys + 1) * sizeof *point), *width = malloc((keys + 1) * sizeof *width);
   uint64_t *spot = malloc((keys + 1) * sizeof *spot), *place = malloc((n + 1) * sizeof *place);
@@ -724,15 +712,12 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
     }
     for (size_t f = 0; !result && f < fatspots; f++) {
       const size_t r = row[f + 1], above = (f ? row[f] : 0) + 1;
-      size_t links;
       if (r > most_row) most_row = r;
-      if (__builtin_mul_overflow(r, above, &links) || __builtin_add_overflow(link_room, links, &link_room) ||
-          __builtin_add_overflow(node_room, r, &node_room)) result = ENOMEM;
+      link_room += r * above;
+      node_room += r;
       total += r;
     }
     for (size_t f = 0; !result && f < fatspots; f++) row[f + 1] += row[f];
-    if (!result && (total >= SIZE_MAX / sizeof(size_t) || node_room >= SIZE_MAX / sizeof(size_t) - 1 ||
-                    link_room >= SIZE_MAX / sizeof(size_t) - 1)) result = ENOMEM;
     if (!result) {
       live = malloc((total + 1) * sizeof *live);
       node_of = malloc((node_room + 1) * sizeof *node_of);
@@ -849,11 +834,6 @@ static int completion_key_before(const void *a, const void *b) {
   if (x->at != y->at) return x->at < y->at ? -1 : 1;
   return (x->vertex > y->vertex) - (x->vertex < y->vertex);
 }
-/* an edge i -> j as one word, i in the high half, for its sort (each edge once among the rows: LP4) */
-static int completion_edge_before(const void *a, const void *b) {
-  const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-  return (x > y) - (x < y);
-}
 /* mesh-graph.h mesh_graph_completion_times.  R5 (mesh 0e56d8da), "How: the program" and "How: solving it", built as
    rows and handed to HiGHS through its C API (highs_c_api.h, HiGHS 1.15.1); no solver is written here (R5: "The code
    builds the rows and calls the library.  It writes no solver of its own").
@@ -897,22 +877,15 @@ static int completion_edge_before(const void *a, const void *b) {
    HiGHS's own solve. */
 int mesh_graph_completion_times(uint32_t vertices, const double *length, const uint32_t *resource, uint32_t resources,
                                 size_t edges, const uint32_t *from, const uint32_t *to, double *completion) {
-  for (uint32_t j = 0; j < vertices; j++)
-    if (!(length[j] >= 0 && length[j] <= DBL_MAX) || resource[j] >= resources) return EINVAL;
-  for (size_t e = 0; e < edges; e++)
-    if (from[e] >= vertices || to[e] >= vertices || from[e] == to[e]) return EINVAL;
-  if (!vertices) return 0;
   const uint64_t room = (uint64_t)vertices + edges + resources + 1;
-  if (room >= INT32_MAX / 2) return ENOMEM;
   const HighsInt columns = (HighsInt)vertices + 1;
-  uint64_t *pair = malloc((edges + 1) * sizeof *pair);
   size_t *first = malloc(((size_t)resources + 1) * sizeof *first), *member = malloc(((size_t)vertices + 1) * sizeof *member);
   struct completion_key *key = malloc(((size_t)vertices + 1) * sizeof *key);
   double *lower = malloc(room * sizeof *lower), *upper = malloc(room * sizeof *upper);
   double *value = malloc(2 * room * sizeof *value), *column = malloc((size_t)columns * sizeof *column);
   double *dual = malloc((size_t)columns * sizeof *dual), *row_value = NULL, *row_dual = NULL;
   HighsInt *start = malloc(room * sizeof *start), *index = malloc(2 * room * sizeof *index);
-  void *highs = pair && first && member && key && lower && upper && value && column && dual && start && index
+  void *highs = first && member && key && lower && upper && value && column && dual && start && index
                     ? Highs_create() : NULL;
   int result = highs ? 0 : ENOMEM;
   double tolerance = 0, infinity = 0;
@@ -942,11 +915,8 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
       index[nonzeros] = (HighsInt)vertices; value[nonzeros++] = 1;
       index[nonzeros] = (HighsInt)j; value[nonzeros++] = -1;
     }
-    for (size_t e = 0; e < edges; e++) pair[e] = (uint64_t)from[e] << 32 | to[e];
-    qsort(pair, edges, sizeof *pair, completion_edge_before);
     for (size_t e = 0; e < edges; e++) {
-      if (e && pair[e] == pair[e - 1]) continue;
-      const uint32_t i = (uint32_t)(pair[e] >> 32), j = (uint32_t)pair[e];
+      const uint32_t i = from[e], j = to[e];
       start[total] = nonzeros; lower[total] = length[j]; upper[total] = infinity; total++;
       index[nonzeros] = (HighsInt)j; value[nonzeros++] = 1;
       index[nonzeros] = (HighsInt)i; value[nonzeros++] = -1;
@@ -1001,7 +971,7 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
   }
   if (!result) for (uint32_t j = 0; j < vertices; j++) completion[j] = column[j];
   if (highs) Highs_destroy(highs);
-  free(pair); free(first); free(member); free(key); free(lower); free(upper); free(value); free(column); free(dual);
+  free(first); free(member); free(key); free(lower); free(upper); free(value); free(column); free(dual);
   free(row_value); free(row_dual); free(start); free(index);
   return result;
 }
@@ -1048,8 +1018,6 @@ static int order_before(const void *context, uint32_t a, uint32_t b) {
    count once; memory O(V + E). */
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place) {
-  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
-  if (edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
   size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
   size_t *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
   uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap);
@@ -1098,10 +1066,6 @@ static void scratch_free(struct graph_scratch *s) {
 }
 /* every array, or ENOMEM (also where |V| + 1 rows or E positions pass their words) */
 static int scratch_alloc(struct graph_scratch *s, uint32_t vertices, size_t edges) {
-  s->first = s->order = s->at = NULL;
-  s->index = s->low = s->stack = s->frame = s->component = NULL;
-  s->distance = NULL;
-  if (vertices == UINT32_MAX || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
   const size_t n = (size_t)vertices + 2;
   s->first = malloc(n * sizeof *s->first); s->order = malloc((edges + 1) * sizeof *s->order);
   s->at = malloc(n * sizeof *s->at); s->index = malloc(n * sizeof *s->index); s->low = malloc(n * sizeof *s->low);
@@ -1119,12 +1083,6 @@ static double time_sum(uint32_t vertices, const double *time) {
 /* EINVAL where an edge names no vertex, or (time not NULL) a time is negative or not finite or their sum is not finite
    (mesh-graph.h: time[v] >= 0, BSL §4.1's "execution time t(v)"; as mesh_graph_completion_times refuses its lengths);
    else 0 */
-static int graph_check(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to) {
-  for (uint32_t v = 0; time && v < vertices; v++) if (!(time[v] >= 0 && time[v] <= DBL_MAX)) return EINVAL;
-  if (time && !(time_sum(vertices, time) <= DBL_MAX)) return EINVAL;
-  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
-  return 0;
-}
 /* R. E. Tarjan's depth-first search for the strongly connected components (Depth-first search and linear graph
    algorithms, SIAM J. Comput. 1(2), 1972) over the rows s->first, s->order: vertex v's edges order[first[v]] ..
    order[first[v + 1] - 1], edge k entering to[k]; rows past |V| are not read.  Each vertex is numbered (index) as the
@@ -1246,10 +1204,8 @@ static int delays_pass(const struct graph_scratch *s, uint32_t vertices, const d
    Every allocation precedes *mean, which an error does not write.  Cost: O(|V| E) for each of at most 201 tests. */
 int mesh_graph_cycle_mean(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
                           const uint64_t *delay, double *mean) {
-  int result = graph_check(vertices, time, edges, from, to);
-  if (result) return result;
   struct graph_scratch s;
-  result = scratch_alloc(&s, vertices, edges);
+  int result = scratch_alloc(&s, vertices, edges);
   if (!result) {
     const double tolerance = cycle_tolerance(vertices, time);
     double lo = 0, hi = time_sum(vertices, time), found = 0;
@@ -1285,25 +1241,20 @@ int mesh_graph_cycle_mean(uint32_t vertices, const double *time, size_t edges, c
    Cost: O(|V| E) a test, at most 65 tests. */
 int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
                          const uint64_t *delay, size_t e, double lambda, uint64_t bound, uint64_t *least) {
-  int result = graph_check(vertices, time, edges, from, to);
-  if (!result && (e >= edges || !(lambda >= 0 && lambda <= DBL_MAX))) result = EINVAL;
-  if (result) return result;
   struct graph_scratch s;
-  result = scratch_alloc(&s, vertices, edges);
-  uint64_t *changed = result ? NULL : malloc((edges + 1) * sizeof *changed);
-  if (!result && !changed) result = ENOMEM;
+  int result = scratch_alloc(&s, vertices, edges);
+  uint64_t *changed = malloc((edges + 1) * sizeof *changed);
+  if (!changed) result = ENOMEM;
   if (!result) {
     const double tolerance = cycle_tolerance(vertices, time);
     for (size_t k = 0; k < edges; k++) changed[k] = delay[k];
-    changed[e] = bound;
-    if (!delays_pass(&s, vertices, time, edges, from, to, changed, lambda, tolerance)) result = ERANGE;
     uint64_t lo = 0, hi = bound;
-    while (!result && lo < hi) {
+    while (lo < hi) {
       const uint64_t mid = lo + (hi - lo) / 2;
       changed[e] = mid;
       if (delays_pass(&s, vertices, time, edges, from, to, changed, lambda, tolerance)) hi = mid; else lo = mid + 1;
     }
-    if (!result) *least = hi;
+    *least = hi;
   }
   scratch_free(&s); free(changed);
   return result;
@@ -1331,10 +1282,8 @@ int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, co
    Every allocation precedes the first output written.  Cost: O(V + E). */
 int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
                           uint32_t *added, uint32_t *added_from, uint32_t *added_to) {
-  int result = graph_check(vertices, time, edges, from, to);
-  if (result) return result;
   struct graph_scratch s;
-  result = scratch_alloc(&s, vertices, edges);
+  int result = scratch_alloc(&s, vertices, edges);
   const size_t n = (size_t)vertices + 1;
   uint32_t *least = malloc(n * sizeof *least), *link = malloc(n * sizeof *link);
   uint32_t *sources = malloc(n * sizeof *sources), *sinks = malloc(n * sizeof *sinks);
@@ -1387,14 +1336,10 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
 int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
                                 const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
                                 const uint32_t *added_to, uint64_t *added_delay) {
-  int result = graph_check(vertices, time, edges, from, to);
-  if (!result) result = graph_check(vertices, NULL, added, added_from, added_to);
-  if (result) return result;
-  if (edges >= SIZE_MAX / sizeof(uint64_t) - added) return ENOMEM;
   const size_t total = edges + added;
   uint32_t *all_from = malloc((total + 1) * sizeof *all_from), *all_to = malloc((total + 1) * sizeof *all_to);
   uint64_t *all_delay = malloc((total + 1) * sizeof *all_delay);
-  result = all_from && all_to && all_delay ? 0 : ENOMEM;
+  int result = all_from && all_to && all_delay ? 0 : ENOMEM;
   double lambda = 0;
   if (!result) {
     for (size_t e = 0; e < edges; e++) { all_from[e] = from[e]; all_to[e] = to[e]; all_delay[e] = delay[e]; }
