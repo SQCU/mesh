@@ -2837,3 +2837,232 @@ triggers one. ND meets A4.
   prerequisite, so any edit of it rebuilt all 216 objects. The operator: "stop arbitrarily rebuilding unchanged
   dependencies as part of linking or assembling whatever runtime our compiler uses". Now (mesh 057174ba) the objects
   are remade only where their tarball, tag or flags change, and builds are verified incrementally.
+
+## The revisions of e4a7398e
+
+The record of the unit whose instruction is design/aot-compilation-change-request.md's appendix item 7, "What the torch
+path adds beyond torch's own work, and removes", and its A4 line on a node the placement operand maps no device, from
+mesh e4a7398e and metal-microbench e9fd7538. It follows item 7 as mesh 9c8c8865 revised it during the unit ("A publish
+waits for nothing", "No output is copied") and as 0ffd880e revised it again (allocator.mm's event form cited alone).
+Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every sub-agent)". Each decision taken where the
+documents are silent is marked as the implementer's and is not a requirement of the documents. No sub-agent was
+started. Nothing was run but the compilers, `python3 -m py_compile`, the three integration builds (incremental) and the
+extension's build against /Users/mdot/.venv-mesh-uv's torch 2.14.0, which the coordinator allowed. Torch claims below
+were read in torch 2.14.0's sources and headers there (lib/python3.12/site-packages/torch, torchgen), not v2.11.0's.
+
+### Done
+
+- **OV. Each operator as its out variant** (item 7: "run each operator as its out variant into its result's placed
+  pages"; ExecuTorch, "Concepts": "an operator's out variant will take in a pre-allocated tensor to its out kwarg").
+  rdma/mesh_compile.py `_forms` runs each operator item on PyTorch's meta device (A4: "Most operations can be performed
+  on meta tensors"), takes the ATen overload the call reaches (`_overload`) and its out variant by torch's own
+  `torch._library._out_variant.to_out_variant` ("Given a functional operator overload, return its corresponding out
+  variant"; inductor's use: "Try to lower single output functional custom ops to their out-variant", torch/_inductor/
+  ir.py). `_run` calls that OpOverload with `out=` the result's placed pages. The program's own operators are out
+  variants too: the AllReduce's and ReduceScatter's sums `torch.add(..., out=)`, the AllGather's and AllToAll's
+  `torch.cat(..., out=)`, a halo region `torch.cat(..., out=)` of the narrows it covers and `fill_` of the parts outside
+  the operand, the CollectivePermute's zeros `zero_()` of its pages. Commit 63638057.
+- **PV. Every value placed by the one allocator** (item 7: "place every value of the node's partitioned graph by the one
+  allocator. A view (a narrow, a slice) is its base's pages, and its base lives as long as it does"; C3.2, C3.3).
+  - `_over` gives each key the set of keys whose pages it may lie over, a view its base's, an out-variant result its
+    own. It replaces `placed`, which held an AllReduce's result and its slices only, and `_readers` and `_consumer` read
+    it.
+  - `_place` makes every key with pages of its own, and no range's, a local value of mesh_plan's allocator
+    (MESH_EXECUTION, `wire` 0, `begin` its producer's item, `end` its last reader's), a reader of a view being its
+    base's reader. `IR.value` is the one constructor of a routed or local value and its layout.
+- **Sent values made in their sent pages** (item 7: "have each sent value's producer make it in its sent pages, so
+  nothing copies it there"):
+  - a member's AllReduce partial whose producer runs as its out variant, published after that item;
+  - the root's sum, made by `torch.add`'s out variant in its sent pages;
+  - an AllGather's operand whose producer writes pages of its own and which no other collective reads (`inplace`). Its
+    production event moves to its producer's third step, and its reads there are the source's read
+    (MESH_FROM_SOURCE_READ, `_all_gather`).
+  Every other sent value is copied once (where the work stopped, below).
+- **A collective's result is its parts' landed pages** (item 7: "A collective's result is the pages its parts land in"):
+  the AllReduce member's result as before, and the CollectivePermute's result its arrival's pages, where `torch.clone`
+  copied them. Its consumption event now spans its readers (`_collective_permute`).
+- **TP. A publish waits for nothing** (item 7 at 9c8c8865: "a torch MPS event is recorded after the producer's
+  out-variant kernel, the publish is done in that event's notification, and torch's command buffer is committed
+  without waiting"; "On the CPU device ... the publish follows the call").
+  - rdma/mesh-torch.mm `mesh_torch_publish` calls torch's own API in fba41159's event form: `acquireEvent(false,
+    stream)`, `record`, `notify` with the publishes, `synchronize(SyncType::COMMIT)`. Each is as torch 2.14.0's
+    MPSEvent.h and MPSStream.h state it, and each symbol is in its libtorch_cpu.
+  - rdma/mesh-torch.mk builds libmesh-torch.dylib against TORCH, an operand (no venv path in source).
+  - `_publish` publishes CPU values by mesh_host_publish and MPS values in one notification. No `synchronize()` is left
+    on the publish path. `write`'s two synchronizations are gone. Commit 6b06a9c4, 63638057.
+- **NC. No output is copied** (item 7 at 9c8c8865: "Each output is a view of its placed pages and holds until the plan
+  reuses them"): the output item returns each key's tensor, and no `torch.clone` is left in the compiled path.
+- **MD. A4, the meta device** (A4: "Its calls return tensors on PyTorch's meta device"): `_absent` makes each tensor
+  output `torch.empty_strided(..., device='meta')`, where it used the function's device (ND-2, reversed). `_value` takes
+  'meta', so that node's next function, traced from meta tensors, builds every rank's IR. The verification the brief
+  asked for:
+  - These operands are built at such a node exactly as at every rank: the declared transfers (ends from the placement
+    and the map; identities in lowering order; kinds by `_consumer`, which reads targets and local shapes; bytes from
+    element type and local shape, which a meta tensor carries alike) and the dependences (positions from the program,
+    the forms by `_forms` on the meta device at every rank, `inplace`).
+  - So are `group`, `program` and `outstanding` (A10's `_analyse` reads no device).
+  - `layouts` and `values` are this node's and empty there, and `IR.value` refuses a meta tensor at a device of the
+    placement.
+  - `function`, the ordinal, is not, where the device changes between calls (below, documents).
+- **C9.** The hook's remarks on 63638057 ("a topological pass over the program DAG ...", "last-use liveness ...") were
+  met by rdma/mesh_graph.py `forward` (a forward data-flow problem's solution in one pass over a topological order) and
+  `ends` (live intervals' ends over a linear order), with `_over`'s rule and `_place`'s uses as operands. Commit
+  a3ab3044. The hook made no remark on a3ab3044 or 6b06a9c4.
+
+### Found already done
+
+- mesh_plan places a local value: MESH_EXECUTION, `begin <= end` "on this node's own program order", sharing pages
+  only where those intervals do not meet (mesh-collective.h struct mesh_value; mesh-collective.c plan_interferes). No C
+  change was needed to place every value.
+- A received range is read only after mesh_host_arrived reports it (K1), and the AllReduce member's result was its
+  landed pages.
+
+### Decisions taken where the documents are silent (each the implementer's, with its reason)
+
+- **OV-1 (`_call`).** _run's three forms of a call are one function, which `_forms` calls on meta tensors. Reason:
+  one implementation of each computation (D4).
+- **OV-2 (which overload a call takes).**
+  - The ATen name is the call's own: a Tensor method's name; an operator module function's by OPERATORS; a function
+    held by torch's generated bindings (torch._C._VariableFunctions, _nn, _linalg, _special, _fft; torch/__init__.py:
+    `__obj = getattr(_C._VariableFunctions, __name)` ... `globals()[__name] = __obj`), its __name__.
+  - The overload is the first whose schema takes the call's arguments, by
+    `torch._C._check_schema_allow_fake_script_object`. That is torch's own resolution of a packet's call (torch/_ops.py
+    `_call_overload_packet_from_python`) and its ONNX pass's `find_compatible_op_overload` (example: `(tensor, 2)` gives
+    'Tensor_Scalar').
+  - Reason: the out variant is defined on ATen overloads (`to_out_variant` takes an OpOverload), and Dynamo's graph holds
+    torch-level calls.
+  - Python functions that are no binding (F.relu, F.silu, F.max_pool1d to 3d) resolve to none.
+- **OV-3 (an operator whose result may alias).** An overload whose return has an alias set (a view), or no overload, or
+  no meta kernel, or a module the program calls: its result is taken to lie over every operand's pages. Reason: "its
+  base lives as long as it does" (item 7) with no knowledge of which operand is the base.
+  - As a consequence, the readers of an AllReduce's result and their spans now follow views made by operators, where
+    `placed` followed `_reshard`'s and `_region`'s alone. The kinds are unchanged, since a view operator is no
+    elementwise reader.
+- **OV-4 (forms at every rank).** Forms are computed on the meta device at every rank, a node with no device among
+  them, since `inplace` moves AllGather events that every rank declares.
+- **PV-1 (local values' positions).** They are item indices. An item's reads and its write share one position, so an
+  out variant never writes pages it reads. An output's last reader is the output item, so no value of its execution
+  takes its pages.
+- **PV-2 (one buffer a space).** An MPS value's tensors lie over one MTLBuffer for each space (window, outside) of a
+  plan, where each value had its own buffer. Reason: the allocator shares a space's pages among values, and Metal
+  orders accesses by each resource's hazard tracking (MTLResource.h; the old note's own reason for `write`'s first
+  synchronization). Over one buffer, a write after another value's read of the same page is ordered with no wait.
+  - The two spaces share no page.
+  - Each is one run of the claim (mesh-dataflow.h struct mesh_claim).
+  - torch 2.14.0 reads an MPS tensor at its storage offset in place on macOS 15 or later (OperationUtils.h
+    `needsGather`).
+- **PV-3 (inputs and module attributes).** They are not placed: they are the caller's and the module's own tensors, and
+  placing them would be a staging copy. A sent input-derived value is copied once (below).
+- **PV-4 (operators with no out variant).** Their results stay torch's and are placed only where they must be, a sent
+  range, copied once there. Reason: item 7, "What stays": "an operator with no out variant, whose result is copied once
+  into its placed pages where it must be there"; a local value nothing writes but a copy would be such a copy.
+- **PV-5.** A result with no elements runs as it is (mesh_plan refuses a value of 0 bytes).
+- **IP (AllGather in place).** Only where the operand's producer writes pages of its own (an out-variant call, a
+  concatenated region, an AllGather, AllToAll or ReduceScatter result) and no other collective reads the operand.
+  Reason: a value is "one range's alone" (mesh-collective.h), so an operand of two collectives can be made in one
+  range only.
+- **Regions.** A halo region is `torch.cat(out=)` of the narrows its window covers, then `fill_` of the parts with
+  index < 0 or >= size. Reason: that is GSPMD section 4.1's Select by the same mask, with no mask tensor, where
+  `masked_fill.Scalar_out` (autogen) would take one.
+- **TP-1 (the extension's interface).** It takes mesh_host_publish's address and the context from Python and mirrors
+  struct mesh_section, as rdma/mesh.py binds it. Reason: mesh's C headers do not compile as C++ (mesh.h's stdatomic.h
+  and infiniband/verbs.h; compiled to check).
+  - It is linked `-undefined dynamic_lookup` with `-std=c++20`, as torch 2.14.0's cpp_extension builds on macOS ("The
+    darwin linker needs explicit consent to ignore unresolved symbols"). So torch's symbols bind to the program's
+    loaded torch.
+  - Its makefile is its own (rdma/mesh-torch.mk), so rdma/Makefile, the bridge's prerequisite, is unchanged.
+  - EIO where torch throws or schedules no notification.
+- **TP-2.** `record(true)` and `notify(true, ...)` take torch's lock at every call. Reason: fba41159 took it where its
+  caller was off the stream's serial queue, and this caller is Python's thread.
+- **TP-3 (mesh_host_publish).** It raises the supplied word by a compare-and-swap loop that never lowers it, where it
+  stored it. Reason: notifications "may come in any order, so the count only rises" (fba41159's message); C3.7. Its
+  only caller is mesh_compile.py. Commit 6b06a9c4.
+- **TP-4 (retirement).** `_retire`, after its device synchronization, waits out the notifications still to run
+  (`mesh_torch_notifying`), for at most MESH_PLATFORM_NS, before it closes the claim. Reason: a notification writes
+  its plan's state section, which is the bridge's to release once the claim is closed. That is deferred reclamation's
+  grace period (C3.4; McKenney and Slingwine). It is a retirement's wait, not a publish's.
+- **TP-5.** libmesh-torch.dylib is loaded at mesh_compile's import, after torch, as mesh.py loads libmesh. A node
+  without it fails that import with OSError. No deployment script builds it (they are not changed).
+- **NC-1 (how long an output holds).** Until its pages are rewritten: the next execution for a local value (its one
+  copy), u executions later for a routed one. Reason: "u executions later (C3.3)" read as the value's own copies. A
+  program that passes an output into the next call of the same function, or keeps it longer, must clone it itself, as
+  item 7 and CUDAGraph Trees state.
+- **MD-2.** `_value` takes 'meta' everywhere, and `IR.value` refuses a meta tensor at a node the placement maps a
+  device, where no binding exists (a compile-time refusal).
+- **C9-1.** mesh_graph `forward`'s and `ends`' citations (Kam and Ullman's one pass on an acyclic graph; Poletto and
+  Sarkar's live interval) are stated from memory, not read in this unit; neither is quoted.
+
+### Where the work stopped
+
+1. **No concatenation for AllGather and AllToAll.**
+   - The text: "A collective's result is the pages its parts land in, so no concatenation copies them".
+   - The code's facts: a destination's value of a range is "MESH_EXECUTION and wire, its bytes the range's, and one
+     range's alone" (mesh-collective.h), and the colouring places each value apart. A torch tensor is one storage at
+     affine offsets.
+   - So a result over several ranges' pages exists only where those ranges are adjacent in the group's order. No value
+     of the plan gives that, and no document states a value made of several ranges.
+   - The concatenation stays, as `torch.cat`'s out variant into the result's placed pages.
+2. **Parts of a value sent as several ranges.**
+   - The text: "have each sent value's producer make it in its sent pages".
+   - AllToAll's pieces, ReduceScatter's slices and CollectivePermute's halo pieces are parts of one producer's result.
+     An out variant writes one result into one out tensor, and each part's range is a value of its own, placed apart.
+   - Each part is copied once into its sent pages, as is an operand of two collectives, an input-derived operand and an
+     operand no out variant makes.
+
+### Where the documents are wrong, or contradict the code's facts
+
+- **A4, "its next compiled function is traced with the shapes and types every rank's is".** This holds of shapes and
+  types, but not of the compile count.
+  - Dynamo guards each tensor input's device: torch 2.14.0 torch/_dynamo/guards.py `extract_tensor_metadata` returns
+    `(t.shape, t.stride(), t.dtype, t.device, t.requires_grad)`, "Used by TENSOR_MATCH guard check spec".
+  - At a node the placement maps no device, a compiled function called once with the program's own tensors and later
+    with an earlier function's meta outputs is compiled twice. Every other rank compiles it once.
+  - The second compile takes the next ordinal (FUNCTIONS), so plan names (group, function) differ across ranks from
+    then on.
+  - Strides are guarded too. A device node's out-variant outputs are contiguous, while the meta outputs take the fake
+    tensor's strides.
+  - No document states how the ordinals stay alike, so nothing was built for it.
+- **A3 at such a node.** A weighting function that reads `ir.values` or `ir.layouts` gets none there. The unit weights
+  read neither.
+
+### Operators with no out variant met
+
+Read in torch 2.14.0's torchgen/packaged/ATen/native/native_functions.yaml (explicit `.out` overloads and `autogen:`
+out variants), for the ATen function each binding of the partitioner's operator sets names:
+- **No out variant:** einsum; conv1d, conv2d, conv3d and conv_transpose1d to 3d (CompositeImplicitAutograd, decomposed
+  to convolution, which has an autogen out the call does not reach); max_pool1d, max_pool2d, max_pool3d; pad
+  (torch._C._nn.pad, F.pad). Each runs as it is, its result copied once into a sent range where it must be there.
+- **Out variants:** add, sub, mul, div, neg, relu (autogen), tanh, sigmoid, exp, gelu, silu, matmul, mm, bmm, linear,
+  avg_pool1d (autogen), avg_pool2d, avg_pool3d, cat, clone (autogen), zeros.
+- **Views, which make no result of their own:** narrow and getitem.
+- **Not resolved:** the Python functions F.relu, F.silu and F.max_pool1d to 3d, being no binding (OV-2). Each runs as
+  it is, taken as a possible view.
+None was met at run time: nothing was run.
+
+### Commits
+
+- mesh:
+  - 6b06a9c4 (rdma/mesh-torch.mm, mesh-torch.mk, mesh-collective.{c,h}: TP, TP-3);
+  - 63638057 (rdma/mesh_compile.py: OV, PV, IP, TP, NC, CP, MD);
+  - a3ab3044 (rdma/mesh_graph.py, mesh_compile.py: C9);
+  - 25410f84 (mesh-torch.mm's note, as 0ffd880e cites allocator.mm);
+  - this record.
+- metal-microbench: none. e9fd7538 builds against the changed header.
+
+### Integration
+
+At mesh 63638057, with a3ab3044 and 25410f84 changing Python and a comment only after it, and metal-microbench
+e9fd7538. Every build was incremental, and none rebuilt HiGHS.
+- `make -C rdma` exited 0. mesh-flow and libmesh.dylib were remade at 6b06a9c4, since mesh-collective.{c,h} are their
+  inputs. The build took 2.4 s, and a later run was up to date.
+- `make -C rdma native-audit` exited 0.
+- `make .build/e2b_replay` exited 0 in metal-microbench. libmesh_metal.dylib and e2b_replay were remade against the
+  changed mesh-collective.h.
+- `make -C rdma -f mesh-torch.mk TORCH=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch` exited 0 in
+  1.2 to 1.6 s. Its undefined symbols are torch's MPS API and libc++ alone.
+- The lines shown carried no warning or error. The C and Objective-C++ compiles are `-Werror`. codesign's "Mesh Bridge:
+  no identity found" is the Makefile's ad hoc fallback.
+- mesh-collective.c compiled alone first with `-Wall -Wextra -Werror`.
+- rdma/mesh_compile.py and rdma/mesh_graph.py compile (`python3 -m py_compile`). mesh_compile's cache entry was there
+  before; mesh_graph's 3.14 entry was rewritten, and whether it was there before is not known (ignored by .gitignore).
+- Nothing was run: no form, overload resolution, binding or publish here has been exercised.
