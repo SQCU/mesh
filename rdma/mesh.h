@@ -767,7 +767,7 @@ static inline int mesh_view_compare(struct mesh_view_id a,struct mesh_view_id b)
      corrected 2026-11-06), so several begin in one row and a row's publication names none of them alone; the
      declared transfer's index is the IR's own name of it.  Every row's publication (mesh_publication_at) is written by
      nothing now and read by nothing.
-   - `serial` is the Lamport time of the installed view whose map the plan was made on (hdr `view`), every entry's
+   - `serial` is the identifier of the installed view whose map the plan was made on (hdr `view`), every entry's
      `serial` the same, where it was the map serial; the plan stands while that view is installed (A7, corrected
      2026-11-06: "A plan then stands while its view does, and its view while the sequencer's map does").
    - `sequencer` and `boot`: JGroups ViewId.java, "Address of the creator of this view".
@@ -1035,7 +1035,7 @@ struct hdr {
      is the sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates
      the view.  Every member plans on those records"; "The revisions of 14b9a757"): `view_map` and `view`, where
      `vacant16` and `vacant17` were, and `view_off` and `view_nodes`, where `vacant18` and `vacant19` were.  `view` the
-     Lamport time of the view this node's bridge installed (mesh-records.c view_install), 0 before its first, and its
+     identifier of the view this node's bridge installed (mesh-records.c view_install), 0 before its first, and its
      `view_nodes` records (mesh-map.h struct mesh_record), the ones the view's first message carried, at `view_off`
      (mesh-map.h mesh_layout: room `map_room`, laid out once with the region), written under `view_map`, a seqlock as
      `map` is (odd while the bridge parent writes, mesh_notify before and after; read whole as mesh_map_whole reads `map`:
