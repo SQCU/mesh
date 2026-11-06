@@ -174,8 +174,8 @@ int main(int argc,char **argv){
   printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,",alive?"true":"false",alive?"true":"false",
     paired?"true":"false",(unsigned long long)pid);
   clients_print(h);
-  printf("\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"links\":%u,\"paired_links\":%u,\"peers\":[",
-    h->version,h->node,h->pgsz,h->block,h->rows,h->links,paired);
+  printf("\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"links\":%u,\"paired_links\":%u,\"code\":%lld,\"domain\":%u,\"peers\":[",
+    h->version,h->node,h->pgsz,h->block,h->rows,h->links,paired,(long long)h->port.code,h->port.domain);
   for(uint32_t i=0;i<h->links;i++){
     struct mesh_link_info *link=&mesh_links(h)[i];
     printf("%s{\"node\":%u,\"phase\":%u,\"code\":%lld,\"domain\":%u,\"device\":\"%s\",\"bandwidth\":%llu}",i?",":"",link->peer,atomic_load(&link->port.phase),(long long)link->port.code,link->port.domain,link->device,(unsigned long long)__atomic_load_n(&link->bandwidth,__ATOMIC_RELAXED));

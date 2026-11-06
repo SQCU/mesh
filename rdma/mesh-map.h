@@ -187,11 +187,13 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   g.wire_pages=(g.wire_pages+g.block-1)/g.block*g.block;
   if(g.wire_pages>arena)g.wire_pages=arena;
   uint32_t pgsz=g.pgsz;
-  uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz;
+  uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)g.rows+63)/64;
   h->pgsz=pgsz; h->block=g.block; h->rows=g.rows; h->wire_pages=g.wire_pages;
   h->links=g.links;
+  h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->arena_off=at; at+=(((uint64_t)arena+63)/64)*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
+  h->buffer_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)(g.links>MESH_PORTS?g.links:MESH_PORTS)*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;

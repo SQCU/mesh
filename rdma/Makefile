@@ -55,7 +55,7 @@ HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph
 # kernel's loss and change events (mesh-events.c), the child's verbs jobs (mesh-lanes.c), the map (mesh-records.c) and
 # the data path over the page lists (mesh-flow.c); one image, its children `mesh-flow --child ...`
 BRIDGE = mesh-link.c mesh-children.c mesh-child.c mesh-ports.c mesh-events.c mesh-lanes.c mesh-records.c mesh-flow.c \
-  mesh-dataflow.c mesh-graph.c
+  mesh-dataflow.c mesh-call.c mesh-graph.c
 all: $(BINS) $(HIGHS_INPUTS)
 # HiGHS's fetch and build (above), after `all`, the default goal
 $(HIGHS_TARBALL):
@@ -82,7 +82,7 @@ $(HIGHS_INPUTS): FORCE
 	if test ! -f $@ && test -f $(HIGHS_BUILT); then echo '$(HIGHS_INPUT_TEXT)' > $@ && touch -r $(HIGHS_BUILT) $@; \
 	else echo '$(HIGHS_INPUT_TEXT)' | cmp -s - $@ || echo '$(HIGHS_INPUT_TEXT)' > $@; fi
 FORCE:
-native-audit: .build/mesh-flow.s .build/mesh-dataflow.s
+native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c $(HEADERS) Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
@@ -101,8 +101,8 @@ mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-map.h mesh-holders.h Makefile
 # it includes alone, where it linked mesh-dataflow.c.  What must stay: its inputs are what it includes
 mesh-stat: mesh-stat.c mesh.h mesh-map.h mesh-holders.h
 	cc -O2 -o $@ mesh-stat.c
-libmesh.dylib: mesh-dataflow.c mesh-collective.c mesh-graph.c $(HEADERS) $(HIGHS_BUILT) Makefile
-	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS)
+libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) $(HIGHS_BUILT) Makefile
+	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS)
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit FORCE
