@@ -1650,11 +1650,11 @@ def _dropped(context, plan):
 # (design/compilation-coordination.md, "The revisions of b5a3c6e6", ND-2): each of the graph's outputs as a tensor of
 # its fake tensor's metadata, "the metadata of a tensor without its actual data" (PyTorch 2 section 3.5), its size,
 # stride, element type and device, by torch.empty_strided ("Creates a tensor with the specified size and stride and
-# filled with undefined data", torch/_torch_docs.py), which nothing writes.  Why: a program whose next compiled function
-# takes this one's result then calls it there with the shapes and types every rank's does, so that function is
-# compiled and planned as every node's (A4), where an output of None would be traced as a constant.  An output that is
-# no tensor is its example value as Dynamo recorded it (A1: shapes are compiled).  Made once, when the plan is made;
-# ir.device None alone
+# filled with undefined data", torch v2.11.0 torch/_torch_docs.py), which nothing writes.  Why: a program whose next
+# compiled function takes this one's result then calls it there with the shapes and types every rank's does, so that
+# function is compiled and planned as every node's (A4), where an output of None would be traced as a constant.  An
+# output that is no tensor is its example value as Dynamo recorded it (A1: shapes are compiled).  Made once, when the
+# plan is made; ir.device None alone
 def _absent(ir):
     (output,) = [node for node in ir.order if node.op == 'output']
 
