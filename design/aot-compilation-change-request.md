@@ -937,8 +937,34 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     - run each operator as its out variant into its result's placed pages;
     - have each sent value's producer make it in its sent pages, so nothing copies it there. A collective's result is
       the pages its parts land in, so no concatenation copies them (transport by view, design/plan-to-bridge-change-request.md R1);
-    - wait for the device only where a publish needs its writes done, once for all the values published at that point;
-    - copy an output only where its pages are reused before the caller can read it (C3.3's u copies).
+    - publish with no wait for the device (below);
+    - copy no output (below).
+  - (2026-11-05, later still)
+    > "so torch allocates every result. Torch's own operators also take an out= result tensor, which is upstream API,
+    > so no torch headers are needed." so lets do it the torchic style instead of the idiomatic slow style...
+    > "- Copies with full syncs: write does synchronize(); target.copy_(source); synchronize() for every sent value.
+    > That's ours." yeah lets not do that...
+    > "- Clones: every placed output gets a torch.clone. Also ours." yeah lets not do that...
+    > revise the issues raised...
+    - **A publish waits for nothing.** The text before allowed one device wait a publish point, which is still a
+      synchronization of the whole device. Instead, a torch MPS event is recorded after the producer's out-variant
+      kernel, the publish is done in that event's notification, and torch's command buffer is committed without waiting.
+      This is the form torch_mesh's allocator.mm took when it stopped calling classic Metal (mesh fba41159, "torch_mesh
+      calls no classic Metal"): it "gives the lease back in a torch MPSEvent's notification after torch's work so far",
+      by `at::mps::getMPSEventPool()->acquireEvent(false, stream)`, `record`, `notify`, then
+      `stream->synchronize(at::mps::SyncType::COMMIT)`. Torch 2.14.0's headers state each call: `MPSEvent::record`,
+      "records an event on the stream"; `MPSEvent::notify`, "schedules a notifyListener callback for the event";
+      `SyncType::COMMIT`, "commit and flush the command buffer" (torch/include/ATen/mps/MPSEvent.h, MPSStream.h). The
+      calls are torch's own API, so mesh calls no classic Metal. They need a small Objective-C++ torch extension, built
+      by a versioned rule against the node's installed torch, as torch_mesh's `_stream.mm` was (mesh 116b27dc). On the
+      CPU device a kernel has ended when its call returns, so the publish follows the call.
+    - **No output is copied.** Each output is a view of its placed pages and holds until the plan reuses them, u
+      executions later (C3.3). Torch's own compiled mode does the same with its static memory: "Error: accessing tensor
+      output of CUDAGraphs that has been overwritten by a subsequent run ... If a tensor is a user-visible output that
+      must remain live across generations, manually clone the tensor outside torch.compile()" (torch 2.14.0,
+      torch/_inductor/cudagraph_trees.py); "the output from the first invocation will be overwritten by the second
+      invocation" (docs, CUDAGraph Trees). A program that keeps an output longer clones it itself, outside the compiled
+      function. This is the cudagraphs style A1 quotes.
   - **What stays, being torch's:**
     - an operator with no out variant, whose result is copied once into its placed pages where it must be there;
     - a kernel's own scratch inside torch;
