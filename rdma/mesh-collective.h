@@ -415,7 +415,11 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    transfer here, or both of the same `lag`), `blocks` >= 1, each run within its value's blocks, `value`'s run covered
    by no declared transfer here and by no other share; EINVAL otherwise.  The shared blocks are one item of the one
    allocation, whose lifetime covers both values' accesses (mesh-collective.c's minimal form is the implementer's,
-   recorded at the code). */
+   recorded at the code).
+   2026-11-05 ("The revisions of 55b9cbad", sub-agent C's decisions, accepted): EINVAL also where `of`'s run is itself
+   another share's run (a share of a share: every share is tested before any is bound, so no order of them decides),
+   and where the two values' `wire` differ (a block lies in one space, mesh-dataflow.h mesh_arena_range).  What must
+   stay: every test before anything is written */
 struct mesh_share { uint32_t value,first,of,at,blocks,padding; };
 _Static_assert(sizeof(struct mesh_share)==24,"mesh_share: rdma/mesh.py Share");
 /* 2026-11-05 ("The revisions of 55b9cbad", V2): `share` after `dependence`, `shares` of them (struct mesh_share)
