@@ -238,7 +238,20 @@ struct mesh_view { uint64_t view,last,boot; uint32_t sequencer,members; };
 /* the payload of a COUNT (`bytes` sizeof): plan (group, epoch)'s synchronization edge from the node whose id is
    `node` to the node whose id is `sink`, its source's count `count` in view `view` (mesh.h struct mesh_state `tells`,
    `waits`, `wait_count`) */
-struct mesh_count { uint64_t group,epoch,view,count; uint32_t node,sink; };
+/* 2026-11-05 (117; design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 4, and "The
+   revisions of 4e78f6f4"): `function` appended, the sink plan's epoch (mesh.h struct mesh_sync `function` of the
+   source's entry out of it), `epoch` the source plan's, so the sink's bridge reads its plan at its place, `function`
+   - 1 among the program's plans (mesh.h mesh_program_plan), and raises the entries of its `waits` whose `node` is the
+   source's map index and whose `function` is `epoch` (mesh-records.c count_take), with no search; the edges are
+   struct mesh_sync entries, where they were one edge's words (`tells`, `waits`, `wait_count`).  Why: point 4, the
+   program's whole IPC graph, an actor for each node's part of each call, so an added edge may join two plans' actors
+   (design/aot-compilation-change-request.md, appendix item 2: "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj,
+   k − delay((vj, vi)))" (BSL (7)) ... The bridge carries the count from source to sink, as it carries an arrival");
+   A9, "What the bridge runs: the self-timed schedule": "the bridge reads the serialized operand at a place its
+   compilation fixed, and searches for nothing".  What must stay: every field before `function` where it is */
+struct mesh_count { uint64_t group,epoch,view,count; uint32_t node,sink; uint64_t function; };
+_Static_assert(sizeof(struct mesh_count)==48 && offsetof(struct mesh_count,count)==24 &&
+  offsetof(struct mesh_count,node)==32 && offsetof(struct mesh_count,function)==40,"mesh_count");
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:0; }
 
 /* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: each stream's
@@ -391,6 +404,26 @@ extern _Atomic uint64_t exit_at;
 extern _Atomic uint32_t faulted,terminated;
 extern char self_path[PATH_MAX];
 extern uint32_t ones;
+/* The bridge's reading of the program's plans, each at its compile-time place (2026-11-05;
+   design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The revisions of
+   4e78f6f4"): from place *k on, the first place among the program's plans, below the root's `plans`, at which a plan
+   stands (mesh.h mesh_program_plan: function k + 1's, the root's `table` word k), its state section with *k that
+   place; NULL where none stands at *k or past it.  A reader takes them as for(uint32_t k=0;(state=plan_from(&k));k++).
+   It is the one form of every reader here (mesh-flow.c plans_walk, streams_cancel, plan_stale; mesh-records.c
+   orders_announce, counts_tell, orders_submit), where each walked the claims' heads (mesh-dataflow.h mesh_head_after,
+   mesh_head_state, removed).  Why: point 5, "R1's method is U-Net's and VIA's queues of descriptors over registered
+   memory, which the interface knows from the endpoint's creation; it does not search for them.  So the serialized
+   operand's place is a constant the region's layout names once ... Nothing walks heads to find it";
+   design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "So the bridge reads
+   the serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: every plan read
+   at its place and none searched for */
+static inline struct mesh_state *plan_from(uint32_t *k){
+  for(;*k<mesh_program(M)->plans;++*k){
+    struct mesh_state *state=mesh_program_plan(M,*k);
+    if(state)return state;
+  }
+  return NULL;
+}
 /* the rest of tag rdma/mesh-bridge.h's externs, defined in mesh-link.c with the tag's types: this node's available
    memory and model as its record carries them, the clients' slots' owners and the ones not released (`owners`: its
    bound, the tag's MESH_CLIENTS, given at its definition; `unreleased`), the record sequence and the nodes heard
@@ -506,7 +539,10 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
    What must stay: order_heard and clients_turn as declared */
 /* not the tag's (2026-11-04, owner B2: e6bd7db2's section 6, "Holders and clients", as the contract's ruling 1 and Q5
    take it): every open claim's owner whose process is `pid` retired, the event loop's EVFILT_PROC of clients_turn's
-   watch (mesh-link.c) */
+   watch (mesh-link.c).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
+   root's owner where its process is `pid` and the root is open (mesh.h struct mesh_program), where it was every open
+   claim's.  What must stay: the declaration */
 void clients_gone(pid_t pid);
 
 /* mesh-flow.c */
