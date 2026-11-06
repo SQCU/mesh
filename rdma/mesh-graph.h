@@ -209,6 +209,59 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
    where an edge names no vertex or the edges hold a cycle (a vertex left unplaced); ENOMEM */
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place);
+/* 2026-11-05 (design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the
+   self-timed buffer bound": "The strongly connected components, Convert-to-SC-graph, Bellman–Ford's cycle mean and
+   MinDelay's binary search are functions of rdma/mesh_graph.py.  They take the caller's vertices, edges, delays and
+   times as operands"; design/compilation-coordination.md, "The revisions of 3f106747", BS-1: here, the graph module's C
+   half, since their one caller is mesh_plan, which holds the routes and u they are computed from).  S. S.
+   Bhattacharyya, S. Sriram and E. A. Lee, Optimizing synchronization in multiprocessor DSP systems, IEEE Trans. Signal
+   Processing 45(6), 1997 (here BSL), over a directed graph of `vertices` vertices whose edge e runs from[e] -> to[e]
+   with delay[e] (UINT64_MAX: BSL's "∞", the edge absent from every cycle) and whose vertex v takes time[v] >= 0 (BSL
+   §4.1, "execution time t(v)").  What must stay: integer and IEEE-exact operations alone (+, -, x, /, <), so every
+   party computes the same components, means and delays from the same operands, as the module's other functions do */
+/* The strongly connected components (BSL §3: "A strongly connected component (SCC) of (V, E) is a strongly connected
+   subset V′ ⊆ V such that no strongly connected subset of V properly contains V′"), by R. E. Tarjan's depth-first
+   search (Depth-first search and linear graph algorithms, SIAM J. Comput. 1(2), 1972), every edge counted whatever its
+   delay: component[v] v's, *count of them, numbered in the order Tarjan's search completes them.  0; EINVAL where an
+   edge names no vertex; ENOMEM */
+int mesh_graph_components(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+                          uint32_t *component, uint32_t *count);
+/* BSL's BellmanFord (§9: "takes a synchronization graph Z as input, and applies the Bellman-Ford algorithm discussed in
+   pp. 94-97 of [15] to return the cycle mean of the critical cycle in Z; if one or more cycles exist that have zero
+   path delay, then BellmanFord returns ∞"): *mean the maximum over cycles C of the sum of time[v] over C's vertices
+   over Delay(C) (BSL (4), Definition 2), INFINITY where a cycle of the edges not absent has zero total delay (BSL
+   Lemma 1: deadlock), 0 where they hold no cycle.  [15] is E. L. Lawler, Combinatorial Optimization: Networks and
+   Matroids, 1976: a binary search on λ, each step Bellman and Ford's test for a cycle of positive length under the
+   lengths time[from[e]] - λ delay[e]; *mean the search's upper end, at which no cycle is positive.  0; EINVAL; ENOMEM */
+int mesh_graph_cycle_mean(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                          const uint64_t *delay, double *mean);
+/* BSL Fig. 8, Function MinDelay(X, e, λ, B): "Perform a binary search in the range [0, 1, …, B] to find the minimum
+   value of r ∈ {0, 1, …, B} such that BellmanFord(X[e → r]) returns a value less than or equal to λ.  Return this
+   minimum value of r", X the operands' graph, e < edges, its delay[e] replaced by r and every other edge's kept; *least
+   r.  Each step's test is mesh_graph_cycle_mean's at λ: no cycle of zero total delay, and none of positive length.  0;
+   ERANGE where r = `bound` fails (BSL's input: "Assuming X[e → B] has estimated throughput no less than λ^-1"); EINVAL;
+   ENOMEM */
+int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                         const uint64_t *delay, size_t e, double lambda, uint64_t bound, uint64_t *least);
+/* BSL §9, Fig. 6, Function Convert-to-SC-graph: the edges, each of delay 0 (BSL's d0), that chain the source SCCs
+   C_1 .. C_m (each the vertex of its SCC of least time, a tie to the lower vertex: "Select a vertex v_i ∈ C_i that
+   minimizes t(*) over C_i"), chain the sink SCCs D_1 .. D_n alike, and join the last sink SCC's to the first source
+   SCC's (step 6, "the sink-source edge"); each ordering of SCCs ascending by its least vertex ("Generate an
+   ordering").  BSL §3: "An SCC V′ of a DFG (V, E) is a source SCC if ∀e ∈ E, (snk(e) ∈ V′) ⇒ (src(e) ∈ V′); V′ is a
+   sink SCC if (src(e) ∈ V′) ⇒ (snk(e) ∈ V′)".  Out, in the order DetermineDelays takes them (BSL §9: "(e_0, e_1, …,
+   e_m – 1) ≡ (e_s, a_1, a_2, …, a_k, b_l, b_l – 1, …, b_1), where e_s is the sink-source edge"): added_from[i] ->
+   added_to[i], *added of them (room for `vertices`); 0 added where the graph is strongly connected.  0; EINVAL;
+   ENOMEM */
+int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                          uint32_t *added, uint32_t *added_from, uint32_t *added_to);
+/* BSL §9, Fig. 8, Function DetermineDelays, over the operands' graph Gs and the `added` edges mesh_graph_convert_sc
+   gave, in its order: "X_0 = Ĝs[e_0 → ∞, …, e_m – 1 → ∞]; λ_max = BellmanFord(X_0); d_ub = ⌈Σ_{x∈V} t(x) / λ_max⌉;
+   For i = 0, 1, …, m – 1: δ_i = MinDelay(X_i, e_i, λ_max, d_ub); X_i + 1 = X_i[e_i → δ_i]", d_ub 1 where λ_max is 0
+   (every cycle's time 0, so any delay of at least 1 keeps a new cycle's mean at 0).  added_delay[i] out, δ_i.  0;
+   EDEADLK where Gs holds a cycle of zero total delay (BSL Lemma 1); ERANGE (mesh_graph_min_delay's); EINVAL; ENOMEM */
+int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
+                                const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
+                                const uint32_t *added_to, uint64_t *added_delay);
 
 #ifdef __cplusplus
 }
