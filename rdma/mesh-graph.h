@@ -191,7 +191,10 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
    each chain a matched path x_1 -> x_2 -> ... of elements, so its elements are mutually ordered; the chains numbered
    from 0 in the order of their first elements, items in the caller's order and an item's elements in turn, so an
    item that precedes and follows none has chains of its own, consecutive.  Every party computing from the same
-   operands numbers the chains alike.  0; ENOMEM */
+   operands numbers the chains alike.  0; ENOMEM.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G1; "The
+   revisions of 55b9cbad"): the items' linear extension is mesh_graph_order's, so EDEADLK where `before`'s pairs hold
+   a cycle, which a strict partial order cannot (nothing written).  What must stay: the chains' numbering */
 int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
                       const void *context, uint64_t *chain, uint64_t *chains);
 /* design/plan-to-bridge-change-request.md R5 (mesh 0e56d8da), "How: the program" and "How: solving it": the completion

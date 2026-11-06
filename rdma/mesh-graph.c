@@ -832,11 +832,23 @@ static void chains_block(struct chains_net *n, const size_t *level, size_t *at, 
      their number of predecessors, ascending, a tie in the caller's order (mesh_graph_rows, a stable counting sort, with
      depth_head over the counts, its rows in queue's words); a before b makes every predecessor of a one of b
      (transitivity), and a one of b but not of a (irreflexivity), so b has more.
+     2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G1:
+     "`mesh_graph_chains` orders its items by its own predecessor count (mesh-graph.c 875–894) where
+     `mesh_graph_order` computes that order ... Both are to call the module's own functions"; "The revisions of
+     55b9cbad"): the extension is mesh_graph_order's topological order of the items over the edges `before` gave
+     (their rows by tail, `first` and `head`), each place the lowest-numbered item whose predecessors are all placed,
+     where it was the stable sort by predecessor count; any topological order is a linear extension, so each element's
+     chain is still set before it is given.  EDEADLK where those edges hold a cycle, which a strict partial order
+     cannot (mesh_graph_order's own error, before any output is written).  What must stay: the chains numbered as
+     above, every party computing the same from the same operands.
      - Each element then has at most one element before it in its chain and one after it, of an item it follows or
        precedes, so each chain is a path x_1 -> x_2 -> ... of mutually ordered elements (transitivity), and they number
        the elements less F, the fewest (Fulkerson).
      - An item that precedes and follows none has no flow in or out: its count[i] elements begin chains, numbered
        consecutively.
+   (2026-11-05, "The revisions of 55b9cbad", B4: "Its time on the largest program is a measurement for when runs are
+   authorized"; the network is Fulkerson's reduction, its phases Hopcroft and Karp's where every count is 1, as
+   above.)
    Arithmetic: integer + - and comparisons alone, every loop in the caller's order or the extension's, no hashing:
    every party with the same operands finds the same flow and the same chains.  Bound: each count[i] < 2^32 (the caller's block counts) and
    items < 2^32, so the elements' sum, every flow and every chain number lie below 2^64, under the unbounded capacity
@@ -853,11 +865,12 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
   size_t *order = malloc(rows * sizeof *order), *into = NULL;
   size_t *level = malloc(vertices * sizeof *level), *queue = malloc(vertices * sizeof *queue);
   size_t *at = malloc(vertices * sizeof *at), *path = malloc(vertices * sizeof *path);
-  uint32_t *predecessors = calloc(rows, sizeof *predecessors), *head = NULL, *tail = NULL;
+  uint32_t *indegree = malloc(rows * sizeof *indegree), *ordinal = malloc(rows * sizeof *ordinal), *head = NULL,
+           *tail = NULL;
   uint64_t *out = calloc(rows, sizeof *out), *in = calloc(rows, sizeof *in), *flow = NULL;
   uint64_t *place = malloc(rows * sizeof *place), *taken = calloc(rows, sizeof *taken);
-  int result = first && into_first && order && level && queue && at && path && predecessors && out && in && place &&
-               taken ? 0 : ENOMEM;
+  int result = first && into_first && order && level && queue && at && path && indegree && ordinal && out && in &&
+               place && taken ? 0 : ENOMEM;
   size_t edges = 0, room = 0;
   if (!result) first[0] = 0;
   for (uint32_t i = 0; !result && i < items; i++) {
@@ -872,7 +885,6 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
         tail = grown;
       }
       head[edges] = j; tail[edges++] = i;
-      predecessors[j]++;
     }
     first[i + 1] = edges;
   }
@@ -881,6 +893,7 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
     into = malloc((edges + 1) * sizeof *into);
     if (!flow || !into) result = ENOMEM;
   }
+  if (!result) result = mesh_graph_order(items, first, depth_head, head, indegree, ordinal);
   if (!result) {
     mesh_graph_rows(items, edges, depth_head, head, into_first, into);
     struct chains_net net = {items, count, first, into_first, into, head, tail, flow, out, in};
@@ -891,7 +904,7 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
       for (uint64_t k = in[i]; k < count[i]; k++) chain[o + k] = next++;
       o += count[i];
     }
-    mesh_graph_rows(items, items, depth_head, predecessors, queue, order);
+    for (uint32_t i = 0; i < items; i++) order[ordinal[i]] = i;
     for (uint32_t p = 0; p < items; p++) {
       const size_t i = order[p];
       uint64_t from = place[i];
@@ -905,7 +918,7 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
     *chains = next;
   }
   free(first); free(into_first); free(order); free(into); free(level); free(queue); free(at); free(path);
-  free(predecessors); free(head); free(tail); free(out); free(in); free(place); free(taken); free(flow);
+  free(indegree); free(ordinal); free(head); free(tail); free(out); free(in); free(place); free(taken); free(flow);
   return result;
 }
 
