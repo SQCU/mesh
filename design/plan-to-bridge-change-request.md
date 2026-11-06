@@ -1944,6 +1944,44 @@ code, and each method is used as its source states it.
   - A change of layout exists only where a consumer's operand cannot take the landed layout as its view. It is then an
     operator of the consumer's own, run as its out variant (design/aot-compilation-change-request.md appendix item 7),
     never part of a transfer.
+  - **Why the code copies, in data-structural terms (2026-11-06).**
+    > stop describing this in idiomatic terms. why does this happen in algorithmic terms. in data structural terms. in
+    > terms of reference literature. once this is said, what we *should* be doing will be a lot more clear, esp with
+    > al lof theo ther 'partial fixes', which all sound like invented problems and idiomatic sourceless code...
+    - **Torch's structure.** A torch tensor is a strided array: one storage, with an offset, sizes and strides
+      (c10/core/TensorImpl.h, `Storage storage_`, `sizes_and_strides_`). A view (a slice, a narrow, a permutation)
+      is the same storage under a new offset, sizes and strides. Its elements are in general not contiguous in the
+      storage.
+    - **The plan's structures** (rdma/mesh-collective.h, mesh-section.h at 327df606):
+      - `struct mesh_section { first, pages, … }`: a value is one run of page-table rows;
+      - `struct mesh_declared { …, value, first; bytes }`: a transfer is one contiguous extent of one value;
+      - `struct mesh_share { value, first, of, at, blocks }`: an alias is one run of one value's blocks placed inside
+        another.
+    - **The mismatch.** A part of a view is an affine subset of its storage, and the descriptor names one extent. So the
+      compiler maps each part to an extent. Where a part is not one, it makes a value of its own and copies the part
+      into it before every send, and unpacks on the other side. This is packing: what communication libraries do for
+      noncontiguous datatypes when their descriptor cannot describe them. MPI implementations flatten a derived
+      datatype into a list of (offset, length) blocks and send from those blocks in place, or pack where the transport
+      cannot take the list (R. Ross, N. Miller and W. D. Gropp, Implementing fast and reusable datatype processing,
+      EuroPVM/MPI 2003; J. Wu, P. Wyckoff and D. K. Panda, High performance implementation of MPI derived datatype
+      communication over InfiniBand, IPDPS 2004; the coordinator cites both from memory).
+    - **The patches it produced, each from the one-extent descriptor:**
+      - the per-execution copies of slices, narrows, windows and arrivals;
+      - a value's layout "fixed by the first collective that names it", and the copy where a second collective needs
+        another order;
+      - the padded most-major layout below (R2), the coordinator's own patch at the landing side;
+      - the share record with its rules, and the copies where they refuse;
+      - AllToAll's pieces landing in a buffer and copied into the result.
+  - **What the code must do instead.**
+    - A value is its page-table rows, and two values' rows may name one frame, as R2 states.
+    - A transfer's source and destination are each a view (offset, sizes, strides) of a value. The compilation flattens
+      each view into its list of (row, offset, bytes) blocks, adjacent blocks merged, as datatype processing flattens a
+      type map. The bridge's instructions are those blocks (aot A9: MSCCL-IR's steps with offset and count).
+    - Then there is no packing and no unpacking, no layout chosen for a transfer's sake, and no share record. A value's
+      layout is the program's own, torch's strides.
+    - A consumer that needs one strided progression gets it from the mapping, fixed when the plan is made (R2). A
+      layout change happens only where a consumer's operand needs another order of strides, and then it is an operator
+      of its own.
 
 ### R2. Every page is placed at compile time and named by the page table
 
@@ -2050,6 +2088,12 @@ code, and each method is used as its source states it.
         cannot take that view, the change of layout is an operator of its own, run as its out variant into placed
         pages (design/aot-compilation-change-request.md appendix item 7). It is not a copy in the transfer.
       - This is the common case: Megatron's column-parallel output, gathered along its last dimension.
+      - (Withdrawn 2026-11-06.) This answer patched the one-extent transfer descriptor at the landing side (R1, "Why
+        the code copies"). With transfers as flattened lists of blocks, a part lands at its byte ranges in the result's
+        own layout, whatever its dimension. No layout is chosen for a transfer, and no part is padded.
+    - (2026-11-06.) The share record of the implementation (`struct mesh_share`), and its rules, is a restricted form of
+      the sharing stated above. A value's rows naming another value's frames is the page table's own sharing, with no
+      record and no rules of its own. The record goes (R1).
     - (Corrected 2026-11-06: design/compilation-coordination.md, "The revisions of 55b9cbad", stops and document
       errors.) **Any value a transfer names is sent from its own pages, whatever its copies.**
       - R1: "The code must move every page from the page that holds it to the page it lands in, with nothing copied on

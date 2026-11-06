@@ -4007,3 +4007,67 @@ is restated below with what remains. Lines are at mesh 327df606 and metal-microb
 - values sent from their own pages whatever their copies;
 - ranges sharing a block by disjoint bytes, with offsets in instructions;
 - a share's one item and its lag.
+
+## The root cause of the copies, and the revised work list (2026-11-06, the coordinator)
+
+The operator: "stop describing this in idiomatic terms. why does this happen in algorithmic terms. in data structural
+terms. in terms of reference literature. once this is said, what we *should* be doing will be a lot more clear, esp
+with al lof theo ther 'partial fixes', which all sound like invented problems and idiomatic sourceless code..."
+
+**The root cause** (plan-to-bridge R1, "Why the code copies"):
+- A torch tensor is a strided array: one storage, offset, sizes and strides. A view's part is an affine subset of its
+  storage.
+- The plan call describes a value as one run of rows (`struct mesh_section`), a transfer as one contiguous extent of
+  one value (`struct mesh_declared`: `value`, `first`, `bytes`), and an alias as one run of blocks
+  (`struct mesh_share`).
+- So the compiler packs every part that is not one extent into a value of its own and copies it before each send.
+  Communication libraries do this for noncontiguous datatypes only where their descriptor cannot describe the data;
+  MPI implementations flatten a datatype into (offset, length) blocks and send from them in place (Ross, Miller and
+  Gropp 2003; Wu, Wyckoff and Panda 2004).
+- These are patches of that one descriptor, and they go with it, not one by one:
+  - review 55b9cbad's W1–W3 and W9;
+  - the layout fixed by the first collective (`_claim`);
+  - the padded most-major layout (withdrawn in PB R2);
+  - `struct mesh_share` and its rules;
+  - `ir.fallbacks`;
+  - AllToAll's landing buffer.
+
+**The revised work list.** It replaces the earlier work lists' W1–W3, W9, the share items and the layout items. Each
+item is written strictly to its source.
+- **R-1. The transfer descriptor is a flattened view** (PB R1 and R2).
+  - A transfer's source and destination are each a view (value, offset, sizes, strides). The compilation flattens each
+    into its list of (row, offset, bytes) blocks, adjacent blocks merged, as datatype processing flattens a type map.
+  - The bridge's instructions are those blocks: aot A9, MSCCL-IR's steps with offset and count.
+  - Two values' rows may name one frame, the page table's sharing (fbufs; IO-Lite). A frame's item lives from the
+    first write to the last read over every value naming it, with C3.3's lag test.
+  - The plan call's interface changes accordingly. That removes `_laid`, `_claim`, `ir.fallbacks`,
+    `struct mesh_share` with its tests on both sides, the padded layout and AllToAll's buffer. A value's layout is the
+    program's own, torch's strides.
+  - Every member of a view plans on the view's map (aot A7), so both ends' blocks agree by construction.
+- **R-2. Operators with several outputs run their out variants** (W4; aot item 7), one `out` per result.
+- **R-3. Publication is read as RCU's publish-subscribe** (W5): every field of the published operand is read through
+  the acquired publication, never before it (McKenney and Slingwine).
+- **R-4. The compiled program is instantiated once** (W6).
+  - At make(), each execution's work becomes a straight-line sequence of its kernel calls and publishes, with no walk
+    of the IR and no test of a make()-time fact. That is a graph instantiated once and launched by each call (aot
+    item 6: "CUDA Graphs: a graph instantiated once and launched many times").
+  - Its form is the specialization of an interpreter to a fixed program, partial evaluation (Y. Futamura, Partial
+    evaluation of computation process: an approach to a compiler-compiler, 1971; cited from memory).
+- **R-5. The alias flush is on the barriers where a frame changes virtual name** (W7). The plan knows each frame's
+  virtual names through R-1's rows. Metal 4's `MTL4VisibilityOptionResourceAlias` ("Flushes caches to ensure that
+  aliased virtual addresses are memory consistent", MTL4CommandEncoder.h) goes on the barrier between a write under
+  one name and a read under another, and on no other.
+- **R-6. The bridge runs A9's self-timed lists** (W8). Each cable's processor executes its list of instructions in the
+  compile-time order, firing each on its dependency word (aot A9, "What the bridge runs"). It scans no table of plans.
+- **R-7. Every wait ends at MESH_PLATFORM_NS without progress, and the first ETIMEDOUT ends the run** (W10):
+  - make()'s waits share one deadline;
+  - e2b's step waits and mesh-metal.m's waiter take one bound each, not one per unit.
+  
+  The operator's bound is judged by time without progress.
+- **R-8. One writer a word** (W11; Lamport's single-writer registers): the program writes `retired`, the bridge writes
+  only `released`, and a gone holder is read from the heartbeat's words.
+- **R-9. Names** (W12): `slots` is a value's copies, and `_claim` goes with R-1.
+- **R-10. The duplicates R-1 leaves** (W13), each merged:
+  - "published and not yet released";
+  - the holder's read and gone-holder test;
+  - the mapping's row list in one mesh-dataflow helper over the plan's rows.
