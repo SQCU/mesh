@@ -98,7 +98,12 @@ int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
    operations"; MPI_START: "The request becomes active once the call is made. [...] The communication buffer should not
    be modified after the call, and until the operation completes."  NCCL User Guide, CUDA Stream Semantics
    (https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/streams.html): "NCCL calls are associated to a
-   stream which is passed as the last argument of the collective communication function." */
+   stream which is passed as the last argument of the collective communication function."  M. Lam, "Software
+   Pipelining: An Effective Scheduling Technique for VLIW Machines", PLDI 1988, §1: "In software pipelining, iterations
+   of a loop in a source program are continuously initiated at constant intervals without having to wait for preceding
+   iterations to complete. That is, multiple iterations, in different stages of their computations, are in progress
+   simultaneously."  Execution `execution` starts at the start of execution `execution` - struct mesh_function
+   `lead`. */
 void mesh_host_started(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data
