@@ -2389,9 +2389,9 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
        notes on `state` state it ("EINVAL but on a local MESH_INVARIANT value outside the window (wire 0, named by no
        declared transfer)"), which the 2026-11-06 notes do not reverse.  What must stay: MESH_ABSENT away from the
        range's ends
-       2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8: "The plan refuses
-       a transfer whose source is MESH_INVARIANT (EINVAL at the plan)"; torch 2.14.0 torch/export/exported_program.py,
-       ExportedProgram: "a state_dict containing tensor values of all lifted parameters and buffers") */
+       torch 2.14.0 torch/export/exported_program.py, ExportedProgram: "It contains an torch.fx.Graph that represents
+       Tensor computation, a state_dict containing tensor values of all lifted parameters and buffers, and various
+       metadata."  GSPMD (Xu et al., arXiv 2105.04663), §4.5: "DynamicSlice to shard replicated dimensions" */
     if(t->source!=p->self && t->destination!=p->self){
       if(t->value!=MESH_ABSENT){status=EINVAL;goto done;}
       continue;
@@ -2412,9 +2412,9 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
      this node share a block of it" goes"; PB R2 at mesh 56ede97e, the share record "and its rules ... The record
      goes").  What must stay: every test before anything is written */
   for(uint32_t i=0;i<p->demands;i++)if(p->demand[i].mine!=MESH_ABSENT)p->named[p->demand[i].mine]=1;
-  /* an execution value's lifetime, a value of lag 0's alone (ExecuTorch, exir/memory_planning.py,
-     update_tensor_lifetime: "A tensor's lifetime are represented by the index of the first and last node referring
-     that tensor in its inputs/outputs"; a value of lag k >= 1 is never freed, its positions not read) */
+  /* ExecuTorch, exir/memory_planning.py, update_tensor_lifetime: "A tensor's lifetime are represented by the index of
+     the first and last node referring that tensor in its inputs/outputs"; "Mutable buffers and device resident
+     constants keep their data across calls, so they are never freed." */
   for(uint32_t j=0;j<given;j++)
     if(values[j].kind==MESH_EXECUTION && !values[j].lag && values[j].begin>values[j].end){
       status=EINVAL;goto done;

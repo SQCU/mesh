@@ -27,15 +27,15 @@
      ruling).
    - In: `lag` (design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-coordination.md, R4; M.
      Lam, Software pipelining, PLDI 1988: modulo variable expansion, a value live across k executions gets k copies).
-     `lag` 0: u copies (design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14).  `lag`
+     `lag` 0: u copies (L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, ACAPS Technical Memo 33, §2.2: "each
+     variable in the original loop will be split into several variables depending the unrolling factor").  `lag`
      k >= 1: the value's instance of execution t is written by a producer the program orders by an event, not by its
      own order (a host producer, D.3.3: "The program declares the host's lag, and the allocator gives them copies by it,
      as modulo variable expansion does for any value").  The
      value must be MESH_EXECUTION, wire 0, state 0, and named by no declared transfer (EINVAL otherwise); its `begin`
-     is not read, nor its `end` but where a transfer names it (design/problems-of-14b9a757-change-request.md,
-     "Appendix: the stops of 36bd7cbd", 14).  The plan gives it k copies: `section.count` k, `stride` P, execution
-     t's instance copy t mod k at mesh_section_address(section, t mod k).  Each copy is an item of its own that
-     interferes with every other item (its write is ordered by no edge of the template, so it shares no page with
+     is not read, nor its `end` but where a transfer names it.  The plan gives it k copies: `section.count` k, `stride`
+     P, execution t's instance copy t mod k at mesh_section_address(section, t mod k).  Each copy is an item of its own
+     that interferes with every other item (its write is ordered by no edge of the template, so it shares no page with
      anything).  The program's side of the order, which the plan neither knows nor checks: copy t mod k is written for
      execution t only after execution t - k has ended, and execution t reads it only after that write.
    - Out: `section`, every field: `first` its first row, `pages` P x block (P its blocks), `bytes` as given, `count` its
@@ -339,14 +339,16 @@
      accesses are those of every range touching it, from the first write to the last read, ordered by C3.3's lag test
      (R-1: "A frame's item lives from the first write to the last read over every value naming it, with C3.3's lag
      test"); a block holding bytes no range here covers is its value's own item, ordered by the value's `begin` and
-     `end` (ExecuTorch, exir/memory_planning.py, update_tensor_lifetime and _does_not_overlap), a range sent or
-     forwarded from it holding it to the wait for its send-completion counters (MPI 4.1 §3.7: "until the send
-     completes"; design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7).
+     `end` (ExecuTorch, exir/memory_planning.py, update_tensor_lifetime: "A tensor's lifetime are represented by the
+     index of the first and last node referring that tensor in its inputs/outputs"; _does_not_overlap:
+     `spec.lifetime[1] < alloc.spec.lifetime[0] or spec.lifetime[0] > alloc.spec.lifetime[1]`), a range sent or
+     forwarded from it holding it to the wait for its send-completion counters (MPI 4.1 §3.7: "The sender should not
+     modify any part of the send buffer after a nonblocking send operation is called, until the send completes.").
    - Any value a transfer names is sent from its own pages, whatever its copies (PB R2, corrected 2026-11-06): the plan
      call's rules that a lag-k value is "named by no declared transfer" and that a transfer's value is "MESH_EXECUTION
-     and wire" go.  A source is a MESH_EXECUTION value (EINVAL otherwise: design/problems-of-14b9a757-change-request.md,
-     "Sources for the second stops", 8), a value of `lag` k >= 1, a host producer's (C3.1), among them, whose copies
-     are then the plan's u, written for execution t into copy t mod u after execution t - k has ended, the program's
+     and wire" go.  A source is a MESH_EXECUTION value (EINVAL otherwise), a value of `lag` k >= 1, a host producer's
+     (C3.1), among them, whose copies are then the plan's u, written for execution t into copy t mod u after execution
+     t - k has ended, the program's
      dependences declaring that order (struct mesh_dependence's premise).  A destination is a MESH_EXECUTION value of
      `lag` 0, its landing that execution's write (EINVAL otherwise: a landing writes its bytes each execution, C3.7).
      Every value a transfer names here is placed in the registered window, whatever its `wire` ("is placed in the
@@ -358,9 +360,8 @@
 enum { MESH_INVARIANT, MESH_EXECUTION };
 /* a value at this node.  In: section.bytes (> 0), kind, wire, state (1 only on a local MESH_INVARIANT value, wire 0),
    for a MESH_EXECUTION value of lag 0 its first and last positions on this node's own program order in one
-   execution, begin <= end, and lag: 0 for a value the program's own order writes (u copies: design/problems-of-
-   14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14), k >= 1 for one a producer the program orders
-   by an event writes (a host input: MESH_EXECUTION, wire 0, state 0, named by no declared transfer, begin not read
+   execution, begin <= end, and lag: 0 for a value the program's own order writes (u copies), k >= 1 for one a
+   producer the program orders by an event writes (a host input: MESH_EXECUTION, wire 0, state 0, named by no declared transfer, begin not read
    and end read where a transfer names it; k copies, execution t's at copy t mod k, written for t only after execution
    t - k has ended and read by t only after that write: the program's order, which the plan does not check;
    design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-coordination.md, R4).  Out: section,
@@ -401,10 +402,12 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
      hands its frames to another row's name after its last access in each execution, and another hands them to it
      before its first.
    What must stay: 64 bytes, every field where it is
-   2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the stops", item 7): `begin` and `end` the
-   value's lifetime, "the index of the first and last node referring that tensor in its inputs/outputs" (ExecuTorch,
-   exir/memory_planning.py, update_tensor_lifetime), each declared transfer's end here occupying it from the position
-   that starts the transfer to the one that waits for its completion (MPI 4.1 §3.7) */
+   `begin` and `end` the value's lifetime (ExecuTorch, exir/memory_planning.py, update_tensor_lifetime: "A tensor's
+   lifetime are represented by the index of the first and last node referring that tensor in its inputs/outputs"),
+   each declared transfer's end here occupying it from the position that starts the transfer to the one that waits
+   for its completion (MPI 4.1 §3.7: "The sender should not modify any part of the send buffer after a nonblocking send
+   operation is called, until the send completes."; "The receiver should not access any part of the receive buffer
+   after a nonblocking receive operation is called, until the receive completes.") */
 struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag,run,shares; uint64_t padding1; };
 _Static_assert(sizeof(struct mesh_value)==64 && offsetof(struct mesh_value,run)==48 &&
                offsetof(struct mesh_value,shares)==52 && offsetof(struct mesh_value,padding1)==56,
@@ -661,9 +664,8 @@ _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function
    - The release waited for is "published and not yet released" (mesh.h mesh_algo_unreleased; R-10), and nothing here
      writes `retired` or `released` (R-8: "the program writes `retired`, the bridge writes only `released`").
    0; EINVAL (as before but struct mesh_share's; a malformed view, two views of one transfer naming different bytes,
-   one range's transfers with different `from`, a source's value MESH_INVARIANT (design/problems-of-14b9a757-change-
-   request.md, "Sources for the second stops", 8), a destination's value not MESH_EXECUTION of `lag` 0, two of this
-   node's destination instructions naming one byte of a value: MPI 4.1 §6.1.11); EHOSTUNREACH;
+   one range's transfers with different `from`, a source's value MESH_INVARIANT, a destination's value not
+   MESH_EXECUTION of `lag` 0, two of this node's destination instructions naming one byte of a value); EHOSTUNREACH;
    ENOMEM; ETIMEDOUT (the previous operand not released by `deadline`); ESTALE (the installed view moved while planning:
    plan again); or the map reader's error.  What must stay: every rank passes the same IR but its values and `value`s,
    and computes the same demands, trees, instructions, template, u, schedule, order, IPC graph and allocation */
