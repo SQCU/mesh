@@ -2308,6 +2308,130 @@ def _metal_device():
     return DEVICE[0]
 
 
+# objc/message.h: "These functions must be cast to an appropriate function pointer type before being called"; each
+# method of the recorder (metal-microbench metal_recording.h), of MTLDevice, MTL4CommandQueue and MTLSharedEvent that
+# the replay calls, by its own type
+def _message(restype, *argtypes):
+    return C.CFUNCTYPE(restype, C.c_void_p, C.c_void_p, *argtypes)(SEND)
+
+
+_SEL = OBJC.sel_registerName
+OBJC.objc_getClass.restype, OBJC.objc_getClass.argtypes = C.c_void_p, [C.c_char_p]
+NEW_BUFFER = _message(C.c_void_p, C.c_ulong, C.c_ulong)
+STRING = _message(C.c_void_p, C.c_char_p)
+SET = _message(None, C.c_void_p)
+OBJECT = _message(C.c_void_p)
+VALUE = _message(C.c_uint64)
+LEVELS = _message(C.c_uint32, C.c_void_p)
+VALUES = _message(C.c_ulong, C.c_void_p, C.c_uint32, C.c_void_p)
+PLACE_OPERAND = _message(None, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_ulong, C.c_ulong, C.c_ulong, C.c_bool)
+PLACE_VALUE = _message(None, C.c_void_p, C.c_ulong, C.c_void_p, C.c_ulong, C.c_ulong, C.c_ulong, C.c_bool)
+SIGNAL = _message(None, C.c_void_p, C.c_uint64)
+WAIT = _message(C.c_bool, C.c_uint64, C.c_uint64)
+
+
+# metal_recording.h struct MetalReplay, struct MetalCall and struct MetalValue, each field in the header's order and of
+# its type
+class Replay(C.Structure):
+    _fields_ = [('commands', C.c_void_p), ('residency', C.c_void_p), ('owner', C.c_void_p), ('count', mesh.U),
+                ('buffers', C.c_uint16), ('memory', C.c_uint16)]
+
+
+class Call(C.Structure):
+    _fields_ = [('replay', C.POINTER(Replay)), ('plan', mesh.Q), ('passes', mesh.Q), ('landed', C.c_void_p)]
+
+
+class MetalValue(C.Structure):
+    _fields_ = [('bytes', C.c_ulong), ('kind', mesh.U), ('state', mesh.U), ('begin', mesh.U), ('end', mesh.U)]
+
+
+ENCODE = C.CFUNCTYPE(None, C.c_void_p)
+START = C.cast(mesh.LIB.mesh_transfers_start, C.c_void_p)
+
+
+# The recorder in the process from its start: dyld include/mach-o/dyld-interposing.h, `DYLD_INTERPOSE(_replacement,
+# _replacee)`, its entry placed `__attribute__ ((section ("__DATA,__interpose,interposing")))`, loaded with the program
+# by DYLD_INSERT_LIBRARIES (metal-microbench 51e15127: "the process started with the recorder inserted"); torch 2.14.0
+# aten/src/ATen/mps/MPSDevice.mm: `NSArray* devices = [MTLCopyAllDevices() autorelease];`, which the recorder
+# interposes, so torch's MPS device is the recorder's.  The library DYLD_INSERT_LIBRARIES names, its repository (the
+# directory above its .build) and the interposed MTLCreateSystemDefaultDevice; ENOENT where DYLD_INSERT_LIBRARIES
+# names none
+RECORDER = []
+
+
+def _recorder():
+    if not RECORDER:
+        path = next((p for p in os.environ.get('DYLD_INSERT_LIBRARIES', '').split(':')
+                     if os.path.basename(p) == 'libmetal_recording.dylib'), None)
+        if path is None:
+            raise OSError(errno.ENOENT, 'no recorder in the process: the program starts with DYLD_INSERT_LIBRARIES='
+                                        '<metal-microbench>/.build/libmetal_recording.dylib')
+        lib, metal = C.CDLL(path), C.CDLL('/System/Library/Frameworks/Metal.framework/Metal')
+        lib.MetalRecorderOpen.restype, lib.MetalRecorderOpen.argtypes = C.c_void_p, [C.c_void_p, C.c_char_p, C.c_size_t]
+        lib.MetalRecorderCapture.restype = C.c_void_p
+        lib.MetalRecorderCapture.argtypes = [C.c_void_p, ENCODE, C.c_void_p, C.c_char_p, C.c_size_t]
+        lib.MetalRecorderReplay.restype = C.c_int
+        lib.MetalRecorderReplay.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(Replay), C.c_char_p, C.c_size_t]
+        lib.MetalRecorderRun.restype = C.c_int
+        lib.MetalRecorderRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.U, C.POINTER(Call), mesh.U, mesh.Q,
+                                         mesh.Q, C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
+        lib.MetalReplayDestroy.restype, lib.MetalReplayDestroy.argtypes = None, [C.POINTER(Replay)]
+        metal.MTLCreateSystemDefaultDevice.restype = C.c_void_p
+        RECORDER.append((lib, os.path.dirname(os.path.dirname(os.path.abspath(path))),
+                         metal.MTLCreateSystemDefaultDevice))
+    return RECORDER[0]
+
+
+# The engine's MPP kernel as torch's MPS mm: Metal Performance Primitives, MPPTensorOpsMatMul2d.h (macOS 26.4 SDK):
+# "User can apply post processing in-register where GEMM output is computed using cooperative_tensor."; torch 2.14.0
+# torch/library.py, impl: "Register an implementation for a device type for this operator. ... Some valid types are:
+# "cpu", "cuda", "xla", "mps", "ipu", "xpu"."; torch/mps/__init__.py, compile_shader: "Compiles compute shader from
+# source and allows one to invoke kernels defined there from the comfort of Python runtime".  dense_tensor_f16
+# (metal-microbench matrix_shaders.metal, after matrix_arithmetic.metal, as the engine's matrixMSL is) computes
+# out[m][n] = sum_k self[m][k] mat2[k][n] for half operands where self's k and mat2's k are of unit stride, any strides of
+# out (its MMB_MATRIX_OUTPUT_TRANSPOSED form where out's n is not), its constants this call's shape and strides, one
+# library a shape (ENGINE), threadgroups of 2 x 2 SIMD-groups over 64 x 64 tiles of out (MMB_MATRIX_ROWS,
+# MMB_MATRIX_GROUP_ROWS).  Any other mm is torch's own MPS kernel, bmm's of one batch (torch 2.14.0
+# torch/_torch_docs.py, bmm: "input and mat2 must be 3-D tensors each containing the same number of matrices").
+ENGINE = {}
+
+
+def _engine(self, mat2, out):
+    m, k, n = self.shape[0], self.shape[1], mat2.shape[1]
+    key = (m, k, n, self.stride(0), mat2.stride(1), out.stride(0), out.stride(1))
+    if key not in ENGINE:
+        ENGINE[key] = torch.mps.compile_shader(
+            '#define MMB_PREFILL_MPP 1\n#define MMB_TENSOR_REDUCTION_TILE 0\n#define MMB_TENSOR_BARRIER 0\n'
+            '#define MMB_MATRIX_OUTPUT_TRANSPOSED %d\n#define MMB_MATRIX_SHAPE uint4(%du, %du, %du, %du)\n'
+            '#define MMB_MATRIX_INPUTS uint4(%du, 0u, 1u, %du)\n#define MMB_MATRIX_OUTPUT uint2(%du, %du)\n'
+            % (out.stride(1) != 1, m, k, n, m, self.stride(0), mat2.stride(1), out.stride(0), out.stride(1))
+            + ENGINE['source'])
+    ENGINE[key].dense_tensor_f16(self, mat2, out, out, threads=[(m + 63) // 64 * 128, (n + 63) // 64, 1],
+                                 group_size=[128, 1, 1])
+    return out
+
+
+def _mm_out(self, mat2, *, out):
+    if self.dtype == mat2.dtype == out.dtype == torch.float16 and self.numel() and mat2.numel() \
+            and self.stride(1) == 1 and mat2.stride(0) == 1:
+        return _engine(self, mat2, out)
+    torch.bmm(self.unsqueeze(0), mat2.unsqueeze(0), out=out.unsqueeze(0))
+    return out
+
+
+def _mm(self, mat2):
+    return _mm_out(self, mat2, out=torch.empty(self.shape[0], mat2.shape[1], dtype=self.dtype, device=self.device))
+
+
+def _kernels(root):
+    if 'source' not in ENGINE:
+        with open(os.path.join(root, 'matrix_arithmetic.metal')) as arithmetic, \
+                open(os.path.join(root, 'matrix_shaders.metal')) as shaders:
+            ENGINE['source'] = arithmetic.read() + '\n' + shaders.read()
+        torch.library.impl('aten::mm.out', 'mps')(_mm_out)
+        torch.library.impl('aten::mm', 'mps')(_mm)
+
+
 # dlpack.h DLManagedTensorVersioned `deleter`: "This should be called to destruct manager_ctx which holds the
 # DLManagedTensorVersioned"; "The destructor deletes the argument self as well".  torch v2.14.0 calls it once the
 # tensor's storage is freed: torch/csrc/utils/tensor_new.cpp tensor_fromDLPackImpl's deleter_maybe_gil
@@ -2508,13 +2632,21 @@ def _bind(context, ir, values, addresses, buffer, mapping):
         copies.append([_dlpack_tensor('cpu', a, 0, None, dtype, (numel,), mapping) if device == 'cpu' else
                        _dlpack_tensor('mps', buffer, a - mapping.view.address, buffer, dtype, (numel,), mapping)
                        for a in at])
+    places, given = _homes(ir, copies)
+    hosts = {i: [copy.view(shape) if ir.layouts[v][2] == 'cpu' else
+                 _dlpack_tensor('cpu', a, 0, None, ir.layouts[v][0], shape, mapping) for copy, a in
+                 zip(copies[v], addresses[v])] for i, (v, shape) in ir.inputs.items()}
+    return places, {i: ir.layouts[d.value][2] for i, d in enumerate(ir.declared) if d.value != mesh.ABSENT}, \
+        {i: (given[i], hosts[i]) for i in given}, copies
+
+
+# each placed key's tensors, its home's strided view of each copy of its value (torch 2.14.0 torch/_torch_docs.py
+# as_strided: "the offset in the underlying storage of the output tensor"), and each program input's device tensors,
+# from `copies`, value v's tensors by copy
+def _homes(ir, copies):
     places = {key: [copy.as_strided(sizes, strides, copy.storage_offset() + offset) for copy in copies[v]]
               for key, (v, offset, sizes, strides) in ir.homes.items()}
-    given = {i: ([copy.view(shape) for copy in copies[v]],
-                 [copy.view(shape) if ir.layouts[v][2] == 'cpu' else
-                  _dlpack_tensor('cpu', a, 0, None, ir.layouts[v][0], shape, mapping) for copy, a in
-                  zip(copies[v], addresses[v])]) for i, (v, shape) in ir.inputs.items()}
-    return places, {i: ir.layouts[d.value][2] for i, d in enumerate(ir.declared) if d.value != mesh.ABSENT}, given
+    return places, {i: [copy.view(shape) for copy in copies[v]] for i, (v, shape) in ir.inputs.items()}
 
 
 # item g of this node's program, (kind, the keys it reads, the key it makes, its operand), at execution t on execution
@@ -2693,14 +2825,14 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
     _, reads, key, collective = item
     me, receives = ir.roles[collective]
     if collective.kind == 'reduce-scatter' or collective.kind == 'all-reduce' and me == 0:
-        waits = [lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
-                 _arrived(context, plan, i, t, count) for i, _ in receives]
+        waits = [[lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
+                  _arrived(context, plan, i, t, count)] if state is not None else [] for i, _ in receives]
         total, first, steps = placed(key), operands[0], []
         if collective.kind == 'reduce-scatter':
             n = first.shape[collective.dim] // (len(receives) + 1)
             first = first.narrow(collective.dim, me * n, n)
         for wait, (_, (received, j)) in zip(waits, receives):
-            steps += [wait, lambda env, inputs, t, a=first, b=placed(received)[j]: torch.add(a, b, out=total)]
+            steps += wait + [lambda env, inputs, t, a=first, b=placed(received)[j]: torch.add(a, b, out=total)]
             first = total
         return steps
     if collective.kind == 'collective-permute':
@@ -2709,8 +2841,22 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
             return [] if places[reads[0]][:4] == places[key][:4] else \
                 [lambda env, inputs, t, a=operands[0]: place.copy_(a)]
         if me not in [q for _, q in pairs]:
-            return [lambda env, inputs, t: place.zero_()]
+            return _filled(state, place, 0)
     return []
+
+
+# PyTorch v2.11.0 aten/src/ATen/native/mps/operations/ConstantOps.mm: "check if it's possible to use fillBuffer() to fill
+# the Tensor's storage", `if (self.is_contiguous()) { if (value.toDouble() == 0.0) { return fill_mps_tensor_(self, 0);`,
+# a blit encoder's fillBuffer:range:value: (aten/src/ATen/mps/MPSStream.mm); Metal MTLIndirectCommandBuffer.h,
+# MTLIndirectCommandType: draws and "Dispatch threadgroups with concurrent execution", no blit.  A fill of `part` with
+# `fill`, a step of the execution; before the plan (`state` None, the capture's form) a stop, since a capture records
+# dispatches alone
+def _filled(state, part, fill):
+    if state is None:
+        raise NotImplementedError('a fill of a value\'s part with %r: torch\'s MPS fill is a blit (ConstantOps.mm '
+                                  'fill_mps_tensor_), which an indirect command buffer does not hold '
+                                  '(MTLIndirectCommandBuffer.h MTLIndirectCommandType)' % (fill,))
+    return [lambda env, inputs, t: part.fill_(fill)]
 
 
 # torch 2.14.0 torch/distributed/_functional_collectives.py, wait_tensor: "Wait on a tensor returned by the collectives
@@ -2774,7 +2920,7 @@ def _copied(ir, read, key, cut, source, target):
 def _specialized(ir, context, plan, state, devices, placed, c, item, operands, steps):
     kind, reads, key, operand = item
     value = placed(key)
-    for collective in ir.waits.get(ir.producer[key], ()):
+    for collective in ir.waits.get(ir.producer[key], ()) if state is not None else ():
         steps += _completed(ir, context, plan, state, c, collective)
     if kind == 'input':
         value = _Dynamic(key)
@@ -2787,8 +2933,8 @@ def _specialized(ir, context, plan, state, devices, placed, c, item, operands, s
         dim, m, _, length, starts, size, fill = operand
         q = ir.coords[ir.device][m]
         below, above = min(length, max(0, -starts[q])), min(length, max(0, size - starts[q]))
-        steps += [lambda env, inputs, t, part=value.narrow(dim, start, extent): part.fill_(fill)
-                  for start, extent in ((0, below), (above, length - above)) if fill is not None and extent]
+        for start, extent in ((0, below), (above, length - above)):
+            steps += _filled(state, value.narrow(dim, start, extent), fill) if fill is not None and extent else []
     elif kind in ('slice', 'narrow', 'window') and value is None:
         at = _cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device)
         if isinstance(operands[0], _Dynamic):
@@ -2801,7 +2947,8 @@ def _specialized(ir, context, plan, state, devices, placed, c, item, operands, s
         steps += made
     elif kind == 'collective':
         steps += _collected(ir, context, plan, state, placed, c, item, operands)
-    steps += _publishes(context, plan, devices, ir.publishes.get(ir.producer[key], ()))
+    if state is not None:
+        steps += _publishes(context, plan, devices, ir.publishes.get(ir.producer[key], ()))
     return value
 
 
@@ -2810,7 +2957,7 @@ def _specialized(ir, context, plan, state, devices, placed, c, item, operands, s
 # order, deciding each key's static or dynamic status from its source's and building the steps per copy; it moves into
 # the graph module"): its steps and its result, the output item's values unflattened by the exported program's out_spec
 def _instantiate(ir, context, plan, devices, tensors, c, spec):
-    state, steps = mesh.State.from_address(context.M + plan), []
+    state, steps = mesh.State.from_address(context.M + plan) if plan else None, []
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
 
     def placed(key):
@@ -2818,7 +2965,7 @@ def _instantiate(ir, context, plan, devices, tensors, c, spec):
     values = mesh_graph.forward(list(items), lambda key: items[key][1],
                                 lambda key, operands: _specialized(ir, context, plan, state, devices, placed, c,
                                                                    items[key], operands, steps))
-    for collective in ir.waits.get(len(ir.program) - 1, ()):
+    for collective in ir.waits.get(len(ir.program) - 1, ()) if state is not None else ():
         steps += _completed(ir, context, plan, state, c, collective)
     node, keys = next(item[3] for item in ir.program if item[0] == 'output')
     arguments = _bound(node.args[0], lambda n: values[keys[n]])[0]
@@ -2889,7 +3036,9 @@ def _steps(ir, context, plan, tensors, devices, spec):
 # caller's (make()'s one, which mesh_plan's release wait then takes; the dropped program's own).  What must stay: no
 # device synchronization; the retirement after torch's work; the wait bounded; the mapping released after it
 def _retire(context, state, deadline):
-    if 'mps' in state['devices']:
+    if state['replay'] is not None:
+        _unreplayed(context, state, deadline)
+    elif 'mps' in state['devices']:
         mesh.check(TORCH.mesh_torch_retire(RETIRE, context.M, context.client))
     else:
         mesh.LIB.mesh_retire(context.M, context.client)
@@ -2983,6 +3132,215 @@ def _execute(context, run, args, kwargs):
     for step in run['steps'][c]:
         step(env, inputs, t)
     return run['results'][c](env)
+
+
+# A buffer of `bytes` on `device` (MTLDevice.h newBufferWithLength:options:, "Create a buffer by allocating new
+# memory"), shared storage, labelled `name` (MTLResource.h `label`, "A string to help identify this object"), which the
+# recorder binds where place:operand: puts it (metal-microbench metal_recording.m MetalProgramOperand: "one it labelled
+# ... the plan places"); its one reference the caller's.  ENOMEM where Metal makes none
+def _labelled(device, nbytes, name):
+    buffer = NEW_BUFFER(device, _SEL(b'newBufferWithLength:options:'), max(nbytes, 1), SHARED)
+    if not buffer:
+        raise OSError(errno.ENOMEM, 'Metal made no buffer of %d bytes (MTLDevice.h newBufferWithLength:options:)'
+                      % nbytes)
+    _label(buffer, name)
+    return buffer
+
+
+def _label(buffer, name):
+    text = STRING(OBJECT(OBJC.objc_getClass(b'NSString'), _SEL(b'alloc')), _SEL(b'initWithUTF8String:'), name.encode())
+    SET(buffer, _SEL(b'setLabel:'), text)
+    PUT(text, SELECTOR[b'release'])
+
+
+# torch 2.14.0 torch/export/__init__.py: "`export` takes any nn.Module along with example inputs, and produces a traced
+# graph representing only the Tensor computation of the function in an Ahead-of-Time (AOT) fashion, which can
+# subsequently be executed with different inputs or serialized."  metal-microbench metal_recording.h, `- (id)capture:(void
+# (^)(void))encode;`, "before the plan: encode's commands captured once, for every execution".  Each call of the block
+# at this node captured once, before the plan, in the block's order (_Program): its function's steps made with no plan
+# (_steps: no host wait and no host publish) over stand-in buffers, one a value of each function here, labelled
+# (_labelled), run once inside the recorder's capture (MetalRecorderCapture), torch's stream committed before it and at
+# its end (torch 2.14.0 aten/src/ATen/mps/MPSStream.mm: `_commandBuffer = [MPSCommandBuffer
+# commandBufferFromCommandQueue:_commandQueue].retain;`, its encoder `[commandBuffer() computeCommandEncoder]`, made
+# afresh after `endKernelCoalescing`), so every command of the call is made inside the capture.  A tensor of the call's
+# result over a buffer torch made is labelled as the capture ends and made a value of its function (IR.value), so it is
+# placed and outlives the execution; any other buffer torch made is a value of the capture (metal_recording.m
+# MetalDelegateValues).  `owners`: each labelled buffer's (function, value).  Each call: (its node, its function, the
+# capture, its result, the capture's levels and its own values, struct mesh_value form).  Every capture's commands bind
+# no plan: its values are placed after it (_replays)
+def _captured(context, irs, compiled, gm, of, constants, holders):
+    lib, root, made = _recorder()
+    _kernels(root)
+    error = C.create_string_buffer(4096)
+    device = made()
+    recorder = lib.MetalRecorderOpen(device, error, len(error))
+    PUT(device, SELECTOR[b'release'])
+    if not recorder:
+        raise OSError(errno.ENODEV, 'the recorder: %s' % error.value.decode())
+    owners, standins, counted = {}, {}, _Mapping(mesh.View())
+    for k, ir in enumerate(irs):
+        if ir.device is None:
+            continue
+        copies = []
+        for v, (dtype, numel, _) in enumerate(ir.layouts):
+            buffer = _labelled(_metal_device(), dtype.itemsize * numel, 'function %d value %d' % (k, v))
+            owners[buffer] = (k, v)
+            copies.append([_dlpack_tensor('mps', buffer, 0, buffer, dtype, (numel,), counted)])
+            PUT(buffer, SELECTOR[b'release'])
+        standins[k] = _homes(ir, copies)
+    calls = []
+
+    def capture(node, args, kwargs):
+        k = of[node]
+        ir = irs[k]
+        if ir.device is None:
+            calls.append((node, k, None, None, 0, []))
+            return None
+        steps, results = _steps(ir, context, 0, standins[k][0], {}, compiled[k].spec)
+        inputs, env, result, failure = pytree.arg_tree_leaves(*args, **kwargs), {}, [], []
+
+        def encode(_):
+            try:
+                for step in steps[0]:
+                    step(env, inputs, 0)
+                result.append(results[0](env))
+                for leaf in pytree.tree_leaves(result[0]):
+                    buffer = leaf.untyped_storage().data_ptr() if isinstance(leaf, torch.Tensor) else None
+                    if buffer is not None and buffer not in owners:
+                        owners[buffer] = (k, ir.value(leaf.dtype, leaf.untyped_storage().nbytes() // leaf.element_size(),
+                                                      'mps', 0, 0, 0))
+                        _label(buffer, 'function %d value %d' % owners[buffer])
+                torch.mps.synchronize()
+            except BaseException as raised:
+                failure.append(raised)
+        torch.mps.synchronize()
+        callback = ENCODE(encode)
+        handle = lib.MetalRecorderCapture(recorder, callback, None, error, len(error))
+        if failure:
+            raise failure[0]
+        if not handle:
+            raise OSError(errno.EINVAL, 'call %s of compiled function %d: the capture: %s'
+                          % (node.name, k, error.value.decode()))
+        levels = LEVELS(recorder, _SEL(b'levels:'), handle)
+        own = (MetalValue * max(VALUES(recorder, _SEL(b'values:level:into:'), handle, 0, None), 1))()
+        count = VALUES(recorder, _SEL(b'values:level:into:'), handle, 0, C.cast(own, C.c_void_p))
+        calls.append((node, k, handle, result[0], levels, [mesh.Value(
+            section=mesh.Section(bytes=v.bytes), kind=v.kind, state=v.state, begin=v.begin, end=v.end, run=1)
+            for v in own[:count]], env))
+        return result[0]
+    _Program(gm, capture).run(*[standins[k][1][i][0] if k is not None else constant
+                                for i, (constant, k) in enumerate(zip(constants, holders))])
+    return {'lib': lib, 'recorder': recorder, 'owners': owners, 'calls': calls}
+
+
+# ExecuTorch "Concepts", Memory planning: "a memory planning pass is run before the graph is saved to flatbuffer.  This
+# assigns a memory ID to each tensor and an offset in the buffer".  torch 2.14.0 torch/_inductor/cudagraph_trees.py:
+# "Sharing a memory pool is an extremely important optimization when chaining multiple CUDA graphs together, as it
+# prevents you from needing to copy intermediate tensors from one graph to the next".  metal_recording.h place:value:
+# (M. Lam, PLDI 1988, §2.3: modulo variable expansion "reduces the number of locations allocated to a variable by reusing
+# the same location in non-overlapping iterations"; "Execution t binds copy t mod `copies`").  Each capture's operands,
+# every labelled buffer (`owners`), placed at their values' copies in the program's mapping (`buffer` over `view`), copy
+# c at offset + c x section.pages x pgsz (mesh-collective.h mesh_view_values), and its own values after its function's
+# (`first`), then its replay built (MetalRecorderReplay) and its residency set on the recorder's queue
+# (MTL4CommandQueue.h addResidencySet:).  One struct MetalCall a call, its plan its function's
+def _replays(captured, functions, values, addresses, view, buffer, pgsz):
+    lib, recorder, error = captured['lib'], captured['recorder'], C.create_string_buffer(4096)
+    queue, replays = OBJECT(recorder, _SEL(b'queue')), []
+    for node, k, handle, _, _, own, *_ in captured['calls']:
+        if handle is None:
+            replays.append(None)
+            continue
+        for operand, (j, v) in captured['owners'].items():
+            value = values[j][v]
+            PLACE_OPERAND(recorder, _SEL(b'place:operand:in:offset:stride:copies:ahead:shares:'), handle, operand,
+                          buffer, addresses[j][v][0] - view.address, value.section.pages * pgsz, value.section.count,
+                          0, bool(value.shares))
+        first = len(values[k]) - len(own)
+        for i in range(len(own)):
+            value = values[k][first + i]
+            PLACE_VALUE(recorder, _SEL(b'place:value:in:offset:stride:copies:shares:'), handle, i, buffer,
+                        addresses[k][first + i][0] - view.address, value.section.pages * pgsz, value.section.count,
+                        bool(value.shares))
+        replay = Replay()
+        status = lib.MetalRecorderReplay(recorder, handle, C.byref(replay), error, len(error))
+        PUT(handle, SELECTOR[b'release'])
+        if status:
+            raise OSError(status, 'call %s of compiled function %d: the replay: %s' % (node.name, k,
+                                                                                         error.value.decode()))
+        SET(queue, _SEL(b'addResidencySet:'), replay.residency)
+        replays.append(replay)
+    calls = (Call * len(replays))(*[Call(C.pointer(replay) if replay is not None else None, functions[k].plan, 0, None)
+                                    for replay, (_, k, *_) in zip(replays, captured['calls'])])
+    gpu = OBJECT(queue, _SEL(b'device'))
+    allocators = (C.c_void_p * HOST_LAG)(*[OBJECT(gpu, _SEL(b'newCommandAllocator')) for _ in range(HOST_LAG)])
+    return {'lib': lib, 'recorder': recorder, 'queue': queue, 'replays': replays, 'calls': calls,
+            'allocators': allocators, 'ended': OBJECT(gpu, _SEL(b'newSharedEvent')), 'error': error}
+
+
+# Every output of the block over its values' pages (torch 2.14.0 torch/_inductor/cudagraph_trees.py: "If a tensor is a
+# user-visible output that must remain live across generations, manually clone the tensor outside torch.compile()"),
+# one pytree a phase of the period P, the
+# least common multiple of every value's copies and of the inputs' HOST_LAG: each call's result with every tensor its
+# value's copy p mod copies at its offset, sizes and strides (`copies`, by function and value, _bind), the block's
+# inputs their copy p mod HOST_LAG, interpreted by _Program once each
+def _outputs(captured, copies, gm, constants, inputs):
+    period = math.lcm(HOST_LAG, *(len(c) for function in copies.values() for c in function))
+
+    def leaf(x, p):
+        if not isinstance(x, torch.Tensor):
+            return x
+        k, v = captured['owners'][x.untyped_storage().data_ptr()]
+        copy = copies[k][v][p % len(copies[k][v])]
+        return copy.as_strided(x.shape, x.stride(), copy.storage_offset() + x.storage_offset())
+    results = {node: result for node, _, _, result, *_ in captured['calls']}
+    return [_Program(gm, lambda node, args, kwargs, p=p: pytree.tree_map(lambda x: leaf(x, p), results[node])).run(
+        *[placed[0][p % len(placed[0])] if placed is not None else constant for constant, placed in zip(constants, inputs)])
+        for p in range(period)]
+
+
+# Execution b of the program at this node: one call of the recorder (MetalRecorderRun), each call's start
+# (mesh-call.h mesh_transfers_start; MPI 4.1 §3.9, MPI_START: "The request becomes active once the call is made"), its
+# start from the GPU stream on the execution's end event (mesh_host_started; NCCL User Guide, CUDA Stream Semantics:
+# "NCCL calls are associated to a stream which is passed as the last argument of the collective communication function.
+# The NCCL call returns when the operation has been effectively enqueued to the given stream, or returns an error."),
+# its replay of repetition b, then the end at b + 1; its result the outputs of phase b mod P (_outputs).  No torch call
+# and no step runs.  The error value of its start or of the recorder, raised
+def _replayed(context, replay, b):
+    status = replay['lib'].MetalRecorderRun(replay['recorder'], replay['allocators'], HOST_LAG, replay['calls'],
+                                            len(replay['calls']), b, 0, replay['ended'], C.addressof(context), START,
+                                            STARTED, replay['error'], len(replay['error']))
+    if status:
+        raise OSError(status, 'execution %d of the program: %s' % (b, replay['error'].value.decode()))
+    return replay['outputs'][b % len(replay['outputs'])]
+
+
+# the executions whose end the recorder's queue has signalled (MTLEvent.h `signaledValue`)
+def _ended(replay):
+    return VALUE(replay['ended'], _SEL(b'signaledValue'))
+
+
+# A replayed program's retirement: the end event signalled once all the queue's work so far is complete
+# (MTL4CommandQueue.h signalEvent:value: "after all GPU work prior to this point is complete") and waited for until
+# `deadline` (MTLEvent.h waitUntilSignaledValue:timeoutMS:), ETIMEDOUT past it with the operand standing; then the
+# program's operand retired (mesh-dataflow.h mesh_retire), as the CPU device's retirement follows its calls, and the
+# replays, their residency sets, the allocators, the event and the recorder released
+def _unreplayed(context, state, deadline):
+    replay, last = state['replay'], state['executions'] + 1
+    SIGNAL(replay['queue'], _SEL(b'signalEvent:value:'), replay['ended'], last)
+    while _ended(replay) < last:
+        left = deadline - time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        if left <= 0 or not WAIT(replay['ended'], _SEL(b'waitUntilSignaledValue:timeoutMS:'), last,
+                                 max(left // 1000000, 1)) and _ended(replay) < last:
+            raise OSError(errno.ETIMEDOUT, 'the replay\'s work not ended by the deadline: the program\'s operand may '
+                                           'stand')
+    mesh.LIB.mesh_retire(context.M, context.client)
+    for made in replay['replays']:
+        if made is not None:
+            SET(replay['queue'], _SEL(b'removeResidencySet:'), made.residency)
+            replay['lib'].MetalReplayDestroy(C.byref(made))
+    for held in (*replay['allocators'], replay['ended'], replay['recorder']):
+        PUT(held, SELECTOR[b'release'])
+    state['replay'] = None
 
 
 # design/aot-compilation-change-request.md A10, "The calls' graph": Pathways' program tracer, "a new program tracer
@@ -3395,7 +3753,8 @@ class _Export(torch.fx.Interpreter):
 # node's values; a failure after mesh_plan retires the program; every input and invariant region pages
 def program(block, *example_inputs):
     tracer = Tracer()
-    gm = torch.fx.GraphModule(tracer.root, tracer.trace(block))
+    graph = tracer.trace(block)
+    gm = torch.fx.GraphModule(tracer.root, graph)
     exporter = _Export(gm, FakeTensorMode())
     exporter.run(*[exporter.fake(x) for x in example_inputs])
     compiled, of, calls, reads = exporter.compiled, exporter.of, exporter.calls, exporter.reads
@@ -3407,7 +3766,7 @@ def program(block, *example_inputs):
              for x in example_inputs]
     constants = [None if isinstance(x, torch.Tensor) else x for x in example_inputs]
     context, state = _context(), {'stale': True, 'mapping': None, 'runs': None, 'devices': (), 'executions': 0,
-                                  'ended': 0, 'inputs': [None] * len(given), 'timeout': None}
+                                  'ended': 0, 'inputs': [None] * len(given), 'timeout': None, 'replay': None}
 
     def make():
         nodes = mesh.Nodes()
@@ -3429,13 +3788,26 @@ def program(block, *example_inputs):
                                  'and reads the result of call %d, whose function has none there: such a node "has '
                                  'no value for any program code to read" (design/aot-compilation-change-request.md '
                                  'A4, withdrawn text)' % (j, k, nodes.self, absent[0]))
+        holders = []
         for i, (x, functions) in enumerate(zip(given, readers)):
             k = next((k for k in functions if irs[k].device is not None), None)
             if x is not None and k is not None:
                 irs[k].inputs[i] = (irs[k].value(*x[:3], 0, 0, 0, lag=HOST_LAG), x[3])
+            holders.append(k if x is not None else None)
+        here = {layout[2] for ir in irs for layout in ir.layouts}
+        if here == {'mps'} and len(set(calls)) != len(calls):
+            raise NotImplementedError('a compiled function called more than once in the block: its replay binds its '
+                                      'values by its plan\'s executions, the block\'s inputs by the block\'s')
+        captured = _captured(context, irs, compiled, gm, of, constants, holders) if here == {'mps'} else None
+        own = [[] for _ in irs]
+        for _, k, handle, _, levels, values, *_ in captured['calls'] if captured else ():
+            for value in irs[k].values if handle is not None else ():
+                if value.kind == mesh.EXECUTION and not value.lag:
+                    value.begin, value.end = 0, max(levels, 1) - 1
+            own[k] = values
         arrays = [((mesh.Declared * len(ir.declared))(*ir.declared), (mesh.Weight * len(ir.weights))(*ir.weights),
-                   (mesh.Value * len(ir.values))(*ir.values),
-                   (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir in irs]
+                   (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
+                   (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir, mine in zip(irs, own)]
         functions = (mesh.Function * len(irs))(*[
             mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
                           C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
@@ -3458,23 +3830,36 @@ def program(block, *example_inputs):
             try:
                 bound = [_bind(context, ir, values, at, buffer, state['mapping']) for ir, (_, _, values, _), at in
                          zip(irs, arrays, addresses)]
+                if captured:
+                    state['replay'] = _replays(captured, functions, [values for _, _, values, _ in arrays], addresses,
+                                               view, buffer, mesh.Header.from_address(context.M).pgsz)
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
             # torch 2.14.0 torch/export/exported_program.py, ExportedProgram: "a state_dict containing tensor values of
             # all lifted parameters and buffers".  GSPMD section 4.5: "DynamicSlice to shard replicated dimensions"
-            for ir, (places, _, _) in zip(irs, bound):
+            for ir, (places, _, _, _), at in zip(irs, bound, addresses):
                 loaded = ir.loads & places.keys()
                 needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
                 host = mesh_graph.forward([key for key in ir.attributes if key in needed],
                                           lambda key: ir.attributes[key][1],
                                           lambda key, values: _hosted(ir, ir.attributes[key], values))
                 for key in loaded:
-                    places[key][0].copy_(host[key])
-            runs = [dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
-                         plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan),
-                         started=_started(context, f.plan, any(layout[2] == 'mps' for layout in ir.layouts)))
-                    for ir, f, record, (places, devices, _) in zip(irs, functions, compiled, bound)]
+                    if captured:
+                        v, offset, sizes, strides = ir.homes[key]
+                        _dlpack_tensor('cpu', at[v][0], 0, None, ir.layouts[v][0], (ir.layouts[v][1],),
+                                       state['mapping']).as_strided(sizes, strides, offset).copy_(host[key].cpu())
+                    else:
+                        places[key][0].copy_(host[key])
+            runs = None if captured else [
+                dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
+                     plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan),
+                     started=_started(context, f.plan, any(layout[2] == 'mps' for layout in ir.layouts)))
+                for ir, f, record, (places, devices, _, _) in zip(irs, functions, compiled, bound)]
+            if captured:
+                state['replay']['outputs'] = _outputs(captured, {k: b[3] for k, b in enumerate(bound)}, gm, constants,
+                                                      [next((b[2][i] for b in bound if i in b[2]), None)
+                                                       for i in range(len(given))])
         except BaseException:
             _retire(context, state, deadline)
             raise
@@ -3494,6 +3879,8 @@ def program(block, *example_inputs):
     timed(make)
 
     def ended():
+        if state['replay'] is not None:
+            return _ended(state['replay'])
         return TORCH.mesh_torch_ended() if 'mps' in state['devices'] else state['ended']
 
     def end(b):
@@ -3515,6 +3902,13 @@ def program(block, *example_inputs):
             make()
         b = state['executions']
         state['executions'] = b + 1
+        if state['replay'] is not None:
+            try:
+                return _replayed(context, state['replay'], b)
+            except OSError as failure:
+                if failure.errno in (errno.ESTALE, errno.ECANCELED):
+                    state['stale'] = True
+                raise
         arguments = [constant if placed is None else placed[0][b % len(placed[0])]
                      for constant, placed in zip(constants, state['inputs'])]
         try:
