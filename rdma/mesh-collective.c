@@ -1,6 +1,6 @@
 #include "mesh-collective.h"
 #include "mesh-graph.h"
-#include <float.h>
+#include <math.h>
 #include <os/os_sync_wait_on_address.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,11 +142,6 @@ static int plan_key_order(const void *a,const void *b){
   if(x->identity!=y->identity)return x->identity<y->identity?-1:1;
   return (x->index>y->index)-(x->index<y->index);
 }
-struct plan_edges { const uint32_t *from,*to; };
-static uint32_t plan_end(const void *context,uint32_t e,uint32_t side){
-  const struct plan_edges *graph=context;
-  return side?graph->to[e]:graph->from[e];
-}
 static int plan_leaf(const void *context,uint32_t d,uint32_t v){
   return (int)(((const struct plan_demand *)context)[d].leaves>>v&1);
 }
@@ -190,9 +185,6 @@ static uint32_t plan_event(const struct plan *p,uint32_t i,int produced,int own)
   if(produced)return plan_produced(p,p->of[i]);
   if(own)return plan_own(p,p->of[i]);
   return plan_consumed(p,p->of[i],p->declared[i].destination);
-}
-static uint32_t plan_event_node(const struct mesh_declared *declared,uint32_t i,int produced,int own){
-  return produced || own?declared[i].source:declared[i].destination;
 }
 struct plan_edge { uint32_t tail,head,lag; };
 static uint32_t plan_edge_tail(const void *context,size_t k){ return ((const struct plan_edge *)context)[k].tail; }
@@ -1067,11 +1059,6 @@ static int plan_view(const struct mesh_strided *v,uint64_t *bytes,uint64_t *end)
   *bytes=b;*end=e;
   return 0;
 }
-static int plan_alike(const struct mesh_strided *a,const struct mesh_strided *b){
-  if(a->offset!=b->offset || a->element!=b->element || a->dims!=b->dims)return 0;
-  for(uint64_t k=0;k<2*(uint64_t)a->dims;k++)if(a->pairs[k]!=b->pairs[k])return 0;
-  return 1;
-}
 /* R. Ross, N. Miller and W. D. Gropp, Implementing fast and reusable datatype processing, EuroPVM/MPI 2003 */
 static void plan_extents(const struct mesh_strided *v,void (*visit)(void *,uint64_t,uint64_t),void *context){
   const uint64_t *pair=v->pairs;
@@ -1310,30 +1297,8 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   const struct mesh_dependence *dependence=function->dependence;
   struct mesh_value *values=function->value;
   const uint32_t count=function->count,given=function->values,dependences=function->dependences;
-  if((count && (!declared || !weights)) || (given && !values) || (dependences && !dependence))return EINVAL;
-  for(uint32_t j=0;j<given;j++){
-    const struct mesh_value *v=values+j;
-    if(!v->section.bytes || v->kind>MESH_EXECUTION || v->wire>1 || v->state>1 || v->run>1 ||
-       (v->state && (v->wire || v->kind!=MESH_INVARIANT)) ||
-       (v->lag && (v->kind!=MESH_EXECUTION || v->wire || v->state)))return EINVAL;
-    if(plan_blocks(m,v->section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
-  }
-  for(uint32_t i=0;i<count;i++){
-    const struct mesh_weight *x=weights+i;
-    if(declared[i].kind>MESH_PAGES || !(x->produced>0 && x->produced<=DBL_MAX) ||
-       !(x->consumed>0 && x->consumed<=DBL_MAX) || !(x->read>0 && x->read<=DBL_MAX) ||
-       !(x->page>0 && x->page<=DBL_MAX))return EINVAL;
-  }
-  const uint32_t kinds=MESH_FROM_PRODUCED|MESH_TO_PRODUCED|MESH_FROM_SOURCE_READ|MESH_TO_SOURCE_READ;
-  for(uint32_t e=0;e<dependences;e++){
-    const struct mesh_dependence *x=dependence+e;
-    const int from_produced=!!(x->kinds&MESH_FROM_PRODUCED),from_own=!!(x->kinds&MESH_FROM_SOURCE_READ),
-              to_produced=!!(x->kinds&MESH_TO_PRODUCED),to_own=!!(x->kinds&MESH_TO_SOURCE_READ);
-    if(x->from>=count || x->to>=count || x->kinds&~kinds || (from_produced && from_own) || (to_produced && to_own) ||
-       x->lag==UINT32_MAX || plan_event_node(declared,x->from,from_produced,from_own)!=
-       plan_event_node(declared,x->to,to_produced,to_own))return EINVAL;
-  }
-  if(!function->outstanding || function->outstanding>=UINT32_MAX)return ENOMEM;
+  for(uint32_t j=0;j<given;j++)if(plan_blocks(m,values[j].section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
+  if(function->outstanding>=UINT32_MAX)return ENOMEM;
   const uint32_t n=nodes->count;
   p->declared=declared;p->transfers=count;p->given=values;p->givens=given;p->weights=weights;
   p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;p->start_lead=function->lead;
@@ -1352,10 +1317,9 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;
     uint64_t from,to,end;
-    if(t->source>=n || t->destination>=n){status=EHOSTUNREACH;goto done;}
-    if(t->source==t->destination || plan_view(&t->from,&from,&end) || plan_view(&t->to,&to,&end) || from!=to){
-      status=EINVAL;goto done;
-    }
+    /* MPI 4.1 §7.1 (https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm): "for collective operations, the
+       amount of data sent must exactly match the amount of data specified by the receiver." */
+    if(plan_view(&t->from,&from,&end) || plan_view(&t->to,&to,&end) || from!=to){status=EINVAL;goto done;}
     if(plan_blocks(m,from)>=UINT32_MAX/m->block){status=ENOMEM;goto done;}
     key[i]=(struct plan_key){t->source,t->identity,i};
   }
@@ -1374,31 +1338,16 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     p->of[i]=placed[i]==i?p->demands-1:p->of[placed[i]];
     struct plan_demand *d=p->demand+p->of[i];
     if(t->kind!=MESH_PAGES)d->set=0;
-    if(!plan_alike(&t->from,&declared[d->first].from) || d->leaves>>t->destination&1 ||
-       weights[i].produced!=weights[d->first].produced || weights[i].read!=weights[d->first].read){
-      status=EINVAL;goto done;
-    }
     d->leaves|=UINT64_C(1)<<t->destination;
-    if(t->source!=p->self && t->destination!=p->self){
-      if(t->value!=MESH_ABSENT){status=EINVAL;goto done;}
-      continue;
-    }
-    if(t->value>=given){status=EINVAL;goto done;}
-    const struct mesh_value *v=values+t->value;
-    const struct mesh_strided *view=t->source==p->self?&t->from:&t->to;
-    plan_view(view,&bytes,&end);
-    if(end>v->section.bytes || v->state || v->kind!=MESH_EXECUTION || (t->destination==p->self && v->lag) ||
-       (t->source==p->self && d->mine!=MESH_ABSENT && d->mine!=t->value)){
-      status=EINVAL;goto done;
-    }
+    if(t->source!=p->self && t->destination!=p->self)continue;
+    /* GSPMD (Xu et al., arXiv 2105.04663), §4.5: "DynamicSlice to shard replicated dimensions"; torch 2.14.0
+       torch/export/exported_program.py, ExportedProgram: "a state_dict containing tensor values of all lifted parameters
+       and buffers" */
+    if(t->source==p->self && values[t->value].kind!=MESH_EXECUTION){status=EINVAL;goto done;}
     d->mine=t->value;
-    d->view=view;
+    d->view=t->source==p->self?&t->from:&t->to;
   }
   for(uint32_t i=0;i<p->demands;i++)if(p->demand[i].mine!=MESH_ABSENT)p->named[p->demand[i].mine]=1;
-  for(uint32_t j=0;j<given;j++)
-    if(values[j].kind==MESH_EXECUTION && !values[j].lag && values[j].begin>values[j].end){
-      status=EINVAL;goto done;
-    }
   for(uint32_t i=0;i<p->demands;i++)if(p->demand[i].source==p->self)p->demand[i].release=(uint32_t)p->releases++;
   if((status=plan_instructions(p,m)) || (status=plan_landings(p)))goto done;
 
@@ -1408,20 +1357,6 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
       if(c){p->from[p->pairs]=a;p->to[p->pairs]=b;p->capacity[p->pairs]=(double)c;p->pairs++;}
     }
     const uint32_t E=p->pairs;
-    const struct plan_edges graph={p->from,p->to};
-    uint32_t order[n];
-    unsigned char reached[n];
-    uint64_t reach[n],known=0;
-    for(uint32_t i=0;i<p->demands;i++){
-      const uint32_t s=p->demand[i].source;
-      if(!(known>>s&1)){
-        mesh_graph_reach(n,E,plan_end,&graph,s,order,reached,NULL);
-        reach[s]=0;
-        for(uint32_t v=0;v<n;v++)if(reached[v])reach[s]|=UINT64_C(1)<<v;
-        known|=UINT64_C(1)<<s;
-      }
-      if(p->demand[i].leaves&~reach[s]){status=EHOSTUNREACH;goto done;}
-    }
     const uint32_t rounds=(uint32_t)(mesh_graph_log(2*E>1?(double)(2*E):2.0)/(MESH_PLAN_EPS*MESH_PLAN_EPS))+1;
     const uint64_t most=(uint64_t)rounds*p->demands;
     const uint32_t room=most>=UINT32_MAX?UINT32_MAX-1:(uint32_t)most;
@@ -1452,9 +1387,6 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     for(uint32_t i=0;i<p->demands;i++){
       struct plan_demand *d=p->demand+i;
       mesh_graph_fill(d->trees,latency+d->tree,rate+d->tree,d->instructions,p->run+d->tree);
-      uint64_t cut=0;
-      for(uint32_t j=d->tree;j<d->tree+d->trees;j++)cut+=p->run[j];
-      if(cut!=d->instructions){status=EHOSTUNREACH;goto done;}
     }
   }
   if((status=plan_trees(p)) || (status=plan_template(p,dependence,dependences)) || (status=plan_acyclic(p)) ||
@@ -1468,7 +1400,6 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   uint64_t spanned=0;
   for(uint32_t i=0;i<p->demands;i++)spanned|=UINT64_C(1)<<p->demand[i].source|p->demand[i].leaves|p->demand[i].on;
   if(!spanned)spanned=UINT64_C(1)<<p->self;
-  if(spanned&~program){status=EINVAL;goto done;}
   p->spanned=spanned;
   p->nodes=p->demands?spanned:UINT64_C(1)<<__builtin_ctzll(program);
   status=plan_times(p);
@@ -1612,7 +1543,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
         const uint32_t r=x.first+c*x.stride+k;
         atomic_store_explicit(&mesh_page(m)[r].device,0,memory_order_relaxed);
         mesh_buffers(m)[r].constant=0;
-        mesh_backing_bind(context,r,m->block,page[r],c);
+        mesh_backing_bind(context,r,m->block,page[r]);
         if(v->state){
           const uint64_t left=v->section.bytes-(uint64_t)k*block;
           memset(mesh_at(m,page[r]),0,(size_t)(left<block?left:block));
