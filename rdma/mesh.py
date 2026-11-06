@@ -123,6 +123,19 @@ class State(C.Structure):
                 ('submit_room', Q), ('transfers', Q), ('padding3', Q * 5)]
 
 
+# 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7: "Every
+# wait ends at MESH_PLATFORM_NS without progress ... The operator's bound is judged by time without progress"; "The
+# revisions of 14b9a757"): mesh.h struct mesh_publication, its fields before `targets`, and its size (64 bytes, the
+# header's assert), the stride of struct mesh_state `transfers` (mesh.h mesh_transfer_at), so a host reader finds a
+# received range's count word, copy c's at `count` + 8 c, whose rises are its progress (rdma/mesh_compile.py _arrived).
+# What must stay: the fields in the header's order and at its offsets
+class Publication(C.Structure):
+    _fields_ = [('sends', U), ('pages', U), ('phases', Q), ('count', Q), ('state', Q)]
+
+
+PUBLICATION_BYTES = 64
+
+
 # mesh-dataflow.h struct mesh_nodes, the map reader's (mesh_nodes_read)
 NODES_MOST = 32
 
