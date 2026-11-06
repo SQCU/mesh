@@ -833,4 +833,70 @@ Code is cited at mesh 36bd7cbd. The two stops above are replaced by items 13 and
     algorithm (A.0.1) for the non-cyclic remainder. A cyclic interval with no fat cover gets new colors, as §3.2.3's
     second phase states. This replaces `plan_before` and `mesh_graph_chains` for these items.
   - PLAN_ALONE items stay as they are.
-  - The open implementations of this kind of solver are appended below once read.
+- **Open implementations of this kind of solver** (read 2026-11-06; each at a pinned commit):
+  - **Dagor Engine daFrameGraph (BSD-3-Clause).** It places resources on a ring of frames, by arc disjointness.
+    GaijinEntertainment/DagorEngine @ 2baf19472d60b96b437b2f9e549a3a6c8958cfd8,
+    prog/gameLibs/render/daFrameGraph/backend/resourceScheduling/:
+    - heapLayout.h:19: "// An arc of the frame ring whose end is not after its start wraps the ring"
+    - heapLayout.cpp:13–23
+      (https://github.com/GaijinEntertainment/DagorEngine/blob/2baf19472d60b96b437b2f9e549a3a6c8958cfd8/prog/gameLibs/render/daFrameGraph/backend/resourceScheduling/heapLayout.cpp#L13-L23):
+
+      ```
+      bool do_arcs_overlap(uint32_t a_start, uint32_t a_end, uint32_t b_start, uint32_t b_end)
+      {
+        const bool aWraps = a_end <= a_start;
+        const bool bWraps = b_end <= b_start;
+        if (aWraps && bWraps)
+          return true;
+        if (aWraps)
+          return a_end > b_start || b_end > a_start;
+        if (bWraps)
+          return b_end > a_start || a_end > b_start;
+        return a_end > b_start && b_end > a_start;
+      }
+      ```
+    - layoutOptimizer.cpp:405–406 and 419–420: the wrapping arcs are placed first, then a scanline places the rest.
+
+      ```
+      for (const auto i : wrapping)
+        scratch.blocks[i] = heap.allocate(items[queue[i]]);
+      ...
+            if (!item.arc.wraps())
+              scratch.blocks[event.item] = heap.allocate(item);
+      ```
+    - The older packer, @ 07b3e083ab4f66209cd8cc5c1c804ec7b3cb31bb, packers/boxingPacker.cpp:510–511: "// Algorithm for
+      UCSDA or rather circular arc graph coloring. (NP-complete btw)" / "// See "Coloring a Family of Circular Arcs" by
+      Alan Tucker for details."
+  - **XLA LoopOptimizerBestFitHeap (Apache-2.0).** It models several iterations of a loop in one heap.
+    openxla/xla @ a1d13182e8fcf1c2365fda678f23b294798528f9,
+    xla/service/memory_space_assignment/memory_bound_loop_optimizer.h:62–74:
+
+    ```
+    // LoopOptimizerBestFitHeap extends GlobalDecreasingSizeBestFitHeap to track
+    // allocated buffers and their live intervals for the MemoryBoundLoopOptimizer.
+    // * We model 4 loop iterations.
+    // * The 0th and 2nd iterations are even. The 1st and 3rd are odd.
+    // * Allocations in even iterations are required to have the same offsets.
+    //   Likewise, allocations in odd iterations are required to have the same
+    //   offset.
+    // * Allocations may have different offsets between odd and even iterations.
+    // * Buffers can span up to 2 iterations.
+    ```
+  - **Implementations that do not share** a multi-buffered value's storage with the loop body's values, as the code at
+    36bd7cbd does not:
+    - Triton (MIT) @ b7196d974bb431964a4e675a1d5481f2ba1fb2c2, lib/Analysis/Allocation.cpp:738–742. Its intervals are
+      linear ranges of operation IDs, and its multi-buffer lives from before the loop to after it:
+
+      ```
+      // Buffers interfere if their allocation offsets overlap and they are
+      // live at the same time.
+      if (xOpRange.intersects(yOpRange) &&
+          xSizeRange.intersects(ySizeRange)) {
+        interference[x].insert(y);
+      ```
+    - TVM USMP (Apache-2.0) v0.19.0, src/tir/usmp/analysis/extract_buffer_info.cc:152–154: "* \brief We record the
+      live allocate_nodes because once in loops" / "* the liveness range has to be extended to the whole of the nested"
+      / "* loops structure."
+  - None of the Apache, MIT or BSD code read implements the fat cover algorithm, Rau et al.'s ordering or the meeting
+    graph. The fetched files are under
+    /private/tmp/claude-501/-Users-mdot-metal-microbench/66e06aa7-8a9f-469f-a879-1939b883b550/scratchpad/cyclic-impl/.
