@@ -397,10 +397,6 @@ struct plan_item { uint64_t element,blocks; uint32_t kind,function,index,copy,sp
 struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,elements; uint32_t split,table;
                         struct mesh_range range[2]; };
 
-static int plan_alone(const void *context,uint32_t a,uint32_t b){
-  (void)context;(void)a;(void)b;
-  return 0;
-}
 
 static void plan_item_put(struct plan_placement *x,uint32_t kind,uint32_t function,uint32_t index,uint32_t copy,
                           uint64_t blocks,uint32_t space){
@@ -508,14 +504,9 @@ static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct pla
   for(uint32_t s=0;!status && s<2;s++){
     if(first[s]==first[s+1])continue;
     uint64_t blocks=0;
-    uint32_t rest=0;
     for(uint32_t i=first[s];i<first[s+1];i++)
-      if(!plan_interval(plans,x->item+i,operations,start,end)){index[rest]=i;counts[rest++]=x->count[i];}
-    if(rest){
-      status=mesh_graph_chains(rest,counts,plan_alone,NULL,out,&blocks);
-      for(uint64_t r=0,o=0;!status && r<rest;r++)
-        for(uint64_t k=0;k<counts[r];k++)x->chain[x->item[index[r]].element+k]=out[o++];
-    }
+      if(!plan_interval(plans,x->item+i,operations,start,end))
+        for(uint64_t k=0;k<x->count[i];k++)x->chain[x->item[i].element+k]=blocks++;
     for(uint32_t f=0;!status && f<count;f++){
       uint32_t n=0;
       for(uint32_t i=first[s];i<first[s+1];i++)
