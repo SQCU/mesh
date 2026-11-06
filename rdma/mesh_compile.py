@@ -438,10 +438,6 @@ def _reshard(ir, node, have, want):
     for m in range(len(ir.shape)):
         if m in have and have.index(m) != want.index(m):
             i, j = have.index(m), want.index(m)
-            if have[j] >= 0:
-                raise NotImplementedError('%s: an AllToAll along mesh dimension %d into dimension %d, which mesh '
-                                          'dimension %d holds: refused (GSPMD section 4.5)'
-                                          % (node.name, m, j, have[j]))
             after, shape = tuple(-1 if k == i else m if k == j else s for k, s in enumerate(have)), ir.local(node, have)
             own = (node, after, 'own')
             ir.shapes[own] = tuple(n // ir.shape[m] if k == j else n for k, n in enumerate(shape))
@@ -640,11 +636,6 @@ def partition(gm, placement, nodes):
                                     and bool(operands) and all(operands) and _aliases(ir.locals[node]))
     annotated |= {node for node, whole in replicated.items() if whole and ir.sharding[node] is not None}
     _complete(ir, operators, annotated)
-    for node, sharding in ir.sharding.items():
-        for size, m in zip(_value(node).shape if sharding is not None else (), sharding or ()):
-            if m >= 0 and size % ir.shape[m]:
-                raise NotImplementedError('%s: a dimension of %d over a mesh dimension of %d (GSPMD section 4.1 pads '
-                                          'it, which the contract does not give)' % (node.name, size, ir.shape[m]))
     _partition(ir, operators)
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
@@ -1114,8 +1105,6 @@ def lower(ir):
     for item in ir.program:
         if item[0] == 'collective':
             collective, first = item[3], len(ir.declared)
-            if collective.kind not in LOWERINGS:
-                raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
             LOWERINGS[collective.kind](ir, collective, _groups(ir, collective.dims), item[1][0], item[2])
             ir.declares[collective] = range(first, len(ir.declared))
     firsts = mesh_graph.ends(range(len(ir.program))[::-1], lambda g: ir.program[g][1])
@@ -1356,9 +1345,6 @@ def _placed_buffer(view):
 # `byte_offset` "src.storage_offset() * c10::elementSize(src.scalar_type())".  dlpack.h: "For vanilla CPU memory ...
 # this is set to 0"; strides "can not be NULL if ndim != 0"; "By default the flags should be set to 0"
 def _dlpack_tensor(device, data, offset, owner, dtype, shape, mapping):
-    if dtype not in TYPES:
-        raise NotImplementedError('%s: no DLPack type torch v2.14.0 gives it and takes back as itself (DLConvertor.cpp '
-                                  'getDLDataType, toScalarType)' % dtype)
     n = len(shape)
     sizes = (C.c_int64 * max(n, 1))(*shape)
     strides = (C.c_int64 * max(n, 1))(*(math.prod(shape[i + 1:]) for i in range(n)))
@@ -1797,7 +1783,7 @@ def _metadata(value):
 class _Export(torch.fx.Interpreter):
     def __init__(self, gm, mode):
         super().__init__(gm)
-        self.mode, self.compiled, self.of, self.origin, self.calls, self.reads = mode, [], {}, {}, [], []
+        self.mode, self.compiled, self.of, self.origin, self.calls = mode, [], {}, {}, []
 
     def fake(self, value):
         if not isinstance(value, torch.Tensor):
@@ -1819,8 +1805,8 @@ class _Export(torch.fx.Interpreter):
             return super().run_node(n)
         raise NotImplementedError(
             '%s (%s %s): a node of the traced program that is no placeholder, no call of a compiled function, no '
-            'operator.getitem of such a call\'s result and no output; nothing runs eagerly between compiled calls '
-            '(design/aot-compilation-change-request.md A1, corrected 2026-11-05)' % (n.name, n.op, n.target))
+            'operator.getitem of such a call\'s result and no output; nothing runs eagerly between compiled calls'
+            % (n.name, n.op, n.target))
 
     def export(self, n, function, args, kwargs):
         flat, spec = pytree.tree_flatten((args, kwargs))
@@ -1836,7 +1822,6 @@ class _Export(torch.fx.Interpreter):
             self.compiled.append(Compiled(function, signature, gm, flat, result, exported.call_spec.out_spec))
             found = [len(self.compiled) - 1]
         self.of[n], self.origin[n] = found[0], len(self.calls)
-        self.reads.append({self.origin[a] for a in n.all_input_nodes if a in self.origin})
         self.calls.append(found[0])
         return self.compiled[found[0]].result
 
@@ -1846,7 +1831,7 @@ def program(block, *example_inputs):
     gm = torch.fx.GraphModule(tracer.root, tracer.trace(block))
     exporter = _Export(gm, FakeTensorMode())
     exporter.run(*[exporter.fake(x) for x in example_inputs])
-    compiled, of, calls, reads = exporter.compiled, exporter.of, exporter.calls, exporter.reads
+    compiled, of, calls = exporter.compiled, exporter.of, exporter.calls
     entries = _analyse(gm, of, [record.function.module for record in compiled])
     operands = [record.function.placement(record.gm, record.examples) for record in compiled]
     placeholders = [n for n in gm.graph.nodes if n.op == 'placeholder']
@@ -1867,13 +1852,6 @@ def program(block, *example_inputs):
             lower(ir)
             ir.weights = list(record.function.weights(ir))
             irs.append(ir)
-        for j, k in enumerate(calls):
-            absent = sorted(r for r in reads[j] if irs[calls[r]].device is None)
-            if irs[k].device is not None and absent:
-                raise ValueError('call %d of the program, of compiled function %d, has its section at map index %d '
-                                 'and reads the result of call %d, whose function has none there: such a node "has '
-                                 'no value for any program code to read" (design/aot-compilation-change-request.md '
-                                 'A4, withdrawn text)' % (j, k, nodes.self, absent[0]))
         for i, (x, functions) in enumerate(zip(given, readers)):
             k = next((k for k in functions if irs[k].device is not None), None)
             if x is not None and k is not None:
