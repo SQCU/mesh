@@ -2044,6 +2044,27 @@ static int plan_instructions(struct plan *p,const struct hdr *m){
   free(first);free(order);free(start);free(pieces);free(index);
   return status;
 }
+/* MPI 4.1 §6.1.11: "A datatype may specify overlapping entries.  The use of such a datatype in any communication in
+   association with a buffer updated by the operation is erroneous."  This node's destination instructions, each the
+   bytes [at, at + its bytes) of the value it lands in, by mesh-graph.h mesh_graph_intersect.  0; EINVAL; ENOMEM */
+static int plan_landings(const struct plan *p){
+  uint64_t count=0,k=0;
+  for(uint32_t i=0;i<p->demands;i++)
+    if(p->demand[i].mine!=MESH_ABSENT && p->demand[i].leaves>>p->self&1)count+=p->demand[i].instructions;
+  struct mesh_graph_interval *interval=malloc((count+1)*sizeof *interval);
+  if(!interval)return ENOMEM;
+  for(uint32_t i=0;i<p->demands;i++){
+    const struct plan_demand *d=p->demand+i;
+    if(d->mine==MESH_ABSENT || !(d->leaves>>p->self&1))continue;
+    for(uint64_t j=0;j<d->instructions;j++){
+      const uint64_t at=p->at[d->at+j];
+      interval[k++]=(struct mesh_graph_interval){d->mine,at,at+p->cut[d->cut+j+1]-p->cut[d->cut+j]};
+    }
+  }
+  const int status=mesh_graph_intersect(count,interval)?EINVAL:0;
+  free(interval);
+  return status;
+}
 
 /* an instruction of a range at one of its ends here (plan_sets): bytes [start, end) of values[value], of the range whose
    routed value here is `member` (p->here's index), by value and first byte */
@@ -2388,7 +2409,7 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     }
   for(uint32_t i=0;i<p->demands;i++)if(p->demand[i].source==p->self)p->demand[i].release=(uint32_t)p->releases++;
   /* 2026-11-06 (R-1; "The revisions of 14b9a757", R-1): each range's instructions, the units of its routing below */
-  if((status=plan_instructions(p,m)))goto done;
+  if((status=plan_instructions(p,m)) || (status=plan_landings(p)))goto done;
 
   if(p->demands){
     for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++){

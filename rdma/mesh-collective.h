@@ -651,7 +651,8 @@ _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function
    - The release waited for is "published and not yet released" (mesh.h mesh_algo_unreleased; R-10), and nothing here
      writes `retired` or `released` (R-8: "the program writes `retired`, the bridge writes only `released`").
    0; EINVAL (as before but struct mesh_share's; a malformed view, two views of one transfer naming different bytes,
-   one range's transfers with different `from`, a destination's value not MESH_EXECUTION of `lag` 0); EHOSTUNREACH;
+   one range's transfers with different `from`, a destination's value not MESH_EXECUTION of `lag` 0, two of this node's
+   destination instructions naming one byte of a value: MPI 4.1 §6.1.11); EHOSTUNREACH;
    ENOMEM; ETIMEDOUT (the previous operand not released by `deadline`); ESTALE (the installed view moved while planning:
    plan again); or the map reader's error.  What must stay: every rank passes the same IR but its values and `value`s,
    and computes the same demands, trees, instructions, template, u, schedule, order, IPC graph and allocation */

@@ -1526,3 +1526,16 @@ int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t ed
   free(all_from); free(all_to); free(all_delay);
   return result;
 }
+
+/* mesh-graph.h mesh_graph_intersect: the intervals by key, then start, a tie in either order */
+static int intersect_before(const void *a, const void *b) {
+  const struct mesh_graph_interval *x = a, *y = b;
+  if (x->key != y->key) return x->key < y->key ? -1 : 1;
+  return (x->start > y->start) - (x->start < y->start);
+}
+int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval) {
+  qsort(interval, count, sizeof *interval, intersect_before);
+  for (size_t k = 1; k < count; k++)
+    if (interval[k].key == interval[k - 1].key && interval[k].start < interval[k - 1].end) return 1;
+  return 0;
+}

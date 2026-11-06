@@ -281,6 +281,13 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
 int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
                                 const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
                                 const uint32_t *added_to, uint64_t *added_delay);
+/* The sweep test for interval intersection (design/problems-of-14b9a757-change-request.md, item 9: "the destination
+   intervals of each node and execution are sorted by start.  Any interval that begins before its predecessor ends
+   makes the plan EINVAL.  That is the sweep test for interval intersection"): interval[0 .. count), each [start, end)
+   with start < end, sorted in place by key, then start; an interval is compared with those of its key alone.  1 where
+   an interval begins before its predecessor of the same key ends, else 0 */
+struct mesh_graph_interval { uint64_t key, start, end; };
+int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval);
 
 #ifdef __cplusplus
 }
