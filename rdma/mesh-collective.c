@@ -1362,10 +1362,15 @@ static uint32_t plan_room_lag(const void *context,size_t k){
    MESH_PAGES) and of its hops' pages, sent or received (BSL §4.1: "t(v) includes the time taken to execute all IPC
    operations (sends and receives) that the actor v performs"; item 2: "Execution times t(x) are A3's weighting
    operand"), a demand's page weight the greatest of its transfers' (GO2's); and `forwarded`, its demands' distinct
-   tree edges carrying pages.  2026-11-05 ("The revisions of 4e78f6f4"): plan_rooms' times as they were, for each plan,
-   where plan_rooms summed them into its own graph's vertices.  What must stay: the sums and their order.  0; ENOMEM */
+   tree edges carrying pages.  A tree's edges are its rows of vertices keyed by parent (mesh_graph_rows, as
+   plan_template, plan_trees and plan_walk read them): no walk over a parent table here (C9).  2026-11-05 ("The
+   revisions of 4e78f6f4"): plan_rooms' times for each plan, where plan_rooms summed them into its own graph's
+   vertices; each tree edge's pages read from its parent's row, where plan_rooms read each vertex's parent from the
+   table (the C9 hook's remark on c6c9c77f: "a walk over each tree's parent table ... it moves into the graph
+   module").  What must stay: the sums, the same at every rank.  0; ENOMEM */
 static int plan_times(struct plan *p){
   const uint32_t n=p->n;
+  size_t first[(size_t)n+2],child[(size_t)n+1];
   double *page=calloc((size_t)p->demands+1,sizeof *page);
   if(!page)return ENOMEM;
   for(uint32_t i=0;i<p->transfers;i++){
@@ -1378,12 +1383,11 @@ static int plan_times(struct plan *p){
     const struct plan_demand *d=p->demand+i;
     p->time[d->source]+=p->weights[d->first].produced+(d->own?p->weights[d->first].read:0.0);
     for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
-      const uint32_t *parent=p->parent+(size_t)p->tree[j]*n;
-      for(uint32_t c=0;c<n && p->run[j];c++)
-        if(c!=d->source && parent[c]<n && parent[c]!=c){
-          p->time[parent[c]]+=(double)p->run[j]*page[i];
-          p->time[c]+=(double)p->run[j]*page[i];
-        }
+      if(!p->run[j])continue;
+      const struct plan_tree tree={p->parent+p->tree[j]*n,n,d->source};
+      const double hops=(double)p->run[j]*page[i];
+      mesh_graph_rows(n+1,n,plan_tree_parent,&tree,first,child);
+      for(uint32_t y=0;y<n;y++)for(size_t c=first[y];c<first[y+1];c++){p->time[y]+=hops;p->time[child[c]]+=hops;}
     }
     p->forwarded+=d->forwards;
   }
