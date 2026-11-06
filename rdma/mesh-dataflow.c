@@ -6,6 +6,9 @@
 #include "mesh-map.h"
 /* mesh_transfers_start's declaration: defined here, beside the map reader it reads */
 #include "mesh-call.h"
+/* mesh_view_values' declaration, defined here beside mesh_view_compose (2026-11-06, design/compilation-coordination.md,
+   "The root cause of the copies, and the revised work list", R-10; "The revisions of 14b9a757") */
+#include "mesh-collective.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -70,7 +73,15 @@
    the heartbeat already knows, reused as the failport's code is".  Its callers store the one value `published`: the
    program's process (mesh_detach, or its retirement before it plans again) and the bridge parent for a gone holder
    (mesh-records.c clients_turn, mesh-link.c region_adopt), so `retired` only ever names the operand published.  What
-   must stay: nothing let go here; the retired operand held until the bridge's release */
+   must stay: nothing let go here; the retired operand held until the bridge's release
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8: "One
+   writer a word (W11; Lamport's single-writer registers): the program writes `retired`, the bridge writes only
+   `released`, and a gone holder is read from the heartbeat's words"; "The revisions of 14b9a757", R-8), reversing "and
+   the bridge parent for a gone holder": the program's process is this function's one caller (mesh_detach, and its
+   retirement before it plans again: rdma/mesh_compile.py RETIRE), so `retired` has one writer.  The bridge parent
+   reads a gone holder by mesh-holders.h mesh_algo_holder and mesh_holds, raises `plans` for it and releases its
+   operand (mesh_retired_release), writing no `retired`.  The publication is read before the holder (R-3).  What must
+   stay: nothing let go here; the retired operand held until the bridge's release */
 void mesh_retire(struct hdr *m,uint64_t client){
   struct mesh_algo *algo=mesh_algo(m);
   const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
@@ -230,6 +241,47 @@ int mesh_view_compose(struct mesh_ctx *c,const uint32_t *rows,size_t count,struc
 void mesh_view_release(struct mesh_view view){
   if(view.address)munmap(view.address,view.bytes);
 }
+/* mesh-collective.h mesh_view_values: the program's one mapping of its `run` values (2026-11-06,
+   design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-10: "the mapping's
+   row list in one mesh-dataflow helper over the plan's rows"; W13: "the mapping's row list in two effectors
+   (mesh_compile.py 2289; e2b_replay.m 1437), to be one mesh-dataflow helper"; "The revisions of 14b9a757", R-10).  The
+   row list the two effectors each built (rdma/mesh_compile.py _mapped; metal-microbench tools/e2b_replay.m main), in
+   their one order, which mesh_plan's mapping had: function by function, value by value in `values`' order, each `run`
+   value's copies in order, block k of copy c its row section.first + c x section.stride + k (mesh-section.h: "copy c's
+   rows first + c x P + k, k < P"), which for c < count and k < P are first + j, j < count x P; so value i's copy 0 lies
+   at the count of rows before it times block x pgsz, and its copy c section.pages x pgsz after that; offset[i]
+   UINT64_MAX where `run` is 0.  The list is this call's own, freed
+   once mesh_view_compose has read it ("reads it and keeps nothing", as e2b's was), and it is the mapping's, never a
+   program value: no page of the region is taken.  An effector: the rows, their order and their count are the plan's,
+   and nothing is decided here (design/page-maps-2026-11-02.md at 6255e92b: "effectors know about pointers and pages but
+   never make any decisions ever").  0, or mesh_view_compose's error (ENOMEM also where the list cannot be held), with
+   nothing mapped, `*view` {NULL, 0} and every offset UINT64_MAX.  What must stay: one mapping a program, every `run`
+   value's copies consecutive in it in row order */
+int mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,uint32_t count,uint64_t *offset,
+                     struct mesh_view *view){
+  const size_t block=(size_t)c->M->block*c->M->pgsz;
+  size_t rows=0,values=0;
+  for(uint32_t f=0;f<count;f++)
+    for(uint32_t i=0;i<functions[f].values;i++,values++){
+      const struct mesh_section s=functions[f].value[i].section;
+      offset[values]=functions[f].value[i].run?rows*block:UINT64_MAX;
+      if(functions[f].value[i].run)rows+=(size_t)s.count*s.stride;
+    }
+  uint32_t *row=malloc((rows?rows:1)*sizeof *row);
+  int error=row?0:ENOMEM;
+  for(uint32_t f=0,at=0;!error && f<count;f++)
+    for(uint32_t i=0;i<functions[f].values;i++){
+      const struct mesh_section s=functions[f].value[i].section;
+      for(uint32_t k=0;functions[f].value[i].run && k<s.count*s.stride;k++)row[at++]=s.first+k;
+    }
+  if(!error)error=mesh_view_compose(c,row,rows,view);
+  free(row);
+  if(error){
+    *view=(struct mesh_view){NULL,0};
+    for(size_t i=0;i<values;i++)offset[i]=UINT64_MAX;
+  }
+  return error;
+}
 
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint64_t address){
@@ -347,12 +399,24 @@ static int mesh_holding_retained(struct hdr *m,const struct mesh_algo *algo,uint
    has one writer"), so the store needs no exchange.  The fence pairs as above: a port announces `published` in its
    `prepared`, fences and reads the operand again (mesh-flow.c plan_load), and this side reads it retired, fences and
    reads the ports.  What must stay: the fence after the retirement is read and before the ports and `held` are read;
-   the store after them, then the wake */
+   the store after them, then the wake
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8 and
+   R-10; "The revisions of 14b9a757"), reversing "its `retired` (acquire) is `published`" as the one case released:
+   - The operand is released where it is published and not yet released (mesh.h mesh_algo_unreleased, R-10's one form
+     of ""published and not yet released"", where this function read `published` and `released` itself) and its holder
+     no longer holds it: the holder as mesh-holders.h mesh_algo_holder reads it ({0} where the operand is not open, so
+     where the program retired it), gone by mesh_holds(pid, start) alone.  Why: R-8, "the program writes `retired`, the
+     bridge writes only `released`, and a gone holder is read from the heartbeat's words" (W11), so a gone holder's
+     operand is published and unretired here, and its release is this test's, not a `retired` the bridge wrote.
+   - Every word of the operand is read after the publication's acquire (R-3: "every field of the published operand is
+     read through the acquired publication, never before it"; mesh_holding_retained's `plans` after it).
+   What must stay: the fence after the release's test and before the ports and `held` are read; the store after them,
+   then the wake; `released` this function's alone */
 uint32_t mesh_retired_release(struct hdr *m){
   struct mesh_algo *algo=mesh_algo(m);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
-  if(!published || atomic_load_explicit(&algo->retired,memory_order_acquire)!=published ||
-     atomic_load_explicit(&algo->released,memory_order_acquire)==published)return 0;
+  const uint64_t published=mesh_algo_unreleased(m);
+  const struct mesh_algo_holder holder=mesh_algo_holder(m);
+  if(!published || mesh_holds(holder.pid,holder.start))return 0;
   atomic_thread_fence(memory_order_seq_cst);
   if(mesh_holding_retained(m,algo,published))return 1;
   atomic_store_explicit(&algo->released,published,memory_order_release);
@@ -425,24 +489,38 @@ int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
    which its caller sets MESH_PLATFORM_NS past the start of its wait.  It differs from the tag's: no copy is allocated
    (the room is the reader's MESH_NODES_MOST, E2BIG past it); main has no expiry to register (mesh_expiry_set), so
    past the deadline it returns ETIMEDOUT, or ESRCH where the bridge's process is gone (its write left open); and an
-   open write is waited on until the deadline, where the tag looked again each MESH_PAUSE_NS */
-static int mesh_map_copy(struct mesh_ctx *c,uint64_t deadline,struct mesh_record *r,uint32_t *count,uint64_t *serial){
+   open write is waited on until the deadline, where the tag looked again each MESH_PAUSE_NS
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "The map a view is created from is the
+   sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates the
+   view.  Every member plans on those records"; "So every member of a view computes the same plan from the same
+   operands"; "The revisions of 14b9a757", A7), reversing the map's records: the installed view's records (mesh.h hdr
+   `view_nodes` of them at `view_off`, mesh-map.h mesh_view_records) and its identifier (hdr `view`) as `*serial`, read
+   whole under the view's seqlock `view_map` as the map's are under `map`: `view_map` read (acquire) even, the words
+   read, an acquire fence and `view_map` read again the same (mesh.h mesh_map_whole's two steps, which that function
+   takes for `map` alone).  ESTALE where no view is installed (`view` 0), after a whole read: the implementer's decision
+   (sub-agent D2's), from A7: "the program's sender TO-broadcasts nothing before its first view (Initial View Event)",
+   and Chockler, Keidar and Vitenberg's "no send events occur before the first view_chng event" (Property 3.3), so a
+   plan, whose sends are the view's, is made in some view; ESTALE is mesh_plan's "plan again" (mesh-collective.h).
+   What must stay: one whole copy under the seqlock; the deadline's ESRCH and ETIMEDOUT as before */
+static int mesh_view_copy(struct mesh_ctx *c,uint64_t deadline,struct mesh_record *r,uint32_t *count,uint64_t *serial){
   struct hdr *m=c->M;
   for(;;){
-    const uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire),now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    const uint64_t before=atomic_load_explicit(&m->view_map,memory_order_acquire),now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
     if(now>=deadline)return mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_acquire))?ESRCH:ETIMEDOUT;
     if(before&1){
-      os_sync_wait_on_address_with_timeout(&m->map,before,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+      os_sync_wait_on_address_with_timeout(&m->view_map,before,sizeof m->view_map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
                                            OS_CLOCK_MACH_ABSOLUTE_TIME,deadline-now);
       continue;
     }
-    const uint64_t nodes=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
-    *serial=atomic_load_explicit(&m->map_serial,memory_order_relaxed);
+    const uint64_t nodes=atomic_load_explicit(&m->view_nodes,memory_order_relaxed),at=m->view_off;
+    *serial=atomic_load_explicit(&m->view,memory_order_relaxed);
     const int fits=at>=sizeof *m && at<=c->len && nodes<=(c->len-at)/sizeof *r;
     if(fits && nodes<=MESH_NODES_MOST)memcpy(r,(char *)m+at,nodes*sizeof *r);
-    if(!mesh_map_whole(m,before))continue;
+    atomic_thread_fence(memory_order_acquire);
+    if(atomic_load_explicit(&m->view_map,memory_order_relaxed)!=before)continue;
     if(!fits)return EINVAL;
     if(nodes>MESH_NODES_MOST)return E2BIG;
+    if(!*serial)return ESTALE;
     *count=(uint32_t)nodes;return 0;
   }
 }
@@ -465,11 +543,17 @@ static uint64_t mesh_capacity(const struct mesh_record *a,const struct mesh_reco
   return sum;
 }
 
+/* mesh-dataflow.h mesh_nodes_read.  2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06;
+   mesh.h hdr `view`: "A plan is made on those records (mesh-dataflow.h mesh_nodes_read), its `serial` `view`"; "The
+   revisions of 14b9a757", A7), reversing "`serial` is the map's (hdr `map_serial`)": the nodes, their indices,
+   capacities and this node's index are the installed view's records' (mesh_view_copy), read as the map's were, and
+   `serial` is the view's identifier; ESTALE where no view is installed, besides mesh-dataflow.h's errors.  What must
+   stay: a node's index its place in ascending node-id order among the records; the pairs' capacities mesh_cables' */
 int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
   struct mesh_record r[MESH_NODES_MOST];
   uint32_t count,order[MESH_NODES_MOST];
   uint64_t serial;
-  int error=mesh_map_copy(c,clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS,r,&count,&serial);
+  int error=mesh_view_copy(c,clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS,r,&count,&serial);
   if(error)return error;
   mesh_map_order(r,count,order);
   *out=(struct mesh_nodes){.serial=serial,.count=count,.self=MESH_ABSENT};
@@ -605,13 +689,32 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
      MESH_PLATFORM_NS deadline: the start's edges, then each `_arrived`.  So one execution is bounded by 5 s × (1 +
      arrivals).  The code must give one execution one absolute deadline, shared by all its waits" (mesh-call.h).
    What must stay: the waits before the raise, nothing raised where one fails; ESTALE where the plan's serial is not the
-   map's; the raise before the fence, the serial's read after it */
+   map's; the raise before the fence, the serial's read after it
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7:
+   "Every wait ends at MESH_PLATFORM_NS without progress, and the first ETIMEDOUT ends the run ... The operator's bound
+   is judged by time without progress"; W10: "B1: a deadline per execution is not the rule.  The rule is the
+   operator's, on stalls: "nothing you're running should take more than around 8000ms", judged by time without
+   progress"; mesh-call.h's note; "The revisions of 14b9a757", R-7), reversing `deadline` above:
+   - The start takes no deadline.  Each wait on an edge's count ends MESH_PLATFORM_NS after the last rise of that count
+     it read (its progress), the wait's start standing for the first read: ETIMEDOUT past it, nothing raised.  The
+     count only rises (appendix item 2, "a count that only rises"), so a value read that differs from the one before is
+     a rise.  A bounded wait: each one of os_sync_wait_on_address_with_timeout's ends by its bound, and the loop ends at
+     ETIMEDOUT where the count stops rising short of its bound.
+   - ESTALE where the plan's serial is not the installed view's identifier (mesh.h hdr `view`, acquire), where it was hdr
+     `map_serial`: the plan's `serial` is the view it was made in (mesh.h struct mesh_state; aot A7, corrected
+     2026-11-06: "A plan then stands while its view does, and its view while the sequencer's map does"), and a view's
+     installation cancels every plan of another (mesh-records.c view_install, mesh-flow.c plan_stale), raising each
+     edge's count to UINT64_MAX and waking it, so a waiter of the old view reads that or ESTALE.
+   - After the raise, the fence, then hdr `view`'s read, ESTALE where it is not the plan's serial: the pairing above,
+     with the view's installation (view_install stores `view`, then plan_stale fences and reads the plans' `executions`).
+   What must stay: the waits before the raise, nothing raised where one fails; the raise before the fence, the serial's
+   read after it */
 /* the plan's row of waits into its call at place `place` (mesh.h struct mesh_state `rows`): row[0] the index at `syncs`
    of its first, row[1] one past its last */
 static inline const uint32_t *mesh_wait_row(struct hdr *m,const struct mesh_state *state,uint64_t place){
   return (const uint32_t *)(const void *)((const char *)m+state->rows)+place;
 }
-int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions,uint64_t deadline){
+int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions){
   struct hdr *m=context->M;
   struct mesh_state *state=mesh_state_at(m,plan);
   uint64_t served=atomic_load_explicit(&state->executions,memory_order_relaxed);
@@ -621,12 +724,16 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
     const uint32_t *row=mesh_wait_row(m,state,k%state->calls);
     for(uint32_t e=row[0];e<row[1];e++){
       const __int128 need=(__int128)K*edge[e].every+edge[e].base;
-      for(uint64_t seen;(seen=atomic_load_explicit(&edge[e].count,memory_order_acquire))<need;){
+      uint64_t seen=atomic_load_explicit(&edge[e].count,memory_order_acquire),
+               until=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;
+      while(seen<need){
         const uint64_t now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-        if(atomic_load_explicit(&m->map_serial,memory_order_acquire)!=state->serial)return ESTALE;
-        if(now>=deadline)return ETIMEDOUT;
+        if(atomic_load_explicit(&m->view,memory_order_acquire)!=state->serial)return ESTALE;
+        if(now>=until)return ETIMEDOUT;
         os_sync_wait_on_address_with_timeout(&edge[e].count,seen,sizeof edge[e].count,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-                                             OS_CLOCK_MACH_ABSOLUTE_TIME,deadline-now);
+                                             OS_CLOCK_MACH_ABSOLUTE_TIME,until-now);
+        const uint64_t risen=atomic_load_explicit(&edge[e].count,memory_order_acquire);
+        if(risen!=seen){seen=risen;until=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;}
       }
     }
   }
@@ -639,7 +746,7 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
   }
   mesh_notify(&m->plans);
   atomic_thread_fence(memory_order_seq_cst);
-  return atomic_load_explicit(&m->map_serial,memory_order_relaxed)!=state->serial?ESTALE:0;
+  return atomic_load_explicit(&m->view,memory_order_relaxed)!=state->serial?ESTALE:0;
 }
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed (sub-assignment 7's 2026-11-03 wait, bounded by
