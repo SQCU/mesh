@@ -117,7 +117,6 @@ struct plan {
   size_t edges;
   size_t *first;
   uint32_t *head,*lag;
-  uint32_t *between;
   uint32_t *farthest;
   uint64_t phases,counts,completions,supplied,publications,status,hops,words;
   uint64_t deliveries,submits,syncs,rows,room,outstanding,submit_room,spanned,nodes,forwarded;
@@ -306,22 +305,20 @@ static int plan_acyclic(const struct plan *p){
 /* M. Lam, Software Pipelining: An Effective Scheduling Technique for VLIW Machines, PLDI 1988, §2.3: "The lifetime of a
    register variable is defi[n]ed as the duration between the f[i]rst assignment into the variable and it[s] last use";
    "the minimum degree of unrolling, u, to implement the same schedule is simply max_i q_i."
-   L(v) = max over reads r of v of D(r -> write v); u = max(1, max_v L(v)); between[a x local + b] = max over reads r of
-   a of D(r -> write b); farthest[a] = max_b between[a x local + b] */
+   L(v) = max over reads r of v of D(r -> write v); u = max(1, max_v L(v)); farthest[a] = max over reads r of a and
+   values b here of D(r -> write b) */
 static int plan_unroll(struct plan *p){
   const uint32_t values=p->values;
   p->copies=1;
   if(!values)return 0;
   const struct plan_value *last=p->value+values-1;
   const uint32_t sources=last->source+1+last->reads;
-  size_t cells,pairs;
-  if(__builtin_mul_overflow((size_t)sources,(size_t)values,&cells) || cells>=SIZE_MAX/sizeof(uint32_t) ||
-     __builtin_mul_overflow((size_t)p->local,(size_t)p->local,&pairs) || pairs>=SIZE_MAX/sizeof(uint32_t))return ENOMEM;
+  size_t cells;
+  if(__builtin_mul_overflow((size_t)sources,(size_t)values,&cells) || cells>=SIZE_MAX/sizeof(uint32_t))return ENOMEM;
   uint32_t *source=malloc((size_t)sources*sizeof *source),*target=malloc((size_t)values*sizeof *target),
            *lags=malloc((cells+1)*sizeof *lags);
-  p->between=malloc((pairs+1)*sizeof *p->between);
   p->farthest=calloc((size_t)p->local+1,sizeof *p->farthest);
-  int status=!source || !target || !lags || !p->between || !p->farthest?ENOMEM:0;
+  int status=!source || !target || !lags || !p->farthest?ENOMEM:0;
   for(uint32_t v=0;!status && v<values;v++){
     const struct plan_value *x=p->value+v;
     source[x->source]=x->write;
@@ -341,13 +338,10 @@ static int plan_unroll(struct plan *p){
   }
   for(uint32_t a=0;!status && a<p->local;a++)for(uint32_t b=0;b<p->local;b++){
     const struct plan_value *x=p->value+p->here[a];
-    uint32_t most=0;
     for(uint32_t j=0;j<x->reads;j++){
       const uint32_t lag=lags[((size_t)x->source+1+j)*values+p->here[b]];
-      if(lag>most)most=lag;
+      if(lag>p->farthest[a])p->farthest[a]=lag;
     }
-    p->between[(size_t)a*p->local+b]=most;
-    if(most>p->farthest[a])p->farthest[a]=most;
   }
   free(source);free(target);free(lags);
   return status;
@@ -1312,7 +1306,7 @@ static void plan_free(struct plan *p){
   free(p->member);free(p->set_blocks);free(p->set_far);free(p->set_of);
   free(p->wait_row);free(p->demand);free(p->of);free(p->parent);
   free(p->tree);free(p->run);free(p->members);free(p->lead);free(p->comm);free(p->child);free(p->value);free(p->read);
-  free(p->here);free(p->first);free(p->head);free(p->lag);free(p->between);free(p->farthest);free(p->entry);
+  free(p->here);free(p->first);free(p->head);free(p->lag);free(p->farthest);free(p->entry);
 }
 
 /* Linux, Documentation/RCU/whatisRCU.rst, synchronize_rcu(): "This temporal primitive marks the end of updater code and
