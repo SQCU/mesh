@@ -970,6 +970,8 @@ def _region(ir, consumer, key, window, m, o, whole):
 # exported graph's operators are functional (partition's note), where it was the last in-place writer's; an
 # AllReduce's record is its item's alone (`reduced` goes: _place reads the item).  What must stay: the program's items
 # as before
+# XLA spmd_partitioner.cc, PartitionedHlo::ReshardAsWindowedInput: "for (int dim = 0; dim <
+# base_shape_.dimensions().size(); ++dim)", "if (shard_count == 1 ...) continue", "visiting_hlo = *resharded"
 def _partition(ir, operators):
     inputs = 0
     for node in ir.order:
@@ -1019,16 +1021,12 @@ def _partition(ir, operators):
             for window in rule.windows:
                 if window.label in whole:
                     wants[window.operand][window.dim] = -1
-            exchanged = [w for w in rule.windows if local[out.index(w.label)] >= 0 and w.label not in whole]
-            if len(exchanged) > 1:
-                raise NotImplementedError('%s: %d windowed dimensions exchanging halos; GSPMD Appendix A.2 gives each '
-                                          'spatial dimension\'s halo exchange, not the order in which several compose '
-                                          'so that corner halos arrive' % (node.name, len(exchanged)))
             keys = [_reshard(ir, o, ir.sharding[o], tuple(w)) for o, w in zip(rule.operands, wants)]
-            sharded, cuts = {}, []
-            for window in rule.windows:
-                at = out.index(window.label)
-                if local[at] >= 0:
+            sharded, cuts, dims = {}, [], {w.dim: w for w in rule.windows}
+            for dim in range(len(_value(rule.operands[rule.windows[0].operand]).shape) if dims else 0):
+                window = dims.get(dim)
+                at = None if window is None else out.index(window.label)
+                if window is not None and local[at] >= 0:
                     sharded[window.label] = ir.local(node, local)[at]
                     keys[window.operand], after = _region(ir, node, keys[window.operand], window, local[at],
                                                           sharded[window.label], window.label in whole)
