@@ -2008,22 +2008,21 @@ def _place(ir):
         return
     places = ir.places[ir.device]
     places.update({key: _own(ir, key) for key in ir.added if key not in places})
+    waits = {c.position: [ir.at[i] for i, _ in receives] for c, (_, receives) in ir.roles.items()}
     last = mesh_graph.ends(range(len(ir.program)),
-                           lambda g: [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())])
-    wired, begins, landed = set(ir.at.values()), {}, {}
+                           lambda g: [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())]
+                           + waits.get(g, []))
+    wired, begins, landed = set(ir.at.values()), {}, {owner for owners in waits.values() for owner in owners}
     for key, place in places.items():
         if place is not None and place.writer == ir.results.get(key, key) and place.writer in ir.producer:
             begins[place.owner] = min(begins.get(place.owner, len(ir.program)), ir.producer[place.writer])
-    for c, (_, receives) in ir.roles.items():
-        for i, _ in receives:
-            landed[ir.at[i]] = max(landed.get(ir.at[i], c.position), c.position)
     for key, place in places.items():
         if place is None or place.owner != key or key in ir.added and ir.added[key] is None and key not in wired:
             continue
         dtype, shape = _layout(ir, key)
         g, wire, first = ir.producer.get(key), int(key in wired), begins.get(key, 0)
         ir.owned[key] = ir.value(dtype, math.prod(shape), _device(ir, key), wire, 0 if key in landed else first,
-                                 max(first, last.get(key, first), landed.get(key, 0)),
+                                 max(first, last.get(key, first)),
                                  kind=mesh.INVARIANT if g is not None and ir.program[g][0] == 'constant'
                                  else mesh.EXECUTION)
     ir.homes = {key: (ir.owned[place.owner], place.offset, place.sizes, place.strides)
