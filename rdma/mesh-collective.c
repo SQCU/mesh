@@ -235,7 +235,11 @@ struct plan {
      item), block_first[j] MESH_ABSENT for every other value.  `toward`: the map indices this node's entries name (a set;
      plan_walk), mesh.h struct mesh_algo `adjacent`'s.  Why: R-1, "A frame's item lives from the first write to the last
      read over every value naming it, with C3.3's lag test"; R-6, "Each cable's processor executes its list ... It scans
-     no table of plans".  What must stay: `named` 0 for a local value */
+     no table of plans".  What must stay: `named` 0 for a local value
+     2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the stops", item 7): `named` | PLAN_SENT
+     where a range here is sent or forwarded from values[j] (plan_sets; MPI 4.1 §3.7: "The sender should not modify
+     any part of the send buffer after a nonblocking send operation is called, until the send completes") */
+#define PLAN_SENT 2u
   unsigned char *named;
   uint32_t *uncovered;
   uint64_t *cut,*at,toward;
@@ -877,7 +881,14 @@ struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,ele
    one member whose blocks are its range's whole blocks is the routed copy above.  PLAN_ALONE's items of a struct
    mesh_share's `of` go with the record (PB R2 at mesh 56ede97e: "The record goes"); a block holding bytes no
    instruction here covers is its value's own item, PLAN_ALONE as an uncovered block was.  What must stay: PLAN_ALONE
-   and PLAN_LOCAL otherwise as above, and items of different plans or kinds unordered */
+   and PLAN_LOCAL otherwise as above, and items of different plans or kinds unordered
+   2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the stops", item 7; ExecuTorch,
+   exir/memory_planning.py, update_tensor_lifetime and _does_not_overlap, "spec.lifetime[1] < alloc.spec.lifetime[0] or
+   spec.lifetime[0] > alloc.spec.lifetime[1]"; MPI 4.1 §3.7), reversing the notes above where a named value's own item
+   is PLAN_ALONE: the own item of a MESH_EXECUTION value of lag 0, named or local, is PLAN_LOCAL, ordered by the
+   value's `begin` and `end`, but where a range here is sent or forwarded from the value (PLAN_SENT); PLAN_ALONE an
+   invariant and a copy of a value of lag k >= 1 ("Mutable buffers and device resident constants keep their data across
+   calls, so they are never freed"), the state sections and the table among the invariants */
 struct plan_order { const struct plan *plans; const struct plan_item *item; };
 static int plan_before(const void *context,uint32_t a,uint32_t b){
   const struct plan_order *order=context;
@@ -928,13 +939,12 @@ static void plan_item_put(struct plan_placement *x,uint32_t kind,uint32_t functi
      PLAN_ROUTED, in the window (a relay's routed copy, or the blocks of its values a set of ranges here covers whole);
    - a value's own item as above, in the window where a range here names it whatever its `wire` (mesh-collective.h:
      "Every value a transfer names here is placed in the registered window, whatever its `wire`"), else in its `wire`
-     space; a named value's PLAN_ALONE;
+     space, its kind plan_before's;
    - the program's table grows by mesh.h struct mesh_algo `adjacent`'s words (R-6: "Place it in the table's item, which
      grows by those words"): n + 1 uint32_t offsets and the plans' places toward each map index, `toward`'s, after the
      `count` words (plan_table).
    Why: R-1, "Two values' rows may name one frame ... A frame's item lives from the first write to the last read over
-   every value naming it"; mesh-collective.h, "a block holding bytes no range here covers is an item that lives the
-   program's whole life, as before".  What must stay: the items' order above, every pass alike */
+   every value naming it".  What must stay: the items' order above, every pass alike */
 /* the program's table's bytes (mesh.h struct mesh_algo `table`, `adjacent`): `count` words, then `nodes` + 1 uint32_t
    offsets and `places` places */
 static uint64_t plan_table(uint32_t count,uint32_t nodes,uint64_t places){
@@ -953,7 +963,7 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
     for(uint32_t j=0;j<p->givens;j++){
       const struct mesh_value *v=p->given+j;
       if((p->named[j]?1u:v->wire)!=space)continue;
-      const uint32_t kind=!p->named[j] && v->kind==MESH_EXECUTION && !v->lag?PLAN_LOCAL:PLAN_ALONE;
+      const uint32_t kind=!(p->named[j]&PLAN_SENT) && v->kind==MESH_EXECUTION && !v->lag?PLAN_LOCAL:PLAN_ALONE;
       p->item[j]=p->uncovered[j]?(uint32_t)x->items:MESH_ABSENT;
       for(uint32_t c=0;p->uncovered[j] && c<plan_copies(p,j);c++)plan_item_put(x,kind,f,j,c,p->uncovered[j],space);
     }
@@ -2103,8 +2113,7 @@ static int plan_cover_order(const void *a,const void *b){
      routed values here, ascending).  Where the union of those instructions' bytes is every byte of the block within the
      value's bytes, the block is an element of that set's item, one item a set and copy (u copies), its elements every
      such block of the set in (value, block) order; where any byte of it is no instruction's, it stays in the value's own
-     item (`uncovered`, its element its place among them), which lives the program's whole life (PLAN_ALONE: the
-     program's own writes and reads of its other bytes are ordered by no edge of the template);
+     item (`uncovered`, its element its place among them), ordered as plan_before orders it;
    - a MESH_INVARIANT source has one copy for the plan's life, every block of it its own item, PLAN_ALONE (mesh-
      collective.h: "one copy for the plan's life, which every copy's send reads"), and every copy's sends name copy 0's
      frames (mesh_plan).
@@ -2127,6 +2136,7 @@ static int plan_sets(struct plan *p,const struct hdr *m){
     if(d->value==MESH_ABSENT)continue;
     if(d->mine==MESH_ABSENT)relays++;
     else if(p->block_first[d->mine]!=MESH_ABSENT)touches+=d->instructions;
+    if(d->mine!=MESH_ABSENT && (d->source==p->self || p->child[(size_t)i*p->n+p->self]))p->named[d->mine]|=PLAN_SENT;
   }
   struct plan_touch *touch=malloc((touches+1)*sizeof *touch);
   struct plan_cover *cover=malloc((blocks+1)*sizeof *cover);
@@ -2401,10 +2411,11 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
      this node share a block of it" goes"; PB R2 at mesh 56ede97e, the share record "and its rules ... The record
      goes").  What must stay: every test before anything is written */
   for(uint32_t i=0;i<p->demands;i++)if(p->demand[i].mine!=MESH_ABSENT)p->named[p->demand[i].mine]=1;
-  /* a local execution value's positions, a value of lag 0's alone (a value of lag k >= 1 is ordered by the program's
-     events, not by its positions, which are not read: R4) */
+  /* an execution value's lifetime, a value of lag 0's alone (ExecuTorch, exir/memory_planning.py,
+     update_tensor_lifetime: "A tensor's lifetime are represented by the index of the first and last node referring
+     that tensor in its inputs/outputs"; a value of lag k >= 1 is never freed, its positions not read) */
   for(uint32_t j=0;j<given;j++)
-    if(!p->named[j] && values[j].kind==MESH_EXECUTION && !values[j].lag && values[j].begin>values[j].end){
+    if(values[j].kind==MESH_EXECUTION && !values[j].lag && values[j].begin>values[j].end){
       status=EINVAL;goto done;
     }
   for(uint32_t i=0;i<p->demands;i++)if(p->demand[i].source==p->self)p->demand[i].release=(uint32_t)p->releases++;

@@ -272,7 +272,7 @@ class IR:
         return transfers
 
     # one value of this node (mesh-collective.h struct mesh_value), MESH_EXECUTION: a routed one in the window (`wire`
-    # 1), a local one outside it (0) with its first and last positions on this node's program order, and its layout,
+    # 1), a local one outside it (0), each with its first and last positions on this node's program order, its layout,
     # the element type, the shape and the device of `node`'s tensors, which its copies' tensors are bound on (K1).  Its
     # index in `values`.  A tensor on the meta device has no binding (_bind), and only a node the placement operand maps
     # no device takes meta tensors (A4), where no value is made: refused, naming it
@@ -1997,6 +1997,12 @@ def lower(ir):
 # whose writer is that key) and its last its last reader's; every placed key's home (value, offset, sizes, strides) its
 # place; each declared transfer's `value` its end's value here.  No struct mesh_share is made, and nothing falls back to
 # a copy.  What must stay: no value at a node the placement maps no device, the positions as above
+# 2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the stops", item 7), reversing the note above
+# where a routed value has no positions: every value's positions its lifetime, "the index of the first and last node
+# referring that tensor in its inputs/outputs" (ExecuTorch, exir/memory_planning.py, update_tensor_lifetime); a value a
+# range lands in here from the call's start, the execution's receives' start (mesh_transfers_start), to the item that
+# waits for the landing (MPI 4.1 section 3.7: "The receiver should not access any part of the receive buffer after a
+# nonblocking receive operation is called, until the receive completes")
 def _place(ir):
     if ir.device is None:
         return
@@ -2004,17 +2010,20 @@ def _place(ir):
     places.update({key: _own(ir, key) for key in ir.added if key not in places})
     last = mesh_graph.ends(range(len(ir.program)),
                            lambda g: [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())])
-    wired, begins = set(ir.at.values()), {}
+    wired, begins, landed = set(ir.at.values()), {}, {}
     for key, place in places.items():
         if place is not None and place.writer == ir.results.get(key, key) and place.writer in ir.producer:
             begins[place.owner] = min(begins.get(place.owner, len(ir.program)), ir.producer[place.writer])
+    for c, (_, receives) in ir.roles.items():
+        for i, _ in receives:
+            landed[ir.at[i]] = max(landed.get(ir.at[i], c.position), c.position)
     for key, place in places.items():
         if place is None or place.owner != key or key in ir.added and ir.added[key] is None and key not in wired:
             continue
         dtype, shape = _layout(ir, key)
-        g, wire, begin = ir.producer.get(key), int(key in wired), begins.get(key, 0)
-        ir.owned[key] = ir.value(dtype, math.prod(shape), _device(ir, key), wire, 0 if wire else begin,
-                                 0 if wire else max(begin, last.get(key, begin)),
+        g, wire, first = ir.producer.get(key), int(key in wired), begins.get(key, 0)
+        ir.owned[key] = ir.value(dtype, math.prod(shape), _device(ir, key), wire, 0 if key in landed else first,
+                                 max(first, last.get(key, first), landed.get(key, 0)),
                                  kind=mesh.INVARIANT if g is not None and ir.program[g][0] == 'constant'
                                  else mesh.EXECUTION)
     ir.homes = {key: (ir.owned[place.owner], place.offset, place.sizes, place.strides)

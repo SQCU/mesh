@@ -20,8 +20,8 @@
      once for the plan's life, as Lam places a loop invariant outside the kernel) or MESH_EXECUTION (written anew in
      each execution); `wire` 1 where it lies in the registered window, 0 outside it; `state` 1 where it is state (a GPU
      counter the program keeps), which the plan writes to 0 once where it places it (the contract's D3), 0 for data,
-     which the plan never writes; and, for a local MESH_EXECUTION value (one no declared transfer names), `begin` <=
-     `end`, its first and last positions on this node's own program order in one execution.  `state` 1 is EINVAL but
+     which the plan never writes; and, for a MESH_EXECUTION value of `lag` 0, `begin` <= `end`, its first and last
+     positions on this node's own program order in one execution.  `state` 1 is EINVAL but
      on a local MESH_INVARIANT value outside the window (wire 0, named by no declared transfer): the plan never writes
      a routed value's pages, and state shares pages with nothing (2026-11-04, review 15's finding 3, the coordinator's
      ruling).
@@ -336,7 +336,10 @@
      mesh_function `share` and `shares`, and their EINVALs go.  A block a range's instructions touch is an item whose
      accesses are those of every range touching it, from the first write to the last read, ordered by C3.3's lag test
      (R-1: "A frame's item lives from the first write to the last read over every value naming it, with C3.3's lag
-     test"); a block holding bytes no range here covers is an item that lives the program's whole life, as before.
+     test"); a block holding bytes no range here covers is its value's own item, ordered by the value's `begin` and
+     `end` (ExecuTorch, exir/memory_planning.py, update_tensor_lifetime and _does_not_overlap) but where a range here
+     is sent or forwarded from the value (MPI 4.1 §3.7: "until the send completes"), which lives the program's whole
+     life.
    - Any value a transfer names is sent from its own pages, whatever its copies (PB R2, corrected 2026-11-06): the plan
      call's rules that a lag-k value is "named by no declared transfer" and that a transfer's value is "MESH_EXECUTION
      and wire" go.  A source may be a MESH_INVARIANT value, one copy for the plan's life, which every copy's send reads,
@@ -352,7 +355,7 @@
    instructions, template, u, schedule and order of each function from them. */
 enum { MESH_INVARIANT, MESH_EXECUTION };
 /* a value at this node.  In: section.bytes (> 0), kind, wire, state (1 only on a local MESH_INVARIANT value, wire 0),
-   for a local MESH_EXECUTION value of lag 0 its first and last positions on this node's own program order in one
+   for a MESH_EXECUTION value of lag 0 its first and last positions on this node's own program order in one
    execution, begin <= end, and lag: 0 for a value the program's own order writes (one copy; a routed value's u), k >= 1
    for one a producer the program orders by an event writes (a host input: MESH_EXECUTION, wire 0, state 0, named by no
    declared transfer, begin and end not read; k copies, execution t's at copy t mod k, written for t only after
@@ -394,7 +397,11 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
      barrier between a write under one name and a read under another, and on no other": a value whose `shares` is 1
      hands its frames to another row's name after its last access in each execution, and another hands them to it
      before its first.
-   What must stay: 64 bytes, every field where it is */
+   What must stay: 64 bytes, every field where it is
+   2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the stops", item 7): `begin` and `end` the
+   value's lifetime, "the index of the first and last node referring that tensor in its inputs/outputs" (ExecuTorch,
+   exir/memory_planning.py, update_tensor_lifetime), each declared transfer's end here occupying it from the position
+   that starts the transfer to the one that waits for its completion (MPI 4.1 §3.7) */
 struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag,run,shares; uint64_t padding1; };
 _Static_assert(sizeof(struct mesh_value)==64 && offsetof(struct mesh_value,run)==48 &&
                offsetof(struct mesh_value,shares)==52 && offsetof(struct mesh_value,padding1)==56,
