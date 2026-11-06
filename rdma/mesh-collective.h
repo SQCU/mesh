@@ -693,11 +693,12 @@ void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_
    (t / u + 1) x P with a field still behind (cancelled); else 0 (not yet).  The caller names a transfer this node is a
    destination of, which its compilation knows; no entry is tested here (as mesh_host_publish's note) */
 uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
-/* execution t of a range this node sends or forwards: 1 where its send-completion counter of copy t mod u reads
-   (acquire) at least (t / u + 1) x its sends a copy, else 0 (libfabric man/fi_cntr.3.md, fi_cntr_wait; rdma-core
-   libibverbs/man/ibv_post_send.3, NOTES).  The caller names a transfer whose range this node sends or forwards, which
-   the plan's entry tells (mesh.h struct mesh_state `transfers`, `sends`) */
-int mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
+/* execution t of a range this node sends or forwards, where its send-completion counter of copy t mod u and its error
+   count (acquire) together reach (t / u + 1) x its sends a copy: UINT64_MAX where the error count is not 0
+   (cancelled), else 1; 0 before (libfabric man/fi_cntr.3.md, fi_cntr_wait and fi_cntr_readerr; man/fi_endpoint.3.md,
+   fi_cancel; rdma-core libibverbs/man/ibv_post_send.3, NOTES).  The caller names a transfer whose range this node
+   sends or forwards, which the plan's entry tells (mesh.h struct mesh_state `transfers`, `sends`) */
+uint64_t mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 /* The program's one mapping of its values (2026-11-06, "The root cause of the copies, and the revised work list", R-10:
    "the mapping's row list in one mesh-dataflow helper over the plan's rows"; W13: "the mapping's row list in two
    effectors (mesh_compile.py 2289; e2b_replay.m 1437), to be one mesh-dataflow helper"; "The revisions of 14b9a757"):

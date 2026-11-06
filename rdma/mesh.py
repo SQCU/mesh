@@ -152,7 +152,8 @@ class Nodes(C.Structure):
                 ('capacity', (Q * NODES_MOST) * NODES_MOST), ('sequencer', U), ('padding', U), ('boot', Q)]
 
 
-# mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled
+# mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled; and mesh_host_sent's, a
+# range's send cancelled
 FAILED = 2 ** 64 - 1
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
 CONTEXT = C.POINTER(Context)
@@ -201,7 +202,7 @@ for name, result, arguments in (
         ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q]),
         ('mesh_host_publish', None, [CONTEXT, Q, U, Q]),
         ('mesh_host_arrived', Q, [CONTEXT, Q, U, Q]),
-        ('mesh_host_sent', C.c_int, [CONTEXT, Q, U, Q])):
+        ('mesh_host_sent', Q, [CONTEXT, Q, U, Q])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 

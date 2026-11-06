@@ -334,8 +334,9 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    - A forwarding send (a relay's, or a destination's that sends the page on): `word` and `field` those of its node's
      receive of the same page in the same copy; `count` as a send's; `pages` 0.  Execution t's send is released once
      that field reads (acquire) mesh_phase(t / u + 1), its receive's landing in execution t.
-   - A send's work completion, once retrieved, adds 1 to its `count` (release) (rdma-core libibverbs/man/
-     ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION).
+   - A send's work completion, once retrieved, adds 1 to its `count` (release), or to the error count 8 bytes after
+     it where it completed in error (rdma-core libibverbs/man/ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md,
+     DESCRIPTION and fi_cntr_readerr).
    - A receive: `page` its page; `word` the region offset of the uint64 holding its phase field and `field` the
      field's low bit (even, < 64); `count` the region offset of its range's count word for this copy, or 0 where this
      node does not consume the range (a relay's own receive: its forwards are released by its phase, nobody waits on a
@@ -388,11 +389,14 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      own reads, and every pass would be held to its deadline; Portals 4's counting events (one counter an operation set)
      and PTX's mbarrier (one a tile) count once a unit of work.  Per copy, since with u >= 2 execution t + 1's
      landings into the other copy can arrive before t's are all in.
-   - `completions`: S x `copies` uint64 words, S every range this node sends or forwards, in the plan's demand order;
-     range g's copy c at index g x copies + c, which each of its sends' work completions raises by 1 and nothing else
-     writes; execution t of range g is complete at (t / u + 1) x its sends a copy (rdma-core libibverbs/man/
-     ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION; design/problems-of-14b9a757-change-request.md,
-     "Sources for the third stops", 7).
+   - `completions`: S x `copies` pairs of uint64 words, S every range this node sends or forwards, in the plan's
+     demand order; range g's copy c the pair at index g x copies + c, its count, which each of its sends' work
+     completions raises by 1, then its error count, which each that completed in error raises by 1 and each send of a
+     cancelled plan its port did not post raises by 1 (mesh-flow.c); execution t of range g is complete at (t / u + 1)
+     x its sends a copy over the two together (rdma-core libibverbs/man/ibv_post_send.3, NOTES; libfabric
+     man/fi_cntr.3.md, DESCRIPTION and fi_cntr_readerr; man/fi_endpoint.3.md, fi_cancel;
+     design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7, and "Sources for the fourth
+     stops", 7).
    - `supplied`: `releases` uint64 words, release r this node's r-th source range in the plan's demand order.  Its
      one writer is the range's producer, which raises it to t + 1 after its last write in execution t (release): a
      host producer stores t + 1 (mesh_host_publish), a GPU producer adds 1, its executions running in order (D9).  One
@@ -763,11 +767,11 @@ static inline int mesh_view_compare(struct mesh_view_id a,struct mesh_view_id b)
      (P), `phases` the region offset of its copy-0 phase group (copy c's at phases + c x mesh_group_bytes(P)), `count`
      the region offset of its copy-0 count word (copy c's at count + 8 c); where this node sends or forwards the
      transfer's range, `sends` its sends of the range a copy and `completion` the region offset of its copy-0
-     send-completion counter (copy c's at completion + 8 c; `completions`); `state` this section's region offset where
-     any holds; every other field 0.  Why: ranges may share a block where their bytes are disjoint (PB R2,
-     corrected 2026-11-06), so several begin in one row and a row's publication names none of them alone; the
-     declared transfer's index is the IR's own name of it.  Every row's publication (mesh_publication_at) is written by
-     nothing now and read by nothing.
+     send-completion counter (copy c's at completion + 16 c, its error count 8 bytes after it; `completions`); `state`
+     this section's region offset where any holds; every other field 0.  Why: ranges may share a block where their
+     bytes are disjoint (PB R2, corrected 2026-11-06), so several begin in one row and a row's publication names none
+     of them alone; the declared transfer's index is the IR's own name of it.  Every row's publication
+     (mesh_publication_at) is written by nothing now and read by nothing.
    - `serial` is the Lamport time of the installed view whose map the plan was made on (hdr `view`), every entry's
      `serial` the same, where it was the map serial; the plan stands while that view is installed (A7, corrected
      2026-11-06: "A plan then stands while its view does, and its view while the sequencer's map does").

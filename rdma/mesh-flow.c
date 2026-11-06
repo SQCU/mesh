@@ -125,9 +125,10 @@
    one queue pair"): `flow`, the plan whose record it is, in the cell's room after the request (offset 160: the
    request, struct ibv_send_wr, is 128 bytes from 32), so the SEND completion, which names the record (`wr_id`),
    counts its plan's `sent`; no field the post reads moves.  What must stay: as above
-   `count`, its hop's send-completion counter (mesh.h struct mesh_hop; rdma-core libibverbs/man/ibv_post_send.3,
-   NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION; design/problems-of-14b9a757-change-request.md, "Sources for the
-   third stops", 7) */
+   `count`, its hop's send-completion counter, its error count at count + 1 (mesh.h struct mesh_hop; rdma-core
+   libibverbs/man/ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION and fi_cntr_readerr;
+   design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7, and "Sources for the fourth
+   stops", 7) */
 struct flow;
 struct prepared_send {
   _Alignas(128) _Atomic uint64_t *word;
@@ -1573,6 +1574,51 @@ static int link_receive_progress(struct port *port,uint32_t served,int traced,in
   return link_receive_drain(port,served,0,again);
 }
 
+/* the SEND completions retrieved, each raising its record's count, or its error count where it completed in error
+   (libfabric man/fi_endpoint.3.md, fi_cancel: "the completion status of that operation will be available in the
+   associated completion queue"; man/fi_cntr.3.md, fi_cntr_readerr; design/problems-of-14b9a757-change-request.md,
+   "Sources for the fourth stops", 7) */
+static inline int sends_complete(struct port *port,uint32_t served){
+  struct link *l=&port->link;
+  struct ibv_wc done[MESH_COMPLETION_BATCH];
+  for(int count=MESH_COMPLETION_BATCH;count==MESH_COMPLETION_BATCH;){
+    count=l->provider.poll(l->provider.sent,MESH_COMPLETION_BATCH,done);
+    if(count<0){link_failed(port,EIO);return 0;}
+    int64_t failed=0;
+    for(int i=0;i<count;i++){
+      const uint32_t lane=link_lane(l,done[i].qp_num);
+      if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
+      const struct prepared_send *record=(const void *)(uintptr_t)done[i].wr_id;
+      if(done[i].status){
+        atomic_fetch_add_explicit(record->count+1,1,memory_order_release);
+        if(!failed)failed=(int64_t)done[i].status;
+        continue;
+      }
+      gate_retire(l->gate+lane,frames_of(record->span.length));l->lane[lane].done++;record->flow->sent++;
+      atomic_fetch_add_explicit(record->count,1,memory_order_release);
+    }
+    if(failed){link_failed(port,failed);return 0;}
+  }
+  return 1;
+}
+/* every send of plan f this port has not posted, of the executions t < its `executions`, completed as cancelled: its
+   record's error count raised by 1 (libfabric man/fi_endpoint.3.md, fi_cancel: "if it is still pending, complete it
+   as having been canceled"; design/problems-of-14b9a757-change-request.md, "Sources for the fourth stops", 7) */
+static void sends_cancel(struct flow *f){
+  const uint64_t executions=atomic_load_explicit(&f->words->executions,memory_order_acquire);
+  const uint64_t width=(uint64_t)f->copies+1;
+  for(uint32_t q=0;q<MESH_LINK_LANES;q++){
+    const struct cursor at=f->cursor[MESH_SEND][q];
+    const uint64_t *first=f->first[MESH_SEND]+q*width;
+    if(at.execution>=executions)continue;
+    for(uint64_t r=at.at;r<at.end;r++)atomic_fetch_add_explicit(f->sends[r].count+1,1,memory_order_release);
+    for(uint32_t c=0;c<f->copies;c++){
+      const uint64_t later=copy_executions(executions,f->copies,c)-copy_executions(at.execution+1,f->copies,c);
+      for(uint64_t r=first[c];later && r<first[c+1];r++)
+        atomic_fetch_add_explicit(f->sends[r].count+1,later,memory_order_release);
+    }
+  }
+}
 /* design/prepared-machine.md#M04 */
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M15 */
@@ -1618,19 +1664,7 @@ static int link_receive_progress(struct port *port,uint32_t served,int traced,in
 static __attribute__((always_inline)) inline int link_send_drain(struct port *port,uint32_t served,int traced,int *again){
   struct link *l=&port->link;
   struct port_plans *own=port_plans+port->index;
-  struct ibv_wc done[MESH_COMPLETION_BATCH];
-  for(int count=MESH_COMPLETION_BATCH;count==MESH_COMPLETION_BATCH;){
-    count=l->provider.poll(l->provider.sent,MESH_COMPLETION_BATCH,done);
-    if(count<0){link_failed(port,EIO);return 0;}
-    for(int i=0;i<count;i++){
-      const uint32_t lane=link_lane(l,done[i].qp_num);
-      if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
-      if(done[i].status){link_failed(port,(int64_t)done[i].status);return 0;}
-      const struct prepared_send *record=(const void *)(uintptr_t)done[i].wr_id;
-      gate_retire(l->gate+lane,frames_of(record->span.length));l->lane[lane].done++;record->flow->sent++;
-      atomic_fetch_add_explicit(record->count,1,memory_order_release);
-    }
-  }
+  if(!sends_complete(port,served))return 0;
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): every served lane reads the
      deliveries' channel (lane_take), where only a lane some plan carries this way merged, so each served lane's place
      passes the deliveries of plans it does not carry and the port lets them go (deliveries_copy).  2026-11-05 ("The
@@ -1772,6 +1806,7 @@ static void plan_outstanding(struct port *port,const struct flow *f,uint64_t out
 static void plan_end(struct port *port,struct flow *f,uint32_t served){
   const uint32_t p=port->index;
   lanes_drop(port_plans+p,f);
+  if(f->state!=FLOW_CANCELLED)sends_cancel(f);
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", PM): each receive's count raised to
      its final value where it reads below it (count_raise, which leaves a count at or past its final as it is), where it
      was raised where the record's own landings were below the executions of its copy.  Why: a set's member is posted at
@@ -2101,7 +2136,10 @@ static int link_run(struct port *port,uint32_t served){
     struct flow *f=at->loaded[at->adjacent[j]];
     if(!f)continue;
     if(f->state!=FLOW_CANCELLED && mesh_view_compare(mesh_plan_view(f->words),view)){
-      f->state=FLOW_CANCELLED;lanes_drop(at,f);
+      lanes_drop(at,f);
+      if(!sends_complete(port,served))return 0;
+      f->state=FLOW_CANCELLED;
+      sends_cancel(f);
       if(f->posted!=f->sent+f->landed)plan_outstanding(port,f,f->posted-f->sent-f->landed,served);
     }
     traced|=f->trace[MESH_SEND] || f->trace[MESH_RECEIVE];

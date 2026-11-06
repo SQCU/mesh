@@ -2709,9 +2709,17 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
 
 # torch 2.14.0 torch/distributed/_functional_collectives.py, wait_tensor: "Wait on a tensor returned by the collectives
 # ops"; design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7: "The collective's `wait_tensor`
-# at a node waits for its landing counts and its send-completion counters to reach the execution's totals"
-def _sent(context, plan, transfer, t, count):
-    _wait(lambda: mesh.LIB.mesh_host_sent(C.byref(context), plan, transfer, t), lambda: count.value,
+# at a node waits for its landing counts and its send-completion counters to reach the execution's totals", and
+# "Sources for the fourth stops", 7: "The program's wait returns ECANCELED once the error count is nonzero, after the
+# count and the error count together reach the execution's total"
+def _sent(context, plan, transfer, t, counter):
+    def ready():
+        status = mesh.LIB.mesh_host_sent(C.byref(context), plan, transfer, t)
+        if status == mesh.FAILED:
+            raise OSError(errno.ECANCELED, 'execution %d of declared transfer %d: a send cancelled '
+                                           '(mesh-collective.h mesh_host_sent)' % (t, transfer))
+        return status == 1
+    _wait(ready, lambda: counter[0] + counter[1],
           'execution %d of declared transfer %d: no send completion for MESH_PLATFORM_NS' % (t, transfer))
 
 
@@ -2723,8 +2731,8 @@ def _completed(ir, context, plan, state, c, collective):
             steps.append(lambda env, inputs, t, i=i, count=_count(context, state, entry.count, c):
                          _arrived(context, plan, i, t, count))
         if entry.sends:
-            steps.append(lambda env, inputs, t, i=i, count=_count(context, state, entry.completion, c):
-                         _sent(context, plan, i, t, count))
+            steps.append(lambda env, inputs, t, i=i, counter=(C.c_uint64 * 2).from_address(
+                context.M + entry.completion + 16 * (c % state.copies)): _sent(context, plan, i, t, counter))
     return steps
 
 

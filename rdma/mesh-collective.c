@@ -93,15 +93,19 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
 }
 
 /* mesh-collective.h mesh_host_sent (libfabric man/fi_cntr.3.md, fi_cntr_wait: "Wait for a counter to be greater or
-   equal to a threshold value"; rdma-core libibverbs/man/ibv_post_send.3, NOTES; design/problems-of-14b9a757-change-
-   request.md, "Sources for the third stops", 7) */
-int mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+   equal to a threshold value", and fi_cntr_readerr; rdma-core libibverbs/man/ibv_post_send.3, NOTES;
+   design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7, and "Sources for the fourth
+   stops", 7) */
+uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
   struct hdr *m=context->M;
   const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
   const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
   const uint64_t copies=state->copies;
-  return atomic_load_explicit((_Atomic uint64_t *)((char *)m+entry->completion+8*(execution%copies)),
-                              memory_order_acquire)>=(execution/copies+1)*entry->sends;
+  _Atomic uint64_t *counter=(_Atomic uint64_t *)((char *)m+entry->completion+16*(execution%copies));
+  const uint64_t count=atomic_load_explicit(counter,memory_order_acquire),
+                 error=atomic_load_explicit(counter+1,memory_order_acquire);
+  if(count+error<(execution/copies+1)*entry->sends)return 0;
+  return error?UINT64_MAX:1;
 }
 
 /* -- the plan call (mesh-collective.h mesh_plan) ------------------------------------------------------------------ */
@@ -716,8 +720,8 @@ static int plan_unroll(struct plan *p){
      a page for round j by that count, in place of PM2's test of the phase field", the count "each range's landed
      count of each copy, which every landing raises"; a relay's receive is named for its rounds as a destination's is
      (mesh-flow.c link_receive_drain).  What must stay: a consumed range's row its `consumed`, `ranges` its number;
-   - `completions`: sending x u uint64 words, the send-completion counters, range g's copy c at index `sending` x u + c
-     (mesh.h struct mesh_state `completions`);
+   - `completions`: sending x u pairs of uint64 words, the send-completion counters and their error counts, range g's
+     copy c the pair at index `sending` x u + c (mesh.h struct mesh_state `completions`);
    - `supplied`: releases uint64 words, release r's at index r;
    - `status`: one struct mesh_status;
    - `deliveries`: the plan's delivered calls' queue here, `room` struct mesh_delivery, and `submits`, the program's
@@ -778,7 +782,7 @@ static void plan_layout(struct plan *p){
   }
   p->counts=plan_align(p->phases+at);
   p->completions=plan_align(p->counts+(uint64_t)p->ranges*p->copies*sizeof(uint64_t));
-  p->supplied=plan_align(p->completions+(uint64_t)p->sending*p->copies*sizeof(uint64_t));
+  p->supplied=plan_align(p->completions+(uint64_t)p->sending*p->copies*2*sizeof(uint64_t));
   p->publications=plan_align(p->supplied+p->releases*sizeof(uint64_t));
   p->status=plan_align(p->publications+(uint64_t)p->transfers*sizeof(struct mesh_publication));
   p->deliveries=plan_align(p->status+sizeof(struct mesh_status));
@@ -803,7 +807,7 @@ static uint64_t plan_count(const struct plan *p,const struct plan_demand *d,uint
   return p->base+p->counts+((uint64_t)d->counted*p->copies+c)*sizeof(uint64_t);
 }
 static uint64_t plan_completion(const struct plan *p,const struct plan_demand *d,uint32_t c){
-  return p->base+p->completions+((uint64_t)d->sending*p->copies+c)*sizeof(uint64_t);
+  return p->base+p->completions+((uint64_t)d->sending*p->copies+c)*2*sizeof(uint64_t);
 }
 
 /* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6: "Place every
