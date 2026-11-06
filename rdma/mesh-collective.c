@@ -265,7 +265,7 @@ struct plan {
   const struct mesh_dependence *dependence;
   uint32_t dependences;
   struct plan_demand *demand;             /* the demands, by their first declared transfer (GO5) */
-  uint32_t demands,n,self,copies,start_lead; /* copies: u (plan_unroll); start_lead: struct mesh_function `lead` */
+  uint32_t demands,n,self,copies;         /* copies: u (plan_unroll) */
   struct mesh_view_id view;               /* mesh_nodes_read's: the installed view's identifier (mesh.h struct
                                              mesh_view_id; JGroups ViewId.java) */
   uint32_t *of;                           /* of[i]: declared[i]'s demand, p->demand[of[i]] */
@@ -932,16 +932,15 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
    one interval needing b colors (Algorithm 3.2.1's reg_num).  Each color is a block of the space"; "This replaces
    `plan_before` and `mesh_graph_chains` for these items"; "PLAN_ALONE items stay as they are" (mesh-graph.h
    mesh_graph_fat_cover). */
-/* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: "G's time points are the node's
-   operations, in program order, over the u executions of the unrolled template"; "Each live range is one lifetime
-   interval, from its write to its last read"; "a value of lag 0 has one interval per execution, and a routed copy has
-   one.  A lifetime that crosses the end of the u executions is a cyclic interval"; rdma/mesh_compile.py, "every value's
-   positions its lifetime".  Mukerji 1994, §2.1: "we say that variable x is defined at time point t"; a received copy's
-   definition its receive's post, mesh-call.h mesh_host_started's raise of `executions` (MPI 4.1 §3.7: "The receiver
-   should not access any part of the receive buffer after a nonblocking receive operation is called, until the receive
-   completes"), at the start of execution t - `lead` (mesh-collective.h struct mesh_function); a copy of a value of lag
-   k written "for execution t only after execution t - k has ended" (struct mesh_value); its last read before the
-   writes of execution t + E (plan_unroll's farthest, `set_far`) */
+/* Mukerji 1994, §2.1: "Let t0, t1, ... be the starting time points of a sequence of machine operations.  Without loss
+   of generality, we use non-negative integers for the time points"; "we say that variable x is defined at time point
+   t.  The live range of x will continue to the time point t', (t' > t), where it is last used in a statement"; §3.1:
+   "Cyclic intervals wrap around from one iteration to the next, it is one long interval".  L. J. Hendren, G. R. Gao,
+   E. R. Altman and C. Mukerji, ACAPS Technical Memo 33, §2.2: "each variable in the original loop will be split into
+   several variables depending the unrolling factor".  M. Lam, PLDI 1988, §2.3: "The lifetime of a register variable is
+   defi[n]ed as the duration between the f[i]rst assignment into the variable and it[s] last use."  MPI 4.1 §3.7: "The
+   receiver should not access any part of the receive buffer after a nonblocking receive operation is called, until the
+   receive completes."  MPI 4.1 §3.9, MPI_START: "The request becomes active once the call is made." */
 static int plan_interval(const struct plan *plans,const struct plan_item *x,const uint64_t *operations,uint64_t *start,
                          uint64_t *end){
   if(x->kind!=PLAN_LOCAL && x->kind!=PLAN_ROUTED)return 0;
@@ -952,7 +951,7 @@ static int plan_interval(const struct plan *plans,const struct plan_item *x,cons
     *end=c*n+p->given[x->index].end;
     return 1;
   }
-  uint64_t back=p->start_lead,from=0,last=n-1,length;
+  uint64_t back=0,from=0,last=n-1,length;
   const uint32_t j=p->demand[p->value[p->here[p->member[p->set_first[x->index]]]].demand].mine;
   int received=j==MESH_ABSENT;
   for(uint32_t k=p->set_first[x->index];k<p->set_first[x->index+1];k++)
@@ -2312,7 +2311,7 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   if(!function->outstanding || function->outstanding>=UINT32_MAX)return ENOMEM;
   const uint32_t n=nodes->count;
   p->declared=declared;p->transfers=count;p->given=values;p->givens=given;p->weights=weights;
-  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;p->start_lead=function->lead;
+  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;
   struct plan_key *key=malloc(((size_t)count+1)*sizeof *key);
   uint32_t *root=NULL,*demand=NULL,*placed=malloc(((size_t)count+1)*sizeof *placed);
   size_t *trees=NULL;

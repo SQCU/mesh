@@ -523,12 +523,9 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    with no record and no rules of its own.  The record goes (R1)"; "The revisions of 14b9a757"): struct mesh_share and
    its tests go, and struct mesh_function's `share` and `shares` with it (64 bytes, as before 55b9cbad).  Two values'
    rows name one frame by the program's one allocation alone (the note before struct mesh_value).  What must stay:
-   `outstanding` and `plan` as their notes state them
-   design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: In: `lead`, the program's start
-   of execution t (mesh-call.h mesh_host_started's raise of `executions` past t, its receives' post) at the start of
-   execution t - `lead` in this node's program order, after every read the program makes before that point */
+   `outstanding` and `plan` as their notes state them */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
-                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,lead;
+                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding,plan; };
 _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function,count)==32 &&
                offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56,
