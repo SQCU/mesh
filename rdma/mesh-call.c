@@ -10,7 +10,11 @@
    page-table rows"; design/plan-to-bridge-change-request.md R2, corrected: "No value is placed as one run", so block k
    of copy c is row c x stride + k, each block placed anywhere, and a copy's bytes are one run only in its value's
    mapping (mesh-collective.h struct mesh_value `view`).  What must stay: an address the row's binding gives, NULL
-   where none */
+   where none.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3; "The
+   revisions of 55b9cbad"): struct mesh_value `view` is gone; a copy's bytes are one run only in the mapping the
+   program's effector composes over its `run` values' rows (mesh-dataflow.h mesh_view_compose).  What must stay: as
+   above */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index;}
 
 /* mesh_transfers_start: mesh-dataflow.c, beside the map reader whose copy of the map it reads (its configured latch and

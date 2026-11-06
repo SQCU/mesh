@@ -557,7 +557,10 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
    watch (mesh-link.c).
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
    root's owner where its process is `pid` and the root is open (mesh.h struct mesh_program), where it was every open
-   claim's.  What must stay: the declaration */
+   claim's.  What must stay: the declaration.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"): the operand's holder, hdr `client`, retired (mesh-dataflow.h mesh_retire) where its process
+   is `pid` and the operand (mesh.h struct mesh_algo) is published and not retired.  What must stay: the declaration */
 void clients_gone(pid_t pid);
 
 /* mesh-flow.c */
