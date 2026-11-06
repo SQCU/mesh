@@ -98,6 +98,11 @@
    (mesh_program, mesh_program_plan; mesh-bridge.h plan_from).  What must stay: nothing of the library's client
    interface here */
 #include "mesh-graph.h"
+/* 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8: "a
+   gone holder is read from the heartbeat's words"; "The revisions of 14b9a757", R-8): mesh-holders.h, for the
+   holder's one read (mesh_algo_holder) and its test (mesh_holds), which plan_stands takes.  What must stay: the holder
+   read there alone */
+#include "mesh-holders.h"
 
 /* design/prepared-machine.md#M29: d6dceac's prepared SEND (its span and request, one cache line's worth of what the
    post reads), its release its entry's `word` and `field` (mesh.h struct mesh_hop; design/disjoint-pages-change-
@@ -268,7 +273,11 @@ struct cursor { uint64_t execution,round,at,end; uint32_t copy,padding; };
    2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K1 and G4;
    "The revisions of 55b9cbad"): `generation` the operand's `published` (mesh.h struct mesh_algo) as its load read it;
    `next` gone, the port's flows held by place (struct port_plans `loaded`).  What must stay: the progress thread's
-   alone */
+   alone.
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "A plan then stands while its view
+   does, and its view while the sequencer's map does (D.3.6)"; "The revisions of 14b9a757", A7): FLOW_CANCELLED where
+   its `serial` is no longer hdr `view`, the installed view's identifier (link_run; mesh-bridge.h plan_stale), where it
+   was this node's `map_serial`.  What must stay: a cancelled flow served no more */
 enum { FLOW_SERVING, FLOW_CANCELLED };
 struct flow_set { uint32_t set,size; uint64_t first; };
 struct flow {
@@ -327,9 +336,25 @@ struct flow {
    published, since no release frees an operand while a port holds a plan of it (mesh-dataflow.h
    mesh_retired_release), and the walk ends each flow that no longer stands before it loads any.  Why: K1, as
    MSCCL-IR's steps name their dependences by index (`depid`, `deps`); A9, "searches for nothing".  What must stay: the
-   progress thread's alone */
+   progress thread's alone.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-6:
+   "Each cable's processor executes its list of instructions in the compile-time order, firing each on its dependency
+   word (aot A9, "What the bridge runs").  It scans no table of plans"; W8: "The bridge's take and poll ... visit every
+   place to `plans`, empty ones included.  The places with flows toward each adjacent node are fixed when the plan is
+   made, so they are a list the plan writes"; "The revisions of 14b9a757", R-6): `generation`, the operand (mesh.h
+   struct mesh_algo `published`) whose places toward this port's peer the walk read, 0 none; `adjacent`, those places
+   (mesh.h mesh_algo_adjacent: the plans with an entry toward the peer's map index, ascending, in the operand's own
+   pages, read in place); `listed`, their count while this port holds a flow at one of them, else 0; `holding`, the
+   flows the table holds.  Every loaded flow is at one of them (plans_walk loads no other place), so the take, the
+   poll, the busy test, the walk's ending pass and link_close visit those places alone, each by its table entry
+   (`loaded`, the store by place).  The list is read only while it is the operand's: under the walk's announcement, and
+   while a flow of the operand holds its `held` bit, which keeps the operand from its release (mesh-dataflow.c
+   mesh_retired_release).  So a pass that ends flows reads no entry once `holding` is 0 (its last `held` bit cleared,
+   the operand may be released and its pages written again), and `listed` is 0 once no flow is held.  What must stay:
+   the progress thread's alone; no place read but the operand's own list, and none of it once no flow holds it */
 static struct port_plans { struct flow **loaded; uint32_t places; uint64_t plans,walked; int walk,ended;
-  struct flow *current[2][MESH_LINK_LANES]; } port_plans[MESH_PORTS];
+  struct flow *current[2][MESH_LINK_LANES]; uint64_t generation; const uint32_t *adjacent; uint32_t listed,holding; }
+  port_plans[MESH_PORTS];
 
 /* tag pre-return-20261103 rdma/mesh-link.c:56-65 port_halt (3f72cbde, 306b22be), verbatim but not static */
 /* design/transport.md: a port halted from any thread (a peer interface's termination heard, a provider's fault
@@ -374,32 +399,54 @@ static void link_failed(struct port *port,int64_t code){
    a write that stays open past MESH_PLATFORM_NS is ETIMEDOUT, not the tag's ESRCH */
 /* the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a copy in *out the caller frees,
    its count and the map's serial with it, or an error value; the read within its deadline, MESH_PLATFORM_NS from its
-   start */
-static int map_read(struct mesh_record **out,uint64_t *count,uint64_t *serial){
+   start.
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "The map a view is created from is the
+   sequencer's, and the view's first message carries it ... Every member plans on those records"; mesh.h hdr
+   `view_map`: "written under `view_map`, a seqlock as `map` is"; "The revisions of 14b9a757", A7), reversing map_read,
+   which read the map alone: records_read reads either seqlock's records whole, `lock` its sequence word, `nodes` its
+   count, `off` its records' region offset and `identity` the word read with them: the map (hdr `map`, `map_nodes`,
+   `map_off`, `map_serial`), whose cables link_prepare joins, or the installed view's (hdr `view_map`, `view_nodes`,
+   `view_off`, `view`: mesh-map.h mesh_view_records), whose places give a plan's map indices (plans_walk,
+   streams_cancel).  The reader's test is mesh_map_whole's (an acquire fence, then the sequence word even and
+   unchanged), written here over `lock` since mesh_map_whole reads hdr `map` alone; `before` is even where it is
+   reached.  Why: "Refactor by pattern analysis: merge duplicated patterns", one reader of the two seqlocks.  What must
+   stay: the reading whole or retried, within MESH_PLATFORM_NS; the reader's errors (ETIMEDOUT, EINVAL, ENOMEM) */
+static int records_read(_Atomic uint64_t *lock,const _Atomic uint64_t *nodes,uint64_t off,
+                        const _Atomic uint64_t *identity,struct mesh_record **out,uint64_t *count,uint64_t *serial){
   const uint64_t until=clock_ns()+MESH_PLATFORM_NS;
   for(;;){
-    const uint64_t before=atomic_load_explicit(&M->map,memory_order_acquire),at=clock_ns();
+    const uint64_t before=atomic_load_explicit(lock,memory_order_acquire),at=clock_ns();
     if(at>=until)return ETIMEDOUT;
     if(before&1){
       const uint64_t left=until-at;
-      os_sync_wait_on_address_with_timeout(&M->map,before,sizeof M->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+      os_sync_wait_on_address_with_timeout(lock,before,sizeof *lock,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
                                            OS_CLOCK_MACH_ABSOLUTE_TIME,left<MESH_PAUSE_NS?left:MESH_PAUSE_NS);
       continue;
     }
-    const uint64_t n=atomic_load_explicit(&M->map_nodes,memory_order_relaxed),off=atomic_load_explicit(&M->map_off,memory_order_relaxed);
+    const uint64_t n=atomic_load_explicit(nodes,memory_order_relaxed);
     const int fits=off<=M->length && n<=(M->length-off)/sizeof(struct mesh_record);
     struct mesh_record *copy=fits?malloc((n?n:1)*sizeof *copy):NULL;
     if(copy)memcpy(copy,(char *)M+off,n*sizeof *copy);
-    const uint64_t s=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
-    if(mesh_map_whole(M,before)){
+    const uint64_t s=atomic_load_explicit(identity,memory_order_relaxed);
+    atomic_thread_fence(memory_order_acquire);
+    if(atomic_load_explicit(lock,memory_order_relaxed)==before){
       if(!copy)return fits?ENOMEM:EINVAL;
       *out=copy;*count=n;*serial=s;return 0;
     }
     free(copy);
   }
 }
+/* the installed view's records whole (records_read), `view` its identifier */
+static int view_read(struct mesh_record **out,uint64_t *count,uint64_t *view){
+  return records_read(&M->view_map,&M->view_nodes,M->view_off,&M->view,out,count,view);
+}
 /* a node's index in the map: its place in ascending node-id order among the map's records (mesh.h hdr `map_serial`);
-   UINT32_MAX where the map holds no record of it */
+   UINT32_MAX where the map holds no record of it.
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on the
+   view's map"; mesh-collective.h: "The map planned on is the installed view's"; "The revisions of 14b9a757", A7): the
+   records given are the installed view's (view_read), so the index is the one the plan's entries name (mesh.h struct
+   mesh_hop `node`), where they were this node's own map's.  What must stay: ascending node-id order, as
+   mesh-dataflow.c mesh_nodes_read orders the records the plan is made on */
 static uint32_t map_index(const struct mesh_record *records,uint64_t count,uint32_t node){
   uint32_t index=0,held=0;
   for(uint64_t r=0;r<count;r++){index+=records[r].node<node;held|=records[r].node==node;}
@@ -474,10 +521,26 @@ static void count_raise(_Atomic uint64_t *count,uint64_t final){
    plans would be read past its table (mesh_algo_plan tests no bound: K2).  Why: G4, the generation the ports announce
    is `published` (mesh.h struct mesh_port_info `prepared`); "The publication's readers": the ports read nothing of an
    operand before `published` (acquire).  What must stay: the operand read again after the announcement, before the
-   load reads the plan */
-static int plan_stands(uint32_t function,uint64_t generation,const struct mesh_state *words){
-  return atomic_load_explicit(&mesh_algo(M)->published,memory_order_acquire)==generation &&
-    mesh_algo_plan(M,function)==words;
+   load reads the plan.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8: "One
+   writer a word (W11; Lamport's single-writer registers): the program writes `retired`, the bridge writes only
+   `released`, and a gone holder is read from the heartbeat's words"; R-3: "every field of the published operand is
+   read through the acquired publication, never before it (McKenney and Slingwine)"; "The revisions of 14b9a757", R-8
+   and R-3), reversing the forms above: plan_stands(generation) is the walk's one re-read of the operand after its
+   announcement (plans_walk): `generation`, the operand it announced, where mesh_algo_open reads it again and its
+   holder holds the region (mesh-holders.h mesh_algo_holder, the holder's one read after the publication's acquire,
+   then mesh_holds), else 0.  A plan stands where its operand does so and mesh_algo_standing finds it at its place (the
+   walk's ending pass, by its flow).  The bridge writes no `retired` for a gone holder (R-8), so a gone holder's
+   operand stays open until its release, and this test is how a walk ends its plans; the bridge parent raises hdr
+   `plans` once it sees the holder gone (mesh-records.c), so the ports walk.  Its cost: one proc_pidinfo
+   (PROC_PIDTBSDINFO: mesh-holders.h mesh_started) a walk, on the port's progress thread, in plans_walk alone, which
+   runs where hdr `plans` moved since the last walk or the port's plans ended (link_run); none on a page's path.  The
+   holder read after mesh_algo_holder's own test is this operand's: mesh_algo_open reads `generation` again after it,
+   and an operand once not open is never open again under its generation.  What must stay: the operand read again
+   after the announcement, before any field of it; the holder read after the publication; no word written */
+static uint64_t plan_stands(uint64_t generation){
+  const struct mesh_algo_holder holder=mesh_algo_holder(M);
+  return mesh_algo_open(M)==generation && mesh_holds(holder.pid,holder.start)?generation:0;
 }
 /* a lane's cursor at the next execution, on that execution's copy's records on the lane (`first` the lane's u + 1
    bounds, struct flow) */
@@ -746,8 +809,20 @@ static void flow_sets_free(struct flow *f){
    word and its `pages` the pages this node receives of the range (at least 1).  Kept, each run-time state or a
    device's report: the map read and its serial (ESTALE, the reader's errors), a cable's queue pairs past the lanes a
    link has (EPROTO, the map's and the provider's), no link of rate (EHOSTUNREACH, the map's cables), a hop past a
-   lane's room (EMSGSIZE, the device's queue), and ENOMEM.  What must stay: the kept refusals */
-static int link_prepare(struct port *port,struct flow *f,struct mesh_state *words){
+   lane's room (EMSGSIZE, the device's queue), and ENOMEM.  What must stay: the kept refusals.
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on the
+   view's map ... A plan then stands while its view does"; design/compilation-coordination.md, "The root cause of the
+   copies, and the revised work list", R-6; "The revisions of 14b9a757", A7 and R-6): the peer's map index is
+   `index`, its place in the installed view's records as the walk read them once for the operand (plans_walk), where it
+   was its place in this node's own map; and the ESTALE test of the plan's `serial` is the walk's, made once for the
+   operand before that index is used (every plan of an operand is made on one view: mesh.h struct mesh_algo `nodes`,
+   "the map the operand was planned on"), where it was made here for each plan against `map_serial`.  The test where
+   the index is UINT32_MAX goes from the picks: the walk loads no plan where the view holds no record of the peer.  The
+   cables of the pair stay this node's own map's (mesh_cables), read whole (records_read): transport is the bridge's
+   alone.  Kept: the map reader's errors (ETIMEDOUT, EINVAL, ENOMEM), EPROTO, EHOSTUNREACH, EMSGSIZE, ENOMEM.  What
+   must stay: both ends pick and assign the same u x n list in list order, the view's indices at both ends being one
+   view's (A7) */
+static int link_prepare(struct port *port,struct flow *f,struct mesh_state *words,uint32_t index){
   struct link *l=&port->link;
   const uint32_t copies=words->copies;
   const uint64_t entries=words->entries;
@@ -755,10 +830,10 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
   const uint64_t n=entries/copies,width=(uint64_t)copies+1;
   const struct mesh_hop *list=mesh_hops(M,words);
   struct mesh_record *records=NULL;uint64_t count=0,serial=0;
-  int error=map_read(&records,&count,&serial);
+  int error=records_read(&M->map,&M->map_nodes,atomic_load_explicit(&M->map_off,memory_order_relaxed),&M->map_serial,
+                         &records,&count,&serial);
   if(error)return error;
-  if(words->serial!=serial){free(records);return ESTALE;}
-  const uint32_t self=M->node,peer=port->peer,index=map_index(records,count,peer);
+  const uint32_t self=M->node,peer=port->peer;
   const struct mesh_record *mine=NULL,*theirs=NULL;
   for(uint64_t r=0;r<count;r++){if(records[r].node==self)mine=records+r;if(records[r].node==peer)theirs=records+r;}
   /* the pair's cables, the one per-cable join (mesh-map.h mesh_cables, which mesh_joined and mesh_nodes_read read too:
@@ -784,7 +859,7 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      (`lead`); and each pick's record (`slot`), where the direction has such a set */
   uint64_t *member[2]={NULL,NULL},*bound[2]={NULL,NULL},*set_of[2]={NULL,NULL},*lead[2]={NULL,NULL},runs[2]={0,0},
            local[2]={0,0},*slot[2]={NULL,NULL},*kept[2]={NULL,NULL},extra[2]={0,0};
-  for(int d=0;d<2 && index!=UINT32_MAX;d++){
+  for(int d=0;d<2;d++){
     if(!(pick[d]=malloc((entries?entries:1)*sizeof *pick[d]))){error=ENOMEM;goto failed;}
     for(uint64_t j=0;j<entries;j++)
       if(list[j].node==index && list[j].direction==(uint32_t)d)pick[d][units[d]++]=(uint32_t)j;
@@ -929,7 +1004,15 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
      cursors start at execution 0 (struct cursor), and each receive's round rule reads its page's phase field (PM,
      link_receive_drain), so what earlier executions landed is read where it is.  A child that pairs again after a loss
      finds the plan's `serial` no longer the map's, the loss having moved
-     the map's serial (mesh-records.c map_put), and refuses it, ESTALE (above).  What must stay: the ESTALE refusal */
+     the map's serial (mesh-records.c map_put), and refuses it, ESTALE (above).  What must stay: the ESTALE refusal.
+     2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06; mesh-bridge.h plan_stale: "a move
+     of this node's own map ends no plan (its link losses cancel their receives as before)"; "The revisions of
+     14b9a757", A7): the serial is the installed view's identifier, which a loss moves only once the sequencer's map
+     moves and its next view is installed here, not at this node's own map_put.  So the same child loads no plan of an
+     operand it loaded before (plans_walk: once an operand; link_close keeps the operand's generation), as the ESTALE
+     refused it; a child spawned after a loss, before the next view is installed, finds the plan's serial the view's
+     and loads it with its cursors at execution 0 (open, in this unit's report).  What must stay: no record served
+     from a load after its run began, in this child */
   /* the records, by lane, copy and assignment order: first[q (u + 1) + c] lane q's copy c's first, each lane's units
      counted by copy and summed in that order (copy pick / n; a lane's units come in list order, so in copy order) */
   /* 2026-11-05 ("The revisions of f3f7cf46", PM): beside them, after every lane's, the records of `extra` (above), one
@@ -964,8 +1047,17 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
        receive's `count` is its range's count word as given, every receive naming its range's from 114
        (mesh-collective.c mesh_plan), where a 0 named none.  What must stay: each record's words its hop's */
     /* the span its hop's `bytes` from the start of its page (T7; mesh.h struct mesh_hop: "A hop moves its `bytes` from
-       the start of that page or into it") */
-    const struct ibv_sge span=wire_span(&port->device,(uint64_t)hop->page*M->pgsz,hop->bytes);
+       the start of that page or into it").
+       2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1:
+       "The bridge's instructions are those blocks: aot A9, MSCCL-IR's steps with offset and count"; mesh.h struct
+       mesh_hop `offset`: "a hop moves bytes [page x pgsz + offset, + bytes) of the region's arena, `offset` +
+       `bytes` <= block x pgsz"; "The revisions of 14b9a757", R-1), reversing the span from its page's start: the span its hop's
+       `bytes` from byte `offset` of its page, at each end its own entry's (a send's in its source's block, a receive's
+       in its destination's or its relay's).  A receive's `pages` is its range's instructions this node receives in one
+       copy (mesh.h), each one landing on its count, so the landing's arithmetic ((j + 1) x `pages`, link_receive_drain)
+       and the cancellation's final value (`pages` x executions: plan_end, plan_cancel) are unchanged.  What must stay:
+       the span's length its hop's `bytes`, which the landing's length test reads */
+    const struct ibv_sge span=wire_span(&port->device,(uint64_t)hop->page*M->pgsz+hop->offset,hop->bytes);
     const uint64_t at=q!=UINT32_MAX?fill[d][q]++:next[d]++;
     if(slot[d])slot[d][k]=at;
     if(d==MESH_SEND){
@@ -1124,44 +1216,49 @@ failed:
    revisions of 55b9cbad"): `generation` the operand's `published` (mesh.h struct mesh_algo), which step 1 announces
    in the port's `prepared` and step 2 reads again (plan_stands); `loaded` the port's table entry of place `function`
    (struct port_plans), NULL where the table could not grow to it, which is refused ENOMEM as a flow that cannot be
-   allocated is.  What must stay: steps 1, 2, 4 and 5 */
-static int plan_load(struct port *port,uint32_t function,uint64_t generation,struct mesh_state *words,
+   allocated is.  What must stay: steps 1, 2, 4 and 5.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-3:
+   "every field of the published operand is read through the acquired publication, never before it (McKenney and
+   Slingwine)", and R-6; "The revisions of 14b9a757", R-3 and R-6): steps 1, 2 and 5 are the walk's, around all its
+   loads of one operand (plans_walk), where they were each load's: the walk reads the operand's places toward the peer
+   (mesh.h mesh_algo_adjacent) before any load, and those reads, as a plan's, are made only under the announcement and
+   after the operand's re-read (plan_stands), so a release cannot reuse the operand's pages while the walk reads them
+   (mesh-dataflow.c mesh_retired_release: a seq_cst fence, then every port's `prepared`, then the plans' `held`).  The
+   load reads its plan after that re-read, at its place (mesh_algo_standing), so its own re-read and EAGAIN go.  Steps
+   3 and 4 are here: `index` the peer's map index the walk read (link_prepare), step 3's ESTALE the walk's, once for
+   the operand (plans_load).  The announcement stays transient, set
+   and cleared within the walk's loads.  What must stay: the announcement and the operand's re-read before the plan is
+   read; the `held` bit set before the announcement is cleared */
+static int plan_load(struct port *port,uint32_t function,uint64_t generation,struct mesh_state *words,uint32_t index,
                      struct flow **loaded){
-  struct mesh_port_info *info=&mesh_links(M)[port->index].port;
   const uint32_t p=port->index;
-  atomic_store_explicit(&info->prepared,generation,memory_order_release);
-  atomic_thread_fence(memory_order_seq_cst);
-  int error=EAGAIN;
-  if(plan_stands(function,generation,words)){
-    struct flow *f=loaded?calloc(1,sizeof *f):NULL;
-    error=f?link_prepare(port,f,words):ENOMEM;
-    if(error){
-      free(f);
-      mesh_say("bridge","link %u (%s): plan (%llu, %llu) refused (code %d)",port->index,port->name,
-               (unsigned long long)words->group,(unsigned long long)words->epoch,error);
-      atomic_store_explicit(&words->refused[p],(int32_t)error,memory_order_release);
-    } else {
-      /* 2026-11-04, owner B4 (DL1, DL3): `told` the plan's `taken[p]` as this load finds it (0 for a plan no child of
-         this port held, mesh_plan's starting value; an earlier child's last otherwise), so taken_tell only raises it.
-         An earlier child of this port ends a plan it carries only as its link is lost (link_close), which changes the
-         map's cables and so moves `map_serial` (mesh-records.c map_put), so a later load of that plan is refused
-         (ESTALE, link_prepare) and no lane reads again a number its `taken[p]` let the parent overwrite.
-         2026-11-05, owner B4 (review X1 #4), the note above made exact: what guards a reload is, first, link_prepare's
-         EALREADY: a plan this port carries units of whose `executions` is above 0 at the load is refused, so no lane
-         of a reload reads a number once its node's run has begun; a plan the port carries nothing of reads no word
-         (its `taken[p]` follows `released`); and the same child walks again after link_close (`walk`) where its link
-         serves again.  A carried plan reloaded before its run began, whose `taken[p]` plan_end raised to `released`
-         while the reload's cursors would start at 0, is refused too (EALREADY: DL10, link_prepare, where `taken[p]` is
-         above 0 at the load; 2026-11-05, owner B4, in place of this case recorded open here), so a loaded plan this
-         port carries starts with `told` 0, and `told` from the word keeps it only rising for a plan it carries nothing
-         of.  What must stay: `taken[p]` never lowered */
-      /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): `told` gone with `taken[p]`;
-         the note above is the 112 form's.  What must stay: nothing of it */
-      f->function=function;f->generation=generation;*loaded=f;
-      atomic_fetch_or_explicit(&words->held,UINT64_C(1)<<p,memory_order_release);
-    }
+  struct flow *f=loaded?calloc(1,sizeof *f):NULL;
+  const int error=f?link_prepare(port,f,words,index):ENOMEM;
+  if(error){
+    free(f);
+    mesh_say("bridge","link %u (%s): plan (%llu, %llu) refused (code %d)",port->index,port->name,
+             (unsigned long long)words->group,(unsigned long long)words->epoch,error);
+    atomic_store_explicit(&words->refused[p],(int32_t)error,memory_order_release);
+  } else {
+    /* 2026-11-04, owner B4 (DL1, DL3): `told` the plan's `taken[p]` as this load finds it (0 for a plan no child of
+       this port held, mesh_plan's starting value; an earlier child's last otherwise), so taken_tell only raises it.
+       An earlier child of this port ends a plan it carries only as its link is lost (link_close), which changes the
+       map's cables and so moves `map_serial` (mesh-records.c map_put), so a later load of that plan is refused
+       (ESTALE, link_prepare) and no lane reads again a number its `taken[p]` let the parent overwrite.
+       2026-11-05, owner B4 (review X1 #4), the note above made exact: what guards a reload is, first, link_prepare's
+       EALREADY: a plan this port carries units of whose `executions` is above 0 at the load is refused, so no lane
+       of a reload reads a number once its node's run has begun; a plan the port carries nothing of reads no word
+       (its `taken[p]` follows `released`); and the same child walks again after link_close (`walk`) where its link
+       serves again.  A carried plan reloaded before its run began, whose `taken[p]` plan_end raised to `released`
+       while the reload's cursors would start at 0, is refused too (EALREADY: DL10, link_prepare, where `taken[p]` is
+       above 0 at the load; 2026-11-05, owner B4, in place of this case recorded open here), so a loaded plan this
+       port carries starts with `told` 0, and `told` from the word keeps it only rising for a plan it carries nothing
+       of.  What must stay: `taken[p]` never lowered */
+    /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): `told` gone with `taken[p]`;
+       the note above is the 112 form's.  What must stay: nothing of it */
+    f->function=function;f->generation=generation;*loaded=f;
+    atomic_fetch_or_explicit(&words->held,UINT64_C(1)<<p,memory_order_release);
   }
-  atomic_store_explicit(&info->prepared,0,memory_order_release);
   return error;
 }
 
@@ -1254,14 +1351,22 @@ static int plan_load(struct port *port,uint32_t function,uint64_t generation,str
    Both ends of a cable hold the same plans and records on each lane and the same numbers (Défago, Schiper and Urbán,
    §3, Uniform Total Order), so each lane takes the same calls in the same order at both ends, and the k-th SEND on its
    queue pair fills the k-th receive.  What must stay: each plan's executions on a lane in order; no execution taken
-   past its node's `executions`; nothing copied */
+   past its node's `executions`; nothing copied.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-6:
+   "Each cable's processor executes its list of instructions in the compile-time order, firing each on its dependency
+   word ... It scans no table of plans"; W8: "The bridge's take and poll (mesh-flow.c 1263, 1879, 1891) visit every
+   place to `plans`, empty ones included"; "The revisions of 14b9a757", R-6): the merge's candidates are the flows at
+   the places of the operand's plans with an entry toward this port's peer (struct port_plans `adjacent`, `listed`;
+   mesh.h mesh_algo_adjacent), each by its table entry, where every place of the table was visited.  A plan with no
+   entry toward the peer has no record on any lane of this port, so it was never a candidate.  What must stay: as
+   above */
 static struct flow *lane_take(struct port_plans *own,int d,uint32_t q,int *again){
   const uint32_t lane=UINT32_C(1)<<q;
   const uint64_t delivered=atomic_load_explicit(&M->delivered,memory_order_acquire);
   struct flow *least=NULL;
   const struct mesh_delivery *head=NULL;
-  for(uint32_t k=0;k<own->places;k++){
-    struct flow *f=own->loaded[k];
+  for(uint32_t j=0;j<own->listed;j++){
+    struct flow *f=own->loaded[own->adjacent[j]];
     if(!f || f->state==FLOW_CANCELLED || !(f->carrying[d]&lane))continue;
     const uint64_t count=atomic_load_explicit(&f->words->delivered,memory_order_acquire),n=f->cursor[d][q].execution;
     uint64_t *at=&f->at[d][q];
@@ -1690,14 +1795,27 @@ static void plan_end(struct port *port,struct flow *f,uint32_t served){
    must stay: no plan served on a link that serves no lane.  2026-11-05 ("The revisions of f3f7cf46", SW): no
    EALREADY; a load of a plan whose serial the loss moved is refused ESTALE (link_prepare) */
 /* 2026-11-05 ("Review of 4e78f6f4 against the requirement lines", K1; "The revisions of 55b9cbad"): every flow of the
-   port's table by place (struct port_plans `loaded`), where the list was.  What must stay: as above */
+   port's table by place (struct port_plans `loaded`), where the list was.  What must stay: as above.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-6: "It
+   scans no table of plans"; design/aot-compilation-change-request.md A7, corrected 2026-11-06; "The revisions of
+   14b9a757", R-6 and A7): the flows at the places toward the peer (struct port_plans `adjacent`), every loaded flow
+   being at one, where every place of the table was visited; then `listed` 0, no flow of the operand held.  The
+   operand's `generation` is kept, so this child loads no plan of it again (plans_walk loads an operand once), where the
+   next walk loaded each anew and link_prepare refused it ESTALE, the loss having moved `map_serial`: the plan's serial
+   is now the installed view's, which this node's own map move does not move (mesh-bridge.h plan_stale), and a reload's
+   cursors would start at execution 0 of a run that has begun (link_prepare's SW note).  What must stay: no plan served
+   on a link that serves no lane; every flow ended before `listed` is 0; no entry of the list read once no flow holds
+   it (`holding` 0) */
 static void link_close(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
-  for(uint32_t k=0;k<at->places;k++){
+  for(uint32_t j=0;at->holding && j<at->listed;j++){
+    const uint32_t k=at->adjacent[j];
     struct flow *f=at->loaded[k];
-    at->loaded[k]=NULL;
-    if(f)plan_end(port,f,served);
+    if(!f)continue;
+    at->loaded[k]=NULL;at->holding--;
+    plan_end(port,f,served);
   }
+  at->listed=0;
   at->walk=1;
 }
 /* The walk of the claims' heads (e6bd7db2's section 6, "Discovery", as design/compilation-coordination.md, Q5 takes
@@ -1728,33 +1846,109 @@ static void link_close(struct port *port,uint32_t served){
    read after the plan (plan_from).  An entry left after the ending pass stands, so it is the plan at k of the operand
    published: no release frees an operand while this port holds a plan of it (mesh-dataflow.h mesh_retired_release).
    What must stay: ended plans ended before any load; nothing loaded once `ended`; a refusal by an earlier child
-   standing */
+   standing.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-3:
+   "Publication is read as RCU's publish-subscribe (W5): every field of the published operand is read through the
+   acquired publication, never before it (McKenney and Slingwine)", R-6: "Each cable's processor executes its list of
+   instructions in the compile-time order ... It scans no table of plans", and R-8: "a gone holder is read from the
+   heartbeat's words"; W8: "The places with flows toward each adjacent node are fixed when the plan is made, so they are
+   a list the plan writes"; design/aot-compilation-change-request.md A7, corrected 2026-11-06; "The revisions of
+   14b9a757", R-3, R-6, R-8 and A7), reversing the forms above:
+   1. The publication acquired first (mesh.h mesh_algo_open), its generation announced in the port's `prepared`
+      (release), a seq_cst fence, and the operand read again with its holder (plan_stands): plan_load's steps 1 and 2,
+      made once for the walk, so every read of the operand below (`plans`, `table`, `nodes`, `adjacent`, a plan's
+      words) is through the acquired publication and under the announcement (M. M. Michael, IEEE TPDS 15(6), 2004: a
+      hazard pointer announced, then the pointer read again; mesh-dataflow.c mesh_retired_release reads `prepared`
+      after its own fence).  Where plan_stands gives 0 (not open, another operand, or its holder gone), every flow ends.
+   2. The ending pass over the places toward the peer (struct port_plans `adjacent`): a flow ends where its operand is
+      not the one standing or its place no longer holds its plan standing (mesh_algo_standing), and no entry is read
+      once no flow is held (`holding` 0), where a retired operand, announced by no port, may be released.
+   3. An operand not met before (`generation` not the port's): plans_load, once an operand.  Every plan of an operand
+      stands from its publication or not at all (a plan's `closed` only rises), so the first walk of the operand meets
+      every plan it will load; a later walk of it only ends.
+   4. `listed` 0 where no flow of the operand is held, then `prepared` 0 (release), after every `held` bit set.
+   What must stay: the publication, its announcement and the operand's re-read before any field of it; ended plans
+   ended before any load; nothing loaded once `ended`; a refusal by an earlier child standing; the `held` bits set
+   before `prepared` is cleared */
 /* entry k of the port's table by place, the table grown where k is past it to the operand's `plans`, at least k + 1
-   (realloc, its new entries NULL); NULL where it cannot grow (plan_load refuses the plan ENOMEM) */
-static struct flow **place_at(struct port_plans *at,uint32_t k){
+   (realloc, its new entries NULL); NULL where it cannot grow (plan_load refuses the plan ENOMEM).
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-3; W5:
+   "The count is read from the published operand after the acquire, so the index is bounded by construction"; "The
+   revisions of 14b9a757", R-3): `plans` the walk's, read once after the publication's acquire (plans_load), where it
+   was read here again; and the table grown to `plans`, k being below it (mesh.h struct mesh_algo `adjacent`: "each a
+   place k below `plans`"), where it was the larger of `plans` and k + 1.  What must stay: the new entries NULL */
+static struct flow **place_at(struct port_plans *at,uint32_t k,uint32_t plans){
   if(k>=at->places){
-    const uint32_t plans=mesh_algo(M)->plans,places=plans>k?plans:k+1;
-    struct flow **grown=realloc(at->loaded,(size_t)places*sizeof *grown);
+    struct flow **grown=realloc(at->loaded,(size_t)plans*sizeof *grown);
     if(!grown)return NULL;
-    memset(grown+at->places,0,(size_t)(places-at->places)*sizeof *grown);
-    at->loaded=grown;at->places=places;
+    memset(grown+at->places,0,(size_t)(plans-at->places)*sizeof *grown);
+    at->loaded=grown;at->places=plans;
   }
   return at->loaded+k;
 }
+/* The loads of an operand's plans toward this port's peer, in the walk, under its announcement (plans_walk): the
+   installed view's records read whole (view_read), the peer's map index its place in them (map_index; A7, corrected
+   2026-11-06: "Every member of a view plans on the view's map"), read once for the operand; the operand's view its
+   plans' one `serial` (mesh.h struct mesh_algo `nodes`: "the map the operand was planned on"; struct mesh_state
+   `serial`; mesh_plan makes every function's plan on one reading and refuses a count of 0, EINVAL, so its plan at
+   place 0 exists), and where it is not the installed view, none loaded: each plan of it ESTALE, the test link_prepare
+   made for each plan against `map_serial`, made once here before the index is used, since the index names the
+   operand's entries only in its own view (where they are one view, the index is below the operand's `nodes` by
+   construction).  Where the view holds no record of the peer, no plan of the operand has an entry toward it, and none
+   is loaded.  Else the places toward the index (mesh.h mesh_algo_adjacent: R-6; W8), each plan standing at one and not
+   refused by this port (`refused[p]`, never reset) loaded (plan_load) into the table, grown to `plans` read once.  A
+   failed view read (ETIMEDOUT, EINVAL, ENOMEM: records_read) is said and loads none of the operand, as link_prepare's
+   map read refused each plan.  The flows loaded are counted in `holding`, the operand's places kept (struct port_plans
+   `adjacent`, `listed`).  What must stay: only the places toward the peer loaded; the view's reading and its test
+   before the index is used */
+static void plans_load(struct port *port,struct port_plans *at,uint64_t generation){
+  struct mesh_record *records=NULL;uint64_t count=0,view=0;
+  const int error=view_read(&records,&count,&view);
+  if(error){
+    mesh_say("bridge","link %u (%s): the installed view not read (code %d): no plan of operand %llu loaded",
+             port->index,port->name,error,(unsigned long long)generation);
+    return;
+  }
+  const uint32_t index=map_index(records,count,port->peer);
+  free(records);
+  if(index==UINT32_MAX)return;
+  const struct mesh_algo *algo=mesh_algo(M);
+  const uint64_t serial=mesh_algo_state(M,algo,0)->serial;
+  if(serial!=view){
+    mesh_say("bridge","link %u (%s): operand %llu planned on view %llu, not the installed view %llu: no plan of it "
+             "loaded (code %d)",port->index,port->name,(unsigned long long)generation,(unsigned long long)serial,
+             (unsigned long long)view,ESTALE);
+    return;
+  }
+  const uint32_t plans=algo->plans;
+  at->adjacent=mesh_algo_adjacent(M,index,&at->listed);
+  for(uint32_t j=0;j<at->listed;j++){
+    const uint32_t k=at->adjacent[j];
+    struct mesh_state *words=mesh_algo_standing(M,k);
+    if(!words || atomic_load_explicit(&words->refused[port->index],memory_order_relaxed))continue;
+    if(!plan_load(port,k,generation,words,index,place_at(at,k,plans)))at->holding++;
+  }
+}
 static void plans_walk(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
-  for(uint32_t k=0;k<at->places;k++){
+  struct mesh_port_info *info=&mesh_links(M)[port->index].port;
+  const uint64_t open=mesh_algo_open(M);
+  atomic_store_explicit(&info->prepared,open,memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  const uint64_t generation=plan_stands(open);
+  for(uint32_t j=0;at->holding && j<at->listed;j++){
+    const uint32_t k=at->adjacent[j];
     struct flow *f=at->loaded[k];
-    if(!f || plan_stands(f->function,f->generation,f->words))continue;
-    at->loaded[k]=NULL;
+    if(!f || (f->generation==generation && mesh_algo_standing(M,k)==f->words))continue;
+    at->loaded[k]=NULL;at->holding--;
     plan_end(port,f,served);
   }
-  struct mesh_state *words;
-  for(uint32_t k=0;!at->ended && (words=plan_from(&k));k++){
-    if((k<at->places && at->loaded[k]) || atomic_load_explicit(&words->refused[port->index],memory_order_relaxed))continue;
-    const uint64_t generation=atomic_load_explicit(&mesh_algo(M)->published,memory_order_acquire);
-    plan_load(port,k,generation,words,place_at(at,k));
+  if(generation!=at->generation){
+    at->generation=generation;at->listed=0;
+    if(generation && !at->ended)plans_load(port,at,generation);
   }
+  if(!at->holding)at->listed=0;
+  atomic_store_explicit(&info->prepared,0,memory_order_release);
 }
 
 /* The port's reading of the deliveries' channel (mesh.h struct mesh_delivery; design/aot-compilation-change-request.md
@@ -1866,20 +2060,28 @@ static void plans_walk(struct port *port,uint32_t served){
    execution past the u-th; os_sync_wait_on_address returns at once where the word has moved.  Its cost, recorded:
    each raise moves `plans`, so each port walks the heads on its next pass (plans_walk), DL3's `plans` test lets a lane
    that read the old value take nothing for one pass, and the parent's release turn runs again (mesh-records.c
-   clients_turn).  What must stay: the raise once a pass, after every `taken[p]` store of it */
+   clients_turn).  What must stay: the raise once a pass, after every `taken[p]` store of it.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-6: "It
+   scans no table of plans"; W8: "The bridge's take and poll (mesh-flow.c 1263, 1879, 1891) visit every place to
+   `plans`, empty ones included"; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "A plan then
+   stands while its view does"; "The revisions of 14b9a757", R-6 and A7): the cancellation's loop and the busy test
+   visit the places toward the peer (struct port_plans `adjacent`, `listed`), where they visited every place of the
+   table; and a flow is cancelled where its `serial` is not hdr `view` (read once a pass), the installed view's
+   identifier, where it was this node's `map_serial`.  What must stay: a cancelled plan served no more; the walk before
+   serving */
 static int link_run(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
   if(!at->ended && (at->walk || at->plans!=at->walked)){at->walk=0;at->walked=at->plans;plans_walk(port,served);}
   if(at->ended)return 0;
-  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
+  const uint64_t view=atomic_load_explicit(&M->view,memory_order_relaxed);
   int traced=0;
   /* 2026-11-05 ("Review of 4e78f6f4 against the requirement lines", K1; "The revisions of 55b9cbad"): the port's
      flows read from its table by place (struct port_plans `loaded`), where they were a list.  What must stay: as
      above */
-  for(uint32_t k=0;k<at->places;k++){
-    struct flow *f=at->loaded[k];
+  for(uint32_t j=0;j<at->listed;j++){
+    struct flow *f=at->loaded[at->adjacent[j]];
     if(!f)continue;
-    if(f->state!=FLOW_CANCELLED && f->words->serial!=serial){
+    if(f->state!=FLOW_CANCELLED && f->words->serial!=view){
       f->state=FLOW_CANCELLED;lanes_drop(at,f);
       if(f->posted!=f->sent+f->landed)plan_outstanding(port,f,f->posted-f->sent-f->landed,served);
     }
@@ -1888,7 +2090,10 @@ static int link_run(struct port *port,uint32_t served){
   if(at->ended)return 0;
   int busy=0;
   if(!link_receive_progress(port,served,traced,&busy) || !link_send_progress(port,served,traced,&busy))return 0;
-  for(uint32_t k=0;k<at->places;k++)busy|=at->loaded[k] && at->loaded[k]->posted!=at->loaded[k]->sent+at->loaded[k]->landed;
+  for(uint32_t j=0;j<at->listed;j++){
+    const struct flow *f=at->loaded[at->adjacent[j]];
+    busy|=f && f->posted!=f->sent+f->landed;
+  }
   for(int d=0;d<2;d++)for(uint32_t q=0;q<MESH_LINK_LANES;q++)busy|=served>>q&1 && at->current[d][q];
   return busy;
 }
@@ -2150,12 +2355,18 @@ static void plan_cancel(struct mesh_state *words,uint32_t from){
    revisions of 55b9cbad"): every plan of the operand (mesh.h struct mesh_algo) not yet released, its `published`
    (acquire) not 0 and not its `released`, closed or standing, each at the operand's `table` word k for k below its
    `plans` (mesh_algo_state), where the root's `owner` was read.  What must stay: on the parent's thread, the
-   releaser's */
+   releaser's.
+   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-10:
+   "The duplicates R-1 leaves (W13), each merged: "published and not yet released""; W13: "written three times
+   (mesh-collective.c 2091; mesh-dataflow.c 354; mesh-flow.c 2157), to be beside `mesh_algo_open`"; R-3: "every field
+   of the published operand is read through the acquired publication, never before it"; "The revisions of 14b9a757",
+   R-10 and R-3): the test is mesh.h mesh_algo_unreleased, its one form, where it was written here (its `released` read
+   with acquire there, where it was relaxed here); then `plans` read once, after that acquire.  What must stay: on the
+   parent's thread, the releaser's; every plan of the operand not yet released, closed or standing */
 static void held_clear(uint64_t ports){
+  if(!mesh_algo_unreleased(M))return;
   const struct mesh_algo *algo=mesh_algo(M);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
-  if(!published || atomic_load_explicit(&algo->released,memory_order_relaxed)==published)return;
-  for(uint32_t k=0;k<algo->plans;k++)
+  for(uint32_t k=0,plans=algo->plans;k<plans;k++)
     atomic_fetch_and_explicit(&mesh_algo_state(M,algo,k)->held,~ports,memory_order_release);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:619-654 streams_open (11807bec), reduced to what it is under the page lists:
@@ -2202,7 +2413,13 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    holding its own to clear (plan_end), or its reap's.
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): every
    standing plan read at its place (mesh-bridge.h plan_from), where plan_after walked the heads.  What must stay: as
-   above */
+   above.
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on the
+   view's map"; "The revisions of 14b9a757", A7): the lost peer's map index its place in ascending node-id order among
+   the installed view's records (view_read: mesh-map.h mesh_view_records, hdr `view_nodes`), the index the plans'
+   entries name, where it was its place in this node's own map; every receive where the view is not read, as where the
+   map was not.  A plan of another view was cancelled whole as the view was installed (plan_stale), and a raise of a
+   count at its final value leaves it there (count_raise).  What must stay: as above */
 static struct cancelled { uint32_t node,index,every; } cancelled[MESH_PORTS];
 void streams_cancel(const struct port *port){
   struct mesh_state *words;
@@ -2218,8 +2435,8 @@ void streams_cancel(const struct port *port){
   }
   struct cancelled *last=cancelled+port->index;
   if(port->peer){
-    struct mesh_record *records=NULL;uint64_t count=0,serial=0;
-    const int error=map_read(&records,&count,&serial);
+    struct mesh_record *records=NULL;uint64_t count=0,view=0;
+    const int error=view_read(&records,&count,&view);
     *last=(struct cancelled){.node=port->peer,.index=error?UINT32_MAX:map_index(records,count,port->peer),.every=error!=0};
     free(records);
   }
@@ -2281,10 +2498,22 @@ void streams_cancel(const struct port *port){
    thread.
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the standing
    plans read at their places (mesh-bridge.h plan_from), where plan_after walked the heads.  What must stay: as
-   above */
+   above.
+   2026-11-06 (design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on the
+   view's map ... A plan then stands while its view does, and its view while the sequencer's map does (D.3.6)";
+   mesh-bridge.h plan_stale; "The revisions of 14b9a757", A7), reversing the map serial: a seq_cst fence, then hdr
+   `view` read (the installed view's identifier; the parent its one writer, under `view_map`), then every standing
+   plan whose `serial` is not it cancelled whole (plan_cancel, every receive and every edge into it), called by
+   mesh-records.c view_install, after it stores the view, and by map_adopt, after it stores no view installed (hdr
+   `view` 0, so every plan is cancelled: mesh-bridge.h plan_stale).  A move of this node's own map ends no plan.  The
+   fence pairs with the start as before, with `view` as the serial (mesh-call.h mesh_transfers_start: the raise of
+   `executions`, a seq_cst fence, then hdr `view` read, ESTALE where it is not the plan's): of the two fences one comes
+   first, so this cancellation covers the raised executions or the start reads the new view.  What must stay: the
+   fence after the view's store and before any plan or its `executions` is read; this call on the parent's one
+   thread */
 void plan_stale(void){
   atomic_thread_fence(memory_order_seq_cst);
-  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
+  const uint64_t view=atomic_load_explicit(&M->view,memory_order_relaxed);
   struct mesh_state *words;
-  for(uint32_t k=0;(words=plan_from(&k));k++)if(words->serial!=serial)plan_cancel(words,UINT32_MAX);
+  for(uint32_t k=0;(words=plan_from(&k));k++)if(words->serial!=view)plan_cancel(words,UINT32_MAX);
 }
