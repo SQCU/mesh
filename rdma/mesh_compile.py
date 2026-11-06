@@ -1,5 +1,5 @@
-# The torch.compile backend of the ahead-of-time compilation (design/aot-compilation-change-request.md, A1 to A4, A8 and
-# A9; design/compilation-coordination.md, "The torch backend (mesh_compile.py, T)" and A-T1 to A-T4).  A function's FX
+# The ahead-of-time compilation of a torch program (design/aot-compilation-change-request.md, A1 to A4 and A8 to A10;
+# design/compilation-coordination.md, "The torch backend (mesh_compile.py, T)" and A-T1 to A-T4).  A function's FX
 # graph with its fixed shapes (A1) is partitioned by the placement operand (A2), its collectives are lowered to declared
 # transfers and dependences (A4), all carried as one IR (A8) and weighed by the weighting operand (A3), then planned by
 # mesh_plan and run by torch's own operators on tensors over the placed pages (A9).  It chooses no placement and no
@@ -22,10 +22,20 @@
 # every value this node makes is placed by mesh_plan's allocator, a sent value is made in its sent pages or copied
 # there once, a publish waits for nothing (a torch MPSEvent's notification, rdma/mesh-torch.mm), no output is copied,
 # and a node the placement maps no device returns meta tensors
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 1, 2 and 4 to 8,
+# and "The revisions of 4e78f6f4"), reversing the notes above where they name a torch.compile backend, a function
+# compiled at its first call, a plan call for each function and meta tensors at a node with no section: a program is
+# traced whole (program, A10), each of its compiled functions (Function) captured by torch.export at its calls in
+# program order before the program runs, the same at every rank, with nothing run eagerly between its calls (A1,
+# corrected: "every function of a torch program is captured and compiled before the program runs, the same at every
+# rank, and nothing runs eagerly between its compiled calls"); the program planned by one mesh_plan call (point 5:
+# "there is one IR of the program and one serialized operand of it"); every value this node binds typed one run and
+# bound over the program's one mapping (points 6 and 8); a collective's parts placed at their places in its values
+# (point 7); and at a node with no section a call starts its plan and computes nothing (point 2).  What must stay: no
+# placement and no weight chosen here
 import collections
 import ctypes as C
 import errno
-import itertools
 import math
 import operator
 import os
@@ -34,54 +44,45 @@ import weakref
 
 import torch
 import torch.utils._pytree as pytree
+from torch._export.passes.remove_runtime_assertions import _RemoveRuntimeAssertionsPass
 from torch._library._out_variant import _is_functional, get_out_arg_names, to_out_variant
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.node import Node, map_arg
 
 import mesh
 import mesh_graph
 
-F = torch.nn.functional
+A = torch.ops.aten
 # Y. Xu et al., GSPMD, arXiv 2105.04663, 2021, section 3.5: elementwise operators, each dimension preserved from the
 # inputs to the output and back; an operand of fewer dimensions, or of size 1 on one the output's is larger on, is
 # broadcast there (design/compilation-coordination.md, "The revisions of abecd389", T4-15)
-ELEMENTWISE = {operator.add, operator.sub, operator.mul, operator.truediv, operator.neg, torch.add, torch.sub,
-               torch.mul, torch.div, torch.neg, torch.relu, torch.tanh, torch.sigmoid, torch.exp, F.relu, F.gelu,
-               F.silu, 'add', 'sub', 'mul', 'div', 'neg', 'relu', 'tanh', 'sigmoid', 'exp'}
-# GSPMD sections 3.2 and 3.5: Dot, a generalized matrix multiply (an Einsum): torch's matrix products, F.linear, and
-# torch.einsum, whose equation is section 3.2's "string equation, e.g., ABC, ACD -> ABD" (T4-21)
-DOT = {operator.matmul, torch.matmul, 'matmul', torch.mm, 'mm', torch.bmm, 'bmm', F.linear}
+ELEMENTWISE = {A.add, A.sub, A.mul, A.div, A.neg, A.relu, A.tanh, A.sigmoid, A.exp, A.gelu, A.silu}
+# GSPMD sections 3.2 and 3.5: Dot, a generalized matrix multiply (an Einsum): torch's matrix products, linear, and
+# einsum, whose equation is section 3.2's "string equation, e.g., ABC, ACD -> ABD" (T4-21)
+DOT = {A.matmul, A.mm, A.bmm}
 # GSPMD section 4.3, "Windowed operators. The most typical use case of halo exchange is for partitinoning window-based
 # operators (e.g., Convolution, ReduceWindow)": torch's convolutions and transposed convolutions by their spatial
 # dimensions, and its max and average pooling, ReduceWindow by max and by sum; section 4.3, "Halo exchange for data
-# formatting ... after a Slice or Pad operator": torch's constant Pad (F.pad, which Dynamo records as torch._C._nn.pad
-# (torch v2.14.0 torch/_dynamo/trace_rules.py), and torch.constant_pad_nd) and its Slice (a tensor's operator.getitem
-# by ints, slices, None and Ellipsis, and narrow).  PARAMETERS: each one's parameters in torch v2.14.0's order
-# (torch/_C/_VariableFunctions.pyi, torch/_C/_nn.pyi; torch/nn/functional.py _max_pool1d to _max_pool3d, the functions
-# F.max_pool1d to F.max_pool3d dispatch to where return_indices is false)
-CONVOLUTION = {torch.conv1d: 1, torch.conv2d: 2, torch.conv3d: 3}
-TRANSPOSED = {torch.conv_transpose1d: 1, torch.conv_transpose2d: 2, torch.conv_transpose3d: 3}
-MAXIMUM = {F.max_pool1d: 1, F.max_pool2d: 2, F.max_pool3d: 3, torch.max_pool1d: 1, torch.max_pool2d: 2,
-           torch.max_pool3d: 3}
-AVERAGE = {F.avg_pool1d: 1, F.avg_pool2d: 2, F.avg_pool3d: 3}
-PAD = {F.pad, torch._C._nn.pad, torch.constant_pad_nd}
-NARROW = {torch.narrow, 'narrow'}
-PARAMETERS = {**dict.fromkeys(CONVOLUTION, ('input', 'weight', 'bias', 'stride', 'padding', 'dilation', 'groups')),
-              **dict.fromkeys(TRANSPOSED, ('input', 'weight', 'bias', 'stride', 'padding', 'output_padding', 'groups',
-                                           'dilation')),
-              **dict.fromkeys(MAXIMUM, ('input', 'kernel_size', 'stride', 'padding', 'dilation', 'ceil_mode',
-                                        'return_indices')),
-              **dict.fromkeys(AVERAGE, ('input', 'kernel_size', 'stride', 'padding', 'ceil_mode', 'count_include_pad',
-                                        'divisor_override')),
-              **dict.fromkeys(PAD, ('input', 'pad', 'mode', 'value')), torch.constant_pad_nd: ('input', 'pad', 'value'),
-              **dict.fromkeys(NARROW, ('input', 'dim', 'start', 'length'))}
-# PyTorch 2 section 3.9: AOTAutograd "makes the graph purely functional by removing operations that perform mutation
-# and replacing them with their functional equivalents": the operator module's in-place operators by their binary forms
-# (Python's `x += y` an `operator.iadd`), the rest by name (T4-16)
-INPLACE = {operator.iadd: operator.add, operator.isub: operator.sub, operator.imul: operator.mul,
-           operator.itruediv: operator.truediv, operator.ifloordiv: operator.floordiv, operator.imod: operator.mod,
-           operator.ipow: operator.pow, operator.imatmul: operator.matmul, operator.iand: operator.and_,
-           operator.ior: operator.or_, operator.ixor: operator.xor, operator.ilshift: operator.lshift,
-           operator.irshift: operator.rshift}
+# formatting ... after a Slice or Pad operator": torch's constant Pad (pad of mode "constant", and constant_pad_nd) and
+# its Slice (slice, select and unsqueeze, the ATen operators a tensor's indexing by slices, ints and None is)
+CONVOLUTION = {A.conv1d: 1, A.conv2d: 2, A.conv3d: 3}
+TRANSPOSED = {A.conv_transpose1d: 1, A.conv_transpose2d: 2, A.conv_transpose3d: 3}
+MAXIMUM = {A.max_pool1d: 1, A.max_pool2d: 2, A.max_pool3d: 3}
+AVERAGE = {A.avg_pool1d: 1, A.avg_pool2d: 2, A.avg_pool3d: 3}
+PAD = {A.pad, A.constant_pad_nd}
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"), reversing the notes above where they name torch's and torch.nn.functional's Python
+# functions as Dynamo recorded them: each table holds ATen operators, the packets of torch.ops.aten, since a function
+# is captured by torch.export, which "produces normalized operators in the functional ATen operator set" (torch 2.14.0
+# torch/export/__init__.py, export).  A node's target is an OpOverload, of which "Each OpOverload object contains
+# pointer to a specific operator overload, a pointer to the parent `OpOverloadPacket` object" (torch/_ops.py), so a
+# node is matched by its target's `overloadpacket`.  PARAMETERS goes: an operator's parameters are its schema's
+# arguments' names (torch._C.FunctionSchema `arguments`, each an Argument with its `name`, torch/_C/__init__.pyi;
+# _names), as native_functions.yaml declares them (conv2d(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2]
+# stride=1, ...), max_pool2d(Tensor self, int[2] kernel_size, ...), torchgen/packaged/ATen/native).  INPLACE goes with
+# _functional: the exported graph's operators are functional (partition's note).  narrow goes: an aliasing operator
+# is no CompositeImplicitAutograd operator export keeps (torch/_export/utils.py _check_valid_to_preserve:
+# "is_mutating_or_aliasing"), so a narrow reaches the graph as slice.  What must stay: GSPMD's rule for each operator
 # design/aot-compilation-change-request.md A2, the placement operand placement(gm, example_inputs) returns.  mesh:
 # GSPMD's device mesh, "a logical multi-dimensional tensor" of device ids (section 3.1), nested sequences holding the
 # ids 0 .. D - 1 once each.  nodes: device d's map index nodes[d] (mesh-dataflow.h mesh_nodes_read), the mapping of the
@@ -159,18 +160,31 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # each key it makes is written into (_place); `copies` and `publishes`, by item, the sent values that item copies once
 # into their pages and publishes, and those it made there and publishes (_place).  What must stay: every operand of
 # mesh_plan the same at every rank
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 1, 5 and 7, and
+# "The revisions of 4e78f6f4"): `gm` is a compiled function's exported graph (its ExportedProgram's module, _Export),
+# `calls` its A10 entry, never None, and the IR one struct mesh_function of the program's one plan call (program).
+# `inplace`, `copies` and `reduced` go, for each range's place (point 7: "name, in each declared transfer, the pages
+# of its destination value that it lands in"): `blockbytes`, a block's bytes (block x pgsz, mesh.h struct hdr), at
+# which a part of a value begins; `inside`, the AllGather operands made in place in their results (_all_gather),
+# every rank's; `blocks`, by key, the blocks of its pages its ranges hold, every rank's (_part, _landing).  This
+# node's: `at`, each declared transfer's place, the key whose value it is sent from or lands in and the element of that
+# value it begins at (the lowerings); `added`, the values of no key of the program (a part copied once, a reduction's
+# received parts); `sends`, by collective item, the ranges it releases before it waits, each with the copy that makes
+# it where one does; `publishes`, by item, the ranges released after it; `homes`, each placed key's value, element
+# offset and shape (_place).  What must stay: every operand of mesh_plan the same at every rank
 class IR:
-    def __init__(self, gm, placement, nodes):
-        self.gm, self.placement, self.weights = gm, placement, None
+    def __init__(self, gm, placement, nodes, blockbytes):
+        self.gm, self.placement, self.weights, self.blockbytes = gm, placement, None, blockbytes
         self.order = list(gm.graph.nodes)
         self.shape, self.coords, self.map = _mesh(placement, nodes.count)
         here = [d for d, index in enumerate(self.map) if index == nodes.self]
         self.device, self.index, self.serial, self.identity = here[0] if here else None, nodes.self, nodes.serial, 0
-        self.sharding, self.program, self.reduced, self.roles, self.events = {}, [], {}, {}, []
+        self.sharding, self.program, self.roles, self.events = {}, [], {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
         self.made, self.calls, self.locals, self.shapes = set(), None, {}, {}
-        self.metas, self.forms, self.over, self.producer, self.inplace = {}, {}, {}, {}, set()
-        self.homes, self.copies, self.publishes = {}, {}, {}
+        self.metas, self.forms, self.over, self.producer = {}, {}, {}, {}
+        self.homes, self.at, self.inside, self.blocks, self.added = {}, {}, {}, {}, {}
+        self.sends, self.publishes = {}, {}
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
     def local(self, node, sharding):
@@ -186,17 +200,18 @@ class IR:
     # the producer's one mesh_host_publish as the reason) goes: the kind is R4's test of the consumer, so a range of
     # function B is a set at the bridge (design/aot-compilation-change-request.md, appendix item 5).  What must stay:
     # each range released whole by one mesh_host_publish, and read only once it is complete
+    # 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+    # revisions of 4e78f6f4"): no value is made for a range; each declared transfer's `value` and `first` are this
+    # node's place of it, set where its key is placed (_place; mesh-collective.h struct mesh_declared `first`).  Why:
+    # design/plan-to-bridge-change-request.md R2, corrected: "A range is not a value of its own".  What must stay: one
+    # identity a range, its bytes its local shape's
     def transfer(self, node, shape, source, destinations, kind):
-        example, value, transfers = _value(node), mesh.ABSENT, {}
-        dtype = example.dtype
-        size, ends = dtype.itemsize * math.prod(shape), [self.map[d] for d in [source] + destinations]
-        if self.index in ends:
-            value = self.value(node, dtype, shape, 1, 0, 0)
+        size, ends = _value(node).dtype.itemsize * math.prod(shape), [self.map[d] for d in [source] + destinations]
         self.identity += 1
+        transfers = {}
         for d in destinations:
             transfers[d] = len(self.declared)
-            mine = value if self.index in (ends[0], self.map[d]) else mesh.ABSENT
-            self.declared.append(mesh.Declared(ends[0], self.map[d], self.identity, kind, mine, 0, size))
+            self.declared.append(mesh.Declared(ends[0], self.map[d], self.identity, kind, mesh.ABSENT, 0, size))
         return transfers
 
     # one value of this node (mesh-collective.h struct mesh_value), MESH_EXECUTION: a routed one in the window (`wire`
@@ -208,14 +223,19 @@ class IR:
     # graph by the one allocator"; A4: "Its calls return tensors on PyTorch's meta device"; design/compilation-
     # coordination.md, "The revisions of e4a7398e", PV-1 and MD-2): new, the routed values' form in `transfer` and the
     # local values' (_place).  What must stay: a routed value MESH_EXECUTION in the window, of its range's bytes
-    def value(self, node, dtype, shape, wire, begin, end):
-        device = _value(node).device.type
-        if device == 'meta':
-            raise NotImplementedError('%s: a value on the meta device at map index %d, a device of the placement operand '
-                                      '(A2); only a node it maps no device takes meta tensors (A4)' % (node.name, self.index))
-        self.values.append(mesh.Value(section=mesh.Section(bytes=dtype.itemsize * math.prod(shape)), kind=mesh.EXECUTION,
-                                      wire=wire, begin=begin, end=end))
-        self.layouts.append((dtype, tuple(shape), device))
+    # 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 6 and 8, and
+    # "The revisions of 4e78f6f4"), reversing MD-2's refusal of a meta tensor, which no node takes now: `run` 1 on
+    # every value, each bound as a tensor (_bind), "a torch MPS operator's operand" seen "in one strided progression of
+    # virtual addresses" (design/aot-compilation-change-request.md, appendix item 7, "Which operands are seen as one
+    # run": "MPSGraph takes an `MTLBuffer` with a shape, and optionally "rowBytes for the fastest moving dimension""),
+    # and a CPU tensor one storage with sizes and strides (torch 2.14.0 include/c10/core/TensorImpl.h, `Storage
+    # storage_`); its layout the element type, its elements and its device, every key over it a run of its elements
+    # (_place).  Its place is the mapping mesh_plan writes (mesh-collective.h struct mesh_value `view`).  What must
+    # stay: a value MESH_EXECUTION, routed in the window, local outside it with its positions
+    def value(self, dtype, numel, device, wire, begin, end):
+        self.values.append(mesh.Value(section=mesh.Section(bytes=dtype.itemsize * numel), kind=mesh.EXECUTION,
+                                      wire=wire, begin=begin, end=end, run=1))
+        self.layouts.append((dtype, numel, device))
         return len(self.values) - 1
 
 
@@ -232,14 +252,22 @@ class IR:
 # it was refused, since that node's next function is traced from meta tensors and builds every rank's IR; its tensors
 # are bound nowhere (IR.value refuses one at a device of the placement).  What must stay: the refusal of any other
 # device with no binding, and of a symbolic size
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 1 and 2, and "The
+# revisions of 4e78f6f4"), reversing MD-2: a node's value is its exported graph's fake tensor, `meta['val']` (torch
+# 2.14.0 torch/fx/experimental/proxy_tensor.py set_meta: `proxy.node.meta["val"] = extract_val(...)`), its device its
+# fake device, the device the call's arguments are on (torch/_subclasses/fake_tensor.py FakeTensor: "FakeTensor extends
+# MetaTensors to also carry an additional `fake_device` which tracks devices that would have been used"), where it was
+# Dynamo's `example_value`; the meta device goes, since no node computes on meta tensors (point 2).  What must stay:
+# the refusal of a device with no binding, and of a symbolic size
 def _value(node):
-    value = node.meta.get('example_value')
+    value = node.meta.get('val')
     if not isinstance(value, torch.Tensor):
-        raise NotImplementedError('%s (%s): no tensor value (PyTorch 2 section 3.5)' % (node.name, node.target))
+        raise NotImplementedError('%s (%s): no tensor value (torch.export: its meta[\'val\'])'
+                                  % (node.name, node.target))
     if not all(isinstance(size, int) for size in value.shape):
         raise ValueError('%s: symbolic sizes %s; A1 compiles shapes, so nothing at run time changes one'
                          % (node.name, tuple(value.shape)))
-    if value.device.type not in ('cpu', 'mps', 'meta'):
+    if value.device.type not in ('cpu', 'mps'):
         raise NotImplementedError('%s on %s: no binding of its tensors to the placed pages (a DLPack tensor of kDLCPU '
                                   'or kDLMetal alone: K1)' % (node.name, value.device))
     return value
@@ -249,6 +277,14 @@ def _value(node):
 # local value in the sharding the key carries (GSPMD section 3.1's tile)
 def _shape(ir, key):
     return ir.shapes[key] if key in ir.shapes else ir.local(key[0], key[1])
+
+
+# a key's element type and local shape: an operator's result's as it ran on the meta device (_forms), else its node's
+# type and the key's local shape (2026-11-05, "The revisions of 4e78f6f4": _place's and _bind's one reading of them)
+def _layout(ir, key):
+    if key in ir.metas:
+        return ir.metas[key].dtype, tuple(ir.metas[key].shape)
+    return _value(key[0]).dtype, tuple(_shape(ir, key))
 
 
 # GSPMD section 3.1, the device mesh: its shape and each device id's coordinates; Alpa section 4.1, the mapping of its
@@ -307,7 +343,13 @@ def _carry(sharding, source, target):
 
 # a parameter given as one int or a sequence, as k ints; the parameters an operator's call gives, by name (`names` its
 # parameters in order, PARAMETERS); the call with some replaced, each where the call gives it, else by keyword; the
-# names of the parameters its tensor operands are given as, in map_arg's order, None for one inside a sequence
+# names of the parameters its tensor operands are given as, in map_arg's order, None for one inside a sequence; an ATen
+# operator's parameters, its schema's arguments' names in order (2026-11-05, "The revisions of 4e78f6f4": where
+# PARAMETERS held them by hand; torch 2.14.0 torch/_C/__init__.pyi, FunctionSchema `arguments`, Argument `name`)
+def _names(local):
+    return tuple(argument.name for argument in local.target._schema.arguments)
+
+
 def _ints(value, k):
     value = tuple(value) if isinstance(value, (list, tuple)) else (value,)
     return value * k if len(value) == 1 else value
@@ -395,10 +437,13 @@ def _einsum(local, operands, shapes, out):
 # with padding 'same' of an odd d(k - 1) the spatial dimensions (T4-12); a bias, added after the contraction, `fused`
 # (T4-13).  Each sharded spatial dimension's padding (and output padding) 0 in the local operator: its halo region
 # holds the padding (GSPMD section 4.1, "Static operator configurations"; Appendix A.2)
+# 2026-11-05 ("The revisions of 4e78f6f4"): the operator an ATen convolution, its parameters its schema's (_names);
+# conv2d.padding's padding the string "valid" or "same", as torch.conv2d's.  What must stay: the rule
 def _convolution(node, local, operands, shapes):
-    target, transposed = local.target, local.target in TRANSPOSED
-    k, names, named = (TRANSPOSED if transposed else CONVOLUTION)[target], PARAMETERS[target], \
-        _named(local, PARAMETERS[target])
+    packet = local.target.overloadpacket
+    transposed = packet in TRANSPOSED
+    k, names = (TRANSPOSED if transposed else CONVOLUTION)[packet], _names(local)
+    named = _named(local, names)
     if None in named or len(set(named)) != len(named) or not {'input', 'weight'} <= set(named):
         return None
     given, x, w = _given(local, names), shapes[named.index('input')], shapes[named.index('weight')]
@@ -438,11 +483,15 @@ def _convolution(node, local, operands, shapes):
 # its divisor does not depend on the window's place: a divisor_override, or no ceil_mode with count_include_pad or no
 # padding there; another of labels of its own, held whole (T4-11).  return_indices gives a pair, no tensor (None).  Each
 # sharded window's padding 0 in the local operator
+# 2026-11-05 ("The revisions of 4e78f6f4"): the operator ATen's max_pool1d to 3d or avg_pool1d to 3d, whose operand is
+# `self` and which have no return_indices (max_pool2d(Tensor self, int[2] kernel_size, int[2] stride=[], ...),
+# native_functions.yaml); avg_pool1d has no divisor_override.  What must stay: the rule
 def _pooling(node, local, operands, shapes):
-    target, maximum = local.target, local.target in MAXIMUM
-    k, names = (MAXIMUM if maximum else AVERAGE)[target], PARAMETERS[target]
+    packet = local.target.overloadpacket
+    maximum = packet in MAXIMUM
+    k, names = (MAXIMUM if maximum else AVERAGE)[packet], _names(local)
     given, lead = _given(local, names), len(shapes[0]) - k
-    if _named(local, names) != ['input'] or given.get('return_indices') or lead not in (1, 2):
+    if _named(local, names) != ['self'] or lead not in (1, 2):
         return None
     kernel, lows = _ints(given['kernel_size'], k), _ints(given.get('padding', 0), k)
     stride, dilation = _ints(given.get('stride') or given['kernel_size'], k), _ints(given.get('dilation', 1), k)
@@ -472,11 +521,18 @@ def _pooling(node, local, operands, shapes):
 # another mode (reflect, replicate, circular), no XLA Pad, holds its padded dimensions whole.  Each sharded window's
 # pad 0 in the local Pad, its slice the step alone, its narrow from 0 the local length (a narrow's dimension a window
 # even where it keeps the dimension whole, so its local length is its shard's)
+# 2026-11-05 ("The revisions of 4e78f6f4"): the Pad ATen's pad(Tensor self, SymInt[] pad, str mode="constant", float?
+# value=None) or constant_pad_nd(Tensor self, SymInt[] pad, Scalar value=0); the Slice ATen's slice(Tensor(a) self,
+# int dim=0, SymInt? start=None, SymInt? end=None, SymInt step=1), a window of its dimension, its local operator's start
+# and end None (the whole local region); select(Tensor(a) self, int dim, SymInt index), its dimension held whole and
+# absent from the output, as an int index's was; unsqueeze(Tensor(a) self, int dim), a dimension of its own, as
+# None's was (native_functions.yaml); a narrow reaches the exported graph as slice (the tables' note).  What must stay:
+# each dimension's rule as the getitem's was
 def _pad(node, local, operands, shapes):
-    names = PARAMETERS[local.target]
+    names = _names(local)
     given, r = _given(local, names), len(shapes[0])
     pads = list(given['pad'])
-    if _named(local, names) != ['input'] or len(pads) % 2 or len(pads) > 2 * r \
+    if _named(local, names) != ['self'] or len(pads) % 2 or len(pads) > 2 * r \
             or not all(type(p) is int for p in pads):
         return None
     padded = {r - 1 - j: (pads[2 * j], pads[2 * j + 1]) for j in range(len(pads) // 2)
@@ -494,54 +550,29 @@ def _pad(node, local, operands, shapes):
 
 
 def _slice(node, local, operands, shapes):
-    x = shapes[0]
-    if local.target in NARROW:
-        names = PARAMETERS['narrow']
-        given = _given(local, names)
-        dim, start, length = given.get('dim'), given.get('start'), given.get('length')
-        if _named(local, names) != ['input'] or not all(type(v) is int for v in (dim, start, length)):
+    packet, names, x = local.target.overloadpacket, _names(local), shapes[0]
+    given, r = _given(local, names), len(x)
+    dim = given.get('dim', 0)
+    if _named(local, names) != ['self'] or type(dim) is not int:
+        return None
+    if packet is A.unsqueeze:
+        d = dim % (r + 1)
+        return Rule('slice', 1, operands, [tuple(range(r))], tuple(range(d)) + (('new', d),) + tuple(range(d, r)),
+                    (0,), (), (), False, None, lambda sharded: ())
+    dim %= r
+    if packet is A.select:
+        if type(given.get('index')) is not int:
             return None
-        dim %= len(x)
-        start += x[dim] if start < 0 else 0
-
-        def configure(sharded):
-            return ((node, _with(local, names, {'start': 0, 'length': sharded[dim]})),) if dim in sharded else ()
-        return Rule('slice', 1, operands, [tuple(range(len(x)))], tuple(range(len(x))), (0,), (),
-                    (Window(dim, 0, dim, 1, 1, -start, None, 0),), False, None, configure)
-    if len(operands) != 1 or len(local.args) != 2 or local.args[0] is not operands[0]:
+        return Rule('slice', 1, operands, [tuple(('x', d) if d == dim else d for d in range(r))],
+                    tuple(d for d in range(r) if d != dim), (0,), (), (), False, None, lambda sharded: ())
+    if not all(v is None or type(v) is int for v in (given.get('start'), given.get('end'), given.get('step', 1))):
         return None
-    index = local.args[1]
-    entries = index if isinstance(index, tuple) else (index,)
-    if list(entries).count(Ellipsis) > 1 or not all(
-            e is None or e is Ellipsis or type(e) is int
-            or isinstance(e, slice) and all(v is None or type(v) is int for v in (e.start, e.stop, e.step))
-            for e in entries):
-        return None
-    fill = len(x) - sum(e is not None and e is not Ellipsis for e in entries)
-    if fill < 0:
-        return None
-    expanded = [f for e in entries for f in ([slice(None)] * fill if e is Ellipsis else [e])]
-    expanded += [slice(None)] * (fill if Ellipsis not in entries else 0)
-    out, windows, where, d = [], [], {}, 0
-    for j, e in enumerate(expanded):
-        if e is None:
-            out.append(('new', j))
-        elif isinstance(e, slice):
-            start, stop, step = e.indices(x[d])
-            out.append(d)
-            if (start, stop, step) != (0, x[d], 1):
-                windows.append(Window(d, 0, d, 1, step, -start, None, 0))
-                where[d] = j
-            d += 1
-        else:
-            d += 1
+    start, stop, step = slice(given.get('start'), given.get('end'), given.get('step', 1)).indices(x[dim])
+    windows = () if (start, stop, step) == (0, x[dim], 1) else (Window(dim, 0, dim, 1, step, -start, None, 0),)
 
     def configure(sharded):
-        changed = tuple(slice(None, None, e.step) if j in {where[d] for d in sharded if d in where} else e
-                        for j, e in enumerate(expanded))
-        return ((node, local._replace(args=(local.args[0], changed))),) if sharded else ()
-    return Rule('slice', 1, operands, [tuple(range(len(x)))], tuple(out), (0,), (), tuple(windows), False, None,
-                configure)
+        return ((node, _with(local, names, {'start': None, 'end': None})),) if dim in sharded else ()
+    return Rule('slice', 1, operands, [tuple(range(r))], tuple(range(r)), (0,), (), windows, False, None, configure)
 
 
 # design/aot-compilation-change-request.md A2 and A4: "The partitioner reaches them by partitioning every operator, as
@@ -563,38 +594,43 @@ def _slice(node, local, operands, shapes):
 # the windowed and data formatting operators take GSPMD's rules, the rest the general rule (design/compilation-
 # coordination.md, "The revisions of abecd389", T4-5, T4-15, T4-21).  What must stay: the elementwise and Dot
 # operators' rules as before (their labels renamed, their partitions the same)
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"): an operator's rule is chosen by its ATen packet (the tables' note); a node whose target is
+# no OpOverload (an operator.getitem of a result of several tensors, a higher-order operator) takes the general rule;
+# the call_module form goes, since the exported graph holds none ("call_module is not valid", torch 2.14.0
+# torch/_export/verifier.py).  What must stay: each operator's rule as before
 def _operator(node, local):
     operands = []
     map_arg((local.args, local.kwargs), operands.append)
     general = Rule('general', None, operands, None, None, (), (), (), False, None, lambda sharded: ())
-    if local.op == 'call_module' or not isinstance(node.meta.get('example_value'), torch.Tensor) \
-            or not all(isinstance(o.meta.get('example_value'), torch.Tensor) for o in operands):
+    if not isinstance(local.target, torch._ops.OpOverload) or not isinstance(node.meta.get('val'), torch.Tensor) \
+            or not all(isinstance(o.meta.get('val'), torch.Tensor) for o in operands):
         return general
-    out, shapes, target = tuple(_value(node).shape), [tuple(_value(o).shape) for o in operands], local.target
-    rule = None
-    if target in ELEMENTWISE and all(len(s) <= len(out) for s in shapes):
+    out, shapes = tuple(_value(node).shape), [tuple(_value(o).shape) for o in operands]
+    packet, rule = local.target.overloadpacket, None
+    if packet in ELEMENTWISE and all(len(s) <= len(out) for s in shapes):
         rule = Rule('elementwise', 0, operands,
                     [tuple(len(out) - len(s) + i if size == out[len(out) - len(s) + i] else ('broadcast', k, i)
                            for i, size in enumerate(s)) for k, s in enumerate(shapes)],
                     tuple(range(len(out))), tuple(k for k, s in enumerate(shapes) if s == out), (), (), False, None,
                     general.configure)
-    elif target is F.linear and len(operands) in (2, 3) and shapes[0] and len(shapes[1]) == 2 \
-            and _named(local, ('input', 'weight', 'bias')) == ['input', 'weight', 'bias'][:len(operands)]:
+    elif packet is A.linear and len(operands) in (2, 3) and shapes[0] and len(shapes[1]) == 2 \
+            and _named(local, _names(local)) == ['input', 'weight', 'bias'][:len(operands)]:
         r = len(shapes[0])
         rule = Rule('dot', 1, operands, [tuple(range(r - 1)) + ('k',), ('m', 'k'), ('m',)][:len(operands)],
                     tuple(range(r - 1)) + ('m',), tuple(range(len(operands))), ('k',), (), len(operands) == 3, None,
                     general.configure)
-    elif target in DOT and target is not F.linear and len(operands) == 2 and shapes[0] and shapes[1]:
+    elif packet in DOT and len(operands) == 2 and shapes[0] and shapes[1]:
         rule = _matmul(operands, shapes, out)
-    elif target is torch.einsum:
+    elif packet is A.einsum:
         rule = _einsum(local, operands, shapes, out)
-    elif target in CONVOLUTION or target in TRANSPOSED:
+    elif packet in CONVOLUTION or packet in TRANSPOSED:
         rule = _convolution(node, local, operands, shapes)
-    elif target in MAXIMUM or target in AVERAGE:
+    elif packet in MAXIMUM or packet in AVERAGE:
         rule = _pooling(node, local, operands, shapes)
-    elif target in PAD:
+    elif packet in PAD:
         rule = _pad(node, local, operands, shapes)
-    elif target is operator.getitem or target in NARROW:
+    elif packet in (A.slice, A.select, A.unsqueeze):
         rule = _slice(node, local, operands, shapes)
     return rule or general
 
@@ -614,30 +650,6 @@ def _merged(pad, padding, slicing):
     def configure(sharded):
         return tuple(padding.configure(sharded)) + tuple(slicing.configure(sharded))
     return slicing._replace(operands=padding.operands, windows=tuple(windows), merged=pad, configure=configure)
-
-
-# PyTorch 2 section 3.9: AOTAutograd "makes the graph purely functional by removing operations that perform mutation
-# and replacing them with their functional equivalents".  A node's Local with its tensor operands as `current` gives
-# them (each read of a value an in-place operator wrote before it reading that operator's result), and the operand it
-# writes, None where it writes none: a Tensor method of a trailing _ by the method without it, an operator module's
-# in-place operator by its binary form (INPLACE), a torch or F function of a trailing _ by the one without it, a call
-# with inplace=True by the call with inplace=False; None for the Local where no functional equivalent is named (T4-16)
-def _functional(node, current):
-    args, kwargs = map_arg((node.args, node.kwargs), current)
-    target = node.target
-    name, written = getattr(target, '__name__', target), node.args[0] if node.args else node.kwargs.get('input')
-    if node.op == 'call_method' and target.endswith('_') and not target.startswith('_'):
-        return (Local(node.op, target[:-1], args, kwargs) if hasattr(torch.Tensor, target[:-1]) else None), written
-    if node.op == 'call_function' and target in INPLACE:
-        return Local(node.op, INPLACE[target], args, kwargs), written
-    if node.op == 'call_function' and isinstance(name, str) and name.endswith('_') and not name.startswith('_') \
-            and any(getattr(module, name, None) is target for module in (torch, F)):
-        functional = next((getattr(m, name[:-1]) for m in (torch, F) if getattr(m, name, None) is target
-                           and hasattr(m, name[:-1])), None)
-        return (Local(node.op, functional, args, kwargs) if functional else None), written
-    if node.op == 'call_function' and kwargs.get('inplace') is True:
-        return Local(node.op, target, args, {**kwargs, 'inplace': False}), written
-    return Local(node.op, target, args, kwargs), None
 
 
 # GSPMD section 3.5, sharding completion: it "runs the propagation pass on the entire graph in multiple iterations, and
@@ -841,22 +853,30 @@ def _region(ir, consumer, key, window, m, o):
 # 2026-11-05 (design/aot-compilation-change-request.md, appendix item 7; design/compilation-coordination.md, "The
 # revisions of e4a7398e", OV): an AllReduce's result no longer added to `placed`; _over makes it a key over the plan's
 # pages, its own.  What must stay: the program's items as before
-def _partition(ir, operators, returned):
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"): an input or attribute that is no tensor (an exported graph's placeholder of an int, a
+# higher-order operator's subgraph) has no sharding and is taken whole; an output is its node's value, since the
+# exported graph's operators are functional (partition's note), where it was the last in-place writer's; an
+# AllReduce's record is its item's alone (`reduced` goes: _place reads the item).  What must stay: the program's items
+# as before
+def _partition(ir, operators):
     inputs = 0
     for node in ir.order:
         if node.op in ('placeholder', 'get_attr'):
-            whole = (-1,) * len(ir.sharding[node])
+            sharding = ir.sharding[node]
+            whole = None if sharding is None else (-1,) * len(sharding)
             ir.program.append(('input', (), (node, whole), inputs) if node.op == 'placeholder'
                               else ('constant', (), (node, whole), node.target))
             ir.made.add((node, whole))
-            _reshard(ir, node, whole, ir.sharding[node])
+            if sharding is not None:
+                _reshard(ir, node, whole, sharding)
             inputs += node.op == 'placeholder'
         elif node.op == 'output':
-            keys = {value: (returned[value], None) if ir.sharding[returned[value]] is None
-                    else _reshard(ir, returned[value], ir.sharding[returned[value]],
-                                  (-1,) * len(ir.sharding[returned[value]])) for value in node.all_input_nodes}
+            keys = {value: (value, None) if ir.sharding[value] is None
+                    else _reshard(ir, value, ir.sharding[value], (-1,) * len(ir.sharding[value]))
+                    for value in node.all_input_nodes}
             ir.program.append(('output', tuple(keys.values()), None, (node, keys)))
-        elif operators[node] is not None:
+        elif operators.get(node) is not None:
             rule, sharding = operators[node], ir.sharding[node]
             if rule.labels is None:
                 keys = [(o, None) if ir.sharding[o] is None
@@ -908,8 +928,8 @@ def _partition(ir, operators, returned):
                 ir.program.append(('collective', (key,), (node, target),
                                    Collective('reduce-scatter', node, (m,), target.index(m), len(ir.program))))
             elif partial:
-                ir.reduced[key] = Collective('all-reduce', node, tuple(partial), None, len(ir.program))
-                ir.program.append(('collective', (key,), (node, target), ir.reduced[key]))
+                ir.program.append(('collective', (key,), (node, target),
+                                   Collective('all-reduce', node, tuple(partial), None, len(ir.program))))
             if target != sharding:
                 _reshard(ir, node, target, sharding)
 
@@ -928,41 +948,29 @@ def _partition(ir, operators, returned):
 # coordination.md, "The revisions of abecd389", T4-16, T4-17, T4-20): the refusal of a get_attr or call_module node
 # (A-T2) goes, and the in-place refusal goes but for a write PyTorch 2 section 3.9's functionalization is not taken for
 # here.  What must stay: the placement operand's checks and the refusal of an undivided dimension
-def partition(gm, placement):
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"), reversing the notes above where they take each operator's functional equivalent: the graph
+# is a compiled function's exported graph, whose operators are functional, so _functional and the refusal of an
+# in-place write go.  torch.export.export gives its training IR, verified by TrainingIRVerifier, which admits a
+# mutating operator ("if self.dialect != "TRAINING" and not is_functional(op): raise SpecViolationError(f"operator
+# '{op}' is not functional")", torch 2.14.0 torch/_export/verifier.py; torch/export/_trace.py _export_for_training,
+# `verifiers=[TrainingIRVerifier]`), and its run_decompositions with an empty table ("If empty, we don't decompose any
+# operator", torch/export/exported_program.py) gives the ATen dialect, verified by Verifier, every operator functional
+# (_Export).  Every node is a placeholder, a get_attr (the module's parameters and buffers, "a self contained
+# GraphModule with all the parameters/buffers inlined", ExportedProgram.module), a call_function or the output.  The
+# map read is the program's one (program's `make`), so every function of one plan call is partitioned on one map, and
+# the block's bytes are its region's (mesh.h struct hdr).  What must stay: the placement operand's checks and the
+# refusal of an undivided dimension
+def partition(gm, placement, nodes, blockbytes):
     if not isinstance(placement, Placement):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
-    nodes = mesh.Nodes()
-    mesh.check(mesh.LIB.mesh_nodes_read(C.byref(_context()), C.byref(nodes)))
-    ir, operators, annotated, latest, root, returned = IR(gm, placement, nodes), {}, set(), {}, {}, {}
-
-    def current(n):
-        return latest.get(root.get(n, n), n)
+    ir, operators, annotated = IR(gm, placement, nodes, blockbytes), {}, set()
     for node in ir.order:
-        if node.op in ('call_function', 'call_method', 'call_module'):
-            local, written = _functional(node, current)
-            base = root.get(written, written) if isinstance(written, Node) else None
-            value = base.meta.get('example_value') if base is not None else None
-            if local is None or base is not None and (
-                    base.op in ('placeholder', 'get_attr') or not isinstance(value, torch.Tensor) or value._is_view()
-                    or any(getattr(n.meta.get('example_value'), '_base', None) is value for n in ir.order)):
-                raise NotImplementedError(
-                    '%s (%s): an operator that writes %s in place; GSPMD partitions XLA\'s HLO, "a dataflow graph '
-                    'where nodes are operators and edges are tensors" (section 2.2), and AOTAutograd makes a graph so '
-                    '"by removing operations that perform mutation and replacing them with their functional '
-                    'equivalents" (PyTorch 2, section 3.9), here only where the written value is no input, no module '
-                    'attribute, no view and no view\'s base, and its functional equivalent is named (the method or '
-                    'function without its trailing _, the operator module\'s binary form, inplace=False): refused'
-                    % (node.name, node.target, getattr(written, 'name', written)))
-            if base is not None:
-                root[node], latest[base] = base, node
-            ir.locals[node] = local
-            operators[node] = _operator(node, local)
-        elif node.op == 'output':
-            returned = {value: current(value) for value in node.all_input_nodes}
+        if node.op == 'call_function':
+            ir.locals[node] = Local(node.op, node.target, node.args, node.kwargs)
+            operators[node] = _operator(node, ir.locals[node])
         if node.op != 'output':
-            value = node.meta.get('example_value')
-            ir.sharding[node] = None if node.op not in ('placeholder', 'get_attr') \
-                and not isinstance(value, torch.Tensor) else (-1,) * _value(node).dim()
+            ir.sharding[node] = (-1,) * _value(node).dim() if isinstance(node.meta.get('val'), torch.Tensor) else None
     for node, rule in list(operators.items()):
         pad = rule.operands[0] if rule is not None and rule.kind == 'slice' else None
         if pad is not None and operators.get(pad) is not None and operators[pad].kind == 'pad' and len(pad.users) == 1:
@@ -970,7 +978,7 @@ def partition(gm, placement):
     names = {node.name: node for node in ir.order if node.op == 'placeholder'}
     for name, mapping in placement.splits.items():
         node, mapping = names.get(name), tuple(mapping)
-        if node is None or len(mapping) != len(ir.sharding[node]) \
+        if node is None or ir.sharding[node] is None or len(mapping) != len(ir.sharding[node]) \
                 or not all(isinstance(m, int) and -1 <= m < len(ir.shape) for m in mapping) \
                 or len([m for m in mapping if m >= 0]) != len({m for m in mapping if m >= 0}):
             raise ValueError('splits[%r] = %s: no placeholder\'s dims_mapping over a mesh of %d dimensions, each at '
@@ -983,7 +991,7 @@ def partition(gm, placement):
             if m >= 0 and size % ir.shape[m]:
                 raise NotImplementedError('%s: a dimension of %d over a mesh dimension of %d (GSPMD section 4.1 pads '
                                           'it, which the contract does not give)' % (node.name, size, ir.shape[m]))
-    _partition(ir, operators, returned)
+    _partition(ir, operators)
     _forms(ir)
     _over(ir)
     return ir
@@ -993,49 +1001,13 @@ def partition(gm, placement):
 # calls by its GraphModule's submodule, any other by its target
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e", OV-1): new, _run's three forms of the call,
 # which _forms makes too, on meta tensors.  What must stay: each form as _run made it
-def _call(ir, local, args, kwargs):
-    if local.op == 'call_method':
-        return getattr(args[0], local.target)(*args[1:], **kwargs)
-    if local.op == 'call_module':
-        return ir.gm.get_submodule(local.target)(*args, **kwargs)
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"): an exported graph's operator is called by its target, an OpOverload or operator.getitem,
+# the Tensor method's and the module's forms going (the exported graph holds neither: torch 2.14.0
+# torch/_export/verifier.py); _overload, OPERATORS and BINDINGS go, since the target is the ATen overload itself.  What
+# must stay: _run's and _forms' one form of the call
+def _call(local, args, kwargs):
     return local.target(*args, **kwargs)
-
-
-# the ATen overload a call of `local` takes, None where torch's bindings name none or no overload's schema takes its
-# arguments (_forms).  Its name: a Tensor method's own (torch._C.TensorBase's methods, generated from ATen's), an operator
-# module function's as OPERATORS gives it, and a function torch's generated bindings hold (BINDINGS: torch's functions
-# are torch._C._VariableFunctions' own, torch v2.14.0 torch/__init__.py: `__obj = getattr(_C._VariableFunctions,
-# __name)` ... `globals()[__name] = __obj`; torch.nn.functional's, torch.linalg's, torch.special's and torch.fft's
-# builtins torch._C._nn's, _linalg's, _special's and _fft's, "connects the torch.linalg Python namespace to the
-# torch._C._linalg builtins", torch/linalg/__init__.py) its __name__; any other function none.  Its overload: of
-# torch.ops.aten's packet of that name, the first whose schema takes the arguments, as torch resolves a packet's call
-# ("JIT creates a stack of all the overloads and then tries to match the correct one at runtime", torch/_ops.py; its
-# _call_overload_packet_from_python: torch._C._check_schema_allow_fake_script_object over op.overloads(), the first that
-# raises no RuntimeError), as torch's own find_compatible_op_overload finds one for a call
-# (torch/onnx/_internal/fx/passes/type_promotion.py, the same loop; its example: `args = (torch.tensor([1.0, 2.0]), 2)`
-# gives 'Tensor_Scalar')
-OPERATORS = {operator.add: 'add', operator.sub: 'sub', operator.mul: 'mul', operator.truediv: 'div',
-             operator.neg: 'neg', operator.matmul: 'matmul'}
-BINDINGS = (torch._C._VariableFunctions, torch._C._nn, torch._C._linalg, torch._C._special, torch._C._fft)
-
-
-def _overload(local, args, kwargs):
-    name = None
-    if local.op == 'call_method' and hasattr(torch._C.TensorBase, local.target):
-        name = local.target
-    elif local.op == 'call_function' and local.target in OPERATORS:
-        name = OPERATORS[local.target]
-    elif local.op == 'call_function' and any(getattr(b, getattr(local.target, '__name__', ''), None) is local.target
-                                             for b in BINDINGS):
-        name = local.target.__name__
-    packet = getattr(torch.ops.aten, name, None) if name else None
-    for overload in packet.op_overloads() if packet is not None else ():
-        try:
-            torch._C._check_schema_allow_fake_script_object(overload._schema, *args, **kwargs)
-        except RuntimeError:
-            continue
-        return overload
-    return None
 
 
 # design/aot-compilation-change-request.md, appendix item 7: "run each operator as its out variant into its result's
@@ -1060,6 +1032,11 @@ def _overload(local, args, kwargs):
 # Every rank computes the same forms, the meta device being every rank's (A4)
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e", OV-1 to OV-3): new.  What must stay:
 # every rank's forms the same
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"): the overload is the node's target (_call's note), where _overload resolved a torch-level
+# call; a value that is no tensor is its exported node's meta['val']; a form is its out variant with its one out
+# argument's name (get_out_arg_names), so _run passes the result's place by that name.  What must stay: every rank's
+# forms the same
 def _forms(ir):
     unknown = object()
 
@@ -1071,10 +1048,10 @@ def _forms(ir):
         if len(key) == 2 and key[1] is None:
             return pytree.tree_map(
                 lambda v: torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device='meta')
-                if isinstance(v, torch.Tensor) else v, key[0].meta.get('example_value'))
+                if isinstance(v, torch.Tensor) else v, key[0].meta.get('val'))
         return unknown
     for kind, reads, key, operand in ir.program:
-        if kind != 'call' or ir.locals[operand].op == 'call_module':
+        if kind != 'call':
             continue
         local, operands = ir.locals[operand], [meta(k) for k in reads]
         if any(o is unknown for o in operands):
@@ -1082,18 +1059,18 @@ def _forms(ir):
         given = iter(operands)
         args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
         try:
-            result = _call(ir, local, args, kwargs)
+            result = _call(local, args, kwargs)
         except (NotImplementedError, RuntimeError):
             continue
         if isinstance(result, torch.Tensor):
             ir.metas[key] = result
-        overload = _overload(local, args, kwargs)
-        schema = overload._schema if overload is not None else None
+        schema = local.target._schema if isinstance(local.target, torch._ops.OpOverload) else None
         if schema is None or not _is_functional(schema) or any(r.alias_info is not None for r in schema.returns):
             continue
-        out = to_out_variant(overload) if len(schema.returns) == 1 and isinstance(result, torch.Tensor) \
+        out = to_out_variant(local.target) if len(schema.returns) == 1 and isinstance(result, torch.Tensor) \
             and result.numel() else None
-        ir.forms[key] = out if out is not None and len(get_out_arg_names(out)) == 1 else 'functional'
+        names = get_out_arg_names(out) if out is not None else ()
+        ir.forms[key] = (out, names[0]) if len(names) == 1 else 'functional'
 
 
 # design/aot-compilation-change-request.md, appendix item 7: "A view (a narrow, a slice) is its base's pages, and its
@@ -1111,17 +1088,11 @@ def _forms(ir):
 # of e4a7398e", where the work stopped)
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e", OV and IP): new, where `placed` held the
 # keys over an AllReduce's result alone.  What must stay: every rank's `over` and `inplace` the same
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+# revisions of 4e78f6f4"): `inplace` and _fresh go, for each part's place (_part, _directed).  What must stay: every
+# rank's `over` the same
 def _viewed(item):
     return item[0] == 'window' and len(item[1]) == 1 and item[3][6] is None
-
-
-def _fresh(ir, key):
-    item = ir.program[ir.producer[key]]
-    if item[0] == 'call':
-        return ir.forms.get(key) not in (None, 'functional')
-    if item[0] == 'window':
-        return not _viewed(item)
-    return item[0] == 'collective' and item[3].kind in ('all-gather', 'all-to-all', 'reduce-scatter')
 
 
 # 2026-11-05 (the C9 hook's remark on 63638057: "a topological pass over the program DAG ... it moves into the graph
@@ -1129,7 +1100,6 @@ def _fresh(ir, key):
 # keys in the program's order, each key's predecessors the keys its item reads, its transfer the rule above.  What must
 # stay: each key's set as above
 def _over(ir):
-    sources = collections.Counter(item[1][0] for item in ir.program if item[0] == 'collective')
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
 
@@ -1146,8 +1116,6 @@ def _over(ir):
                                         else frozenset())
         return frozenset()
     ir.over = mesh_graph.forward(list(items), lambda key: items[key][1], rule)
-    ir.inplace = {reads[0] for kind, reads, key, operand in ir.program if kind == 'collective'
-                  and operand.kind == 'all-gather' and sources[reads[0]] == 1 and _fresh(ir, reads[0])}
 
 
 # GSPMD section 4.4, partition grouping: the devices that differ along `dims` alone, each group in the device mesh's
@@ -1194,13 +1162,130 @@ def _readers(ir, roots, default):
 # pages operand_a to be contiguous and complete").  What must stay: the kinds as before for operands of one shape
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e", OV): the readers of the keys over
 # `roots` (_readers), where they were those of `node`'s keys in `placed`.  What must stay: the kinds as before
+# 2026-11-05 ("The revisions of 4e78f6f4"): an elementwise reader is an ATen operator of ELEMENTWISE, by its packet
+# (the tables' note).  What must stay: the kinds as before
 def _consumer(ir, roots):
     readers = [(item, k) for item in ir.program for k in item[1] if ir.over.get(k, frozenset()) & roots]
-    if readers and all(item[0] == 'call' and ir.locals[item[3]].op != 'call_module'
-                       and ir.locals[item[3]].target in ELEMENTWISE and _shape(ir, k) == _shape(ir, item[2])
-                       for item, k in readers):
+    if readers and all(item[0] == 'call' and isinstance(ir.locals[item[3]].target, torch._ops.OpOverload)
+                       and ir.locals[item[3]].target.overloadpacket in ELEMENTWISE
+                       and _shape(ir, k) == _shape(ir, item[2]) for item, k in readers):
         return mesh.PAGES
     return mesh.JOIN
+
+
+# A range's place (2026-11-05, design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7,
+# and "The revisions of 4e78f6f4"): "name, in each declared transfer, the pages of its destination value that it
+# lands in, as NCCL's receives land at offsets of one result ... A collective's result is then the pages its parts land
+# in, so no concatenation and no copy of a part remains"; design/plan-to-bridge-change-request.md R2, corrected: "A
+# collective's receive lands in the pages of the value it belongs to, at its place in that value: "receiving data from
+# rank `i` at offset `i*sendcount`" (NCCL, ncclAllGather); "the `recvbuff` on rank `i` will contain the i-th block of
+# the result" (NCCL, ncclReduceScatter)".  A part of a key's local value is a run of its elements in row-major order:
+# [start, start + length) along `dim` is one where every dimension before `dim` is of size 1, from element start x (the
+# product of the dimensions after it).  A range's place is a block of its value (mesh-collective.h struct
+# mesh_declared `first`: "the range's P blocks are rows [first, first + P) of each copy of that value"), so a part's
+# place begins a block, and "no two ranges at this node share a block of it": `blocks` holds, by key, the blocks its
+# ranges hold, every rank's, the program being every rank's.
+# - _landing: a value `parts` parts land in along `dim` (a collective's result; a reduction's received parts, "the
+#   received slices landing at their places in one value", the coordinator's brief for point 7), each a run beginning
+#   at a block, else refused at compile time naming point 7 ("A part whose bytes are not whole blocks (block x pgsz)
+#   cannot begin a block of the result: refuse it at compile time naming point 7", the same brief); its parts' blocks
+#   held; a part's elements.
+# - _based: the place of a key whose pages are one run of a value its producer makes (an operator's out variant, a
+#   region's concatenation, a collective's result but a CollectivePermute's, whose result is its operand where its pair
+#   is its own), or of a narrow that is a run of such a key: (that value's key, element offset); None else.
+# - _part: where a collective sends a part from.  From its place (R1: "The code must move every page from the page
+#   that holds it to the page it lands in, with nothing copied on the way"), where its key is _based, the part is a run
+#   beginning at a block and no range holds a block of it; else from a value of its own, which the collective's item
+#   copies it into once: the part is then a slice, "an operator with no out variant, whose result is copied once into
+#   its placed pages where it must be there" (design/aot-compilation-change-request.md, appendix item 7, "What stays"),
+#   of a value no out variant makes or of an input (the caller's tensor, PV-3).  The choice reads the program alone, so
+#   every rank makes it alike, and with it the range's events.  (The copy where the part is no run of a placed value
+#   is the implementation's choice, recorded in design/compilation-coordination.md, "The revisions of 4e78f6f4".)
+# - _directed: an AllGather's operand its producer can make in its place in the result ("the source's own part made in
+#   place by its producer's out variant into its narrow of the result and sent from there", the brief): an operator's
+#   out variant, a region's concatenation or a ReduceScatter's sum, of a key not yet placed in another value.
+# - _produced: a sent range's events, its production at its producer's third step where it is made in its place, and
+#   the source's own reads of that value its source read (mesh-collective.h struct mesh_dependence,
+#   MESH_FROM_SOURCE_READ, "the source's own read of the range it sends", as _all_gather's IP had it), else its
+#   production at the item's sends, where it is copied (design/compilation-coordination.md, A-T7).
+# - _send: this node's release of a sent range, after its producer where it is made in place (`publishes`), else at the
+#   item's sends after its copy (`sends`).
+def _span(ir, key, first, count):
+    size = _value(key[0]).dtype.itemsize
+    return first * size // ir.blockbytes, -(-((first + count) * size) // ir.blockbytes)
+
+
+def _landing(ir, c, base, dim, parts):
+    shape, size = _shape(ir, base), _value(base[0]).dtype.itemsize
+    part = math.prod(shape) // parts
+    if parts > 1 and (math.prod(shape[:dim]) != 1 or part * size % ir.blockbytes):
+        raise NotImplementedError(
+            '%s of %s: its %d parts along dimension %d of %s, %d bytes each, are not runs of its pages that each '
+            'begin a block of %d bytes, so a part cannot land at its place in the value (design/compilation-'
+            'coordination.md, '
+            '"The documents\' corrections of 2026-11-05", point 7; mesh-collective.h struct mesh_declared `first`)'
+            % (c.kind, c.node.name, parts, dim, tuple(shape), part * size, ir.blockbytes))
+    for p in range(parts):
+        ir.blocks.setdefault(base, []).append(_span(ir, base, p * part, part))
+    return part
+
+
+def _based(ir, key):
+    g = ir.producer.get(key)
+    if g is None or key in ir.inside:
+        return None
+    kind, reads, _, operand = ir.program[g]
+    if kind == 'narrow':
+        base, (dim, start, length), shape = _based(ir, reads[0]), operand, _shape(ir, reads[0])
+        if base is None or math.prod(shape[:dim]) != 1:
+            return None
+        return base[0], base[1] + start * math.prod(shape[dim + 1:])
+    if kind == 'call' and ir.forms.get(key) not in (None, 'functional') \
+            or kind == 'window' and not _viewed(ir.program[g]) \
+            or kind == 'collective' and operand.kind != 'collective-permute':
+        return key, 0
+    return None
+
+
+def _directed(ir, key):
+    g = ir.producer.get(key)
+    if g is None or key in ir.inside or key in ir.blocks:
+        return False
+    kind, _, _, operand = ir.program[g]
+    return kind == 'call' and ir.forms.get(key) not in (None, 'functional') \
+        or kind == 'window' and not _viewed(ir.program[g]) \
+        or kind == 'collective' and operand.kind == 'reduce-scatter'
+
+
+def _part(ir, c, key, at):
+    shape, size = _shape(ir, key), _value(key[0]).dtype.itemsize
+    count = math.prod(shape) if at is None else math.prod(shape[:at[0]]) * at[2] * math.prod(shape[at[0] + 1:])
+    offset = 0 if at is None else at[1] * math.prod(shape[at[0] + 1:])
+    base = _based(ir, key) if at is None or math.prod(shape[:at[0]]) == 1 else None
+    if base is not None:
+        span = _span(ir, base[0], base[1] + offset, count)
+        if (base[1] + offset) * size % ir.blockbytes == 0 \
+                and not any(a < span[1] and span[0] < b for a, b in ir.blocks.get(base[0], ())):
+            ir.blocks.setdefault(base[0], []).append(span)
+            return (base[0], base[1] + offset), True
+    own = (key[0], 'sent', c.position, key, at)
+    ir.shapes[own] = tuple(shape) if at is None else tuple(at[2] if d == at[0] else s for d, s in enumerate(shape))
+    return (own, 0), False
+
+
+def _produced(ir, d, i, place, own, sent, received):
+    if not own:
+        return [(d, i, 'P', sent, sent)]
+    at = 3 * ir.producer[place[0]] + 2
+    return [(d, i, 'P', at, at), (d, i, 'S') + _readers(ir, {place[0]}, received)]
+
+
+def _send(ir, c, i, place, own, key, at):
+    if own:
+        ir.publishes.setdefault(ir.producer[place[0]], []).append((i, None))
+    else:
+        ir.added[place[0]] = None
+        ir.sends.setdefault(c.position, []).append((i, ((place[0], None), (key, at))))
 
 
 # design/compilation-coordination.md, A-T3': AllReduce as a reduce to a chosen root, then a broadcast from it (G. Wang
@@ -1226,22 +1311,41 @@ def _consumer(ir, roots):
 # revisions of e4a7398e", OV): the sum's readers and kind those of its key, `made` (_readers, _consumer).  A member's
 # partial is made in its sent pages by its producer, the Dot's out variant, and the root's sum in its sent pages by the
 # combine's (_place, _run); their positions as before.  What must stay: the events as before
-def _all_reduce(ir, c, group, key, made):
-    node, root, members = c.node, group[0], group[1:]
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+# revisions of 4e78f6f4"): every group lowered by one call, so each part's place is chosen once (_part); a member's
+# partial sent from its place, made there by its producer's out variant (its production at that producer's third
+# step, its reads there its source read), else copied once into a value of its own at the item's sends (_part, where
+# `copies` copied it after its producer); the root's received partials landing at their places in one value
+# (`received`, one part a member in the group's order: "the received slices landing at their places in one value", as
+# ReduceScatter's), where each was a value of its own; the sum sent from the result's value and every member's sum
+# landing in its result's.  What must stay: the events as before but the member's production where its partial is copied
+def _all_reduce(ir, c, groups, key, made):
     shape, arrive = _shape(ir, key), 3 * c.position + 1
-    readers = _readers(ir, {made}, arrive + 1)
-    up = [ir.transfer(node, shape, d, [root], mesh.PAGES)[root] for d in members]
-    down = ir.transfer(node, shape, root, members, _consumer(ir, {made}))
-    for d, partial in zip(members, up):
-        ir.events += [(d, partial, 'P', arrive - 2, arrive - 2), (d, down[d], 'C') + readers,
-                      (root, partial, 'C', arrive, arrive)]
-    first = min(down.values())
-    ir.events += [(root, first, 'P', arrive + 1, arrive + 1), (root, first, 'S') + readers]
-    if ir.device == root:
-        ir.roles[c] = (0, {None: ir.declared[first].value}, {p + 1: ir.declared[u].value for p, u in enumerate(up)})
-    elif ir.device in members:
-        me = group.index(ir.device)
-        ir.roles[c] = (me, {0: ir.declared[up[me - 1]].value}, {0: ir.declared[down[ir.device]].value})
+    readers, (place, own) = _readers(ir, {made}, arrive + 1), _part(ir, c, key, None)
+    received, k, n = (c.node, 'received', c.position), len(groups[0]), math.prod(shape)
+    ir.shapes[received] = (k - 1,) + tuple(shape)
+    _landing(ir, c, received, 0, k - 1)
+    _landing(ir, c, made, 0, 1)
+    for group in groups:
+        root, members = group[0], group[1:]
+        up = [ir.transfer(c.node, shape, d, [root], mesh.PAGES)[root] for d in members]
+        down = ir.transfer(c.node, shape, root, members, _consumer(ir, {made}))
+        for d, partial in zip(members, up):
+            ir.events += _produced(ir, d, partial, place, own, arrive - 1, arrive) \
+                + [(d, down[d], 'C') + readers, (root, partial, 'C', arrive, arrive)]
+        first = min(down.values())
+        ir.events += [(root, first, 'P', arrive + 1, arrive + 1), (root, first, 'S') + readers]
+        if ir.device == root:
+            ir.roles[c] = (0, {None: first}, {j + 1: i for j, i in enumerate(up)}, received)
+            ir.at.update({i: (made, 0) for i in down.values()})
+            ir.at.update({i: (received, j * n) for j, i in enumerate(up)})
+            ir.added[received] = None
+            ir.publishes.setdefault(c.position, []).append((first, None))
+        elif ir.device in members:
+            me = group.index(ir.device)
+            ir.roles[c] = (me, {0: up[me - 1]}, {0: down[ir.device]}, None)
+            ir.at.update({up[me - 1]: place, down[ir.device]: (made, 0)})
+            _send(ir, c, up[me - 1], place, own, key, None)
 
 
 # design/compilation-coordination.md, A-T3': AllGather (GSPMD section 4.2: it "concatenates tensors from all
@@ -1257,19 +1361,41 @@ def _all_reduce(ir, c, group, key, made):
 # MESH_FROM_SOURCE_READ: "the source's own read of the range it sends"), the span of its readers (_readers), its
 # result's concatenation among them; else as before, the range written at the item's sends.  What must stay: each
 # member's range to every other member, MESH_JOIN
-def _all_gather(ir, c, group, key, made):
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+# revisions of 4e78f6f4"), reversing the notes above where they concatenate (the stop 1 of "The revisions of
+# e4a7398e"): the result is the value the parts land in, member p's part at its place p along the gathered dimension
+# (NCCL: "receiving data from rank `i` at offset `i*sendcount`"), each a run beginning at a block (_landing); the
+# member's own part made in place by its producer's out variant into its narrow of the result and sent from there
+# (`inside`, _directed), else copied once into that narrow at the item's sends; its reads there, the result's readers
+# and, made in place, the operand's, its source read; each other member's consumption of its part spanning the result's
+# readers, as a CollectivePermute's arrival's (CP-1).  What must stay: each member's range to every other member,
+# MESH_JOIN
+def _all_gather(ir, c, groups, key, made):
     shape, sent, received = _shape(ir, key), 3 * c.position, 3 * c.position + 1
-    ranges = [ir.transfer(c.node, shape, d, [e for e in group if e != d], mesh.JOIN) for d in group]
-    produced = 3 * ir.producer[key] + 2 if key in ir.inplace else sent
-    for d, transfers in zip(group, ranges):
-        ir.events.append((d, min(transfers.values()), 'P', produced, produced))
-        if key in ir.inplace:
-            ir.events.append((d, min(transfers.values()), 'S') + _readers(ir, {key}, received))
-        ir.events += [(e, i, 'C', received, received) for e, i in transfers.items()]
-    if ir.device in group:
-        me = group.index(ir.device)
-        ir.roles[c] = (me, {None: ir.declared[min(ranges[me].values())].value},
-                       {p: ir.declared[t[ir.device]].value for p, t in enumerate(ranges) if p != me})
+    n = _landing(ir, c, made, c.dim, len(groups[0]))
+    own = _directed(ir, key)
+    if own:
+        ir.inside[key] = (made, None)
+    produced, roots = 3 * ir.producer[key] + 2 if own else sent, {made} | ({key} if own else set())
+    last = max(received, _readers(ir, {made}, received)[1])
+    for group in groups:
+        ranges = [ir.transfer(c.node, shape, d, [e for e in group if e != d], mesh.JOIN) for d in group]
+        for d, transfers in zip(group, ranges):
+            i = min(transfers.values())
+            ir.events += [(d, i, 'P', produced, produced), (d, i, 'S') + _readers(ir, roots, received)]
+            ir.events += [(e, j, 'C', received, last) for e, j in transfers.items()]
+        if ir.device in group:
+            me = group.index(ir.device)
+            for p, transfers in enumerate(ranges):
+                ir.at.update({j: (made, p * n) for e, j in transfers.items() if p == me or e == ir.device})
+            mine = min(ranges[me].values())
+            ir.roles[c] = (me, {None: mine}, {p: t[ir.device] for p, t in enumerate(ranges) if p != me}, None)
+            if own:
+                ir.inside[key] = (made, me * n)
+                ir.publishes.setdefault(ir.producer[key], []).append((mine, None))
+            else:
+                ir.sends.setdefault(c.position, []).append(
+                    (mine, ((made, (c.dim, me * shape[c.dim], shape[c.dim])), (key, None))))
 
 
 # design/compilation-coordination.md, A-T3': AllToAll (GSPMD section 4.2: it "logically splits the input of each
@@ -1281,17 +1407,40 @@ def _all_gather(ir, c, group, key, made):
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e"): `made`, the item's result, taken as
 # every lowering takes it (lower).  Each piece is copied once into its sent pages, and the result concatenated into its
 # placed pages (torch.cat's out variant), the stop recorded there.  What must stay: as above
-def _all_to_all(ir, c, group, key, made):
-    shape, sent, received = list(_shape(ir, key)), 3 * c.position, 3 * c.position + 1
-    shape[c.dim[1]] //= len(group)
-    pieces = {(p, q): ir.transfer(c.node, tuple(shape), d, [e], mesh.JOIN)[e]
-              for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
-    for (p, q), i in pieces.items():
-        ir.events += [(group[p], i, 'P', sent, sent), (group[q], i, 'C', received, received)]
-    if ir.device in group:
-        me = group.index(ir.device)
-        ir.roles[c] = (me, {q: ir.declared[i].value for (p, q), i in pieces.items() if p == me},
-                       {p: ir.declared[i].value for (p, q), i in pieces.items() if q == me})
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+# revisions of 4e78f6f4"), reversing the note above (the stops of "The revisions of e4a7398e"): piece q sent from its
+# place in the operand's value where it is one (_part), else copied once; the piece from member p landing at its place
+# p in the result along the dimension it leaves (_landing), its consumption spanning the result's readers; the result
+# is the pages the pieces land in, so torch.cat goes.  The member's own piece, which no range carries, is copied once
+# from its place in the operand into its place in the result at the item's sends: the operand is one tensor its
+# producer's out variant writes, of which the other pieces are sent, so its own piece is in the result's pages only by
+# a copy, as NCCL moves a rank's own block by its send and receive to itself (the implementation's choice, recorded in
+# design/compilation-coordination.md, "The revisions of 4e78f6f4", against point 7's "no copy of a part remains").
+# What must stay: one declared transfer p -> q a piece, MESH_JOIN
+def _all_to_all(ir, c, groups, key, made):
+    (i, j), k = c.dim, len(groups[0])
+    shape, result = _shape(ir, key), _shape(ir, made)
+    sent, received, nj, ni = 3 * c.position, 3 * c.position + 1, shape[j] // k, result[i] // k
+    piece = tuple(nj if d == j else size for d, size in enumerate(shape))
+    part = _landing(ir, c, made, i, k)
+    places = [_part(ir, c, key, (j, q * nj, nj)) for q in range(k)]
+    last = max(received, _readers(ir, {made}, received)[1])
+    for group in groups:
+        pieces = {(p, q): ir.transfer(c.node, piece, d, [e], mesh.JOIN)[e]
+                  for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
+        for (p, q), x in pieces.items():
+            ir.events += _produced(ir, group[p], x, *places[q], sent, received) + [(group[q], x, 'C', received, last)]
+        if ir.device in group:
+            me = group.index(ir.device)
+            ir.roles[c] = (me, {q: x for (p, q), x in pieces.items() if p == me},
+                           {p: x for (p, q), x in pieces.items() if q == me}, None)
+            for (p, q), x in pieces.items():
+                if p == me:
+                    ir.at[x] = places[q][0]
+                    _send(ir, c, x, *places[q], key, (j, q * nj, nj))
+                elif q == me:
+                    ir.at[x] = (made, p * part)
+            ir.sends.setdefault(c.position, []).append((None, ((made, (i, me * ni, ni)), (key, (j, me * nj, nj)))))
 
 
 # design/aot-compilation-change-request.md A4: ReduceScatter (GSPMD section 4.2: it "is semantically equivalent to an
@@ -1318,17 +1467,37 @@ def _all_to_all(ir, c, group, key, made):
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e"): `made`, as every lowering takes it;
 # each slice copied once into its sent pages, the keeper's sum made in its placed pages by torch.add's out variant.
 # What must stay: as above
-def _reduce_scatter(ir, c, group, key, made):
-    shape, sent, received = list(_shape(ir, key)), 3 * c.position, 3 * c.position + 1
-    shape[c.dim] //= len(group)
-    slices = {(p, q): ir.transfer(c.node, tuple(shape), d, [e], mesh.PAGES)[e]
-              for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
-    for (p, q), i in slices.items():
-        ir.events += [(group[p], i, 'P', sent, sent), (group[q], i, 'C', received, received)]
-    if ir.device in group:
-        me = group.index(ir.device)
-        ir.roles[c] = (me, {q: ir.declared[i].value for (p, q), i in slices.items() if p == me},
-                       {p: ir.declared[i].value for (p, q), i in slices.items() if q == me})
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+# revisions of 4e78f6f4"; the coordinator's brief: "ReduceScatter's slices sent from their places in the partial (no
+# copy), the received slices landing at their places in one value and summed by torch.add's out variant"): slice q
+# sent from its place in the partial's value where it is one (_part), else copied once; the slices member q receives
+# landing in one value (`received`), the one from the j-th other member of the group's order at its place j
+# (_landing), each a value of its own before.  What must stay: each slice to its keeper, MESH_PAGES
+def _reduce_scatter(ir, c, groups, key, made):
+    dim, k, shape = c.dim, len(groups[0]), _shape(ir, key)
+    sent, received, n = 3 * c.position, 3 * c.position + 1, shape[dim] // k
+    piece = tuple(n if d == dim else size for d, size in enumerate(shape))
+    places = [_part(ir, c, key, (dim, q * n, n)) for q in range(k)]
+    buffer = (c.node, 'received', c.position)
+    ir.shapes[buffer] = (k - 1,) + piece
+    part = _landing(ir, c, buffer, 0, k - 1)
+    for group in groups:
+        slices = {(p, q): ir.transfer(c.node, piece, d, [e], mesh.PAGES)[e]
+                  for p, d in enumerate(group) for q, e in enumerate(group) if p != q}
+        for (p, q), x in slices.items():
+            ir.events += _produced(ir, group[p], x, *places[q], sent, received) \
+                + [(group[q], x, 'C', received, received)]
+        if ir.device in group:
+            me = group.index(ir.device)
+            others = [p for p in range(k) if p != me]
+            ir.roles[c] = (me, {q: x for (p, q), x in slices.items() if p == me},
+                           {p: slices[(p, me)] for p in others}, buffer)
+            for (p, q), x in slices.items():
+                if p == me:
+                    ir.at[x] = places[q][0]
+                    _send(ir, c, x, *places[q], key, (dim, q * n, n))
+            ir.at.update({slices[(p, me)]: (buffer, r * part) for r, p in enumerate(others)})
+            ir.added[buffer] = None
 
 
 # design/aot-compilation-change-request.md A4: CollectivePermute (GSPMD section 4.2: it "exchanges data among a list of
@@ -1369,22 +1538,35 @@ def _reduce_scatter(ir, c, group, key, made):
 # pages, where it was torch.clone of them, so its consumption spans its readers (_readers of `made`, the region's
 # concatenation that reads it), where it ended at the arrival; its kind stays MESH_JOIN, its consumer that
 # concatenation (R4's function A).  What must stay: one transfer a pair
-def _collective_permute(ir, c, group, key, made):
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+# revisions of 4e78f6f4"): the halo's piece sent from its place where it is a run of its base's value (_part: a
+# narrow of a value made by an out variant), else copied once (a slice, which has no out variant); the arrival landing
+# in the result's value, held whole.  What must stay: one transfer a pair
+def _collective_permute(ir, c, groups, key, made):
     pairs = tuple(tuple(pair) for pair in c.dim)
-    places = [p for pair in pairs for p in pair]
-    if not all(isinstance(p, int) and 0 <= p < len(group) for p in places) \
+    places, k = [p for pair in pairs for p in pair], len(groups[0])
+    if not all(isinstance(p, int) and 0 <= p < k for p in places) \
             or len({p for p, _ in pairs}) != len(pairs) or len({q for _, q in pairs}) != len(pairs):
         raise ValueError('%s: a CollectivePermute\'s pairs %s over a group of %d: each a (source, target) place, no two '
-                         'with one source or one target (XLA\'s source_target_pairs)' % (c.node.name, pairs, len(group)))
+                         'with one source or one target (XLA\'s source_target_pairs)' % (c.node.name, pairs, k))
     shape, sent, received = _shape(ir, key), 3 * c.position, 3 * c.position + 1
-    moved = {(p, q): ir.transfer(c.node, shape, group[p], [group[q]], mesh.JOIN)[group[q]] for p, q in pairs if p != q}
-    last = max(received, _readers(ir, {made}, received)[1])
-    for (p, q), i in moved.items():
-        ir.events += [(group[p], i, 'P', sent, sent), (group[q], i, 'C', received, last)]
-    if ir.device in group:
-        me = group.index(ir.device)
-        ir.roles[c] = (me, {q: ir.declared[i].value for (p, q), i in moved.items() if p == me},
-                       {p: ir.declared[i].value for (p, q), i in moved.items() if q == me})
+    (place, own), last = _part(ir, c, key, None), max(received, _readers(ir, {made}, received)[1])
+    _landing(ir, c, made, 0, 1)
+    for group in groups:
+        moved = {(p, q): ir.transfer(c.node, shape, group[p], [group[q]], mesh.JOIN)[group[q]]
+                 for p, q in pairs if p != q}
+        for (p, q), x in moved.items():
+            ir.events += _produced(ir, group[p], x, place, own, sent, received) + [(group[q], x, 'C', received, last)]
+        if ir.device in group:
+            me = group.index(ir.device)
+            ir.roles[c] = (me, {q: x for (p, q), x in moved.items() if p == me},
+                           {p: x for (p, q), x in moved.items() if q == me}, None)
+            for (p, q), x in moved.items():
+                if p == me:
+                    ir.at[x] = place
+                    _send(ir, c, x, place, own, key, None)
+                elif q == me:
+                    ir.at[x] = (made, 0)
 
 
 # the program's own data edges at each node (mesh-collective.h struct mesh_dependence: event `from` before event `to`,
@@ -1449,6 +1631,10 @@ def _dependences(ir):
 # revisions of e4a7398e", OV and PV): each lowering is given the key its item makes as well, whose readers are its
 # result's (_readers), and once every collective is lowered this node's values are placed (_place).  What must stay:
 # each collective's lowering as before
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+# revisions of 4e78f6f4"): each lowering is given every group of its collective at once, so the places of its parts,
+# one key's at every member, are chosen once (_part), where it was called once a group.  What must stay: each group
+# lowered as before
 LOWERINGS = {'all-reduce': _all_reduce, 'all-gather': _all_gather, 'all-to-all': _all_to_all,
              'reduce-scatter': _reduce_scatter, 'collective-permute': _collective_permute}
 
@@ -1459,8 +1645,7 @@ def lower(ir):
             collective = item[3]
             if collective.kind not in LOWERINGS:
                 raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
-            for group in _groups(ir, collective.dims):
-                LOWERINGS[collective.kind](ir, collective, group, item[1][0], item[2])
+            LOWERINGS[collective.kind](ir, collective, _groups(ir, collective.dims), item[1][0], item[2])
     ir.dependences = _dependences(ir)
     _place(ir)
 
@@ -1490,33 +1675,40 @@ def lower(ir):
 # graph module"; design/compilation-coordination.md, "The revisions of e4a7398e", C9): each value's last reader is
 # mesh_graph.ends over the items in order, each item's uses the keys over which its reads lie.  What must stay: the
 # positions as above
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 6 to 8, and "The
+# revisions of 4e78f6f4"), reversing the notes above where a range is a value of its own and a sent value is copied
+# into one: a value is made for every key with pages of its own but an AllGather operand made inside its result
+# (`inside`) and a CollectivePermute's result that is its operand, and for every value of no key (`added`); it is
+# routed (`wire` 1, MESH_EXECUTION in the window) where a range of this node is placed in it (`at`: "the value is
+# MESH_EXECUTION and wire", mesh-collective.h struct mesh_declared), else local with its positions as above, each
+# `run` 1 (IR.value); every placed key's home its value, its element offset there and its shape; each declared transfer
+# of this node its value and `first`, the block its place begins (every place begins a block: _landing, _part).  The
+# placement of the values' pages is mesh_plan's ("Every value's pages are placed anywhere, by the fewest chains",
+# design/plan-to-bridge-change-request.md R2, corrected).  What must stay: no value at a node the placement maps no
+# device, and the positions as above
 def _place(ir):
     if ir.device is None:
         return
     last = mesh_graph.ends(range(len(ir.program)),
                            lambda g: [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())])
-    for key, c in ir.reduced.items():
-        me, sent, received = ir.roles[c]
-        if me and _fresh(ir, key):
-            ir.homes[key] = sent[0]
-            ir.publishes.setdefault(ir.producer[key], []).append(sent[0])
-        elif me:
-            ir.copies.setdefault(ir.producer[key], []).append((key, sent[0]))
-        else:
-            ir.homes[ir.program[c.position][2]] = sent[None]
-    for kind, reads, key, operand in ir.program:
-        if kind == 'collective' and reads[0] in ir.inplace:
-            ir.homes[reads[0]] = ir.roles[operand][1][None]
-            ir.publishes.setdefault(ir.producer[reads[0]], []).append(ir.roles[operand][1][None])
+    wired, bases = {base for base, _ in ir.at.values()}, []
     for g, (kind, reads, key, operand) in enumerate(ir.program):
-        if kind == 'output' or key in ir.homes or key not in ir.over.get(key, ()):
+        if kind == 'output' or key in ir.inside or key not in ir.over.get(key, ()):
             continue
-        if kind == 'collective' and (operand.kind == 'all-reduce' or operand.kind == 'collective-permute' and (
-                ir.roles[operand][2] or any(tuple(pair) == (ir.roles[operand][0],) * 2 for pair in operand.dim))):
+        if kind == 'collective' and operand.kind == 'collective-permute' and not ir.roles[operand][2] \
+                and any(tuple(pair) == (ir.roles[operand][0],) * 2 for pair in operand.dim):
             continue
-        dtype, shape = (ir.metas[key].dtype, tuple(ir.metas[key].shape)) if kind == 'call' \
-            else (_value(key[0]).dtype, _shape(ir, key))
-        ir.homes[key] = ir.value(key[0], dtype, shape, 0, g, last.get(key, g))
+        bases.append((key, g))
+    for key, g in bases + [(key, None) for key in ir.added]:
+        dtype, shape = _layout(ir, key)
+        wire = int(key in wired)
+        ir.homes[key] = (ir.value(dtype, math.prod(shape), _value(key[0]).device.type, wire, 0 if wire else g,
+                                  0 if wire else last.get(key, g)), 0, shape)
+    for key, (made, offset) in ir.inside.items():
+        ir.homes[key] = (ir.homes[made][0], offset, _layout(ir, key)[1])
+    for i, (base, offset) in ir.at.items():
+        ir.declared[i].value = ir.homes[base][0]
+        ir.declared[i].first = offset * _layout(ir, base)[0].itemsize // ir.blockbytes
 
 
 # design/compilation-coordination.md, P2: unit weights, every task and every edge 1, a weighting function the program
@@ -1533,7 +1725,11 @@ def unit(ir):
 # 2026-11-04, owner T2 (N1, N5; design/aot-compilation-change-request.md, appendix item 6): STANDING, the record of
 # the one graph whose plan stood (A-T6), goes with A-T6, and a plan's name is (group, function) in place of (group, the
 # context's count of its plans): compiled functions coexist, each its own plan.  What must stay: one context a program
-CONTEXT, FUNCTIONS = [], itertools.count(1)
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"): FUNCTIONS goes, a compiled function's ordinal being its place in the program's order of
+# compilation, its first call's in the traced block (_Export; mesh-collective.h struct mesh_function: "Function k (from
+# 0) is named (group, k + 1)"), where Dynamo's compile function took the next.  What must stay: one context a program
+CONTEXT = []
 
 
 def _context():
@@ -1613,14 +1809,18 @@ TORCH.mesh_torch_notifying.restype, TORCH.mesh_torch_notifying.argtypes = mesh.Q
 PUBLISH = C.cast(mesh.LIB.mesh_host_publish, C.c_void_p)
 
 
-def _publish(context, tensors, layouts, values, t):
-    sections = [tensors[v][0] for v in values if layouts[v][2] == 'mps']
-    for v in values:
-        if layouts[v][2] != 'mps':
-            mesh.LIB.mesh_host_publish(C.byref(context), tensors[v][0], t)
-    if sections:
-        mesh.check(TORCH.mesh_torch_publish(PUBLISH, C.addressof(context), (mesh.Section * len(sections))(*sections),
-                                            len(sections), t))
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
+# revisions of 4e78f6f4"): each publish a range's section, its first row the range's first block in its value
+# (_bind: "mesh_host_arrived and mesh_host_publish take a section of the range", the coordinator's brief), each with
+# its value's device, where it was a value's section.  What must stay: a publish after its range's last write, no wait
+def _publish(context, sections, devices, t):
+    metal = [section for section, device in zip(sections, devices) if device == 'mps']
+    for section, device in zip(sections, devices):
+        if device != 'mps':
+            mesh.LIB.mesh_host_publish(C.byref(context), section, t)
+    if metal:
+        mesh.check(TORCH.mesh_torch_publish(PUBLISH, C.addressof(context), (mesh.Section * len(metal))(*metal),
+                                            len(metal), t))
 
 
 # DLPack as torch v2.14.0 bundles it (torch's include/ATen/dlpack.h, DLPACK_MAJOR_VERSION 1, DLPACK_MINOR_VERSION 3):
@@ -1719,14 +1919,36 @@ def _metal_device():
 # 2026-11-04, owner T2 (the coordinator's ruling on review W2's finding 6): the deleter's caller cited as torch's
 # tensor_fromDLPackImpl, not fromDLPackImpl's own default; and (W3's finding 12) the buffer is `manager_ctx`, so CPU
 # and MPS copies share the form.  What must stay: one release a tensor
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6, and "The
+# revisions of 4e78f6f4"; the coordinator's brief: "Release the view (mesh_view_release) only after the program
+# retires and no tensor over it remains"): each tensor over the program's mapping counted in its _Mapping, the count
+# lowered by its deleter, torch's word that it holds the tensor no more; the mapping released (mesh-dataflow.h
+# mesh_view_release) once the program has retired it and the count is 0: reference counting (G. E. Collins, A method
+# for overlapping and erasure of lists, CACM 3(12), 1960) over DLPack's own report of each release ("This should be
+# called to destruct manager_ctx", dlpack.h).  An output the program keeps (appendix item 7: "Each output is a view of
+# its placed pages") holds the mapping until torch frees it.  What must stay: one release a tensor, the mapping
+# released after the last
+class _Mapping:
+    def __init__(self, view):
+        self.view, self.tensors, self.retired = view, 0, False
+
+    def release(self):
+        if self.retired and not self.tensors and self.view.address:
+            mesh.LIB.mesh_view_release(self.view)
+            self.view = mesh.View()
+
+
 HELD = {}
 
 
 @DELETER
 def _delete(managed):
     held = HELD.pop(C.addressof(managed.contents), None)
-    if held and held[0].manager_ctx:
-        PUT(held[0].manager_ctx, SELECTOR[b'release'])
+    if held:
+        if held[0].manager_ctx:
+            PUT(held[0].manager_ctx, SELECTOR[b'release'])
+        held[3].tensors -= 1
+        held[3].release()
 
 
 # design/compilation-coordination.md, K1: a placed value's copies wrapped by one MTLBuffer with no copy, as
@@ -1747,16 +1969,23 @@ def _delete(managed):
 # tensor at its storage offset in place on macOS 15 or later (include/ATen/native/mps/OperationUtils.h needsGather:
 # `!is_macOS_15_0_or_newer && (!t.is_contiguous() || t.storage_offset())`).  What must stay: a page-aligned buffer of
 # whole pages over the region's pages, no deallocator
-def _placed_buffer(context, spans):
-    pgsz = mesh.Header.from_address(context.M).pgsz
-    low = min(address for address, _ in spans)
-    length = max(address + pages * pgsz for address, pages in spans) - low
-    buffer = WRAP(_metal_device(), SELECTOR[b'newBufferWithBytesNoCopy:length:options:deallocator:'], low, length,
-                  SHARED, None)
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 6 and 8, and "The
+# revisions of 4e78f6f4"; the coordinator's brief: "MPS over ONE MTLBuffer made over the whole program view
+# (newBufferWithBytesNoCopy of `view.address`, `view.bytes`), each copy's tensor at its offset in it"): the buffer is
+# over the program's one mapping (mesh-collective.h mesh_plan `*view`), where it was over a space's copies, whose rows
+# are now bound each to a block placed anywhere (mesh-section.h), so no run of the region's pages holds a value.  PV-2's
+# reason stays: the allocator's chains share pages among values (design/plan-to-bridge-change-request.md R2,
+# corrected), and with one buffer over the mapping a write after another value's read of the same physical page stays
+# within one resource, which Metal orders by its hazard tracking (MTLResource.h hazardTrackingMode).  The mapping is
+# mmap'd (mesh-dataflow.h mesh_view_compose), so it starts on a page, and is whole blocks long.  What must stay: a
+# page-aligned buffer of whole pages, no deallocator
+def _placed_buffer(view):
+    buffer = WRAP(_metal_device(), SELECTOR[b'newBufferWithBytesNoCopy:length:options:deallocator:'], view.address,
+                  view.bytes, SHARED, None)
     if not buffer:
-        raise OSError(errno.ENOMEM, 'Metal made no buffer over %d copies of placed values, %d bytes (MTLDevice.h '
-                                    'newBufferWithBytesNoCopy)' % (len(spans), length))
-    return buffer, low
+        raise OSError(errno.ENOMEM, 'Metal made no buffer over the program\'s mapping, %d bytes (MTLDevice.h '
+                                    'newBufferWithBytesNoCopy)' % view.bytes)
+    return buffer
 
 
 # design/compilation-coordination.md, K1: a copy of a placed value as a tensor of `device` over its pages, by torch's
@@ -1775,7 +2004,9 @@ def _placed_buffer(context, spans):
 # version the header's, which torch takes where its major is at most DLPACK_MAJOR_VERSION
 # (torch/csrc/utils/tensor_new.cpp tensor_fromDLPack); flags 0 ("By default the flags should be set to 0").  Where
 # torch makes no tensor, the deleter's work is done here, once whoever calls it
-def _dlpack_tensor(device, data, offset, owner, dtype, shape):
+# 2026-11-05 ("The revisions of 4e78f6f4"): each tensor counted in the mapping it lies over (_Mapping).  What must stay:
+# as above
+def _dlpack_tensor(device, data, offset, owner, dtype, shape, mapping):
     if dtype not in TYPES:
         raise NotImplementedError('%s: no DLPack type torch v2.14.0 gives it and takes back as itself (DLConvertor.cpp '
                                   'getDLDataType, toScalarType)' % dtype)
@@ -1787,7 +2018,8 @@ def _dlpack_tensor(device, data, offset, owner, dtype, shape):
                                                 sizes, strides, offset))
     if owner:
         GET(owner, SELECTOR[b'retain'])
-    HELD[C.addressof(managed)] = (managed, sizes, strides)
+    HELD[C.addressof(managed)] = (managed, sizes, strides, mapping)
+    mapping.tensors += 1
     try:
         return torch.from_dlpack(CAPSULE_NEW(C.addressof(managed), CAPSULE, None))
     except BaseException:
@@ -1806,25 +2038,35 @@ def _dlpack_tensor(device, data, offset, owner, dtype, shape):
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e", PV-2): every value of the plan bound at
 # once, its section and its copies' tensors, an MPS value's over its space's one _placed_buffer, where each value was
 # bound alone over a buffer of its own.  What must stay: as above
-def _bind(context, values, layouts):
-    addresses = [[mesh.LIB.mesh_section_address(C.byref(context), v.section, c) for c in range(v.section.count)]
-                 for v in values]
-    for copies in addresses:
-        if not all(copies):
-            raise OSError(errno.EFAULT, 'copy %d of a placed value has no page (mesh-call.h mesh_section_address)'
-                          % copies.index(None))
-    bound = [(v.section, [_dlpack_tensor('cpu', a, 0, None, dtype, shape) for a in copies] if device == 'cpu' else None)
-             for v, copies, (dtype, shape, device) in zip(values, addresses, layouts)]
-    for wire in {v.wire for v, layout in zip(values, layouts) if layout[2] == 'mps'}:
-        space = [i for i, (v, layout) in enumerate(zip(values, layouts)) if layout[2] == 'mps' and v.wire == wire]
-        buffer, low = _placed_buffer(context, [(a, values[i].section.pages) for i in space for a in addresses[i]])
-        try:
-            for i in space:
-                bound[i] = (values[i].section, [_dlpack_tensor('mps', buffer, a - low, buffer, *layouts[i][:2])
-                                                for a in addresses[i]])
-        finally:
-            PUT(buffer, SELECTOR[b'release'])
-    return bound
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 6 to 8, and "The
+# revisions of 4e78f6f4"; the coordinator's brief: "bind every copy's tensor over its view: CPU by DLPack at the copy's
+# view address; MPS over ONE MTLBuffer made over the whole program view"), reversing the notes above where a copy is
+# found by its rows (mesh_section_address, EFAULT) and an MPS value lies in its space's buffer: copy c of each value of
+# one compiled function at its place in the program's mapping, view + c x section.pages x pgsz (mesh-collective.h
+# struct mesh_value `view`: "every copy's blocks consecutive there, in row order"), as one tensor of its elements; a
+# CPU copy's `data` that address, an MPS copy's the program's one buffer (`buffer`, _placed_buffer) at the copy's
+# offset in it, each counted in `mapping`.  Each placed key's tensors, one a copy, a narrow of its value's at its
+# element offset viewed in its shape (`homes`); each declared transfer of this node its range's section, its first row
+# the range's first block in its value's rows (value.first + first, struct mesh_declared), its blocks x block pages,
+# the value's count and stride (the brief: "mesh_host_arrived and mesh_host_publish take a section of the range"), and
+# its value's device.  What must stay: each device's `data` and `byte_offset` as torch's own export sets them
+def _bind(context, ir, values, buffer, mapping):
+    header, copies = mesh.Header.from_address(context.M), []
+    for v, (dtype, numel, device) in zip(values, ir.layouts):
+        addresses = [v.view + c * v.section.pages * header.pgsz for c in range(v.section.count)]
+        copies.append([_dlpack_tensor('cpu', a, 0, None, dtype, (numel,), mapping) if device == 'cpu' else
+                       _dlpack_tensor('mps', buffer, a - mapping.view.address, buffer, dtype, (numel,), mapping)
+                       for a in addresses])
+    places = {key: [copy.narrow(0, offset, math.prod(shape)).view(shape) for copy in copies[v]]
+              for key, (v, offset, shape) in ir.homes.items()}
+    sections, devices = {}, {}
+    for i, d in enumerate(ir.declared):
+        if d.value != mesh.ABSENT:
+            value = values[d.value].section
+            sections[i] = mesh.Section(value.first + d.first, -(-d.bytes // ir.blockbytes) * header.block, d.bytes,
+                                       value.count, value.stride)
+            devices[i] = ir.layouts[d.value][2]
+    return places, sections, devices
 
 
 # item g of this node's program, (kind, the keys it reads, the key it makes, its operand), at execution t on execution
@@ -1880,30 +2122,45 @@ def _bind(context, values, layouts):
 # torch's fill_ of the parts outside the operand, where it was torch.cat, narrow and masked_fill of a mask from
 # torch.arange (GSPMD section 4.1's Select: those parts are "index < 0" and "index >= size" along the window); no output
 # torch.clone'd.  What must stay: one execution a call, every read of a received range after its arrival
-def _run(ir, context, tensors, g, env, inputs, t):
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 1, 6 and 7, and
+# "The revisions of 4e78f6f4"), reversing the notes above where they concatenate a collective's parts and copy each
+# sent part (`send`, "#6's stop 2. Point 7 removes it", the coordinator): each placed key's tensor at execution t is its
+# place in copy t mod count of its value (`places`, _bind); a collective item first releases its sends (`sends`: each
+# range sent from its place, or copied once into a value of its own and released; an AllToAll's own piece copied into
+# its place in the result), then waits for each range it receives and reads its result where the parts landed: an
+# AllGather's and AllToAll's result is that value, torch.cat goes; a ReduceScatter's and an AllReduce root's received
+# parts lie at their places in one value, each added in by torch.add's out variant as it arrives; a CollectivePermute's
+# result is its arrival's value.  Every item then releases the ranges it made in place (`publishes`).  An operator is
+# its exported graph's ATen operator (_call), its out variant called with its result's place by its out argument's
+# name.  What must stay: one execution a call, every read of a received range after its arrival, a release after its
+# range's writes
+def _run(ir, context, run, g, env, inputs, t):
     kind, reads, key, operand = ir.program[g]
 
-    def pages(value):
-        return tensors[value][1][t % len(tensors[value][1])]
+    def place(k):
+        copies = run['places'][k]
+        return copies[t % len(copies)]
 
-    def place():
-        return pages(ir.homes[key])
+    def release(entries):
+        for _, copy in entries:
+            if copy is not None:
+                (target, into), (source, out) = copy
+                _narrow(place(target), into).copy_(_narrow(env[source], out))
+        published = [i for i, _ in entries if i is not None]
+        if published:
+            _publish(context, [run['sections'][i] for i in published], [run['devices'][i] for i in published], t)
 
-    def send(pairs, made=()):
-        for value, source in pairs:
-            pages(value).copy_(source)
-        if pairs or made:
-            _publish(context, tensors, ir.layouts, [value for value, _ in pairs] + list(made), t)
+    def arrived(i):
+        _arrived(context, run['sections'][i], t)
 
-    def arrived(value):
-        _arrived(context, tensors[value][0], t)
-        return pages(value)
-
-    def combine(total, first, received):
-        for p in sorted(received):
-            torch.add(first, arrived(received[p]), out=total)
+    def combine(total, first, parts):
+        for i, part in parts:
+            arrived(i)
+            torch.add(first, part, out=total)
             first = total
         return total
+    if kind == 'collective':
+        release(ir.sends.get(g, ()))
     if kind == 'input':
         env[key] = inputs[operand]
     elif kind == 'constant':
@@ -1921,7 +2178,7 @@ def _run(ir, context, tensors, g, env, inputs, t):
         if key not in ir.homes:
             env[key] = env[reads[0]].narrow(dim, offsets[q], length)
         else:
-            target, at, parts = place(), 0, []
+            target, at, parts = place(key), 0, []
             for k in reads:
                 n = env[k].shape[dim]
                 low, high = max(offsets[q], at), min(offsets[q] + length, at + n)
@@ -1938,46 +2195,41 @@ def _run(ir, context, tensors, g, env, inputs, t):
         local, given = ir.locals[operand], iter(reads)
         args, kwargs = map_arg((local.args, local.kwargs), lambda n: env[next(given)])
         if key in ir.homes:
-            ir.forms[key](*args, **kwargs, out=place())
-            env[key] = place()
+            out, name = ir.forms[key]
+            out(*args, **kwargs, **{name: place(key)})
+            env[key] = place(key)
         else:
-            env[key] = _call(ir, local, args, kwargs)
+            env[key] = _call(local, args, kwargs)
     elif kind == 'collective':
-        (source,), (me, sent, received) = reads, ir.roles[operand]
+        (source,), (me, sent, received, buffer) = reads, ir.roles[operand]
         if operand.kind == 'all-reduce' and me:
-            env[key] = arrived(received[0])
+            arrived(received[0])
+            env[key] = place(key)
         elif operand.kind == 'all-reduce':
-            env[key] = combine(place(), env[source], received)
-            send((), (sent[None],))
+            parts = place(buffer)
+            env[key] = combine(place(key), env[source],
+                               [(received[p], parts[j]) for j, p in enumerate(sorted(received))])
         elif operand.kind == 'reduce-scatter':
-            size = env[source].shape[operand.dim] // (len(received) + 1)
-
-            def piece(q):
-                return env[source].narrow(operand.dim, q * size, size)
-            send([(value, piece(q)) for q, value in sent.items()])
-            env[key] = combine(place(), piece(me), received)
-        elif operand.kind == 'collective-permute':
-            send([(value, env[source]) for value in sent.values()])
-            if received:
-                env[key] = arrived(*received.values())
-            elif any(tuple(pair) == (me, me) for pair in operand.dim):
-                env[key] = env[source]
-            else:
-                env[key] = place().zero_()
+            size, parts = env[source].shape[operand.dim] // (len(received) + 1), place(buffer)
+            env[key] = combine(place(key), env[source].narrow(operand.dim, me * size, size),
+                               [(i, parts[j]) for j, i in enumerate(received.values())])
+        elif operand.kind == 'collective-permute' and not received:
+            own = any(tuple(pair) == (me, me) for pair in operand.dim)
+            env[key] = env[source] if own else place(key).zero_()
         else:
-            gather, members = operand.kind == 'all-gather', len(received) + 1
-            dim = operand.dim if gather else operand.dim[0]
-            size = 0 if gather else env[source].shape[operand.dim[1]] // members
-
-            def part(q):
-                return env[source] if gather else env[source].narrow(operand.dim[1], q * size, size)
-            send([] if source in ir.inplace else [(value, part(q)) for q, value in sent.items()])
-            env[key] = torch.cat([part(me) if p == me else arrived(received[p]) for p in range(members)], dim,
-                                 out=place())
+            for i in received.values():
+                arrived(i)
+            env[key] = place(key)
     else:
         node, keys = operand
         env['output'] = map_arg(node.args[0], lambda n: env[keys[n]])
-    send([(value, env[k]) for k, value in ir.copies.get(g, ())], ir.publishes.get(g, ()))
+    release(ir.publishes.get(g, ()))
+
+
+# a tensor's narrow (dim, start, length), the tensor itself where it is None (2026-11-05, "The revisions of 4e78f6f4":
+# a copy's target and source, _run)
+def _narrow(tensor, at):
+    return tensor if at is None else tensor.narrow(*at)
 
 
 # design/compilation-coordination.md, N3: the program's retirement of one compiled function's plan.  First every
@@ -1996,17 +2248,30 @@ def _run(ir, context, tensors, g, env, inputs, t):
 # reclamation, which ends once every reader that may hold a reference has finished (C3.4, P. E. McKenney and J. D.
 # Slingwine, Read-copy update, PDCS 1998); the device's synchronization runs every MPSEvent's signal before it.  This is
 # a retirement's wait, never a publish's.  What must stay: the synchronization before the claim is closed
-def _retire(context, plan):
-    for device in plan['devices']:
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+# revisions of 4e78f6f4"; the coordinator's brief: "The program's plans are retired with the program (mesh_retire(M,
+# client) closes its root ...); after ESTALE or a cancelled range the program plans again: retire, release the view
+# after torch's device work on it is done (device synchronize, as `_retire` does now, and the notifications waited out,
+# TP-4), then plan the whole program again"), reversing the notes above where one compiled function's claim is closed:
+# the program is retired whole, its root closed (mesh-dataflow.h mesh_retire: its `closed` 1 where its `owner` is this
+# client), which ends every plan of it (mesh.h mesh_program_plan), after every device of its values is synchronized
+# and the notifications are waited out; then its tensors let go and its mapping released once none over it remains
+# (_Mapping).  The bridge releases the root once no port holds a plan of it (mesh-dataflow.h mesh_retired_release,
+# deferred reclamation), and mesh_plan is EBUSY until then.  What must stay: the synchronization and the wait before
+# the root is closed, ETIMEDOUT with it standing
+def _retire(context, state):
+    for device in state['devices']:
         torch.get_device_module(device).synchronize()
     deadline = time.monotonic_ns() + mesh.PLATFORM_NS
     while TORCH.mesh_torch_notifying():
         if time.monotonic_ns() > deadline:
             raise OSError(errno.ETIMEDOUT, 'a publish\'s notification not run within MESH_PLATFORM_NS of its device\'s '
-                                           'synchronization: the plan\'s claim left standing (rdma/mesh-torch.mm)')
-    status = mesh.LIB.mesh_plan_retire(C.byref(context), plan['handle'])
-    plan.update(handle=0, devices=(), ir=None, tensors=None)
-    mesh.check(status)
+                                           'synchronization: the program\'s root left standing (rdma/mesh-torch.mm)')
+    mesh.LIB.mesh_retire(context.M, context.client)
+    mapping = state['mapping']
+    mapping.retired = True
+    state.update(mapping=None, runs=None, devices=(), stale=True)
+    mapping.release()
 
 
 # the coordinator's ruling on review W2's finding 3: a compiled function is retired when the program drops it, by
@@ -2021,151 +2286,42 @@ def _retire(context, plan):
 # A failure here is "shown on the standard error output, but cannot be propagated" (the same documentation); the
 # program's own retirement, the bridge's of a gone pid (N3), follows at its exit as before.  A plan already retired (a
 # replan that failed before it stood) is nothing to retire
-def _dropped(context, plan):
-    if plan['handle']:
-        _retire(context, plan)
+# 2026-11-05 ("The revisions of 4e78f6f4"): the program, retired whole when its callable (program) is collected, where
+# each compiled function's callable was.  What must stay: as above
+def _dropped(context, state):
+    if state['mapping'] is not None:
+        _retire(context, state)
 
 
-# design/aot-compilation-change-request.md A4: at a node the placement operand maps no device, the function has "no
-# section of its own" and the node's "part of each call is the relaying its routes give it", so the call runs no item
-# of the program there (serialize).  What it returns there is the coordinating implementer's decision
-# (design/compilation-coordination.md, "The revisions of b5a3c6e6", ND-2): each of the graph's outputs as a tensor of
-# its fake tensor's metadata, "the metadata of a tensor without its actual data" (PyTorch 2 section 3.5), its size,
-# stride, element type and device, by torch.empty_strided ("Creates a tensor with the specified size and stride and
-# filled with undefined data", torch v2.11.0 torch/_torch_docs.py), which nothing writes.  Why: a program whose next
-# compiled function takes this one's result then calls it there with the shapes and types every rank's does, so that
-# function is compiled and planned as every node's (A4), where an output of None would be traced as a constant.  An
-# output that is no tensor is its example value as Dynamo recorded it (A1: shapes are compiled).  Made once, when the
-# plan is made; ir.device None alone
-# 2026-11-05 (design/aot-compilation-change-request.md A4: "Its calls return tensors on PyTorch's meta device: "The
-# "meta" device is an abstract device which denotes a tensor which records only metadata, but no actual data""; the
-# coordinator, design/compilation-coordination.md, "Answered in the documents" after "The revisions of b5a3c6e6":
-# "ND-2 reversed.  `torch.empty_strided` on the function's device is memory outside the region"; "The revisions of
-# e4a7398e", MD-1): each tensor output on the meta device, of its fake tensor's size, stride and element type, where it
-# was on the function's device.  What must stay: the outputs' metadata every rank's, an output no tensor its example
-# value
-def _absent(ir):
-    (output,) = [node for node in ir.order if node.op == 'output']
-
-    def absent(node):
-        value = node.meta.get('example_value')
-        return torch.empty_strided(value.shape, value.stride(), dtype=value.dtype, device='meta') \
-            if isinstance(value, torch.Tensor) else value
-    return map_arg(output.args[0], absent)
-
-
-# design/aot-compilation-change-request.md A9; design/compilation-coordination.md, A-T4.  `build` gives the IR on the
-# map as it is; mesh_plan writes the lists from it (each node's page instructions, the page table's bindings and the
-# plan's state section); the GPU's program is the function's own operators, this node's partitioned graph run by torch
-# on tensors over the placed pages, each copy of each value bound by _bind (torch.from_dlpack, a kDLCPU or kDLMetal
-# tensor: design/compilation-coordination.md, K1).
-# - Each compiled graph is its own function and its own plan (design/compilation-coordination.md, "The appendix's
-#   revisions", N1): `function` its ordinal, the plan named (group, function), and `handle` the plan's state section
-#   offset, mesh_plan's `*plan` (N2), as an instantiated graph's handle (NVIDIA, CUDA Programming Guide, section 4.2.2:
-#   "It may be launched any number of times without repeating the instantiation").  Other functions' plans stand
-#   beside it (R. Frostig, M. J. Johnson and C. Leary, SysML 2018; P. Barham et al., Pathways, MLSys 2022, section 3).
-# - The plan is ESTALE where its map serial (struct mesh_state `serial`) is not the IR's map read's (the coordinator's
-#   ruling on review V2's finding 6).  A plan that stood when the planning fails after it (that test, or a copy's
-#   binding) is retired at once (_retire), as mesh_plan closes its own claim on its own failure after its writes (N3;
-#   design/plan-to-bridge-change-request.md R8: nothing is held for a program but its plans' claims).
-# - Each call launches one execution of its function: call t raises the plan's executions to t + 1, the program's
-#   submission of that function execution to this node's bridge (N4; A7, Q1), before it runs it.  An execution is
-#   consumed at its submission: once the plan's `executions` word has reached t + 1, the next call is t + 1 whether
-#   this call's run then completes or fails, since `executions` and the supplied words only rise
-#   (design/disjoint-pages-change-request.md C3.7; mesh-call.h mesh_transfers_start;
-#   design/disjoint-pages-revision-coordination.md, D2), so no later call writes the published pages of t again;
-#   nothing is retried (the coordinator's ruling on review W2's finding 2).  A start that fails before its raise (a
-#   port's refusal, its bounded wait) submitted nothing, and the next call is t again.
-# - After an ESTALE or a cancelled range, the next call plans again: the stale plan retired (_retire), then the IR
-#   built anew on the map as it is and planned with the same function (N1; mesh-call.h mesh_transfers_start: "plan
-#   again"; docs/principles.md section 4: recover across calls; V2's finding 5)
-# - The function is retired when the program drops it: its plan retired (_retire) once the callable returned to torch
-#   is collected, or at the program's exit, by Python's weakref.finalize (_dropped; the coordinator's ruling on review
-#   W2's finding 3)
-# 2026-11-04, owner T2 (W2's finding 2): `executions` set to t + 1 only after the run completed, so a call failing after
-#   its submission had the next call run execution t again over pages already published, goes.  What must stay: one
-#   execution a call
-# 2026-11-04, owner T2 (U1; design/aot-compilation-change-request.md, appendix item 1): the ENOMEM message citing D5 and
-# a lone AllGather or AllToAll goes, since C3.3 refuses only a value with no least lag; mesh_plan's failure is
-# mesh.check's as any other.  (N5; appendix item 6): A-T6's refusal of a graph planned while another's plan stands goes,
-# and the plan is found by its handle, not by context.state.  What must stay: the serial test, and a replan's IR built
-# anew with the same placement operand
-# 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", the coordinating implementer's choices
-# for mesh_plan's new operands; rdma/mesh-collective.h mesh_plan): `program`, the program's nodes, is the set of map
-# indices of the placement operand's nodes (ir.map, A2's mapping of the logical mesh onto the map's nodes), bit i for
-# map index i, the same at every rank and in every plan call of one program, its least the program's one sender
-# (design/aot-compilation-change-request.md A7: "sender(m) is the program's one sender: the least of the program's
-# nodes"); `outstanding` is A10's bound for this function, "the most calls of it the analysis lets be outstanding at
-# once in the program that submits them" (A10, "Its output"; ir.calls.outstanding), 0 where no traced program submits
-# it (ir.calls None), which mesh_plan fails with ENOMEM (appendix item 2: "A plan whose bound A10 cannot find fails
-# with `ENOMEM` when it is planned").  Both choices are the coordinating implementer's, not the documents'.  What must
-# stay: every operand the same at every rank
-# 2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", PG), reversing the first of those
-# choices: `program` is the launcher's MESH_PROGRAM (_program), where it was the placement operand's nodes.  Why:
-# design/aot-compilation-change-request.md A7, sender(m), as _program's note quotes it.  `outstanding` stays A10's
-# bound, now the delay on "the edge from a call's completion to the program's later submission" in the program's IPC
-# graph, from which mesh_plan computes the rooms (appendix item 2).  What must stay: every operand the same at every
-# rank
-# 2026-11-05 (design/aot-compilation-change-request.md A4: a node the placement operand maps no device "compiles and
-# plans each function as every node does, with no section of its own ... its part of each call is the relaying its
-# routes give it"; design/compilation-coordination.md, "The revisions of b5a3c6e6", ND and ND-2): at such a node
-# (ir.device None) the plan is made from the same operands as every rank's, with no value of its own (ir.values
-# empty), and each call launches its execution (mesh_transfers_start: the node's relays served by its bridge, its
-# submission counted as every node's) and runs no item of the program, returning _absent's outputs.  What must stay:
-# the plan call and the start at every node of the program
-# 2026-11-05 (design/aot-compilation-change-request.md, appendix item 7; design/compilation-coordination.md, "The
-# revisions of e4a7398e", PV): the plan's values, its ranges and every local value _place gave it, bound at once
-# (_bind), and each item run by its index (_run), whose copies and publishes are kept by index.  What must stay: as
-# above
-def serialize(build, function):
-    context, plan = _context(), {'stale': True, 'handle': 0, 'devices': ()}
-
-    def make():
-        if plan['handle']:
-            _retire(context, plan)
-        ir = build()
-        count = len(ir.declared)
-        if len(ir.weights) != count or not all(isinstance(w, mesh.Weight) for w in ir.weights):
-            raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight each '
-                             '(A3)' % (len(ir.weights), count))
-        values, handle = (mesh.Value * len(ir.values))(*ir.values), mesh.Q()
-        program = _program()
-        outstanding = ir.calls.outstanding if ir.calls is not None else 0
-        mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), function, program, outstanding,
-                                      (mesh.Declared * count)(*ir.declared), (mesh.Weight * count)(*ir.weights), count,
-                                      values, len(values), (mesh.Dependence * len(ir.dependences))(*ir.dependences),
-                                      len(ir.dependences), C.byref(handle)))
-        plan.update(handle=handle.value, devices={layout[2] for layout in ir.layouts})
-        try:
-            if mesh.State.from_address(context.M + handle.value).serial != ir.serial:
-                raise OSError(errno.ESTALE, 'the plan\'s map serial is not the one its IR was built on: plan again')
-            tensors = _bind(context, values, ir.layouts)
-        except BaseException:
-            _retire(context, plan)
-            raise
-        plan.update(ir=ir, tensors=tensors, executions=0, stale=False, absent=None if ir.device is not None
-                    else _absent(ir))
-    make()
-
-    def run(*inputs):
-        if plan['stale']:
-            make()
-        ir, tensors, t = plan['ir'], plan['tensors'], plan['executions']
-        status = mesh.LIB.mesh_transfers_start(C.byref(context), plan['handle'], t + 1)
-        if mesh.State.from_address(context.M + plan['handle']).executions > t:
-            plan['executions'] = t + 1
-        try:
-            mesh.check(status)
-            env = {'output': plan['absent']}
-            for g in range(len(ir.program)) if ir.device is not None else ():
-                _run(ir, context, tensors, g, env, inputs, t)
-        except OSError as failure:
-            if failure.errno in (errno.ESTALE, errno.ECANCELED):
-                plan['stale'] = True
-            raise
-        return env['output']
-    weakref.finalize(run, _dropped, context, plan)
-    return run
+# One call of a compiled function at this node, the program's j-th (2026-11-05, design/compilation-coordination.md,
+# "The documents' corrections of 2026-11-05", points 1, 2 and 5, and "The revisions of 4e78f6f4"; design/aot-
+# compilation-change-request.md, appendix item 6: "have each call launch one execution of its function"): its plan's
+# next execution started (mesh-call.h mesh_transfers_start: its waits on the plan's synchronization edges, then the
+# raise of `executions` to t + 1, the program's submission of it), counted as serialize's was: once `executions` has
+# reached t + 1 the next call is t + 1 whether this one then completes or fails, since `executions` and the supplied
+# words only rise (design/disjoint-pages-change-request.md C3.7), and a start that fails before its raise (ETIMEDOUT)
+# submitted nothing; then, at a node with a section, each item of the function's program run at execution t (_run) on
+# the call's arguments flattened as the exported module's own code flattens them (torch 2.14.0 torch/fx/graph.py
+# _PyTreeCodeGen process_inputs: `pytree.arg_tree_leaves(*inputs)`, "A slightly faster version of tree_leaves((args,
+# kwargs))", torch/utils/_pytree.py), and its outputs unflattened by the exported program's out_spec as its
+# process_outputs does (`pytree.tree_unflatten(out, self.pytree_info.out_spec)`).  At a node the placement operand maps no device the call starts its plan and computes
+# nothing (point 2: "at such a node, start its plans' executions and relay, and compute nothing.  `_absent` goes"),
+# its result no value, None (design/aot-compilation-change-request.md A4, withdrawn text: "it has no value for any
+# program code to read"); a call with a section here that reads one is refused when the program is planned (program).
+# _absent and serialize go: the program is planned whole by program, and _execute is a call's part of its run.  What
+# must stay: one execution a call, the start at every node of the program
+def _execute(context, run, args, kwargs):
+    ir, t = run['ir'], run['executions']
+    status = mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1)
+    if mesh.State.from_address(context.M + run['plan']).executions > t:
+        run['executions'] = t + 1
+    mesh.check(status)
+    if ir.device is None:
+        return None
+    env, inputs = {}, pytree.arg_tree_leaves(*args, **kwargs)
+    for g in range(len(ir.program)):
+        _run(ir, context, run, g, env, inputs, t)
+    return pytree.tree_unflatten(list(env['output']), run['spec'])
 
 
 # design/aot-compilation-change-request.md A10, "The calls' graph": Pathways' program tracer, "a new program tracer
@@ -2181,20 +2337,26 @@ def serialize(build, function):
 # symbolically trace a dynamo-optimized function").  A compiled function is what torch.compile returns, a function or
 # an OptimizedModule, each marked by Dynamo with `_torchdynamo_orig_callable` and `_torchdynamo_wrapper_id` its own id
 # (eval_frame.py, innermost_fn's test) (design/compilation-coordination.md, "The revisions of f3f7cf46", TT1)
-def _compiled(target):
-    return getattr(target, '_torchdynamo_orig_callable', None) is not None \
-        and getattr(target, '_torchdynamo_wrapper_id', None) == id(target)
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"; design/aot-compilation-change-request.md A1, corrected: "For a torch program: `torch.export`,
+# not a `torch.compile` backend"), reversing the note above where it names a function torch.compile returns: a compiled
+# function is a Function, the module torch.export captures (A1) with its placement-choosing and weighting functions
+# (A2, A3: "The compilation must take placement as an operand"; "The compilation must take every weight its router and
+# its scheduler use as an operand"), neither with a default, held by the traced block as its submodule
+# (path_of_module), so the Tracer keeps it a leaf.  It has no forward: nothing runs it eagerly ("nothing runs eagerly
+# between its compiled calls", A1), and a call of it outside a traced program meets torch's own
+# _forward_unimplemented ("Module [Function] is missing the required "forward" function", torch 2.14.0
+# torch/nn/modules/module.py).  _compiled's Dynamo markers, _callee and torch.fx.wrap's form go.  What must stay: each
+# compiled function a leaf of the block's trace
+class Function(torch.nn.Module):
+    def __init__(self, module, placement, weights):
+        super().__init__()
+        self.module, self.placement, self.weights = module, placement, weights
 
 
 class Tracer(torch.fx.Tracer):
     def is_leaf_module(self, m, module_qualified_name):
-        return _compiled(m) or super().is_leaf_module(m, module_qualified_name)
-
-
-# the compiled function a node of a traced block calls, None where it calls none
-def _callee(gm, node):
-    target = gm.get_submodule(node.target) if node.op == 'call_module' else node.target
-    return target if node.op in ('call_module', 'call_function') and _compiled(target) else None
+        return isinstance(m, Function) or super().is_leaf_module(m, module_qualified_name)
 
 
 # M. C. Rinard and P. C. Diniz, Commutativity analysis: a new analysis technique for parallelizing compilers, ACM TOPLAS
@@ -2264,11 +2426,12 @@ class _Symbolic(torch.fx.Interpreter):
 # compiled function it calls stays one operation) is executed on the receiver with one call's other arguments, then on
 # that result with the other call's, in both orders.  A body FX cannot trace (torch.fx's TraceError, "symbolically
 # traced variables cannot be used as inputs to control flow") is one it cannot execute (TT4)
-def _commutes(callee, k):
+# 2026-11-05 ("The revisions of 4e78f6f4"): the body a Function's module, where it was Dynamo's original callable.  What
+# must stay: the test as before
+def _commutes(module, k):
     tracer = Tracer()
     try:
-        graph = tracer.trace(callee._orig_mod if isinstance(callee, torch.nn.Module)
-                             else callee._torchdynamo_orig_callable)
+        graph = tracer.trace(module)
     except torch.fx.proxy.TraceError:
         return False
     body, count = torch.fx.GraphModule(tracer.root, graph), sum(node.op == 'placeholder' for node in graph.nodes)
@@ -2306,9 +2469,15 @@ def _commutes(callee, k):
 # C9a, design/compilation-coordination.md, "The revisions of f3f7cf46"): _analyse's `ancestors` and chain loop, and
 # _width, go, for mesh_graph.closure, mesh_graph.paths and mesh_graph.width (design/compilation-coordination.md, "The
 # revisions of abecd389", T4-1, T4-2).  What must stay: the entries, `orders` and `commuting` as before
-def _analyse(gm):
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 1, and "The
+# revisions of 4e78f6f4"): a call's compiled function is the one _Export gave it (`of`, its ordinal), a Function called
+# with other argument metadata being another (design/aot-compilation-change-request.md, appendix item 6: JAX traces
+# anew only "on a trace cache miss"), so each bound is the width of one compiled function's calls; `modules`, each
+# compiled function's module, the body _commutes executes.  The entries are each compiled function's, by its ordinal.
+# What must stay: the entries, `orders` and `commuting` as before
+def _analyse(gm, of, modules):
     nodes = list(gm.graph.nodes)
-    callee = {node: _callee(gm, node) for node in nodes}
+    callee = {node: of.get(node) for node in nodes}
     calls = [node for node in nodes if callee[node] is not None]
     place = {node: i for i, node in enumerate(calls)}
     link, follower = {}, {}
@@ -2316,8 +2485,8 @@ def _analyse(gm):
         reads = []
         map_arg((b.args, b.kwargs), reads.append)
         for k, a in enumerate(b.args):
-            if isinstance(a, Node) and a in place and callee[a] is callee[b] and len(a.users) == 1 \
-                    and reads.count(a) == 1 and link.get(a, (a, k))[1] == k and _commutes(callee[b], k):
+            if isinstance(a, Node) and a in place and callee[a] == callee[b] and len(a.users) == 1 \
+                    and reads.count(a) == 1 and link.get(a, (a, k))[1] == k and _commutes(modules[callee[b]], k):
                 link[b], follower[a] = (a, k), b
                 break
     chains = mesh_graph.paths(calls, lambda a: [follower[a]] if a in follower else [])
@@ -2337,10 +2506,10 @@ def _analyse(gm):
     commuting = tuple(tuple(place[node] for node in chain) for chain in chains)
     entries = {}
     for f in dict.fromkeys(callee[node] for node in calls):
-        mine = [node for node in calls if callee[node] is f]
+        mine = [node for node in calls if callee[node] == f]
         entries[f] = Calls(tuple(place[node] for node in mine),
                            mesh_graph.width(mine, lambda a: [b for b in mine if a in held[b]]), orders, commuting)
-    return {node: entries[callee[node]] for node in calls}
+    return entries
 
 
 # design/aot-compilation-change-request.md A10: the program a block traces to.  It runs as Pathways' traced program
@@ -2351,49 +2520,219 @@ def _analyse(gm):
 # order constraint.  A call of a compiled function runs with its function's entry current (CALLING), so the backend's
 # compile function, which Dynamo calls within that call where it compiles a graph of the function, carries the entry in
 # that graph's IR (TT7).  CALLING: the current entries, the innermost last
-CALLING = []
-
-
+# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 1 and 2, and "The
+# revisions of 4e78f6f4"), reversing the note above where a call runs its function's Dynamo-compiled callable: CALLING
+# goes, every function being exported and its entry carried before the program runs (program); a call of a compiled
+# function runs its execution (`execute`, _execute), an operator.getitem of a call's result takes its item, and an
+# item of no value (a call at a node with no section) is no value.  What must stay: the block's order
 class _Program(torch.fx.Interpreter):
-    def __init__(self, gm, entries):
+    def __init__(self, gm, execute):
         super().__init__(gm)
-        self.entries = entries
+        self.execute = execute
 
     def run_node(self, n):
-        if n not in self.entries:
-            return super().run_node(n)
-        CALLING.append(self.entries[n])
-        try:
-            return super().run_node(n)
-        finally:
-            CALLING.pop()
+        if n.op == 'call_module':
+            args, kwargs = self.fetch_args_kwargs_from_env(n)
+            return self.execute(n, args, kwargs)
+        if n.op == 'call_function' and self.env[n.args[0]] is None:
+            return None
+        return super().run_node(n)
 
 
-def program(block):
+# A compiled function as exported (2026-11-05, "The revisions of 4e78f6f4"): its Function, its call's argument
+# metadata (`signature`), its exported graph (`gm`), its example arguments, its fake result and its result's out_spec
+Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec')
+
+
+# a value's metadata, as a compiled function's argument: a tensor's shape, strides, element type and device, any other
+# value itself
+def _metadata(value):
+    return (tuple(value.shape), tuple(value.stride()), value.dtype, value.device) \
+        if isinstance(value, torch.Tensor) else value
+
+
+# The capture of a traced block's compiled functions (2026-11-05, design/compilation-coordination.md, "The documents'
+# corrections of 2026-11-05", point 1, and "The revisions of 4e78f6f4"; design/aot-compilation-change-request.md A1,
+# corrected: "every function of a torch program is captured and compiled before the program runs, the same at every
+# rank, and nothing runs eagerly between its compiled calls").  The block's nodes run in its order on torch.fx's
+# Interpreter, as A10 has a body's symbolic execution run ("not on a second loop over a graph's nodes"), on fake
+# example values:
+# - a placeholder takes its example input; an operator.getitem of a call's result that is no tensor (a tuple or list
+#   the call returns) takes its item; a call of a Function exports it; the output returns.  Any other node (a module
+#   or operator the block runs itself, an attribute, a getitem of a tensor) is refused, an exception before anything
+#   is planned.
+# - A call's arguments are fake tensors of their metadata, every one of one FakeTensorMode (`mode`), made by
+#   torch.empty_strided in it, so nothing is allocated, in the region or by torch: "FakeTensor extends MetaTensors to
+#   also carry an additional `fake_device`" (torch 2.14.0 torch/_subclasses/fake_tensor.py), and a factory in that mode
+#   runs on the meta device and wraps its result with the device asked for (torch/_subclasses/fake_impls.py
+#   constructors: `new_kwargs["device"] = torch.device("meta")`, then from_meta_and_device with `out_device`).
+#   torch.export takes them: its non-strict tracing fakifies each input by its own mode's from_tensor
+#   (torch/_export/non_strict_utils.py fakify: `fake = mode.from_tensor(t, source=source,
+#   symbolic_context=symbolic_context)`), which describes a fake tensor by its fake device (torch/_subclasses/
+#   meta_utils.py describe_tensor, `device=t.device`) and its sizes ("FakeTensor from a different ShapeEnv.  Transfer
+#   symbols."), and _export_for_training expects them ("If we are tracing with fake inputs, it is expected to see fake
+#   tensor constants", torch/export/_trace.py); every fake input of one call must be of one mode (torch/_guards.py
+#   detect_fake_mode: "fake mode ... doesn't match mode"), so all are `mode`'s.
+# - Each export is torch.export.export(module, args, kwargs, strict=False), as mesh's engines.py captured
+#   (`torch.export.export(module, tuple(arguments), strict=False)`, mesh 1f794b8f^ rdma/torch-mesh/torch_mesh/
+#   engines.py), which "produces a traced graph representing only the Tensor computation of the function in an
+#   Ahead-of-Time (AOT) fashion, which can subsequently be executed with different inputs or serialized"
+#   (torch/export/__init__.py); then run_decompositions with an empty table, the functional ATen dialect (partition's
+#   note); its module, "a self contained GraphModule with all the parameters/buffers inlined" (ExportedProgram.module,
+#   with no guards submodule: check_guards=False), with torch's own pass removing its run-time assertions
+#   (torch/_export/passes/remove_runtime_assertions.py _RemoveRuntimeAssertionsPass, _assert_tensor_metadata among
+#   them), since every metadata is fixed when the function is compiled ("Compile-time, never runtime checks", the
+#   operator).  Its result is its outputs' fake values, each output node's meta['val'] (_value's note), unflattened by
+#   its call_spec's out_spec, as fake tensors of `mode`.
+# - A Function called again with the same argument metadata (its pytree's spec and each leaf's _metadata) is the same
+#   compiled function; with other metadata another, exported anew, as JAX traces anew only "on a trace cache miss"
+#   (R. Frostig, M. J. Johnson and C. Leary, SysML 2018; design/aot-compilation-change-request.md, appendix item 6).  A
+#   compiled function's ordinal is its place in the order of first calls, the same at every rank whatever its device
+#   (mesh-collective.h struct mesh_function: function k named (group, k + 1)).
+# `of`: each call node's compiled function; `calls`: the block's calls' compiled functions in program order (mesh_plan's
+# `calls`); `reads`: for each call, the calls whose results it reads, through getitems (`origin`).
+class _Export(torch.fx.Interpreter):
+    def __init__(self, gm, mode):
+        super().__init__(gm)
+        self.mode, self.compiled, self.of, self.origin, self.calls, self.reads = mode, [], {}, {}, [], []
+
+    def fake(self, value):
+        if not isinstance(value, torch.Tensor):
+            return value
+        with self.mode:
+            return torch.empty_strided(tuple(value.shape), tuple(value.stride()), dtype=value.dtype,
+                                       device=value.device)
+
+    def run_node(self, n):
+        function = self.module.get_submodule(n.target) if n.op == 'call_module' else None
+        if isinstance(function, Function):
+            args, kwargs = self.fetch_args_kwargs_from_env(n)
+            return self.export(n, function, args, kwargs)
+        source = n.args[0] if n.op == 'call_function' and n.target is operator.getitem and n.args else None
+        if isinstance(source, Node) and source in self.origin and not isinstance(self.env[source], torch.Tensor):
+            self.origin[n] = self.origin[source]
+            return super().run_node(n)
+        if n.op in ('placeholder', 'output'):
+            return super().run_node(n)
+        raise NotImplementedError(
+            '%s (%s %s): a node of the traced program that is no placeholder, no call of a compiled function, no '
+            'operator.getitem of such a call\'s result and no output; nothing runs eagerly between compiled calls '
+            '(design/aot-compilation-change-request.md A1, corrected 2026-11-05)' % (n.name, n.op, n.target))
+
+    def export(self, n, function, args, kwargs):
+        flat, spec = pytree.tree_flatten((args, kwargs))
+        signature = (spec, tuple(_metadata(v) for v in flat))
+        found = [k for k, c in enumerate(self.compiled) if c.function is function and c.signature == signature]
+        if not found:
+            exported = torch.export.export(function.module, tuple(args), dict(kwargs), strict=False) \
+                .run_decompositions({})
+            gm = exported.module(check_guards=False)
+            _RemoveRuntimeAssertionsPass()(gm)
+            out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
+            result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
+            self.compiled.append(Compiled(function, signature, gm, flat, result, exported.call_spec.out_spec))
+            found = [len(self.compiled) - 1]
+        self.of[n], self.origin[n] = found[0], len(self.calls)
+        self.reads.append({self.origin[a] for a in n.all_input_nodes if a in self.origin})
+        self.calls.append(found[0])
+        return self.compiled[found[0]].result
+
+
+# design/aot-compilation-change-request.md A1, A8 to A10 (2026-11-05, design/compilation-coordination.md, "The
+# documents' corrections of 2026-11-05", points 1, 2, 4 and 5, and "The revisions of 4e78f6f4"): program(block,
+# *example_inputs), the program's callable, in place of torch.compile(f, backend=backend(placement, weights)) and
+# serialize, which go.  `block`, an nn.Module whose forward calls its compiled functions (Function submodules), is
+# traced by torch.fx's symbolic tracer with each compiled function a leaf (Tracer; A10, "The calls' graph"), and its
+# compiled functions are exported at their calls in program order (_Export); A10's analysis gives each its entry
+# (_analyse) and each Function's placement function its operand, once (A2: placement(gm, example_inputs), its exported
+# graph and its example arguments).  Then the program is planned (`make`), before it runs:
+# - on one map read (mesh_nodes_read), each compiled function partitioned, lowered and weighed (partition, lower,
+#   its weighting function, A3), one IR a function, and refused at compile time where a call with a section at this
+#   node reads the result of a call with none (A4, withdrawn text: "it has no value for any program code to read");
+# - one mesh_plan call for the whole program (point 5: "The plan call's form for a whole program is A8 and A9 ... there
+#   is one IR of the program and one serialized operand of it"): every function's declared transfers, weights, values,
+#   dependences and A10 bound as its struct mesh_function, the block's calls in program order as `calls`, the
+#   program's one mapping out (`*view`); every plan's map serial then compared with the IR's (ESTALE, the coordinator's
+#   ruling on review V2's finding 6), every value bound over the mapping (_bind), MPS values over one buffer of it
+#   (_placed_buffer); a failure after mesh_plan retires the program;
+# - after an ESTALE or a cancelled range (ECANCELED) the next run plans again: the program retired (_retire), then
+#   planned whole on the map as it is; mesh_plan is EBUSY until the bridge has released the root (mesh-collective.h:
+#   "EBUSY where the root's `owner` is not 0 ... before anything is written"), raised as any failure, and the next
+#   run tries again (the coordinator's brief for point 5).
+# Each run interprets the block (_Program), each call of a compiled function one execution of its plan (_execute).
+# The program is retired when its callable is collected (_dropped).  What must stay: no placement and no weight chosen
+# here; every operand of mesh_plan the same at every rank but this node's values
+def program(block, *example_inputs):
     tracer = Tracer()
-    graph = tracer.trace(block)
-    gm = torch.fx.GraphModule(tracer.root, graph)
-    return _Program(gm, _analyse(gm)).run
+    gm = torch.fx.GraphModule(tracer.root, tracer.trace(block))
+    exporter = _Export(gm, FakeTensorMode())
+    exporter.run(*[exporter.fake(x) for x in example_inputs])
+    compiled, of, calls, reads = exporter.compiled, exporter.of, exporter.calls, exporter.reads
+    entries = _analyse(gm, of, [record.function.module for record in compiled])
+    operands = [record.function.placement(record.gm, record.examples) for record in compiled]
+    context, state = _context(), {'stale': True, 'mapping': None, 'runs': None, 'devices': ()}
 
-
-# design/aot-compilation-change-request.md A1 (PyTorch 2 section 3.1: "a custom compile function which takes a
-# torch.fx.Graph and a list of example inputs and returns a Python callable"), the placement-choosing function and the
-# weighting function its parameters (A2, A3; design/compilation-coordination.md, "The torch backend"), neither with a
-# default: torch.compile(f, backend=backend(placement, weights)).  Each call of the compile function takes the next
-# ordinal of the program's compiled functions, the graph's `function` (design/compilation-coordination.md, "The
-# appendix's revisions", N1), kept by every replan of that graph.  The placement operand is chosen once; the IR is built
-# from it on the map as it is, and built again where the callable plans again.  A10's output is the entry of the traced
-# program's call within which Dynamo compiles the graph (CALLING), carried by every IR built for it (TT7)
-def backend(placement, weights):
-    def compiler(gm, example_inputs):
-        function, calls = next(FUNCTIONS), CALLING[-1] if CALLING else None
-        operand = placement(gm, example_inputs)
-
-        def build():
-            ir = partition(gm, operand)
-            ir.calls = calls
+    def make():
+        if state['mapping'] is not None:
+            _retire(context, state)
+        nodes, header = mesh.Nodes(), mesh.Header.from_address(context.M)
+        mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
+        irs = []
+        for k, (record, operand) in enumerate(zip(compiled, operands)):
+            ir = partition(record.gm, operand, nodes, header.block * header.pgsz)
+            ir.calls = entries[k]
             lower(ir)
-            ir.weights = list(weights(ir))
-            return ir
-        return serialize(build, function)
-    return compiler
+            ir.weights = list(record.function.weights(ir))
+            if len(ir.weights) != len(ir.declared) or not all(isinstance(w, mesh.Weight) for w in ir.weights):
+                raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight '
+                                 'each (A3)' % (len(ir.weights), len(ir.declared)))
+            irs.append(ir)
+        for j, k in enumerate(calls):
+            absent = sorted(r for r in reads[j] if irs[calls[r]].device is None)
+            if irs[k].device is not None and absent:
+                raise ValueError('call %d of the program, of compiled function %d, has its section at map index %d '
+                                 'and reads the result of call %d, whose function has none there: such a node "has '
+                                 'no value for any program code to read" (design/aot-compilation-change-request.md '
+                                 'A4, withdrawn text)' % (j, k, nodes.self, absent[0]))
+        arrays = [((mesh.Declared * len(ir.declared))(*ir.declared), (mesh.Weight * len(ir.weights))(*ir.weights),
+                   (mesh.Value * len(ir.values))(*ir.values),
+                   (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir in irs]
+        functions = (mesh.Function * len(irs))(*[
+            mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
+                          C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
+                          len(e), 0, ir.calls.outstanding, 0) for ir, (d, w, v, e) in zip(irs, arrays)])
+        view = mesh.View()
+        mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
+                                      (mesh.U * len(calls))(*calls), len(calls), C.byref(view)))
+        state.update(mapping=_Mapping(view), devices={layout[2] for ir in irs for layout in ir.layouts})
+        try:
+            if any(mesh.State.from_address(context.M + f.plan).serial != nodes.serial for f in functions):
+                raise OSError(errno.ESTALE, 'a plan\'s map serial is not the one its IR was built on: plan again')
+            buffer = _placed_buffer(view) if 'mps' in state['devices'] else None
+            try:
+                bound = [_bind(context, ir, values, buffer, state['mapping']) for ir, (_, _, values, _) in
+                         zip(irs, arrays)]
+            finally:
+                if buffer:
+                    PUT(buffer, SELECTOR[b'release'])
+        except BaseException:
+            _retire(context, state)
+            raise
+        state.update(stale=False, runs=[{'ir': ir, 'plan': f.plan, 'executions': 0, 'spec': record.spec,
+                                         'places': places, 'sections': sections, 'devices': devices}
+                                        for ir, f, record, (places, sections, devices) in
+                                        zip(irs, functions, compiled, bound)])
+    make()
+
+    def run(*inputs):
+        if state['stale']:
+            make()
+        try:
+            return _Program(gm, lambda node, args, kwargs: _execute(context, state['runs'][of[node]], args,
+                                                                    kwargs)).run(*inputs)
+        except OSError as failure:
+            if failure.errno in (errno.ESTALE, errno.ECANCELED):
+                state['stale'] = True
+            raise
+    weakref.finalize(run, _dropped, context, state)
+    return run
