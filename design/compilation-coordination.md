@@ -3109,6 +3109,18 @@ points 1, 2 and 4, and are superseded with them.
      - `ENOMEM` from fragmentation.
      Release at retirement stays deferred reclamation (RCU). The program's group still names its plans, as NCCL's
      `ncclUniqueId` names a communicator.
+   - Two things the coordinator's brief for the next unit called open are answered by the documents. The operator, of
+     that brief: "but both of these sound idiomatic instead of citational and there are no groundings to literature,
+     data structures, or algorithms? are they even questions?" They are not.
+     - **The plan call's form for a whole program** is A8 and A9. A8: "The compilation must carry one IR from
+       partitioning to serialization, as an operand of its own", its type R3's task graph, R4's kinds, and the
+       placement and weighting operands. A9: the serialized operand, per node, in MSCCL-IR's shape. With the program
+       exported whole (point 1), there is one IR of the program and one serialized operand of it.
+     - **How the bridge finds a program's plans** is A9 and R1. "The bridge consumes the lists", and "every address is
+       a constant in the plan" (C3.3). R1's method is U-Net's and VIA's queues of descriptors over registered memory,
+       which the interface knows from the endpoint's creation; it does not search for them. So the serialized
+       operand's place is a constant the region's layout names once, as the bridge's own pages are "laid out once with
+       the region" (disjoint-pages A3). Nothing walks heads to find it.
 6. **Every value one run of pages (PB R2 and R4; DP C3.3).**
    - Wrong against: the operator's typing, "function B requires set of pages operand_b to be complete but not
      contiguous" and "domain:Async,noncontiguous,incomplete"; and the turn "collective functions only 'know' about
