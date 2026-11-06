@@ -92,7 +92,11 @@
    plan's executions on a lane in order; nothing written in or beside a page; no request taken back but by the child's
    exit */
 #include "mesh-bridge.h"
-#include "mesh-dataflow.h"
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): mesh-dataflow.h
+   is no longer included, reversing owner B1's note above ("included again, for the walk"): the walk of the claims'
+   heads (mesh_head_after, mesh_head_state) is gone, and the program's plans are read at their places through mesh.h
+   (mesh_program, mesh_program_plan; mesh-bridge.h plan_from).  What must stay: nothing of the library's client
+   interface here */
 #include "mesh-graph.h"
 
 /* design/prepared-machine.md#M29: d6dceac's prepared SEND (its span and request, one cache line's worth of what the
@@ -252,14 +256,22 @@ struct cursor { uint64_t execution,round,at,end; uint32_t copy,padding; };
    queue holds its every message from its first (its barrier, A7), each until every lane carrying it has taken it (the
    room's bound, appendix item 2).  Why: item 2, "Each plan's delivered calls reach the bridge at a node through a
    queue of the plan's own ... The bridge reads it in place, by view, and nothing copies it".  What must stay: the
+   progress thread's alone.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): a flow is the plan at place `function` among the program's plans (mesh.h struct
+   mesh_program `table` word k, function k + 1's: mesh_program_plan) of the program's root of generation
+   `generation`, as its load read them (plan_stands), where it was the claim at head row `head` with its `owner` word
+   and generation; `owner` gone.  Why: point 5, "These go: `mesh_claim_take`'s first fit and the claim's head record";
+   the root's generation is minted once a program from hdr `serial` (mesh.h struct mesh_program), so (place,
+   generation) names one plan of one program as (head, owner, generation) named one claim's.  What must stay: the
    progress thread's alone */
 enum { FLOW_SERVING, FLOW_CANCELLED };
 struct flow_set { uint32_t set,size; uint64_t first; };
 struct flow {
   struct flow *next;
   int state,ledger;
-  uint32_t head,lanes,carrying[2],copies;
-  uint64_t owner,generation,send_count,receive_count,sent,landed,posted;
+  uint32_t function,lanes,carrying[2],copies;
+  uint64_t generation,send_count,receive_count,sent,landed,posted;
   struct mesh_state *words;
   struct prepared_send *sends;
   struct prepared_receive *receives;
@@ -426,10 +438,19 @@ static int plan_inside(const struct mesh_state *words){
    read again (e6bd7db2's section 6, "A load", step 2, as design/compilation-coordination.md, Q5 takes it: the hazard
    pointer's announce-and-recheck, M. M. Michael, Hazard pointers: safe memory reclamation for lock-free objects, IEEE
    TPDS 15(6), 2004), and the test by which a walk ends a loaded plan whose claim closed or was reused (plans_walk).  A generation is minted once from hdr
-   `serial` (mesh-dataflow.h mesh_claim_take), so a head a later claim reused reads another */
-static int plan_stands(uint32_t head,uint64_t owner,uint64_t generation,const struct mesh_state *words){
-  return atomic_load_explicit(&mesh_buffers(M)[head].owner,memory_order_acquire)==owner &&
-    atomic_load_explicit(&mesh_page(M)[head].device,memory_order_relaxed)==generation && mesh_head_state(M,head)==words;
+   `serial` (mesh-dataflow.h mesh_claim_take), so a head a later claim reused reads another.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): whether the plan read at place `function` of the program's root of generation
+   `generation` stands there still: the plan standing at that place (mesh.h mesh_program_plan: the root's `owner` not
+   0 and `closed` 0, the place below its `plans`, the plan's `closed` 0, each read with acquire) the same state
+   section, and the root's `generation`, read after them, the same, where a claim's head was read again.  It is the
+   root read again after the announcement (plan_load; M. M. Michael, IEEE TPDS 15(6), 2004, as above), and the test by
+   which a walk ends a loaded plan the program retired, alone (its `closed`) or with itself (the root's), or a
+   released root's next program replaced.  Why: point 5, "Nothing walks heads to find it"; the root's generation is
+   minted once a program from hdr `serial` (mesh.h struct mesh_program), so a place a later program's plan holds reads
+   another.  What must stay: the plan read again after the announcement, before the load reads it */
+static int plan_stands(uint32_t function,uint64_t generation,const struct mesh_state *words){
+  return mesh_program_plan(M,function)==words && mesh_program(M)->generation==generation;
 }
 /* a lane's cursor at the next execution, on that execution's copy's records on the lane (`first` the lane's u + 1
    bounds, struct flow) */
@@ -1062,15 +1083,22 @@ failed:
    announcement is transient, set and cleared within this call (mesh.h struct mesh_port_info).
    2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW): step 3's EALREADY is gone
    (link_prepare); the start reads no `held` bit (mesh-dataflow.c mesh_transfers_start), which the bridge's release
-   still reads (mesh-dataflow.c mesh_retired_release).  What must stay: steps 1, 2, 4 and 5 */
-static int plan_load(struct port *port,uint32_t head,uint64_t owner,uint64_t generation,struct mesh_state *words,
+   still reads (mesh-dataflow.c mesh_retired_release).  What must stay: steps 1, 2, 4 and 5.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): the plan at place `function` of the program's root of generation `generation` (as the
+   walk read them, plans_walk), where it was the claim at head `head` with its `owner` and generation: step 1's
+   announcement is the root's `generation` in the port's `prepared`, which the root's release reads (mesh-dataflow.h
+   mesh_retired_release: kept while a port's `prepared` is its generation), and step 2 reads the root again
+   (plan_stands).  Why: point 5, "Release at retirement stays deferred reclamation (RCU)"; "Nothing walks heads to
+   find it".  What must stay: steps 1, 2, 4 and 5 */
+static int plan_load(struct port *port,uint32_t function,uint64_t generation,struct mesh_state *words,
                      struct flow **loaded){
   struct mesh_port_info *info=&mesh_links(M)[port->index].port;
   const uint32_t p=port->index;
   atomic_store_explicit(&info->prepared,generation,memory_order_release);
   atomic_thread_fence(memory_order_seq_cst);
   int error=EAGAIN;
-  if(plan_stands(head,owner,generation,words)){
+  if(plan_stands(function,generation,words)){
     struct flow *f=calloc(1,sizeof *f);
     error=f?link_prepare(port,f,words):ENOMEM;
     if(error){
@@ -1095,7 +1123,7 @@ static int plan_load(struct port *port,uint32_t head,uint64_t owner,uint64_t gen
          of.  What must stay: `taken[p]` never lowered */
       /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): `told` gone with `taken[p]`;
          the note above is the 112 form's.  What must stay: nothing of it */
-      f->head=head;f->owner=owner;f->generation=generation;*loaded=f;
+      f->function=function;f->generation=generation;*loaded=f;
       atomic_fetch_or_explicit(&words->held,UINT64_C(1)<<p,memory_order_release);
     }
   }
@@ -1641,26 +1669,34 @@ static void link_close(struct port *port,uint32_t served){
    missed (mesh-dataflow.h: a walk reads a moving set); each publication and close raises `plans` again, so the next
    pass walks again.  `refused[p]` is read before the announcement: a value read of a claim released meanwhile only
    skips a plan that no longer stands, and one read 0 is loaded only after plan_load's announcement and head read
-   again find the plan standing.  Nothing more is loaded once a plan ended with requests outstanding (`ended`) */
+   again find the plan standing.  Nothing more is loaded once a plan ended with requests outstanding (`ended`).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): the program's plans read at their places (mesh-bridge.h plan_from: k below the root's
+   `plans`, mesh.h mesh_program_plan), where the claims' heads were walked; a loaded plan ended where its place no
+   longer holds it standing in the root of its generation (plan_stands); a plan standing at place k loaded where this
+   port holds no flow of (k, the root's `generation`, read after the plan) and has not refused it.  Why: point 5, "the
+   serialized operand's place is a constant the region's layout names once ... Nothing walks heads to find it";
+   design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "the bridge reads the
+   serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: ended plans ended
+   before any load; nothing loaded once `ended`; a refusal by an earlier child standing */
 static void plans_walk(struct port *port,uint32_t served){
   struct port_plans *at=port_plans+port->index;
   struct flow **tail=&at->loaded;
   while(*tail){
     struct flow *f=*tail;
-    if(plan_stands(f->head,f->owner,f->generation,f->words)){tail=&f->next;continue;}
+    if(plan_stands(f->function,f->generation,f->words)){tail=&f->next;continue;}
     *tail=f->next;
     plan_end(port,f,served);
   }
-  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX && !at->ended;head=mesh_head_after(M,head)){
-    const uint64_t owner=atomic_load_explicit(&mesh_buffers(M)[head].owner,memory_order_acquire);
-    const uint64_t generation=atomic_load_explicit(&mesh_page(M)[head].device,memory_order_relaxed);
-    struct mesh_state *words=mesh_head_state(M,head);
-    if(!words || atomic_load_explicit(&words->refused[port->index],memory_order_relaxed))continue;
+  struct mesh_state *words;
+  for(uint32_t k=0;!at->ended && (words=plan_from(&k));k++){
+    const uint64_t generation=mesh_program(M)->generation;
+    if(atomic_load_explicit(&words->refused[port->index],memory_order_relaxed))continue;
     const struct flow *held=at->loaded;
-    while(held && (held->head!=head || held->generation!=generation))held=held->next;
+    while(held && (held->function!=k || held->generation!=generation))held=held->next;
     if(held)continue;
     struct flow *f=NULL;
-    if(!plan_load(port,head,owner,generation,words,&f)){*tail=f;tail=&f->next;}
+    if(!plan_load(port,k,generation,words,&f)){*tail=f;tail=&f->next;}
   }
 }
 
@@ -1996,11 +2032,21 @@ int guard_raise(struct port *port){
    mesh_transfers_start: ESTALE).  Why: design/aot-compilation-change-request.md, appendix item 2, "The only waits are
    at the sinks of the added synchronization edges, on a count that only rises.  Each ends when its source moves on, or
    when the view ends and the plan with it (`ESTALE`)"; C3.1, a cancellation arrives on a count.  What must stay: the
-   count only raised */
+   count only raised.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 4, and "The
+   revisions of 4e78f6f4"): every synchronization edge into the plan here (mesh.h struct mesh_sync, the `waits` entries
+   at `syncs`) has its `count` raised to UINT64_MAX (release) and its waiter woken (os_sync_wake_by_address_all,
+   region-shared), where the one edge's `wait_count` was.  Why: point 4, the program's whole IPC graph, a plan an actor
+   a call, so a plan has as many edges into it here as Convert-to-SC-graph added (BSL §9, Fig. 6); appendix item 2:
+   "Each ends when its source moves on, or when the view ends and the plan with it (`ESTALE`)".  What must stay: each
+   count only raised, this thread its one writer */
 static void plan_cancel(struct mesh_state *words,uint32_t from){
-  if(from==UINT32_MAX && words->waits!=MESH_ABSENT){
-    atomic_store_explicit(&words->wait_count,UINT64_MAX,memory_order_release);
-    os_sync_wake_by_address_all(&words->wait_count,sizeof words->wait_count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  if(from==UINT32_MAX){
+    struct mesh_sync *edge=mesh_syncs(M,words);
+    for(uint32_t e=0;e<words->waits;e++){
+      atomic_store_explicit(&edge[e].count,UINT64_MAX,memory_order_release);
+      os_sync_wake_by_address_all(&edge[e].count,sizeof edge[e].count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    }
   }
   const uint32_t copies=words->copies;
   const uint64_t entries=words->entries;
@@ -2018,29 +2064,29 @@ static void plan_cancel(struct mesh_state *words,uint32_t from){
     }
   }
 }
-/* the next plan standing after claim head *head (UINT32_MAX: from the first), its state section, *head its head; NULL
-   past the last (mesh-dataflow.h mesh_head_after, mesh_head_state): the parent's walk of every standing plan, for its
-   cancellations (e6bd7db2's section 6, "The parent walks the heads on its event-loop thread, for plan_stale, the
-   cancellations, clients_turn and the release", as design/compilation-coordination.md, Q5 takes it) */
-static struct mesh_state *plan_after(uint32_t *head){
-  for(uint32_t at=mesh_head_after(M,*head);at!=UINT32_MAX;at=mesh_head_after(M,at)){
-    struct mesh_state *words=mesh_head_state(M,at);
-    if(words){*head=at;return words;}
-  }
-  return NULL;
-}
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): plan_after (the parent's walk of the claims' heads, mesh_head_after and mesh_head_state,
+   for its cancellations) is removed; streams_cancel and plan_stale read the program's plans at their places
+   (mesh-bridge.h plan_from).  Why: point 5, "Nothing walks heads to find it".  What must stay: every standing plan
+   read, on the parent's thread */
 /* the `held` bits `ports` (bit p port p) cleared (atomic_fetch_and, release) in every plan not yet released: each claim
    head whose owner word is not 0 (mesh-dataflow.h mesh_head_after) and whose publication `state` (acquire) names a
    state section, closed or standing, on the parent's thread, the releaser's.  A dead child's bit (e6bd7db2's section 6,
    "Retirement and the deferred release": "A child's death: streams_cancel(port) with !port->child clears bit p in
    every plan not yet released, on the parent's thread, the releaser's"; design/compilation-coordination.md, Q5): its
    requests are released by its exit, so nothing of it names the plans' pages any more, and the release
-   (mesh_retired_release) frees a closed claim no live port holds */
+   (mesh_retired_release) frees a closed claim no live port holds.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): every plan of the program's root not yet released (its `owner`, acquire, not 0), closed
+   or standing, each read at its place, the root's `table` word k for k below its `plans` (mesh.h struct
+   mesh_program), where it was each claim head's publication `state`.  Why: point 5: the claim's head record goes, and
+   "Release at retirement stays deferred reclamation (RCU)", whose release reads every plan's `held`
+   (mesh-dataflow.c mesh_holding_retained).  What must stay: on the parent's thread, the releaser's */
 static void held_clear(uint64_t ports){
-  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
-    struct mesh_state *words=mesh_state_at(M,__atomic_load_n(&mesh_publication_at(M,head)->state,__ATOMIC_ACQUIRE));
-    if(words)atomic_fetch_and_explicit(&words->held,~ports,memory_order_release);
-  }
+  struct mesh_program *program=mesh_program(M);
+  if(!atomic_load_explicit(&program->owner,memory_order_acquire))return;
+  const uint64_t *table=(const uint64_t *)(const void *)((const char *)M+program->table);
+  for(uint32_t k=0;k<program->plans;k++)atomic_fetch_and_explicit(&mesh_state_at(M,table[k])->held,~ports,memory_order_release);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:619-654 streams_open (11807bec), reduced to what it is under the page lists:
    the tag's streams made new and live for a new pairing; here the port's serving opened, as its lanes connect and
@@ -2083,12 +2129,15 @@ void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
    receives cancelled and every port index no live child of this bridge holds (a reaped child's, a port not found yet,
    or a dead bridge's children's at the adoption) cleared from every plan's `held`, as `prepared` was cleared for every
    port with no child.  What must stay: the signature (mesh-children.c, a lifecycle file, calls it); a live child's
-   holding its own to clear (plan_end), or its reap's */
+   holding its own to clear (plan_end), or its reap's.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): every
+   standing plan read at its place (mesh-bridge.h plan_from), where plan_after walked the heads.  What must stay: as
+   above */
 static struct cancelled { uint32_t node,index,every; } cancelled[MESH_PORTS];
 void streams_cancel(const struct port *port){
   struct mesh_state *words;
   if(!port){
-    for(uint32_t head=UINT32_MAX;(words=plan_after(&head));)plan_cancel(words,UINT32_MAX);
+    for(uint32_t k=0;(words=plan_from(&k));k++)plan_cancel(words,UINT32_MAX);
     uint64_t live=0;
     for(uint32_t p=0;p<port_count;p++){
       if(ports[p].child)live|=UINT64_C(1)<<ports[p].index;
@@ -2105,7 +2154,7 @@ void streams_cancel(const struct port *port){
     free(records);
   }
   if(last->node && (last->every || last->index!=UINT32_MAX))
-    for(uint32_t head=UINT32_MAX;(words=plan_after(&head));)plan_cancel(words,last->every?UINT32_MAX:last->index);
+    for(uint32_t k=0;(words=plan_from(&k));k++)plan_cancel(words,last->every?UINT32_MAX:last->index);
   if(!port->child){
     atomic_store_explicit(&mesh_links(M)[port->index].port.prepared,0,memory_order_release);
     held_clear(UINT64_C(1)<<port->index);
@@ -2159,10 +2208,13 @@ void streams_cancel(const struct port *port){
    standing here, or its start reads the moved serial (R3), by the pairing above.  The generation passed to plan_cancel
    and the re-read go: each plan is named by its state section, never rewritten while it stands.  What must stay: the
    fence after the serial's move and before any plan or its `executions` is read; this call on the parent's one
-   thread */
+   thread.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the standing
+   plans read at their places (mesh-bridge.h plan_from), where plan_after walked the heads.  What must stay: as
+   above */
 void plan_stale(void){
   atomic_thread_fence(memory_order_seq_cst);
   const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
   struct mesh_state *words;
-  for(uint32_t head=UINT32_MAX;(words=plan_after(&head));)if(words->serial!=serial)plan_cancel(words,UINT32_MAX);
+  for(uint32_t k=0;(words=plan_from(&k));k++)if(words->serial!=serial)plan_cancel(words,UINT32_MAX);
 }
