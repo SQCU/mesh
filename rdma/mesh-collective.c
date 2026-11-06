@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* tag pre-return-20261103 rdma/mesh-collective.c, verbatim: every node computes the same trees, routes and programs
    from the same map, so no product is fused into a sum where one node's compiler might fuse it and another's not */
@@ -88,6 +89,13 @@ struct plan_demand {
   uint32_t source,identity,first;         /* first: its first declared transfer, which numbers it (GO5) */
   uint32_t mine;                          /* the index in `values` of this node's value of it (this node its source or
                                              a destination), else MESH_ABSENT */
+  /* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7; "The
+     revisions of 4e78f6f4"): `offset`, its first block in this node's value `mine` (struct mesh_declared `first`), so
+     its pages are blocks [offset, offset + pages) of each copy of that value.  Why: point 7, "name, in each declared
+     transfer, the pages of its destination value that it lands in, as NCCL's receives land at offsets of one result";
+     design/plan-to-bridge-change-request.md R2, corrected: "A collective's receive lands in the pages of the value it
+     belongs to, at its place in that value".  What must stay: `mine` as above */
+  uint32_t offset;
   uint32_t tree,trees;                    /* its trees, plan `tree` [tree, tree + trees) */
   uint32_t release;                       /* this node's release of it, its supplied word's index (struct mesh_state
                                              `supplied`), where this node is its source */
@@ -146,14 +154,32 @@ struct plan_value { uint32_t demand,node,write,read,reads,source; };
    2026-11-05, owner C3 (design/compilation-coordination.md, "The documents' revisions of edd4b583", "Amendments
    during the work (2026-11-05)", GO4′: "`walk` goes with T6's ties"): the removal of `walk` cited to the ruling. */
 struct plan_entry { uint32_t value,node,direction,demand,field,communication,set,place; uint64_t page; };
+/* A range at this node in its value (2026-11-05, point 7; "The revisions of 4e78f6f4"): demand `demand`'s pages, blocks
+   [first, first + pages) of each copy of this node's value `value` (struct mesh_declared `first`); sorted by value,
+   then first (plan_offset_order), each value's ranges consecutive */
+struct plan_offset { uint32_t value,first,pages,demand; };
+/* One synchronization edge of the program's IPC graph at one of the plan's actors here, as struct mesh_sync holds it
+   (2026-11-05, point 4; plan_graph): `node`, `function`, `position`, `every`, `at` and `delay` as mesh.h states them */
+struct plan_sync { uint32_t node,function,position,every,at; uint64_t delay; };
 struct plan {
   struct mesh_ctx *context;
   const struct mesh_declared *declared;
   uint32_t transfers;                     /* the declared transfers, declared[0 .. transfers) */
   struct mesh_value *given;               /* the caller's values, `givens` of them */
   uint32_t givens;
-  uint32_t *named;                        /* named[j]: the first declared transfer of the demand whose range values[j]
-                                             is here, MESH_ABSENT where none (a local value) */
+  /* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7; "The revisions
+     of 4e78f6f4"): named[j] the place in `offset` of values[j]'s first range here, its others after it (`offsets` of
+     them in all, sorted by value and first block), MESH_ABSENT where none lies in it (a local value), where it was the
+     first declared transfer of the one demand whose range values[j] was.  Why: point 7, "no concatenation and no copy
+     of a part remains"; R2, corrected: "A range is not a value of its own".  What must stay: MESH_ABSENT for a local
+     value */
+  uint32_t *named;
+  struct plan_offset *offset;
+  uint32_t offsets;
+  /* the function's operands (struct mesh_function): its weights and dependences, A10's bound */
+  const struct mesh_weight *weights;
+  const struct mesh_dependence *dependence;
+  uint32_t dependences;
   struct plan_demand *demand;             /* the demands, by their first declared transfer (GO5) */
   uint32_t demands,n,self,copies;         /* copies: u (plan_unroll) */
   uint64_t serial;
@@ -189,6 +215,8 @@ struct plan {
   uint32_t *head,*lag;                    /* edge k's head vertex, and its execution distance */
   uint32_t *between;                      /* between[a x local + b]: D_ab, the largest least lag from a read of this
                                              node's routed value a to b's write (plan_unroll) */
+  uint32_t *farthest;                     /* farthest[w]: E_w, the largest D_wz over this node's routed values z
+                                             (UINT32_MAX where any is; plan_unroll, plan_before) */
   /* the state section (plan_layout), offsets from its start: `hops` its entries', `words` its end (2026-11-05, "The
      revisions of 46ae8fdf", LP9: `sequences`, the sequence words', gone) */
   uint64_t phases,counts,supplied,status,hops,words;
@@ -196,17 +224,29 @@ struct plan {
      the section, `deliveries` (room `room` struct mesh_delivery) and `submits` (room `outstanding` struct
      mesh_submission), between the status and the entries.
      2026-11-05 ("The revisions of 3f106747", BS): the submissions' queue's room `submit_room`, and `room` and it the
-     queues' self-timed buffer bounds (plan_rooms), `outstanding` A10's bound alone; the synchronization edge into this
-     node (`waits` its source's map index, `wait_delay` its delay) and out of it (`tells` its sink's), MESH_ABSENT none */
-  uint64_t deliveries,submits,room,outstanding,submit_room,wait_delay;
-  uint32_t waits,tells;
-  /* the items (plan_place): routed copies (a, c) at item a x u + c, then this node's other values (others[k] the index
-     in `values` of item local x u + k; a value of lag k >= 1 k consecutive items, its copies in order), then the state
-     section, item `state` */
-  uint32_t *others,other,state;
-  uint64_t *colour;                       /* item i's first block in its space */
-  uint64_t window,outside;                /* the blocks each colouring uses (mesh_graph_left_edge's `used`) */
-  struct mesh_claim claim;
+     queues' self-timed buffer bounds, `outstanding` A10's bound alone.
+     2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 4; "The revisions
+     of 4e78f6f4"): the plan's synchronization edges at this node, `waits` into its actors here then `tells` out of
+     them (`sync`, struct mesh_sync at `syncs` in the section), where it held one edge's source and sink map indices and
+     `wait_delay`; `calls` its function's calls in the program's traced block; `time` t(x_v) of its actor at each node v
+     and `nodes` its nodes in the program's IPC graph (plan_graph).  Why: point 4, "build the program's whole IPC graph
+     at compile time, every function together, with each queue's room (5) in it"; mesh.h struct mesh_state's 117 note.
+     What must stay: `room` and `submit_room` the queues' self-timed buffer bounds, `outstanding` A10's bound */
+  uint64_t deliveries,submits,syncs,room,outstanding,submit_room,spanned,nodes,forwarded;
+  uint32_t waits,tells,calls;
+  struct plan_sync *sync;
+  double time[MESH_NODES_MOST];
+  /* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 5 and 6; "The
+     revisions of 4e78f6f4"): the plan's items among the program's (plan_place): routed copy (a, c) item routed + a x u
+     + c; values[j]'s first item[j] (a local value's copies, or a named value's uncovered blocks, one item a copy;
+     MESH_ABSENT where a named value has none); the state section item `state`; `base` the section's region offset,
+     where the items were numbered among this plan's alone, `colour` their first blocks, `window` and `outside` each
+     colouring's blocks and `claim` the claim of them.  Why: point 5, "place the whole program's values in one offline
+     allocation at compile time.  These go: `mesh_claim_take`'s first fit and the claim's head record"; point 6, "Place
+     every value's pages anywhere, by the fewest chains of the interference order".  What must stay: every value's,
+     every routed copy's and the state section's items */
+  uint32_t routed,*item,state;
+  uint64_t base;
 };
 
 struct plan_key { uint32_t source,identity,index; };
@@ -231,8 +271,11 @@ static uint32_t plan_end(const void *context,uint32_t e,uint32_t side){
 static int plan_leaf(const void *context,uint32_t d,uint32_t v){
   return (int)(((const struct plan_demand *)context)[d].leaves>>v&1);
 }
-/* mesh_graph_rows' keys: a solved tree's demand (its trees grouped by demand) */
-static uint32_t plan_tree_demand(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
+/* the caller's array's word k: mesh_graph_rows' keys (a solved tree's demand, its trees grouped by demand; a call's
+   function, the program's calls grouped by function; an IPC edge's tail) and mesh_graph_order's heads (plan_acyclic's
+   lag-0 rows).  2026-11-05 ("The revisions of 4e78f6f4"): one function, where plan_tree_demand, plan_head_of and
+   plan_room_tail were three copies of it (the operator's "Refactor by pattern analysis").  What must stay: word k */
+static uint32_t plan_at(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
 /* mesh_graph_rows' keys: a vertex's parent on a tree, so a vertex's row its children; the root and a vertex off the
    tree key `n`, past every vertex */
 struct plan_tree { const uint32_t *parent; uint32_t n,root; };
@@ -426,10 +469,9 @@ static int plan_template(struct plan *p,const struct mesh_dependence *dependence
 /* -- the one allocator (design/disjoint-pages-change-request.md, C3.2-C3.4; the contract's "The allocator") -------- */
 
 /* mesh_graph_lags' and mesh_graph_order's edges: the template's, edge k's head and execution distance; and the lag-0
-   edges' heads alone (plan_acyclic's rows) */
+   edges' heads alone (plan_acyclic's rows, plan_at) */
 static uint32_t plan_head(const void *context,size_t k){ return ((const struct plan *)context)->head[k]; }
 static uint32_t plan_lag(const void *context,size_t k){ return ((const struct plan *)context)->lag[k]; }
-static uint32_t plan_head_of(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
 
 /* No lag-0 cycle (the contract's "The plan call": EINVAL for a lag-0 cycle): the template's lag-0 edges, in rows by
    tail as the template's, have a topological order (mesh-graph.h mesh_graph_order; its EDEADLK is EINVAL), as
@@ -451,7 +493,7 @@ static int plan_acyclic(const struct plan *p){
       for(size_t k=p->first[v];k<p->first[v+1];k++)if(!p->lag[k])head[e++]=p->head[k];
     }
     first[p->vertices]=e;
-    status=mesh_graph_order(p->vertices,first,plan_head_of,head,indegree,ordinal)?EINVAL:0;
+    status=mesh_graph_order(p->vertices,first,plan_at,head,indegree,ordinal)?EINVAL:0;
   }
   free(first);free(head);free(indegree);free(ordinal);
   return status;
@@ -488,7 +530,11 @@ static void plan_name(const struct plan *p,uint32_t v,const char *what,uint32_t 
      the largest L").  Every rank computes the same template, lags and u, so both nodes of every adjacent pair hold the
      same copies;
    - between[a x local + b] = D_ab, the largest D(r -> write b) over this node's routed value a's reads r, for every
-     pair of this node's routed values, so the colouring's tests (plan_interferes) are table reads.
+     pair of this node's routed values, so the order's tests (plan_before) are table reads; and farthest[a] = E_a, the
+     largest D_ab over b (UINT32_MAX where any is).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6; "The revisions
+   of 4e78f6f4"): farthest added, the order's last clause's operand (plan_before), where between was the colouring's
+   (plan_interferes, gone).  What must stay: between as it is.
    The least lags are C3.3's happens-before at every larger distance too (U1): every walk of the template into a write
    passes its range's production P (plan_template, the plan's own); and, the premise the least lags rest on, a property
    of the program's dependences and not of the plan (mesh-collective.h struct mesh_dependence), every event of a node
@@ -517,7 +563,8 @@ static int plan_unroll(struct plan *p){
   uint32_t *source=malloc((size_t)sources*sizeof *source),*target=malloc((size_t)values*sizeof *target),
            *lags=malloc((cells+1)*sizeof *lags);
   p->between=malloc((pairs+1)*sizeof *p->between);
-  int status=!source || !target || !lags || !p->between?ENOMEM:0;
+  p->farthest=calloc((size_t)p->local+1,sizeof *p->farthest);
+  int status=!source || !target || !lags || !p->between || !p->farthest?ENOMEM:0;
   for(uint32_t v=0;!status && v<values;v++){
     const struct plan_value *x=p->value+v;
     source[x->source]=x->write;
@@ -543,6 +590,7 @@ static int plan_unroll(struct plan *p){
       if(lag>most)most=lag;
     }
     p->between[(size_t)a*p->local+b]=most;
+    if(most>p->farthest[a])p->farthest[a]=most;
   }
   free(source);free(target);free(lags);
   return status;
@@ -571,6 +619,12 @@ static int plan_unroll(struct plan *p){
      submissions' queue, `outstanding` struct mesh_submission (mesh.h struct mesh_state's notes; 2026-11-05, "The
      revisions of abecd389", PQ and PS: design/aot-compilation-change-request.md, appendix item 2, "It is laid out with
      the plan's pages when the plan is placed, and claimed and released with them (C3.2, C3.4)");
+   - `syncs`: the plan's synchronization edges at this node, `waits` then `tells` struct mesh_sync (mesh.h; plan_graph);
+     2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 4; "The
+     revisions of 4e78f6f4"): added between the submissions' queue and the entries.  Why: mesh.h struct mesh_state's
+     117 note, "`syncs` the region offset of their struct mesh_sync entries, the `waits` first, in the state section";
+     a plan has an actor for each call of its function, and Convert-to-SC-graph adds at most one edge into each actor
+     and one out of it.  What must stay: every offset before the submissions' queue's end as it was;
    - `hops`: this node's entries, u x n struct mesh_hop, copy c's n at [c n, c n + n) (design/compilation-
      coordination.md, "The region", struct mesh_state: "the entries; each 64-aligned"); [0, hops) the bytes mesh_plan
      starts (D3), the entries written whole after them;
@@ -609,140 +663,175 @@ static void plan_layout(struct plan *p){
   p->status=plan_align(p->supplied+p->releases*sizeof(uint64_t));
   p->deliveries=plan_align(p->status+sizeof(struct mesh_status));
   p->submits=plan_align(p->deliveries+p->room*sizeof(struct mesh_delivery));
-  p->hops=plan_align(p->submits+p->submit_room*sizeof(struct mesh_submission));
+  p->syncs=plan_align(p->submits+p->submit_room*sizeof(struct mesh_submission));
+  p->hops=plan_align(p->syncs+((uint64_t)p->waits+p->tells)*sizeof(struct mesh_sync));
   p->words=p->hops+p->entries*p->copies*sizeof(struct mesh_hop);
 }
 
-/* the colouring's order (the contract's "The allocator"): greedy by size, an item's blocks largest first, then its
-   index, which is the value order (this node's routed values in demand order, then its other values in `values`'s
-   order, then the state section) and, within a routed value or a value of lag k >= 1, the copy */
-struct plan_sized { uint64_t blocks; uint32_t item; };
-static int plan_sized_order(const void *a,const void *b){
-  const struct plan_sized *x=a,*y=b;
-  if(x->blocks!=y->blocks)return x->blocks>y->blocks?-1:1;
-  return (x->item>y->item)-(x->item<y->item);
-}
-/* mesh_graph_left_edge's interference, the contract's rule (two items interfere unless it lets them share):
-   - an invariant (the state section among them) interferes with every other item;
-   - a copy of a value of lag k >= 1 (mesh-collective.h struct mesh_value `lag`) interferes with every other item, its
-     own value's other copies among them: its write is ordered by an event of the program's, a host producer's, not by
-     an edge of the template, so no order the plan knows lets it share a page (design/disjoint-pages-change-request.md,
-     D.3.3; design/disjoint-pages-rulings-coordination.md, R4);
-   - two local execution values of lag 0 share only where their [begin, end] on this node's program order do not
-     overlap (this node's work runs in that order, execution after execution); a local execution value interferes with
-     every routed copy;
-   - routed copies (v, c) and (w, c'), D_vw = between[v x local + w], d = (c' - c) mod u: where d > 0 they share only
-     if d >= D_vw and u - d >= D_wv; where d == 0 (v != w) only if D_vw <= u, D_wv <= u and D_vw == 0 or D_wv == 0.
-     These are the distances at which their executions meet (t and t' with t' - t = d mod u: d, d - u, d + u, ...);
-     an order at the least such distance holds at every larger one of its class (design/compilation-coordination.md,
-     U1: every walk into a write passes its range's production P; and, the premise the least lags rest on, the
-     program's dependences' and untested (mesh-collective.h struct mesh_dependence), each node's events of execution t
-     precede those of t + 1, so a walk at lag L through P continues at every lag past L; plan_unroll), and a value's
-     every read before the other's write orders its writes too.  Two copies of one value
-     follow the d > 0 rule.
-   Symmetric: swapping the items swaps D_vw and D_wv and takes d to u - d.
-   2026-11-04, owner C2 (U1): this order at every larger distance cited to U1, where it cited the contract's D5.  Why:
-   D5's refusal is gone (design/aot-compilation-change-request.md, appendix item 1).  What must stay: the tests as they
-   are, the least lags' at the distances the copies' executions meet (C3.3). */
-static int plan_interferes(const void *context,uint32_t a,uint32_t b){
-  const struct plan *p=context;
-  const uint32_t u=p->copies,routed=p->local*u;
-  if(a>=routed || b>=routed){
-    if(a<routed || b<routed || a==p->state || b==p->state)return 1;
-    const struct mesh_value *x=p->given+p->others[a-routed],*y=p->given+p->others[b-routed];
-    if(x->kind==MESH_INVARIANT || y->kind==MESH_INVARIANT || x->lag || y->lag)return 1;
-    return x->begin<=y->end && y->begin<=x->end;
-  }
-  const uint32_t v=a/u,c=a%u,w=b/u,c2=b%u,d=(c2+u-c)%u;
-  const uint64_t vw=p->between[(size_t)v*p->local+w],wv=p->between[(size_t)w*p->local+v];
-  if(d)return !(d>=vw && u-d>=wv);
-  return !(vw<=u && wv<=u && (!vw || !wv));
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6: "Place every
+   value's pages anywhere, by the fewest chains of the interference order ... Greedy by size goes, with
+   `mesh_graph_left_edge`'s colouring"; "The revisions of 4e78f6f4"): plan_sized_order (greedy by size's order, an
+   item's blocks largest first), plan_interferes (mesh_graph_left_edge's interference), plan_item_page and the
+   plan's own plan_place (two greedy-by-size colourings of one plan's items, their ENOSPC as ENOMEM, its pages the
+   claim's runs) are removed.  Why: design/plan-to-bridge-change-request.md R2, corrected: "No value is placed as one
+   run.  So greedy by size (Pisarchyk and Lee), and the contiguous-block problem it approximates (M. R. Garey and D. S.
+   Johnson, Computers and Intractability, 1979, problem SR2), have no use here.  The chains replace C3.3's colouring";
+   point 5: "place the whole program's values in one offline allocation at compile time".  What must stay: the items
+   (each routed value's u copies, a relay's among them, each other value, a value of lag k >= 1 its k copies, the state
+   section), the least lags' tests at the distances the copies' executions meet, ENOMEM before anything is written. */
+
+/* An item of the program's one allocation (plan_place): `blocks` elements, each a block (point 6: "Every item is
+   counted in blocks"; mesh-graph.h mesh_graph_chains' elements), the first `element` among the chains' elements, in
+   space `space` (1 the registered window, 0 outside it: mesh-dataflow.h mesh_arena_range); `kind` the order it takes
+   part in (plan_before), of plan `function` (UINT32_MAX: the program's table), `index` its routed value here
+   (PLAN_ROUTED) or its value in `values` (PLAN_LOCAL, PLAN_ALONE), `copy` its copy */
+enum { PLAN_ALONE, PLAN_LOCAL, PLAN_ROUTED };
+struct plan_item { uint64_t element,blocks; uint32_t kind,function,index,copy,space; };
+/* the program's items (`items`, the window's first, [0, split), then the rest), their blocks (mesh_graph_chains'
+   `count`), each element's chain, each space's arena range (`range[space]`) and the program's table's item */
+struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,elements; uint32_t split,table;
+                        struct mesh_range range[2]; };
+
+/* The interference order, mesh_graph_chains' operand: before(x, y) where x's every access happens before y's first
+   write at every distance their executions meet (design/plan-to-bridge-change-request.md R2, corrected: "Two items
+   may share a page exactly when one's last access happens before the other's first write.  That is C3.3's own
+   interference test, over Lamport's happens-before (L. Lamport, Time, clocks, and the ordering of events in a
+   distributed system, CACM 21(7), 1978).  That relation is a partial order"; design/disjoint-pages-change-request.md
+   C3.3, corrected: "Two items may share a page exactly when this interference test orders them").  The tests are
+   plan_interferes' as they were, each pair that shared now ordered one way (2026-11-05, design/compilation-
+   coordination.md, "The documents' corrections of 2026-11-05", point 6; "The revisions of 4e78f6f4"):
+   - items of different plans are unordered: no edge of either template orders them;
+   - PLAN_ALONE, unordered with every item, as plan_interferes had them interfering with every item: an invariant (the
+     state sections and the table among them); a copy of a value of lag k >= 1, whose write an event of the program's
+     orders, a host producer's, not an edge of the template (design/disjoint-pages-change-request.md, D.3.3;
+     design/disjoint-pages-rulings-coordination.md, R4); and a named value's blocks no range covers (point 7; mesh-
+     collective.h struct mesh_declared `first`: "no edge of the template orders their write");
+   - two local execution values of lag 0 of one plan (PLAN_LOCAL): x before y where x's `end` is below y's `begin`,
+     their positions on this node's program order in one execution, this node's work running in that order (and, by
+     U1's premise, each node's events of execution t before those of t + 1, so the next execution's write of x
+     follows y's reads); a local execution value and a routed copy are unordered;
+   - two routed copies x = (v, c) and y = (w, c') of one plan (PLAN_ROUTED), D_vw = between[v x local + w], E_w =
+     farthest[w], u the copies: x before y where c <= c', c' - c >= D_vw (and, where c == c', D_vw == 0 and v != w:
+     y's write in x's execution follows x's every read), and c' + E_w <= u.  The last clause is the coordinating
+     implementer's (design/compilation-coordination.md, "The revisions of 4e78f6f4"), the cyclic case of R2's
+     relation, whose text states one execution's: a page holding a chain x_1 < ... < x_k is written again by x_1's
+     next instance, in execution c_1 + u, which must follow x_k's reads in execution c_k, and c_k + E_{x_k} <= u <=
+     c_1 + u gives it.  With it the relation is transitive: for x < y < z, every read of v reaches z's write within
+     D_vy + D_yz (through y's write, which precedes y's reads at lag 0), so D_vz <= D_vy + D_yz <= c_z - c_x, and c_z
+     + E_z <= u holds from y < z; and irreflexive (c == c' asks v != w, and x < y < x would be a lag-0 cycle, which
+     plan_acyclic refuses).  Dilworth's theorem needs both (mesh-graph.h: "a strict partial order the caller gives").
+     Within a chain each pair of neighbours is so ordered, and happens-before is transitive, so every earlier item's
+     accesses on a page precede each later write of it.
+   The least lags decide each test at every larger distance of its class (U1; plan_unroll). */
+struct plan_order { const struct plan *plans; const struct plan_item *item; };
+static int plan_before(const void *context,uint32_t a,uint32_t b){
+  const struct plan_order *order=context;
+  const struct plan_item *x=order->item+a,*y=order->item+b;
+  if(x->kind!=y->kind || x->function!=y->function || x->kind==PLAN_ALONE)return 0;
+  const struct plan *p=order->plans+x->function;
+  if(x->kind==PLAN_LOCAL)return p->given[x->index].end<p->given[y->index].begin;
+  const uint64_t u=p->copies,c=x->copy,later=y->copy,d=p->between[(size_t)x->index*p->local+y->index];
+  if(c>later || later-c<d || later+p->farthest[y->index]>u)return 0;
+  return c<later || x->index!=y->index;
 }
 
-/* The one allocator (design/disjoint-pages-change-request.md, C3.2-C3.4: every value placed once, at compile time, by
-   one allocator, a program holding exactly the pages its plan uses; the contract's "The allocator"): every item at
-   this node, decided once a plan, after the least lags and before anything is claimed or written.
-   - The items: each of this node's routed values' u copies (a, c), its demand's P blocks each, a relay's value among
-     them (this node on a demand's trees but neither its source nor a destination: no `values` entry names it and no
-     row holds it); each other value in `values` (a local invariant or a local execution value), its bytes in blocks,
-     one each but a value of lag k >= 1, which has k, its copies, P blocks each (Lam's modulo variable expansion: a
-     value live across k executions gets k copies; R4); the state section (plan_layout's `words` in blocks), one,
-     invariant, no rows.
-   - Two colourings by mesh_graph_left_edge, greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020; the
-     order plan_sized_order gives): the wire items (every routed copy, and the other values whose `wire` is 1) in the
-     window space, every other item (the state section among them) in the local space, each in blocks, its capacity
-     the arena's range of that kind (mesh-dataflow.h mesh_arena_range).  Interference is plan_interferes, its tests
-     table reads; under happens-before the lifetimes are not intervals on one order (a landing's write is set by another
-     node's send), so left-edge's optimality does not apply, and greedy by size is the heuristic (C3.3).
-   - `used` of each colouring (`window`, `outside`) is the claim's size in that space: the program holds exactly that.
-   - No room in a space (the colouring's ENOSPC) is ENOMEM, before anything is claimed: no fallback, nothing
-     allocated at run time.
-   Cost, once a plan and never in the run's length (C3.3): plan_acyclic's mesh_graph_order, O(V^2 + E); the least lags,
-   Dijkstra from each source, O(sources x (E + V) log V), sources the routed values' reads and writes at every node,
-   and their table, sources x values words; the colouring's walk, quadratic at worst in this node's items (its values
-   x u), each test one table read.
-   2026-11-04, sub-assignment 3: reversing 2026-11-03's (sub-assignments 4 and 5's) allocator, items a value's every
-   execution (values x executions), interference by a happens-before table over the executions (plan_before,
-   plan_interferes over mesh_graph_happens_before's bits) and the window alone.  Why: the unroll factor is the longest
-   lifetime, not the trip count (C1, C3.3), and the allocator places every value, the state section's words among them
-   (C3.2).  What must stay: the items' order, greedy by size; ENOMEM before anything is written.
-   2026-11-04, sub-assignment 2 (design/disjoint-pages-rulings-coordination.md, R4): reversing one copy for every value
-   but a routed one.  A value of lag k >= 1 (a host producer's input, ordered by the program's events) is k items, its
-   copies, each interfering with every other item, all outside the window.  Why: the per-step host inputs had an
-   instance per step, sized by the run (design/disjoint-pages-revision-coordination.md, D12); D.3.3 gives them copies
-   by the lag the program declares, as modulo variable expansion does for any value, so nothing bound grows with the
-   steps.  What must stay: a value of lag 0 one item as before; the items' order; ENOMEM before anything is written.
-   0; ENOMEM. */
-static int plan_place(struct plan *p){
-  struct hdr *m=p->context->M;
-  const uint32_t u=p->copies;
-  uint64_t routed,others=0;
-  if(__builtin_mul_overflow((uint64_t)p->local,(uint64_t)u,&routed) || routed>=UINT32_MAX)return ENOMEM;
-  /* this node's values no declared transfer names, in `values`'s order, a value of lag k its k copies in copy order */
-  for(uint32_t j=0;j<p->givens;j++)
-    if(p->named[j]==MESH_ABSENT && (others+=p->given[j].lag?p->given[j].lag:1)>=UINT32_MAX)return ENOMEM;
-  if(routed+others+1>=UINT32_MAX || !(p->others=malloc(((size_t)others+1)*sizeof *p->others)))return ENOMEM;
-  p->other=0;
-  for(uint32_t j=0;j<p->givens;j++)if(p->named[j]==MESH_ABSENT)
-    for(uint32_t c=0;c<(p->given[j].lag?p->given[j].lag:1);c++)p->others[p->other++]=j;
-  p->state=(uint32_t)routed+p->other;
-  const uint32_t items=p->state+1;
-  struct plan_sized *sized=malloc((size_t)items*sizeof *sized);
-  uint32_t *wired=malloc((size_t)items*sizeof *wired),*outside=malloc((size_t)items*sizeof *outside);
-  uint64_t *size=malloc((size_t)items*sizeof *size);
-  p->colour=calloc(items,sizeof *p->colour);
-  int status=!sized || !wired || !outside || !size || !p->colour?ENOMEM:0;
-  if(!status){
-    for(uint32_t a=0;a<p->local;a++)for(uint32_t c=0;c<u;c++)
-      size[a*u+c]=p->demand[p->value[p->here[a]].demand].pages;
-    for(uint32_t k=0;k<p->other;k++)size[routed+k]=plan_blocks(m,p->given[p->others[k]].section.bytes);
-    size[p->state]=plan_blocks(m,p->words);
-    for(uint32_t i=0;i<items;i++)sized[i]=(struct plan_sized){size[i],i};
-    qsort(sized,items,sizeof *sized,plan_sized_order);
-    uint32_t w=0,o=0;
-    for(uint32_t k=0;k<items;k++){
-      const uint32_t i=sized[k].item;
-      if(i<routed || (i!=p->state && p->given[p->others[i-routed]].wire))wired[w++]=i;
-      else outside[o++]=i;
+/* an item appended (`item` NULL: counted alone) */
+static void plan_item_put(struct plan_placement *x,uint32_t kind,uint32_t function,uint32_t index,uint32_t copy,
+                          uint64_t blocks,uint32_t space){
+  if(x->item){
+    x->item[x->items]=(struct plan_item){x->elements,blocks,kind,function,index,copy,space};
+    x->count[x->items]=blocks;
+  }
+  x->items++;x->elements+=blocks;
+}
+/* The program's items of space `space`, plan by plan (point 6: "The items, per function, at this node, as now"): its
+   routed copies (a, c), a major, each its demand's P blocks, a relay's among them (this node on a demand's trees but
+   neither its source nor a destination: no `values` entry names it and no row holds it), in the window; then its
+   values in `values`' order: a named value's blocks no range covers, one item a copy, in the window (the value is
+   wire); a local value's one item, or a value of lag k >= 1's k, its copies, in the window where `wire` is 1; then its
+   state section (plan_layout's `words` in blocks), outside; last the program's table, `count` words in blocks,
+   outside, once (mesh.h struct mesh_program `table`).  Every item has a block at least.  The plan's `routed`, `item`
+   and `state` and the table's index are each item's place in this order, rewritten alike by every pass. */
+static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,struct plan_placement *x,uint32_t space){
+  for(uint32_t f=0;f<count;f++){
+    struct plan *p=plans+f;
+    const uint32_t u=p->copies;
+    if(space){
+      p->routed=(uint32_t)x->items;
+      for(uint32_t a=0;a<p->local;a++)for(uint32_t c=0;c<u;c++)
+        plan_item_put(x,PLAN_ROUTED,f,a,c,p->demand[p->value[p->here[a]].demand].pages,1);
     }
-    const uint64_t window=mesh_arena_range(m,1).count/m->block,local=mesh_arena_range(m,0).count/m->block;
-    status=mesh_graph_left_edge(w,size,wired,plan_interferes,p,window,p->colour,&p->window);
-    if(!status)status=mesh_graph_left_edge(o,size,outside,plan_interferes,p,local,p->colour,&p->outside);
-    if(status==ENOSPC)status=ENOMEM;
+    for(uint32_t j=0;j<p->givens;j++){
+      const struct mesh_value *v=p->given+j;
+      const uint64_t blocks=plan_blocks(m,v->section.bytes);
+      if(p->named[j]!=MESH_ABSENT){
+        if(!space)continue;
+        uint64_t covered=0;
+        for(uint32_t q=p->named[j];q<p->offsets && p->offset[q].value==j;q++)covered+=p->offset[q].pages;
+        p->item[j]=covered<blocks?(uint32_t)x->items:MESH_ABSENT;
+        for(uint32_t c=0;covered<blocks && c<u;c++)plan_item_put(x,PLAN_ALONE,f,j,c,blocks-covered,1);
+      }else if(v->wire==space){
+        p->item[j]=(uint32_t)x->items;
+        for(uint32_t c=0;c<(v->lag?v->lag:1);c++)
+          plan_item_put(x,v->kind==MESH_EXECUTION && !v->lag?PLAN_LOCAL:PLAN_ALONE,f,j,c,blocks,space);
+      }
+    }
+    if(!space){p->state=(uint32_t)x->items;plan_item_put(x,PLAN_ALONE,f,0,0,plan_blocks(m,p->words),0);}
   }
-  free(sized);free(wired);free(outside);free(size);
-  return status;
+  if(!space){
+    x->table=(uint32_t)x->items;
+    plan_item_put(x,PLAN_ALONE,UINT32_MAX,0,0,plan_blocks(m,(uint64_t)count*sizeof(uint64_t)),0);
+  }
 }
 
-/* item i's first arena page (plan_place's colour in its space, a block of the claim's run there) */
-static uint32_t plan_item_page(const struct plan *p,uint32_t i,int wire){
-  const struct mesh_range run=wire?p->claim.window:p->claim.local;
-  return (uint32_t)(run.first+p->colour[i]*p->context->M->block);
+/* The program's one allocation (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points
+   5 and 6; design/plan-to-bridge-change-request.md R2 and R8, corrected: "One offline allocation over the whole
+   exported program ..., at compile time ... Nothing takes pages at run time, and no handle is looked up at run time";
+   design/disjoint-pages-change-request.md A3, C3.3 and C3.4, corrected; "The revisions of 4e78f6f4"): every item of
+   every plan at this node and the program's table (plan_items), decided once, after every plan's least lags and
+   layout and before anything is written.
+   - One call of mesh_graph_chains a space (mesh-graph.h: Dilworth's fewest chains by Fulkerson's bipartite matching),
+     the window's items then the others', each over the interference order (plan_before), every item counted in
+     blocks.  Where the two spaces are one range (an undeclared window is the whole arena, and mesh-dataflow.h
+     mesh_arena_range then gives "one range over it"), one call over every item.
+   - Chain j of a space is its block j: element k of item i at arena page range.first + chain x block (plan_page).  An
+     item ordered with no other has chains of its own, consecutive (mesh_graph_chains' numbering), so a state section's
+     and the table's blocks are consecutive and each is at its first block's page.
+   - ENOMEM where a space's chains pass its blocks (mesh_arena_range(m, space).count / block), or the items pass their
+     words, before anything is written.  No first fit, no claim and no ENOMEM from fragmentation (point 5).
+   0; ENOMEM (mesh_graph_chains' too). */
+static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct plan_placement *x){
+  *x=(struct plan_placement){0};
+  plan_items(plans,count,m,x,1);
+  plan_items(plans,count,m,x,0);
+  if(x->items>=UINT32_MAX || x->elements>=SIZE_MAX/sizeof(uint64_t))return ENOMEM;
+  x->item=malloc(((size_t)x->items+1)*sizeof *x->item);
+  x->count=malloc(((size_t)x->items+1)*sizeof *x->count);
+  x->chain=malloc(((size_t)x->elements+1)*sizeof *x->chain);
+  if(!x->item || !x->count || !x->chain)return ENOMEM;
+  x->items=x->elements=0;
+  plan_items(plans,count,m,x,1);
+  x->split=(uint32_t)x->items;
+  plan_items(plans,count,m,x,0);
+  x->range[1]=mesh_arena_range(m,1);
+  x->range[0]=mesh_arena_range(m,0);
+  const int one=x->range[0].first==x->range[1].first && x->range[0].count==x->range[1].count;
+  const uint32_t first[3]={0,one?(uint32_t)x->items:x->split,(uint32_t)x->items};
+  for(uint32_t s=0;s<2;s++){
+    if(first[s]==first[s+1])continue;
+    const struct plan_order order={plans,x->item+first[s]};
+    uint64_t chains=0;
+    const int status=mesh_graph_chains(first[s+1]-first[s],x->count+first[s],plan_before,&order,
+                                       x->chain+x->item[first[s]].element,&chains);
+    if(status)return status;
+    if(chains>x->range[x->item[first[s]].space].count/m->block)return ENOMEM;
+  }
+  return 0;
 }
-/* this node's routed value a's copy c, its page k: arena page window.first + (colour + k) x block, the first page of a
-   block inside the registered window */
-static uint32_t plan_page(const struct plan *p,uint32_t a,uint32_t c,uint64_t k){
-  return (uint32_t)(plan_item_page(p,a*p->copies+c,1)+k*p->context->M->block);
+/* item i's element k's first arena page: its space's first page and its chain's block (point 6: "Chain j of a space is
+   that space's block j"); a routed copy's a block inside the registered window */
+static uint32_t plan_page(const struct plan_placement *x,uint32_t block,uint32_t i,uint64_t k){
+  return (uint32_t)(x->range[x->item[i].space].first+x->chain[x->item[i].element+k]*block);
 }
 
 /* -- this node's hops (design/disjoint-pages-change-request.md, C3.3 and C3.7) ------------------------------------ */
@@ -1179,57 +1268,80 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
   return status;
 }
 
-/* The queues' rooms and the plan's synchronization edges, fixed at compile time by the self-timed buffer bound
+/* The queues' rooms and the program's synchronization edges, fixed at compile time by the self-timed buffer bound
    (design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the self-timed
    buffer bound"; S. S. Bhattacharyya, S. Sriram and E. A. Lee, Optimizing synchronization in multiprocessor DSP
    systems, IEEE Trans. Signal Processing 45(6), 1997, here BSL; design/compilation-coordination.md, "The revisions of
-   3f106747", BS).  The graph is the plan's part of the program's IPC graph, built as BSL §4.1 builds one ("if actors v1,
-   v2, …, vn are assigned to the same processor in that order, then Gipc would have a cycle ((v1, v2), (v2, v3), …, (vn −
-   1, vn), (vn, v1)), with delay((vn, v1)) = 1"), the processors the program's nodes (`program`, its least s the
-   sender):
-   - its actors: the program's submission at s, σ (vertex 0); s's bridge's TO-broadcast of the plan's calls, β (vertex
-     1: item 2, "Its source is the sender's TO-broadcast of the plan's calls, and its sink is the bridge's taking of them
-     at the node"); and node v's part of the plan's call, x_v, for each node v of the plan, `nodes` (vertex 2 + v's rank
-     in it; "The actors are each node's parts of the program's calls, in program order");
-   - its edges: σ -> β, delay 0, the submissions' queue; β -> x_v, delay 0, the delivered calls' queue at v ("these
-     queues"); at s, σ -> x_s, delay 0, and x_s -> σ, delay `outstanding` (s's cycle in program order: "At each node,
-     A10's bound is the delay on the edge from a call's completion to the program's later submission"), or, where s is
-     no node of the plan, σ -> σ of that delay; x_v -> x_v of that delay at every other node; and each transfer, a tree
-     edge y -> c carrying pages of a demand (`child`), as x_y -> x_c and x_c -> x_y, each of delay u ("The IPC edges are
-     the plans' transfers, each with C3.3's u copies as its delay");
-   - its times: x_v's t(x_v) the weighting operand's weights of v's tasks in one execution (each production at its
-     source, each source read, each consumption at a destination, a page's task each for MESH_PAGES) and of its hops'
-     pages, sent or received (BSL §4.1: "t(v) includes the time taken to execute all IPC operations (sends and
-     receives) that the actor v performs"; "Execution times t(x) are A3's weighting operand"), a demand's page weight
-     the greatest of its transfers' (GO2's); t(σ) = t(β) = 0.
-   Then: ENOMEM where a cycle has zero total delay (BSL Lemma 1, "Every cycle C in the IPC graph has a path delay of at
-   least one if and only if the static schedule it is constructed from is free of deadlock"; item 2: "or where a cycle
-   has no delay"); the edges Convert-to-SC-graph adds (§9, Fig. 6; mesh-graph.h mesh_graph_convert_sc) with their
-   delays from DetermineDelays (Fig. 8; mesh_graph_determine_delays), so that every queue "becomes encapsulated in an
-   SCC" (§9); and each queue's room its edge's bound in the converted graph, Theorem 2's "Bfb(e) = ρ_Gs(snk(e), src(e))
-   + delay(e)", ρ the least total delay over walks from snk(e) to src(e) (BSL §3; mesh-graph.h mesh_graph_lags,
-   Dijkstra's, as the theorem's "Dijkstra's algorithm"): `room` ρ(x_self, β), `submit_room` ρ(β, σ); a node of the
-   program that is no node of the plan, whose queue no message reaches (Dest(m) is `nodes`), `room` 1.  ENOMEM where a
-   queue lies on no cycle after the conversion, or a room passes its words.
-   Decisions where the documents are silent (design/compilation-coordination.md, "The revisions of 3f106747"):
-   - BS-2: the program's submission σ and its bridge's TO-broadcast β are two actors, so the submissions' queue between
-     them, of PS-3, is an IPC edge with its own bound; t(σ) = t(β) = 0, A3 weighing neither, so σ, lowest of the least,
-     is the source SCC's link, and the sink-source edge's sink is the program's start at s;
-   - BS-3: the graph's part of the program's IPC graph is the plan's own, which is what its compilation holds when it
-     is planned (each function is compiled at its first call); every cycle C containing e bounds the tokens on e by
-     Delay(C) ("The number of tokens in any cycle of the IPC graph is always conserved", Lemma 2), so (5) over a
-     subgraph's cycles bounds it over the program's;
-   - BS-4: each added edge's source count is its node's program's starts of the plan (`submissions`), which trail that
-     node's part's ends by the delay `outstanding` on its own edge, so in the rooms each added edge's delay is
-     DetermineDelays' plus `outstanding`, the constraint the bridge's count implements (mesh-records.c counts_tell);
-   - BS-5: a plan with no declared transfer has `nodes` {s} in the graph at every rank, where its `nodes` is each
-     rank's own (mesh_plan), so every rank builds one graph.
-   At most one added edge enters and one leaves each node's vertices: σ reaches every vertex, so σ's SCC is the one
-   source SCC and Convert-to-SC-graph chains the sink SCCs alone, each link the one vertex x_v of its node, and its
-   sink-source edge enters σ, its SCC's least time and lowest vertex.  So `waits` and `tells` name at most one each.
-   Every rank computes the same graph, delays and edges from the same trees, u, weights and operands, the graph module's
-   arithmetic IEEE-exact.  Allocations before any output; ENOMEM */
-static uint32_t plan_room_tail(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
+   3f106747", BS).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 4: "build the
+   program's whole IPC graph at compile time, every function together, with each queue's room (5) in it.
+   `plan_rooms`' part graph goes"; appendix item 2, "Each plan builds its own part of that graph", withdrawn: "the
+   compilation builds the program's whole IPC graph, as this item states above, and each queue's room is (5) in that
+   graph"; "The revisions of 4e78f6f4"), reversing plan_rooms' graph of one plan (BS-3) and its one edge into and one
+   out of this node (BS-7): the graph is the program's, built once in the plan call over every plan together, as BSL
+   §4.1 builds one ("if actors v1, v2, …, vn are assigned to the same processor in that order, then Gipc would have a
+   cycle ((v1, v2), (v2, v3), …, (vn − 1, vn), (vn, v1)), with delay((vn, v1)) = 1"), every delay counting executions
+   of the program's traced block, BSL's iterations (mesh.h struct mesh_sync).  plan_graph builds its operands only:
+   the components, Convert-to-SC-graph, the cycle mean, MinDelay, DetermineDelays and the least delays are the graph
+   module's (item 2, "Where they live"; mesh-graph.h).  What must stay: each queue's room its edge's bound by (5),
+   ENOMEM where none is found, before anything is written.
+   - Its vertices, in this order, so ties of least time fall to σ (BS-2): for each call j (the program's calls in
+     program order, calls[j] its function f), the program's submission σ_j and its bridge's TO-broadcast β_j at the
+     sender s, the least of `program` (A7, sender(m)), vertices 2j and 2j + 1; then for each call j and each node v of
+     f's plan (its `nodes`; BS-5: {s} for a plan with no declared transfer, at every rank) the actor x_{j,v}, node v's
+     part of call j (item 2: "The actors are each node's parts of the program's calls, in program order").
+   - Its edges, each with its delay:
+     - the sender's two processors in program order, BSL §4.1's cycle: σ_j -> σ_{j+1} of delay 0, σ_last -> σ_0 of
+       delay 1, and β_j -> β_{j+1}, β_last -> β_0 alike: one program thread submits in program order, and one
+       sender's TO-broadcasts keep FIFO Order (A7);
+     - each call's queues, its function's, each of delay 0: σ_j -> β_j, the submissions' queue; β_j -> x_{j,v} for
+       each v, the delivered calls' queue at v (item 2: "Its source is the sender's TO-broadcast of the plan's calls,
+       and its sink is the bridge's taking of them at the node"); and σ_j -> x_{j,s} where s is a node of f's plan;
+     - A10's bound (item 2: "At each node, A10's bound is the delay on the edge from a call's completion to the
+       program's later submission"): f's n calls in program order, b its `outstanding`, from the call at place i to
+       the one at place m = (i + b) mod n, b of f's calls later, of delay ⌊(i + b) / n⌋ executions of the block: at s,
+       x_{j_i,s} -> σ_{j_m}, or σ_{j_i} -> σ_{j_m} where s is no node of f's plan (BS: "σ -> σ of that delay"); at
+       each other node v of f's plan, x_{j_i,v} -> x_{j_m,v}.  For n = 1 these are BS's x_s -> σ and x_v -> x_v of
+       delay b;
+     - each transfer, a tree edge y -> c carrying f's pages (`child`), both ways, x_{j_i,y} -> x_{j_m,c} and
+       x_{j_i,c} -> x_{j_m,y}, m = (i + u) mod n, of delay ⌊(i + u) / n⌋: C3.3's u copies (item 2: "The IPC edges are
+       the plans' transfers, each with C3.3's u copies as its delay"; BS-6), u of f's executions mapped to the
+       block's as A10's edges are;
+     - not added: an edge between two calls' actors at one node in program order (BSL's cycle over a node's actors).
+       Stop IPC-1 (design/compilation-coordination.md, "The revisions of 4e78f6f4"): item 2 says "The processors are
+       the program's nodes.  The actors are each node's parts of the program's calls, in program order", while it
+       also says "Delivery does not wait for any earlier call to finish ... A call still running at a node delays no
+       later call's delivery there", and A9 makes the processors "the sends of each adjacent node and direction, R5's
+       cables"; a node's parts of successive calls overlap, so an edge forcing them in sequence would bound the
+       queues by an order the code does not keep.
+   - Its times: t(x_{j,v}) f's plan's t(x_v) (plan_times); t(σ) = t(β) = 0 (BS-2).
+   - Then: ENOMEM where a cycle has zero total delay (mesh_graph_cycle_mean's INFINITY; BSL Lemma 1, "Every cycle C in
+     the IPC graph has a path delay of at least one if and only if the static schedule it is constructed from is free
+     of deadlock"); the edges Convert-to-SC-graph adds (§9, Fig. 6; mesh_graph_convert_sc), so that every queue
+     "becomes encapsulated in an SCC" (§9), and their delays δ by DetermineDelays (Fig. 8;
+     mesh_graph_determine_delays), its EDEADLK and ERANGE as ENOMEM.
+   - The added edges.  σ_0 reaches every vertex (σ's cycle, σ_j -> β_j, β_j -> each x_{j,v}), so its component is the
+     one source SCC and Convert-to-SC-graph chains the sink SCCs alone; no sink SCC holds a σ or a β but where the
+     graph is strongly connected (σ's component reaches every vertex, and β's reaches a σ only through an actor, all
+     three one component then).  So every added edge's tail is an actor x_{j,a}, and its head an actor x_{j',b} or the
+     source SCC's vertex of least time, σ_0 (time 0, the lowest vertex; BS-2: "the sink-source edge's sink is the
+     program's start at s").  An edge's count is f's starts at a (BS-4; item 2: "The count its source raises is
+     therefore the program's starts of the plan at that node"), and the start of the call A10's edge out of x_{j,a}
+     leads to (its place m among f's calls, its delay d) follows x_{j,a}'s end d executions earlier, so the edge's
+     delay in the rooms' graph is δ + d.  It is a wait entry of plan f' = calls[j'] at b (at s for σ_{j'}: the
+     program's start of call j' there), `node` a, `function` f + 1, `position` m, `every` n_f, `at` j''s place among
+     f''s calls, `delay` δ; and a tell entry of plan f at a, `node` b (s for σ), `function` f' + 1 (mesh.h struct
+     mesh_sync).  The bridge consumes them as A9's self-timed schedule's firing rule
+     (design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "Before firing an
+     actor, a processor waits for the data needed by that actor to become available").
+   - Rooms, (5) by Theorem 2's "Bfb(e) = ρ_Gs(snk(e), src(e)) + delay(e)", ρ the least total delay over walks in the
+     converted graph (BSL §3; mesh_graph_lags, Dijkstra's, as the theorem's "Dijkstra's algorithm"): f's `room` here
+     the sum over its calls j of ρ(x_{j,self}, β_j), its one queue here carrying every call's deliveries and so every
+     call's tokens; its `submit_room` the sum of ρ(β_j, σ_j); `room` 1 at a node of the program that is no node of f's
+     plan, whose queue no message reaches (Dest(m) is `nodes`; BS-5).  ENOMEM where a queue lies on no cycle after the
+     conversion (ρ UINT32_MAX), where a bound is 0, or where a room passes its words.
+   Every rank computes the same graph, delays and edges from the same trees, u, weights, calls and operands, the graph
+   module's arithmetic IEEE-exact.  0; ENOMEM, before anything is written. */
 /* an edge of the IPC graph, a -> b of delay d, appended */
 struct plan_room_edges { uint32_t *from,*to; uint64_t *delay; size_t edges; };
 static void plan_room_edge(struct plan_room_edges *graph,uint32_t a,uint32_t b,uint64_t d){
@@ -1245,193 +1357,227 @@ static uint32_t plan_room_lag(const void *context,size_t k){
   const uint64_t delay=rows->delay[rows->order[k]];
   return delay>=UINT32_MAX?UINT32_MAX:(uint32_t)delay;
 }
-static int plan_rooms(struct plan *p,const struct mesh_weight *weight,uint64_t program,uint64_t outstanding,
-                      uint64_t spanned){
-  const uint32_t n=p->n,s=(uint32_t)__builtin_ctzll(program),u=p->copies;
-  const uint64_t nodes=p->demands?spanned:UINT64_C(1)<<s;
-  const uint32_t members=(uint32_t)__builtin_popcountll(nodes),V=2+members;
-  uint64_t hops=0;
-  for(uint32_t i=0;i<p->demands;i++)hops+=p->demand[i].forwards;
-  const size_t room=3+2*(size_t)members+2*(size_t)hops;
-  double *t=calloc(V,sizeof *t),*page=calloc((size_t)p->demands+1,sizeof *page);
-  uint32_t *from=malloc((room+2*(size_t)V)*sizeof *from),*to=malloc((room+2*(size_t)V)*sizeof *to),
-           *vertex=malloc(((size_t)n+1)*sizeof *vertex);
-  uint64_t *delay=malloc((room+2*(size_t)V)*sizeof *delay);
-  uint32_t *added_from=malloc(2*(size_t)V*sizeof *added_from),*added_to=malloc(2*(size_t)V*sizeof *added_to);
-  uint64_t *added_delay=malloc(2*(size_t)V*sizeof *added_delay);
-  size_t *first=malloc(((size_t)V+2)*sizeof *first),*order=malloc((room+2*(size_t)V+1)*sizeof *order);
-  int status=!t || !page || !from || !to || !vertex || !delay || !added_from || !added_to || !added_delay || !first ||
-             !order?ENOMEM:0;
-  if(status)goto done;
-  for(uint32_t v=0,k=2;v<n;v++)vertex[v]=nodes>>v&1?k++:UINT32_MAX;
-  struct plan_room_edges graph={from,to,delay,0};
-  plan_room_edge(&graph,0,1,0);
-  for(uint32_t v=0;v<n;v++)if(vertex[v]!=UINT32_MAX){
-    plan_room_edge(&graph,1,vertex[v],0);
-    if(v!=s)plan_room_edge(&graph,vertex[v],vertex[v],outstanding);
-  }
-  if(vertex[s]!=UINT32_MAX){plan_room_edge(&graph,0,vertex[s],0);plan_room_edge(&graph,vertex[s],0,outstanding);}
-  else plan_room_edge(&graph,0,0,outstanding);
-  for(uint32_t i=0;i<p->demands;i++)for(uint32_t y=0;y<n;y++)
-    for(uint64_t below=p->child[(size_t)i*n+y];below;below&=below-1){
-      const uint32_t c=(uint32_t)__builtin_ctzll(below);
-      plan_room_edge(&graph,vertex[y],vertex[c],u);plan_room_edge(&graph,vertex[c],vertex[y],u);
-    }
-  size_t edges=graph.edges;
+/* t(x_v) of the plan's actor at each node v (time[v]): the weighting operand's weights of v's tasks in one execution
+   (each production at its source, each source read, each consumption at a destination, a page's task each for
+   MESH_PAGES) and of its hops' pages, sent or received (BSL §4.1: "t(v) includes the time taken to execute all IPC
+   operations (sends and receives) that the actor v performs"; item 2: "Execution times t(x) are A3's weighting
+   operand"), a demand's page weight the greatest of its transfers' (GO2's); and `forwarded`, its demands' distinct
+   tree edges carrying pages.  2026-11-05 ("The revisions of 4e78f6f4"): plan_rooms' times as they were, for each plan,
+   where plan_rooms summed them into its own graph's vertices.  What must stay: the sums and their order.  0; ENOMEM */
+static int plan_times(struct plan *p){
+  const uint32_t n=p->n;
+  double *page=calloc((size_t)p->demands+1,sizeof *page);
+  if(!page)return ENOMEM;
   for(uint32_t i=0;i<p->transfers;i++){
     const uint32_t d=p->of[i];
-    if(weight[i].page>page[d])page[d]=weight[i].page;
-    t[vertex[p->declared[i].destination]]+=weight[i].consumed*(p->declared[i].kind==MESH_PAGES?(double)p->demand[d].pages:1.0);
+    if(p->weights[i].page>page[d])page[d]=p->weights[i].page;
+    p->time[p->declared[i].destination]+=
+      p->weights[i].consumed*(p->declared[i].kind==MESH_PAGES?(double)p->demand[d].pages:1.0);
   }
   for(uint32_t i=0;i<p->demands;i++){
     const struct plan_demand *d=p->demand+i;
-    t[vertex[d->source]]+=weight[d->first].produced+(d->own?weight[d->first].read:0.0);
+    p->time[d->source]+=p->weights[d->first].produced+(d->own?p->weights[d->first].read:0.0);
     for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
       const uint32_t *parent=p->parent+(size_t)p->tree[j]*n;
       for(uint32_t c=0;c<n && p->run[j];c++)
         if(c!=d->source && parent[c]<n && parent[c]!=c){
-          t[vertex[parent[c]]]+=(double)p->run[j]*page[i];
-          t[vertex[c]]+=(double)p->run[j]*page[i];
+          p->time[parent[c]]+=(double)p->run[j]*page[i];
+          p->time[c]+=(double)p->run[j]*page[i];
         }
     }
+    p->forwarded+=d->forwards;
   }
+  free(page);
+  return 0;
+}
+/* The program's IPC graph and its rooms (the note above), over every plan of the call: `row` and `order` the program's
+   calls grouped by function (mesh_graph_rows: function f's calls order[row[f]] .. order[row[f + 1] - 1], in program
+   order), `self` this node's map index.  Out: each plan's `calls`, `room`, `submit_room`, `waits`, `tells` and `sync`
+   at this node */
+static int plan_graph(struct plan *plans,uint32_t count,const uint32_t *calls,uint32_t ncalls,uint64_t program,
+                      uint32_t self,const size_t *row,const size_t *order){
+  const uint32_t s=(uint32_t)__builtin_ctzll(program),J=ncalls;
+  uint64_t vertices=2*(uint64_t)J,edges=0;
+  uint32_t *place=malloc(((size_t)J+1)*sizeof *place),*actor=malloc(((size_t)J+1)*sizeof *actor);
+  double *t=NULL;
+  uint32_t *from=NULL,*to=NULL,*call=NULL,*node=NULL,*added_from=NULL,*added_to=NULL,*filled=NULL;
+  uint64_t *delay=NULL,*added_delay=NULL;
+  size_t *first=NULL,*rows=NULL;
+  int status=!place || !actor?ENOMEM:0;
+  if(status)goto done;
+  /* each call's place among its function's calls */
+  for(uint32_t f=0;f<count;f++){
+    plans[f].calls=(uint32_t)(row[f+1]-row[f]);
+    for(size_t q=row[f];q<row[f+1];q++)place[order[q]]=(uint32_t)(q-row[f]);
+  }
+  /* each call's first actor, and the edges' room: per call its sender's 3, its queues' 1 + |nodes|, A10's |nodes| + 1
+     at most (σ -> x_s with x_s -> σ, or σ -> σ) and its transfers' 2 a tree edge; Convert-to-SC-graph's 2 x vertices */
+  for(uint32_t j=0;j<J && vertices<UINT32_MAX;j++){
+    const struct plan *p=plans+calls[j];
+    actor[j]=(uint32_t)vertices;
+    vertices+=(uint64_t)__builtin_popcountll(p->nodes);
+    edges+=4+2*(uint64_t)__builtin_popcountll(p->nodes)+2*p->forwarded;
+  }
+  if(vertices>=UINT32_MAX/4 || edges>=SIZE_MAX/(8*sizeof(uint64_t))){status=ENOMEM;goto done;}
+  const uint32_t V=(uint32_t)vertices;
+  const size_t room=(size_t)edges+2*(size_t)V;
+  t=calloc((size_t)V+1,sizeof *t);
+  from=malloc((room+1)*sizeof *from);
+  to=malloc((room+1)*sizeof *to);
+  delay=malloc((room+1)*sizeof *delay);
+  call=malloc(((size_t)V+1)*sizeof *call);
+  node=malloc(((size_t)V+1)*sizeof *node);
+  added_from=malloc((2*(size_t)V+1)*sizeof *added_from);
+  added_to=malloc((2*(size_t)V+1)*sizeof *added_to);
+  added_delay=malloc((2*(size_t)V+1)*sizeof *added_delay);
+  first=malloc(((size_t)V+2)*sizeof *first);
+  rows=malloc((room+1)*sizeof *rows);
+  filled=calloc(2*(size_t)count+1,sizeof *filled);
+  if(!t || !from || !to || !delay || !call || !node || !added_from || !added_to || !added_delay || !first || !rows ||
+     !filled){status=ENOMEM;goto done;}
+  /* the vertices: each one's call, and an actor's node (MESH_ABSENT for σ and β) and time */
+  for(uint32_t j=0;j<J;j++){
+    const struct plan *p=plans+calls[j];
+    call[2*j]=call[2*j+1]=j;
+    node[2*j]=node[2*j+1]=MESH_ABSENT;
+    uint32_t k=actor[j];
+    for(uint64_t set=p->nodes;set;set&=set-1,k++){
+      call[k]=j;
+      node[k]=(uint32_t)__builtin_ctzll(set);
+      t[k]=p->time[node[k]];
+    }
+  }
+  /* the edges, call by call: the sender's cycles, the queues, A10's edges, the transfers */
+  struct plan_room_edges graph={from,to,delay,0};
+  for(uint32_t j=0;j<J;j++){
+    const uint32_t f=calls[j],i=place[j],next=j+1==J?0:j+1;
+    const struct plan *p=plans+f;
+    const uint64_t n=p->calls,lag=(i+p->outstanding)/n,span=(i+(uint64_t)p->copies)/n;
+    const uint32_t later=(uint32_t)order[row[f]+(i+p->outstanding)%n],
+                   ahead=(uint32_t)order[row[f]+(i+(uint64_t)p->copies)%n];
+    plan_room_edge(&graph,2*j,2*next,!next);
+    plan_room_edge(&graph,2*j+1,2*next+1,!next);
+    plan_room_edge(&graph,2*j,2*j+1,0);
+    for(uint64_t set=p->nodes;set;set&=set-1){
+      const uint32_t v=(uint32_t)__builtin_ctzll(set),x=actor[j]+plan_rank(p->nodes,v);
+      plan_room_edge(&graph,2*j+1,x,0);
+      if(v==s){
+        plan_room_edge(&graph,2*j,x,0);
+        plan_room_edge(&graph,x,2*later,lag);
+      }else plan_room_edge(&graph,x,actor[later]+plan_rank(p->nodes,v),lag);
+    }
+    if(!(p->nodes>>s&1))plan_room_edge(&graph,2*j,2*later,lag);
+    for(uint32_t d=0;d<p->demands;d++)for(uint32_t y=0;y<p->n;y++)
+      for(uint64_t below=p->child[(size_t)d*p->n+y];below;below&=below-1){
+        const uint32_t c=(uint32_t)__builtin_ctzll(below);
+        plan_room_edge(&graph,actor[j]+plan_rank(p->nodes,y),actor[ahead]+plan_rank(p->nodes,c),span);
+        plan_room_edge(&graph,actor[j]+plan_rank(p->nodes,c),actor[ahead]+plan_rank(p->nodes,y),span);
+      }
+  }
+  const size_t built=graph.edges;
   double mean;
   uint32_t added;
-  if((status=mesh_graph_cycle_mean(V,t,edges,from,to,delay,&mean)))goto done;
+  if((status=mesh_graph_cycle_mean(V,t,built,from,to,delay,&mean)))goto done;
   if(mean==INFINITY){status=ENOMEM;goto done;}
-  if((status=mesh_graph_convert_sc(V,t,edges,from,to,&added,added_from,added_to)) ||
-     (status=mesh_graph_determine_delays(V,t,edges,from,to,delay,added,added_from,added_to,added_delay))){
+  if((status=mesh_graph_convert_sc(V,t,built,from,to,&added,added_from,added_to)) ||
+     (status=mesh_graph_determine_delays(V,t,built,from,to,delay,added,added_from,added_to,added_delay))){
     if(status==EDEADLK || status==ERANGE)status=ENOMEM;
     goto done;
   }
-  p->waits=p->tells=MESH_ABSENT;p->wait_delay=0;
+  /* the added edges: each in the rooms' graph of delay δ + d (BS-4's shift), and counted at each plan's actors here;
+     then each plan's entries written, its waits first */
   for(uint32_t a=0;a<added;a++){
-    uint32_t tail=s,head=s;
-    for(uint32_t v=0;v<n;v++){if(vertex[v]==added_from[a])tail=v;if(vertex[v]==added_to[a])head=v;}
-    if(head==p->self){p->waits=tail;p->wait_delay=added_delay[a];}
-    if(tail==p->self)p->tells=head;
-    if(__builtin_add_overflow(added_delay[a],outstanding,&delay[edges])){status=ENOMEM;goto done;}
-    from[edges]=added_from[a];to[edges]=added_to[a];edges++;
+    const uint32_t tail=added_from[a],head=added_to[a],f=calls[call[tail]],h=calls[call[head]];
+    const struct plan *p=plans+f;
+    if(__builtin_add_overflow(added_delay[a],(place[call[tail]]+p->outstanding)/p->calls,&delay[built+a])){
+      status=ENOMEM;goto done;
+    }
+    from[built+a]=tail;to[built+a]=head;
+    if((node[head]==MESH_ABSENT?s:node[head])==self)plans[h].waits++;
+    if(node[tail]==self)plans[f].tells++;
   }
-  mesh_graph_rows(V,edges,plan_room_tail,from,first,order);
-  const struct plan_room_rows rows={order,to,delay};
-  const uint32_t source[2]={1,vertex[p->self]==UINT32_MAX?1:vertex[p->self]},target[2]={0,1};
-  uint32_t lags[4];
-  if((status=mesh_graph_lags(V,first,plan_room_head,plan_room_lag,&rows,2,source,2,target,lags)))goto done;
-  p->submit_room=lags[0*2+0];
-  p->room=vertex[p->self]==UINT32_MAX?1:lags[1*2+1];
-  if(p->submit_room==UINT32_MAX || p->room==UINT32_MAX || !p->submit_room || !p->room ||
-     p->room>=UINT64_MAX/(4*sizeof(struct mesh_delivery)))status=ENOMEM;
+  for(uint32_t f=0;f<count;f++)
+    if(!(plans[f].sync=malloc(((size_t)plans[f].waits+plans[f].tells+1)*sizeof *plans[f].sync))){
+      status=ENOMEM;goto done;
+    }
+  for(uint32_t a=0;a<added;a++){
+    const uint32_t tail=added_from[a],head=added_to[a],f=calls[call[tail]],h=calls[call[head]],
+                   sink=node[head]==MESH_ABSENT?s:node[head];
+    const struct plan *p=plans+f;
+    if(sink==self)
+      plans[h].sync[filled[h]++]=(struct plan_sync){.node=node[tail],.function=f+1,
+        .position=(uint32_t)((place[call[tail]]+p->outstanding)%p->calls),.every=p->calls,.at=place[call[head]],
+        .delay=added_delay[a]};
+    if(node[tail]==self)plans[f].sync[plans[f].waits+filled[count+f]++]=(struct plan_sync){.node=sink,.function=h+1};
+  }
+  /* the rooms, (5) in the converted graph: per call, ρ(β_j, σ_j) and ρ(x_{j,self}, β_j) */
+  mesh_graph_rows(V,built+added,plan_at,from,first,rows);
+  const struct plan_room_rows rooms={rows,to,delay};
+  for(uint32_t f=0;f<count;f++){plans[f].room=plans[f].nodes>>self&1?0:1;plans[f].submit_room=0;}
+  for(uint32_t j=0;j<J;j++){
+    struct plan *p=plans+calls[j];
+    const int here=(int)(p->nodes>>self&1);
+    const uint32_t source[2]={2*j+1,here?actor[j]+plan_rank(p->nodes,self):2*j+1},target[2]={2*j,2*j+1};
+    uint32_t lags[4];
+    if((status=mesh_graph_lags(V,first,plan_room_head,plan_room_lag,&rooms,2,source,2,target,lags)))goto done;
+    if(lags[0]==UINT32_MAX || !lags[0] || (here && (lags[3]==UINT32_MAX || !lags[3]))){status=ENOMEM;goto done;}
+    p->submit_room+=lags[0];
+    if(here)p->room+=lags[3];
+  }
+  for(uint32_t f=0;f<count;f++)
+    if(plans[f].room>=UINT64_MAX/(4*sizeof(struct mesh_delivery)) ||
+       plans[f].submit_room>=UINT64_MAX/(4*sizeof(struct mesh_submission))){status=ENOMEM;goto done;}
 done:
-  free(t);free(page);free(from);free(to);free(vertex);free(delay);free(added_from);free(added_to);free(added_delay);
-  free(first);free(order);
+  free(place);free(actor);free(t);free(from);free(to);free(delay);free(call);free(node);free(added_from);free(added_to);
+  free(added_delay);free(first);free(rows);free(filled);
   return status;
 }
-/* mesh-collective.h mesh_plan.  The demands: the declared transfers grouped by source and identity, a range to each of
-   its destinations, numbered by their first declared transfer (design/compilation-coordination.md, "The documents'
-   revisions of edd4b583", GO5: "The demands stay numbered by their first declared transfer (T6's other half, not an
-   order of the lists)").  The routing:
-   every demand at once over the map's node graph (a node pair an edge where the map gives it a capacity both ways, of
-   the lesser of the two: mesh-dataflow.h struct mesh_nodes `capacity`, D.2's node pairs and their capacities from the
+
+/* plan_offset's order: by value, then first block */
+static int plan_offset_order(const void *a,const void *b){
+  const struct plan_offset *x=a,*y=b;
+  if(x->value!=y->value)return x->value<y->value?-1:1;
+  return (x->first>y->first)-(x->first<y->first);
+}
+
+/* One compiled function's plan (mesh-collective.h struct mesh_function), computed whole before anything is written:
+   its operands' tests, its demands, routing, pages, the trees' communications, the template, no lag-0 cycle, the least
+   lags and u, this node's entries of one copy counted, its nodes and its actors' times.  The demands: the declared
+   transfers grouped by source and identity, a range to each of its destinations, numbered by their first declared
+   transfer (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO5: "The demands stay
+   numbered by their first declared transfer (T6's other half, not an order of the lists)").  The routing: every
+   demand at once over the map's node graph (a node pair an edge where the map gives it a capacity both ways, of the
+   lesser of the two: mesh-dataflow.h struct mesh_nodes `capacity`, D.2's node pairs and their capacities from the
    map, and nothing else of how the bridge carries pages), a destination its source reaches by no path refused
    (mesh-graph.h mesh_graph_reach), by the concurrent-flow solve (mesh_graph_flow, Garg and Koenemann's multiplicative
    weights, the tag's mesh_solve rounds and room), demand d a tree rooted at its source reaching its destinations, its
    bytes down from the root: each demand's trees and their shares, a tree's vertices past its source and destinations
    the relays, members all.  The pages: each demand's pages cut over its trees by their shares by earliest finish
-   (mesh_graph_fill), a tree's pages one run of them.  The order: one execution's task graph scheduled (plan_schedule;
-   design/plan-to-bridge-change-request.md, R3 to R5), and its instructions, the tasks and the communications, in one
-   global topological order by their completion times in R5's linear program, the least first (MSCCLang §5.2, step 3;
-   R5 at mesh 0e56d8da), this node's entries in it, a set's at their own places (design/compilation-coordination.md,
-   "The documents' revisions of edd4b583", GO1; "The revisions of 46ae8fdf", LP; "The revisions of 67ca86f8", SP: R5,
-   "keep their places in that order").  The sets: a
-   demand whose every declared transfer is MESH_PAGES is a set on each of its trees (S1, S2; its `set`).  Every rank
-   computes the same demands, trees, pages, template, u, schedule and order from the same declared transfers, weights,
-   dependences and map, and writes its own hops of them (plan_walk, plan_schedule).
-   The plan's name (design/compilation-coordination.md, N1): (group, function), `function` the program's ordinal of
-   the compiled function, held in struct mesh_state `epoch`; `*plan` the plan's handle once it stands (N2).
-   Then, in the order of the draft e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan in its claim", steps 1
-   to 5, as the operator's ruling 1 allows it (design/compilation-coordination.md, Q5, as N3 and N5 amend it):
-   1. everything computed first: the trees' communications (plan_trees), the template (plan_template), no lag-0 cycle
-      (plan_acyclic), the least lags and u (plan_unroll), this node's entries of one copy counted and every room
-      (ENOMEM where the receives, the entries or the rows pass their words), the state section's layout with the
-      entries in it (plan_layout), the items and both colourings (plan_place), the entries filled (plan_walk) and in
-      their places' order (plan_schedule, R5), the plan's nodes and sender; EEXIST where a plan standing at this
-      node on the same map is already (group, function), the claims' heads walked (mesh-dataflow.h mesh_head_after and
-      mesh_head_state);
-   2. the claim (mesh-dataflow.h mesh_claim_take), its generation from hdr `serial` (the draft's §6, step 2: one past
-      its count, never 0), its head's `start` the take's: rows, the head and every value's count x P after it (count u
-      for a routed value, k for a value of lag k >= 1, 1 for every other); window pages, the window colouring's blocks
-      x block; local pages, the local one's.  ENOMEM leaves every plan of the program standing;
-   3. the state section started once (D3: its bytes before the entries 0, then struct mesh_state's `copies`,
-      `receives`, `ranges`, `releases`, region offsets, `group`, `epoch` (the function, N1), `serial`, `hops`,
-      `entries`, `nodes` and `sender`; `held`, every `refused`, `submitted`, `released`, every `taken` and `sequences`
-      0 (design/compilation-coordination.md, "The documents' revisions of edd4b583", DL1; "The revisions of
-      46ae8fdf", LP9: no sequence words, appendix item 2 at mesh 0e56d8da), every
-      `state` 1 value's bytes 0 once (D3), every value's rows named and bound copy by copy (mesh_backing_bind), every
-      value row's publication written, the entries u x n in plan_schedule's order, each with its `set` (S1, S2); no
-      data page is written;
-   4. the map read again: where its serial moved, or the reader failed, this claim alone closed
-      (mesh_claim_close(context, generation), which the bridge releases once no port holds it, D10), `*plan`
-      untouched: ESTALE, or the reader's error (N3);
-   5. the head's publication `state` the section's region offset (release): the plan stands; `*plan` that offset (N2);
-      hdr `plans` raised and woken (mesh.h mesh_notify: "every publication of a plan (mesh_plan) ... adds 1").  No
-      earlier claim of this client is closed (N3, N5): its other plans stand, each until the program retires it.
-   2026-11-04, owner C2 (design/compilation-coordination.md, N1 to N5; design/aot-compilation-change-request.md,
-   appendix item 6): reversing C-epoch's computation (the epoch one past the context's count, `mine`, the epoch kept
-   from a cancelled standing plan, context->epoch raised once the plan stood and left at the named epoch less 1 on a
-   failure after the writes), context->state, step 4's close of every earlier claim of the client, and step 6 (every
-   earlier claim of this client closed once the plan stood).  Why: compiled functions coexist, each its own plan with
-   its own claim, released only when the program retires that function or itself (R. Frostig, M. J. Johnson and C.
-   Leary, SysML 2018; NVIDIA, CUDA Programming Guide §4.2.2; Pathways §3, §4.4); a plan is named by the program's
-   ordinal of its function, the same at every rank; struct mesh_ctx holds no plan.  What must stay: every failure but
-   ESTALE and the second map read's found before anything is written; the map read again after everything is written
-   and before the plan stands; `plans` raised and woken once the plan stands.
-   2026-11-04, owner C (design/compilation-coordination.md, "The region" and Q5): reversing the writing order of
-   design/disjoint-pages-revision-coordination.md, "Writing a plan": the generation hdr `plan` + 1; hdr `hops` 0, a
-   release fence and `plan` woken before the entries; the entries in hdr's hop area, ENOSPC past `hop_capacity`; hdr
-   `state` and `plan` stored with them; `hops` stored, and `plan` woken, after the second map read.  Why: any number of
-   plans stand at once, each in its own claim and found by its head (design/plan-to-bridge-change-request.md, R8;
-   design/aot-compilation-change-request.md, A7), and hdr's one-plan fields are vacant.  What must stay: every failure
-   but ESTALE and the second map read's found before anything is written; the map read again after everything is
-   written and before the plan stands; the earlier claims closed only once the new plan stands (that last gone with
-   step 6, 2026-11-04, owner C2: N3, N5, above).
-   2026-11-04, sub-assignment 3: reversing 2026-11-03's (sub-assignments 3 and 5's) tail: `executions` as an input and
-   its per-execution items; plan_section's check of sections mesh_section_create made (values now come in through
-   `values`); the memset of every declared instance's pages before `hops`; the word-by-word zeroing of the supplied
-   words and landed records; the call to mesh_plan_erased and its ETIMEDOUT; the layout's fixed areas of words.  Why:
-   C4; a data page holds payload only and nothing is zeroed or reset while a plan stands (C3.7); a new plan's state is
-   in new pages, so nothing is erased or waited for (C3.4).  What must stay: the demands, mesh_graph_reach,
-   mesh_graph_flow and mesh_graph_fill as they were, so every rank's trees and template are the same; every failure but
-   ESTALE and the second map read's found before anything is written. */
-/* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS, PQ and RC): `program` and
-   `outstanding` (mesh-collective.h): EINVAL where `program` is 0, lacks this node or lacks a node of the plan's (its
-   `nodes`, step 1), ENOMEM where `outstanding` is 0 or a queue's room passes its words, before anything is written;
-   struct mesh_state `sender` the least of `program`, where it was the least of the plan's `nodes`; the state section
-   holds the plan's two queues, the delivered calls' of `room` = `outstanding` + u x the hops of the plan's routes (the
-   distinct tree edges of its demands' trees that carry pages, each demand's `forwards`) and the submissions' of
-   `outstanding`, between the status and the entries (plan_layout), started 0 with every word before the entries (D3);
-   every received range has its count words, a relay's too, so every receive entry names one.  Why:
-   design/aot-compilation-change-request.md A7, "sender(m) is the program's one sender: the least of the program's
-   nodes"; appendix item 2, "a queue of the plan's own.  It is laid out with the plan's pages when the plan is placed,
-   and claimed and released with them (C3.2, C3.4)"; "Its room is fixed at compile time ... That is at most A10's bound
-   on the plan's submissions outstanding at its sender, plus C3.3's u copies on each hop of the plan's routes ... A plan
-   whose bound A10 cannot find fails with `ENOMEM` when it is planned"; item 5, "The code must name a page for round j
-   by that count".  What must stay: every failure but ESTALE and the second map read's found before anything is
-   written */
-int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t program,uint64_t outstanding,
-              const struct mesh_declared *declared,const struct mesh_weight *weights,uint32_t count,
-              struct mesh_value *values,uint32_t given,const struct mesh_dependence *dependence,uint32_t dependences,
-              uint64_t *plan){
-  struct hdr *m=context->M;
-  if(!group || !program || !plan || (count && (!declared || !weights)) || (given && !values) ||
-     (dependences && !dependence))
-    return EINVAL;
+   (mesh_graph_fill), a tree's pages one run of them.  The sets: a demand whose every declared transfer is MESH_PAGES is
+   a set on each of its trees (S1, S2; its `set`).  Every rank computes the same demands, trees, pages, template and u
+   from the same declared transfers, weights, dependences and map.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5; "The revisions
+   of 4e78f6f4"): mesh_plan's computation of its one function, for each function of the program's call, where
+   mesh_plan took one function's operands as its own arguments.  What must stay: every test and computation as it was,
+   every failure before anything is written.  0, or mesh_plan's errors before its writes. */
+static int plan_function(struct plan *p,const struct mesh_function *function,const struct mesh_nodes *nodes,
+                         uint64_t program){
+  struct hdr *m=p->context->M;
+  const struct mesh_declared *declared=function->declared;
+  const struct mesh_weight *weights=function->weights;
+  const struct mesh_dependence *dependence=function->dependence;
+  struct mesh_value *values=function->value;
+  const uint32_t count=function->count,given=function->values,dependences=function->dependences;
+  if((count && (!declared || !weights)) || (given && !values) || (dependences && !dependence))return EINVAL;
   /* a value: its bytes, its kind, its wire and state flags, and its lag (k >= 1 only on an execution value outside the
      window that is no state: design/disjoint-pages-change-request.md, D.3.3; design/disjoint-pages-rulings-
-     coordination.md, R4; that no declared transfer names it is the declared transfers' test below) */
+     coordination.md, R4; that no declared transfer names it is the declared transfers' test below).
+     2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 6 and 8; "The
+     revisions of 4e78f6f4"): and its `run`, 0 or 1 (mesh-collective.h struct mesh_value).  What must stay: the tests
+     above */
   for(uint32_t j=0;j<given;j++){
     const struct mesh_value *v=values+j;
-    if(!v->section.bytes || v->kind>MESH_EXECUTION || v->wire>1 || v->state>1 ||
+    if(!v->section.bytes || v->kind>MESH_EXECUTION || v->wire>1 || v->state>1 || v->run>1 ||
        (v->state && (v->wire || v->kind!=MESH_INVARIANT)) ||
        (v->lag && (v->kind!=MESH_EXECUTION || v->wire || v->state)))return EINVAL;
     if(plan_blocks(m,v->section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
@@ -1476,26 +1622,23 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t
        x->lag==UINT32_MAX || plan_event_node(declared,x->from,from_produced,from_own)!=
        plan_event_node(declared,x->to,to_produced,to_own))return EINVAL;
   }
-  if(!outstanding || outstanding>=UINT32_MAX)return ENOMEM;
-  struct mesh_nodes nodes,after;
-  int status=mesh_nodes_read(context,&nodes);
-  if(status)return status;
-  const uint32_t n=nodes.count;
-  if(nodes.self>=n)return EHOSTUNREACH;
-  if(!(program>>nodes.self&1))return EINVAL;
+  if(!function->outstanding || function->outstanding>=UINT32_MAX)return ENOMEM;
+  const uint32_t n=nodes->count;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
-  struct plan p={.context=context,.declared=declared,.transfers=count,.given=values,.givens=given,.n=n,
-                 .self=nodes.self,.serial=nodes.serial};
+  p->declared=declared;p->transfers=count;p->given=values;p->givens=given;p->weights=weights;
+  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;
   struct plan_key *key=malloc(((size_t)count+1)*sizeof *key);
-  uint32_t *root=NULL,*demand=NULL,*placed=malloc(((size_t)count+1)*sizeof *placed),
-           *named=malloc(((size_t)given+1)*sizeof *named);
+  uint32_t *root=NULL,*demand=NULL,*placed=malloc(((size_t)count+1)*sizeof *placed);
   size_t *trees=NULL;
   double *up=NULL,*down=NULL,*share=NULL,*rate=NULL,*latency=NULL;
-  p.demand=calloc((size_t)count+1,sizeof *p.demand);
-  p.of=malloc(((size_t)count+1)*sizeof *p.of);
-  if(!key || !placed || !named || !p.demand || !p.of){status=ENOMEM;goto done;}
-  p.named=named;
-  for(uint32_t j=0;j<given;j++)named[j]=MESH_ABSENT;
+  int status=0;
+  p->named=malloc(((size_t)given+1)*sizeof *p->named);
+  p->item=malloc(((size_t)given+1)*sizeof *p->item);
+  p->offset=malloc(((size_t)count+1)*sizeof *p->offset);
+  p->demand=calloc((size_t)count+1,sizeof *p->demand);
+  p->of=malloc(((size_t)count+1)*sizeof *p->of);
+  if(!key || !placed || !p->named || !p->item || !p->offset || !p->demand || !p->of){status=ENOMEM;goto done;}
+  for(uint32_t j=0;j<given;j++)p->named[j]=MESH_ABSENT;
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;
     if(t->source>=n || t->destination>=n){status=EHOSTUNREACH;goto done;}
@@ -1516,11 +1659,11 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;
     if(placed[i]==i)
-      p.demand[p.demands++]=(struct plan_demand){.source=t->source,.identity=t->identity,.first=i,.mine=MESH_ABSENT,
-                                                 .set=1,.bytes=t->bytes,.pages=plan_blocks(m,t->bytes),
-                                                 .range=MESH_ABSENT};
-    p.of[i]=placed[i]==i?p.demands-1:p.of[placed[i]];
-    struct plan_demand *d=p.demand+p.of[i];
+      p->demand[p->demands++]=(struct plan_demand){.source=t->source,.identity=t->identity,.first=i,.mine=MESH_ABSENT,
+                                                   .set=1,.bytes=t->bytes,.pages=plan_blocks(m,t->bytes),
+                                                   .range=MESH_ABSENT};
+    p->of[i]=placed[i]==i?p->demands-1:p->of[placed[i]];
+    struct plan_demand *d=p->demand+p->of[i];
     /* a set where every declared transfer of the range is MESH_PAGES, function B at every destination; any MESH_JOIN
        destination keeps the schedule's order (design/compilation-coordination.md, S1; design/aot-compilation-change-
        request.md, appendix item 5: "Function A's operands (joins) keep the schedule's order"), each of its pages at its
@@ -1532,100 +1675,119 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t
        weights[i].read!=weights[d->first].read){status=EINVAL;goto done;}
     d->leaves|=UINT64_C(1)<<t->destination;
     /* `value`: MESH_ABSENT where this node is neither the transfer's source nor its destination; else an execution
-       value in the window of the range's bytes and of lag 0 (a value of lag k >= 1 is written by a producer the
-       program orders by an event, which no declared transfer is: R4), the source's one value of every transfer of the
-       range, one range's alone */
-    if(t->source!=p.self && t->destination!=p.self){
+       value in the window of lag 0 (a value of lag k >= 1 is written by a producer the program orders by an event,
+       which no declared transfer is: R4), the source's one value of every transfer of the range.
+       2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7; "The
+       revisions of 4e78f6f4"): the range's blocks [first, first + P) within the value's, and the source's one `first`
+       of every transfer of the range, where the value's bytes were the range's and "one range's alone".  Why: point
+       7, "name, in each declared transfer, the pages of its destination value that it lands in, as NCCL's receives
+       land at offsets of one result ... no concatenation and no copy of a part remains"; mesh-collective.h struct
+       mesh_declared `first`.  What must stay: MESH_ABSENT away from the range's ends; an execution value in the
+       window of lag 0 */
+    if(t->source!=p->self && t->destination!=p->self){
       if(t->value!=MESH_ABSENT){status=EINVAL;goto done;}
       continue;
     }
     if(t->value>=given){status=EINVAL;goto done;}
     const struct mesh_value *v=values+t->value;
-    if(v->kind!=MESH_EXECUTION || !v->wire || v->lag || v->section.bytes!=t->bytes ||
-       (t->source==p.self && d->mine!=MESH_ABSENT && d->mine!=t->value) ||
-       (named[t->value]!=MESH_ABSENT && named[t->value]!=d->first)){status=EINVAL;goto done;}
-    named[t->value]=d->first;
+    if(v->kind!=MESH_EXECUTION || !v->wire || v->lag || (uint64_t)t->first+d->pages>plan_blocks(m,v->section.bytes) ||
+       (t->source==p->self && d->mine!=MESH_ABSENT && (d->mine!=t->value || d->offset!=t->first))){
+      status=EINVAL;goto done;
+    }
     d->mine=t->value;
+    d->offset=t->first;
+  }
+  /* this node's ranges in their values (2026-11-05, point 7; "The revisions of 4e78f6f4"), sorted by value and first
+     block: EINVAL where two at this node share a block of one value (mesh-collective.h struct mesh_declared `first`:
+     "no two ranges at this node share a block of it"); each value's first range its `named` */
+  for(uint32_t i=0;i<p->demands;i++)
+    if(p->demand[i].mine!=MESH_ABSENT)
+      p->offset[p->offsets++]=(struct plan_offset){p->demand[i].mine,p->demand[i].offset,(uint32_t)p->demand[i].pages,i};
+  qsort(p->offset,p->offsets,sizeof *p->offset,plan_offset_order);
+  for(uint32_t q=0;q<p->offsets;q++){
+    const struct plan_offset *o=p->offset+q;
+    if(!q || o[-1].value!=o->value)p->named[o->value]=q;
+    else if((uint64_t)o[-1].first+o[-1].pages>o->first){status=EINVAL;goto done;}
   }
   /* a local execution value's positions, a value of lag 0's alone (a value of lag k >= 1 is ordered by the program's
      events, not by its positions, which are not read: R4) */
   for(uint32_t j=0;j<given;j++)
-    if(named[j]==MESH_ABSENT && values[j].kind==MESH_EXECUTION && !values[j].lag && values[j].begin>values[j].end){
+    if(p->named[j]==MESH_ABSENT && values[j].kind==MESH_EXECUTION && !values[j].lag && values[j].begin>values[j].end){
       status=EINVAL;goto done;
     }
-  for(uint32_t i=0;i<p.demands;i++)if(p.demand[i].source==p.self)p.demand[i].release=(uint32_t)p.releases++;
+  for(uint32_t i=0;i<p->demands;i++)if(p->demand[i].source==p->self)p->demand[i].release=(uint32_t)p->releases++;
 
-  if(p.demands){
+  if(p->demands){
     for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++){
-      const uint64_t c=nodes.capacity[a][b]<nodes.capacity[b][a]?nodes.capacity[a][b]:nodes.capacity[b][a];
-      if(c){p.from[p.pairs]=a;p.to[p.pairs]=b;p.capacity[p.pairs]=(double)c;p.pairs++;}
+      const uint64_t c=nodes->capacity[a][b]<nodes->capacity[b][a]?nodes->capacity[a][b]:nodes->capacity[b][a];
+      if(c){p->from[p->pairs]=a;p->to[p->pairs]=b;p->capacity[p->pairs]=(double)c;p->pairs++;}
     }
-    const uint32_t E=p.pairs;
+    const uint32_t E=p->pairs;
     /* a destination its source reaches by no Thunderbolt-5 path within the map: refused (mesh_graph_reach, once from
        each source; no breadth-first parents wanted here) */
-    const struct plan_edges graph={p.from,p.to};
+    const struct plan_edges graph={p->from,p->to};
     uint32_t order[n];
     unsigned char reached[n];
     uint64_t reach[n],known=0;
-    for(uint32_t i=0;i<p.demands;i++){
-      const uint32_t s=p.demand[i].source;
+    for(uint32_t i=0;i<p->demands;i++){
+      const uint32_t s=p->demand[i].source;
       if(!(known>>s&1)){
         mesh_graph_reach(n,E,plan_end,&graph,s,order,reached,NULL);
         reach[s]=0;
         for(uint32_t v=0;v<n;v++)if(reached[v])reach[s]|=UINT64_C(1)<<v;
         known|=UINT64_C(1)<<s;
       }
-      if(p.demand[i].leaves&~reach[s]){status=EHOSTUNREACH;goto done;}
+      if(p->demand[i].leaves&~reach[s]){status=EHOSTUNREACH;goto done;}
     }
     const uint32_t rounds=(uint32_t)(mesh_graph_log(2*E>1?(double)(2*E):2.0)/(MESH_PLAN_EPS*MESH_PLAN_EPS))+1;
-    const uint64_t most=(uint64_t)rounds*p.demands;
+    const uint64_t most=(uint64_t)rounds*p->demands;
     const uint32_t room=most>=UINT32_MAX?UINT32_MAX-1:(uint32_t)most;
-    root=malloc((size_t)p.demands*sizeof *root);
-    up=calloc(p.demands,sizeof *up);
-    down=malloc((size_t)p.demands*sizeof *down);
+    root=malloc((size_t)p->demands*sizeof *root);
+    up=calloc(p->demands,sizeof *up);
+    down=malloc((size_t)p->demands*sizeof *down);
     demand=malloc((size_t)room*sizeof *demand);
-    p.parent=malloc((size_t)room*n*sizeof *p.parent);
+    p->parent=malloc((size_t)room*n*sizeof *p->parent);
     share=malloc((size_t)room*sizeof *share);
-    if(!root || !up || !down || !demand || !p.parent || !share){status=ENOMEM;goto done;}
-    for(uint32_t i=0;i<p.demands;i++){root[i]=p.demand[i].source;down[i]=(double)(p.demand[i].pages*block);}
+    if(!root || !up || !down || !demand || !p->parent || !share){status=ENOMEM;goto done;}
+    for(uint32_t i=0;i<p->demands;i++){root[i]=p->demand[i].source;down[i]=(double)(p->demand[i].pages*block);}
     /* UINT32_MAX: its own allocations failed (its eps is positive, its roots members, every leaf reached and its room
        the most trees its rounds can find) */
-    const uint32_t made=mesh_graph_flow(n,E,p.from,p.to,p.capacity,p.demands,root,up,down,plan_leaf,p.demand,
-                                        MESH_PLAN_EPS,rounds,room,demand,p.parent,share);
+    const uint32_t made=mesh_graph_flow(n,E,p->from,p->to,p->capacity,p->demands,root,up,down,plan_leaf,p->demand,
+                                        MESH_PLAN_EPS,rounds,room,demand,p->parent,share);
     if(made==UINT32_MAX){status=ENOMEM;goto done;}
-    p.made=made;
-    p.tree=malloc(((size_t)made+1)*sizeof *p.tree);
-    p.run=calloc((size_t)made+1,sizeof *p.run);
+    p->made=made;
+    p->tree=malloc(((size_t)made+1)*sizeof *p->tree);
+    p->run=calloc((size_t)made+1,sizeof *p->run);
     rate=malloc(((size_t)made+1)*sizeof *rate);
     latency=calloc((size_t)made+1,sizeof *latency);
-    trees=malloc(((size_t)p.demands+1)*sizeof *trees);
-    if(!p.tree || !p.run || !rate || !latency || !trees){status=ENOMEM;goto done;}
+    trees=malloc(((size_t)p->demands+1)*sizeof *trees);
+    if(!p->tree || !p->run || !rate || !latency || !trees){status=ENOMEM;goto done;}
     /* the solved trees grouped by demand, in the order the solve found them */
-    mesh_graph_rows(p.demands,made,plan_tree_demand,demand,trees,p.tree);
-    for(uint32_t i=0;i<p.demands;i++){p.demand[i].tree=(uint32_t)trees[i];p.demand[i].trees=(uint32_t)(trees[i+1]-trees[i]);}
-    for(uint32_t j=0;j<made;j++)rate[j]=share[p.tree[j]];
-    for(uint32_t i=0;i<p.demands;i++){
-      struct plan_demand *d=p.demand+i;
+    mesh_graph_rows(p->demands,made,plan_at,demand,trees,p->tree);
+    for(uint32_t i=0;i<p->demands;i++){
+      p->demand[i].tree=(uint32_t)trees[i];
+      p->demand[i].trees=(uint32_t)(trees[i+1]-trees[i]);
+    }
+    for(uint32_t j=0;j<made;j++)rate[j]=share[p->tree[j]];
+    for(uint32_t i=0;i<p->demands;i++){
+      struct plan_demand *d=p->demand+i;
       /* a tree's rate its share of the demand's flow; no tree is known to start later than another (latency 0) */
-      mesh_graph_fill(d->trees,latency+d->tree,rate+d->tree,d->pages,p.run+d->tree);
+      mesh_graph_fill(d->trees,latency+d->tree,rate+d->tree,d->pages,p->run+d->tree);
       uint64_t cut=0;
-      for(uint32_t j=d->tree;j<d->tree+d->trees;j++)cut+=p.run[j];
+      for(uint32_t j=d->tree;j<d->tree+d->trees;j++)cut+=p->run[j];
       if(cut!=d->pages){status=EHOSTUNREACH;goto done;}
     }
   }
-  /* 1. the trees' communications, the template, no lag-0 cycle, the least lags and u; this node's entries of one copy
-     counted and its rooms; the state section's layout; the items and both colourings; the entries in their places'
-     order (R5); the plan's nodes and sender; its name unused at this node: all before anything is claimed or
-     written */
-  if((status=plan_trees(&p)) || (status=plan_template(&p,dependence,dependences)) || (status=plan_acyclic(&p)) ||
-     (status=plan_unroll(&p)))goto done;
-  plan_walk(&p);
-  const uint32_t u=p.copies;
-  uint64_t entries,rows=1;
+  /* the trees' communications, the template, no lag-0 cycle, the least lags and u; this node's entries of one copy
+     counted; the plan's nodes; its actors' times: all before anything is written */
+  if((status=plan_trees(p)) || (status=plan_template(p,dependence,dependences)) || (status=plan_acyclic(p)) ||
+     (status=plan_unroll(p)))goto done;
+  plan_walk(p);
+  uint64_t entries;
   /* 2026-11-04, owner C: the receives past a 32-bit count (struct mesh_state `receives`) are ENOMEM, as every other
      count past its word here, where they were ENOSPC with the list's room, which is gone (the entries are in the
      state section) */
-  if(p.receives>=UINT32_MAX || __builtin_mul_overflow(p.entries,(uint64_t)u,&entries) ||
+  if(p->receives>=UINT32_MAX || __builtin_mul_overflow(p->entries,(uint64_t)p->copies,&entries) ||
      entries>=UINT64_MAX/(2*sizeof(struct mesh_hop))){
     status=ENOMEM;goto done;
   }
@@ -1633,170 +1795,342 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t function,uint64_t
      "The region", struct mesh_state `nodes` and `sender`; Q2), the same at every rank: every source and destination of
      a declared transfer and every node a tree the fill gave pages reaches (its `on`), this node's own where none.
      2026-11-05 ("The revisions of 3f106747", BS): computed here, before the rooms, where it followed the schedule.
-     What must stay: as above */
+     2026-11-05 ("The revisions of 4e78f6f4"): and its nodes in the program's IPC graph, `nodes`: these, or {s} for a
+     plan with no declared transfer, at every rank (BS-5; plan_graph).  What must stay: as above */
   uint64_t spanned=0;
-  for(uint32_t i=0;i<p.demands;i++)spanned|=UINT64_C(1)<<p.demand[i].source|p.demand[i].leaves|p.demand[i].on;
-  if(!spanned)spanned=UINT64_C(1)<<p.self;
+  for(uint32_t i=0;i<p->demands;i++)spanned|=UINT64_C(1)<<p->demand[i].source|p->demand[i].leaves|p->demand[i].on;
+  if(!spanned)spanned=UINT64_C(1)<<p->self;
   if(spanned&~program){status=EINVAL;goto done;}
-  /* the queues' rooms and the synchronization edges, each queue's self-timed buffer bound in the plan's part of the
-     program's IPC graph (plan_rooms), every rank's the same from the same trees, u, weights and operands.
-     2026-11-05 (design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the
-     self-timed buffer bound"; design/compilation-coordination.md, "The revisions of 3f106747", BS), reversing the
-     abecd389 form, the delivered calls' queue's room A10's bound plus u copies on each hop of the plan's routes and
-     the submissions' queue's room A10's bound.  Why: item 2's correction: "It holds only where the queue lies on a
-     cycle through the sender.  A7's program sender may hold no page of a plan, and then the queue is BSL's feedforward
-     edge with no bound".  What must stay: ENOMEM where no bound is found, before anything is written */
-  p.outstanding=outstanding;
-  if((status=plan_rooms(&p,weights,program,outstanding,spanned)))goto done;
-  /* every value's rows: count x P, count u for a routed value, k for a value of lag k >= 1 and 1 for every other, after
-     the claim's head (each term below 2^64 - 2^32, P below UINT32_MAX / block, so no sum wraps before the test) */
-  for(uint32_t j=0;j<given && rows<UINT32_MAX;j++){
-    const uint64_t copies=named[j]!=MESH_ABSENT?u:values[j].lag?values[j].lag:1;
-    rows+=copies*plan_blocks(m,values[j].section.bytes);
-  }
-  if(rows>=UINT32_MAX){status=ENOMEM;goto done;}
-  plan_layout(&p);
-  if((status=plan_place(&p)))goto done;
-  if(p.window*m->block>=UINT32_MAX || p.outside*m->block>=UINT32_MAX){status=ENOMEM;goto done;}
-  if(!(p.entry=malloc((p.entries+1)*sizeof *p.entry))){status=ENOMEM;goto done;}
-  plan_walk(&p);
-  if(p.demands && (status=plan_schedule(&p,weights,dependence,dependences)))goto done;
-  /* a plan standing at this node already (group, function) on the map this call plans on: EEXIST until the program
-     retires it (design/compilation-coordination.md, N1: "A replan of a function on the same map is EEXIST until the
-     program retires the standing one"; one whose `serial` is not that map's is cancelled, D.3.6, and ignored), every
-     claim's head walked (mesh-dataflow.h mesh_head_after, mesh_head_state).
-     2026-11-04, owner C2 (N1): the name's second word the function, where it was C-epoch's epoch.  What must stay:
-     EEXIST where a plan of the name stands on the same map */
-  for(uint32_t head=mesh_head_after(m,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(m,head)){
-    const struct mesh_state *standing=mesh_head_state(m,head);
-    if(standing && standing->serial==p.serial && standing->group==group && standing->epoch==function){
-      status=EEXIST;goto done;
-    }
-  }
+  p->spanned=spanned;
+  p->nodes=p->demands?spanned:UINT64_C(1)<<__builtin_ctzll(program);
+  status=plan_times(p);
+done:
+  free(key);free(placed);free(root);free(up);free(down);free(demand);free(share);free(rate);free(latency);free(trees);
+  return status;
+}
 
-  /* 2. the claim, its generation from hdr `serial`: exactly the rows and pages this plan places, whole or not at all */
-  const uint64_t generation=atomic_fetch_add(&m->serial,1)+1;
-  if((status=mesh_claim_take(context,generation,(uint32_t)rows,(uint32_t)(p.window*m->block),
-                             (uint32_t)(p.outside*m->block),&p.claim)))goto done;
+/* a plan's allocations */
+static void plan_free(struct plan *p){
+  free(p->named);free(p->offset);free(p->item);free(p->sync);free(p->demand);free(p->of);free(p->parent);
+  free(p->tree);free(p->run);free(p->members);free(p->lead);free(p->comm);free(p->child);free(p->value);free(p->read);
+  free(p->here);free(p->first);free(p->head);free(p->lag);free(p->between);free(p->farthest);free(p->entry);
+}
 
-  /* 3. the state section started once, where it is placed (D3): its bytes before the entries 0, then struct
-     mesh_state's fields; nothing else of it is written by the plan but the entries, and no word of it is reset while
-     the plan stands */
-  const uint32_t at=plan_item_page(&p,p.state,0);
-  const uint64_t base=m->data_off+(uint64_t)at*m->pgsz;
-  memset(mesh_at(m,at),0,(size_t)p.hops);
-  struct mesh_state *state=(struct mesh_state *)mesh_at(m,at);
-  state->copies=u;
-  state->receives=(uint32_t)p.receives;
-  state->ranges=p.consumed;
-  state->releases=(uint32_t)p.releases;
-  state->phases=base+p.phases;
-  state->counts=base+p.counts;
-  state->supplied=base+p.supplied;
-  state->status=base+p.status;
-  state->group=group;
-  state->epoch=function;
-  state->serial=p.serial;
-  state->hops=base+p.hops;
-  state->entries=entries;
-  state->nodes=spanned;
-  state->sender=(uint32_t)__builtin_ctzll(program);
-  state->outstanding=(uint32_t)p.outstanding;
-  state->room=p.room;
-  state->submit_room=p.submit_room;
-  state->waits=p.waits;
-  state->tells=p.tells;
-  state->wait_delay=p.wait_delay;
-  state->deliveries=base+p.deliveries;
-  state->submits=base+p.submits;
-  /* every value's rows, from the head's next, copy c's rows first + c x P + k bound to its copy's pages (an item's
-     first page, plan_item_page), named clean as mesh_section_create named them (no device, no owner, no publication:
-     every field of a row's publication 0 but its range's words below); a `state` 1 value's bytes 0 once, its one copy
-     (D3: a local invariant outside the window alone); a routed value's copies its demand's routed value's here
-     (plan_page), a relay's value no row's; a value of lag k >= 1's copy c its item local x u + other + c (its k items
-     in copy order), its rows bound to that item's pages, every row's publication 0 as every local value's (R4) */
-  uint32_t row=p.claim.rows.first+1;
-  for(uint32_t j=0,other=0;j<given;j++){
-    struct mesh_value *v=values+j;
-    const struct plan_demand *d=named[j]!=MESH_ABSENT?p.demand+p.of[named[j]]:NULL;
-    const uint32_t P=(uint32_t)plan_blocks(m,v->section.bytes),copies=d?u:v->lag?v->lag:1;
-    v->section=(struct mesh_section){row,P*m->block,v->section.bytes,copies,P};
-    for(uint32_t r=row;r<row+copies*P;r++){
-      atomic_store_explicit(&mesh_page(m)[r].device,0,memory_order_relaxed);
-      struct mesh_buffer *buffer=&mesh_buffers(m)[r];
-      atomic_store_explicit(&buffer->owner,0,memory_order_relaxed);
-      atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-      buffer->pages=buffer->constant=0;
-      memset(mesh_publication_at(m,r),0,(size_t)m->target_stride);
-    }
-    for(uint32_t c=0;c<copies;c++){
-      const uint32_t page=d?plan_page(&p,d->value,c,0):plan_item_page(&p,u*p.local+other+c,v->wire);
-      mesh_backing_bind(context,row+c*P,P*m->block,page,c);
-      if(v->state)memset(mesh_at(m,page),0,v->section.bytes);
-    }
-    if(!d)other+=copies;
-    /* a received range's first row: its pages, its copy-0 group and count word, the state section; a source range's:
-       its supplied word, the one target a host or GPU producer stores into */
-    struct mesh_publication *publication=mesh_publication_at(m,row);
-    if(d && d->source==p.self){
-      publication->sends=1;
-      publication->targets[0]=(struct mesh_target){.word=base+p.supplied+(uint64_t)d->release*sizeof(uint64_t),
-                                                   .count=1,.stride=0};
-      publication->state=base;
-    }else if(d){
-      publication->pages=d->received;
-      publication->phases=base+p.phases+d->group;
-      publication->count=base+p.counts+(uint64_t)d->consumed*u*sizeof(uint64_t);
-      publication->state=base;
-    }
-    row+=copies*P;
+/* mesh-collective.h mesh_plan: the program's plan call (design/compilation-coordination.md, "The documents'
+   corrections of 2026-11-05", points 4 to 8, and "The revisions of 4e78f6f4"; design/aot-compilation-change-
+   request.md A8 and A9: "The compilation must carry one IR from partitioning to serialization, as an operand of its
+   own"; point 5: "The plan call's form for a whole program is A8 and A9 ... With the program exported whole (point 1),
+   there is one IR of the program and one serialized operand of it").  The IR is each compiled function's operands
+   (struct mesh_function) and the program's calls of them in program order (`calls`, A10's graph); the serialized
+   operand at this node is, for each function, its plan (A9: "for each adjacent node and direction, the ordered list of
+   page instructions ... the page table's bindings and the plan's state section"), and its root at the layout's one
+   place (mesh.h struct mesh_program), which the bridge reads "at a place its compilation fixed, and searches for
+   nothing" (A9, "What the bridge runs: the self-timed schedule").  Each plan: its demands, routing, pages, template, u
+   and sets (plan_function); its order, one execution's task graph scheduled (plan_schedule; design/plan-to-bridge-
+   change-request.md, R3 to R5), and its instructions, the tasks and the communications, in one global topological
+   order by their completion times in R5's linear program, the least first (MSCCLang §5.2, step 3; R5 at mesh
+   0e56d8da), this node's entries in it, a set's at their own places (design/compilation-coordination.md, "The
+   documents' revisions of edd4b583", GO1; "The revisions of 46ae8fdf", LP; "The revisions of 67ca86f8", SP: R5, "keep
+   their places in that order").  Every rank computes the same demands, trees, pages, template, u, schedule, order and
+   IPC graph from the same IR and map, and writes its own hops of them (plan_walk, plan_schedule).
+   The plans' names (design/compilation-coordination.md, N1; design/aot-compilation-change-request.md, appendix item
+   6): function k (from 0) is (group, k + 1), held in struct mesh_state `epoch`; its struct mesh_function `plan` its
+   state section's region offset once the program's root stands (N2), a constant of the plan.
+   In this order:
+   1. everything computed first: the calls' tests (EINVAL where one names no function or a function has none), each
+      plan (plan_function), the program's IPC graph with every plan's synchronization edges and rooms (plan_graph), the
+      rows (ENOMEM where they pass the page table's), each state section's layout (plan_layout), the program's one
+      allocation (plan_place), each plan's entries filled (plan_walk) and in their places' order (plan_schedule, R5);
+      then EBUSY where the root's `owner` (acquire) is not 0;
+   2. each plan's state section started once, where it is placed (D3: its bytes before the entries 0, then struct
+      mesh_state's words, `epoch` k + 1, `calls`, `waits`, `tells` and `syncs` among them, `closed` 0), its
+      synchronization edges (struct mesh_sync, `count` 0); every value's rows from row 0, function by function and
+      value by value, count x P each, each row named clean and bound to its block's page (mesh_backing_bind, one row a
+      block), every `state` 1 value's bytes 0 once (D3); each range's words at its own first row's publication (copy
+      0's row value.first + first: point 7); the entries u x n in plan_schedule's order, each with its `set` (S1, S2);
+      the table's words, each plan's state section's region offset; no data page is written;
+   3. the program's one mapping of its `run` values (mesh-dataflow.h mesh_view_compose, after the bindings it reads);
+   4. the map read again: where its serial moved, or the reader failed, the root is not published and the mapping is
+      released (mesh_view_release), `*view` {NULL, 0}: ESTALE, or the reader's error;
+   5. each `run` value's `view`; the root (`closed` 0, `plans`, `start` mesh_started(getpid()), `group`, `generation`
+      minted from hdr `serial`, `table`), then its `owner` the client word, last (release); each function's `plan`;
+      hdr `plans` raised and woken (mesh.h mesh_notify).
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 4 to 8; "The
+   revisions of 4e78f6f4"), reversing the steps of the draft e6bd7db2:design/plan-bridge-coordination.md, §6, "Each plan
+   in its claim" (one function a call; EEXIST where a plan of its name stood, every claim's head walked by
+   mesh_head_after and mesh_head_state; its claim by mesh_claim_take, its rows after the claim's head and its pages two
+   runs of the claim; its head's publication `state` stored last; mesh_claim_close on ESTALE): the call plans the
+   whole program, every value placed by one allocation from row 0 and each space's first block, and stands once its
+   root does.  Why: point 5: "place the whole program's values in one offline allocation at compile time.  These go:
+   `mesh_claim_take`'s first fit and the claim's head record; `mesh_plan_head`'s walk of every claim head in
+   `mesh_transfers_start` and `mesh_plan_retire`, a run-time check; `ENOMEM` from fragmentation.  Release at
+   retirement stays deferred reclamation (RCU).  The program's group still names its plans"; "the serialized operand's
+   place is a constant the region's layout names once".  What must stay: every failure but ESTALE, the second map
+   read's and the mapping's found before anything is written; the map read again after everything is written and
+   before the root stands; `plans` raised and woken once it stands.
+   The notes before 4e78f6f4, each on the steps of one function's claim:
+   2026-11-04, owner C2 (design/compilation-coordination.md, N1 to N5; design/aot-compilation-change-request.md,
+   appendix item 6): reversing C-epoch's computation (the epoch one past the context's count, `mine`, the epoch kept
+   from a cancelled standing plan, context->epoch raised once the plan stood and left at the named epoch less 1 on a
+   failure after the writes), context->state, step 4's close of every earlier claim of the client, and step 6 (every
+   earlier claim of this client closed once the plan stood).  Why: compiled functions coexist, each its own plan with
+   its own claim, released only when the program retires that function or itself (R. Frostig, M. J. Johnson and C.
+   Leary, SysML 2018; NVIDIA, CUDA Programming Guide §4.2.2; Pathways §3, §4.4); a plan is named by the program's
+   ordinal of its function, the same at every rank; struct mesh_ctx holds no plan.  What must stay: every failure but
+   ESTALE and the second map read's found before anything is written; the map read again after everything is written
+   and before the plan stands; `plans` raised and woken once the plan stands.
+   2026-11-04, owner C (design/compilation-coordination.md, "The region" and Q5): reversing the writing order of
+   design/disjoint-pages-revision-coordination.md, "Writing a plan": the generation hdr `plan` + 1; hdr `hops` 0, a
+   release fence and `plan` woken before the entries; the entries in hdr's hop area, ENOSPC past `hop_capacity`; hdr
+   `state` and `plan` stored with them; `hops` stored, and `plan` woken, after the second map read.  Why: any number of
+   plans stand at once, each in its own claim and found by its head (design/plan-to-bridge-change-request.md, R8;
+   design/aot-compilation-change-request.md, A7), and hdr's one-plan fields are vacant.  What must stay: every failure
+   but ESTALE and the second map read's found before anything is written; the map read again after everything is
+   written and before the plan stands; the earlier claims closed only once the new plan stands (that last gone with
+   step 6, 2026-11-04, owner C2: N3, N5, above).
+   2026-11-04, sub-assignment 3: reversing 2026-11-03's (sub-assignments 3 and 5's) tail: `executions` as an input and
+   its per-execution items; plan_section's check of sections mesh_section_create made (values now come in through
+   `values`); the memset of every declared instance's pages before `hops`; the word-by-word zeroing of the supplied
+   words and landed records; the call to mesh_plan_erased and its ETIMEDOUT; the layout's fixed areas of words.  Why:
+   C4; a data page holds payload only and nothing is zeroed or reset while a plan stands (C3.7); a new plan's state is
+   in new pages, so nothing is erased or waited for (C3.4).  What must stay: the demands, mesh_graph_reach,
+   mesh_graph_flow and mesh_graph_fill as they were, so every rank's trees and template are the same; every failure but
+   ESTALE and the second map read's found before anything is written.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS, PQ and RC): `program` and
+   `outstanding` (mesh-collective.h): EINVAL where `program` is 0, lacks this node or lacks a node of the plan's (its
+   `nodes`), ENOMEM where `outstanding` is 0 or a queue's room passes its words, before anything is written; struct
+   mesh_state `sender` the least of `program`, where it was the least of the plan's `nodes`; the state section holds
+   the plan's two queues, between the status and the entries (plan_layout), started 0 with every word before the
+   entries (D3); every received range has its count words, a relay's too, so every receive entry names one.  Why:
+   design/aot-compilation-change-request.md A7, "sender(m) is the program's one sender: the least of the program's
+   nodes"; appendix item 2, "a queue of the plan's own.  It is laid out with the plan's pages when the plan is placed";
+   item 5, "The code must name a page for round j by that count".  What must stay: every failure but ESTALE and the
+   second map read's found before anything is written. */
+int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
+              const uint32_t *calls,uint32_t ncalls,struct mesh_view *view){
+  struct hdr *m=context->M;
+  if(!view)return EINVAL;
+  *view=(struct mesh_view){NULL,0};
+  if(!group || !program || !count || !functions || !ncalls || !calls)return EINVAL;
+  for(uint32_t j=0;j<ncalls;j++)if(calls[j]>=count)return EINVAL;
+  struct plan *plans=calloc(count,sizeof *plans);
+  size_t *row=malloc(((size_t)count+1)*sizeof *row),*order=malloc(((size_t)ncalls+1)*sizeof *order);
+  struct plan_placement placed={0};
+  struct mesh_nodes nodes,after;
+  uint32_t *mapped=NULL;
+  int status=!plans || !row || !order?ENOMEM:0;
+  if(status)goto done;
+  /* the program's calls grouped by function, each function called at least once (mesh-collective.h mesh_plan) */
+  mesh_graph_rows(count,ncalls,plan_at,calls,row,order);
+  for(uint32_t f=0;f<count;f++)if(row[f]==row[f+1]){status=EINVAL;goto done;}
+  if((status=mesh_nodes_read(context,&nodes)))goto done;
+  if(nodes.self>=nodes.count){status=EHOSTUNREACH;goto done;}
+  if(!(program>>nodes.self&1)){status=EINVAL;goto done;}
+  const uint64_t block=(uint64_t)m->block*m->pgsz;
+  /* 1. each plan, the IPC graph, the rows, the layouts, the one allocation, the entries in their order */
+  for(uint32_t f=0;f<count;f++){
+    struct plan *p=plans+f;
+    p->context=context;p->n=nodes.count;p->self=nodes.self;p->serial=nodes.serial;
+    if((status=plan_function(p,functions+f,&nodes,program)))goto done;
   }
-  /* the entries, copy c's n at [c n, c n + n) of the section's `hops`, in plan_schedule's order (R5), each naming
-     copy c's page and words (mesh.h struct mesh_hop): a receive its field's word and low bit in its range's copy-c
-     group, its range's copy-c count word where this node consumes the range (0 at a relay, whose receive the bridge
-     counts nothing for: review 15's finding 1) and P_g; a forwarding send its receive's word and field; a send from the
-     range's source its release's supplied word; each its page's bytes, page k of a range of B bytes min(Q, B - k Q), Q
-     = block x pgsz (design/compilation-coordination.md, T7); each its entry's `set`, every copy's the same (S1, S2) */
-  struct mesh_hop *hop=mesh_hops(m,state);
-  for(uint32_t c=0;c<u;c++)for(uint64_t j=0;j<p.entries;j++){
-    const struct plan_entry *e=p.entry+j;
-    const struct plan_demand *d=p.demand+e->demand;
-    const uint64_t left=d->bytes-e->page*block;
-    struct mesh_hop h={.page=plan_page(&p,e->value,c,e->page),.node=e->node,.direction=e->direction,
-                       .field=MESH_ABSENT,.bytes=(uint32_t)(left<block?left:block),.serial=p.serial,.set=e->set};
-    if(e->field==MESH_ABSENT)h.word=base+p.supplied+(uint64_t)d->release*sizeof(uint64_t);
-    else{
-      h.word=base+p.phases+d->group+(uint64_t)c*mesh_group_bytes(d->received)+(uint64_t)e->field/32*sizeof(uint64_t);
-      h.field=2*(e->field%32);
-      if(e->direction==MESH_RECEIVE){
-        h.count=base+p.counts+((uint64_t)d->counted*u+c)*sizeof(uint64_t);
-        h.pages=d->received;
+  if((status=plan_graph(plans,count,calls,ncalls,program,nodes.self,row,order)))goto done;
+  /* every value's rows: count x P, count u for a value a range lies in, k for a value of lag k >= 1 and 1 for every
+     other, the program's from row 0, at most the page table's (2026-11-05, point 5: no claim's head row, no first fit
+     over the rows); and the `run` values' rows, the mapping's */
+  uint64_t rows=0,runs=0;
+  for(uint32_t f=0;f<count;f++)for(uint32_t j=0;j<plans[f].givens;j++){
+    const struct mesh_value *v=plans[f].given+j;
+    const uint64_t copies=plans[f].named[j]!=MESH_ABSENT?plans[f].copies:v->lag?v->lag:1;
+    uint64_t blocks;
+    if(__builtin_mul_overflow(copies,plan_blocks(m,v->section.bytes),&blocks) ||
+       __builtin_add_overflow(rows,blocks,&rows) || rows>mesh_rows(m)){status=ENOMEM;goto done;}
+    if(v->run)runs+=blocks;
+  }
+  for(uint32_t f=0;f<count;f++)plan_layout(plans+f);
+  if((status=plan_place(plans,count,m,&placed)))goto done;
+  for(uint32_t f=0;f<count;f++){
+    struct plan *p=plans+f;
+    if(!(p->entry=malloc((p->entries+1)*sizeof *p->entry))){status=ENOMEM;goto done;}
+    plan_walk(p);
+    if(p->demands && (status=plan_schedule(p,p->weights,p->dependence,p->dependences)))goto done;
+  }
+  if(!(mapped=malloc(((size_t)runs+1)*sizeof *mapped))){status=ENOMEM;goto done;}
+  /* another program's operand, or this program's earlier one, stands or is not yet released (mesh.h struct
+     mesh_program `owner`): EBUSY, before anything is written */
+  if(atomic_load_explicit(&mesh_program(m)->owner,memory_order_acquire)){status=EBUSY;goto done;}
+
+  /* 2. each plan's state section, its synchronization edges, its values' rows, its ranges' publications and its
+     entries; then the table */
+  uint32_t row_at=0;
+  size_t runs_at=0;
+  for(uint32_t f=0;f<count;f++){
+    struct plan *p=plans+f;
+    const uint32_t u=p->copies,at=plan_page(&placed,m->block,p->state,0);
+    const uint64_t base=m->data_off+(uint64_t)at*m->pgsz;
+    p->base=base;
+    /* the state section started once, where it is placed (D3): its bytes before the entries 0, then struct
+       mesh_state's fields; nothing else of it is written by the plan but the entries, and no word of it is reset while
+       the plan stands */
+    memset(mesh_at(m,at),0,(size_t)p->hops);
+    struct mesh_state *state=(struct mesh_state *)mesh_at(m,at);
+    state->copies=u;
+    state->receives=(uint32_t)p->receives;
+    state->ranges=p->consumed;
+    state->releases=(uint32_t)p->releases;
+    state->phases=base+p->phases;
+    state->counts=base+p->counts;
+    state->supplied=base+p->supplied;
+    state->status=base+p->status;
+    state->group=group;
+    state->epoch=(uint64_t)f+1;
+    state->serial=p->serial;
+    state->hops=base+p->hops;
+    state->entries=p->entries*u;
+    state->nodes=p->spanned;
+    state->sender=(uint32_t)__builtin_ctzll(program);
+    state->outstanding=(uint32_t)p->outstanding;
+    state->room=p->room;
+    state->submit_room=p->submit_room;
+    state->deliveries=base+p->deliveries;
+    state->submits=base+p->submits;
+    /* 2026-11-05 (point 4; "The revisions of 4e78f6f4"): the plan's synchronization edges here, `waits` then `tells`
+       (struct mesh_sync, `count` 0 from the bytes started above), its calls, `closed` 0 (the bytes above), where it
+       held one edge's `waits`, `tells` and `wait_delay`.  What must stay: every word started once */
+    state->waits=p->waits;
+    state->tells=p->tells;
+    state->syncs=base+p->syncs;
+    state->calls=p->calls;
+    struct mesh_sync *sync=mesh_syncs(m,state);
+    for(uint32_t k=0;k<p->waits+p->tells;k++){
+      sync[k].node=p->sync[k].node;sync[k].function=p->sync[k].function;sync[k].position=p->sync[k].position;
+      sync[k].every=p->sync[k].every;sync[k].at=p->sync[k].at;sync[k].delay=p->sync[k].delay;
+    }
+    /* every value's rows, from the program's next, copy c's rows first + c x P + k each bound to its block's page
+       (point 6: "bind every value's rows (mesh_backing_bind, one row a block)"), named clean as mesh_section_create
+       named them (no device, no constant, no publication: every field of a row's publication 0 but its ranges' words
+       below); a named value's block k of copy c, where a range lies, the range's routed copy c's block k - first (its
+       demand's routed value here, a relay's among them, no row's), elsewhere its uncovered item's next block; a local
+       value's copy c its item[j] + c; a `state` 1 value's bytes 0 once, block by block (D3: a local invariant outside
+       the window alone).
+       2026-11-05 (points 5 to 7; "The revisions of 4e78f6f4"): the rows the program's allocation numbers, one row a
+       block placed anywhere, where they were the claim's after its head, bound copy by copy to one run of pages, and
+       struct mesh_buffer's `owner`, `closed` and `pages` named 0 with `constant` (117: read and written no more).
+       What must stay: every row named clean; no data page written but a `state` value's, once */
+    for(uint32_t j=0;j<p->givens;j++){
+      struct mesh_value *v=p->given+j;
+      const uint32_t P=(uint32_t)plan_blocks(m,v->section.bytes),
+                     copies=p->named[j]!=MESH_ABSENT?u:v->lag?v->lag:1;
+      v->section=(struct mesh_section){row_at,P*m->block,v->section.bytes,copies,P};
+      v->view=NULL;
+      for(uint32_t r=row_at;r<row_at+copies*P;r++){
+        atomic_store_explicit(&mesh_page(m)[r].device,0,memory_order_relaxed);
+        mesh_buffers(m)[r].constant=0;
+        memset(mesh_publication_at(m,r),0,(size_t)m->target_stride);
+        if(v->run)mapped[runs_at++]=r;
       }
+      for(uint32_t c=0;c<copies;c++){
+        const uint32_t first=row_at+c*P;
+        if(p->named[j]!=MESH_ABSENT){
+          uint32_t k=0,alone=0;
+          for(uint32_t q=p->named[j];q<p->offsets && p->offset[q].value==j;q++){
+            const struct plan_offset *o=p->offset+q;
+            const uint32_t routed=p->routed+p->demand[o->demand].value*u+c;
+            for(;k<o->first;k++)
+              mesh_backing_bind(context,first+k,m->block,plan_page(&placed,m->block,p->item[j]+c,alone++),c);
+            for(;k<o->first+o->pages;k++)
+              mesh_backing_bind(context,first+k,m->block,plan_page(&placed,m->block,routed,k-o->first),c);
+          }
+          for(;k<P;k++)mesh_backing_bind(context,first+k,m->block,plan_page(&placed,m->block,p->item[j]+c,alone++),c);
+        }else for(uint32_t k=0;k<P;k++){
+          const uint32_t page=plan_page(&placed,m->block,p->item[j]+c,k);
+          mesh_backing_bind(context,first+k,m->block,page,c);
+          if(v->state){
+            const uint64_t left=v->section.bytes-(uint64_t)k*block;
+            memset(mesh_at(m,page),0,(size_t)(left<block?left:block));
+          }
+        }
+      }
+      row_at+=copies*P;
     }
-    *hop++=h;
+    /* each range's words at its own first row (point 7: copy 0's row value.first + first), as a range's first row's
+       were: a received range's its pages, its copy-0 group and count word, the state section; a source range's its
+       supplied word, the one target a host or GPU producer stores into, the state section */
+    for(uint32_t q=0;q<p->offsets;q++){
+      const struct plan_offset *o=p->offset+q;
+      const struct plan_demand *d=p->demand+o->demand;
+      struct mesh_publication *publication=mesh_publication_at(m,p->given[o->value].section.first+o->first);
+      if(d->source==p->self){
+        publication->sends=1;
+        publication->targets[0]=(struct mesh_target){.word=base+p->supplied+(uint64_t)d->release*sizeof(uint64_t),
+                                                     .count=1,.stride=0};
+      }else{
+        publication->pages=d->received;
+        publication->phases=base+p->phases+d->group;
+        publication->count=base+p->counts+(uint64_t)d->consumed*u*sizeof(uint64_t);
+      }
+      publication->state=base;
+    }
+    /* the entries, copy c's n at [c n, c n + n) of the section's `hops`, in plan_schedule's order (R5), each naming
+       copy c's page and words (mesh.h struct mesh_hop): a receive its field's word and low bit in its range's copy-c
+       group, its range's copy-c count word and P_g; a forwarding send its receive's word and field; a send from the
+       range's source its release's supplied word; each its page's bytes, page k of a range of B bytes min(Q, B - k Q),
+       Q = block x pgsz (design/compilation-coordination.md, T7); each its entry's `set`, every copy's the same (S1,
+       S2); its page the routed copy's block k's (plan_page, point 6) */
+    struct mesh_hop *hop=mesh_hops(m,state);
+    for(uint32_t c=0;c<u;c++)for(uint64_t j=0;j<p->entries;j++){
+      const struct plan_entry *e=p->entry+j;
+      const struct plan_demand *d=p->demand+e->demand;
+      const uint64_t left=d->bytes-e->page*block;
+      struct mesh_hop h={.page=plan_page(&placed,m->block,p->routed+e->value*u+c,e->page),.node=e->node,
+                         .direction=e->direction,.field=MESH_ABSENT,.bytes=(uint32_t)(left<block?left:block),
+                         .serial=p->serial,.set=e->set};
+      if(e->field==MESH_ABSENT)h.word=base+p->supplied+(uint64_t)d->release*sizeof(uint64_t);
+      else{
+        h.word=base+p->phases+d->group+(uint64_t)c*mesh_group_bytes(d->received)+(uint64_t)e->field/32*sizeof(uint64_t);
+        h.field=2*(e->field%32);
+        if(e->direction==MESH_RECEIVE){
+          h.count=base+p->counts+((uint64_t)d->counted*u+c)*sizeof(uint64_t);
+          h.pages=d->received;
+        }
+      }
+      *hop++=h;
+    }
   }
-  /* 4. the map read again: where it moved, or the reader failed, this claim alone is closed and `*plan` untouched
-     (design/compilation-coordination.md, N3; a bridge refuses a plan whose `serial` is not `map_serial` as it loads
-     it, and cancels one that stands where the serial moves: mesh.h, "Cancellation").
-     2026-11-04, owner C2 (N3, N5): reversing the close of every earlier claim of the client, context->state 0 and
-     context->epoch the named epoch less 1 (C-epoch).  Why: compiled functions coexist; this call's failure is its own
-     claim's alone.  What must stay: ESTALE, or the reader's error, with this claim closed */
-  if(!(status=mesh_nodes_read(context,&after)) && after.serial!=p.serial)status=ESTALE;
-  if(status){mesh_claim_close(context,generation);goto done;}
-  /* 5. the plan stands: its head's publication `state` (release), after every write above; `*plan` that offset, the
-     plan's handle (N2); `plans` raised and woken.
-     2026-11-04, owner C2 (N3, N5): step 6, every earlier claim of this client closed once this plan stood, is gone,
-     and context->state and context->epoch are no longer set.  Why: a program holds any number of compiled functions
-     at once, each released only by its retirement or the program's (design/aot-compilation-change-request.md, appendix
-     item 6).  What must stay: the publication a release after every write, then `plans` raised and woken */
-  __atomic_store_n(&mesh_publication_at(m,p.claim.rows.first)->state,base,__ATOMIC_RELEASE);
-  *plan=base;
+  /* the program's table (mesh.h struct mesh_program `table`): word k function k + 1's state section's region offset */
+  const uint32_t table=plan_page(&placed,m->block,placed.table,0);
+  uint64_t *word=(uint64_t *)(void *)mesh_at(m,table);
+  for(uint32_t f=0;f<count;f++)word[f]=plans[f].base;
+  /* 3. the program's one mapping of its `run` values' rows, function by function and value by value, each value's
+     copies in order (point 6: "Give an operand typed as one run its run as a mapping written when the plan is made";
+     R2, corrected: "the map from the operand's consecutive virtual pages to its pages is written once"); it reads the
+     bindings above, so its failure (a mapping Mach refuses) is after them, and the root is not published */
+  if((status=mesh_view_compose(context,mapped,runs_at,view)))goto done;
+  /* 4. the map read again: where it moved, or the reader failed, the root is not published and the mapping released
+     (a bridge refuses a plan whose `serial` is not `map_serial` as it loads it, and cancels one that stands where the
+     serial moves: mesh.h, "Cancellation") */
+  if(!(status=mesh_nodes_read(context,&after)) && after.serial!=nodes.serial)status=ESTALE;
+  if(status){mesh_view_release(*view);*view=(struct mesh_view){NULL,0};goto done;}
+  /* 5. each `run` value's view, at its first row's place in the mapping (mesh-collective.h struct mesh_value `view`);
+     the root, its `owner` last (release), so the bridge reads every plan of it written (mesh.h mesh_program_plan);
+     each function's `plan`; `plans` raised and woken */
+  for(uint32_t f=0,at=0;f<count;f++)for(uint32_t j=0;j<plans[f].givens;j++){
+    struct mesh_value *v=plans[f].given+j;
+    if(!v->run)continue;
+    v->view=(char *)view->address+(size_t)at*block;
+    at+=v->section.count*v->section.stride;
+  }
+  struct mesh_program *root=mesh_program(m);
+  atomic_store_explicit(&root->closed,0,memory_order_relaxed);
+  root->plans=count;
+  root->start=mesh_started(getpid());
+  root->group=group;
+  root->generation=atomic_fetch_add(&m->serial,1)+1;
+  root->table=m->data_off+(uint64_t)table*m->pgsz;
+  atomic_store_explicit(&root->owner,context->client,memory_order_release);
+  for(uint32_t f=0;f<count;f++)functions[f].plan=plans[f].base;
   mesh_notify(&m->plans);
 done:
-  free(key);free(placed);free(named);free(p.demand);free(p.of);
-  free(root);free(up);free(down);free(demand);free(p.parent);free(share);
-  free(p.tree);free(p.run);free(rate);free(latency);free(trees);free(p.members);free(p.lead);free(p.comm);
-  free(p.child);free(p.value);free(p.read);free(p.here);free(p.first);free(p.head);free(p.lag);free(p.between);
-  free(p.others);free(p.colour);free(p.entry);
+  for(uint32_t f=0;plans && f<count;f++)plan_free(plans+f);
+  free(plans);free(row);free(order);free(placed.item);free(placed.count);free(placed.chain);free(mapped);
   return status;
 }
