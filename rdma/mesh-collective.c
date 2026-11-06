@@ -38,8 +38,8 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
   return 1;
 }
 
-/* libfabric man/fi_cntr.3.md: "Counters record the number of requested operations that have completed"; "fi_cntr_readerr:
-   Reads the number of operations which have completed in error."
+/* libfabric man/fi_cntr.3.md: "Counters record the number of requested operations that have completed";
+   "fi_cntr_readerr: Reads the number of operations which have completed in error."
    rdma-core libibverbs/man/ibv_post_send.3, NOTES: "The buffers used by a WR can only be safely reused after WR the
    request is fully executed and a work completion has been retrieved from the corresponding completion queue (CQ)." */
 uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
@@ -181,8 +181,8 @@ static uint32_t plan_event(const struct plan *p,uint32_t i,int produced,int own)
 struct plan_edge { uint32_t tail,head,lag; };
 static uint32_t plan_edge_tail(const void *context,size_t k){ return ((const struct plan_edge *)context)[k].tail; }
 
-/* M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo scheduling, MICRO 1994: the dependence graph, each
-   edge its iteration distance `lag` */
+/* M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo scheduling, MICRO 1994: the dependence graph,
+   each edge its iteration distance `lag` */
 static int plan_template(struct plan *p,const struct mesh_dependence *dependence,uint32_t dependences){
   const uint32_t n=p->n,self=p->self;
   size_t first[(size_t)n+2],child[(size_t)n+1];
@@ -390,7 +390,6 @@ struct plan_item { uint64_t element,blocks; uint32_t kind,function,index,copy,sp
 struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,elements; uint32_t split,table;
                         struct mesh_range range[2]; };
 
-
 static void plan_item_put(struct plan_placement *x,uint32_t kind,uint32_t function,uint32_t index,uint32_t copy,
                           uint64_t blocks,uint32_t space){
   if(x->item){
@@ -402,8 +401,8 @@ static void plan_item_put(struct plan_placement *x,uint32_t kind,uint32_t functi
 static uint64_t plan_table(uint32_t count,uint32_t nodes,uint64_t places){
   return (uint64_t)count*sizeof(uint64_t)+((uint64_t)nodes+1+places)*sizeof(uint32_t);
 }
-/* ExecuTorch, exir/memory_planning.py, update_tensor_lifetime: "Mutable buffers and device resident constants keep their
-   data across calls, so they are never freed." (PLAN_ALONE) */
+/* ExecuTorch, exir/memory_planning.py, update_tensor_lifetime: "Mutable buffers and device resident constants keep
+   their data across calls, so they are never freed." (PLAN_ALONE) */
 static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,struct plan_placement *x,uint32_t space){
   uint64_t places=0;
   for(uint32_t f=0;f<count;f++){
@@ -463,8 +462,8 @@ static int plan_interval(const struct plan *plans,const struct plan_item *x,cons
 }
 /* Mukerji 1994, §2.2, Problem 1: "Given a set of live ranges represented as a cyclic interval graph G, find a minimum
    register (color) assignment for the intervals in G such that overlapping intervals are assigned different
-   registers"; Algorithm 3.2.1's input: "The number of registers, reg_num, needed by each interval of the cyclic interval
-   graph" (mesh-graph.h mesh_graph_fat_cover) */
+   registers"; Algorithm 3.2.1's input: "The number of registers, reg_num, needed by each interval of the cyclic
+   interval graph" (mesh-graph.h mesh_graph_fat_cover) */
 static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct plan_placement *x){
   *x=(struct plan_placement){0};
   plan_items(plans,count,m,x,1);
@@ -661,8 +660,8 @@ static int plan_entry_order(const void *a,const void *b){
    Communication contention in task scheduling, IEEE TPDS 16(6) 2005, Definition 4 (the topology graph).
    MSCCLang, ASPLOS 2023, §4.2: a remote copy expanded "into a send and a receive instruction", joined by "a
    communication edge"; here one instruction.
-   C.-Y. Chen, arXiv 2205.02474, 2022, (14), (14a), (1b), (1c); L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math.
-   Oper. Res. 22(3) 1997, (5) (mesh-graph.h mesh_graph_completion_times); MSCCLang §5.2, step 3 (mesh-graph.h
+   C.-Y. Chen, arXiv 2205.02474, 2022, (14), (14a), (1b), (1c); L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein,
+   Math. Oper. Res. 22(3) 1997, (5) (mesh-graph.h mesh_graph_completion_times); MSCCLang §5.2, step 3 (mesh-graph.h
    mesh_graph_heap_order).
    d_j = w(j) for a task; d_j = max over the edges e routed over communication j of c(e) / b(L) */
 static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const struct mesh_dependence *dependence,
@@ -1234,8 +1233,8 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     d->leaves|=UINT64_C(1)<<t->destination;
     if(t->source!=p->self && t->destination!=p->self)continue;
     /* GSPMD (Xu et al., arXiv 2105.04663), §4.5: "DynamicSlice to shard replicated dimensions"; torch 2.14.0
-       torch/export/exported_program.py, ExportedProgram: "a state_dict containing tensor values of all lifted parameters
-       and buffers" */
+       torch/export/exported_program.py, ExportedProgram: "a state_dict containing tensor values of all lifted
+       parameters and buffers" */
     if(t->source==p->self && values[t->value].kind!=MESH_EXECUTION){status=EINVAL;goto done;}
     d->mine=t->value;
     d->view=t->source==p->self?&t->from:&t->to;
