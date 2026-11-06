@@ -494,8 +494,7 @@ int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
    sequencer's, and the view's first message carries it: the records the sequencer's map holds when it creates the
    view.  Every member plans on those records"; "So every member of a view computes the same plan from the same
    operands"; "The revisions of 14b9a757", A7), reversing the map's records: the installed view's records (mesh.h hdr
-   `view_nodes` of them at `view_off`, mesh-map.h mesh_view_records) and its identifier (hdr `view`, `view_sequencer`,
-   `view_boot`: mesh.h mesh_view_installed) as `*view`, read
+   `view_nodes` of them at `view_off`, mesh-map.h mesh_view_records) and its identifier (hdr `view`) as `*view`, read
    whole under the view's seqlock `view_map` as the map's are under `map`: `view_map` read (acquire) even, the words
    read, an acquire fence and `view_map` read again the same (mesh.h mesh_map_whole's two steps, which that function
    takes for `map` alone).  ESTALE where no view is installed (`view` 0), after a whole read: the implementer's decision
@@ -548,9 +547,8 @@ static uint64_t mesh_capacity(const struct mesh_record *a,const struct mesh_reco
    mesh.h hdr `view`: "A plan is made on those records (mesh-dataflow.h mesh_nodes_read), its `serial` `view`"; "The
    revisions of 14b9a757", A7), reversing "`serial` is the map's (hdr `map_serial`)": the nodes, their indices,
    capacities and this node's index are the installed view's records' (mesh_view_copy), read as the map's were, and
-   `serial`, `sequencer` and `boot` are the view's identifier (mesh.h struct mesh_view_id, read with the records);
-   ESTALE where no view is installed, besides mesh-dataflow.h's errors.  What must stay: a node's index its place in
-   ascending node-id order among the records; the pairs' capacities mesh_cables' */
+   `serial` is the view's identifier; ESTALE where no view is installed, besides mesh-dataflow.h's errors.  What must
+   stay: a node's index its place in ascending node-id order among the records; the pairs' capacities mesh_cables' */
 int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
   struct mesh_record r[MESH_NODES_MOST];
   uint32_t count,order[MESH_NODES_MOST];
@@ -702,15 +700,6 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
      count only rises (appendix item 2, "a count that only rises"), so a value read that differs from the one before is
      a rise.  A bounded wait: each one of os_sync_wait_on_address_with_timeout's ends by its bound, and the loop ends at
      ETIMEDOUT where the count stops rising short of its bound.
-   - ESTALE where the plan's view is not the installed view's identifier (mesh.h mesh_view_compare of mesh_plan_view and
-     mesh_view_installed, acquire), where it was hdr `map_serial`: the plan's `serial`, `sequencer` and `boot` are the
-     view it was made in (mesh.h struct mesh_state; aot A7, corrected 2026-11-06: "A plan then stands while its view
-     does, and its view while the sequencer's map does"), and a view's installation cancels every plan of another
-     (mesh-records.c view_install, mesh-flow.c plan_stale), raising each edge's count to UINT64_MAX and waking it, so a
-     waiter of the old view reads that or ESTALE.
-   - After the raise, the fence, then the installed view's identifier read, ESTALE where it is not the plan's view: the
-     pairing above, with the view's installation (view_install stores the identifier, then plan_stale fences and reads
-     the plans' `executions`).
    What must stay: the waits before the raise, nothing raised where one fails; the raise before the fence, the serial's
    read after it */
 /* the plan's row of waits into its call at place `place` (mesh.h struct mesh_state `rows`): row[0] the index at `syncs`
@@ -750,8 +739,15 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
   atomic_thread_fence(memory_order_seq_cst);
   return mesh_view_compare(mesh_view_installed(m,memory_order_relaxed),mesh_plan_view(state))?ESTALE:0;
 }
-/* mesh-call.h mesh_host_started; where the installed view is not the plan's, mesh-flow.c plan_cancel's completion of
-   the plan's waiters */
+/* MPI 4.1 §3.9, MPI_START: "The request becomes active once the call is made."  `executions` := max(`executions`,
+   `execution` + 1).
+   ISO/IEC 9899:2011 (N1570) 7.17.3p11: "For atomic operations A and B on an atomic object M, where A modifies M and B
+   takes its value, if there are memory_order_seq_cst fences X and Y such that A is sequenced before X, Y is sequenced
+   before B, and X precedes Y in S, then B observes either the effects of A or a later modification of M in its
+   modification order."
+   libfabric man/fi_endpoint.3.md (https://raw.githubusercontent.com/ofiwg/libfabric/main/man/fi_endpoint.3.md),
+   fi_cancel: "Canceling an operation causes the fabric provider to search for the operation and, if it is still
+   pending, complete it as having been canceled." */
 void mesh_host_started(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
   struct hdr *m=context->M;
   struct mesh_state *state=mesh_state_at(m,plan);
