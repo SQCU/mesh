@@ -1006,3 +1006,359 @@ int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edge
   free(first); free(order); free(indegree); free(heap); free(position);
   return result;
 }
+
+/* New (design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the
+   self-timed buffer bound"; design/compilation-coordination.md, "The revisions of 3f106747", BS-1): no tag source.
+   2026-11-05 (design/aot-compilation-change-request.md, appendix item 2; design/compilation-coordination.md, "The
+   revisions of 3f106747", BS-1): new.  What must stay: integer and IEEE-exact operations alone (+, -, x, / and
+   comparisons, correctly rounded; the Makefile's -ffp-contract=off) and every loop bounded by the operands' counts, so
+   every party computes the same components, means and delays from the same operands (mesh-graph.h); one copy each of
+   Tarjan's search (components_search) and of the cycle tests (zero_delay_cycle, positive_cycle), which the five
+   functions share; the caller's operands written only through the outputs the header names.
+   S. S. Bhattacharyya, S. Sriram and E. A. Lee, Optimizing synchronization in multiprocessor DSP systems, IEEE Trans.
+   Signal Processing 45(6), 1997, here BSL.  The scratch the searches share: compressed rows first[0 .. |V| + 1] and
+   order[0 .. E) (mesh_graph_rows), Tarjan's index, low, stack, frame and at, the components, and Bellman and Ford's
+   distances, |V| words each. */
+struct graph_scratch { size_t *first, *order, *at; uint32_t *index, *low, *stack, *frame, *component; double *distance; };
+static void scratch_free(struct graph_scratch *s) {
+  free(s->first); free(s->order); free(s->at); free(s->index); free(s->low); free(s->stack); free(s->frame);
+  free(s->component); free(s->distance);
+}
+/* every array, or ENOMEM (also where |V| + 1 rows or E positions pass their words) */
+static int scratch_alloc(struct graph_scratch *s, uint32_t vertices, size_t edges) {
+  s->first = s->order = s->at = NULL;
+  s->index = s->low = s->stack = s->frame = s->component = NULL;
+  s->distance = NULL;
+  if (vertices == UINT32_MAX || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
+  const size_t n = (size_t)vertices + 2;
+  s->first = malloc(n * sizeof *s->first); s->order = malloc((edges + 1) * sizeof *s->order);
+  s->at = malloc(n * sizeof *s->at); s->index = malloc(n * sizeof *s->index); s->low = malloc(n * sizeof *s->low);
+  s->stack = malloc(n * sizeof *s->stack); s->frame = malloc(n * sizeof *s->frame);
+  s->component = malloc(n * sizeof *s->component); s->distance = malloc(n * sizeof *s->distance);
+  return s->first && s->order && s->at && s->index && s->low && s->stack && s->frame && s->component && s->distance
+             ? 0 : ENOMEM;
+}
+/* the times' sum, in vertex order */
+static double time_sum(uint32_t vertices, const double *time) {
+  double sum = 0;
+  for (uint32_t v = 0; v < vertices; v++) sum += time[v];
+  return sum;
+}
+/* EINVAL where an edge names no vertex, or (time not NULL) a time is negative or not finite or their sum is not finite
+   (mesh-graph.h: time[v] >= 0, BSL §4.1's "execution time t(v)"; as mesh_graph_completion_times refuses its lengths);
+   else 0 */
+static int graph_check(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to) {
+  for (uint32_t v = 0; time && v < vertices; v++) if (!(time[v] >= 0 && time[v] <= DBL_MAX)) return EINVAL;
+  if (time && !(time_sum(vertices, time) <= DBL_MAX)) return EINVAL;
+  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
+  return 0;
+}
+/* R. E. Tarjan's depth-first search for the strongly connected components (Depth-first search and linear graph
+   algorithms, SIAM J. Comput. 1(2), 1972) over the rows s->first, s->order: vertex v's edges order[first[v]] ..
+   order[first[v + 1] - 1], edge k entering to[k]; rows past |V| are not read.  Each vertex is numbered (index) as the
+   search first reaches it; low[v] is the least number of a vertex still on the search's stack that v's subtree reaches
+   by one edge; a vertex whose low is its own number roots a component, which takes the stack's vertices down to it.  A
+   vertex is on the stack exactly while it is numbered and has no component.  The recursion is an explicit stack of
+   frames (frame[d] its vertex, at[d] its next row position), at most |V| deep, so a large graph cannot overflow the C
+   stack.  Roots in vertex order and each row in its order, so component[v] is numbered as the search completes the
+   components, alike at every party; their count.  Cost: O(V + E), each vertex framed once and each edge read once. */
+static uint32_t components_search(const struct graph_scratch *s, uint32_t vertices, const uint32_t *to,
+                                  uint32_t *component) {
+  uint32_t count = 0, next = 0, top = 0;
+  for (uint32_t v = 0; v < vertices; v++) { s->index[v] = UINT32_MAX; component[v] = UINT32_MAX; }
+  for (uint32_t root = 0; root < vertices; root++) {
+    if (s->index[root] != UINT32_MAX) continue;
+    uint32_t depth = 0;
+    s->index[root] = s->low[root] = next++; s->stack[top++] = root;
+    s->frame[depth] = root; s->at[depth++] = s->first[root];
+    while (depth) {
+      const uint32_t v = s->frame[depth - 1];
+      if (s->at[depth - 1] < s->first[v + 1]) {
+        const uint32_t w = to[s->order[s->at[depth - 1]++]];
+        if (s->index[w] == UINT32_MAX) {
+          s->index[w] = s->low[w] = next++; s->stack[top++] = w;
+          s->frame[depth] = w; s->at[depth++] = s->first[w];
+        } else if (component[w] == UINT32_MAX && s->index[w] < s->low[v]) s->low[v] = s->index[w];
+        continue;
+      }
+      if (s->low[v] == s->index[v]) {
+        uint32_t w;
+        do { w = s->stack[--top]; component[w] = count; } while (w != v);
+        count++;
+      }
+      if (--depth && s->low[v] < s->low[s->frame[depth - 1]]) s->low[s->frame[depth - 1]] = s->low[v];
+    }
+  }
+  return count;
+}
+/* zero_delay_cycle's rows: an edge's row is its tail where its delay is 0, else row |V|, past every vertex's, which
+   components_search does not read (an absent edge's delay, UINT64_MAX, is not 0) */
+struct zero_rows { const uint32_t *from; const uint64_t *delay; uint32_t vertices; };
+static uint32_t zero_row(const void *context, size_t e) {
+  const struct zero_rows *z = context;
+  return z->delay[e] ? z->vertices : z->from[e];
+}
+/* 1 where the edges of delay 0 hold a cycle (BSL Lemma 1: "Every cycle C in the IPC graph has a path delay of at least
+   one if and only if the static schedule it is constructed from is free of deadlock"), exactly, by components alone:
+   an edge of delay 0 whose ends lie in one component of those edges, which a self-loop's do, lies on a cycle with
+   the component's path back to its tail; else 0 */
+static int zero_delay_cycle(const struct graph_scratch *s, uint32_t vertices, size_t edges, const uint32_t *from,
+                            const uint32_t *to, const uint64_t *delay) {
+  const struct zero_rows rows = {from, delay, vertices};
+  mesh_graph_rows(vertices + 1, edges, zero_row, &rows, s->first, s->order);
+  components_search(s, vertices, to, s->component);
+  for (size_t e = 0; e < edges; e++) if (!delay[e] && s->component[from[e]] == s->component[to[e]]) return 1;
+  return 0;
+}
+/* The tolerance τ of positive_cycle, 1e-9 x Σ time: this file's choice.  Why: at λ_max the critical cycle's length is
+   0 in exact arithmetic (BSL Definition 2: "A cycle in Gipc whose cycle mean is λ max is called a critical cycle of
+   Gipc"), and the test must not report it.  Where no cycle is positive in exact arithmetic every distance is the
+   length of a path of distinct vertices, at most Σ time, so a cycle's computed length, a sum of at most |V| terms each
+   rounded once and added once, is off by a few times |V| x 2^-53 x Σ time, below τ while |V| is under about 10^6.  τ
+   is relative to the times, so the test is the same whatever their unit (A3's weighting, the caller's); every time 0,
+   τ is 0 and no length is positive. */
+static double cycle_tolerance(uint32_t vertices, const double *time) { return 1e-9 * time_sum(vertices, time); }
+/* Bellman and Ford's test (R. Bellman, On a routing problem, Quart. Appl. Math. 16, 1958; L. R. Ford, Network flow
+   theory, RAND P-923, 1956) for a cycle of positive length under the lengths time[from[e]] - λ delay[e], an edge of
+   delay UINT64_MAX absent: every distance 0 (a source joined to every vertex by an edge of length 0); each round
+   relaxes the edges in their order, an edge only where it raises its head's distance by more than `tolerance`; 1 where
+   round |V| still relaxes one, 0 where a round relaxes none.
+   - Sound: a relaxation in round r reads its tail's distance as set in round r - 1 or r (had it been set before the
+     edge's turn in round r - 1, that turn would have relaxed the edge), so the relaxations behind one in round |V|
+     number |V| or more and repeat a vertex, between whose two settings its distance rose by more than `tolerance`: a
+     cycle of that length, up to the sums' rounding.
+   - Complete within the tolerance: where a round relaxes none, each edge's head lies within `tolerance` of its tail's
+     distance plus its length, so a cycle C's length, the sum of those around it, is at most |C| x `tolerance`.
+   Arithmetic: + - x and < alone, in the edges' order.  Cost: O(|V| E). */
+static int positive_cycle(double *distance, uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
+                          const uint32_t *to, const uint64_t *delay, double lambda, double tolerance) {
+  for (uint32_t v = 0; v < vertices; v++) distance[v] = 0;
+  for (uint32_t round = 0; round < vertices; round++) {
+    int moved = 0;
+    for (size_t e = 0; e < edges; e++) {
+      if (delay[e] == UINT64_MAX) continue;
+      const double through = distance[from[e]] + (time[from[e]] - lambda * (double)delay[e]);
+      if (distance[to[e]] + tolerance < through) { distance[to[e]] = through; moved = 1; }
+    }
+    if (!moved) return 0;
+  }
+  return vertices > 0;
+}
+/* MinDelay's test at λ: 1 where the edges hold no cycle of zero delay and none of positive length */
+static int delays_pass(const struct graph_scratch *s, uint32_t vertices, const double *time, size_t edges,
+                       const uint32_t *from, const uint32_t *to, const uint64_t *delay, double lambda, double tolerance) {
+  return !zero_delay_cycle(s, vertices, edges, from, to, delay) &&
+         !positive_cycle(s->distance, vertices, time, edges, from, to, delay, lambda, tolerance);
+}
+/* mesh-graph.h mesh_graph_components.  BSL §3's SCCs, by components_search over every edge, whatever its delay, in rows
+   by its tail (mesh_graph_rows keyed by from[e]; depth_head reads the e-th word).  An edge naming no vertex is EINVAL
+   before anything is written; every allocation precedes the first component written, so ENOMEM writes none.  Cost:
+   O(V + E). */
+int mesh_graph_components(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+                          uint32_t *component, uint32_t *count) {
+  int result = graph_check(vertices, NULL, edges, from, to);
+  if (result) return result;
+  struct graph_scratch s;
+  result = scratch_alloc(&s, vertices, edges);
+  if (!result) {
+    mesh_graph_rows(vertices, edges, depth_head, from, s.first, s.order);
+    *count = components_search(&s, vertices, to, component);
+  }
+  scratch_free(&s);
+  return result;
+}
+/* mesh-graph.h mesh_graph_cycle_mean.  BSL §9's BellmanFord, by "the Bellman-Ford algorithm discussed in pp. 94-97 of
+   [15]" (E. L. Lawler, Combinatorial Optimization: Networks and Matroids, 1976): a binary search on λ, each step the
+   test for a cycle of positive length under the lengths time[from[e]] - λ delay[e] (positive_cycle, at τ =
+   cycle_tolerance).
+   - A cycle of present edges with zero total delay: INFINITY (§9: "deadlock is equivalent to the existence of a cycle
+     that has zero path delay, and is thus equivalent to an infinite maximum cycle mean"), found exactly, over the
+     present edges of delay 0 alone (zero_delay_cycle), before any length is computed.
+   - Otherwise every cycle's delay is at least 1 (Lemma 1), and a fundamental cycle's time is at most Σ time, so its
+     mean is at most Σ time: the search's range is [0, Σ time], no cycle positive at its upper end.  Where the test
+     finds none positive at 0 (no cycle, or none of positive time), *mean is 0.
+   - Each step halves the range at its midpoint, the lower end moved where a cycle is positive there and the upper end
+     where none is, for 200 steps or until the midpoint equals an end (the ends adjacent doubles): bounded, and the
+     same steps at every party.
+   - The test's resolution: where it finds no cycle positive at λ, a cycle C's length is at most |C|τ, so C's mean is
+     at most λ + |C|τ / Delay(C) <= λ + |V|τ.  *mean is the search's upper end raised by |V|τ, the least value at which
+     the test certifies that no cycle is positive in exact arithmetic.  Why (this file's choice): at the upper end
+     itself the critical cycle's length lies within about τ of the test's threshold, so the test at that λ on this
+     graph with edges added (MinDelay's X[e → r], DetermineDelays' X_i), whose distances round differently, could
+     report one of this graph's own cycles, and MinDelay would fail where Fig. 8 succeeds, or take a delay more than
+     the least where a new cycle's mean equals λ_max; at *mean every cycle of this graph has length at most 0, below
+     any report's τ.  The cost: a mean above the critical cycle's by at most about (|V| + 1)τ, 1e-9 (|V| + 1) Σ time.
+   Every allocation precedes *mean, which an error does not write.  Cost: O(|V| E) for each of at most 201 tests. */
+int mesh_graph_cycle_mean(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                          const uint64_t *delay, double *mean) {
+  int result = graph_check(vertices, time, edges, from, to);
+  if (result) return result;
+  struct graph_scratch s;
+  result = scratch_alloc(&s, vertices, edges);
+  if (!result) {
+    const double tolerance = cycle_tolerance(vertices, time);
+    double lo = 0, hi = time_sum(vertices, time), found = 0;
+    if (zero_delay_cycle(&s, vertices, edges, from, to, delay)) found = INFINITY;
+    else if (positive_cycle(s.distance, vertices, time, edges, from, to, delay, 0, tolerance)) {
+      for (int step = 0; step < 200; step++) {
+        const double mid = lo + (hi - lo) / 2;
+        if (mid <= lo || mid >= hi) break;
+        if (positive_cycle(s.distance, vertices, time, edges, from, to, delay, mid, tolerance)) lo = mid; else hi = mid;
+      }
+      found = hi + vertices * tolerance;
+    }
+    *mean = found;
+  }
+  scratch_free(&s);
+  return result;
+}
+/* mesh-graph.h mesh_graph_min_delay.  BSL Fig. 8, Function MinDelay(X, e, λ, B): "Perform a binary search in the range
+   [0, 1, …, B] to find the minimum value of r ∈ {0, 1, …, B} such that BellmanFord(X[e → r]) returns a value less
+   than or equal to λ"; X[e → r] "is simply the DFG that results from “changing the delay”" on e (§9), here in a copy
+   of the caller's delays, which are not written.
+   - Each step's test (delays_pass): no cycle of zero delay among the present edges (zero_delay_cycle) and none of
+     positive length under time[from[e]] - λ delay[e] (positive_cycle, at mesh_graph_cycle_mean's τ from the same
+     times).  BellmanFord's value is at most λ exactly where no cycle's delay is 0 and no cycle's mean exceeds λ, so
+     where no cycle's length is positive at λ: the test decides it without a search of its own.
+   - r = B first: ERANGE where it fails (the input's "Assuming X[e → B] has estimated throughput no less than λ^-1").
+     Then the least r of [0, B] that passes, by halving [lo, hi] (hi passes, every r below lo fails): at most 64 steps.
+     A larger r lowers the length of every cycle through e and leaves the others', so in exact arithmetic the tests
+     fail and then pass as r rises.
+   - λ finite and not negative (the input's "a positive real number λ", with 0, DetermineDelays' λ_max where no cycle
+     carries time), else EINVAL, as for e >= edges.  Every allocation precedes the first test, and an error does not
+     write *least.
+   Cost: O(|V| E) a test, at most 65 tests. */
+int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                         const uint64_t *delay, size_t e, double lambda, uint64_t bound, uint64_t *least) {
+  int result = graph_check(vertices, time, edges, from, to);
+  if (!result && (e >= edges || !(lambda >= 0 && lambda <= DBL_MAX))) result = EINVAL;
+  if (result) return result;
+  struct graph_scratch s;
+  result = scratch_alloc(&s, vertices, edges);
+  uint64_t *changed = result ? NULL : malloc((edges + 1) * sizeof *changed);
+  if (!result && !changed) result = ENOMEM;
+  if (!result) {
+    const double tolerance = cycle_tolerance(vertices, time);
+    for (size_t k = 0; k < edges; k++) changed[k] = delay[k];
+    changed[e] = bound;
+    if (!delays_pass(&s, vertices, time, edges, from, to, changed, lambda, tolerance)) result = ERANGE;
+    uint64_t lo = 0, hi = bound;
+    while (!result && lo < hi) {
+      const uint64_t mid = lo + (hi - lo) / 2;
+      changed[e] = mid;
+      if (delays_pass(&s, vertices, time, edges, from, to, changed, lambda, tolerance)) hi = mid; else lo = mid + 1;
+    }
+    if (!result) *least = hi;
+  }
+  scratch_free(&s); free(changed);
+  return result;
+}
+/* mesh-graph.h mesh_graph_convert_sc.  BSL §9, Fig. 6, Function Convert-to-SC-graph: "This algorithm simply “chains
+   together” the source SCCs, and similarly, chains together the sink SCCs.  The construction is completed by
+   connecting the first SCC of the “source chain” to the last SCC of the sink chain with an edge that we call the
+   sink-source edge."
+   - The SCCs by components_search over every edge; one SCC, or no vertex: strongly connected, none added.
+   - An SCC is a source SCC where no edge enters it from another, a sink SCC where none leaves it for another (BSL §3);
+     an SCC that no edge joins to another is both, and in both chains.
+   - Each SCC's link: "From each source or sink SCC, the algorithm selects a vertex that has minimum execution time to
+     be the chain “link” corresponding to that SCC"; its vertex of least time, the vertices scanned ascending and a
+     later one taken only where its time is less, so a tie goes to the lower vertex.
+   - The orderings (step 1, "Generate an ordering"): the SCCs ascending by their least vertex, the order in which an
+     ascending scan of the vertices first meets them; Fig. 6 names none, and this one every party computes alike.
+   - Out, in the order DetermineDelays takes (§9: "(e_0, e_1, …, e_m – 1) ≡ (e_s, a_1, a_2, …, a_k, b_l, b_l – 1, …,
+     b_1), where e_s is the sink-source edge"): e_s from the last sink SCC's link to the first source SCC's (step 6),
+     a_i from C_i's link to C_i+1's (step 3), b_i from D_i's link to D_i+1's (step 5).  Their number is "(n src + n snk
+     – 1), where n src is the number of source SCCs, and n snk is the number of sink SCCs" (Theorem 4's proof), up to
+     2|V| - 1 where SCCs of one vertex are both: ENOMEM where it passes the room `vertices`, before anything is written.
+   Every allocation precedes the first output written.  Cost: O(V + E). */
+int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                          uint32_t *added, uint32_t *added_from, uint32_t *added_to) {
+  int result = graph_check(vertices, time, edges, from, to);
+  if (result) return result;
+  struct graph_scratch s;
+  result = scratch_alloc(&s, vertices, edges);
+  const size_t n = (size_t)vertices + 1;
+  uint32_t *least = malloc(n * sizeof *least), *link = malloc(n * sizeof *link);
+  uint32_t *sources = malloc(n * sizeof *sources), *sinks = malloc(n * sizeof *sinks);
+  unsigned char *entered = malloc(n), *left = malloc(n);
+  if (!result && (!least || !link || !sources || !sinks || !entered || !left)) result = ENOMEM;
+  uint32_t count = 0, m = 0, k = 0;
+  if (!result) {
+    mesh_graph_rows(vertices, edges, depth_head, from, s.first, s.order);
+    count = components_search(&s, vertices, to, s.component);
+    for (uint32_t c = 0; c < count; c++) { least[c] = UINT32_MAX; entered[c] = 0; left[c] = 0; }
+    for (size_t e = 0; e < edges; e++)
+      if (s.component[from[e]] != s.component[to[e]]) { entered[s.component[to[e]]] = 1; left[s.component[from[e]]] = 1; }
+    for (uint32_t v = 0; v < vertices; v++) {
+      const uint32_t c = s.component[v];
+      if (least[c] == UINT32_MAX) { least[c] = v; link[c] = v; }
+      else if (time[v] < time[link[c]]) link[c] = v;
+    }
+    for (uint32_t v = 0; count > 1 && v < vertices; v++) {
+      const uint32_t c = s.component[v];
+      if (least[c] != v) continue;
+      if (!entered[c]) sources[m++] = link[c];
+      if (!left[c]) sinks[k++] = link[c];
+    }
+    if (count > 1 && (uint64_t)m + k - 1 > vertices) result = ENOMEM;
+  }
+  if (!result) {
+    const uint32_t made = count > 1 ? m + k - 1 : 0;
+    if (made) { added_from[0] = sinks[k - 1]; added_to[0] = sources[0]; }
+    for (uint32_t i = 1; i < m; i++) { added_from[i] = sources[i - 1]; added_to[i] = sources[i]; }
+    for (uint32_t j = 0; j + 1 < k; j++) { added_from[m + j] = sinks[k - 2 - j]; added_to[m + j] = sinks[k - 1 - j]; }
+    *added = made;
+  }
+  scratch_free(&s); free(least); free(link); free(sources); free(sinks); free(entered); free(left);
+  return result;
+}
+/* mesh-graph.h mesh_graph_determine_delays.  BSL §9, Fig. 8, Function DetermineDelays, over one edge array: the
+   caller's edges, then the added ones in mesh_graph_convert_sc's order, edge `edges` + i being e_i.
+   - X_0 = "Ĝs[e_0 → ∞, …, e_m – 1 → ∞]": the added edges at delay UINT64_MAX, absent from every cycle, so X_0's
+     cycles are Gs's.
+   - λ_max = mesh_graph_cycle_mean(X_0) (Fig. 8: "compute the max. cycle mean of G s"), computed even where nothing is
+     added; EDEADLK where it is INFINITY (a cycle of zero delay, Lemma 1's deadlock).
+   - d_ub = ⌈Σ time / λ_max⌉ (Fig. 8: "an upper bound on the delay required for any e i"; §4.3, (6): "the maximum
+     execution time along any such newly introduced cycle can be at most" Σ t(x)): the quotient's integer part by a
+     conversion, one more where that falls short of the quotient, an exact ceiling; 1 where λ_max is 0.
+   - For i = 0, 1, …, m – 1: δ_i = mesh_graph_min_delay(X_i, e_i, λ_max, d_ub), then e_i's delay in the array δ_i,
+     which makes it X_i+1.  §9: "the algorithm does guarantee that the output graph is not deadlocked, assuming that
+     the input graph is not deadlocked"; here each δ_i passed MinDelay's test, which a cycle of zero delay fails.
+   - added_delay[i] = δ_i, written once every δ is found; an error (ERANGE, MinDelay's; EDEADLK; EINVAL where an edge or
+     an added edge names no vertex; ENOMEM) writes none.
+   Cost: one cycle mean and m MinDelays, over |V| vertices and E + m edges. */
+int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
+                                const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
+                                const uint32_t *added_to, uint64_t *added_delay) {
+  int result = graph_check(vertices, time, edges, from, to);
+  if (!result) result = graph_check(vertices, NULL, added, added_from, added_to);
+  if (result) return result;
+  if (edges >= SIZE_MAX / sizeof(uint64_t) - added) return ENOMEM;
+  const size_t total = edges + added;
+  uint32_t *all_from = malloc((total + 1) * sizeof *all_from), *all_to = malloc((total + 1) * sizeof *all_to);
+  uint64_t *all_delay = malloc((total + 1) * sizeof *all_delay);
+  result = all_from && all_to && all_delay ? 0 : ENOMEM;
+  double lambda = 0;
+  if (!result) {
+    for (size_t e = 0; e < edges; e++) { all_from[e] = from[e]; all_to[e] = to[e]; all_delay[e] = delay[e]; }
+    for (uint32_t i = 0; i < added; i++) {
+      all_from[edges + i] = added_from[i]; all_to[edges + i] = added_to[i]; all_delay[edges + i] = UINT64_MAX;
+    }
+    result = mesh_graph_cycle_mean(vertices, time, total, all_from, all_to, all_delay, &lambda);
+  }
+  if (!result && lambda == INFINITY) result = EDEADLK;
+  if (!result) {
+    const double quotient = lambda > 0 ? time_sum(vertices, time) / lambda : 0;
+    uint64_t bound = quotient < 0x1p64 ? (uint64_t)quotient : UINT64_MAX;
+    if (bound < UINT64_MAX && (double)bound < quotient) bound++;
+    if (!bound) bound = 1;
+    for (uint32_t i = 0; !result && i < added; i++) {
+      uint64_t least = 0;
+      result = mesh_graph_min_delay(vertices, time, total, all_from, all_to, all_delay, edges + i, lambda, bound, &least);
+      if (!result) all_delay[edges + i] = least;
+    }
+  }
+  for (uint32_t i = 0; !result && i < added; i++) added_delay[i] = all_delay[edges + i];
+  free(all_from); free(all_to); free(all_delay);
+  return result;
+}
