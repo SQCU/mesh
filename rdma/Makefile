@@ -38,6 +38,12 @@ HIGHS_SOURCES = highs/interfaces/highs_c_api.cpp highs/HighsExternalApi.cpp high
   highs/qpsolver/*.cpp highs/simplex/*.cpp highs/test_kkt/*.cpp highs/util/*.cpp
 HIGHS_FLAGS = -O2 -DNDEBUG $(CFLAGS_EXACT) -fexceptions -Wno-unused-variable -Wno-unused-but-set-variable -DCUPDLP_CPU \
   -I. -Iextern -Iextern/catch -Ihighs
+# its translation units compiled at once, one per hardware thread, where a shell loop compiled them one after another
+# (2026-11-05: `make -B -C rdma` took 113 s, 99.5 s of it user time in that loop, on 18 threads).  Why: the operator,
+# 2026-10-31: "nothing you're running should take more than around 8000ms in any situation, no matter how complicated it
+# might sound. remember that you have over 20x4 hardware cpu cores".  xargs -P, since make 3.81, the members' make,
+# leaves -j to its caller.  What must stay: each unit its own compiler process, every one's failure the recipe's
+HIGHS_JOBS := $(shell sysctl -n hw.logicalcpu)
 HIGHS_CFLAGS = -isystem $(HIGHS)/highs -isystem $(HIGHS)
 HIGHS_LIBS = .build/highs/obj/*.o -lc++ -lpthread
 HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h
@@ -58,8 +64,8 @@ $(HIGHS_BUILT): $(HIGHS_TARBALL) Makefile
 	tar -xzf $(HIGHS_TARBALL) -C .build/highs
 	cp $(HIGHS)/highs/HConfig.h.bazel.in $(HIGHS)/HConfig.h
 	mkdir -p .build/highs/obj
-	cd $(HIGHS) && for f in $(HIGHS_SOURCES); do o=../obj/$$(echo $$f | tr / _).o; \
-	  case $$f in *.c) cc $(HIGHS_FLAGS) -c $$f -o $$o;; *) c++ -std=c++17 $(HIGHS_FLAGS) -c $$f -o $$o;; esac || exit 1; done
+	cd $(HIGHS) && printf '%s\n' $(HIGHS_SOURCES) | xargs -P $(HIGHS_JOBS) -n 1 sh -c 'f=$$1; o=../obj/$$(echo $$f | tr / _).o; \
+	  case $$f in *.c) exec cc $(HIGHS_FLAGS) -c $$f -o $$o;; *) exec c++ -std=c++17 $(HIGHS_FLAGS) -c $$f -o $$o;; esac' sh
 	touch $@
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c $(HEADERS) Makefile
