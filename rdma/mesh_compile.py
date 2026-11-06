@@ -230,7 +230,7 @@ class IR:
         self.made, self.calls, self.locals, self.shapes = set(), None, {}, {}
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
-        self.publishes, self.inputs = {}, {}
+        self.publishes, self.inputs, self.declares, self.waits = {}, {}, {}, {}
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
@@ -1913,13 +1913,22 @@ LOWERINGS = {'all-reduce': _all_reduce, 'all-gather': _all_gather, 'all-to-all':
              'reduce-scatter': _reduce_scatter, 'collective-permute': _collective_permute}
 
 
+# torch 2.14.0 torch/distributed/_functional_collectives.py, AsyncCollectiveTensor: "A Tensor wrapper subclass that is
+# used to trigger a call to wait prior to first use of the underlying tensor"; design/problems-of-14b9a757-change-
+# request.md, "Sources for the second stops", 7: "A collective whose result has no use at a node waits at the program's
+# last node"
 def lower(ir):
     for item in ir.program:
         if item[0] == 'collective':
-            collective = item[3]
+            collective, first = item[3], len(ir.declared)
             if collective.kind not in LOWERINGS:
                 raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
             LOWERINGS[collective.kind](ir, collective, _groups(ir, collective.dims), item[1][0], item[2])
+            ir.declares[collective] = range(first, len(ir.declared))
+    firsts = mesh_graph.ends(range(len(ir.program))[::-1], lambda g: ir.program[g][1])
+    for kind, _, key, collective in ir.program:
+        if kind == 'collective':
+            ir.waits.setdefault(firsts.get(key, len(ir.program) - 1), []).append(collective)
     ir.dependences = _dependences(ir)
     _place(ir)
 
@@ -2003,11 +2012,13 @@ def _place(ir):
         return
     places = ir.places[ir.device]
     places.update({key: _own(ir, key) for key in ir.added if key not in places})
-    waits = {c.position: [ir.at[i] for i, _ in receives] for c, (_, receives) in ir.roles.items()}
+    waits = {g: [ir.at[i] for c in collectives for i in ir.declares[c] if i in ir.at]
+             for g, collectives in ir.waits.items()}
     last = mesh_graph.ends(range(len(ir.program)),
                            lambda g: [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())]
                            + waits.get(g, []))
-    wired, begins, landed = set(ir.at.values()), {}, {owner for owners in waits.values() for owner in owners}
+    wired, begins = set(ir.at.values()), {}
+    landed = {ir.at[i] for _, receives in ir.roles.values() for i, _ in receives}
     for key, place in places.items():
         if place is not None and place.writer == ir.results.get(key, key) and place.writer in ir.producer:
             begins[place.owner] = min(begins.get(place.owner, len(ir.program)), ir.producer[place.writer])
@@ -2628,9 +2639,12 @@ def _aliases(local):
         and any(r.alias_info is not None for r in local.target._schema.returns)
 
 
-def _count(context, state, transfer, c):
-    entry = mesh.Publication.from_address(context.M + state.transfers + transfer * mesh.PUBLICATION_BYTES)
-    return C.c_uint64.from_address(context.M + entry.count + 8 * (c % state.copies))
+def _entry(context, state, transfer):
+    return mesh.Publication.from_address(context.M + state.transfers + transfer * mesh.PUBLICATION_BYTES)
+
+
+def _count(context, state, word, c):
+    return C.c_uint64.from_address(context.M + word + 8 * (c % state.copies))
 
 
 def _called(ir, key, operands, local, form, placed):
@@ -2657,9 +2671,9 @@ def _called(ir, key, operands, local, form, placed):
 def _collected(ir, context, plan, state, placed, c, item, operands):
     _, reads, key, collective = item
     me, receives = ir.roles[collective]
-    waits = [lambda env, inputs, t, i=i, count=_count(context, state, i, c): _arrived(context, plan, i, t, count)
-             for i, _ in receives]
     if collective.kind == 'reduce-scatter' or collective.kind == 'all-reduce' and me == 0:
+        waits = [lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
+                 _arrived(context, plan, i, t, count) for i, _ in receives]
         total, first, steps = placed(key), operands[0], []
         if collective.kind == 'reduce-scatter':
             n = first.shape[collective.dim] // (len(receives) + 1)
@@ -2675,7 +2689,28 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
                 [lambda env, inputs, t, a=operands[0]: place.copy_(a)]
         if me not in [q for _, q in pairs]:
             return [lambda env, inputs, t: place.zero_()]
-    return waits
+    return []
+
+
+# torch 2.14.0 torch/distributed/_functional_collectives.py, wait_tensor: "Wait on a tensor returned by the collectives
+# ops"; design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7: "The collective's `wait_tensor`
+# at a node waits for its landing counts and its send-completion counters to reach the execution's totals"
+def _sent(context, plan, transfer, t, count):
+    _wait(lambda: mesh.LIB.mesh_host_sent(C.byref(context), plan, transfer, t), lambda: count.value,
+          'execution %d of declared transfer %d: no send completion for MESH_PLATFORM_NS' % (t, transfer))
+
+
+def _completed(ir, context, plan, state, c, collective):
+    steps = []
+    for i in ir.declares[collective]:
+        entry = _entry(context, state, i)
+        if entry.pages:
+            steps.append(lambda env, inputs, t, i=i, count=_count(context, state, entry.count, c):
+                         _arrived(context, plan, i, t, count))
+        if entry.sends:
+            steps.append(lambda env, inputs, t, i=i, count=_count(context, state, entry.completion, c):
+                         _sent(context, plan, i, t, count))
+    return steps
 
 
 # MPICH MPIR_Localcopy, torch 2.14.0 torch/_tensor_docs.py copy_: "Copies the elements from src into self tensor and
@@ -2697,6 +2732,8 @@ def _copied(ir, read, key, cut, source, target):
 def _specialized(ir, context, plan, state, devices, placed, c, item, operands, steps):
     kind, reads, key, operand = item
     value = placed(key)
+    for collective in ir.waits.get(ir.producer[key], ()):
+        steps += _completed(ir, context, plan, state, c, collective)
     if kind == 'input':
         value = _Dynamic(key)
         steps.append(lambda env, inputs, t: env.__setitem__(key, inputs[operand]))
@@ -2739,6 +2776,8 @@ def _instantiate(ir, context, plan, devices, tensors, c, spec):
     values = mesh_graph.forward(list(items), lambda key: items[key][1],
                                 lambda key, operands: _specialized(ir, context, plan, state, devices, placed, c,
                                                                    items[key], operands, steps))
+    for collective in ir.waits.get(len(ir.program) - 1, ()):
+        steps += _completed(ir, context, plan, state, c, collective)
     node, keys = next(item[3] for item in ir.program if item[0] == 'output')
     arguments = _bound(node.args[0], lambda n: values[keys[n]])[0]
     return steps, lambda env: pytree.tree_unflatten(list(arguments(env)), spec)

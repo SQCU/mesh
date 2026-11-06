@@ -124,7 +124,10 @@
    names its plan (struct flow), so a pass's completions are counted to their own plans while several interleave on
    one queue pair"): `flow`, the plan whose record it is, in the cell's room after the request (offset 160: the
    request, struct ibv_send_wr, is 128 bytes from 32), so the SEND completion, which names the record (`wr_id`),
-   counts its plan's `sent`; no field the post reads moves.  What must stay: as above */
+   counts its plan's `sent`; no field the post reads moves.  What must stay: as above
+   `count`, its hop's send-completion counter (mesh.h struct mesh_hop; rdma-core libibverbs/man/ibv_post_send.3,
+   NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION; design/problems-of-14b9a757-change-request.md, "Sources for the
+   third stops", 7) */
 struct flow;
 struct prepared_send {
   _Alignas(128) _Atomic uint64_t *word;
@@ -132,12 +135,13 @@ struct prepared_send {
   struct ibv_sge span;
   struct ibv_send_wr request;
   struct flow *flow;
+  _Atomic uint64_t *count;
 };
 _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_send)==128 &&
   offsetof(struct prepared_send,field)==8 && offsetof(struct prepared_send,span)==16 &&
   offsetof(struct prepared_send,request)==32 &&
   offsetof(struct prepared_send,request.send_flags)+sizeof(unsigned int)<=128 &&
-  offsetof(struct prepared_send,flow)==160,"M29");
+  offsetof(struct prepared_send,flow)==160 && offsetof(struct prepared_send,count)==168,"M29");
 /* design/prepared-machine.md#M08: d6dceac's prepared receive, its request and span verbatim, and what its landing
    writes (design/disjoint-pages-change-request.md, C3.1 and C3.7; design/disjoint-pages-revision-coordination.md, "The
    bridge"): its phase field, bits [field, field + 2) of `word`, and `count`, its range's count word of its copy, which
@@ -1069,7 +1073,8 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
     if(record_of[d])record_of[d][k]=at;
     if(d==MESH_SEND){
       struct prepared_send *record=f->sends+at;
-      *record=(struct prepared_send){.word=region_word(hop->word),.field=hop->field,.span=span,.flow=f};
+      *record=(struct prepared_send){.word=region_word(hop->word),.field=hop->field,.span=span,.flow=f,
+        .count=region_word(hop->count)};
       record->request=(struct ibv_send_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND,
         .send_flags=IBV_SEND_SIGNALED};
     } else {
@@ -1623,6 +1628,7 @@ static __attribute__((always_inline)) inline int link_send_drain(struct port *po
       if(done[i].status){link_failed(port,(int64_t)done[i].status);return 0;}
       const struct prepared_send *record=(const void *)(uintptr_t)done[i].wr_id;
       gate_retire(l->gate+lane,frames_of(record->span.length));l->lane[lane].done++;record->flow->sent++;
+      atomic_fetch_add_explicit(record->count,1,memory_order_release);
     }
   }
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): every served lane reads the

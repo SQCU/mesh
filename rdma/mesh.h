@@ -167,12 +167,15 @@ _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
    `argument` (MESH_SUPPLIED), `device_input` and `device_stride` (hdr `landed_off`, `landed_stride`) became `pages`,
    `phases`, `count` and `state` at the same offsets, since the landed records and per-execution supplied words are
    gone.  What must stay: no field moves (the assert below) */
+/* `completion` (design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7; struct mesh_state
+   `transfers`) */
 struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t pages; uint64_t phases,count,state;
-  struct mesh_target targets[]; };
+  struct mesh_target targets[1]; uint64_t completion,padding; };
 _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 &&
   offsetof(struct mesh_publication,sends)==0 && offsetof(struct mesh_publication,pages)==4 &&
   offsetof(struct mesh_publication,phases)==8 && offsetof(struct mesh_publication,count)==16 &&
-  offsetof(struct mesh_publication,state)==24 && offsetof(struct mesh_publication,targets)==32,"mesh_publication");
+  offsetof(struct mesh_publication,state)==24 && offsetof(struct mesh_publication,targets)==32 &&
+  offsetof(struct mesh_publication,completion)==48,"mesh_publication");
 /* a port's words: `prepared` the generation of the claim the port is loading now, 0 none, set and cleared within one
    load, the load's transient announcement, which mesh_retired_release reads before it releases a claim: an
    announcement lives in memory that reclamation cannot reuse, as a hazard pointer does (M. M. Michael, Hazard
@@ -326,10 +329,13 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    C3.3's text (item 1).  What must stay: u the largest least lag, the same at every rank; ENOMEM only for a value with
    no such L.
    - A send from its range's source: `word` the region offset of the range's supplied word; `field` MESH_ABSENT;
-     `count` 0; `pages` 0.  Execution t's send is released once the word reads (acquire) at least t + 1.
+     `count` the region offset of its range's send-completion counter for this copy; `pages` 0.  Execution t's send
+     is released once the word reads (acquire) at least t + 1.
    - A forwarding send (a relay's, or a destination's that sends the page on): `word` and `field` those of its node's
-     receive of the same page in the same copy; `count` 0; `pages` 0.  Execution t's send is released once that field
-     reads (acquire) mesh_phase(t / u + 1), its receive's landing in execution t.
+     receive of the same page in the same copy; `count` as a send's; `pages` 0.  Execution t's send is released once
+     that field reads (acquire) mesh_phase(t / u + 1), its receive's landing in execution t.
+   - A send's work completion, once retrieved, adds 1 to its `count` (release) (rdma-core libibverbs/man/
+     ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION).
    - A receive: `page` its page; `word` the region offset of the uint64 holding its phase field and `field` the
      field's low bit (even, < 64); `count` the region offset of its range's count word for this copy, or 0 where this
      node does not consume the range (a relay's own receive: its forwards are released by its phase, nobody waits on a
@@ -354,9 +360,10 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    mesh_plan's `*plan`, the plan's handle, mesh_state_at; design/compilation-coordination.md, "The appendix's
    revisions", N2): the plan's state, the landed list's own section, which mesh_plan
    places with the plan's values in its claim (an invariant of the plan, no page-table row naming it), in new pages for
-   every plan, apart from the data pages it tells of.  Its layout: the struct; the phases, counts, supplied words and
-   status; the delivered calls' queue, `room` struct mesh_delivery at `deliveries`; the submissions' queue,
-   `submit_room` struct mesh_submission at `submits` (`outstanding` of them at 114); the entries; each 64-aligned
+   every plan, apart from the data pages it tells of.  Its layout: the struct; the phases, counts, send-completion
+   counters, supplied words and status; the delivered calls' queue, `room` struct mesh_delivery at `deliveries`; the
+   submissions' queue, `submit_room` struct mesh_submission at `submits` (`outstanding` of them at 114); the entries;
+   each 64-aligned
    (2026-11-05, "The revisions of abecd389", PQ: the two queues where the sequence words were before 113; "The
    revisions of 3f106747", BS: `submit_room`) (mesh-collective.c plan_layout; design/compilation-coordination.md, "The documents' revisions of
    edd4b583", "The region").  Each word has one writer:
@@ -381,6 +388,11 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      own reads, and every pass would be held to its deadline; Portals 4's counting events (one counter an operation set)
      and PTX's mbarrier (one a tile) count once a unit of work.  Per copy, since with u >= 2 execution t + 1's
      landings into the other copy can arrive before t's are all in.
+   - `completions`: S x `copies` uint64 words, S every range this node sends or forwards, in the plan's demand order;
+     range g's copy c at index g x copies + c, which each of its sends' work completions raises by 1 and nothing else
+     writes; execution t of range g is complete at (t / u + 1) x its sends a copy (rdma-core libibverbs/man/
+     ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION; design/problems-of-14b9a757-change-request.md,
+     "Sources for the third stops", 7).
    - `supplied`: `releases` uint64 words, release r this node's r-th source range in the plan's demand order.  Its
      one writer is the range's producer, which raises it to t + 1 after its last write in execution t (release): a
      host producer stores t + 1 (mesh_host_publish), a GPU producer adds 1, its executions running in order (D9).  One
@@ -746,11 +758,13 @@ static inline int mesh_view_compare(struct mesh_view_id a,struct mesh_view_id b)
    R-1; "The revisions of 14b9a757"):
    - `transfers`, where `padding3[0]` was: the region offset of one struct mesh_publication (64 bytes) for each of the
      function's declared transfers, in their order (mesh_transfer_at), each written once by mesh_plan, read by index:
-     where this node is the transfer's source, `sends` 1, `targets[0]` {word: the region offset of its range's supplied
-     word, count 1, stride 0}; where it is the transfer's destination, `pages` the range's instructions it receives a
-     copy (P), `phases` the region offset of its copy-0 phase group (copy c's at phases + c x mesh_group_bytes(P)),
-     `count` the region offset of its copy-0 count word (copy c's at count + 8 c); `state` this section's region offset
-     where either holds; every other field 0.  Why: ranges may share a block where their bytes are disjoint (PB R2,
+     where this node is the transfer's source, `targets[0]` {word: the region offset of its range's supplied word,
+     count 1, stride 0}; where it is the transfer's destination, `pages` the range's instructions it receives a copy
+     (P), `phases` the region offset of its copy-0 phase group (copy c's at phases + c x mesh_group_bytes(P)), `count`
+     the region offset of its copy-0 count word (copy c's at count + 8 c); where this node sends or forwards the
+     transfer's range, `sends` its sends of the range a copy and `completion` the region offset of its copy-0
+     send-completion counter (copy c's at completion + 8 c; `completions`); `state` this section's region offset where
+     any holds; every other field 0.  Why: ranges may share a block where their bytes are disjoint (PB R2,
      corrected 2026-11-06), so several begin in one row and a row's publication names none of them alone; the
      declared transfer's index is the IR's own name of it.  Every row's publication (mesh_publication_at) is written by
      nothing now and read by nothing.
@@ -762,9 +776,11 @@ static inline int mesh_view_compare(struct mesh_view_id a,struct mesh_view_id b)
    What must stay: every other field where it is, the struct 320 bytes.
    `removed`, where `padding4` was, the bridge parent its one writer (design/problems-of-14b9a757-change-request.md,
    "Sources for the stops", 11; Documentation/RCU/whatisRCU.rst: "The removal phase removes references to data items
-   within a data structure") */
+   within a data structure").
+   `completions`, where `padding` was, the region offset of the send-completion counters (design/problems-of-
+   14b9a757-change-request.md, "Sources for the third stops", 7) */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
-  uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
+  uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t completions;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
   uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
   _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced;
@@ -774,7 +790,7 @@ _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
   offsetof(struct mesh_state,supplied)==32 && offsetof(struct mesh_state,status)==40 &&
-  offsetof(struct mesh_state,executions)==48 && offsetof(struct mesh_state,padding)==56 &&
+  offsetof(struct mesh_state,executions)==48 && offsetof(struct mesh_state,completions)==56 &&
   offsetof(struct mesh_state,group)==64 && offsetof(struct mesh_state,epoch)==72 && offsetof(struct mesh_state,serial)==80 &&
   offsetof(struct mesh_state,hops)==88 && offsetof(struct mesh_state,entries)==96 && offsetof(struct mesh_state,held)==104 &&
   offsetof(struct mesh_state,refused)==112 && offsetof(struct mesh_state,nodes)==144 && offsetof(struct mesh_state,sender)==152 &&

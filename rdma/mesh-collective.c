@@ -92,6 +92,18 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
   return count>=(round+1)*pages?UINT64_MAX:0;
 }
 
+/* mesh-collective.h mesh_host_sent (libfabric man/fi_cntr.3.md, fi_cntr_wait: "Wait for a counter to be greater or
+   equal to a threshold value"; rdma-core libibverbs/man/ibv_post_send.3, NOTES; design/problems-of-14b9a757-change-
+   request.md, "Sources for the third stops", 7) */
+int mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+  struct hdr *m=context->M;
+  const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
+  const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
+  const uint64_t copies=state->copies;
+  return atomic_load_explicit((_Atomic uint64_t *)((char *)m+entry->completion+8*(execution%copies)),
+                              memory_order_acquire)>=(execution/copies+1)*entry->sends;
+}
+
 /* -- the plan call (mesh-collective.h mesh_plan) ------------------------------------------------------------------ */
 
 /* tag pre-return-20261103 rdma/nccl-mesh.c MESH_SOLVE_EPS: the concurrent-flow solve's epsilon, its rounds and room
@@ -150,6 +162,10 @@ struct plan_demand {
      where none of its pages lands here; design/compilation-coordination.md, "The revisions of abecd389", RC) */
   uint32_t counted;
   uint64_t group;                         /* range g's copy-0 phase group, its offset in the phase list (plan_layout) */
+  /* its send-completion counters' row here, among the ranges this node sends or forwards, in the plan's demand order
+     (MESH_ABSENT where it neither sends nor forwards it), and its sends here a copy (plan_walk's count;
+     design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7) */
+  uint32_t sending,sends;
 };
 /* A routed value (design/disjoint-pages-change-request.md, C3.3; design/disjoint-pages-revision-coordination.md, "The
    allocator"): demand `demand`'s pages at node `node`, its source or a node its trees reach (a destination or a relay),
@@ -235,11 +251,7 @@ struct plan {
      item), block_first[j] MESH_ABSENT for every other value.  `toward`: the map indices this node's entries name (a set;
      plan_walk), mesh.h struct mesh_algo `adjacent`'s.  Why: R-1, "A frame's item lives from the first write to the last
      read over every value naming it, with C3.3's lag test"; R-6, "Each cable's processor executes its list ... It scans
-     no table of plans".  What must stay: `named` 0 for a local value
-     2026-11-06 (design/problems-of-14b9a757-change-request.md, "Sources for the stops", item 7): `named` | PLAN_SENT
-     where a range here is sent or forwarded from values[j] (plan_sets; MPI 4.1 §3.7: "The sender should not modify
-     any part of the send buffer after a nonblocking send operation is called, until the send completes") */
-#define PLAN_SENT 2u
+     no table of plans".  What must stay: `named` 0 for a local value */
   unsigned char *named;
   uint32_t *uncovered;
   uint64_t *cut,*at,toward;
@@ -269,6 +281,7 @@ struct plan {
   struct plan_entry *entry;               /* entry[0 .. entries), NULL while plan_walk counts */
   uint64_t entries,receives;              /* their count (n of mesh.h's u x n) and their receives */
   uint32_t ranges,consumed;               /* this node's received ranges, and those it consumes (a destination's) */
+  uint32_t sending;                       /* this node's ranges it sends or forwards (struct plan_demand `sending`) */
   /* The dependence template (plan_template), one execution's, every rank's the same from the same declared transfers,
      dependences and map; each edge carries the execution distance `lag` from its tail's execution to its head's. */
   uint64_t *child;                        /* child[i x n + y]: the nodes y sends demand i's pages to over its trees (a
@@ -290,7 +303,7 @@ struct plan {
      revisions of 46ae8fdf", LP9: `sequences`, the sequence words', gone).  2026-11-06 (R-1; "The revisions of
      14b9a757"): `publications`, the declared transfers' entries (mesh.h struct mesh_state `transfers`).  What must stay:
      every other offset */
-  uint64_t phases,counts,supplied,publications,status,hops,words;
+  uint64_t phases,counts,completions,supplied,publications,status,hops,words;
   /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS and PQ): the plan's two queues in
      the section, `deliveries` (room `room` struct mesh_delivery) and `submits` (room `outstanding` struct
      mesh_submission), between the status and the entries.
@@ -703,6 +716,8 @@ static int plan_unroll(struct plan *p){
      a page for round j by that count, in place of PM2's test of the phase field", the count "each range's landed
      count of each copy, which every landing raises"; a relay's receive is named for its rounds as a destination's is
      (mesh-flow.c link_receive_drain).  What must stay: a consumed range's row its `consumed`, `ranges` its number;
+   - `completions`: sending x u uint64 words, the send-completion counters, range g's copy c at index `sending` x u + c
+     (mesh.h struct mesh_state `completions`);
    - `supplied`: releases uint64 words, release r's at index r;
    - `status`: one struct mesh_status;
    - `deliveries`: the plan's delivered calls' queue here, `room` struct mesh_delivery, and `submits`, the program's
@@ -762,7 +777,8 @@ static void plan_layout(struct plan *p){
     at+=(uint64_t)p->copies*mesh_group_bytes(d->received);
   }
   p->counts=plan_align(p->phases+at);
-  p->supplied=plan_align(p->counts+(uint64_t)p->ranges*p->copies*sizeof(uint64_t));
+  p->completions=plan_align(p->counts+(uint64_t)p->ranges*p->copies*sizeof(uint64_t));
+  p->supplied=plan_align(p->completions+(uint64_t)p->sending*p->copies*sizeof(uint64_t));
   p->publications=plan_align(p->supplied+p->releases*sizeof(uint64_t));
   p->status=plan_align(p->publications+(uint64_t)p->transfers*sizeof(struct mesh_publication));
   p->deliveries=plan_align(p->status+sizeof(struct mesh_status));
@@ -785,6 +801,9 @@ static uint64_t plan_group(const struct plan *p,const struct plan_demand *d,uint
 }
 static uint64_t plan_count(const struct plan *p,const struct plan_demand *d,uint32_t c){
   return p->base+p->counts+((uint64_t)d->counted*p->copies+c)*sizeof(uint64_t);
+}
+static uint64_t plan_completion(const struct plan *p,const struct plan_demand *d,uint32_t c){
+  return p->base+p->completions+((uint64_t)d->sending*p->copies+c)*sizeof(uint64_t);
 }
 
 /* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6: "Place every
@@ -885,9 +904,9 @@ struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,ele
    exir/memory_planning.py, update_tensor_lifetime and _does_not_overlap, "spec.lifetime[1] < alloc.spec.lifetime[0] or
    spec.lifetime[0] > alloc.spec.lifetime[1]"; MPI 4.1 §3.7), reversing the notes above where a named value's own item
    is PLAN_ALONE: the own item of a MESH_EXECUTION value of lag 0, named or local, is PLAN_LOCAL, ordered by the
-   value's `begin` and `end`, but where a range here is sent or forwarded from the value (PLAN_SENT); PLAN_ALONE an
-   invariant and a copy of a value of lag k >= 1 ("Mutable buffers and device resident constants keep their data across
-   calls, so they are never freed"), the state sections and the table among the invariants */
+   value's `begin` and `end`; PLAN_ALONE an invariant and a copy of a value of lag k >= 1 ("Mutable buffers and device
+   resident constants keep their data across calls, so they are never freed"), the state sections and the table among
+   the invariants */
 struct plan_order { const struct plan *plans; const struct plan_item *item; };
 static int plan_before(const void *context,uint32_t a,uint32_t b){
   const struct plan_order *order=context;
@@ -962,7 +981,7 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
     for(uint32_t j=0;j<p->givens;j++){
       const struct mesh_value *v=p->given+j;
       if((p->named[j]?1u:v->wire)!=space)continue;
-      const uint32_t kind=!(p->named[j]&PLAN_SENT) && v->kind==MESH_EXECUTION && !v->lag?PLAN_LOCAL:PLAN_ALONE;
+      const uint32_t kind=v->kind==MESH_EXECUTION && !v->lag?PLAN_LOCAL:PLAN_ALONE;
       p->item[j]=p->uncovered[j]?(uint32_t)x->items:MESH_ABSENT;
       for(uint32_t c=0;p->uncovered[j] && c<plan_copies(p,j);c++)plan_item_put(x,kind,f,j,c,p->uncovered[j],space);
     }
@@ -1173,10 +1192,10 @@ static void plan_walk(struct plan *p){
   const uint32_t n=p->n,self=p->self;
   size_t first[(size_t)n+2],child[(size_t)n+1];
   uint64_t at=0,receives=0;
-  if(!p->entry)p->ranges=p->consumed=0,p->toward=0;
+  if(!p->entry)p->ranges=p->consumed=p->sending=0,p->toward=0;
   for(uint32_t i=0;i<p->demands;i++){
     struct plan_demand *d=p->demand+i;
-    uint32_t field=0;
+    uint32_t field=0,sends=0;
     uint64_t k=0;
     for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
       const uint64_t end=k+p->run[j];
@@ -1200,7 +1219,7 @@ static void plan_walk(struct plan *p){
                                                        .set=set,.instruction=k};
           at++;
         }
-        for(size_t c=first[self];c<first[self+1];c++,at++)
+        for(size_t c=first[self];c<first[self+1];c++,at++,sends++)
           if(p->entry)p->entry[at]=(struct plan_entry){.node=(uint32_t)child[c],.direction=MESH_SEND,.demand=i,
                                                        .field=mine,
                                                        .communication=plan_communication(p,j,k-p->lead[j],
@@ -1212,6 +1231,8 @@ static void plan_walk(struct plan *p){
       d->received=field;
       d->range=field?p->ranges++:MESH_ABSENT;
       d->consumed=field && d->leaves>>self&1?p->consumed++:MESH_ABSENT;
+      d->sends=sends;
+      d->sending=sends?p->sending++:MESH_ABSENT;
       receives+=field;
     }
   }
@@ -2133,7 +2154,6 @@ static int plan_sets(struct plan *p,const struct hdr *m){
     if(d->value==MESH_ABSENT)continue;
     if(d->mine==MESH_ABSENT)relays++;
     else touches+=d->instructions;
-    if(d->mine!=MESH_ABSENT && (d->source==p->self || p->child[(size_t)i*p->n+p->self]))p->named[d->mine]|=PLAN_SENT;
   }
   struct plan_touch *touch=malloc((touches+1)*sizeof *touch);
   struct plan_cover *cover=malloc((blocks+1)*sizeof *cover);
@@ -2798,6 +2818,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     state->releases=(uint32_t)p->releases;
     state->phases=base+p->phases;
     state->counts=base+p->counts;
+    state->completions=base+p->completions;
     state->supplied=base+p->supplied;
     state->transfers=base+p->publications;
     state->status=base+p->status;
@@ -2870,9 +2891,10 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     }
     /* each declared transfer's range's words here (2026-11-06, R-1; mesh.h struct mesh_state `transfers`; "The
        revisions of 14b9a757", R-1), entry i of the section's `publications` (64 bytes each, 0 from the bytes started
-       above): where this node is declared[i]'s source, `sends` 1 and `targets[0]` {its range's supplied word, 1, 0};
-       where it is declared[i]'s destination, `pages` P (its range's instructions it receives a copy), `phases` its
-       copy-0 group and `count` its copy-0 count word; `state` the section where either holds; every other field 0.
+       above): where this node is declared[i]'s source, `targets[0]` {its range's supplied word, 1, 0}; where it is
+       declared[i]'s destination, `pages` P (its range's instructions it receives a copy), `phases` its copy-0 group
+       and `count` its copy-0 count word; where it sends or forwards the range, `sends` its sends a copy and
+       `completion` its copy-0 send-completion counter; `state` the section where any holds; every other field 0.
        Why: mesh.h, "each written once by mesh_plan, read by index" (mesh_transfer_at), where a range's first row's
        publication held them; ranges may share a block, so a row names no one range.  What must stay: written before
        `published` */
@@ -2882,7 +2904,6 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
       struct mesh_publication *entry=(struct mesh_publication *)(void *)(mesh_at(m,at)+p->publications+
                                                                          (size_t)i*sizeof(struct mesh_publication));
       if(t->source==p->self){
-        entry->sends=1;
         entry->targets[0]=(struct mesh_target){.word=plan_supplied(p,d),.count=1,.stride=0};
         entry->state=base;
       }else if(t->destination==p->self){
@@ -2891,11 +2912,17 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
         entry->count=plan_count(p,d,0);
         entry->state=base;
       }
+      if(d->sending!=MESH_ABSENT){
+        entry->sends=d->sends;
+        entry->completion=plan_completion(p,d,0);
+        entry->state=base;
+      }
     }
     /* the entries, copy c's n at [c n, c n + n) of the section's `hops`, in plan_schedule's order (R5), each naming
        copy c's page and words (mesh.h struct mesh_hop): a receive its field's word and low bit in its range's copy-c
        group, its range's copy-c count word and P_g; a forwarding send its receive's word and field; a send from the
-       range's source its release's supplied word; each its page's bytes, page k of a range of B bytes min(Q, B - k Q),
+       range's source its release's supplied word; each send its range's copy-c send-completion counter; each its
+       page's bytes, page k of a range of B bytes min(Q, B - k Q),
        Q = block x pgsz (design/compilation-coordination.md, T7); each its entry's `set`, every copy's the same (S1,
        S2); its page the routed copy's block k's (plan_page, point 6)
        2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1;
@@ -2933,6 +2960,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
           h.pages=d->received;
         }
       }
+      if(e->direction==MESH_SEND)h.count=plan_completion(p,d,c);
       *hop++=h;
     }
   }

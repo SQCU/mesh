@@ -337,9 +337,9 @@
      accesses are those of every range touching it, from the first write to the last read, ordered by C3.3's lag test
      (R-1: "A frame's item lives from the first write to the last read over every value naming it, with C3.3's lag
      test"); a block holding bytes no range here covers is its value's own item, ordered by the value's `begin` and
-     `end` (ExecuTorch, exir/memory_planning.py, update_tensor_lifetime and _does_not_overlap) but where a range here
-     is sent or forwarded from the value (MPI 4.1 §3.7: "until the send completes"), which lives the program's whole
-     life.
+     `end` (ExecuTorch, exir/memory_planning.py, update_tensor_lifetime and _does_not_overlap), a range sent or
+     forwarded from it holding it to the wait for its send-completion counters (MPI 4.1 §3.7: "until the send
+     completes"; design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7).
    - Any value a transfer names is sent from its own pages, whatever its copies (PB R2, corrected 2026-11-06): the plan
      call's rules that a lag-k value is "named by no declared transfer" and that a transfer's value is "MESH_EXECUTION
      and wire" go.  A source is a MESH_EXECUTION value (EINVAL otherwise: design/problems-of-14b9a757-change-request.md,
@@ -693,6 +693,11 @@ void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_
    (t / u + 1) x P with a field still behind (cancelled); else 0 (not yet).  The caller names a transfer this node is a
    destination of, which its compilation knows; no entry is tested here (as mesh_host_publish's note) */
 uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
+/* execution t of a range this node sends or forwards: 1 where its send-completion counter of copy t mod u reads
+   (acquire) at least (t / u + 1) x its sends a copy, else 0 (libfabric man/fi_cntr.3.md, fi_cntr_wait; rdma-core
+   libibverbs/man/ibv_post_send.3, NOTES).  The caller names a transfer whose range this node sends or forwards, which
+   the plan's entry tells (mesh.h struct mesh_state `transfers`, `sends`) */
+int mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 /* The program's one mapping of its values (2026-11-06, "The root cause of the copies, and the revised work list", R-10:
    "the mapping's row list in one mesh-dataflow helper over the plan's rows"; W13: "the mapping's row list in two
    effectors (mesh_compile.py 2289; e2b_replay.m 1437), to be one mesh-dataflow helper"; "The revisions of 14b9a757"):

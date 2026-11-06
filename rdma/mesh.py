@@ -114,7 +114,7 @@ PLATFORM_NS = 5000000000
 # `sequencer`, `boot`), mesh.h mesh_plan_view, and the map read's (Nodes `serial`, `sequencer`, `boot`)
 class State(C.Structure):
     _fields_ = [('copies', U), ('receives', U), ('ranges', U), ('releases', U), ('phases', Q), ('counts', Q),
-                ('supplied', Q), ('status', Q), ('executions', Q), ('padding', Q), ('group', Q), ('epoch', Q),
+                ('supplied', Q), ('status', Q), ('executions', Q), ('completions', Q), ('group', Q), ('epoch', Q),
                 ('serial', Q), ('hops', Q), ('entries', Q), ('held', Q), ('refused', C.c_int32 * 8), ('nodes', Q),
                 ('sender', U), ('outstanding', U), ('submitted', Q), ('delivered', Q), ('submissions', Q),
                 ('broadcast', Q), ('arrived', Q), ('room', Q), ('deliveries', Q), ('submits', Q), ('announced', Q),
@@ -129,8 +129,15 @@ class State(C.Structure):
 # header's assert), the stride of struct mesh_state `transfers` (mesh.h mesh_transfer_at), so a host reader finds a
 # received range's count word, copy c's at `count` + 8 c, whose rises are its progress (rdma/mesh_compile.py _arrived).
 # What must stay: the fields in the header's order and at its offsets
+# mesh.h struct mesh_publication `completion` (design/problems-of-14b9a757-change-request.md, "Sources for the third
+# stops", 7)
+class Target(C.Structure):
+    _fields_ = [('word', Q), ('count', U), ('stride', U)]
+
+
 class Publication(C.Structure):
-    _fields_ = [('sends', U), ('pages', U), ('phases', Q), ('count', Q), ('state', Q)]
+    _fields_ = [('sends', U), ('pages', U), ('phases', Q), ('count', Q), ('state', Q), ('targets', Target * 1),
+                ('completion', Q)]
 
 
 PUBLICATION_BYTES = 64
@@ -193,7 +200,8 @@ for name, result, arguments in (
         ('mesh_retire', None, [C.c_void_p, Q]),
         ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q]),
         ('mesh_host_publish', None, [CONTEXT, Q, U, Q]),
-        ('mesh_host_arrived', Q, [CONTEXT, Q, U, Q])):
+        ('mesh_host_arrived', Q, [CONTEXT, Q, U, Q]),
+        ('mesh_host_sent', C.c_int, [CONTEXT, Q, U, Q])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 
