@@ -592,7 +592,13 @@ void streams_cancel(const struct port *port);
    lifecycle file, calls streams_cancel) */
 /* the plan written cancelled where its map has moved (its entries' serial not hdr `map_serial`): mesh-records.c map_put
    and map_adopt, after a write that moved the serial, on the bridge parent's one event-loop thread
-   (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2) */
+   (design/disjoint-pages-change-request.md, D.3.6; design/disjoint-pages-rulings-coordination.md, R2)
+   2026-11-06 (119; design/aot-compilation-change-request.md A7, corrected 2026-11-06: "Every member of a view plans on
+   the view's map ... A plan then stands while its view does, and its view while the sequencer's map does (D.3.6)";
+   "The revisions of 14b9a757"): every standing plan whose `serial` is not the installed view's identifier (mesh.h hdr
+   `view`) cancelled, called by mesh-records.c view_install alone, after it stores the view (under `view_map`), on the
+   bridge parent's one thread; a move of this node's own map ends no plan (its link losses cancel their receives as
+   before).  What must stay: the fence before any plan or its `executions` is read; on the parent's one thread */
 void plan_stale(void);
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 46ae8fdf", CH): plan_sequences_inside's declaration
    is gone with the plan's sequence words (design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2) */
