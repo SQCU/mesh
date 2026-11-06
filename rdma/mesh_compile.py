@@ -126,15 +126,26 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # shapes of the values a halo exchange makes (its halos, their arrivals, its regions), which no node's sharding gives
 # (design/aot-compilation-change-request.md A4; design/compilation-coordination.md, "The revisions of abecd389");
 # `reduced`: each AllReduce by the key of the partial sums it reduces
+# 2026-11-05 (design/aot-compilation-change-request.md A4: "A node of the program to which the placement operand maps
+# no device (A2) compiles and plans each function as every node does, with no section of its own.  It declares the
+# function's transfers as every rank does, and its part of each call is the relaying its routes give it"; NCCL:
+# "Collective operations have to be called for each rank (hence CUDA device), using the same count and the same
+# datatype, to form a complete collective operation.  Failure to do so will result in undefined behavior, including
+# hangs, crashes, or data corruption" (NCCL User Guide, "Collective Operations"); design/compilation-coordination.md,
+# "The revisions of b5a3c6e6", ND): the refusal of a node that is no device of the placement operand ("map index %d,
+# this node, is no device of the placement operand (A2)") goes; `device` is None there.  Its program, declared
+# transfers, weights and dependences are built as at every rank: _partition reads no device, `transfer` gives this node
+# a value only where its map index is an end, which no device's is, and the lowerings and _dependences declare every
+# device's transfers and events, so mesh_plan's operands are every rank's; no lowering gives it a role (each tests
+# ir.device against its group), and serialize runs none of its items.  What must stay: at most one device a node
+# (_mesh), every operand of mesh_plan the same at every rank
 class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
         self.order = list(gm.graph.nodes)
         self.shape, self.coords, self.map = _mesh(placement, nodes.count)
         here = [d for d, index in enumerate(self.map) if index == nodes.self]
-        if not here:
-            raise ValueError('map index %d, this node, is no device of the placement operand (A2)' % nodes.self)
-        self.device, self.index, self.serial, self.identity = here[0], nodes.self, nodes.serial, 0
+        self.device, self.index, self.serial, self.identity = here[0] if here else None, nodes.self, nodes.serial, 0
         self.sharding, self.program, self.reduced, self.roles, self.events = {}, [], {}, {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
         self.placed, self.made, self.calls, self.locals, self.shapes = set(), set(), None, {}, {}
@@ -1633,6 +1644,27 @@ def _dropped(context, plan):
         _retire(context, plan)
 
 
+# design/aot-compilation-change-request.md A4: at a node the placement operand maps no device, the function has "no
+# section of its own" and the node's "part of each call is the relaying its routes give it", so the call runs no item
+# of the program there (serialize).  What it returns there is the coordinating implementer's decision
+# (design/compilation-coordination.md, "The revisions of b5a3c6e6", ND-2): each of the graph's outputs as a tensor of
+# its fake tensor's metadata, "the metadata of a tensor without its actual data" (PyTorch 2 section 3.5), its size,
+# stride, element type and device, by torch.empty_strided ("Creates a tensor with the specified size and stride and
+# filled with undefined data", torch/_torch_docs.py), which nothing writes.  Why: a program whose next compiled function
+# takes this one's result then calls it there with the shapes and types every rank's does, so that function is
+# compiled and planned as every node's (A4), where an output of None would be traced as a constant.  An output that is
+# no tensor is its example value as Dynamo recorded it (A1: shapes are compiled).  Made once, when the plan is made;
+# ir.device None alone
+def _absent(ir):
+    (output,) = [node for node in ir.order if node.op == 'output']
+
+    def absent(node):
+        value = node.meta.get('example_value')
+        return torch.empty_strided(value.shape, value.stride(), dtype=value.dtype, device=value.device) \
+            if isinstance(value, torch.Tensor) else value
+    return map_arg(output.args[0], absent)
+
+
 # design/aot-compilation-change-request.md A9; design/compilation-coordination.md, A-T4.  `build` gives the IR on the
 # map as it is; mesh_plan writes the lists from it (each node's page instructions, the page table's bindings and the
 # plan's state section); the GPU's program is the function's own operators, this node's partitioned graph run by torch
@@ -1685,6 +1717,13 @@ def _dropped(context, plan):
 # bound, now the delay on "the edge from a call's completion to the program's later submission" in the program's IPC
 # graph, from which mesh_plan computes the rooms (appendix item 2).  What must stay: every operand the same at every
 # rank
+# 2026-11-05 (design/aot-compilation-change-request.md A4: a node the placement operand maps no device "compiles and
+# plans each function as every node does, with no section of its own ... its part of each call is the relaying its
+# routes give it"; design/compilation-coordination.md, "The revisions of b5a3c6e6", ND and ND-2): at such a node
+# (ir.device None) the plan is made from the same operands as every rank's, with no value of its own (ir.values
+# empty), and each call launches its execution (mesh_transfers_start: the node's relays served by its bridge, its
+# submission counted as every node's) and runs no item of the program, returning _absent's outputs.  What must stay:
+# the plan call and the start at every node of the program
 def serialize(build, function):
     context, plan = _context(), {'stale': True, 'handle': 0, 'devices': ()}
 
@@ -1712,7 +1751,8 @@ def serialize(build, function):
         except BaseException:
             _retire(context, plan)
             raise
-        plan.update(ir=ir, tensors=tensors, executions=0, stale=False)
+        plan.update(ir=ir, tensors=tensors, executions=0, stale=False, absent=None if ir.device is not None
+                    else _absent(ir))
     make()
 
     def run(*inputs):
@@ -1724,8 +1764,8 @@ def serialize(build, function):
             plan['executions'] = t + 1
         try:
             mesh.check(status)
-            env = {}
-            for item in ir.program:
+            env = {'output': plan['absent']}
+            for item in ir.program if ir.device is not None else ():
                 _run(ir, context, tensors, item, env, inputs, t)
         except OSError as failure:
             if failure.errno in (errno.ESTALE, errno.ECANCELED):
