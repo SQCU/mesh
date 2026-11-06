@@ -1154,51 +1154,62 @@ def _call(local, args, kwargs):
 # form is (the out variant, its (out argument, result key) pairs in order): a key's own where it returns one tensor,
 # else result j's key + ('out', j), a value of no key of the program made at the operator's item (`added`, `results`,
 # its fake value metas), which an operator.getitem of it takes (`taken`).  What must stay: every rank's forms the same
-def _forms(ir):
-    unknown = object()
+# 2026-11-06 (the C9 hook's remark on f2a1efd1: "_forms(): a forward data-flow pass over the program's items in order,
+# each operator's result and getitem's taken result propagated from its operands' metas; it moves into the graph
+# module"; "The revisions of 14b9a757"): the pass is mesh_graph.forward over the program's keys, each key's value its
+# meta value (_formed: an operator's result on the meta device, else _meta's, UNKNOWN where neither is), its forms
+# recorded as before.  What must stay: every rank's forms the same
+UNKNOWN = object()
 
-    def meta(key):
-        if key in ir.metas:
-            return ir.metas[key]
-        if key in ir.shapes or len(key) == 2 and isinstance(key[1], tuple):
-            return torch.empty(_shape(ir, key), dtype=_value(key[0]).dtype, device='meta')
-        if len(key) == 2 and key[1] is None:
-            return pytree.tree_map(
-                lambda v: torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device='meta')
-                if isinstance(v, torch.Tensor) else v, key[0].meta.get('val'))
-        return unknown
-    for g, (kind, reads, key, operand) in enumerate(ir.program):
-        if kind != 'call':
-            continue
-        local, operands = ir.locals[operand], [meta(k) for k in reads]
-        if local.target is operator.getitem and isinstance(ir.forms.get(reads[0]), tuple) \
-                and len(ir.forms[reads[0]][1]) > 1:
-            ir.taken[key] = ir.forms[reads[0]][1][local.args[1]][1]
-        if any(o is unknown for o in operands):
-            continue
-        given = iter(operands)
-        args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
-        try:
-            result = _call(local, args, kwargs)
-        except (NotImplementedError, RuntimeError):
-            continue
-        if isinstance(result, torch.Tensor):
-            ir.metas[key] = result
-        schema = local.target._schema if isinstance(local.target, torch._ops.OpOverload) else None
-        if schema is None or not _is_functional(schema) or any(r.alias_info is not None for r in schema.returns):
-            continue
-        results = tuple(result) if isinstance(result, (tuple, list)) else (result,)
-        out = to_out_variant(local.target) if len(results) == len(schema.returns) \
-            and all(isinstance(r, torch.Tensor) and r.numel() for r in results) else None
-        names = get_out_arg_names(out) if out is not None else ()
-        if len(names) != len(results):
-            ir.forms[key] = 'functional'
-            continue
-        made = (key,) if len(results) == 1 else tuple(key + ('out', j) for j in range(len(results)))
-        if len(results) > 1:
-            for k, r in zip(made, results):
-                ir.metas[k], ir.added[k], ir.results[k] = r, (g, g), key
-        ir.forms[key] = (out, tuple(zip(names, made)))
+
+def _forms(ir):
+    items = {item[2]: item for item in ir.program if item[0] != 'output'}
+    mesh_graph.forward(list(items), lambda key: items[key][1], lambda key, operands: _formed(ir, items[key], operands))
+
+
+def _meta(ir, key):
+    if key in ir.shapes or len(key) == 2 and isinstance(key[1], tuple):
+        return torch.empty(_shape(ir, key), dtype=_value(key[0]).dtype, device='meta')
+    if len(key) == 2 and key[1] is None:
+        return pytree.tree_map(lambda v: torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device='meta')
+                               if isinstance(v, torch.Tensor) else v, key[0].meta.get('val'))
+    return UNKNOWN
+
+
+def _formed(ir, item, operands):
+    kind, reads, key, operand = item
+    if kind != 'call':
+        return _meta(ir, key)
+    local = ir.locals[operand]
+    if local.target is operator.getitem and isinstance(ir.forms.get(reads[0]), tuple) \
+            and len(ir.forms[reads[0]][1]) > 1:
+        ir.taken[key] = ir.forms[reads[0]][1][local.args[1]][1]
+    if any(o is UNKNOWN for o in operands):
+        return _meta(ir, key)
+    given = iter(operands)
+    args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
+    try:
+        result = _call(local, args, kwargs)
+    except (NotImplementedError, RuntimeError):
+        return _meta(ir, key)
+    if isinstance(result, torch.Tensor):
+        ir.metas[key] = result
+    schema = local.target._schema if isinstance(local.target, torch._ops.OpOverload) else None
+    if schema is None or not _is_functional(schema) or any(r.alias_info is not None for r in schema.returns):
+        return result
+    results = tuple(result) if isinstance(result, (tuple, list)) else (result,)
+    out = to_out_variant(local.target) if len(results) == len(schema.returns) \
+        and all(isinstance(r, torch.Tensor) and r.numel() for r in results) else None
+    names = get_out_arg_names(out) if out is not None else ()
+    if len(names) != len(results):
+        ir.forms[key] = 'functional'
+        return result
+    made = (key,) if len(results) == 1 else tuple(key + ('out', j) for j in range(len(results)))
+    if len(results) > 1:
+        for k, r in zip(made, results):
+            ir.metas[k], ir.added[k], ir.results[k] = r, (ir.producer[key],) * 2, key
+    ir.forms[key] = (out, tuple(zip(names, made)))
+    return result
 
 
 # design/aot-compilation-change-request.md, appendix item 7: "A view (a narrow, a slice) is its base's pages, and its
@@ -2516,12 +2527,13 @@ def _bind(context, ir, values, addresses, buffer, mapping):
 # their branches:
 # - The program is instantiated once a copy (_instantiate), as C3.3 unrolls the template ("The template is unrolled
 #   into u copies, and execution t runs copy t mod u"), here over the period of every placed value's copies (the least
-#   common multiple of their counts), so at copy c every placed key's tensor is a constant (`static`, its home's tensor
+#   common multiple of their counts), so at copy c every placed key's tensor is a constant (`placed`, its home's tensor
 #   of copy c mod its count).  Each item is specialized to its steps, closures in program order, each one kernel call,
-#   wait or publish with its operands bound: a view of constants (a slice, a narrow, a window's view, an operator whose
-#   result aliases its operand, an operator.getitem) is evaluated once, when it is instantiated, and is a constant; a
-#   key no constant gives (an input, the caller's; a result torch allocates; a view of either) is the execution's
-#   (`env`), set by the step that makes it, and a call reading one sets it into its arguments' leaves by index
+#   wait or publish with its operands bound, by mesh_graph.forward over the program's keys, each key's value its
+#   specialization's (_specialized): a view of constants (a slice, a narrow, a window's view, an operator whose result
+#   aliases its operand, an operator.getitem) is evaluated once, when it is instantiated, and is a constant; a key no
+#   constant gives (an input, the caller's; a result torch allocates; a view of either) is the execution's (`env`,
+#   _Dynamic), set by the step that makes it, and a call reading one sets it into its arguments' leaves by index
 #   (_bound): partial evaluation's division of a program's values into static and dynamic.  No step tests a
 #   make()-time fact: each such fact chooses which steps are made.
 # - An operator of an out variant writes its results' places; one with none, placed because a collective reads it or it
@@ -2539,11 +2551,8 @@ class _Dynamic:
         self.key = key
 
 
-def _bound(structure, key_of, static):
-    def leaf(n):
-        key = key_of(n)
-        return static[key] if key in static else _Dynamic(key)
-    built = map_arg(structure, leaf)
+def _bound(structure, value_of):
+    built = map_arg(structure, value_of)
     leaves, spec = pytree.tree_flatten(built)
     dynamic = [(j, value.key) for j, value in enumerate(leaves) if isinstance(value, _Dynamic)]
     if not dynamic:
@@ -2571,81 +2580,99 @@ def _count(context, state, transfer, c):
     return C.c_uint64.from_address(context.M + entry.count + 8 * (c % state.copies))
 
 
-def _called(static, key, reads, local, form):
-    keys = iter(reads)
-    arguments, dynamic = _bound((local.args, local.kwargs), lambda n: next(keys), static)
+def _called(key, operands, local, form, placed):
+    given = iter(operands)
+    arguments, dynamic = _bound((local.args, local.kwargs), lambda n: next(given))
+    mine = placed(key)
     if isinstance(form, tuple):
-        outs = {name: static[result] for name, result in form[1]}
-        static[key] = tuple(outs[name] for name, _ in form[1]) if len(outs) > 1 else static[key]
-        return [lambda env, inputs, t: _apply(form[0], arguments, env, outs)]
-    if form == 'functional' and key in static:
-        place = static[key]
-        return [lambda env, inputs, t: place.copy_(_apply(local.target, arguments, env, {}))]
-    if key in static:
-        return []
+        outs = {name: placed(result) for name, result in form[1]}
+        return tuple(outs.values()) if len(outs) > 1 else mine, \
+            [lambda env, inputs, t: _apply(form[0], arguments, env, outs)]
+    if form == 'functional' and mine is not None:
+        return mine, [lambda env, inputs, t: mine.copy_(_apply(local.target, arguments, env, {}))]
+    if mine is not None:
+        return mine, []
     if not dynamic and _aliases(local):
-        static[key] = _apply(local.target, arguments, None, {})
-        return []
-    return [lambda env, inputs, t: env.__setitem__(key, _apply(local.target, arguments, env, {}))]
+        return _apply(local.target, arguments, None, {}), []
+    return _Dynamic(key), [lambda env, inputs, t: env.__setitem__(key, _apply(local.target, arguments, env, {}))]
 
 
-def _collected(ir, context, plan, state, static, c, key, source, collective):
+def _collected(ir, context, plan, state, placed, c, key, operands, collective):
     me, receives = ir.roles[collective]
     waits = [lambda env, inputs, t, i=i, count=_count(context, state, i, c): _arrived(context, plan, i, t, count)
              for i, _ in receives]
     if collective.kind == 'reduce-scatter' or collective.kind == 'all-reduce' and me == 0:
-        total, first, steps = static[key], static[source], []
+        total, first, steps = placed(key), operands[0], []
         if collective.kind == 'reduce-scatter':
             n = first.shape[collective.dim] // (len(receives) + 1)
             first = first.narrow(collective.dim, me * n, n)
         for wait, (_, (received, j)) in zip(waits, receives):
-            steps += [wait, lambda env, inputs, t, a=first, b=static[received][j]: torch.add(a, b, out=total)]
+            steps += [wait, lambda env, inputs, t, a=first, b=placed(received)[j]: torch.add(a, b, out=total)]
             first = total
         return steps
     if collective.kind == 'collective-permute' and not receives:
-        place = static[key]
+        place = placed(key)
         return [lambda env, inputs, t: place.zero_()]
     return waits
 
 
-def _instantiate(ir, context, plan, devices, static, c, spec):
-    state, steps, result = mesh.State.from_address(context.M + plan), [], None
-    for g, (kind, reads, key, operand) in enumerate(ir.program):
-        source = reads[0] if reads else None
-        if kind == 'input':
-            steps.append(lambda env, inputs, t, key=key, i=operand: env.__setitem__(key, inputs[i]))
-        elif kind == 'constant' and key not in static:
-            static[key] = operator.attrgetter(operand)(ir.gm)
-        elif kind == 'window' and key in ir.inside:
-            dim, m, _, length, starts, size, fill = operand
-            q = ir.coords[ir.device][m]
-            below, above = min(length, max(0, -starts[q])), min(length, max(0, size - starts[q]))
-            steps += [lambda env, inputs, t, part=static[key].narrow(dim, start, extent), value=fill: part.fill_(value)
-                      for start, extent in ((0, below), (above, length - above)) if fill is not None and extent]
-        elif kind in ('slice', 'narrow', 'window') and key not in static:
-            at = _cut(ir, kind, operand, _layout(ir, source)[1], ir.device)
-            if source in static:
-                static[key] = static[source].narrow(*at)
-            else:
-                steps.append(lambda env, inputs, t, key=key, source=source, at=at:
-                             env.__setitem__(key, env[source].narrow(*at)))
-        elif kind == 'call':
-            steps += _called(static, key, reads, ir.locals[operand], ir.forms.get(key))
-        elif kind == 'collective':
-            steps += _collected(ir, context, plan, state, static, c, key, source, operand)
-        elif kind == 'output':
-            arguments = _bound(operand[0].args[0], operand[1].__getitem__, static)[0]
-            result = lambda env, arguments=arguments: pytree.tree_unflatten(list(arguments(env)), spec)
-        steps += _publishes(context, plan, devices, ir.publishes.get(g, ()))
-    return steps, result
+# item `item`'s value at copy c, the transfer of _instantiate's forward pass: its placed tensor (`placed`), a constant
+# it evaluates, or the execution's (_Dynamic), its steps appended to `steps` in program order, then its publishes
+def _specialized(ir, context, plan, state, devices, placed, c, item, operands, steps):
+    kind, reads, key, operand = item
+    value = placed(key)
+    if kind == 'input':
+        value = _Dynamic(key)
+        steps.append(lambda env, inputs, t: env.__setitem__(key, inputs[operand]))
+    elif kind == 'constant' and value is None:
+        value = operator.attrgetter(operand)(ir.gm)
+    elif kind == 'window' and key in ir.inside:
+        dim, m, _, length, starts, size, fill = operand
+        q = ir.coords[ir.device][m]
+        below, above = min(length, max(0, -starts[q])), min(length, max(0, size - starts[q]))
+        steps += [lambda env, inputs, t, part=value.narrow(dim, start, extent): part.fill_(fill)
+                  for start, extent in ((0, below), (above, length - above)) if fill is not None and extent]
+    elif kind in ('slice', 'narrow', 'window') and value is None:
+        at = _cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device)
+        if isinstance(operands[0], _Dynamic):
+            value = _Dynamic(key)
+            steps.append(lambda env, inputs, t: env.__setitem__(key, env[reads[0]].narrow(*at)))
+        else:
+            value = operands[0].narrow(*at)
+    elif kind == 'call':
+        value, made = _called(key, operands, ir.locals[operand], ir.forms.get(key), placed)
+        steps += made
+    elif kind == 'collective':
+        steps += _collected(ir, context, plan, state, placed, c, key, operands, operand)
+    steps += _publishes(context, plan, devices, ir.publishes.get(ir.producer[key], ()))
+    return value
+
+
+# copy c of the program at this node, mesh_graph.forward over its keys in program order with _specialized each key's
+# transfer (2026-11-06, the C9 hook's remark on f2a1efd1: "_instantiate(): a forward pass over the program's items in
+# order, deciding each key's static or dynamic status from its source's and building the steps per copy; it moves into
+# the graph module"): its steps and its result, the output item's values unflattened by the exported program's out_spec
+def _instantiate(ir, context, plan, devices, tensors, c, spec):
+    state, steps = mesh.State.from_address(context.M + plan), []
+    items = {item[2]: item for item in ir.program if item[0] != 'output'}
+
+    def placed(key):
+        return tensors[key][c % len(tensors[key])] if key in tensors else None
+    values = mesh_graph.forward(list(items), lambda key: items[key][1],
+                                lambda key, operands: _specialized(ir, context, plan, state, devices, placed, c,
+                                                                   items[key], operands, steps))
+    node, keys = next(item[3] for item in ir.program if item[0] == 'output')
+    arguments = _bound(node.args[0], lambda n: values[keys[n]])[0]
+    return steps, lambda env: pytree.tree_unflatten(list(arguments(env)), spec)
 
 
 def _steps(ir, context, plan, tensors, devices, spec):
     if ir.device is None:
         return [[]], [lambda env: None]
-    made = [_instantiate(ir, context, plan, devices, {key: x[c % len(x)] for key, x in tensors.items()}, c, spec)
+    made = [_instantiate(ir, context, plan, devices, tensors, c, spec)
             for c in range(math.lcm(1, *(len(x) for x in tensors.values())))]
     return [steps for steps, _ in made], [result for _, result in made]
+
 
 
 # design/compilation-coordination.md, N3: the program's retirement of one compiled function's plan.  First every
