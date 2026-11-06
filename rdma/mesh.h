@@ -47,8 +47,13 @@
    from the layout, hdr `deliveries_off`, `deliveries_room` and `delivery_read` kept by name, hdr `delivered` this
    node's delivered count (Fig. 5's nextdeliver - 1); every received range a count word, a relay's among them; the
    wire's ARRIVE (mesh-bridge.h) (design/aot-compilation-change-request.md at mesh abecd389, A7 and appendix items 2
-   and 5; design/compilation-coordination.md, "The revisions of abecd389") */
-#define MESH_VERSION 114u
+   and 5; design/compilation-coordination.md, "The revisions of abecd389").  115: struct mesh_record `view` appended
+   (the bridge's counter, mesh-map.h); struct mesh_state 320 bytes, its words from byte 232 the plan's synchronization
+   edge's (`waits`, `tells`, `wait_delay`, `wait_count`, `told`) and its submissions' queue's room (`submit_room`);
+   the wire's VIEW and COUNT, and struct mesh_order's `view` where its `serial` was (mesh-bridge.h); hdr `map_serial`
+   moved at each view's installation too (design/aot-compilation-change-request.md at mesh 3f106747, A7 and appendix
+   item 2; design/compilation-coordination.md, "The revisions of 3f106747") */
+#define MESH_VERSION 115u
 #define MESH_ABSENT UINT32_MAX
 /* tag pre-return-20261103 etc/bridge/layout.h MESH_PLATFORM_NS, verbatim: a wait's deadline where its caller gives
    none; the operator's deadline (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
@@ -448,6 +453,15 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      a set of map indices; the bridge parent's alone at the sender; no submission of the plan is TO-broadcast before it
      holds `nodes`.  `announced` (where `taken[6]` was): 1 once this node's bridge parent has told the sender that this
      node holds the plan (mesh-records.c orders_announce), its alone.
+   2026-11-05 (115; design/aot-compilation-change-request.md at mesh 3f106747, appendix item 2, "Its room is fixed at
+   compile time, by the self-timed buffer bound"; design/compilation-coordination.md, "The revisions of 3f106747", BS),
+   reversing 114's rooms above (`room` `outstanding` plus u times the hops of the plan's routes, and the submissions'
+   queue's room `outstanding`): `room` and `submit_room` (the struct's note) are the queues' self-timed buffer bounds in
+   the plan's part of the program's IPC graph, and the submissions' queue is `submit_room` struct mesh_submission at
+   `submits`, the k-th in entry k mod `submit_room`; `outstanding` is A10's bound alone.  Why: "the text before
+   bounded the room by "A10's bound on the plan's submissions outstanding at its sender, plus C3.3's u copies on each
+   hop ..." ... It holds only where the queue lies on a cycle through the sender" (item 2's correction).  What must
+   stay: nothing waits to write and nothing checks for a full queue.
    Every word is set to its starting value once, where mesh_plan places the section (D3), as mbarrier.init runs once
    a kernel: the phases, counts, supplied words, status, `executions`, `held`, `refused`, `submitted`, `released`,
    every `taken` and every sequence word 0.  None is reset, and none written to an earlier value, while the plan
@@ -611,13 +625,34 @@ _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahe
    `taken` and `sequences` gone, their bytes the plan's queues' and the barrier's words (the note "2026-11-05 (114"
    above).  Why: design/aot-compilation-change-request.md, appendix item 2: "This replaces the sequence words
    (`sequences`), `taken[p]` and the parent's wait while they are full ..., and then the one channel for every plan".
-   What must stay: bytes 0-155 where they are, the struct 256 bytes */
+   What must stay: bytes 0-155 where they are, the struct 256 bytes.
+   2026-11-05 (115; design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by
+   the self-timed buffer bound"; design/compilation-coordination.md, "The revisions of 3f106747", BS), the struct 320
+   bytes, `padding3`, `padding4` and `padding2` gone, their bytes and those appended after them:
+   - `outstanding` is A10's bound as mesh_plan took it, the delay on the edge from a call's completion to the
+     program's later submission in the program's IPC graph ("At each node, A10's bound is the delay on the edge from a
+     call's completion to the program's later submission"), and no queue's room;
+   - `room` the delivered calls' queue's room here and `submit_room` the submissions' queue's, each its edge's
+     self-timed buffer bound (S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997,
+     Theorem 2: "Bfb(e) = ρ_Gs(snk(e), src(e)) + delay(e)"), mesh_plan's;
+   - the plan's synchronization edge into this node, added by BSL's Convert-to-SC-graph (§9, Fig. 6) with its delay
+     from DetermineDelays (Fig. 8): `waits` its source's map index (MESH_ABSENT none), `wait_delay` its delay, and
+     `wait_count` the count its source raises as the bridge carries it here (the bridge parent its one writer, only
+     rising; UINT64_MAX once the plan is cancelled); the program's k-th start of the plan reads it first (mesh-call.h
+     mesh_transfers_start: BSL (7), "start(vi, k) ≥ end(vj, k − delay((vj, vi)))");
+   - the plan's synchronization edge out of this node: `tells` its sink's map index (MESH_ABSENT none), and `told` the
+     count the bridge parent here last carried toward it (mesh-records.c counts_tell).
+   Why: "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" (BSL (7)).  Its source raises a
+   count that only rises (C3's counted completion: Portals 4 counting events), and its sink reads that count before
+   its k-th start.  The bridge carries the count from source to sink, as it carries an arrival."  What must stay:
+   bytes 0-231 where they are */
 struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,releases;
   uint64_t phases,counts,supplied,status; _Atomic uint64_t executions; uint64_t padding;
   uint64_t group,epoch,serial,hops,entries; _Atomic uint64_t held; _Atomic int32_t refused[MESH_PORTS];
   uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
-  _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced,padding3,padding4,padding2; };
-_Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64 &&
+  _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced;
+  uint32_t waits,tells; uint64_t wait_delay; _Atomic uint64_t wait_count; uint64_t told,submit_room,padding3[6]; };
+_Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
   offsetof(struct mesh_state,supplied)==32 && offsetof(struct mesh_state,status)==40 &&
@@ -630,7 +665,9 @@ _Static_assert(sizeof(struct mesh_state)==256 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,broadcast)==184 && offsetof(struct mesh_state,arrived)==192 &&
   offsetof(struct mesh_state,room)==200 && offsetof(struct mesh_state,deliveries)==208 &&
   offsetof(struct mesh_state,submits)==216 && offsetof(struct mesh_state,announced)==224 &&
-  offsetof(struct mesh_state,padding2)==248,"mesh_state");
+  offsetof(struct mesh_state,waits)==232 && offsetof(struct mesh_state,tells)==236 &&
+  offsetof(struct mesh_state,wait_delay)==240 && offsetof(struct mesh_state,wait_count)==248 &&
+  offsetof(struct mesh_state,told)==256 && offsetof(struct mesh_state,submit_room)==264,"mesh_state");
 
 /* The deliveries' channel (design/aot-compilation-change-request.md at mesh 0e56d8da, appendix item 2, "Delivery at a
    node"; design/compilation-coordination.md, "The revisions of 46ae8fdf", CH and M3 to M6): the calls this node's bridge

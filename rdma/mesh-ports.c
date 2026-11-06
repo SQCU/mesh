@@ -258,12 +258,18 @@ static void link_heard(struct port *port,const struct message *heard){
    known let be.
    2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PB): an ARRIVE, a node's arrival at a
    plan's barrier (mesh-bridge.h struct mesh_arrival; design/aot-compilation-change-request.md A7, "A plan's
-   destinations exist before its first message"), is taken there too.  What must stay: as above */
+   destinations exist before its first message"), is taken there too.  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", VW and BS): a VIEW, the sequencer's
+   first message of a view (design/aot-compilation-change-request.md A7, "The island is a dynamic group, and each of
+   its views is a static system"), and a COUNT, a synchronization edge's count (appendix item 2: "The bridge carries the
+   count from source to sink, as it carries an arrival"; mesh-bridge.h struct mesh_view, struct mesh_count), are taken
+   there too.  What must stay: as above */
 static void message_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(heard->kind==RECORD)record_heard(port,payload,heard->bytes);
   else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);}
   else if(heard->kind==LINK)link_heard(port,heard);
-  else if(heard->kind==SUBMIT || heard->kind==ORDER || heard->kind==ARRIVE)order_heard(port,heard,payload);
+  else if(heard->kind==SUBMIT || heard->kind==ORDER || heard->kind==ARRIVE || heard->kind==VIEW || heard->kind==COUNT)
+    order_heard(port,heard,payload);
 }
 /* tag pre-return-20261103 rdma/mesh-link.c:832-856 port_heard, the budget both ends' smaller (MIN, 76be3217; bd85613e), main's struct mesh_link_info (abeffc1b 4bb01da0 3f72cbde 0905738c; first 6b33cc33) */
 /* a message heard on a port's control socket: before its peer's hello, that hello alone (any other let be); the hello

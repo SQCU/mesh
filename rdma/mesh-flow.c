@@ -1988,8 +1988,20 @@ int guard_raise(struct port *port){
    peer_terminated and peer_arrived) call none of them: they wake the loop, list the devices and store atomics
    (port_halt).  So a release never runs inside this walk: a plan found standing at a head keeps its claim's pages until
    a release that runs later on this thread, closed or not, and every count word computed from its entries is stored
-   while they are held.  What must stay: this walk and the release on one thread */
+   while they are held.  What must stay: this walk and the release on one thread.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", BS and VW): where the whole plan is
+   cancelled (`from` UINT32_MAX: plan_stale, a map's move or a view's installation), its synchronization edge's count
+   into this node (mesh.h struct mesh_state `wait_count`, this thread its one writer) raised to UINT64_MAX and its
+   waiter woken, so the program's start that waits on it ends at once and reads the moved serial (mesh-call.h
+   mesh_transfers_start: ESTALE).  Why: design/aot-compilation-change-request.md, appendix item 2, "The only waits are
+   at the sinks of the added synchronization edges, on a count that only rises.  Each ends when its source moves on, or
+   when the view ends and the plan with it (`ESTALE`)"; C3.1, a cancellation arrives on a count.  What must stay: the
+   count only raised */
 static void plan_cancel(struct mesh_state *words,uint32_t from){
+  if(from==UINT32_MAX && words->waits!=MESH_ABSENT){
+    atomic_store_explicit(&words->wait_count,UINT64_MAX,memory_order_release);
+    os_sync_wake_by_address_all(&words->wait_count,sizeof words->wait_count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  }
   const uint32_t copies=words->copies;
   const uint64_t entries=words->entries;
   if(!copies || entries%copies || !plan_inside(words))return;

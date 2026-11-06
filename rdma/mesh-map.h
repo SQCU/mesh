@@ -87,8 +87,17 @@ _Static_assert(sizeof(struct mesh_reach)==24,"mesh_reach");
    (hw.model, MESH_MODEL_BYTES with its NUL), and the `reached` cables of its node (struct mesh_reach).  No host name: a name a person reads is a label the readers take from the
    name table by node number (etc/mesh-nodes.json, rdma/peers.py label; AGENTS.md "A node is its hardware; names are
    virtual") */
+/* 2026-11-05 (115; design/aot-compilation-change-request.md A7, "The view identifier is Transis's": "a positive
+   integer.  This integer is computed based on the values of local counters, maintained by all processes.  This local
+   counter is increased by a process upon each installation" (G. V. Chockler, I. Keidar and R. Vitenberg, ACM Comput.
+   Surv. 33(4), 2001, §3.1.1); "A bridge's counter is the identifier of the last view it installed, 0 before its first.
+   Each bridge's announcement of itself to the sequencer carries its counter"; design/compilation-coordination.md, "The
+   revisions of 3f106747", VW): `view` appended, the record's bridge's counter, 0 from its start until it installs a
+   view (mesh-records.c view_install).  Why: the record is the bridge's announcement of itself, flooded to every node
+   and so to the sequencer (RFC 2328 s13's database, mesh-records.c record_heard).  What must stay: the record only
+   appended to */
 struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
-  char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_PORTS]; struct mesh_health health; };
+  char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_PORTS]; struct mesh_health health; uint64_t view; };
 /* the map's room: the records its area of the layout holds (hdr `map_room`, mesh_layout) */
 #define MESH_MAP_ROOM 256u
 /* moved from mesh.h (review R1, C1): the map's records' reader, bridge-side only (the note above); mesh_map_whole, the

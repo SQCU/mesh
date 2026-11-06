@@ -196,14 +196,26 @@ struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,f
    design/aot-compilation-change-request.md A7, "A plan's destinations exist before its first message": "The program's
    sender counts the plan's nodes as each holds the plan, as a centralized barrier counts arrivals: "each processor
    updates a small amount of shared state to indicate its arrival"" (J. M. Mellor-Crummey and M. L. Scott, ACM TOCS
-   9(1), 1991, §3.1); the bridges share no memory but the control sockets.  What must stay: the kinds' values */
-enum { HELLO=1, FAREWELL, RECORD, LINK, SUBMIT, ORDER, ARRIVE };
+   9(1), 1991, §3.1); the bridges share no memory but the control sockets.  What must stay: the kinds' values.
+   2026-11-05 (115; design/compilation-coordination.md, "The revisions of 3f106747", VW and BS): VIEW and COUNT join
+   them.  A VIEW (struct mesh_view and its members) is the island's sequencer's first message of a view it creates,
+   relayed down the island's tree as an ORDER is (design/aot-compilation-change-request.md A7, "The island is a dynamic
+   group, and each of its views is a static system": "The sequencer creates a view at its bridge's start and at each
+   move of its map"; "A bridge installs a view when the view's first message reaches it").  A COUNT (struct mesh_count)
+   is a synchronization edge's count carried from its source's node to its sink's, as an ARRIVE goes (appendix item
+   2: "The bridge carries the count from source to sink, as it carries an arrival").  What must stay: the kinds' values */
+enum { HELLO=1, FAREWELL, RECORD, LINK, SUBMIT, ORDER, ARRIVE, VIEW, COUNT };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 /* the payload of a SUBMIT and an ORDER (`bytes` sizeof): plan (group, epoch) made on map serial `serial`, its nodes
    (a set of map indices) and sender; its function executions [first, end); in an ORDER, `sequence` the number the
    sequencer gave `first` (first + k numbered sequence + k), 0 in a SUBMIT */
-struct mesh_order { uint64_t group,epoch,serial,first,end,sequence,nodes; uint32_t sender,padding; };
+/* 2026-11-05 (115; design/compilation-coordination.md, "The revisions of 3f106747", VW): `view` where `serial` was,
+   the identifier of the view the message is sent in (design/aot-compilation-change-request.md A7: "m is one
+   submission: its plan's name (`group`, `epoch`), the identifier of the view it is sent in (below), and a range of its
+   executions"; "Every message carries its view's identifier").  Why: "the map serial it was made on ... no receiver
+   can compare: each node's serial is its own count" (A7's correction).  What must stay: the layout */
+struct mesh_order { uint64_t group,epoch,view,first,end,sequence,nodes; uint32_t sender,padding; };
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ1): an ORDER's `sequence` is sn(m),
    one number a message however many executions [first, end) it carries, from 1 (X. Défago, A. Schiper and P. Urbán,
    ACM Comput. Surv. 36(4), 2004, Fig. 5: "Initialization: seqnum := 1"; "sn(m) := seqnum ... seqnum := seqnum + 1";
@@ -212,7 +224,21 @@ struct mesh_order { uint64_t group,epoch,serial,first,end,sequence,nodes; uint32
    mesh_state `sender`).  What must stay: the layout */
 /* the payload of an ARRIVE (`bytes` sizeof): plan (group, epoch) stands at the node whose id is `node`; `sender` the
    node id of the program's sender, the one that counts it (mesh-records.c arrival_take) */
-struct mesh_arrival { uint64_t group,epoch; uint32_t node,sender; };
+/* 2026-11-05 (115; "The revisions of 3f106747", VW): `view` appended, the identifier of the view the arriving node
+   has installed (A7: "Each arrival carries its view's identifier, and the program's sender counts only the arrivals of
+   the view it has installed").  What must stay: an arrival names its plan, its node and the sender that counts it */
+struct mesh_arrival { uint64_t group,epoch; uint32_t node,sender; uint64_t view; };
+/* the payload of a VIEW (`bytes` sizeof plus 4 a member): view `view` (Transis's identifier: G. V. Chockler, I. Keidar
+   and R. Vitenberg, ACM Comput. Surv. 33(4), 2001, §3.1.1), created by the sequencer whose node id is `sequencer` and
+   whose bridge started at `boot` (mesh.h hdr `boot`: the process, "one start of a bridge", A7), `last` the last
+   sequence number that process gave in the view it created before (0 none: A7's flush, "Its first message of the new
+   view carries the last sequence number it gave in the old one"), then `members` uint32_t node ids, the nodes the
+   sequencer's map reaches (A7: "A view's members are the nodes the sequencer's map reaches") */
+struct mesh_view { uint64_t view,last,boot; uint32_t sequencer,members; };
+/* the payload of a COUNT (`bytes` sizeof): plan (group, epoch)'s synchronization edge from the node whose id is
+   `node` to the node whose id is `sink`, its source's count `count` in view `view` (mesh.h struct mesh_state `tells`,
+   `waits`, `wait_count`) */
+struct mesh_count { uint64_t group,epoch,view,count; uint32_t node,sink; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:0; }
 
 /* tag rdma/mesh-bridge.h struct link and its states and jobs, verbatim but for the fields left out: each stream's
@@ -470,7 +496,8 @@ void health_turn(void);
 void clients_turn(int liveness);
 /* not the tag's (2026-11-04, owner B2: design/compilation-coordination.md, Q2 to Q4): the island's fixed sequencer's
    messages heard on a port's control socket, a SUBMIT or an ORDER and its struct mesh_order (mesh-ports.c
-   message_heard) */
+   message_heard); 2026-11-05: an ARRIVE, a VIEW and a COUNT too ("The revisions of abecd389", PB; "The revisions of
+   3f106747", VW and BS) */
 void order_heard(struct port *from,const struct message *heard,const unsigned char *payload);
 /* 2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O1 and H1): `uint64_t
    orders_due(void)` (the pending head's bound, its arrival + MESH_PLATFORM_NS, which mesh-link.c turn_due waited for:

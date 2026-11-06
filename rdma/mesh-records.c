@@ -246,8 +246,32 @@ static struct island { uint32_t self,sequencer,parent,up,down[MESH_PORTS],downs;
    design/aot-compilation-change-request.md A7: "The algorithm is their Fig. 5, the "UB" variant of §7.1, as written";
    "Sequencer: "Initialization: seqnum := 1"; "when receive (m): sn(m) := seqnum; send (m, sn(m)) to all; seqnum :=
    seqnum + 1""; "m is one submission ... One submission is one message however many executions it carries".  What
-   must stay: the number only rising, never set back */
+   must stay: the number only rising, never set back.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", VW), reversing "never set back": 1 again
+   at each view this bridge creates (view_create), and only rising within the view.  Why:
+   design/aot-compilation-change-request.md A7, "Fig. 5 runs within each view as written.  Its initializations, "seqnum
+   := 1" and "nextdeliver := 1; pending := ∅", happen at the view's creation at the sequencer and at its installation at
+   each member"; appendix item 2: "the number begins again at 1 only at a view's creation, by A7's views".  What must
+   stay: the number only rising within a view */
 static uint64_t seqnum=1;
+/* The view this bridge has installed (design/aot-compilation-change-request.md A7, "The island is a dynamic group, and
+   each of its views is a static system"; G. V. Chockler, I. Keidar and R. Vitenberg, Group communication
+   specifications: a comprehensive study, ACM Comput. Surv. 33(4), 2001; design/compilation-coordination.md, "The
+   revisions of 3f106747", VW): `view` its identifier, 0 before the first, and so this bridge's counter, Transis's
+   "local counter ... increased by a process upon each installation" (§3.1.1), which its record carries (mesh-map.h
+   struct mesh_record `view`); `sequencer` and `boot` the process that created it, a bridge's node id and its start
+   (hdr `boot`): "A process is one start of a bridge.  A bridge started again is a new process: "In Isis [RB91] a
+   process recovering after a crash is assigned a different identifier (using a new incarnation number)"" (A7).  0 at
+   this bridge's start, a new process's.  What must stay: `view` only rising (Property 3.2, Local Monotonicity) */
+static struct installed { uint64_t view,boot; uint32_t sequencer; } installed;
+/* the messages this node has passed through Fig. 5's delivery in every view it installed, each delivered into its
+   plan's queue or discarded (§5.2.4), hdr `delivered`'s value and each queue entry's `sequence`: the message's place
+   in this node's delivery order, which within a view is its sn(m)'s order and across views Local Monotonicity's.  Why:
+   a delivered entry's number is the ports' merge key (mesh-flow.c lane_take: "of the first untaken entries of its
+   standing plans, the least sequence number first"), and sn(m) begins again at each view, so the view's own numbers
+   would set the key back (design/compilation-coordination.md, "The revisions of 3f106747", VW-4).  What must stay: it
+   only rises, 0 at this bridge's start */
+static uint64_t passed;
 /* Défago et al., Fig. 5, the destinations' "nextdeliver" (2026-11-05, "The revisions of abecd389", SQ2): the number of
    the message this node delivers next, from 1 at the bridge's start ("Initialization: nextdeliver := 1"), one more at
    each message delivered or, for a message whose Dest(m) lacks this node, discarded (§5.2.4: "3. processes not in
@@ -255,7 +279,12 @@ static uint64_t seqnum=1;
    "Destinations: "Initialization: nextdeliver := 1; pending := ∅"; "when receive (m, seqnum): pending := pending ∪
    {(m, seqnum)}; while ∃(m′, seqnum′) ∈ pending : seqnum′ = nextdeliver do deliver (m′); nextdeliver := nextdeliver +
    1""; the super-group "is the island's nodes.  One sequence numbers every message and every node delivers in its
-   order".  What must stay: one more for every message, delivered or discarded */
+   order".  What must stay: one more for every message, delivered or discarded.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", VW), reversing "never set back": 1
+   again, and `pending` emptied, at each view this bridge installs (view_install), after the old view's flush.  Why:
+   A7, "Its initializations ... happen at the view's creation at the sequencer and at its installation at each
+   member"; hdr `delivered` is `passed`, which only rises, where it was nextdeliver - 1.  What must stay: one more for
+   every message of the view, delivered or discarded */
 static uint64_t nextdeliver=1;
 /* the arrivals this node has heard as the program's sender of a plan (mesh-bridge.h struct mesh_arrival), not yet
    counted into a plan standing here (arrivals_apply), `arrivals_held` of them in room for `arrivals_room`; let go at
@@ -347,6 +376,7 @@ static uint32_t island_parent(const void *context,size_t k){
    their standing plans again on their liveness turns (orders_announce); the pending ORDERs and `nextdeliver` are kept
    (appendix item 2: "no node drops a pending order when its map changes").  What must stay: no reset of `seqnum`, of
    `nextdeliver` or of the pending ORDERs */
+static void view_create(const struct mesh_record *r,uint64_t n,const unsigned char *reached);
 static void island_set(void){
   arrivals_held=0;
   island=(struct island){.self=UINT32_MAX,.sequencer=UINT32_MAX,.up=MESH_PORTS};
@@ -377,6 +407,13 @@ static void island_set(void){
     const uint32_t p=port_toward(r[child[c]].node);
     if(p<MESH_PORTS)island.down[island.downs++]=p;
   }
+  /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", VW): at the sequencer, a view of the
+     nodes this map reaches, its first message down the tree just made (view_create).  Why:
+     design/aot-compilation-change-request.md A7: "The membership service is the sequencer ... A view's members are the
+     nodes the sequencer's map reaches.  The sequencer creates a view at its bridge's start and at each move of its
+     map": this is the one place both reach (map_put's first write of this bridge's own record moves the map, and every
+     later move calls this).  What must stay: the view made after the tree it is sent down */
+  if(self==sequencer)view_create(r,n,reached);
   free(reached);free(order);free(parent);free(join);free(first);free(child);
 }
 /* Defago et al., Fig. 5, the destinations: "when receive (m, seqnum): pending := pending U {(m, seqnum)}".  An ORDER
@@ -403,7 +440,12 @@ static void island_set(void){
    to the super-group, and 3. processes not in Dest(m) discard m."  The super-group is the island's nodes."  What must
    stay: the ORDER appended in arrival order */
 static void order_take(const struct mesh_order *order){
-  if(island.self==UINT32_MAX)return;
+  /* 2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", VW): held only where its view is the
+     one installed here.  Why: design/aot-compilation-change-request.md A7: "A member holds and delivers only the
+     messages of the view it has installed (Sending View Delivery)", "(Sending View Delivery) If a process p receives
+     message m in view V, and some process q (possibly p = q) sends m in view V′, then V = V′" (Chockler, Keidar and
+     Vitenberg, Property 4.3).  What must stay: the ORDER appended in arrival order */
+  if(island.self==UINT32_MAX || order->view!=installed.view)return;
   if(pendings==pending_room){
     const size_t room=2*pending_room+1;
     struct pending *grown=realloc(pending,room*sizeof *grown);
@@ -416,6 +458,38 @@ static void order_take(const struct mesh_order *order){
     pending=grown;pending_room=room;
   }
   pending[pendings++]=(struct pending){*order};
+}
+/* One message down the island's tree, to each child's port on its hop's control socket, in arrival order
+   (design/compilation-coordination.md, Q3: "an ORDER down to the children, each hop on the existing control socket");
+   a child's port not greeted, whose message port_say would drop, said on the bridge's log (the coordinator's ruling on
+   review V1's finding 7).  2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", VW and BS):
+   order_relay's loop made one function, which an ORDER, an ARRIVE, a VIEW and a COUNT going down take, where
+   order_relay and arrival_down each held a copy.  Why: the operator, "inlined code is unilaterally bad and to be
+   deduplicated and uninlined where possible".  What must stay: every child's port, in order */
+static void tree_down(uint32_t kind,const void *payload,uint32_t bytes){
+  for(uint32_t k=0;k<island.downs;k++){
+    struct port *down=ports+island.down[k];
+    if(!down->greeted)
+      mesh_say("bridge","link %u (%s): a message of kind %u not relayed: the port toward a child of the island's tree is "
+               "not greeted",down->index,down->name,kind);
+    else port_say(down,(struct message){.kind=kind},payload,bytes);
+  }
+}
+/* One message toward the node whose id is `to`, over the island's tree, as an ARRIVE went (design/compilation-
+   coordination.md, "The revisions of abecd389", PB-1: up the tree as a SUBMIT goes, to `to` where the path meets it,
+   else to the sequencer, and from there down the tree as an ORDER goes): 2 where `to` is this node (its caller takes
+   it); 1 where it went down from the sequencer (tree_down: `to` among the nodes below takes it) or up on the port toward
+   the parent, that port greeted before the queueing and still after it (order_submit's test); else 0, nothing sent.
+   2026-11-05 ("The revisions of 3f106747", BS): arrival_up's route made one function, which an ARRIVE and a COUNT
+   take.  Why: design/aot-compilation-change-request.md, appendix item 2: "The bridge carries the count from source to
+   sink, as it carries an arrival"; one copy of the route.  What must stay: a SUBMIT's route up and an ORDER's down */
+static int tree_toward(uint32_t kind,const void *payload,uint32_t bytes,uint32_t to){
+  if(to==M->node)return 2;
+  if(island.self==UINT32_MAX)return 0;
+  if(island.self==island.sequencer){tree_down(kind,payload,bytes);return 1;}
+  if(island.up>=MESH_PORTS || !ports[island.up].greeted)return 0;
+  port_say(ports+island.up,(struct message){.kind=kind},payload,bytes);
+  return ports[island.up].greeted;
 }
 /* Defago et al., Fig. 5, the sequencer's "send (m, sn(m)) to all", over the island's tree: an ORDER to each child, in
    arrival order, on its hop's control socket, and taken here (design/compilation-coordination.md, Q3: "an ORDER down
@@ -431,15 +505,10 @@ static void order_take(const struct mesh_order *order){
    plan publish past the lost one's executions there: that child's head stays at the plan's next ORDER, whose `first`
    is past its `released` (orders_deliver), said on its log (open, "Delivery's liveness").  What must stay: as above.
    2026-11-05 (CH): that child delivers the plan's next ORDER, and its lanes take nothing past the gap (mesh-flow.c
-   lane_take).  What must stay: as above */
+   lane_take).  What must stay: as above.
+   2026-11-05 ("The revisions of 3f106747", VW): the relay is tree_down's.  What must stay: as above */
 static void order_relay(const struct mesh_order *order){
-  for(uint32_t k=0;k<island.downs;k++){
-    struct port *down=ports+island.down[k];
-    if(!down->greeted)
-      mesh_say("bridge","link %u (%s): an ORDER of plan (%llu, %llu) not relayed: the port toward a child of the island's "
-               "tree is not greeted",down->index,down->name,(unsigned long long)order->group,(unsigned long long)order->epoch);
-    else port_say(down,(struct message){.kind=ORDER},order,sizeof *order);
-  }
+  tree_down(ORDER,order,sizeof *order);
   order_take(order);
 }
 /* Defago et al., Fig. 5, the sequencer: "when receive (m): sn(m) := seqnum; send (m, sn(m)) to all; seqnum := seqnum +
@@ -448,8 +517,19 @@ static void order_relay(const struct mesh_order *order){
    2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", SQ1): one number a submission, sn(m)
    := seqnum, then seqnum + 1, where a submission took one number an execution.  Why: A7, "m is one submission ... One
    submission is one message however many executions it carries, as Pathways sends "a single message (describing the
-   entire subgraph)" (§4.5)"; Fig. 5 "as written".  What must stay: first in, first out */
+   entire subgraph)" (§4.5)"; Fig. 5 "as written".  What must stay: first in, first out.
+   2026-11-05 ("The revisions of 3f106747", VW): numbered only where it was sent in the view this bridge created and has
+   installed, its ORDER carrying that view; any other discarded, said on the bridge's log.  Why: A7: "When the
+   sequencer's map moves, it numbers no further message of the old view"; Sending View Delivery (Property 4.3), the
+   message received in the view it was sent in.  What must stay: first in, first out */
 static void order_sequence(const struct mesh_order *submission){
+  if(!installed.view || submission->view!=installed.view || installed.sequencer!=M->node || installed.boot!=M->boot){
+    mesh_say("bridge","a SUBMIT of plan (%llu, %llu), executions [%llu, %llu), discarded: sent in view %llu, this sequencer's "
+             "view %llu",(unsigned long long)submission->group,(unsigned long long)submission->epoch,
+             (unsigned long long)submission->first,(unsigned long long)submission->end,
+             (unsigned long long)submission->view,(unsigned long long)installed.view);
+    return;
+  }
   struct mesh_order order=*submission;
   order.sequence=seqnum++;
   order_relay(&order);
@@ -463,7 +543,9 @@ static void order_sequence(const struct mesh_order *submission){
    PB).  The shared state is the sender's plan's `arrived` (mesh.h struct mesh_state), which its bridge parent alone
    writes, so an arrival travels to it as a message: up the island's tree, as a SUBMIT goes (Q3), to the sender where
    the path meets it, else to the sequencer, and from there down the tree to every node, as an ORDER goes, kept at the
-   node it names as the sender.  arrival_take holds it there; arrivals_apply counts it into the plan once it stands. */
+   node it names as the sender.  arrival_take holds it there; arrivals_apply counts it into the plan once it stands.
+   2026-11-05 ("The revisions of 3f106747", BS): its route is tree_toward's and tree_down's, where arrival_up and
+   arrival_down held it.  What must stay: the route as above */
 static void arrival_take(const struct mesh_arrival *a){
   if(arrivals_held==arrivals_room){
     const size_t room=2*arrivals_room+1;
@@ -476,23 +558,6 @@ static void arrival_take(const struct mesh_arrival *a){
     arrivals=grown;arrivals_room=room;
   }
   arrivals[arrivals_held++]=*a;
-}
-static void arrival_down(const struct mesh_arrival *a){
-  for(uint32_t k=0;k<island.downs;k++){
-    struct port *down=ports+island.down[k];
-    if(down->greeted)port_say(down,(struct message){.kind=ARRIVE},a,sizeof *a);
-  }
-  if(a->sender==M->node)arrival_take(a);
-}
-/* 1 where the arrival was taken here, relayed down from here or queued on the port toward the parent, that port
-   greeted before and after (as order_submit's), else 0 */
-static int arrival_up(const struct mesh_arrival *a){
-  if(a->sender==M->node){arrival_take(a);return 1;}
-  if(island.self==UINT32_MAX)return 0;
-  if(island.self==island.sequencer){arrival_down(a);return 1;}
-  if(island.up>=MESH_PORTS || !ports[island.up].greeted)return 0;
-  port_say(ports+island.up,(struct message){.kind=ARRIVE},a,sizeof *a);
-  return ports[island.up].greeted;
 }
 /* Defago et al., Fig. 5, the sender's "send (m) to sequencer", over the island's tree: at the sequencer it is numbered
    here, elsewhere it goes to this node's parent (design/compilation-coordination.md, Q3: "a SUBMIT up to the parent").
@@ -514,6 +579,102 @@ static int order_submit(const struct mesh_order *order){
   port_say(ports+island.up,(struct message){.kind=SUBMIT},order,sizeof *order);
   return ports[island.up].greeted;
 }
+/* The island's views (design/aot-compilation-change-request.md A7, "The island is a dynamic group, and each of its
+   views is a static system"; G. V. Chockler, I. Keidar and R. Vitenberg, Group communication specifications: a
+   comprehensive study, ACM Comput. Surv. 33(4), 2001; X. Défago, A. Schiper and P. Urbán, ACM Comput. Surv. 36(4),
+   2004, §6.1 and §8.2; design/compilation-coordination.md, "The revisions of 3f106747", VW).  The membership service
+   is the sequencer, which decides each view alone: "Suspected processes are excluded from the group as the result of
+   the unilateral decision of a single process" (Défago et al., §9.1.1, Amoeba).  The view properties the code keeps,
+   as A7 quotes them:
+   - "(Self Inclusion) If process p installs view V, then p is a member of V." (Property 3.1): view_install installs
+     only a view whose members name this node;
+   - "(Local Monotonicity) If a process p installs view V after installing view V′ then the identifier of V is greater
+     than that of V′." (Property 3.2): view_install installs only a view whose identifier passes this bridge's counter,
+     and view_create gives a view one more than the greatest counter among its members (Transis's identifier, §3.1.1),
+     the counters as the members' records carry them and this bridge's own;
+   - "(Initial View Event) Every send, recv and safe_prefix event occurs within some view." (Property 3.3), "so that no
+     send events occur before the first view_chng event": no SUBMIT, ARRIVE or COUNT is sent here before this bridge's
+     first view (orders_submit, orders_announce, counts_tell);
+   - "(Sending View Delivery) If a process p receives message m in view V, and some process q (possibly p = q) sends m
+     in view V′, then V = V′." (Property 4.3): every message carries its view's identifier, the sequencer numbers only
+     its own view's SUBMITs (order_sequence), a member holds only its installed view's ORDERs (order_take), and the
+     sender counts only its installed view's arrivals (arrivals_apply), a sink only its view's counts (count_take). */
+/* Defago et al., Fig. 5's destinations' delivery, to message number `last` at most (UINT64_MAX: every one): below */
+static void orders_deliver(uint64_t last);
+/* A view installed here, `member` its v->members node ids (A7: "A bridge installs a view when the view's first message
+   reaches it, if the view names it a member (Self Inclusion) and the view's identifier is greater than its counter
+   (Local Monotonicity).  It ignores any other view's messages").  The change blocks and flushes (A7, Chockler, Keidar
+   and Vitenberg, §4.2.1: "group communication systems block sending of messages while a view change is taking place
+   ... The application responds with a flush message which follows all the messages sent by the application in the old
+   view"): "A member that installed the old view from the same process delivers the old view's messages up to that
+   number, then installs the new view", the process the view's creator and its start (`sequencer`, `boot`), the number
+   the VIEW's `last`; "Where the old view's sequencer is gone (its bridge stopped, or the map moved to another
+   sequencer), the old view's undelivered messages are never delivered".  Then Fig. 5's initializations, "nextdeliver :=
+   1; pending := ∅" ("at its installation at each member"), the arrivals held let go (of the old view: A7, the sender
+   "counts only the arrivals of the view it has installed"), this bridge's counter the view's identifier and its record
+   told again (record_changed: "Each bridge's announcement of itself to the sequencer carries its counter"), and every
+   plan of the old view ended with ESTALE: hdr `map_serial` moved, while `map` is odd, and plan_stale (A7: "Installing a
+   view ends every plan of the old one with `ESTALE`, as D.3.6 ends a plan at its map's move, and the plan's replan
+   arrives in the new view").  A plan made in this view has the moved serial, so a plan stands only within the view it
+   was made, its nodes' arrivals counted, in.  Decisions (VW-1, VW-2, the record's): the flush delivers the old view's
+   messages this node holds, in Fig. 5's order, while each is the next and at most `last`, a message not yet arrived
+   never delivered, since nothing bounds when one would; and installation moves the serial D.3.6 reads, so every
+   reader of a plan's serial (the ports' loads and cancellations, the start, mesh_plan's second read) ends the old
+   view's plans by its one path.  On the bridge parent's one event-loop thread, as every caller of plan_stale is */
+static void view_install(const struct mesh_view *v,const uint32_t *member){
+  int named=0;
+  for(uint32_t i=0;i<v->members;i++)named|=member[i]==M->node;
+  if(!named || v->view<=installed.view)return;
+  if(installed.view && installed.sequencer==v->sequencer && installed.boot==v->boot)orders_deliver(v->last);
+  pendings=0;nextdeliver=1;arrivals_held=0;
+  installed=(struct installed){.view=v->view,.boot=v->boot,.sequencer=v->sequencer};
+  mesh_notify(&M->map);
+  atomic_fetch_add(&M->map_serial,1);
+  mesh_notify(&M->map);
+  plan_stale();
+  record_changed();
+}
+/* The sequencer's view of the nodes its map reaches (`reached` over the map's records r[0, n), island_set's), at its
+   bridge's start and at each move of its map (A7): its identifier one more than the greatest counter among its members
+   (A7: "the sequencer gives a view one more than the greatest counter among its members.  So Local Monotonicity holds
+   at every member, a bridge started again among them"), this bridge's own counter its installed view's; `last` the
+   last sequence number this process gave in the view it created before, seqnum - 1, 0 where the view installed here is
+   not this process's ("When the sequencer's map moves, it numbers no further message of the old view.  Its first
+   message of the new view carries the last sequence number it gave in the old one"); then Fig. 5's "Initialization:
+   seqnum := 1" ("at the view's creation at the sequencer"); its first message, the VIEW, down the tree (tree_down), and
+   installed here, the sequencer a member of its own view.  ENOMEM creates no view, said: the old view stands here */
+static void view_create(const struct mesh_record *r,uint64_t n,const unsigned char *reached){
+  uint64_t greatest=installed.view;
+  uint32_t members=0;
+  for(uint64_t k=0;k<n;k++)if(reached[k]){members++;if(r[k].node!=M->node && r[k].view>greatest)greatest=r[k].view;}
+  const size_t bytes=sizeof(struct mesh_view)+(size_t)members*sizeof(uint32_t);
+  unsigned char *message=malloc(bytes);
+  if(!message){mesh_say("bridge","no view of map serial %llu created (ENOMEM)",(unsigned long long)atomic_load(&M->map_serial));return;}
+  const struct mesh_view v={.view=greatest+1,.last=installed.sequencer==M->node && installed.boot==M->boot?seqnum-1:0,
+                            .boot=M->boot,.sequencer=M->node,.members=members};
+  memcpy(message,&v,sizeof v);
+  uint32_t *member=(uint32_t *)(void *)(message+sizeof v);
+  for(uint64_t k=0,i=0;k<n;k++)if(reached[k])member[i++]=r[k].node;
+  seqnum=1;
+  tree_down(VIEW,message,(uint32_t)bytes);
+  view_install(&v,member);
+  free(message);
+}
+/* A VIEW heard from this node's parent in the island's tree (order_heard): relayed down, as an ORDER is, then
+   installed here where it may be (view_install).  A payload that is not one struct mesh_view and its members is let
+   be */
+static void view_heard(const struct message *heard,const unsigned char *payload){
+  struct mesh_view v;
+  if(heard->bytes<sizeof v)return;
+  memcpy(&v,payload,sizeof v);
+  if(v.members>MESH_MAP_ROOM || heard->bytes!=sizeof v+(uint64_t)v.members*sizeof(uint32_t))return;
+  uint32_t member[MESH_MAP_ROOM];
+  memcpy(member,payload+sizeof v,(size_t)v.members*sizeof *member);
+  tree_down(VIEW,payload,heard->bytes);
+  view_install(&v,member);
+}
+/* a synchronization edge's count taken at its sink's node (below) */
+static void count_take(const struct mesh_count *c);
 /* the sequencer's messages heard on a port's control socket (mesh-ports.c message_heard; design/compilation-
    coordination.md, Q3): a SUBMIT is passed on toward the sequencer, or numbered there (order_submit); an ORDER from
    this node's parent in the tree is relayed to its children and taken here (order_relay), and one from any other
@@ -523,16 +684,31 @@ static int order_submit(const struct mesh_order *order){
    the bridge's log.
    2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PB): an ARRIVE from this node's parent
    goes down (arrival_down), any other up (arrival_up), a payload not one struct mesh_arrival let be.  What must stay:
-   as above */
+   as above.
+   2026-11-05 ("The revisions of 3f106747", VW and BS): a VIEW from this node's parent is view_heard's, from any other
+   node dropped, as an ORDER is; an ARRIVE or a COUNT from the parent goes down (tree_down) and is taken here where it
+   names this node, from any other goes toward the node it names (tree_toward), taken here where that is this node
+   (arrival_take, count_take).  What must stay: as above */
 void order_heard(struct port *from,const struct message *heard,const unsigned char *payload){
-  if(heard->kind==ARRIVE){
-    struct mesh_arrival a;
-    if(heard->bytes!=sizeof a)return;
-    memcpy(&a,payload,sizeof a);
-    if(island.parent && from->peer==island.parent)arrival_down(&a);
-    else if(!arrival_up(&a))
-      mesh_say("bridge","link %u (%s): an arrival at plan (%llu, %llu) of node %u not passed on toward its sender %u",
-               from->index,from->name,(unsigned long long)a.group,(unsigned long long)a.epoch,a.node,a.sender);
+  const int down=island.parent && from->peer==island.parent;
+  if(heard->kind==VIEW){
+    if(down)view_heard(heard,payload);
+    return;
+  }
+  if(heard->kind==ARRIVE || heard->kind==COUNT){
+    union { struct mesh_arrival a; struct mesh_count c; } m;
+    const uint32_t bytes=heard->kind==ARRIVE?sizeof m.a:sizeof m.c;
+    if(heard->bytes!=bytes)return;
+    memcpy(&m,payload,bytes);
+    const uint32_t to=heard->kind==ARRIVE?m.a.sender:m.c.sink;
+    int routed=2*(to==M->node);
+    if(down)tree_down(heard->kind,&m,bytes);
+    else routed=tree_toward(heard->kind,&m,bytes,to);
+    if(routed==2 && heard->kind==ARRIVE)arrival_take(&m.a);
+    else if(routed==2)count_take(&m.c);
+    else if(!routed && !down)
+      mesh_say("bridge","link %u (%s): a message of kind %u toward node %u not passed on",from->index,from->name,
+               heard->kind,to);
     return;
   }
   struct mesh_order order;
@@ -544,7 +720,7 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
                "island's sequencer",from->index,from->name,(unsigned long long)order.group,(unsigned long long)order.epoch,
                (unsigned long long)order.first,(unsigned long long)order.end);
   }
-  else if(island.parent && from->peer==island.parent)order_relay(&order);
+  else if(down)order_relay(&order);
 }
 /* design/compilation-coordination.md, Q2 (Defago et al., section 7.1: the sequencer numbers each message its sender
    sends once, so one bridge submits each plan's executions, the one at the plan's `sender`): for each plan standing
@@ -599,10 +775,12 @@ static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
 }
 /* whether a plan's queues lie inside the region, as plan_inside (mesh-flow.c) judges its entries: a store outside it
    would be a fault, not an error value */
+/* 2026-11-05 ("The revisions of 3f106747", BS): the submissions' queue's room `submit_room`, where it was
+   `outstanding` (mesh.h struct mesh_state's note).  What must stay: as above */
 static int queues_inside(const struct mesh_state *s){
-  return s->room && s->outstanding && s->deliveries<=M->length &&
+  return s->room && s->submit_room && s->deliveries<=M->length &&
     s->room<=(M->length-s->deliveries)/sizeof(struct mesh_delivery) && s->submits<=M->length &&
-    s->outstanding<=(M->length-s->submits)/sizeof(struct mesh_submission);
+    s->submit_room<=(M->length-s->submits)/sizeof(struct mesh_submission);
 }
 /* this node's map index of node id `node` (its place in ascending node-id order among the map's records, mesh.h
    `map_serial`), UINT32_MAX where the map holds none */
@@ -615,10 +793,15 @@ static uint32_t map_index_of(uint32_t node){
 /* each arrival held counted into its plan where that plan stands here with this node its sender, its node's map index
    set in `arrived` (A7: "each processor updates a small amount of shared state to indicate its arrival"), and let go;
    one whose plan does not stand here yet is held */
+/* 2026-11-05 ("The revisions of 3f106747", VW): an arrival of a view other than the one installed here let go, not
+   counted.  Why: A7, "Each arrival carries its view's identifier, and the program's sender counts only the arrivals of
+   the view it has installed"; one of a later view is told again on its node's liveness turns.  What must stay: as
+   above */
 static void arrivals_apply(void){
   for(size_t k=0;k<arrivals_held;){
     struct mesh_state *s=plan_here(arrivals[k].group,arrivals[k].epoch);
     const uint32_t at=map_index_of(arrivals[k].node);
+    if(arrivals[k].view!=installed.view){arrivals[k]=arrivals[--arrivals_held];continue;}
     if(!s || s->sender!=island.self){k++;continue;}
     if(at<64)s->arrived|=UINT64_C(1)<<at;
     arrivals[k]=arrivals[--arrivals_held];
@@ -627,19 +810,73 @@ static void arrivals_apply(void){
 /* this node's arrival at each plan standing here on its map serial, told to the plan's sender (arrival_up) once the
    plan stands, `announced` 1 once it went, and again on every liveness turn, as record_retell tells this node's record
    again (the tag's: "told again at its current sequence on every greeted port, each liveness turn"), since the sender
-   lets go of the arrivals it holds at its map move (island_set) and an arrival lost on the way is told again */
+   lets go of the arrivals it holds at its map move (island_set) and an arrival lost on the way is told again.
+   2026-11-05 ("The revisions of 3f106747", VW and BS): none before this bridge's first view, and each carrying the
+   view installed here, its route tree_toward's.  Why: A7, Initial View Event (Property 3.3: "no send events occur
+   before the first view_chng event"); "Each arrival carries its view's identifier".  A plan standing on this node's
+   map serial was made in that view, since installing one moves the serial (view_install).  What must stay: as above */
 static void orders_announce(int liveness){
+  if(!installed.view)return;
   const uint64_t n=atomic_load(&M->map_nodes),serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
   const struct mesh_record *r=mesh_records(M);
   for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
     struct mesh_state *state=mesh_head_state(M,head);
     if(!state || state->serial!=serial || (state->announced && !liveness) || state->sender>=n)continue;
-    const struct mesh_arrival a={.group=state->group,.epoch=state->epoch,.node=M->node,.sender=r[state->sender].node};
-    if(arrival_up(&a))state->announced=1;
+    const struct mesh_arrival a={.group=state->group,.epoch=state->epoch,.node=M->node,.sender=r[state->sender].node,
+                                 .view=installed.view};
+    const int routed=tree_toward(ARRIVE,&a,sizeof a,a.sender);
+    if(routed==2)arrival_take(&a);
+    if(routed)state->announced=1;
   }
 }
+/* A synchronization edge's count, carried from its source's node to its sink's (design/aot-compilation-change-
+   request.md, appendix item 2: "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" (BSL (7)).
+   Its source raises a count that only rises (C3's counted completion: Portals 4 counting events), and its sink reads
+   that count before its k-th start.  The bridge carries the count from source to sink, as it carries an arrival";
+   design/compilation-coordination.md, "The revisions of 3f106747", BS).  At the sink, the count of the plan standing
+   here that names the COUNT's node as its edge's source (mesh.h struct mesh_state `waits`), of the view installed here,
+   stored in its `wait_count` where it rises (release), its waiter woken (os_sync_wake_by_address_all, region-shared,
+   as mesh-call.h mesh_transfers_start waits on it); any other let be (a plan not standing here yet hears it again on its
+   source's liveness turn) */
+static void count_take(const struct mesh_count *c){
+  struct mesh_state *s=plan_here(c->group,c->epoch);
+  const uint32_t from=map_index_of(c->node);
+  if(!s || c->view!=installed.view || from==UINT32_MAX || s->waits!=from ||
+     c->count<=atomic_load_explicit(&s->wait_count,memory_order_relaxed))return;
+  atomic_store_explicit(&s->wait_count,c->count,memory_order_release);
+  os_sync_wake_by_address_all(&s->wait_count,sizeof s->wait_count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+}
+/* At the source: each plan standing here on this node's map serial with an edge out of this node (`tells`), its count
+   told toward its sink's node (tree_toward, as orders_announce tells an arrival) where it rose past `told`, and again
+   on every liveness turn, as an arrival is ("told again on every liveness turn"), `told` the count once it went (this
+   bridge its one writer).  The count is the plan's `submissions` here (acquire), its program's starts: the source's
+   ends trail them by A10's bound, the delay on its own edge from a call's completion to the program's later
+   submission, which mesh_plan adds to the edge's delay in the queues' rooms (design/compilation-coordination.md, "The
+   revisions of 3f106747", BS-4).  None before this bridge's first view (Initial View Event) */
+static void counts_tell(int liveness){
+  if(!installed.view)return;
+  const uint64_t n=atomic_load(&M->map_nodes),serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
+  const struct mesh_record *r=mesh_records(M);
+  for(uint32_t head=mesh_head_after(M,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(M,head)){
+    struct mesh_state *state=mesh_head_state(M,head);
+    if(!state || state->serial!=serial || state->tells>=n)continue;
+    const uint64_t count=atomic_load_explicit(&state->submissions,memory_order_acquire);
+    if(count<=state->told && !(liveness && count))continue;
+    const struct mesh_count c={.group=state->group,.epoch=state->epoch,.view=installed.view,.count=count,
+                               .node=M->node,.sink=r[state->tells].node};
+    const int routed=tree_toward(COUNT,&c,sizeof c,c.sink);
+    if(routed==2)count_take(&c);
+    if(routed)state->told=count;
+  }
+}
+/* 2026-11-05 ("The revisions of 3f106747", VW and BS): nothing before this bridge's first view, each message carrying
+   the view installed here where it carried this node's map serial, and the queues' room `submit_room`.  Why: A7, "the
+   program's sender TO-broadcasts nothing before its first view (Initial View Event)"; "Every message carries its view's
+   identifier, which replaces the map serial"; a plan standing on this node's serial was made in that view
+   (view_install).  What must stay: as above */
 struct program_head { struct mesh_state *state; uint64_t seen; };
 static void orders_submit(void){
+  if(!installed.view)return;
   const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
   for(int sent=1;sent;){
     sent=0;
@@ -668,12 +905,12 @@ static void orders_submit(void){
         acquired|=heads[j].seen>s->broadcast;
         if(atomic_load_explicit(&s->submissions,memory_order_acquire)<=s->broadcast)continue;
         const struct mesh_submission e=((const struct mesh_submission *)(const void *)((const char *)M+s->submits))
-          [s->broadcast%s->outstanding];
+          [s->broadcast%s->submit_room];
         if(!least || e.clock<next.clock){least=s;next=e;}
       }
       if(!acquired || !least || (least->arrived&least->nodes)!=least->nodes)continue;
       if(next.end>least->submitted){
-        const struct mesh_order order={.group=least->group,.epoch=least->epoch,.serial=serial,.first=least->submitted,
+        const struct mesh_order order={.group=least->group,.epoch=least->epoch,.view=installed.view,.first=least->submitted,
                                        .end=next.end,.nodes=least->nodes,.sender=least->sender};
         if(!order_submit(&order)){
           if(!unsent)
@@ -854,6 +1091,9 @@ static void orders_submit(void){
    at a node through a queue of the plan's own"; "Fig. 5 delivers in sequence-number order (its `nextdeliver`), so every
    entry below the node's delivery count is in its queue already, and no smaller one comes later".  What must stay:
    delivery in sequence-number order, with no timeout and no skip; the entries' stores before `delivered`'s */
+/* 2026-11-05 ("The revisions of 3f106747", VW-4): the entry's `sequence` the message's place in this node's delivery
+   order (`passed`), where it was its sn(m), which begins again at each view.  What must stay: the entry's stores before
+   `delivered`'s */
 static void order_deliver(const struct mesh_order *m){
   struct mesh_state *state=plan_here(m->group,m->epoch);
   if(!state || !queues_inside(state)){
@@ -864,21 +1104,28 @@ static void order_deliver(const struct mesh_order *m){
   }
   const uint64_t k=atomic_load_explicit(&state->delivered,memory_order_relaxed);
   ((struct mesh_delivery *)(void *)((char *)M+state->deliveries))[k%state->room]=
-    (struct mesh_delivery){.sequence=m->sequence,.first=m->first,.end=m->end};
+    (struct mesh_delivery){.sequence=passed,.first=m->first,.end=m->end};
   atomic_store_explicit(&state->delivered,k+1,memory_order_release);
 }
-static void orders_deliver(void){
+/* 2026-11-05 ("The revisions of 3f106747", VW and VW-4): the messages numbered at most `last` alone, for a view's
+   flush (view_install; UINT64_MAX on every other turn), and hdr `delivered` `passed`, the messages this node has
+   passed in every view, where it was nextdeliver - 1, which begins again at each view.  Why: A7, "A member that
+   installed the old view from the same process delivers the old view's messages up to that number, then installs the
+   new view"; the ports' merge reads `delivered` as a bound on every entry's number (mesh-flow.c lane_take).  What must
+   stay: delivery in sequence-number order, with no timeout and no skip; the entries' stores before `delivered`'s */
+static void orders_deliver(uint64_t last){
   int delivered=0;
-  for(size_t i=0;i<pendings;){
+  for(size_t i=0;i<pendings && nextdeliver<=last;){
     if(pending[i].order.sequence!=nextdeliver){i++;continue;}
     const struct mesh_order m=pending[i].order;
     memmove(pending+i,pending+i+1,(--pendings-i)*sizeof *pending);
+    passed++;
     if(island.self<64 && m.nodes>>island.self&1)order_deliver(&m);
     nextdeliver++;delivered=1;i=0;
   }
   if(!delivered)return;
   mesh_notify(&M->plans);
-  atomic_store_explicit(&M->delivered,nextdeliver-1,memory_order_release);
+  atomic_store_explicit(&M->delivered,passed,memory_order_release);
   mesh_notify(&M->plans);
 }
 /* 2026-11-04, owner B3 (design/compilation-coordination.md, O1 and H1): orders_due (the pending head's bound, its
@@ -891,8 +1138,12 @@ static void orders_deliver(void){
 /* differs from the tag: the reach entry is mesh.h's per cable, and every field of it (peer node, both ports, queue
    pairs, bandwidth) is the rule's input (struct mesh_hop, "Both ends"), so all are compared, not the tag's node and
    bandwidth alone; its bound MESH_PORTS, the tag's MESH_STREAMS */
+/* 2026-11-05 ("The revisions of 3f106747", VW): the record's counter (mesh-map.h struct mesh_record `view`) compared
+   too, so a record whose counter rose is written into the map (map_put, which moves no serial for it: neither its
+   nodes nor its cables changed) and the sequencer reads the counter there (view_create).  What must stay: a
+   health-only change written under the health serial alone */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
-  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot &&
+  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot && a->view==b->view &&
     a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
   for(uint32_t k=0;same && k<a->reached && k<MESH_PORTS;k++)
     same=!memcmp(a->reach+k,b->reach+k,sizeof *a->reach);
@@ -917,8 +1168,12 @@ struct mesh_record *record_held(uint32_t node){
    tag's `- held_pages*M->pgsz` goes, since the bridge holds no arena page (its map is the layout's area, map_grow's
    note, and it leases no link pages or duds' block, mesh-link.c): every arena byte is the programs'.  What must stay:
    `region` the bytes the programs' sections may take */
+/* 2026-11-05 ("The revisions of 3f106747", VW): the record carries this bridge's counter, its installed view's
+   identifier (A7: "Each bridge's announcement of itself to the sequencer carries its counter").  What must stay: as
+   above */
 void record_changed(void){
-  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=(uint64_t)mesh_arena_pages(M)*M->pgsz,.memory=memory};
+  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=(uint64_t)mesh_arena_pages(M)*M->pgsz,.memory=memory,
+                          .view=installed.view};
   memcpy(own.model,model,sizeof own.model);
   own.reached=record_reach(own.reach,MESH_PORTS);
   own.health=health;
@@ -1029,9 +1284,10 @@ void clients_turn(int liveness){
     else busy=1;
   }
   orders_announce(liveness);
+  counts_tell(liveness);
   arrivals_apply();
   orders_submit();
-  orders_deliver();
+  orders_deliver(UINT64_MAX);
   const uint64_t plans=atomic_load_explicit(&M->plans,memory_order_acquire);
   unreleased|=plans!=plans_seen;plans_seen=plans;
   /* the tag's line again (the coordinator, at integration, once mesh-dataflow.c's mesh_retired_release returns the rows
