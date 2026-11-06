@@ -173,6 +173,9 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # reduction's received parts); `sends`, by collective item, the ranges it releases before it waits, each with the copy
 # that makes it where one does; `publishes`, by item, the ranges released after it; `homes`, each placed key's value,
 # element offset and shape (_place).  What must stay: every operand of mesh_plan the same at every rank
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V5; "The
+# revisions of 55b9cbad"): `inputs`, this node's: by the index of an input of the traced block, the value of `lag`
+# HOST_LAG that holds it here and its shape (program).  What must stay: as above
 class IR:
     def __init__(self, gm, placement, nodes, blockbytes):
         self.gm, self.placement, self.weights, self.blockbytes = gm, placement, None, blockbytes
@@ -185,7 +188,7 @@ class IR:
         self.made, self.calls, self.locals, self.shapes = set(), None, {}, {}
         self.metas, self.forms, self.over, self.producer, self.bases = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.blocks, self.added = {}, {}, {}, {}, {}
-        self.sends, self.publishes = {}, {}
+        self.sends, self.publishes, self.inputs = {}, {}, {}
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
     def local(self, node, sharding):
@@ -236,9 +239,13 @@ class IR:
     # 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3; "The
     # revisions of 55b9cbad"): its place is in the program's own mapping of its rows (_mapped), `view` being gone from
     # struct mesh_value.  What must stay: as above
-    def value(self, dtype, numel, device, wire, begin, end):
-        self.values.append(mesh.Value(section=mesh.Section(bytes=dtype.itemsize * numel), kind=mesh.EXECUTION,
-                                      wire=wire, begin=begin, end=end, run=1))
+    # 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V4 and V5;
+    # "The revisions of 55b9cbad"): `kind` and `lag` given, MESH_INVARIANT for a parameter or buffer of the exported
+    # module (_place) and `lag` HOST_LAG for a program input (program), each MESH_EXECUTION and lag 0 otherwise as
+    # before.  What must stay: as above
+    def value(self, dtype, numel, device, wire, begin, end, kind=mesh.EXECUTION, lag=0):
+        self.values.append(mesh.Value(section=mesh.Section(bytes=dtype.itemsize * numel), kind=kind, wire=wire,
+                                      begin=begin, end=end, lag=lag, run=1))
         self.layouts.append((dtype, numel, device))
         return len(self.values) - 1
 
@@ -1104,6 +1111,11 @@ def _viewed(item):
 # module"; design/compilation-coordination.md, "The revisions of e4a7398e", C9): the pass is mesh_graph.forward over the
 # keys in the program's order, each key's predecessors the keys its item reads, its transfer the rule above.  What must
 # stay: each key's set as above
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V4: "The
+# exported module's parameters and buffers are read from torch's allocations (2170, `_over`'s empty set for a
+# constant).  That fails region-only memory"; "The revisions of 55b9cbad"): a module attribute that is a tensor (a
+# parameter, a buffer, a lifted constant) makes pages of its own, an invariant of the plan (_place), where its set was
+# empty.  What must stay: each other key's set as above
 def _over(ir):
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
@@ -1119,6 +1131,8 @@ def _over(ir):
         if kind in ('window', 'collective'):
             return frozenset((key,)) | (joined if kind == 'collective' and operand.kind == 'collective-permute'
                                         else frozenset())
+        if kind == 'constant' and isinstance(key[0].meta.get('val'), torch.Tensor):
+            return frozenset((key,))
         return frozenset()
     ir.over = mesh_graph.forward(list(items), lambda key: items[key][1], rule)
     ir.bases = mesh_graph.forward(list(items), lambda key: items[key][1],
@@ -1693,6 +1707,13 @@ def lower(ir):
 # placement of the values' pages is mesh_plan's ("Every value's pages are placed anywhere, by the fewest chains",
 # design/plan-to-bridge-change-request.md R2, corrected).  What must stay: no value at a node the placement maps no
 # device, and the positions as above
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V4: "C3.2:
+# "Weights, the KV cache, pooled intermediates, exchanges … are all placed by `mesh_plan`'s allocator".  The code must
+# place them as invariants, as e2b does"; "The revisions of 55b9cbad"): a module attribute's key (a parameter or buffer
+# of the exported module, _over) is a local MESH_INVARIANT value, "written before the first execution and read by every
+# one: placed once for the plan's life, as Lam places a loop invariant outside the kernel" (mesh-collective.h struct
+# mesh_value), its positions not read, as tools/e2b_replay.m places every operand no route names and no host writes;
+# its producer's one write, the load, is program's (`make`).  What must stay: as above
 def _place(ir):
     if ir.device is None:
         return
@@ -1708,9 +1729,10 @@ def _place(ir):
         bases.append((key, g))
     for key, g in bases + [(key, None) for key in ir.added]:
         dtype, shape = _layout(ir, key)
-        wire = int(key in wired)
+        wire, invariant = int(key in wired), g is not None and ir.program[g][0] == 'constant'
         ir.homes[key] = (ir.value(dtype, math.prod(shape), _value(key[0]).device.type, wire, 0 if wire else g,
-                                  0 if wire else last.get(key, g)), 0, shape)
+                                  0 if wire else last.get(key, g),
+                                  kind=mesh.INVARIANT if invariant else mesh.EXECUTION), 0, shape)
     for key, (made, offset) in ir.inside.items():
         ir.homes[key] = (ir.homes[made][0], offset, _layout(ir, key)[1])
     for i, (base, offset) in ir.at.items():
@@ -1781,6 +1803,14 @@ def _program():
         raise ValueError('MESH_PROGRAM %r: the program\'s nodes, the map indices its launcher started it at, whole '
                          'numbers below 64 apart by commas, the same at every rank' % text)
     return sum(1 << n for n in nodes)
+
+
+# A program input's copies (2026-11-05, design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement
+# lines", V5; design/disjoint-pages-change-request.md D.3.3: "The program declares the host's lag, and the allocator
+# gives them copies by it ... With the host writing step t + 1 while the GPU runs step t, the lag is 2"; "The revisions
+# of 55b9cbad"): `lag` 2 (mesh-collective.h struct mesh_value), as metal-microbench tools/e2b_replay.m HOST_LAG.  What
+# must stay: D.3.3's lag
+HOST_LAG = 2
 
 
 # mesh-collective.h mesh_host_arrived, waited on for at most MESH_PLATFORM_NS (mesh.h): 1 arrived; FAILED a field ahead
@@ -2107,6 +2137,10 @@ def _dlpack_tensor(device, data, offset, owner, dtype, shape, mapping):
 # copies at the addresses the program's own mapping gives them (`addresses`, _mapped), where they were read from
 # struct mesh_value `view`, which the plan no longer writes.  What must stay: each device's `data` and `byte_offset`
 # as torch's own export sets them
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V5; "The
+# revisions of 55b9cbad"): `given` as well, for each program input this function's values hold (IR `inputs`), its copies'
+# tensors on its device and, for the caller's write, each copy's CPU tensor over the same pages of the mapping (the
+# device tensor itself on the CPU), by _dlpack_tensor as every copy is.  What must stay: as above
 def _bind(context, ir, values, addresses, buffer, mapping):
     header, copies = mesh.Header.from_address(context.M), []
     for v, (dtype, numel, device), at in zip(values, ir.layouts, addresses):
@@ -2115,6 +2149,10 @@ def _bind(context, ir, values, addresses, buffer, mapping):
                        for a in at])
     places = {key: [copy.narrow(0, offset, math.prod(shape)).view(shape) for copy in copies[v]]
               for key, (v, offset, shape) in ir.homes.items()}
+    given = {i: ([copy.view(shape) for copy in copies[v]],
+                 [copy.view(shape) if ir.layouts[v][2] == 'cpu' else
+                  _dlpack_tensor('cpu', a, 0, None, ir.layouts[v][0], shape, mapping) for copy, a in
+                  zip(copies[v], addresses[v])]) for i, (v, shape) in ir.inputs.items()}
     sections, devices = {}, {}
     for i, d in enumerate(ir.declared):
         if d.value != mesh.ABSENT:
@@ -2122,7 +2160,7 @@ def _bind(context, ir, values, addresses, buffer, mapping):
             sections[i] = mesh.Section(value.first + d.first, -(-d.bytes // ir.blockbytes) * header.block, d.bytes,
                                        value.count, value.stride)
             devices[i] = ir.layouts[d.value][2]
-    return places, sections, devices
+    return places, sections, devices, given
 
 
 # item g of this node's program, (kind, the keys it reads, the key it makes, its operand), at execution t on execution
@@ -2220,7 +2258,7 @@ def _run(ir, context, run, g, env, inputs, t, deadline):
     if kind == 'input':
         env[key] = inputs[operand]
     elif kind == 'constant':
-        env[key] = operator.attrgetter(operand)(ir.gm)
+        env[key] = place(key) if key in run['places'] else operator.attrgetter(operand)(ir.gm)
     elif kind == 'slice':
         (source,), (dim, m) = reads, operand
         size = env[source].shape[dim] // ir.shape[m]
@@ -2766,6 +2804,44 @@ class _Export(torch.fx.Interpreter):
 #   context's `client` and `start`, which mesh_attach set (mesh-dataflow.h struct mesh_ctx) and mesh_plan copies.
 # What must stay: no placement and no weight chosen here; every operand of mesh_plan the same at every rank but this
 # node's values; a failure after mesh_plan retires the program
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", V4 and V5; "The
+# revisions of 55b9cbad"):
+# - V4 ("The code must place them as invariants, as e2b does"): every parameter and buffer of each exported module is a
+#   MESH_INVARIANT value (_over, _place), written into its placed pages once, after the plan and before the first
+#   execution, by torch's copy_ from the module's own tensor, "For the weights, that write is the load: one copy from
+#   the buffer the delegate loaded, at the bind.  C3.7 allows it, because the producer is writing its own value"
+#   (design/disjoint-pages-change-request.md D.3.2); every execution reads it there (_run), so after the load nothing
+#   reads torch's allocation of it ("After the bind, no command reads a delegate buffer", D.3.2).  On MPS the load is
+#   on torch's stream before the first execution's kernels, ordered by the stream's command order (C3.1: "A producer on
+#   the same queue comes before its consumer by the command buffer's order"); on the CPU it has ended when it returns.
+# - V5 ("Region-only memory makes every program value region pages, so the plan places each input.  The caller writes
+#   into the input placed for it, as a host producer, ordered by the event (C3.1: "A host producer is ordered by the
+#   event")"): each tensor input of the traced block is a value of `lag` HOST_LAG (MESH_EXECUTION, wire 0, named by no
+#   declared transfer: mesh-collective.h struct mesh_value, D.3.3's host input) of the compiled function of the first
+#   call reading it whose function has a section at this node (the implementer's decision, recorded in design/
+#   compilation-coordination.md: a value is one function's, struct mesh_function `value`; one reading it with no
+#   section here holds no value, A4), execution b of the program reading its copy b mod HOST_LAG, every call reading the
+#   input given that copy's tensor (_Program), as a call is given an earlier call's result over its pages.  The order
+#   is D.3.3's, by its events: "The host writes step t's inputs into copy t mod k (k being their copies) once the queue
+#   has signalled that step t − k is done": `inputs` waits, bounded by MESH_PLATFORM_NS ("The host's wait on that is
+#   bounded by MESH_PLATFORM_NS and ends as an error value", ETIMEDOUT), until execution b − HOST_LAG has ended, its end
+#   signalled on torch's stream after its last work ("The queue signals each step's end with `signalEvent:value:` after
+#   its last commit": rdma/mesh-torch.mm mesh_torch_end, an MPSEvent's notification raising mesh_torch_ended), on the
+#   CPU at its run's return; "then sets its input event to t + 1.  Step t's commands that read them are committed after
+#   the queue's `waitForEvent:value:` on that event at t + 1": here the host's write is done before `run` encodes
+#   execution b's kernels, which torch commits only after they are encoded, so the input event's order is the host's
+#   own program order before that commit (C3.1's "A host producer is ordered by the event", the event the host's
+#   return from its write).  A host input at a node where no function reading it has a section is placed nowhere
+#   there, and `inputs` gives None for it.
+# - The API change for the caller: program(block, *example_inputs) returns `run`; `run.inputs()` gives, for the next
+#   execution, a tuple with, for each input of the block, the CPU tensor over that input's placed copy (the caller writes
+#   it, a host producer: torch's copy_, out=, or numpy over it), None for a non-tensor input, whose example value is
+#   compiled into each exported function (A1: "shapes are compiled"), and None where no function here reads it;
+#   `run()`, with no argument, runs that execution on the placed inputs, where `run(*inputs)` read the caller's
+#   tensors.  `inputs` is called before each `run` whose inputs the caller writes; an input not written keeps its copy's
+#   earlier contents.  `run`'s outputs are as before, views of their placed pages (appendix item 7).
+# What must stay: no placement and no weight chosen here; every operand of mesh_plan the same at every rank but this
+# node's values; a failure after mesh_plan retires the program; every input and invariant region pages
 def program(block, *example_inputs):
     tracer = Tracer()
     gm = torch.fx.GraphModule(tracer.root, tracer.trace(block))
@@ -2774,7 +2850,13 @@ def program(block, *example_inputs):
     compiled, of, calls, reads = exporter.compiled, exporter.of, exporter.calls, exporter.reads
     entries = _analyse(gm, of, [record.function.module for record in compiled])
     operands = [record.function.placement(record.gm, record.examples) for record in compiled]
-    context, state = _context(), {'stale': True, 'mapping': None, 'runs': None, 'devices': ()}
+    placeholders = [n for n in gm.graph.nodes if n.op == 'placeholder']
+    readers = [[of[n] for n in gm.graph.nodes if n in of and p in n.all_input_nodes] for p in placeholders]
+    given = [(x.dtype, x.numel(), x.device.type, tuple(x.shape)) if isinstance(x, torch.Tensor) else None
+             for x in example_inputs]
+    constants = [None if isinstance(x, torch.Tensor) else x for x in example_inputs]
+    context, state = _context(), {'stale': True, 'mapping': None, 'runs': None, 'devices': (), 'executions': 0,
+                                  'ended': 0, 'inputs': [None] * len(given)}
 
     def make():
         if state['mapping'] is not None:
@@ -2798,6 +2880,10 @@ def program(block, *example_inputs):
                                  'and reads the result of call %d, whose function has none there: such a node "has '
                                  'no value for any program code to read" (design/aot-compilation-change-request.md '
                                  'A4, withdrawn text)' % (j, k, nodes.self, absent[0]))
+        for i, (x, functions) in enumerate(zip(given, readers)):
+            k = next((k for k in functions if irs[k].device is not None), None)
+            if x is not None and k is not None:
+                irs[k].inputs[i] = (irs[k].value(*x[:3], 0, 0, 0, lag=HOST_LAG), x[3])
         arrays = [((mesh.Declared * len(ir.declared))(*ir.declared), (mesh.Weight * len(ir.weights))(*ir.weights),
                    (mesh.Value * len(ir.values))(*ir.values),
                    (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir in irs]
@@ -2820,24 +2906,57 @@ def program(block, *example_inputs):
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
+            for ir, (places, _, _, _) in zip(irs, bound):
+                for kind, _, key, target in ir.program:
+                    if kind == 'constant' and key in places:
+                        places[key][0].copy_(operator.attrgetter(target)(ir.gm))
         except BaseException:
             _retire(context, state)
             raise
+        state['inputs'] = [next((b[3][i] for b in bound if i in b[3]), None) for i in range(len(given))]
         state.update(stale=False, runs=[{'ir': ir, 'plan': f.plan, 'executions': 0, 'spec': record.spec,
                                          'places': places, 'sections': sections, 'devices': devices}
-                                        for ir, f, record, (places, sections, devices) in
+                                        for ir, f, record, (places, sections, devices, _) in
                                         zip(irs, functions, compiled, bound)])
     make()
 
-    def run(*inputs):
+    def ended():
+        return TORCH.mesh_torch_ended() if 'mps' in state['devices'] else state['ended']
+
+    def end(b):
+        if 'mps' in state['devices']:
+            mesh.check(TORCH.mesh_torch_end(b))
+        else:
+            state['ended'] = b + 1
+
+    def inputs():
         if state['stale']:
             make()
+        b, deadline = state['executions'], time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
+        while ended() + HOST_LAG <= b:
+            if time.clock_gettime_ns(time.CLOCK_MONOTONIC) > deadline:
+                raise OSError(errno.ETIMEDOUT, 'execution %d of the program: execution %d not ended within '
+                                               'MESH_PLATFORM_NS, so its inputs\' copy is not free (D.3.3)'
+                              % (b, b - HOST_LAG))
+        return tuple(None if placed is None else placed[1][b % len(placed[1])] for placed in state['inputs'])
+
+    def run():
+        if state['stale']:
+            make()
+        b = state['executions']
+        state['executions'] = b + 1
+        arguments = [constant if placed is None else placed[0][b % len(placed[0])]
+                     for constant, placed in zip(constants, state['inputs'])]
         try:
-            return _Program(gm, lambda node, args, kwargs: _execute(context, state['runs'][of[node]], args,
-                                                                    kwargs)).run(*inputs)
-        except OSError as failure:
-            if failure.errno in (errno.ESTALE, errno.ECANCELED):
+            result = _Program(gm, lambda node, args, kwargs: _execute(context, state['runs'][of[node]], args,
+                                                                      kwargs)).run(*arguments)
+        except BaseException as failure:
+            if isinstance(failure, OSError) and failure.errno in (errno.ESTALE, errno.ECANCELED):
                 state['stale'] = True
+            end(b)
             raise
+        end(b)
+        return result
+    run.inputs = inputs
     weakref.finalize(run, _dropped, context, state)
     return run
