@@ -3,7 +3,8 @@
 #include "mesh-map.h"
 #include "mesh-holders.h"
 /* 2026-11-04, owner B2: the walk of the claims' heads (mesh_head_after), for "clients" (clients_print) */
-#include "mesh-dataflow.h"
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): mesh-dataflow.h
+   no longer included: the walk is gone, and "clients" reads the program's root (mesh.h mesh_program) */
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -96,33 +97,33 @@ static int map_print(struct hdr *m,size_t length){
 /* not the tag's (2026-11-04, owner B2: design/plan-to-bridge-change-request.md R8; e6bd7db2's section 6, "Holders and
    clients", as design/compilation-coordination.md ruling 1 and Q5 take it: "mesh-stat prints "clients":[pids] in place
    of client"): the process of an open claim at head `head` (its owner word's low 32 bits; the owner not 0 and `closed`
-   0, each read with acquire), 0 where none is open there */
-static pid_t clients_open(struct hdr *h,uint32_t head){
-  const struct mesh_buffer *claim=mesh_buffers(h)+head;
-  const uint64_t owner=atomic_load_explicit(&claim->owner,memory_order_acquire);
-  return owner && !atomic_load_explicit(&claim->closed,memory_order_acquire)?(pid_t)(uint32_t)owner:0;
+   0, each read with acquire), 0 where none is open there.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
+   revisions of 4e78f6f4"): the process of the program's root (mesh.h struct mesh_program, at the layout's one place)
+   where it is open (its owner word's low 32 bits; `owner` not 0 and `closed` 0, each read with acquire), 0 where it is
+   not, where it was a claim head's.  Why: point 5, "These go: ... the claim's head record"; one program's operand at
+   the layout's place (A9, "What the bridge runs: the self-timed schedule": "searches for nothing").  What must stay:
+   the owner's process, 0 where none */
+static pid_t clients_open(struct hdr *h){
+  struct mesh_program *program=mesh_program(h);
+  const uint64_t owner=atomic_load_explicit(&program->owner,memory_order_acquire);
+  return owner && !atomic_load_explicit(&program->closed,memory_order_acquire)?(pid_t)(uint32_t)owner:0;
 }
 /* "clients": the processes of the region's open claims, each once, in the order of their first claim's head
    (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed).
    2026-11-04, owner B2, the coordinator's ruling on review V1's finding 1: "client" printed before it, the process of
    the first open claim's owner, 0 where none, since bin/mesh-bridge.sh (a deployment script this unit may not change)
    holds a restart while mesh-stat prints "client":[1-9] (its client_attached), and without the field the guard never
-   held and a restart could end a running program.  What must stay: "client" while that script reads it */
+   held and a restart could end a running program.  What must stay: "client" while that script reads it.
+   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the open
+   root's process alone, "client" it and "clients" [it] ([] and 0 where the root is not open), where the claims' heads
+   were walked and each process printed once.  Why: point 5 and the root's note (mesh.h struct mesh_program: "the
+   region holds one program's operand at a time").  What must stay: both fields, "client" while bin/mesh-bridge.sh
+   reads it */
 static void clients_print(struct hdr *h){
-  pid_t client=0;
-  for(uint32_t head=mesh_head_after(h,UINT32_MAX);!client && head!=UINT32_MAX;head=mesh_head_after(h,head))
-    client=clients_open(h,head);
+  const pid_t client=clients_open(h);
   printf("\"client\":%d,\"clients\":[",(int)client);
-  int first=1;
-  for(uint32_t head=mesh_head_after(h,UINT32_MAX);head!=UINT32_MAX;head=mesh_head_after(h,head)){
-    const pid_t pid=clients_open(h,head);
-    if(!pid)continue;
-    uint32_t earlier=mesh_head_after(h,UINT32_MAX);
-    while(earlier<head && clients_open(h,earlier)!=pid)earlier=mesh_head_after(h,earlier);
-    if(earlier<head)continue;
-    printf("%s%d",first?"":",",(int)pid);
-    first=0;
-  }
+  if(client)printf("%d",(int)client);
   printf("],");
 }
 /* design/algorithm-sources.md#programcopy */
