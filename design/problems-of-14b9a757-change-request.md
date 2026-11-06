@@ -356,3 +356,62 @@ lack of a quoted source. Each source is given here verbatim, with the change it 
   - **One writer:** that store is the bridge parent's alone.
   - **The load:** it reads the removal after its acquire and gains no reference to the plan.
   - **The program:** it learns of the cancellation through the raised counts, as plan_cancel already gives it.
+
+## Sources for the second stops (2026-11-06)
+
+The implementation of the sources above (mesh 0f48775f, c840ff2f, bce1ed90, 028b27d6) stopped at three places.
+
+### 7. The end of a send's or forward's hold
+
+- **Stop:** no node waits for a send's or a forward's completion, so MPI §3.7's hold has no end in the program's order.
+- **Source:**
+  - torch 2.14.0 torch/distributed/_functional_collectives.py:
+    - `wait_tensor`: "Wait on a tensor returned by the collectives ops."
+    - `AsyncCollectiveTensor`: "A Tensor wrapper subclass that is used to trigger a call to wait prior to first use of
+      the underlying tensor."
+  - MPI 4.1 §7.1 (https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node113.htm):
+    - "Collective operations can (but are not required to) complete as soon as the caller's participation in the
+      collective communication is finished."
+    - "The completion of a collective operation indicates that the caller is free to modify locations in the
+      communication buffer."
+- **Change:**
+  - Each collective has one completion wait at each node: torch's `wait_tensor`, placed at the node before the first
+    use of the collective's result there.
+  - That wait completes the node's whole participation: its sends, its forwards and its landings.
+  - A send's source and a forwarded block are held until that node, which ends the MPI §3.7 hold. Their lifetimes are
+    then item 7's, and the stop's "unordered with every item" goes.
+  - A collective whose result has no use at a node waits at the program's last node.
+
+### 7. The u copies against one-copy items
+
+- **Stop:** nothing orders the plan's u copies of a landing, which live across executions, against items that live
+  within one execution.
+- **Source:** M. Lam, "Software Pipelining: An Effective Scheduling Technique for VLIW Machines", PLDI 1988, §2.3
+  (https://fg-kastens.cs.uni-paderborn.de/lehre/pgrekonf/seminar/Lam1988.pdf, read 2026-11-06; the scan's errors are
+  corrected in brackets):
+  - "The lifetime of a register variable is defi[n]ed as the duration between the f[i]rst assignment into the variable
+    and it[s] last use."
+  - "the minimum degree of unrolling, u, to implement the same schedule is simply max_i q_i."
+  - The source gives each variable locations of its own. It gives no rule for two variables sharing a location across
+    the unrolled steady state.
+- **Change:** none. The two kinds of item stay unordered with each other.
+  - This costs pages only. It writes no byte twice.
+  - It stands until a source for sharing across the steady state is quoted. Hendren, Gao, Altman and Mukerji's cyclic
+    interval graphs (1992) is named as that source, not yet read.
+
+### 8. An invariant's transfer
+
+- **Stop:** no quoted source gave the form of a function called once outside the block. Nor did any say how the
+  per-execution functions name another plan's pages.
+- **Source:**
+  - torch 2.14.0 torch/export/exported_program.py, `ExportedProgram`: "It contains an torch.fx.Graph that represents
+    Tensor computation, a state_dict containing tensor values of all lifted parameters and buffers, and various
+    metadata."
+  - Every rank runs make() on the same exported program, so every rank holds every parameter and buffer.
+  - GSPMD §4.5 (quoted at item 4): "DynamicSlice to shard replicated dimensions".
+- **Change:**
+  - No transfer has an invariant as its source.
+  - Each node loads, once in make() before execution 0, the DynamicSlice of its own copy that its placement needs, into
+    its own never-freed pages (item 7).
+  - The plan refuses a transfer whose source is MESH_INVARIANT (EINVAL at the plan).
+  - LOADED and the execution UINT64_MAX − 1 are deleted. The function called once is not needed.
