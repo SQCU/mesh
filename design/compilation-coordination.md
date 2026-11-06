@@ -3562,3 +3562,346 @@ and what the code must do. Where a finding needs a method, the method is cited.
 - PO-1's text;
 - the publication rule in mesh-collective.h's note;
 - EB-1, which is B2.
+
+## The revisions of 55b9cbad
+
+The record of the unit whose work list is "The revisions of 4e78f6f4"'s last two parts, "Answered in the documents
+(2026-11-05, the coordinator, on this part's record)" and "Review of 4e78f6f4 against the requirement lines". It
+starts from mesh 55b9cbad and metal-microbench 8c3a8e06, with the document text of 3a7fe8b0 and 55b9cbad. Its rules
+are design/disjoint-pages-revision-coordination.md, "Rules (every sub-agent)".
+- The coordinating implementer fixed the shared interface first (b35234c3, b25fad5c) and took rdma/mesh-graph.c (G1).
+- Four sub-agents then worked on disjoint files:
+  - C: rdma/mesh-collective.c;
+  - D: rdma/mesh-dataflow.c, mesh-call.c, mesh-records.c, mesh-flow.c, mesh-link.c, mesh-stat.c, and mesh-bridge.h past
+    the interface's hunk;
+  - T: rdma/mesh_compile.py, mesh.py and mesh-torch.mm;
+  - E: metal-microbench tools/e2b_replay.m, metal_recording.m and metal_recording.h.
+- The coordinating implementer reviewed each commit as it landed and sent D three findings, each fixed (045ac991,
+  2765c562, 0a2fdf50).
+- Nothing was run but the compilers, `python3 -m py_compile` and the four incremental builds.
+
+### Done
+
+**Answered in the documents**
+- **IG-5, the submissions cycle** (appendix item 2, corrected: "The program-order cycle is each node's submissions,
+  not its calls' parts ... Call k's part at the node, x_k, follows its submission (σ_k → x_k, delay 0). A10's bound b
+  is the edge from x_k to the submission b calls later ... no edge orders the parts themselves"). C, 31919b97,
+  plan_graph and plan_submission:
+  - each node of a call's plan has a submission actor σ_{j,v} of time 0, and the sender's σ_j are its node's;
+  - each node's submissions form BSL §4.1's cycle (delay 1 from the last to the first);
+  - σ_{j,v} → x_{j,v} has delay 0, and A10's edge runs x → σ, where it ran x → x;
+  - an added edge's tail may be a σ at a node: its position is its own call's place and its delay δ (its end is that
+    start); an x tail keeps IG-3's form;
+  - the argument that no sink SCC holds only a σ or a β is restated at the code. A sink SCC holding a β holds some σ at
+    the sender, which reaches every vertex, so the graph is strongly connected and nothing is added.
+- **A rank's own part shared through the page table** (PB R2: "the result's rows for the rank's own part name the
+  operand's own pages ... as fbufs and IO-Lite pass buffers"): V2 below.
+- **A part that is not whole blocks** (PB R2: "the collective's dimension most-major, each part padded to whole
+  blocks ... The refusal goes"): V1 below.
+- **PO-1's text.** plan_before cites PB R2's corrected clause ("Copies (v, c) and (w, c′) are ordered where c ≤ c′,
+  ...", Lam 1988; Hendren, Gao, Altman and Mukerji, CC 1992) as the document's, where it called the clause the
+  implementer's (C).
+- **The publication rule** ("nothing is visible before the root's publication: one release store after every write,
+  in C3's writing order, as RCU publishes a structure only once it is initialized").
+  - mesh-collective.h's note is restated so (b35234c3), in place of "Every failure but ESTALE and the second map
+    read's is found before anything is written".
+  - mesh_plan writes every word in this order (C): every word of the operand, then the second map read, then struct
+    mesh_algo `plans`, `group` and `table` and the holder (hdr `client`, `client_start`), then `published` last
+    (release).
+  - A failure before that store (ESTALE, the reader's error) leaves nothing published. The mapping is no longer
+    mesh_plan's (G3), so no Mach failure follows the writes.
+- **EB-1**, which is B2 below.
+- **The run-time checks left**, which is K2 below.
+
+**Transport by view and region-only memory** (T: 96cb578c, 0c980472, 75f3c1cd, 44212450)
+- **V1** ("The code must send each part as a view of its producer's pages at their places, and lay parts that are
+  not whole blocks out by PB R2's layout answer").
+  - Each value has a layout (_layout, _form, _claim): one dimension most-major, each slice along it padded so every
+    part is a run of whole blocks, kept as one strided view its producer's out variant writes.
+  - Each part is sent from its producer's pages (_run_of). Where the parts do not fit the producer's layout, the key
+    is laid out once into a value of its own (_laid): PB R2's "the change of layout is an operator of its own, run as
+    its out variant into placed pages".
+  - A collective's parts all come from one value (75f3c1cd). `_landing`'s refusal and `_part`'s four copies go.
+- **V2** ("make the result's rows for the own part name the operand's own pages"; PB R2, as above).
+  - The interface: struct mesh_share and struct mesh_function `share`/`shares` (b35234c3).
+  - The planner, C (plan_function, plan_rows): validates each share before anything is written; binds each copy's
+    shared rows to `of`'s pages; gives the shared items a lifetime covering both values' accesses (a decision, below).
+  - The torch path, T: AllGather's own shard where it is not made in place, and AllToAll's own piece, are shares, with
+    no copy.
+- **V3** ("The pieces must land at their places in the window region's value (point 7), so no concatenation
+  remains"). T: each halo piece lands at its `first` in its window's landing value (_region), and the window's middle
+  is shared from the operand. `torch.cat` goes.
+- **V4** ("The code must place them as invariants, as e2b does"; D.3.2: "For the weights, that write is the load").
+  T: each parameter and buffer is a MESH_INVARIANT value, loaded once by `copy_` after the plan and before the first
+  execution, and read there by every execution.
+- **V5** ("the plan places each input. The caller writes into the input placed for it, as a host producer, ordered by
+  the event"). T (44212450):
+  - each tensor input of the traced block is a value of `lag` HOST_LAG (2, D.3.3);
+  - `run.inputs()` gives the caller CPU tensors over the next execution's placed copies, once execution b − HOST_LAG
+    has ended (its end an MPSEvent notification, mesh-torch.mm mesh_torch_end, the wait bounded);
+  - `run()` takes no argument. This is the API change for the caller.
+
+**Compile-time, never run-time checks**
+- **K1** ("Each is to be read by index, as MSCCL-IR's steps name their dependences by index (`depid`, `deps`)").
+  - **The waits.** The interface (b35234c3): struct mesh_sync is 32 bytes. A wait carries `base` = position + 1 −
+    delay × every, and struct mesh_state `rows` holds its waits' compressed rows by call place.
+    - C writes them grouped by mesh_graph_rows.
+    - D (13c2d411, mesh_transfers_start, mesh_wait_row) reads only row k mod `calls`, each wait until `count` ≥ K ×
+      every + base, with no branch against a delay.
+  - **The COUNT.** A tell's `entry` is its edge's index among the sink's waits, which struct mesh_count carries.
+    - C computes it.
+    - D (d61df2a9, 045ac991): counts_tell sends it, and count_take raises edge[entry] alone, with no loop and no
+      map_index_of search.
+  - **The held flow.** D (d64fb13b): struct port_plans `loaded` is a table indexed by place (place_at), and struct
+    flow `next` is gone.
+- **K2** ("Run-time bound and null tests of facts the plan fixes go"; and "Answered in the documents", "Run-time
+  checks left": "They go in the next unit").
+  - mesh.h mesh_algo_plan: the k-against-`plans` test and the table word's NULL test go (b35234c3).
+  - mesh-records.c (D): `queues_inside` and `state->sender>=n` go.
+  - mesh-flow.c (D): `plan_inside` and its uses in link_prepare and plan_cancel go, as do link_prepare's room,
+    deliveries, copies and entries tests and its `bytes`, `field`, `count` and `pages` EINVALs, and the null tests of
+    a receive's count word. Each removal's note names its producer, mesh_plan.
+  - Kept, as run-time state or a device's report: the map read and its serial (ESTALE), EPROTO, EHOSTUNREACH,
+    EMSGSIZE, ENOMEM, the landing's byte-length check, and held_clear's test for a plan not yet released.
+- **K3** ("Values recomputed every execution from make()-time facts become constants of the plan"). T (_steps): each
+  item is built once as a closure of its release lists, receive order, places, own pair and the plan's state view. A
+  node with no section has no steps.
+- **K4** ("The flush goes on those barriers alone").
+  - The interface: struct mesh_value `shares` out, 1 where a page bound in one of the value's rows is bound in another
+    row at this node, another value's or another copy's (b25fad5c). C computes it once from the placement (plan_rows).
+  - E (d329555a): MetalEncoder, MetalReplayEncode, MetalReplayRecorded and `replay:visibility:` take the queue
+    barrier's visibility.
+  - e2b gives each phase MTL4VisibilityOptionDevice, with MTL4VisibilityOptionResourceAlias added where a value the
+    phase may touch has `shares` 1. The invariants' copy has its own, and the optimizer and the capture's scalar copy
+    take Device alone.
+  - E's Metal claims rest on MTL4CommandEncoder.h.
+
+**The eight-second bound and bounded waits**
+- **B1** ("one execution one absolute deadline, shared by all its waits").
+  - mesh_transfers_start takes `deadline`, absolute clock_gettime_nsec_np(CLOCK_MONOTONIC) ns (b35234c3), and every
+    wait of the start is bounded by it (D).
+  - T's _execute takes one deadline and passes it to mesh_transfers_start, every `_arrived` and `_combine`
+    (time.clock_gettime_ns(time.CLOCK_MONOTONIC), the same clock).
+  - E's start passes the deadline of its first execution.
+- **B2 / EB-1** ("The replan must wait for the release, bounded by MESH_PLATFORM_NS, as RCU's writer waits out a grace
+  period (`synchronize_rcu`), with ETIMEDOUT past it ... a single-writer register").
+  - C (plan_released): after everything is computed and before anything is written, mesh_plan waits on struct
+    mesh_algo `released` until it is `published` or nothing is published (os_sync_wait_on_address_with_timeout,
+    region-shared), ETIMEDOUT past MESH_PLATFORM_NS. There is no compare-and-swap, and EBUSY goes.
+  - D: mesh_retired_release stores `released` = `published` (release) once no port announces it and no plan is held,
+    and wakes it.
+  - T raises ETIMEDOUT as it raised EBUSY, and the program still retires its own operand before it plans again.
+- **B3** ("The record's release must follow torch's work in an MPSEvent notification"). T (bfc93712):
+  - mesh-torch.mm after_torch is the one event form (acquireEvent, record, notify, SyncType::COMMIT; torch 2.14.0
+    MPSEvent.h, MPSStream.h), for mesh_torch_publish, the new mesh_torch_retire and mesh_torch_end;
+  - `_retire` synchronizes no device: on MPS it retires in the notification, on the CPU after the calls, and the
+    notifications' wait stays bounded.
+
+**The graph module, duplication, deciders and effectors, and names**
+- **G1.**
+  - mesh_graph_chains takes its items' linear extension from mesh_graph_order over the edges `before` gave, where it
+    sorted them by its own predecessor count. Any topological order is a linear extension; EDEADLK where those edges
+    hold a cycle, which a strict partial order cannot. The coordinating implementer, 3686d9c8.
+  - The added edges' grouping by plan is mesh_graph_rows, keyed by the sink node and the call place, and the tells by
+    plan. C.
+- **G2.**
+  - C: one walk of a value's covers, its ranges and shares together (plan_rows), and one copies function
+    (plan_copies). The run-place walk went with G3.
+  - T: _exchange is the one body of AllToAll, ReduceScatter and CollectivePermute's send.
+  - mesh.h mesh_algo_open is the one test of the operand open, which mesh_algo_plan, clients_turn, clients_gone,
+    region_adopt and mesh-stat each wrote (52a12eb0, 2765c562).
+- **G3** ("The plan writes rows, and the program's effector maps them").
+  - mesh_plan takes no `view`, and struct mesh_value `view` goes (b35234c3). C: no mesh_view_compose, mach_vm_remap,
+    getpid or mesh_started in the planner.
+  - E: e2b maps every value's rows with mesh_view_compose, keeps one MTLBuffer over the mapping, and releases it after
+    mesh_detach.
+  - T: _mapped maps every `run` value's rows in one mesh_view_compose call, and _bind binds at those places.
+  - The process's start is read at attach (D, mesh_attach: struct mesh_ctx `start`).
+- **G4** ("Its name is A9's ... Its fields are what A9 and the failport's lifecycle need: the operand's publication
+  (B2's single writer) and the holder the heartbeat already knows, reused as the failport's code is"; "Root" goes).
+  - struct mesh_algo at hdr `algo_off`, MESH_VERSION 118 (b35234c3), with three words:
+    - `published`: the generation, the program's alone, stored last;
+    - `retired`: the retirement;
+    - `released`: the bridge parent's.
+  - The holder is hdr `client` and `client_start`, which mesh_plan writes from the context. `owner`, `closed`, `start`
+    and `generation` go.
+  - D's readers (mesh_retire, mesh_retired_release, mesh_holding_retained, plan_here, clients_turn, clients_gone,
+    region_adopt, plan_stands, plans_walk, held_clear, mesh-stat's clients_open) all read struct mesh_algo.
+  - "root" names no record in any changed note.
+
+### Found already done
+
+- **B4** ("The matching is Hopcroft and Karp's where capacities are 1 ..., Fulkerson's reduction. Its time on the
+  largest program is a measurement for when runs are authorized"): mesh_graph_chains is that network, solved by
+  Dinic's phases, which are Hopcroft and Karp's where every count is 1. The answer is cited at its note (3686d9c8), and
+  no code changed.
+- **B5** ("They are rarer now, and open like HiGHS's build"): open, with no code change.
+- e2b concatenates no part and reads no record word (E). mesh_graph.py needed no change (T).
+
+### Decisions taken where the documents are silent (each the named implementer's, with its reason)
+
+The coordinating implementer's (the interface):
+- **struct mesh_algo's words, each one writer's** (C3's rule 2; B2's single-writer register).
+  - `published` is the program's.
+  - `released` is the bridge parent's: RCU's grace period ends there, and mesh_plan waits on it.
+  - `retired` is stored by mesh_retire's two callers, the program at its detach or replan and the bridge for a gone
+    holder (the failport's lifecycle, as the tag's mesh_retire retires a gone client). Both store the one value
+    `published`.
+  - A plan stands where `published` is not 0 and is not `retired`.
+- **The holder is hdr `client` and `client_start`**, G4's "the holder the heartbeat already knows". mesh_plan copies
+  them from struct mesh_ctx `client` (minted at attach) and `start` (read at attach, so the planner reads no process
+  identity: G3). Nothing is written at attach (R8).
+- **The waits' form.**
+  - Each delay is folded as `base` = position + 1 − delay × every, so one bound K × every + base serves every K, and
+    a bound of 0 or below holds at once.
+  - The waits are rows by call place (`rows`), each an index among the plan's waits.
+  - A tell names its sink's wait (`entry`), and struct mesh_count's `function` is 32 bits with `entry` beside it.
+- **The deadline's clock** is CLOCK_MONOTONIC in nanoseconds, the clock mesh_transfers_start read already and Python's
+  time.clock_gettime_ns reads.
+- **struct mesh_share** is (value, first, of, at, blocks), both values of the same copies. C's two further EINVALs (a
+  share of a share; two spaces) are accepted into the header (e627f61b).
+- **`shares` counts another copy of the same value too**, since a mapping of every copy puts both rows at two virtual
+  addresses (b25fad5c).
+- **MESH_VERSION 118**, and hdr `program_off` renamed `algo_off` in its place.
+- **mesh_algo_open** (52a12eb0), from the review of D's commits.
+- **mesh_graph_chains' EDEADLK**, mesh_graph_order's own error.
+- **metal-microbench Makefile** (4671b439): libmesh's rule lists mesh-map.h and mesh-holders.h, which mesh-dataflow.c
+  includes and the rule omitted. "A dependency is remade only when its own inputs change", and is remade when one
+  does.
+- **plan_here** compares the operand's group before it reads a table word, so another launch's message is let go
+  before the table (the ruling on D's finding, 0a2fdf50).
+
+C's:
+- **IG-5's cycle at a node** holds the calls whose plan's `nodes` include it. A start with no part there has time 0
+  and no other edge, so it changes no cycle's delay or mean. The sender keeps σ_j for every call, and keeps σ_j →
+  σ_later where it is no node of the plan.
+- **V2's lifetime** is a superset: every item of `of` takes part in no order (PLAN_ALONE), which covers both values'
+  accesses and can cost pages.
+- **V2's further tests:** EINVAL for a share of a share, and for two values whose `wire` differs.
+- **A `state` value's zeroing** covers shared rows too, the plan's own write before any producer's (506b8d5e).
+- **K4's count** is kept by page / block, unique for every placed block.
+- **New ENOMEMs** where n × J keys pass 32 bits or δ × every passes int64. Waits entering one place keep the added
+  edges' order.
+- **Values' `section` and `shares`** are set before the release wait, so on ETIMEDOUT the caller's structs are filled
+  and nothing in the region is written.
+
+D's:
+- **The start's bound is compared in `__int128`**, so a bound of 0 or below holds at once and a cancellation's
+  UINT64_MAX passes every bound.
+- **plan_stands reads `published` before the plan**, so after a replan with fewer plans no place is read past the new
+  table.
+- **Downstream null tests go:** a receive's count word is tested nowhere, since every receive has carried one since
+  114.
+- **place_at grows the flow table** to the operand's `plans`, ENOMEM through plan_load's existing refusal.
+- **region_adopt** leaves this bridge's own pid as no gone holder.
+
+T's:
+- **Padding:** each slice along the major dimension is padded to the least s ≥ its elements that is a multiple of
+  E / gcd(m, E). The value stays one strided view its producer's out variant writes; where E and m are powers of two
+  this is padding each part.
+- **A value's layout** is fixed by the first collective that names it (_claim). A later collective needing another
+  takes a layout change.
+- **AllToAll's result** is copied once into its own value from its parts' view. A received part arrives in its
+  sender's layout, so no single strided view fits both ends; this is PB R2's layout change, "an operator of its own".
+- **A share refused by struct mesh_share's rules** is copied once at its item: two values not both named by a
+  declared transfer here (a halo region at an edge partition), or a share of a share.
+- **An input** is held by the function of the first call that reads it and has a section here. An AllReduce member
+  holds no received buffer.
+
+E's:
+- **The mapping's rows** go value by value, each value's copies in order, the order mesh_plan's mapping had, so every
+  binding stays where it was.
+- **B1:** no other e2b wait changed. The step waits keep the waiter's per-value bound (mesh-metal.h), since holding
+  step 0's end to the start's deadline would time out a step the waiter still considers live.
+- **K4's granularity:** one visibility a phase is the finest this code allows, since `shares` is one bit with no
+  partner. Each phase counts every earlier capture's own values.
+
+### Where the work stopped
+
+- **V1 and V2 for program inputs and parameters** (T).
+  - V1 lists "a program input" among the copies to remove, and V2 says "Only the no-out-variant case keeps its one
+    copy".
+  - Against them, the interface's facts:
+    - struct mesh_value: a `lag` k value is "named by no declared transfer (EINVAL otherwise)";
+    - struct mesh_declared: the value is "MESH_EXECUTION and wire";
+    - struct mesh_share: "of the same copies (both named by a declared transfer here, or both of the same `lag`)".
+  - So a part of an input or of an invariant is still sent from its one layout change, a copy. No document states a
+    lag-k or invariant value that a range lands in or is sent from, with copies other than u.
+- **V1 for overlapping parts** (T). "send each part as a view of its producer's pages" is against struct
+  mesh_declared's "no two ranges at this node share a block of it". A halo wider than a shard, or two halos over one
+  shard, has a copy of its own.
+
+### Where the documents are wrong, or contradict the code's facts
+
+- **A plan's name in a view does not identify its compiled plan** (D's finding).
+  - K1's index read takes "the COUNT carries the sink entry's index" as a fact both ends' plans fix.
+  - But a replan keeps its plan's name (N1), and while a map move floods, two nodes can plan one name on two maps
+    within one view.
+  - An `entry` past the sink's waits is then a store outside its edges: a fault in the bridge, not an error value.
+  - The search the index replaced matched by node and function, and stored nothing outside the edges. Nothing
+    changed for it; it is for the operator.
+- **V2 where `of`'s blocks land here** (C's finding).
+  - The minimal lifetime is sound where `of`'s shared blocks are written at this node (U1's premise orders the next
+    write after `value`'s reads).
+  - Where they land here as a received range, no edge of the template orders the next landing after `value`'s reads.
+  - The own parts of AllGather and AllToAll are written at their node, so the torch path's shares are the sound case.
+    The documents state no form for the other.
+- **Appendix item 8 against G4.** Item 8 is "Settled, with no change: The heartbeat's holders"; G4 says "the holder
+  the heartbeat already knows, reused as the failport's code is".
+  - With the holder in hdr `client` and `client_start`, mesh-heartbeat.c (unchanged) now finds the program as its
+    client holder, where it found none from 110 (L3).
+  - The coordinating implementer read G4 as naming those fields.
+- **The coordinating implementer's brief, not a document:** T's compile line `clang++ -std=c++17` fails inside torch
+  2.14.0's own c10/util/intrusive_ptr.h:775 (`operator<=>`). rdma/mesh-torch.mk's `-std=c++20` compiles it.
+
+### Open
+
+- **Aliased virtual addresses, needing a run** (as before).
+  - e2b now flushes at the phases whose values share pages (K4).
+  - torch's encoders are torch's, so mesh_compile.py sets no visibility. Whether one MTLBuffer's aliased addresses stay
+    consistent across torch's encoders is unshown (T).
+- **mesh-metal.m's waiter**, a file no sub-agent held, gives each value a fresh MESH_PLATFORM_NS after the previous
+  one. B1 names the start's edges and `_arrived`, and e2b's step waits share no deadline with its start. Making them
+  share one would be a joint change of mesh-metal.m and e2b (E).
+- **The C9 hook's remarks, not moved** (D):
+  - on 13c2d411, mesh_wait_row and the start's waits: an indexed read of a compiled row and BSL's self-timed firing,
+    as the last unit answered on 19c8f25e;
+  - on d61df2a9, orders_submit's merge: Knuth §5.4.1's multiway merge, older than this unit, of which only
+    `queues_inside` was removed here.
+- **B4's time** on the largest program, and B5's network fetches: measurements and fetches for when runs are
+  authorized.
+- **No-out-variant copies** stay where appendix item 7's "What stays" puts them.
+
+### Commits
+
+- mesh:
+  - the coordinating implementer's: b35234c3 and b25fad5c (the interface), 3686d9c8 (G1), 52a12eb0 (mesh_algo_open),
+    e627f61b (struct mesh_share's tests), and this record;
+  - C: 31919b97, 506b8d5e;
+  - D: 13c2d411, d61df2a9, 045ac991, d64fb13b, 949ac07f, 927b69ac, cdbff3bb, 2765c562, 0a2fdf50;
+  - T: 0c27ecd2, bfc93712, 44212450, 96cb578c, 0c980472, 197f595d, 75f3c1cd.
+- metal-microbench: 4671b439 (the coordinating implementer's); E: b84e27bc, d329555a.
+
+### Integration
+
+Every build was incremental, at mesh 75f3c1cd and metal-microbench d329555a. HiGHS and the LiteRT/Dawn SDK were not
+rebuilt.
+- **`make -C rdma`:** exit 0, no warning.
+  - The first whole build after C's 31919b97 took 2.4 s. mesh-flow, mesh-heartbeat (its mesh.h changed), mesh-stat
+    and libmesh.dylib were remade.
+  - The run at the end: nothing remade.
+  - The codesign line's "Mesh Bridge: no identity found" is the rule's fallback to an ad-hoc signature, as before.
+- **`make -C rdma native-audit`:** exit 0, no warning; the run at the end: nothing to be done.
+- **`make -C rdma -f mesh-torch.mk TORCH=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch`:** exit 0, no
+  warning, 1.0 s. libmesh-torch.dylib was remade.
+- **`make .build/e2b_replay`:** exit 0, no warning, 1.7 s. libmetal_recording, libmesh_metal and e2b_replay were
+  remade; the run at the end: nothing remade.
+- **Compiled alone** with `-Wall -Wextra -Werror`, exit 0:
+  - every changed C file;
+  - the failport lifecycle files, unchanged (mesh-heartbeat.c, mesh-children.c, mesh-child.c, mesh-lanes.c);
+  - mesh-ports.c, mesh-events.c, mesh-call.c, mesh-metal.m;
+  - e2b_replay.m, and metal_recording.m with metal_native.m;
+  - mesh-torch.mm with `-std=c++20`.
+- **Python:** `python3 -m py_compile` passes rdma/mesh_compile.py, mesh.py and mesh_graph.py (T: pyflakes clean on
+  mesh_compile.py).
+- **Nothing was run.** No plan, wait, release, share, layout, mapping, flush or retirement here has been exercised.
