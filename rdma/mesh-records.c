@@ -804,21 +804,37 @@ static int unsent;
    still names its plans, as NCCL's `ncclUniqueId` names a communicator"; "Nothing walks heads to find it";
    design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "the bridge reads the
    serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: a plan of another
-   map serial not matched */
+   map serial not matched.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4 and K2; "The
+   revisions of 55b9cbad"): the operand (mesh.h struct mesh_algo) read from its publication: `published` (acquire) not
+   0 and not `retired` (acquire), then its `group` compared, then the plan at place epoch - 1 (mesh_algo_plan), where
+   the root's `owner` and `closed` were read and the epoch tested against 0 and `plans`.  Why: K2, "Run-time bound and
+   null tests of facts the plan fixes go", and mesh.h mesh_algo_plan, which tests no bound: a message's epoch is a
+   place of this operand once its group is this operand's, since every rank passes the same IR (mesh-collective.h
+   mesh_plan: "every rank passes the same IR but its values"; struct mesh_function: function k is named (group, k + 1),
+   so an epoch is at least 1 and at most `plans`).  The group is compared first, and only after the publication is
+   acquired: it is the operand published here that a message is matched to (run-time state; a message of another
+   launch's group names no place here), and the operand's words stand while it is not retired (its next is written
+   only after this thread's release: mesh-dataflow.h mesh_retired_release).  The implementer's (sub-agent D's) order of
+   the reads, the minimal one that reads no place a foreign group names.  What must stay: a plan of another map serial
+   not matched; the group compared before any place is read */
 static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
-  struct mesh_state *state=epoch?mesh_program_plan(M,(uint32_t)(epoch-1)):NULL;
-  return state && mesh_program(M)->group==group &&
-    state->serial==atomic_load_explicit(&M->map_serial,memory_order_relaxed)?state:NULL;
+  const struct mesh_algo *algo=mesh_algo(M);
+  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  if(!published || atomic_load_explicit(&algo->retired,memory_order_acquire)==published || algo->group!=group)return NULL;
+  struct mesh_state *state=mesh_algo_plan(M,(uint32_t)(epoch-1));
+  return state && state->serial==atomic_load_explicit(&M->map_serial,memory_order_relaxed)?state:NULL;
 }
-/* whether a plan's queues lie inside the region, as plan_inside (mesh-flow.c) judges its entries: a store outside it
-   would be a fault, not an error value */
-/* 2026-11-05 ("The revisions of 3f106747", BS): the submissions' queue's room `submit_room`, where it was
-   `outstanding` (mesh.h struct mesh_state's note).  What must stay: as above */
-static int queues_inside(const struct mesh_state *s){
-  return s->room && s->submit_room && s->deliveries<=M->length &&
-    s->room<=(M->length-s->deliveries)/sizeof(struct mesh_delivery) && s->submits<=M->length &&
-    s->submit_room<=(M->length-s->submits)/sizeof(struct mesh_submission);
-}
+/* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
+   "`queues_inside` (mesh-records.c 958, 1170)"; "Answered in the documents", "Run-time checks left": "mesh-records.c
+   `queues_inside` and mesh-flow.c link_prepare's room and entry tests check facts the plan fixes at compile time,
+   which the compile-time requirement forbids.  They go in the next unit"; "The revisions of 55b9cbad"): queues_inside
+   is removed, the test that a plan's `room` and `submit_room` were not 0 and its deliveries' and submissions' queues lay
+   inside the region.  Its producer, one hop up, is mesh-collective.c mesh_plan (sub-agent C's): each room is the sum of
+   its calls' self-timed buffer bounds, each at least 1 (plan_graph's ENOMEM where a lag is 0), and each queue is laid
+   out in the plan's state section (plan_layout: `deliveries`, `submits`), placed in the region's pages by the one
+   allocation; the operand is read only once published.  What must stay: no store but at a queue's entry k mod its
+   room */
 /* this node's map index of node id `node` (its place in ascending node-id order among the map's records, mesh.h
    `map_serial`), UINT32_MAX where the map holds none */
 static uint32_t map_index_of(uint32_t node){
@@ -854,14 +870,20 @@ static void arrivals_apply(void){
    map serial was made in that view, since installing one moves the serial (view_install).  What must stay: as above.
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
    plans read at their places (mesh-bridge.h plan_from), where the claims' heads were walked.  What must stay: as
-   above */
+   above.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
+   "`state->sender>=n` (mesh-records.c 864)"; "The revisions of 55b9cbad"): the test of the plan's `sender` against the
+   map's count goes.  Its producer, one hop up, is mesh-collective.c mesh_plan (sub-agent C's): `sender` the least bit
+   of `program`, which holds this node's map index (its EINVAL otherwise), so it is below the count of the map the plan
+   was made on, and the plan is read only on that map's serial (the test above).  What must stay: a plan of another
+   serial not announced */
 static void orders_announce(int liveness){
   if(!installed.view)return;
-  const uint64_t n=atomic_load(&M->map_nodes),serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
+  const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
   const struct mesh_record *r=mesh_records(M);
   struct mesh_state *state;
   for(uint32_t k=0;(state=plan_from(&k));k++){
-    if(state->serial!=serial || (state->announced && !liveness) || state->sender>=n)continue;
+    if(state->serial!=serial || (state->announced && !liveness))continue;
     const struct mesh_arrival a={.group=state->group,.epoch=state->epoch,.node=M->node,.sender=r[state->sender].node,
                                  .view=installed.view};
     const int routed=tree_toward(ARRIVE,&a,sizeof a,a.sender);
@@ -887,18 +909,30 @@ static void orders_announce(int liveness){
    plans' actors and a plan has as many edges into it as Convert-to-SC-graph added (BSL §9, Fig. 6); appendix item 2:
    "An added edge (vj, vi) holds "start(vi, k) ≥ end(vj, k − delay((vj, vi)))" (BSL (7)).  Its source raises a count
    that only rises ..., and its sink reads that count before its k-th start.  The bridge carries the count from source
-   to sink, as it carries an arrival".  What must stay: each count only rising, this thread its one writer */
+   to sink, as it carries an arrival".  What must stay: each count only rising, this thread its one writer.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K1:
+   "`count_take`'s search (mesh-records.c 896): the COUNT carries the sink entry's index"; "The revisions of
+   55b9cbad"), reversing the search above (each wait entry's `node` against the COUNT's source's map index, map_index_of,
+   and its `function` against the source's epoch): the one entry the COUNT names, `entry` (mesh-bridge.h struct
+   mesh_count; the source's tell's struct mesh_sync `entry`, the index of the edge among the sink plan's waits),
+   raised where its count rises (release) and woken; no loop over the waits and no search of the map.  Why: K1, as
+   MSCCL-IR's steps name their dependences by index (`depid`, `deps`); A9, "searches for nothing".  One test of the
+   COUNT is kept, `entry` below the sink plan's `waits`, the implementer's (sub-agent D's): `entry` is another node's
+   word, written by that node's mesh_plan for its plan of this name, and that this node's plan of the same name and view
+   is the same plan is run-time state, not a fact this node's plan fixes.  A replan keeps its name (design/compilation-
+   coordination.md N1, and its open item: "An ORDER of a cancelled plan can still match its replan, which keeps the
+   plan's name"), and a node that hears a map's move first replans on the new map, in the view still installed, while
+   a node the move has not reached holds its plan of the old map, whose waits may be fewer: an entry past them would be
+   a store outside the plan's synchronization edges, a fault, not an error value.  An entry within them raises a count
+   of a plan whose map has moved, which its cancellation raises to UINT64_MAX anyway (mesh-flow.c plan_cancel).  What
+   must stay: each count only rising, this thread its one writer */
 static void count_take(const struct mesh_count *c){
-  struct mesh_state *s=plan_here(c->group,c->function);
-  const uint32_t from=map_index_of(c->node);
-  if(!s || c->view!=installed.view || from==UINT32_MAX)return;
-  struct mesh_sync *edge=mesh_syncs(M,s);
-  for(uint32_t e=0;e<s->waits;e++){
-    if(edge[e].node!=from || edge[e].function!=c->epoch ||
-       c->count<=atomic_load_explicit(&edge[e].count,memory_order_relaxed))continue;
-    atomic_store_explicit(&edge[e].count,c->count,memory_order_release);
-    os_sync_wake_by_address_all(&edge[e].count,sizeof edge[e].count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-  }
+  struct mesh_state *s=c->view==installed.view?plan_here(c->group,c->function):NULL;
+  if(!s || c->entry>=s->waits)return;
+  _Atomic uint64_t *count=&mesh_syncs(M,s)[c->entry].count;
+  if(c->count<=atomic_load_explicit(count,memory_order_relaxed))return;
+  atomic_store_explicit(count,c->count,memory_order_release);
+  os_sync_wake_by_address_all(count,sizeof *count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
 /* At the source: each plan standing here on this node's map serial with an edge out of this node (`tells`), its count
    told toward its sink's node (tree_toward, as orders_announce tells an arrival) where it rose past `told`, and again
@@ -917,7 +951,11 @@ static void count_take(const struct mesh_count *c){
    made the plan against the map whose serial it carries, and the plan is read only on that serial), so it names a
    record of the map as it stands, with no test of its bound.  Why: point 4, the program's whole IPC graph, a plan an
    actor a call; appendix item 2: "The bridge carries the count from source to sink, as it carries an arrival".  What
-   must stay: a count told only where it rose or on a liveness turn; none before the first view */
+   must stay: a count told only where it rose or on a liveness turn; none before the first view.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K1; "The
+   revisions of 55b9cbad"): the COUNT's `function` the tell's (the sink plan's epoch) and its `entry` the tell's (the
+   index of its edge among the sink plan's waits: mesh.h struct mesh_sync), which the sink's count_take raises by
+   index.  What must stay: as above */
 static void counts_tell(int liveness){
   if(!installed.view)return;
   const uint64_t serial=atomic_load_explicit(&M->map_serial,memory_order_relaxed);
@@ -930,7 +968,8 @@ static void counts_tell(int liveness){
     for(uint32_t e=0;e<state->tells;e++){
       if(count<=atomic_load_explicit(&edge[e].count,memory_order_relaxed) && !(liveness && count))continue;
       const struct mesh_count c={.group=state->group,.epoch=state->epoch,.view=installed.view,.count=count,
-                                 .node=M->node,.sink=r[edge[e].node].node,.function=edge[e].function};
+                                 .node=M->node,.sink=r[edge[e].node].node,.function=edge[e].function,
+                                 .entry=edge[e].entry};
       const int routed=tree_toward(COUNT,&c,sizeof c,c.sink);
       if(routed==2)count_take(&c);
       if(routed)atomic_store_explicit(&edge[e].count,count,memory_order_relaxed);
@@ -955,7 +994,7 @@ static void orders_submit(void){
     size_t count=0,room=0;
     struct mesh_state *state;
     for(uint32_t k=0;(state=plan_from(&k));k++){
-      if(state->sender!=island.self || state->serial!=serial || !queues_inside(state))continue;
+      if(state->sender!=island.self || state->serial!=serial)continue;
       if(count==room){
         struct program_head *grown=realloc(heads,(2*room+1)*sizeof *grown);
         if(!grown){free(heads);mesh_say("bridge","the programs' submissions not read (ENOMEM): read on a later turn");return;}
@@ -1165,11 +1204,14 @@ static void orders_submit(void){
 /* 2026-11-05 ("The revisions of 3f106747", VW-4): the entry's `sequence` the message's place in this node's delivery
    order (`passed`), where it was its sn(m), which begins again at each view.  What must stay: the entry's stores before
    `delivered`'s */
+/* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2; "The
+   revisions of 55b9cbad"): queues_inside's test goes (the note after plan_here); a message whose plan does not stand
+   here is discarded, as before.  What must stay: the entry's stores before `delivered`'s */
 static void order_deliver(const struct mesh_order *m){
   struct mesh_state *state=plan_here(m->group,m->epoch);
-  if(!state || !queues_inside(state)){
+  if(!state){
     mesh_say("bridge","the message numbered %llu, plan (%llu, %llu) executions [%llu, %llu), discarded: no plan of its name "
-             "stands here with its queue in the region",(unsigned long long)m->sequence,(unsigned long long)m->group,
+             "stands here",(unsigned long long)m->sequence,(unsigned long long)m->group,
              (unsigned long long)m->epoch,(unsigned long long)m->first,(unsigned long long)m->end);
     return;
   }
@@ -1359,17 +1401,28 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    release (mesh_retired_release) is the root's.  Why: point 5, the claim's head record goes, and "Release at
    retirement stays deferred reclamation (RCU)"; the root is the program's one record (A9, "What the bridge runs":
    "searches for nothing").  What must stay: the release last, after this turn's cancellations and deliveries, on
-   this thread */
+   this thread.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"), reversing the root's `owner`, `closed` and `start` above: the operand (mesh.h struct
+   mesh_algo), where it is published and not retired (`published` not 0 and not `retired`, each acquire), and its holder
+   (hdr `client`, its low 32 bits the pid, and `client_start`, read after the publication is acquired: mesh_plan stores
+   them before `published`) a process other than this bridge: retired at once (mesh-dataflow.h mesh_retire(M, hdr
+   `client`)) where the holder does not hold the region (mesh-holders.h mesh_holds, by its pid and start), else its
+   exit watched as before (EV_ADD, udata 0; ESRCH retires it at once).  Why: G4, "Its fields are what A9 and the
+   failport's lifecycle need: the operand's publication (B2's single writer) and the holder the heartbeat already
+   knows, reused as the failport's code is" (mesh-heartbeat.c replace_turn reads the same two words as its one client
+   holder).  What must stay: the release last, after this turn's cancellations and deliveries, on this thread */
 static uint64_t plans_seen;
 void clients_turn(int liveness){
   const pid_t self=getpid();
   uint64_t busy=0;
-  struct mesh_program *program=mesh_program(M);
-  const uint64_t owner=atomic_load_explicit(&program->owner,memory_order_acquire);
-  if(owner && !atomic_load_explicit(&program->closed,memory_order_acquire) && (pid_t)(uint32_t)owner!=self){
-    struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
-    if(!mesh_holds((pid_t)(uint32_t)owner,program->start) ||
-       (kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH))mesh_retire(M,owner);
+  const struct mesh_algo *algo=mesh_algo(M);
+  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
+  if(published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published && (pid_t)(uint32_t)client!=self){
+    struct kevent64_s watch;EV_SET64(&watch,(uint32_t)client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
+    if(!mesh_holds((pid_t)(uint32_t)client,atomic_load_explicit(&M->client_start,memory_order_acquire)) ||
+       (kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH))mesh_retire(M,client);
     else busy=1;
   }
   orders_announce(liveness);
@@ -1422,9 +1475,15 @@ void clients_turn(int liveness){
    closed, `plans` raised and woken); mesh-link.c's event loop, on main's thread.
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
    root's owner retired where the root is open and its owner's process is `pid`, where every open claim's was.  What
-   must stay: on main's thread */
+   must stay: on main's thread.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"): the operand's holder, hdr `client`, retired (mesh_retire) where the operand is published
+   and not retired (each acquire) and the holder's process is `pid`, where the root's `owner` and `closed` were read.
+   What must stay: on main's thread */
 void clients_gone(pid_t pid){
-  struct mesh_program *program=mesh_program(M);
-  const uint64_t owner=atomic_load_explicit(&program->owner,memory_order_acquire);
-  if(owner && !atomic_load_explicit(&program->closed,memory_order_acquire) && (pid_t)(uint32_t)owner==pid)mesh_retire(M,owner);
+  const struct mesh_algo *algo=mesh_algo(M);
+  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
+  if(published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published && (pid_t)(uint32_t)client==pid)
+    mesh_retire(M,client);
 }
