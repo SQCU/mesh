@@ -60,11 +60,22 @@
    `mesh_claim_take`'s first fit and the claim's head record; `mesh_plan_head`'s walk of every claim head"; "Release
    at retirement stays deferred reclamation (RCU)"; the root is the program's one record (A9, "What the bridge runs":
    "the bridge reads the serialized operand at a place its compilation fixed, and searches for nothing").  What must
-   stay: nothing let go here; a closed root held until the bridge's release */
+   stay: nothing let go here; a closed root held until the bridge's release.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"), reversing the root's `owner` and `closed`: the program's operand (mesh.h struct mesh_algo)
+   retired where its holder, hdr `client` (acquire), is `client` and its `published` (acquire) is not 0: `retired` =
+   `published` (release), then hdr `plans` raised and woken and the bridge's control word notified, as before.  Why:
+   G4, "keeps the claim head record's `owner`, `closed` and start under a new name, which point 5 removes ... Its
+   fields are what A9 and the failport's lifecycle need: the operand's publication (B2's single writer) and the holder
+   the heartbeat already knows, reused as the failport's code is".  Its callers store the one value `published`: the
+   program's process (mesh_detach, or its retirement before it plans again) and the bridge parent for a gone holder
+   (mesh-records.c clients_turn, mesh-link.c region_adopt), so `retired` only ever names the operand published.  What
+   must stay: nothing let go here; the retired operand held until the bridge's release */
 void mesh_retire(struct hdr *m,uint64_t client){
-  struct mesh_program *program=mesh_program(m);
-  if(atomic_load_explicit(&program->owner,memory_order_acquire)==client)
-    atomic_store_explicit(&program->closed,1,memory_order_release);
+  struct mesh_algo *algo=mesh_algo(m);
+  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  if(atomic_load_explicit(&m->client,memory_order_acquire)==client && published)
+    atomic_store_explicit(&algo->retired,published,memory_order_release);
   mesh_notify(&m->plans);
   /* design/prepared-machine.md#M26 */
   mesh_control_notify(m);
@@ -113,7 +124,13 @@ void mesh_plan_retire(struct mesh_ctx *c,uint64_t plan){
    stay: nothing written in the region but hdr `serial`; the version read again.
    2026-11-04, owner L2 (design/compilation-coordination.md, "The appendix's revisions", N5): the context's `epoch` and
    `state`, which started at 0 here, gone with struct mesh_ctx's fields.  Why: the context holds no plan; a plan's
-   handle is mesh_plan's `*plan` (N2).  What must stay: as above */
+   handle is mesh_plan's `*plan` (N2).  What must stay: as above.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3 and G4; "The
+   revisions of 55b9cbad"): the context's `start` set to this process's start, mesh_started(getpid()) (mesh-holders.h,
+   the failport's own probe), beside the client word, and nothing written in the region for it; mesh_plan copies both
+   into the operand's holder, hdr `client` and `client_start`, as it publishes.  Why: G3, "The planner ... reads
+   `getpid()` ... Deciders see pages"; G4, "the holder the heartbeat already knows, reused as the failport's code is".
+   What must stay: nothing written in the region but hdr `serial`; the version read again */
 int mesh_attach(struct mesh_ctx *c,const char *name){
   if(c->M) return 0;
   if(!name) name=getenv("MESH_REGION");
@@ -132,7 +149,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   const uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
   if(__atomic_load_n(&memory->version,__ATOMIC_SEQ_CST)!=MESH_VERSION){ munmap(memory,(size_t)info.st_size); close(file); return EINVAL; }
-  *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file};
+  *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file,.start=mesh_started(getpid())};
   return 0;
 }
 
@@ -252,13 +269,18 @@ void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint64_t address){
    alone, struct mesh_state `closed` 1, is held until every port ends it), where a claim's head named one generation
    and one plan.  Why: point 5, "Release at retirement stays deferred reclamation (RCU)"; the root at the layout's one
    place (mesh.h struct mesh_program).  What must stay: the ports' `prepared` read first, then `held`, each with
-   acquire; every port of the link table read */
-static int mesh_holding_retained(struct hdr *m,struct mesh_program *program){
+   acquire; every port of the link table read.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"): the operand (mesh.h struct mesh_algo) kept where any port's `prepared` is its `published`
+   (the generation the ports announce, struct mesh_port_info) or any of its plans' `held` is not 0, each plan's state
+   section at the operand's `table` word k for k below its `plans` (mesh_algo_state), where the root's `generation` and
+   table were read.  What must stay: as above */
+static int mesh_holding_retained(struct hdr *m,const struct mesh_algo *algo,uint64_t published){
   const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
   for(uint32_t p=0;p<links;p++)
-    if(atomic_load_explicit(&mesh_links(m)[p].port.prepared,memory_order_acquire)==program->generation)return 1;
-  for(uint32_t k=0;k<program->plans;k++)
-    if(atomic_load_explicit(&mesh_program_state(m,program,k)->held,memory_order_acquire))return 1;
+    if(atomic_load_explicit(&mesh_links(m)[p].port.prepared,memory_order_acquire)==published)return 1;
+  for(uint32_t k=0;k<algo->plans;k++)
+    if(atomic_load_explicit(&mesh_algo_state(m,algo,k)->held,memory_order_acquire))return 1;
   return 0;
 }
 
@@ -311,14 +333,30 @@ static int mesh_holding_retained(struct hdr *m,struct mesh_program *program){
    point 5; design/aot-compilation-change-request.md, appendix item 6, as corrected: "A function's pages are released
    when the program retires it or itself, by deferred reclamation, as R8 cites"; the root at the layout's one place
    (A9, "What the bridge runs": "searches for nothing").  What must stay: the fence after the close is read and before
-   the ports and `held` are read; nobody waits for it */
+   the ports and `held` are read; nobody waits for it.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B2 and G4, and
+   "Answered in the documents", EB-1; "The revisions of 55b9cbad"), reversing the root's `owner` 0 and "nobody waits
+   for it": where the operand's `published` (acquire) is not 0, its `retired` (acquire) is `published` and its
+   `released` (acquire) is not: a seq_cst fence, then kept where any port's `prepared` is `published` or any of its
+   plans' `held` is not 0 (mesh_holding_retained), else `released` = `published` (release) and its waiters woken
+   (os_sync_wake_by_address_all, region-shared); 1 kept, else 0.  mesh_plan waits on `released` before it writes a next
+   operand (mesh-collective.h), as RCU's writer waits for the grace period to end.  Why: EB-1, "An EBUSY that hands a
+   retry to the program's next call is not deferred reclamation's form.  In RCU's form the writer waits for the grace
+   period to end (`synchronize_rcu`), here the bridge's release of the old root"; B2, "The replan must wait for the
+   release, bounded by MESH_PLATFORM_NS".  The bridge parent is `released`'s one writer (C3's rule 2, "Each state word
+   has one writer"), so the store needs no exchange.  The fence pairs as above: a port announces `published` in its
+   `prepared`, fences and reads the operand again (mesh-flow.c plan_load), and this side reads it retired, fences and
+   reads the ports.  What must stay: the fence after the retirement is read and before the ports and `held` are read;
+   the store after them, then the wake */
 uint32_t mesh_retired_release(struct hdr *m){
-  struct mesh_program *program=mesh_program(m);
-  if(!atomic_load_explicit(&program->owner,memory_order_acquire) ||
-     !atomic_load_explicit(&program->closed,memory_order_acquire))return 0;
+  struct mesh_algo *algo=mesh_algo(m);
+  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  if(!published || atomic_load_explicit(&algo->retired,memory_order_acquire)!=published ||
+     atomic_load_explicit(&algo->released,memory_order_acquire)==published)return 0;
   atomic_thread_fence(memory_order_seq_cst);
-  if(mesh_holding_retained(m,program))return 1;
-  atomic_store_explicit(&program->owner,0,memory_order_release);
+  if(mesh_holding_retained(m,algo,published))return 1;
+  atomic_store_explicit(&algo->released,published,memory_order_release);
+  os_sync_wake_by_address_all(&algo->released,sizeof algo->released,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   return 0;
 }
 
@@ -549,21 +587,42 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
    its k-th start"; a plan has an actor for each call of its function (mesh.h struct mesh_state `calls`), each block's
    execution K calling it `calls` times, and an edge from a source of `every` calls an execution waits for its call
    at `position` in execution K - `delay` (BSL's iterations; point 4: the program's whole IPC graph).  What must stay:
-   the waits before the raise, nothing raised where one fails; the raise before the fence, the serial's read after it */
-int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions){
+   the waits before the raise, nothing raised where one fails; the raise before the fence, the serial's read after it.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B1 and K1; "The
+   revisions of 55b9cbad"), reversing the note above where it scans every entry, skips one by its place and its delay,
+   and takes a deadline of its own:
+   - The waits are the plan's row k mod `calls` alone (mesh.h struct mesh_state `rows`: entries rows[a] .. rows[a + 1]
+     - 1 at `syncs`, mesh_wait_row), each until its `count` (acquire) >= K x `every` + `base` (struct mesh_sync), at
+     once where that bound is 0 or below.  Why: K1, "the start's scan of every wait entry (mesh-dataflow.c 562): the
+     waits are stored in rows keyed by call place, and each edge's delay is folded into its threshold", as MSCCL-IR's
+     steps name their dependences by index (`depid`, `deps`).  The bound is compared with the count over the integers,
+     in clang's 128-bit integer (`__int128`), so a bound of 0 or below holds at once and a count of UINT64_MAX (a
+     cancellation, mesh-flow.c plan_cancel) holds every bound, as it did, with no branch per K against a delay: the
+     implementer's (sub-agent D's) minimal form, the comparison the interface states, where a 64-bit compare would
+     read a negative bound as a large one.
+   - Every wait is bounded by the caller's `deadline` (clock_gettime_nsec_np(CLOCK_MONOTONIC) nanoseconds, absolute),
+     ETIMEDOUT at it; the start takes no deadline of its own.  Why: B1, "An execution's waits each take a fresh
+     MESH_PLATFORM_NS deadline: the start's edges, then each `_arrived`.  So one execution is bounded by 5 s × (1 +
+     arrivals).  The code must give one execution one absolute deadline, shared by all its waits" (mesh-call.h).
+   What must stay: the waits before the raise, nothing raised where one fails; ESTALE where the plan's serial is not the
+   map's; the raise before the fence, the serial's read after it */
+/* the plan's row of waits into its call at place `place` (mesh.h struct mesh_state `rows`): row[0] the index at `syncs`
+   of its first, row[1] one past its last */
+static inline const uint32_t *mesh_wait_row(struct hdr *m,const struct mesh_state *state,uint64_t place){
+  return (const uint32_t *)(const void *)((const char *)m+state->rows)+place;
+}
+int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executions,uint64_t deadline){
   struct hdr *m=context->M;
   struct mesh_state *state=mesh_state_at(m,plan);
   uint64_t served=atomic_load_explicit(&state->executions,memory_order_relaxed);
-  const uint64_t k=atomic_load_explicit(&state->submissions,memory_order_relaxed),K=k/state->calls,at=k%state->calls;
+  const uint64_t k=atomic_load_explicit(&state->submissions,memory_order_relaxed),K=k/state->calls;
   if(served<executions){
     struct mesh_sync *edge=mesh_syncs(m,state);
-    uint64_t deadline=0;
-    for(uint32_t e=0;e<state->waits;e++){
-      if(edge[e].at!=at || K<edge[e].delay)continue;
-      const uint64_t need=(K-edge[e].delay)*edge[e].every+edge[e].position+1;
+    const uint32_t *row=mesh_wait_row(m,state,k%state->calls);
+    for(uint32_t e=row[0];e<row[1];e++){
+      const __int128 need=(__int128)K*edge[e].every+edge[e].base;
       for(uint64_t seen;(seen=atomic_load_explicit(&edge[e].count,memory_order_acquire))<need;){
         const uint64_t now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-        if(!deadline)deadline=now+MESH_PLATFORM_NS;
         if(atomic_load_explicit(&m->map_serial,memory_order_acquire)!=state->serial)return ESTALE;
         if(now>=deadline)return ETIMEDOUT;
         os_sync_wait_on_address_with_timeout(&edge[e].count,seen,sizeof edge[e].count,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
