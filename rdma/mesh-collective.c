@@ -92,10 +92,12 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
   return count>=(round+1)*pages?UINT64_MAX:0;
 }
 
-/* mesh-collective.h mesh_host_sent (libfabric man/fi_cntr.3.md, fi_cntr_wait: "Wait for a counter to be greater or
-   equal to a threshold value", and fi_cntr_readerr; rdma-core libibverbs/man/ibv_post_send.3, NOTES;
-   design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7, and "Sources for the fourth
-   stops", 7) */
+/* libfabric man/fi_cntr.3.md: "Counters record the number of requested operations that have completed."; fi_cntr_wait:
+   "Wait for a counter to be greater or equal to a threshold value"; fi_cntr_readerr: "Reads the number of operations
+   which have completed in error."  man/fi_endpoint.3.md, fi_cancel: "Canceling an operation causes the fabric provider
+   to search for the operation and, if it is still pending, complete it as having been canceled."  rdma-core
+   libibverbs/man/ibv_post_send.3, NOTES: "The buffers used by a WR can only be safely reused after WR the request is
+   fully executed and a work completion has been retrieved from the corresponding completion queue (CQ)." */
 uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
   struct hdr *m=context->M;
   const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
@@ -167,8 +169,7 @@ struct plan_demand {
   uint32_t counted;
   uint64_t group;                         /* range g's copy-0 phase group, its offset in the phase list (plan_layout) */
   /* its send-completion counters' row here, among the ranges this node sends or forwards, in the plan's demand order
-     (MESH_ABSENT where it neither sends nor forwards it), and its sends here a copy (plan_walk's count;
-     design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 7) */
+     (MESH_ABSENT where it neither sends nor forwards it), and its sends here a copy */
   uint32_t sending,sends;
 };
 /* A routed value (design/disjoint-pages-change-request.md, C3.3; design/disjoint-pages-revision-coordination.md, "The
@@ -285,7 +286,7 @@ struct plan {
   struct plan_entry *entry;               /* entry[0 .. entries), NULL while plan_walk counts */
   uint64_t entries,receives;              /* their count (n of mesh.h's u x n) and their receives */
   uint32_t ranges,consumed;               /* this node's received ranges, and those it consumes (a destination's) */
-  uint32_t sending;                       /* this node's ranges it sends or forwards (struct plan_demand `sending`) */
+  uint32_t sending;                       /* this node's ranges it sends or forwards */
   /* The dependence template (plan_template), one execution's, every rank's the same from the same declared transfers,
      dependences and map; each edge carries the execution distance `lag` from its tail's execution to its head's. */
   uint64_t *child;                        /* child[i x n + y]: the nodes y sends demand i's pages to over its trees (a
@@ -721,7 +722,7 @@ static int plan_unroll(struct plan *p){
      count of each copy, which every landing raises"; a relay's receive is named for its rounds as a destination's is
      (mesh-flow.c link_receive_drain).  What must stay: a consumed range's row its `consumed`, `ranges` its number;
    - `completions`: sending x u pairs of uint64 words, the send-completion counters and their error counts, range g's
-     copy c the pair at index `sending` x u + c (mesh.h struct mesh_state `completions`);
+     copy c the pair at index `sending` x u + c;
    - `supplied`: releases uint64 words, release r's at index r;
    - `status`: one struct mesh_status;
    - `deliveries`: the plan's delivered calls' queue here, `room` struct mesh_delivery, and `submits`, the program's
