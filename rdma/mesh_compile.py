@@ -1243,6 +1243,29 @@ def _group():
     return group
 
 
+# mesh_plan's `program`, the nodes the launcher started the program at, which it passes as it passes MESH_GROUP:
+# MESH_PROGRAM, the program's nodes' map indices, whole numbers apart by commas, each below 64, the same at every rank
+# of a run; as a set of map indices, bit i for map index i (mesh-collective.h mesh_plan)
+# 2026-11-05 (design/aot-compilation-change-request.md A7, sender(m): "The program's nodes are the nodes its launcher
+# started it at, an operand of the plan call (`program`) that the launcher passes as it passes `group` (MESH_GROUP)";
+# design/compilation-coordination.md, "The revisions of 3f106747", PG), in place of the placement operand's nodes (the
+# coordinating implementer's PS-1 of "The revisions of abecd389").  Why: the program's nodes are its launcher's, not
+# one function's placement, so every plan of one program names one sender ("The program's sender ... the least of the
+# program's nodes"), and every run is launched on the whole collective, its relays among its nodes.  The variable's
+# name and form are the coordinating implementer's (PG-1).  What must stay: the launcher's operand, refused where it
+# is missing or not one
+def _program():
+    text = os.environ.get('MESH_PROGRAM', '')
+    try:
+        nodes = {int(item, 10) for item in text.split(',')}
+    except ValueError:
+        nodes = set()
+    if not nodes or not all(0 <= n < 64 for n in nodes):
+        raise ValueError('MESH_PROGRAM %r: the program\'s nodes, the map indices its launcher started it at, whole '
+                         'numbers below 64 apart by commas, the same at every rank' % text)
+    return sum(1 << n for n in nodes)
+
+
 # mesh-collective.h mesh_host_arrived, waited on for at most MESH_PLATFORM_NS (mesh.h): 1 arrived; FAILED a field ahead
 # or the range cancelled; 0 not yet
 def _arrived(context, section, t):
@@ -1656,6 +1679,12 @@ def _dropped(context, plan):
 # it (ir.calls None), which mesh_plan fails with ENOMEM (appendix item 2: "A plan whose bound A10 cannot find fails
 # with `ENOMEM` when it is planned").  Both choices are the coordinating implementer's, not the documents'.  What must
 # stay: every operand the same at every rank
+# 2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", PG), reversing the first of those
+# choices: `program` is the launcher's MESH_PROGRAM (_program), where it was the placement operand's nodes.  Why:
+# design/aot-compilation-change-request.md A7, sender(m), as _program's note quotes it.  `outstanding` stays A10's
+# bound, now the delay on "the edge from a call's completion to the program's later submission" in the program's IPC
+# graph, from which mesh_plan computes the rooms (appendix item 2).  What must stay: every operand the same at every
+# rank
 def serialize(build, function):
     context, plan = _context(), {'stale': True, 'handle': 0, 'devices': ()}
 
@@ -1668,7 +1697,7 @@ def serialize(build, function):
             raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight each '
                              '(A3)' % (len(ir.weights), count))
         values, handle = (mesh.Value * len(ir.values))(*ir.values), mesh.Q()
-        program = sum(1 << index for index in set(ir.map))
+        program = _program()
         outstanding = ir.calls.outstanding if ir.calls is not None else 0
         mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), function, program, outstanding,
                                       (mesh.Declared * count)(*ir.declared), (mesh.Weight * count)(*ir.weights), count,
