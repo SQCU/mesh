@@ -577,6 +577,8 @@ Code is cited at mesh 36bd7cbd. The two stops above are replaced by items 13 and
   - rdma-core libibverbs/enum_strs.c:110, at a70151dfec390eb5f7fc5b266f51d601da2a7778
     (https://raw.githubusercontent.com/linux-rdma/rdma-core/a70151dfec390eb5f7fc5b266f51d601da2a7778/libibverbs/enum_strs.c):
     `[IBV_WC_WR_FLUSH_ERR]		= "Work Request Flushed Error",`
+  - rdma-core libibverbs/man/ibv_poll_cq.3: "Not all wc attributes are always valid. If the completion status is other
+    than IBV_WC_SUCCESS, only the following attributes are valid: wr_id, status, qp_num, and vendor_err."
   - libfabric man/fi_cntr.3.md (https://raw.githubusercontent.com/ofiwg/libfabric/main/man/fi_cntr.3.md):
     - "fi_cntr_readerr: Reads the number of operations which have completed in error."
     - "The read error call returns the number of operations that completed in error and were unable to update the
