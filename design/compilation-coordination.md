@@ -2679,3 +2679,138 @@ shell loop. They now compile at once, one per hardware thread (rdma/Makefile, me
 takes 16.4 s, HiGHS's part about 11.7 s on 18 threads. Its longest unit is 4.9 s, so the floor on one node is the
 compiler time, 176 s under contention. Reaching the bound needs the other nodes' cores, or a smaller source set than
 R5's BUILD.bazel globs. Open.
+
+## The revisions of b5a3c6e6
+
+The record of the unit whose instruction is design/plan-to-bridge-change-request.md and
+design/aot-compilation-change-request.md as mesh b5a3c6e6 holds them, from mesh b5a3c6e6 and metal-microbench e9fd7538.
+Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every sub-agent)", but its reading order and its
+file table, as the previous part's were. What the code did not yet do was the two items marked **Code:** in "Answered
+in the documents (2026-11-05, the coordinator, on this part's record)" after "The revisions of 3f106747": A4's node of
+the program to which the placement operand maps no device, and A7's view at a risen counter. Each decision taken where
+the documents are silent is marked as the implementer's (ND, RV) and is not a requirement of the documents. No
+sub-agent was started. Nothing was run but the compilers, `python3 -m py_compile` and the three integration builds.
+
+### Done
+
+- **ND. A node of the program to which the placement operand maps no device** (A4: "A node of the program to which the
+  placement operand maps no device (A2) compiles and plans each function as every node does, with no section of its
+  own. It declares the function's transfers as every rank does, and its part of each call is the relaying its routes
+  give it."; NCCL, as A4 quotes it: "Collective operations have to be called for each rank (hence CUDA device), using
+  the same count and the same datatype, to form a complete collective operation. Failure to do so will result in
+  undefined behavior, including hangs, crashes, or data corruption.").
+  - rdma/mesh_compile.py IR: the refusal "map index %d, this node, is no device of the placement operand (A2)" is
+    gone, and `device` is None at such a node (ND-1). What the IR builds there is every rank's: the partitioned
+    program (_partition reads no device); every device's declared transfers and events, over every group (the five
+    lowerings, `_groups`), each declared transfer's `value`, and a layout, this node's only where its map index is an
+    end (`transfer`), which at such a node none is; the dependences over every device's events (_dependences); the
+    kinds (_consumer, over the program); the weights the weighting function gives over them. So `group`, `function`,
+    `program`, `outstanding`, the declared transfers' ends, identities, kinds and bytes, the weights and the
+    dependences that mesh_plan takes are every rank's; its `values` are none and each declared transfer's `value`
+    MESH_ABSENT, as mesh_plan's contract has each rank pass its own (rdma/mesh-collective.c: "`value`: MESH_ABSENT
+    where this node is neither the transfer's source nor its destination"). No lowering gives it a role.
+  - serialize: the plan is made there with no value, and each call launches its execution by mesh_transfers_start, as
+    at every node (its `executions` and `submissions` raised and its submission queued: its bridge serves the relays
+    its routes give it once the ORDER is delivered, its starts are the count of any added edge leaving it (BS-4), and
+    where it is the program's sender its bridge TO-broadcasts the submission). The call runs no item of the program
+    and returns ND-2's outputs. Commit 80967a66.
+- **RV. A view at a risen counter** (A7, "The membership service is the sequencer": "It also creates one whenever a
+  member's announcement names a view other than the sequencer's installed one, with a counter not less than that
+  view's identifier. ... The identifier is "computed based on the values of local counters" (below), so the sequencer
+  computes it again from the counters it now holds. To tell such a member from one that installed the sequencer's own
+  view, each announcement names the process that created its bridge's installed view as well as its counter.").
+  - rdma/mesh-map.h struct mesh_record: `view_boot` and `view_sequencer` appended, the process that created the
+    record's bridge's installed view (the creating sequencer's start, hdr `boot`, and its node id, as mesh-records.c
+    struct installed names it), 0 both before its first view, and `padding` (RV-3); MESH_VERSION 116 (rdma/mesh.h).
+  - rdma/mesh-records.c: record_changed writes them from `installed`; record_links_same compares them, so a record
+    that names another view at an unchanged counter is written into the map; view_announced, at the sequencer alone
+    (island.self == island.sequencer), holds of a record whose counter is not less than the installed view's
+    identifier and whose view, counter and creator, is not the installed one (RV-2); map_put calls island_set where its
+    write moved no serial and view_announced holds of the record it put (RV-1, RV-4), and island_set's view_create
+    makes the view, its identifier one more than the greatest counter among the members' records the map now holds. A
+    member that installed the sequencer's own view names it whole, its counter equal to the identifier, and creates
+    none; nor does the sequencer's own record, which record_changed writes from `installed`. Commit c02318a3.
+
+### Found already done (the code at b5a3c6e6 and e9fd7538 does what the document states)
+
+- A4, "It declares the function's transfers as every rank does": the lowerings declared every device's transfers and
+  events at every rank, and _dependences was "every rank's, by the program's order on that rank"; only the IR's
+  refusal stood before them.
+- mesh_plan takes a node with no value: its operand test is `(given && !values)`, every declared transfer's `value` is
+  MESH_ABSENT at a node that is no end of it, and a node of `program` that is no node of the plan has `room` 1 (BS-5);
+  `spanned` holds the plan's nodes alone, so its EINVAL past `program` does not arise for such a node.
+- mesh_transfers_start: the same at such a node as at every node.
+- A7, "the sequencer computes it again from the counters it now holds": view_create computes the identifier from the
+  members' counters as the map holds them (VW); and a member installs the new view, flushing the old one where the same
+  process created both (view_install, VW).
+
+### Decisions taken where the documents are silent (each the implementer's, with its reason)
+
+- **ND-1 (A4, `device`).** None at such a node. Reason: the lowerings' role tests and _run's coordinates are the IR's
+  only readers of it; None is in no group and equal to no root, so the node holds no role, and _run is not run there.
+- **ND-2 (A4, what the call returns at such a node).** Each of the graph's outputs as a tensor of its fake tensor's
+  size, stride, element type and device, by torch.empty_strided ("Creates a tensor with the specified size and stride
+  and filled with undefined data", torch's documentation, read in torch v2.11.0's torch/_torch_docs.py, the source at
+  hand), which nothing writes, made once when the plan is made; an output that is no tensor is its example value as
+  Dynamo recorded it. Reason: the documents give such a node no value ("with no section of its own") and say nothing of
+  what its call returns. A torch.compile callable stands for its graph (PyTorch 2 §3.1), and Dynamo takes its outputs
+  apart, so a call returning nothing fails at that node; an output of None reaches the program's next compiled function
+  as a constant, which Dynamo captures into another graph, so that function would not be compiled and planned "as every
+  node does" (A4). A tensor of the fake tensor's metadata, "the metadata of a tensor without its actual data" (PyTorch 2
+  §3.5), gives that capture the shapes and types every rank's gives. Cost: such a node holds each output's bytes for the
+  plan's life, where a device node makes its outputs' clones at each call (A-T5). Torch code of the program between its
+  calls computes there on undefined data; A10's traced block has no control flow on values (torch.fx: "symbolically
+  traced variables cannot be used as inputs to control flow"), so it makes the same calls there.
+- **RV-1 (A7, where the view is made).** map_put calls island_set, the one path to view_create, not view_create
+  itself. Reason: A7's members are "the nodes the sequencer's map reaches", which island_set computes; with the map
+  unmoved it computes the island of the last move again, and its other work (the arrivals held let go) is
+  view_install's too.
+- **RV-2 (A7, "names a view other than the sequencer's installed one").** Two views are one where their identifiers
+  and their creators (node id and start) are equal. Reason: A7's "each announcement names the process that created its
+  bridge's installed view as well as its counter", for a counter equal to the identifier, where only the creator tells
+  the views apart.
+- **RV-3 (A7, the record's fields).** `view_boot` (64 bits), `view_sequencer` (32) and `padding` (32, 0) appended after
+  `view`. Reason: "The record is only appended to" (the brief; mesh-records.c record_heard: "struct mesh_record is only
+  appended to"); `padding` makes the tail a field every writer sets, as struct mesh_order's `padding` (mesh-bridge.h),
+  so a record told on the wire carries no unset byte.
+- **RV-4 (A7, when the test runs).** On the record map_put has just written, at that write. Reason: "whenever a
+  member's announcement names ...": an announcement is one record heard (record_heard), and a change of its counter or
+  creator is one record_links_same sees, so map_put writes it; a view the sequencer creates at a move already reads
+  every counter the map holds.
+
+### Where the work stopped
+
+- Nowhere: each point the documents leave open took a minimal decision above.
+
+### Where the documents are wrong, or contradict the code's facts
+
+- A4, "its part of each call is the relaying its routes give it": A7 makes the program's sender "the least of the
+  program's nodes", which can be a node the placement operand maps no device (map index 0, where the placement maps
+  devices onto other nodes alone). There its part of each call is also the program's submission, which its bridge
+  TO-broadcasts (A7, sender(m)). The code does both by the one start (mesh_transfers_start).
+
+### Commits
+
+- mesh c02318a3 (rdma/mesh.h, mesh-map.h, mesh-records.c: RV), 80967a66 (rdma/mesh_compile.py: ND), d0b816b0
+  (rdma/mesh_compile.py: ND-2's note names the torch source it quotes), and this record.
+- metal-microbench: none; no item names its files, and e9fd7538 builds against the changed headers.
+- The C9 hook (bin/mesh-c9-review.py on each mesh commit) returned no remark on any of them.
+
+### Integration
+
+At mesh 80967a66 and metal-microbench e9fd7538, both level with origin (d0b816b0 after it a comment alone), the trees
+clean but for this record and untracked build artifacts: `make -B -C rdma` 0 in 15 s (the pinned HiGHS tarball fetched
+and its SHA-256 checked OK, its objects built, mesh-flow, mesh-heartbeat, mesh-stat and libmesh.dylib), `make -C rdma
+native-audit` 0, `make .build/e2b_replay` 0 in metal-microbench (libmesh_metal.dylib and e2b_replay rebuilt against the
+changed headers), no warning or error in any; codesign's "Mesh Bridge: no identity found" is the Makefile's ad hoc
+fallback, not a compiler's. Each changed C file compiled alone first, and the lifecycle files (mesh-heartbeat.c,
+mesh-children.c, mesh-child.c, mesh-lanes.c), unchanged, compiled alone against the changed headers;
+rdma/mesh_compile.py compiles (py_compile; its cache entry was there before). Nothing was run.
+
+### What this changes among the earlier parts' open items
+
+- "The revisions of 3f106747", "Where the documents are wrong": A4's refusal of a node the placement leaves out, built
+  (ND); A7's risen counter, which moved no map so no view followed it, built (RV).
+- That part's PS-2 EINVAL (a node of the plan outside `program`) is unchanged; a node the placement leaves out is in
+  `program` for a run on the whole collective.
+- "Outside the documents", the forced build's time: unchanged by this unit, 15 s here.
