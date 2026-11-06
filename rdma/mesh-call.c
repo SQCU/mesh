@@ -4,7 +4,14 @@
 #include <string.h>
 
 /* design/algorithm-sources.md#programtensor */
-static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
+/* 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 6, and "The
+   revisions of 4e78f6f4"): row `index` of the section's rows, first + index, where it was copy `index`'s first row,
+   first + index x stride (mesh-call.h mesh_section_address's note).  Why: point 6, "Represent a value as its ordered
+   page-table rows"; design/plan-to-bridge-change-request.md R2, corrected: "No value is placed as one run", so block k
+   of copy c is row c x stride + k, each block placed anywhere, and a copy's bytes are one run only in its value's
+   mapping (mesh-collective.h struct mesh_value `view`).  What must stay: an address the row's binding gives, NULL
+   where none */
+static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index;}
 
 /* mesh_transfers_start: mesh-dataflow.c, beside the map reader whose copy of the map it reads (its configured latch and
    unbounded spin on `prepared` gave way to a bounded wait for the ports the plan's hops reach) */
