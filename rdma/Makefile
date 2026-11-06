@@ -48,7 +48,8 @@ HIGHS_FLAGS = -O2 -DNDEBUG $(CFLAGS_EXACT) -fexceptions -Wno-unused-variable -Wn
 HIGHS_JOBS := $(shell sysctl -n hw.logicalcpu)
 HIGHS_CFLAGS = -isystem $(HIGHS)/highs -isystem $(HIGHS)
 HIGHS_LIBS = .build/highs/obj/*.o -lc++ -lpthread
-HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h
+HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h \
+  mesh-section.h
 # the resident bridge (design/page-queue-change-request.md): its main and event loop (mesh-link.c), its ports' children
 # from the parent's side (mesh-children.c) and their own (mesh-child.c), discovery and pairing (mesh-ports.c), the
 # kernel's loss and change events (mesh-events.c), the child's verbs jobs (mesh-lanes.c), the map (mesh-records.c) and
@@ -95,7 +96,7 @@ mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-map.h mesh-holders.h Makefile
 	cc $(CPPFLAGS) -O2 -Wall -Wextra -Werror -o $@ mesh-heartbeat.c
 # 2026-11-04 (design/compilation-coordination.md, B2's report): mesh-stat walks the claim heads (mesh-dataflow.h
 # mesh_head_after), so it links mesh-dataflow.c, as the bridge and libmesh do
-mesh-stat: mesh-stat.c mesh-dataflow.c mesh.h mesh-map.h mesh-holders.h mesh-dataflow.h mesh-call.h
+mesh-stat: mesh-stat.c mesh-dataflow.c mesh.h mesh-map.h mesh-holders.h mesh-dataflow.h mesh-call.h mesh-section.h
 	cc -O2 -o $@ mesh-stat.c mesh-dataflow.c
 libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) $(HIGHS_BUILT) Makefile
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS)
