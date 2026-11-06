@@ -456,6 +456,13 @@ Programming Guide, "Graph Memory Nodes").
   dynamic storage allocation, STOC 2003), solved in the ML compilers by greedy by size: Y. Pisarchyk and J. Lee,
   Efficient memory management for deep neural net inference, arXiv 2001.03288, 2020 (TensorFlow Lite's arena planner);
   XLA's buffer assignment and heap simulator; T. Chen et al., TVM, OSDI 2018 (static memory planning).
+- (Corrected 2026-11-05.) A value instance of several pages takes any free pages, not a run of them: each of its pages
+  is an item of its own (design/plan-to-bridge-change-request.md R2, corrected).
+  - A consumer typed to see one run is given it as a mapping written when the plan is made (R4, corrected).
+  - Under happens-before the instances' precedence is a partial order, not intervals on one order (C2, below). The
+    fewest pages is then its fewest chains, by Dilworth's theorem (Annals of Mathematics, 1950), found by Fulkerson's
+    bipartite matching (Proc. AMS, 1956). Left-edge is that count's special case where the order is an interval order.
+  - Dynamic storage allocation and greedy by size, which assume runs, go.
 - **Repeated executions are unrolled, not ringed.** The same value in executions t and t + 1 are two instances. They
   share a page only if the dependence graph already orders t's last read before t + 1's first write. Otherwise they
   get different pages, as compile-time modulo variable expansion gives each overlapping iteration its own copy (M. Lam,
@@ -812,6 +819,9 @@ turns quote of it.
   intervals", and left-edge "is optimal". A landing's write is set by another node's send, so under happens-before the
   lifetimes are not intervals on one order. The implementation tests happens-before and colours greedily by size,
   which is right.
+  - (Corrected 2026-11-05.) The happens-before test is right. Greedy by size is not needed: it places runs, and no
+    value needs one. The exact method over that partial order is Dilworth's fewest chains (A3's assignment,
+    corrected).
 - Report item 5 called fresh pages for every step "correct". The operator's ruling: the code isn't correct when it
   avoids demonstrating the requirements.
 - Report item 3's mechanisms come from neither this request nor the literature as they are used (C1, the operator's
@@ -874,13 +884,14 @@ This section is Claude's. It consolidates the review in C1 into one proposal. It
      meet. A landing's write is set by another node's send, so lifetimes under happens-before are not intervals on one
      order, and left-edge doesn't apply. The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288,
      2020), as `mesh_graph_left_edge` does now.
-   - (Corrected 2026-11-05.) Greedy by size followed from giving every value one run of pages. Only operands typed as
-     one run need that (design/plan-to-bridge-change-request.md R4 and R2, corrected). Every other value is pages
-     placed anywhere, each item one page. Two items may share a page exactly when this interference test orders them,
-     and that relation is a partial order. So the fewest pages is the fewest chains, which by Dilworth's theorem
-     (Annals of Mathematics, 1950) equals the largest set of mutually unordered items, found exactly by bipartite
-     matching (Fulkerson, Proc. AMS, 1956). Greedy by size stays for the values typed as one run, where placement is
-     Garey and Johnson's SR2.
+   - (Corrected 2026-11-05.) Greedy by size followed from giving every value one run of pages, and no value needs one.
+     - Every value is pages placed anywhere, each item one page. Two items may share a page exactly when this
+       interference test orders them, and that relation is a partial order.
+     - So the fewest pages is the fewest chains. By Dilworth's theorem (Annals of Mathematics, 1950) that equals the
+       largest set of mutually unordered items, found exactly by bipartite matching (Fulkerson, Proc. AMS, 1956).
+     - An operand typed as one run (design/plan-to-bridge-change-request.md R4) is given its run as a mapping written
+       when the plan is made, not by placement (R2, corrected).
+     - So greedy by size goes, with `mesh_graph_left_edge`'s colouring.
    - Its cost is compile time only, once per plan: quadratic at worst in one execution's values × u, never in the
      run's length. At run time there are no allocations and no bookkeeping; every address is a constant in the plan.
 4. **Nothing grabs.**

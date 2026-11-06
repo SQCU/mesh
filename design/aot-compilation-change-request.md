@@ -1018,7 +1018,7 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       torch/_inductor/cudagraph_trees.py); "the output from the first invocation will be overwritten by the second
       invocation" (docs, CUDAGraph Trees). A program that keeps an output longer clones it itself, outside the compiled
       function. This is the cudagraphs style A1 quotes.
-  - **Which operands need their pages in one run (2026-11-05, later).**
+  - **Which operands are seen as one run (2026-11-05, later).**
     > if i say that tensors whose outputs or inputs cover arbitrary noncontiguous blocks of pages, then all functions
     > which do not explicitly require contiguity at runtime for their exact inputs and outputs do not overconstrain the
     > allocator and data movements by imposing contiguity.
@@ -1030,9 +1030,10 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
       macOS 15.0, MPS supports native strides directly in the kernels" (PyTorch v2.11.0,
       aten/src/ATen/native/mps/OperationUtils.mm). A torch tensor is one storage with sizes and strides
       (c10/core/TensorImpl.h, `Storage storage_`; c10/core/StorageImpl.h, one `DataPtr data_ptr_`).
-    - So an operand of a torch MPS operator needs its pages at addresses in one strided progression. A value read
-      only by page-wise consumers (transfers, function B, kernels that read through a page list, as PagedAttention's
-      block tables do) needs no such placement.
+    - So an operand of a torch MPS operator is seen in one strided progression of virtual addresses. Its pages are
+      placed anywhere, as every value's are, and the progression is a mapping written when the plan is made, which the
+      GPU translates as it does for every buffer (design/plan-to-bridge-change-request.md R2, corrected). A value read
+      only by page-wise consumers (transfers, function B) needs no mapping.
   - **What stays, being torch's:**
     - an operator with no out variant, whose result is copied once into its placed pages where it must be there;
     - a kernel's own scratch inside torch;

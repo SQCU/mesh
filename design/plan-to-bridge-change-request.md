@@ -1945,7 +1945,7 @@ code, and each method is used as its source states it.
   - "The template is unrolled into u copies, and execution t runs copy t mod u."
   - "The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020)."
   - "At run time there are no allocations and no bookkeeping; every address is a constant in the plan."
-- (Corrected 2026-11-05.) **A value is a list of pages; only a typed operand is one run.**
+- (Corrected 2026-11-05.) **A value is a list of pages placed anywhere. A run is a mapping, not a placement.**
   > if i say that tensors whose outputs or inputs cover arbitrary noncontiguous blocks of pages, then all functions
   > which do not explicitly require contiguity at runtime for their exact inputs and outputs do not overconstrain the
   > allocator and data movements by imposing contiguity. dfoes this mean we have to virtualize a 'a buffer of length l
@@ -1955,6 +1955,11 @@ code, and each method is used as its source states it.
   > access to raw poitners or even a mapping of what pointers are valid or used by programs in collectives, and that
   > collective functions only 'know' about pages (and, at the maximum limit in runtime, 'know' that a specific list of
   > pages are contiguous or noncontiguous, and whihc indices go where and when in transfers and function calls>).
+  > "That form needs kernels written to read the table, which item 7 forbids for torch's operators." does this really
+  > require special kernels or is it an address translation problem that can be solved aot and be effectively zero
+  > marginal latency at runtime...?
+  > "Metal 4 has exactly that for buffers:" ok so we're done with this topic because the constraints which seemed to
+  > require heroic intervention were fictional and involved only idiomatic code.
   - **The structure is the page table above.** A value's ordered list of pages is its page-table rows (Kilburn et
     al.; Denning). The same structure for tensors is PagedAttention's: "PagedAttention allows storing continuous keys
     and values in non-contiguous memory space" (W. Kwon et al., Efficient memory management for large language model
@@ -1963,62 +1968,40 @@ code, and each method is used as its source states it.
     Functions see values only by name, and the runtime places them: Legion's logical regions and physical instances
     (M. Bauer, S. Treichler, E. Slaughter and A. Aiken, Legion: expressing locality and independence with logical
     regions, SC 2012).
-  - **Contiguity is a type of particular operands (R4).** A value whose consumer needs one run, or one strided
-    progression (a torch MPS operator, design/aot-compilation-change-request.md appendix item 7), is placed so. Every
-    other value's pages go anywhere.
-  - **The allocation problem this gives.**
-    - For pages placed anywhere, every item is one page. Two items may share a page exactly when one's last access
-      happens before the other's first write, which is C3.3's own interference test. That relation is a partial order:
-      if x ends before y begins and y ends before z begins, then x ends before z begins. A page holds a chain of it,
-      so the fewest pages is the fewest chains. By Dilworth's theorem that number equals the largest set of items no
-      two of which are ordered (R. P. Dilworth, A decomposition theorem for partially ordered sets, Annals of
-      Mathematics 51(1), 1950). It is found by maximum bipartite matching (D. R. Fulkerson, Note on Dilworth's
-      decomposition theorem for partially ordered sets, Proc. AMS 7(4), 1956), exactly and in polynomial time.
-    - For values typed as one run, placement is dynamic storage allocation with contiguous blocks, NP-complete in the
-      strong sense (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979, problem SR2). There C3.3's
-      greedy by size stays (Pisarchyk and Lee).
-    - **The typed case is an interval-order question, unless the run is virtual.**
-      - Each item's first write and last access are events of Lamport's happens-before order (L. Lamport, Time,
-        clocks, and the ordering of events in a distributed system, CACM 21(7), 1978).
-      - Item x precedes item y when x's last access happens before y's first write. Items conflict when neither
-        precedes the other, so the conflict graph is the incomparability graph of that order.
-      - It is an interval graph exactly when the order is an interval order, that is, has no induced 2 + 2 (P. C.
-        Fishburn, Intransitive indifference with unequal indifference intervals, J. Math. Psychology 7, 1970). Then
-        placing the typed values is SR2 on interval lifetimes. A landing written by another node's send can make a
-        2 + 2.
-      - **The run can be virtual instead.** The page table maps consecutive virtual pages to frames placed anywhere
-        (Kilburn et al.; Denning), and Metal 4 has that map for buffers. A placement sparse buffer, made by
-        `newBufferWithLength:options:placementSparsePageSize:`, is mapped by `MTL4CommandQueue`'s
-        `updateBufferMappings:heap:operations:count:`. There "Metal walks the tiles in the range in buffer offset order,
-        assigning the next tile from the heap in increasing order, starting at heapOffset", from an `MTLHeap` of type
-        `MTLHeapTypePlacement` (macOS 26 SDK, MTL4CommandQueue.h, MTLDevice.h).
-      - mesh's history has both remaining forms:
-        - composed views over `mach_vm_remap`;
-        - their replacement on 2026-11-02, "one GPU address table an occurrence written by the lowering, no composed
-          remapped view" (6255e92b, 9ac9163a), a table the kernel reads, as PagedAttention's block table is.
-      - Unproven: whether the region's pages can be the tiles of a placement heap. The region is shared by the bridge
-        and the programs and registered for transfers, and no header read here makes a heap over existing memory.
-        Where the run is virtual, every value is placed as pages anywhere, and the interval-order question does not
-        arise.
-      - (2026-11-05, later.) **A virtual run is address translation fixed ahead of time, and needs no kernel of its
-        own.**
-        > does this really require special kernels or is it an address translation problem that can be solved aot and
-        > be effectively zero marginal latency at runtime...?
-        - Every page's place is a constant of the plan (C3.3: "every address is a constant in the plan"). So the map
-          from a typed operand's consecutive virtual pages to its frames is written once, when the plan is made.
-        - The GPU then translates through its page tables, as it does for every buffer. A buffer is already virtual
-          memory over frames placed anywhere (Kilburn et al.; Denning), so a torch kernel reads the operand as any
-          strided buffer.
-        - mesh ran this form on these machines: on 2026-11-02 "`compose` maps all their pages into one remapped view
-          (`ncclMeshPageTableCompose`, `mach_vm_remap`). So a kernel reads `mesh_effects + 3272ul`, a word's place in a
-          composed view of foreign pages, fixed at preparation" (design/page-maps-2026-11-02.md at 6255e92b).
-        - That design replaced the composed view only for mesh's own generated kernels' fields. Its reason was
-          "Metal 4 binds by GPU address (`MTL4ArgumentTable setAddress:atIndex:`), so no composed view is needed",
-          not a limit of the remap. A table read by the kernel is needed only by a kernel written to read one.
-        - The run-time cost is the translation every access already has. Whether TLB reach differs with the mapping's
-          page size is a measurement, not shown here.
-    - C3.3's text above applied greedy by size to every value, because it gave every value one run. The typing
-      confines that to the operands that need it.
+  - **Every value's pages are placed anywhere, by the fewest chains.**
+    - Every item is one page. Two items may share a page exactly when one's last access happens before the other's
+      first write. That is C3.3's own interference test, over Lamport's happens-before (L. Lamport, Time, clocks, and
+      the ordering of events in a distributed system, CACM 21(7), 1978).
+    - That relation is a partial order: if x ends before y begins and y ends before z begins, then x ends before z
+      begins. A page holds a chain of it, so the fewest pages is the fewest chains.
+    - By Dilworth's theorem that number equals the largest set of items no two of which are ordered (R. P. Dilworth,
+      A decomposition theorem for partially ordered sets, Annals of Mathematics 51(1), 1950). It is found by maximum
+      bipartite matching (D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered sets, Proc.
+      AMS 7(4), 1956), exactly and in polynomial time.
+    - No value is placed as one run. So greedy by size (Pisarchyk and Lee), and the contiguous-block problem it
+      approximates (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979, problem SR2), have no use
+      here. The chains replace C3.3's colouring.
+  - **Contiguity is a type of particular operands, given as a mapping (R4).**
+    - The types are function A's operand, and a torch MPS operator's strided operand
+      (design/aot-compilation-change-request.md appendix item 7).
+    - Such an operand's run is address translation, fixed when the plan is made. Every page's place is a constant of
+      the plan (C3.3: "every address is a constant in the plan"), so the map from the operand's consecutive virtual
+      pages to its pages is written once.
+    - The GPU translates through its page tables, as it does for every buffer, and a buffer is already virtual memory
+      over frames placed anywhere. So a torch kernel reads the operand as any strided buffer, and no kernel reads a
+      table of its own.
+    - mesh ran this form on these machines: on 2026-11-02 "`compose` maps all their pages into one remapped view
+      (`ncclMeshPageTableCompose`, `mach_vm_remap`). So a kernel reads `mesh_effects + 3272ul`, a word's place in a
+      composed view of foreign pages, fixed at preparation" (design/page-maps-2026-11-02.md at 6255e92b).
+    - That design replaced the composed view only for mesh's own generated kernels' fields. Its reason was "Metal 4
+      binds by GPU address (`MTL4ArgumentTable setAddress:atIndex:`), so no composed view is needed", not a limit of
+      the remap.
+    - The run-time cost is the translation every access already has. Whether TLB reach differs with the mapping's
+      page size is a measurement, not shown here.
+  - (Earlier the same day, this correction gave a typed operand physical pages in one run, placed by greedy by size
+    (SR2). It then asked whether the typed values' lifetimes form an interval order, one with no induced 2 + 2 (P. C.
+    Fishburn, J. Math. Psychology 7, 1970), and named Metal 4's placement sparse buffers. With the run a mapping, none
+    of these is needed.)
   - **A received range is pages of its destination value.** A collective's receive lands in the pages of the value it
     belongs to, at its place in that value: "receiving data from rank `i` at offset `i*sendcount`" (NCCL, ncclAllGather);
     "the `recvbuff` on rank `i` will contain the i-th block of the result" (NCCL, ncclReduceScatter). A range is not a
@@ -2104,10 +2087,11 @@ code, and each method is used as its source states it.
     - A's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
       assignment gives each tensor one contiguous range (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020; C3.3;
       rdma/mesh-collective.c).
-    - (Corrected 2026-11-05.) Only A's operand, and any operand whose consumer needs one strided progression, is one
-      run. The bullet above gave every value's copy one run. That imposes A's type on B's operands and on every
-      transfer, which the operator's typing forbids: "function B requires set of pages operand_b to be complete but
-      not contiguous", "domain:Async,noncontiguous,incomplete" (above). See R2's correction.
+    - (Corrected 2026-11-05.) Only A's operand, and an operand whose consumer needs one strided progression, is seen
+      as one run. That run is a mapping written when the plan is made, and its pages are placed anywhere, as every
+      value's are (R2's correction). The bullet above gave every value's copy one run of placed pages. That imposes A's
+      type on B's operands and on every transfer, which the operator's typing forbids: "function B requires set of
+      pages operand_b to be complete but not contiguous", "domain:Async,noncontiguous,incomplete" (above).
 - **Code:** the IR carries each consumer's kind (aot-compilation A8). The bridge's lists carry no kind, only which
   entries are a set's (aot-compilation, appendix item 5).
 
@@ -2307,8 +2291,8 @@ code, and each method is used as its source states it.
     - no page shared between plans whose values are never live together.
   - **The method.** One offline allocation over the whole exported program (design/aot-compilation-change-request.md
     A1, corrected), at compile time, by R2's correction. Its input is the program's values with their lifetimes, and
-    which of them are typed as one run. A program's pages are released at its retirement by deferred reclamation, as
-    above. Nothing takes pages at run time, and no handle is looked up at run time.
+    which consumers see one as a run, each such run a mapping. A program's pages are released at its retirement by
+    deferred reclamation, as above. Nothing takes pages at run time, and no handle is looked up at run time.
   - Function executions are the one program's, ordered by A7's scheduler (design/aot-compilation-change-request.md A7,
     corrected).
 

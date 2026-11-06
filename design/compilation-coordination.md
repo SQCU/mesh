@@ -3116,12 +3116,13 @@ points 1, 2 and 4, and are superseded with them.
    - The code must:
      - Represent a value as its ordered page-table rows (Kilburn et al.; Denning; PagedAttention's block tables, Kwon et
        al., SOSP 2023).
-     - Place one run, or one strided progression, only for an operand typed so: R4's function A, or a torch MPS
-       operator's operand (item 7).
-     - Place every other value's pages anywhere, by the fewest chains of the interference order. That is Dilworth's
-       theorem, computed by Fulkerson's bipartite matching, a function of rdma/mesh-graph.h or mesh_graph.py with caller
+     - Place every value's pages anywhere, by the fewest chains of the interference order. That is Dilworth's theorem,
+       computed by Fulkerson's bipartite matching, a function of rdma/mesh-graph.h or mesh_graph.py with caller
        operands.
-     - Keep greedy by size for the typed values only.
+     - Give an operand typed as one run (R4's function A, or a torch MPS operator's operand, item 7) its run as a
+       mapping written when the plan is made: consecutive virtual pages over its pages, as `ncclMeshPageTableCompose`'s
+       `mach_vm_remap` view was on 2026-11-02 (PB R2).
+     - Greedy by size goes, with `mesh_graph_left_edge`'s colouring.
 7. **A received range is a value of its own, "one range's alone" (rdma/mesh-collective.h; the plan call of
    design/disjoint-pages-revision-coordination.md).**
    - Wrong against: NCCL's receives at offsets of one result ("receiving data from rank `i` at offset
@@ -3132,7 +3133,7 @@ points 1, 2 and 4, and are superseded with them.
 8. **Torch MPS operands (AOT appendix item 7).**
    - Added: MPSGraph takes an `MTLBuffer` with a shape and an optional row stride, and torch uses native strides from
      macOS 15.0. So such an operand is typed one strided progression (point 6).
-   - The code must: the IR types each such operand.
+   - The code must: the IR types each such operand, and the plan writes its mapping (point 6).
 9. **"Lease" (AOT appendix item 7; the deleted allocator.mm).**
    - Wrong against: the coordination's rules ("No hashing, receipts, credits, gates, filters, locks, leases …"). The
      canonical lease is a grant limited in time (Gray and Cheriton, SOSP 1989).
@@ -3143,9 +3144,7 @@ Open, outside these points:
 - Torch's own allocations (kernel scratch, and results of operators with no out variant) are not a requirement. The
   operator, 2026-11-05: ""- torch's own allocations (kernel scratch, and results of ops with no out= form);" i dunno
   who cares...?"
-- The typed values' placement, as PB R2 now states it canonically. The order of first writes and last accesses under
-  happens-before (Lamport 1978) is an interval order exactly when it has no induced 2 + 2 (Fishburn 1970); then
-  placement is SR2. A landing can make a 2 + 2. The question goes away where the run is virtual: address translation
-  fixed when the plan is made, read by any kernel, as mesh's `mach_vm_remap` composed views were on 2026-11-02 (PB R2).
-  So every value is pages anywhere, placed by Dilworth's chains. The Metal 4 placement-heap form is unproven, and
-  nothing needs it.
+- Closed: typed values need no placement of their own. Their run is a mapping, and every value is placed by Dilworth's
+  chains (PB R2). The operator: "ok so we're done with this topic because the constraints which seemed to require
+  heroic intervention were fictional and involved only idiomatic code." Left is a measurement, when runs are
+  authorized: whether TLB reach over a mapped run differs from the region's own mapping.

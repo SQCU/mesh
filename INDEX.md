@@ -52,7 +52,7 @@ other projects, such as a game bot, and old dated records; they are not listed h
   the disjoint-pages change request.
 - [design/aot-compilation-change-request.md](design/aot-compilation-change-request.md): what the ahead-of-time
   compilation must do: whole programs captured ahead of time (`torch.export`, not a `torch.compile` backend), every
-  value a list of pages and only typed operands one run; the placement operand (GSPMD, Alpa) and the weighting operand
+  value a list of pages placed anywhere, a typed operand's run a mapping; the placement operand (GSPMD, Alpa) and the weighting operand
   (Sinnen; Garg and Könemann), both chosen elsewhere; collectives over packed trees (Blink) lowered to page
   instructions (MSCCLang); one schedule per function; function executions ordered by one scheduler per island
   (Pathways), which is total order multicast by a fixed sequencer (Défago, Schiper and Urbán: their §3 and FIFO Order
