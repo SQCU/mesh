@@ -166,12 +166,13 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # `inplace`, `copies` and `reduced` go, for each range's place (point 7: "name, in each declared transfer, the pages
 # of its destination value that it lands in"): `blockbytes`, a block's bytes (block x pgsz, mesh.h struct hdr), at
 # which a part of a value begins; `inside`, the AllGather operands made in place in their results (_all_gather),
-# every rank's; `blocks`, by key, the blocks of its pages its ranges hold, every rank's (_part, _landing).  This
-# node's: `at`, each declared transfer's place, the key whose value it is sent from or lands in and the element of that
-# value it begins at (the lowerings); `added`, the values of no key of the program (a part copied once, a reduction's
-# received parts); `sends`, by collective item, the ranges it releases before it waits, each with the copy that makes
-# it where one does; `publishes`, by item, the ranges released after it; `homes`, each placed key's value, element
-# offset and shape (_place).  What must stay: every operand of mesh_plan the same at every rank
+# every rank's; `blocks`, by key, the blocks of its pages its ranges hold, every rank's (_part, _landing); `bases`,
+# each key's base, the key whose value its pages are one run of, and its element offset there, every rank's (_over).
+# This node's: `at`, each declared transfer's place, the key whose value it is sent from or lands in and the element of
+# that value it begins at (the lowerings); `added`, the values of no key of the program (a part copied once, a
+# reduction's received parts); `sends`, by collective item, the ranges it releases before it waits, each with the copy
+# that makes it where one does; `publishes`, by item, the ranges released after it; `homes`, each placed key's value,
+# element offset and shape (_place).  What must stay: every operand of mesh_plan the same at every rank
 class IR:
     def __init__(self, gm, placement, nodes, blockbytes):
         self.gm, self.placement, self.weights, self.blockbytes = gm, placement, None, blockbytes
@@ -182,7 +183,7 @@ class IR:
         self.sharding, self.program, self.roles, self.events = {}, [], {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
         self.made, self.calls, self.locals, self.shapes = set(), None, {}, {}
-        self.metas, self.forms, self.over, self.producer = {}, {}, {}, {}
+        self.metas, self.forms, self.over, self.producer, self.bases = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.blocks, self.added = {}, {}, {}, {}, {}
         self.sends, self.publishes = {}, {}
 
@@ -1089,8 +1090,9 @@ def _forms(ir):
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e", OV and IP): new, where `placed` held the
 # keys over an AllReduce's result alone.  What must stay: every rank's `over` and `inplace` the same
 # 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
-# revisions of 4e78f6f4"): `inplace` and _fresh go, for each part's place (_part, _directed).  What must stay: every
-# rank's `over` the same
+# revisions of 4e78f6f4"): `inplace` and _fresh go, for each part's place (_part, _directed); `bases`, each key's base
+# and element offset in it, by the same pass (_base, the note above _span).  What must stay: every rank's `over` the
+# same
 def _viewed(item):
     return item[0] == 'window' and len(item[1]) == 1 and item[3][6] is None
 
@@ -1116,6 +1118,8 @@ def _over(ir):
                                         else frozenset())
         return frozenset()
     ir.over = mesh_graph.forward(list(items), lambda key: items[key][1], rule)
+    ir.bases = mesh_graph.forward(list(items), lambda key: items[key][1],
+                                  lambda key, bases: _base(ir, items[key], bases))
 
 
 # GSPMD section 4.4, partition grouping: the devices that differ along `dims` alone, each group in the device mesh's
@@ -1190,11 +1194,15 @@ def _consumer(ir, roots):
 #   at a block, else refused at compile time naming point 7 ("A part whose bytes are not whole blocks (block x pgsz)
 #   cannot begin a block of the result: refuse it at compile time naming point 7", the same brief); its parts' blocks
 #   held; a part's elements.
-# - _based: the place of a key whose pages are one run of a value its producer makes (an operator's out variant, a
-#   region's concatenation, a collective's result but a CollectivePermute's, whose result is its operand where its pair
-#   is its own), or of a narrow that is a run of such a key: (that value's key, element offset); None else.
+# - `bases` (_over, by _base): the place of a key whose pages are one run of a value its producer makes (an operator's
+#   out variant, a region's concatenation, a collective's result but a CollectivePermute's, whose result is its operand
+#   where its pair is its own), or of a narrow that is a run of such a key: (that value's key, element offset); None
+#   else.  It is a forward data-flow problem over the program's keys, each key's place from its read's, solved by the
+#   graph module's one pass over a topological order (rdma/mesh_graph.py forward), as `over` is (the C9 hook's remark
+#   on 44ebaa3b: "a walk up the producer parent chain of narrows to the base value, accumulating element offsets; it
+#   moves into the graph module"); a base made inside an AllGather's result is no place a part is sent from (_part).
 # - _part: where a collective sends a part from.  From its place (R1: "The code must move every page from the page
-#   that holds it to the page it lands in, with nothing copied on the way"), where its key is _based, the part is a run
+#   that holds it to the page it lands in, with nothing copied on the way"), where its key has a base, the part is a run
 #   beginning at a block and no range holds a block of it; else from a value of its own, which the collective's item
 #   copies it into once: the part is then a slice, "an operator with no out variant, whose result is copied once into
 #   its placed pages where it must be there" (design/aot-compilation-change-request.md, appendix item 7, "What stays"),
@@ -1230,18 +1238,14 @@ def _landing(ir, c, base, dim, parts):
     return part
 
 
-def _based(ir, key):
-    g = ir.producer.get(key)
-    if g is None or key in ir.inside:
-        return None
-    kind, reads, _, operand = ir.program[g]
+def _base(ir, item, bases):
+    kind, reads, key, operand = item
     if kind == 'narrow':
-        base, (dim, start, length), shape = _based(ir, reads[0]), operand, _shape(ir, reads[0])
-        if base is None or math.prod(shape[:dim]) != 1:
+        (dim, start, length), shape = operand, _shape(ir, reads[0])
+        if bases[0] is None or math.prod(shape[:dim]) != 1:
             return None
-        return base[0], base[1] + start * math.prod(shape[dim + 1:])
-    if kind == 'call' and ir.forms.get(key) not in (None, 'functional') \
-            or kind == 'window' and not _viewed(ir.program[g]) \
+        return bases[0][0], bases[0][1] + start * math.prod(shape[dim + 1:])
+    if kind == 'call' and ir.forms.get(key) not in (None, 'functional') or kind == 'window' and not _viewed(item) \
             or kind == 'collective' and operand.kind != 'collective-permute':
         return key, 0
     return None
@@ -1261,8 +1265,8 @@ def _part(ir, c, key, at):
     shape, size = _shape(ir, key), _value(key[0]).dtype.itemsize
     count = math.prod(shape) if at is None else math.prod(shape[:at[0]]) * at[2] * math.prod(shape[at[0] + 1:])
     offset = 0 if at is None else at[1] * math.prod(shape[at[0] + 1:])
-    base = _based(ir, key) if at is None or math.prod(shape[:at[0]]) == 1 else None
-    if base is not None:
+    base = ir.bases.get(key) if at is None or math.prod(shape[:at[0]]) == 1 else None
+    if base is not None and base[0] not in ir.inside:
         span = _span(ir, base[0], base[1] + offset, count)
         if (base[1] + offset) * size % ir.blockbytes == 0 \
                 and not any(a < span[1] and span[0] < b for a, b in ir.blocks.get(base[0], ())):
