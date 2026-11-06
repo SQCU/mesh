@@ -388,9 +388,40 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding,plan; };
+/* The 116 plan call's notes on its operands, kept (2026-11-05, "The revisions of 4e78f6f4": restored where dd215cbe
+   dropped them; sub-agent C's finding).  aot-compilation appendix item 6 (design/compilation-coordination.md, "The
+   appendix's revisions", N1 to N5): the plan of one compiled function, named (group, function): `group` the
+   launcher's (MESH_GROUP), 0 EINVAL; `function` the program's own ordinal of the compiled function, the same at every
+   rank, kept by every replan of that function; held in struct mesh_state `epoch`.  EEXIST where a plan of that name stands here on the same map.  *plan out: the region
+   offset of the plan's state section once it stands (untouched on any failure).  No earlier plan is closed.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", PS and PQ): `program` and
+   `outstanding` added after `function`.  `program`: the program's nodes, a set of map indices (bit i, map index i),
+   the same at every rank and in every plan call of one program (`group`); its least is the program's one sender
+   (design/aot-compilation-change-request.md A7: "sender(m) is the program's one sender: the least of the program's
+   nodes, the program being its launcher's `group`"), held in struct mesh_state `sender`; EINVAL where it is 0, lacks
+   this node, or lacks a node of the plan's (a relay outside the program would never hold the plan, so the barrier
+   would never count it: A7, "A plan's destinations exist before its first message").  `outstanding`: A10's bound for
+   this function, "the most calls of it the analysis lets be outstanding at once in the program that submits them"
+   (A10, "Its output"), the room of the plan's submissions' queue and the first term of its delivered calls' queue's
+   room (appendix item 2, "Its room is fixed at compile time"); 0 where A10 found none, which fails ENOMEM (item 2: "A
+   plan whose bound A10 cannot find fails with `ENOMEM` when it is planned").  What must stay: every operand the same
+   at every rank.
+   2026-11-05 (design/compilation-coordination.md, "The revisions of 3f106747", BS and PG): `outstanding` is the delay
+   on the edge from a call's completion to the program's later submission in the program's IPC graph, and no room: each
+   queue's room is its self-timed buffer bound there, with the synchronization edges Convert-to-SC-graph adds and
+   DetermineDelays' delays (S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997,
+   §4.3 (5), §9, Figs. 6 and 8; mesh-collective.c plan_rooms); ENOMEM also where a cycle has zero delay (BSL Lemma 1).
+   `program` is the nodes the program's launcher started it at, passed by the launcher as it passes `group`
+   (design/aot-compilation-change-request.md A7, sender(m): "The program's nodes are the nodes its launcher started it
+   at, an operand of the plan call (`program`) that the launcher passes as it passes `group` (MESH_GROUP)"); every run
+   is launched on the whole collective, so `program` holds every node of the map, every relay among them.  What must
+   stay: every operand the same at every rank.
+   2026-11-05 ("The revisions of 4e78f6f4"): `function` and `*plan` are struct mesh_function's (function k named (group,
+   k + 1)), EEXIST is EBUSY on the program's root, and `outstanding` is each function's (struct mesh_function); the
+   rest stands */
 /* The plan call (2026-11-05, design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points
    4 to 8; "The revisions of 4e78f6f4").  `group` the launcher's (MESH_GROUP), 0 EINVAL.  `program` the program's
-   nodes, a set of map indices (the notes on `program` above).  `functions`, `count` of them, the program's compiled
+   nodes, a set of map indices (the notes on `program` just above).  `functions`, `count` of them, the program's compiled
    functions, each struct mesh_function; `calls`, `ncalls` of them, the program's calls of them in program order in
    one execution of its traced block (A10, "The calls' graph": "each compiled function is represented by a computation
    node in a dataflow graph"), calls[j] the index of the j-th call's function, every function called at least once
@@ -412,7 +443,9 @@ struct mesh_function { const struct mesh_declared *declared; const struct mesh_w
    before anything is written; EHOSTUNREACH; ENOMEM (a space's chains past its blocks; a value with no unroll bound; a
    cycle of zero delay; a queue on no cycle after the conversion; A10's bound 0; the call's own memory; a mapping
    Mach refuses); ESTALE (the map moved while planning: plan again on the map as it is); or the map reader's error.
-   On ESTALE or the second map read's error the root is not published and the mapping is released.  There is no
+   On ESTALE, the second map read's error, or a mapping Mach refuses (mesh_view_compose reads the rows' bindings, so
+   it follows their writes: sub-agent C's finding, "The revisions of 4e78f6f4"), the root is not published and the
+   mapping is released.  There is no
    ETIMEDOUT: nothing waits.  `*view` out: the program's one mapping of its `run` values at this node (mesh-dataflow.h
    mesh_view_compose: every `run` value's rows, function by function and value by value in `values`' order, each
    value's copies in order), which its holder releases with mesh_view_release once it retires the program; {NULL, 0}
