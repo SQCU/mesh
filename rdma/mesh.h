@@ -1102,11 +1102,18 @@ static inline struct mesh_state *mesh_algo_state(struct hdr *m,const struct mesh
    rank: mesh-collective.h struct mesh_function), and every table word of a published operand names its plan's state
    section (mesh-collective.c mesh_plan writes it before `published`).  What must stay: the publication and the
    retirements read, each acquire */
-static inline struct mesh_state *mesh_algo_plan(struct hdr *m,uint32_t k){
-  struct mesh_algo *algo=mesh_algo(m);
+/* the program's operand open: its `published` generation where it is not 0 and `retired` is not it (each acquire),
+   else 0 (2026-11-05, "The revisions of 55b9cbad", G2 and G4: the one form of the test that mesh_algo_plan,
+   mesh-records.c clients_turn and its pid's retirement, mesh-link.c region_adopt and mesh-stat.c each wrote; "merge
+   duplicated patterns found by analysis").  What must stay: the publication read before the retirement */
+static inline uint64_t mesh_algo_open(struct hdr *m){
+  const struct mesh_algo *algo=mesh_algo(m);
   const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
-  if(!published || atomic_load_explicit(&algo->retired,memory_order_acquire)==published)return NULL;
-  struct mesh_state *state=mesh_algo_state(m,algo,k);
+  return published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published?published:0;
+}
+static inline struct mesh_state *mesh_algo_plan(struct hdr *m,uint32_t k){
+  if(!mesh_algo_open(m))return NULL;
+  struct mesh_state *state=mesh_algo_state(m,mesh_algo(m),k);
   return !atomic_load_explicit(&state->closed,memory_order_acquire)?state:NULL;
 }
 /* the synchronization edges of plan `state` here, `waits` into it then `tells` out of it (struct mesh_sync's note) */
