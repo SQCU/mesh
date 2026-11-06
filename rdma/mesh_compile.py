@@ -214,9 +214,11 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 # `inside`, by key, the value its producer writes it into (owner, dimension, its start there by device: an AllGather's
 # own part, a window's middle, a halo's arrival and region, _inside and _region); `landing`, by a window's landing
 # value, its middle and that middle's start; `results`, by the result of an operator of several, that operator's key,
-# and `taken`, by an operator.getitem of one, the result it takes (R-2, _forms); `sent`, the keys a collective reads.
-# This node's: `owned`, each value's index by the key that owns it; `loaded`, the ranges sent from an invariant,
-# released once after its load.  What must stay: every operand of mesh_plan the same at every rank
+# and `taken`, by an operator.getitem of one, the result it takes (R-2, _forms); `sent`, the keys a collective reads;
+# `contiguous`, the view nodes for which "it will not be possible to view self tensor as shape without copying it (e.g.,
+# via contiguous())" (torch 2.14.0 torch/_tensor_docs.py, view; _view).  This node's: `owned`, each value's index by the
+# key that owns it; `loaded`, the ranges sent from an invariant, released once after its load.  What must stay: every
+# operand of mesh_plan the same at every rank
 class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
@@ -230,7 +232,7 @@ class IR:
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
         self.publishes, self.loaded, self.inputs, self.landing = {}, [], {}, {}
-        self.taken, self.results, self.sent = {}, {}, set()
+        self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
 
     # GSPMD section 3.1, a tiled dimension: each device's tile, the dimension's size over its mesh dimension's
     def local(self, node, sharding):
@@ -1058,9 +1060,9 @@ def _partition(ir, operators):
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The
 # revisions of 14b9a757"), reversing the block's bytes: no block enters the compilation, since a transfer's ends are
 # byte views (_strided), not runs of blocks.  After the partitioning, each key's producer and the keys collectives
-# read (`producer`, `sent`), the forms (_forms), the values an own part lies in (_inside), the pages each key may lie
-# over (_over), and every device's places (_places), every rank's.  What must stay: the placement operand's checks and
-# the refusal of an undivided dimension
+# read (`producer`, `sent`), the forms (_forms), the values an own part lies in (_inside), every device's places
+# (_places) and the pages each key may lie over (_over), every rank's.  What must stay: the placement operand's checks
+# and the refusal of an undivided dimension
 def partition(gm, placement, nodes):
     if not isinstance(placement, Placement):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
@@ -1096,8 +1098,8 @@ def partition(gm, placement, nodes):
     ir.sent = {item[1][0] for item in ir.program if item[0] == 'collective'}
     _forms(ir)
     _inside(ir)
-    _over(ir)
     ir.places = {device: _places(ir, device) for device in ir.coords}
+    _over(ir)
     return ir
 
 
@@ -1252,29 +1254,23 @@ def _viewed(item):
 # R-2; "The revisions of 14b9a757"), reversing `bases` and `landing`'s sets: a key its producer writes inside another
 # value (`inside`: an AllGather's own part, a window's middle, a halo's arrival and region) lies over that value, a
 # region over its reads' pages as well; an operator of an out variant over its results' values (each its own, or the
-# value it lies inside); one with none over pages of its own only where a collective reads it ("an operator with no out
-# variant, whose result is copied once into its placed pages where it must be there", appendix item 7, "What stays"),
-# else over none.  `producer` is partition's.  What must stay: each other key's set as above
+# value it lies inside); a key whose place is its own value (_places) over that value; any other over none.  `producer`
+# is partition's.  What must stay: each other key's set as above
 def _over(ir):
-    items = {item[2]: item for item in ir.program if item[0] != 'output'}
+    items, places = {item[2]: item for item in ir.program if item[0] != 'output'}, ir.places[min(ir.coords)]
 
     def rule(key, sets):
         kind, reads, _, operand = items[key]
         joined = frozenset().union(*sets)
         if key in ir.inside:
             return frozenset((ir.inside[key][0],)) | (joined if kind == 'window' else frozenset())
+        if places[key] is not None and places[key].owner == key:
+            return frozenset((key,))
         if kind in ('slice', 'narrow') or _viewed(items[key]):
             return joined
-        if kind == 'call':
-            form = ir.forms.get(key)
-            if form is None:
-                return joined
-            if form == 'functional':
-                return frozenset((key,)) if key in ir.sent else frozenset()
-            return frozenset(ir.inside[result][0] if result in ir.inside else result for _, result in form[1])
-        if kind == 'collective' or kind == 'constant' and isinstance(key[0].meta.get('val'), torch.Tensor):
-            return frozenset((key,))
-        return frozenset()
+        if kind == 'call' and isinstance(ir.forms.get(key), tuple):
+            return frozenset(ir.inside[result][0] if result in ir.inside else result for _, result in ir.forms[key][1])
+        return joined if kind == 'call' and ir.forms.get(key) is None else frozenset()
     ir.over = mesh_graph.forward(list(items), lambda key: items[key][1], rule)
 
 
@@ -1351,9 +1347,10 @@ def _consumer(ir, roots):
 # - _places gives every key's place at every device, every rank's, a forward data-flow problem over the program's keys
 #   (rdma/mesh_graph.py forward, as `over`): a key inside another value (`inside`) its narrow there at that device's
 #   start; a slice, a narrow and a viewed window its read's view narrowed at that device's offset (_cut; "A view (a
-#   narrow, a slice) is its base's pages", design/aot-compilation-change-request.md appendix item 7); a key with pages
-#   of its own, and a value of no key, its own value whole; any other none (a view an operator makes, an input, a result
-#   torch allocates), never a transfer's end.
+#   narrow, a slice) is its base's pages", design/aot-compilation-change-request.md appendix item 7); a view an
+#   operator makes its base's place, at the offset, sizes and strides torch's own view gives it over that place (_view),
+#   or its own value where torch copies (`contiguous`); a key with pages of its own, and a value of no key, its own
+#   value whole; any other none (an input, a result torch allocates), never a transfer's end.
 # - _strided gives a place's mesh.Strided (mesh-collective.h struct mesh_strided): its offset and strides in bytes,
 #   `element` the element's bytes, its dimensions of size 1 dropped and adjacent ones merged where they nest, as torch's
 #   own collapse merges them ("The dimensions can be merged if and only if they are all "nested" with each other.  That
@@ -1416,7 +1413,56 @@ def _placement(ir, item, reads, device, added):
         return added[ir.taken[key]]
     if (kind in ('slice', 'narrow') or _viewed(item)) and reads[0] is not None:
         return _narrowed(reads[0], *_cut(ir, kind, operand, reads[0].sizes, device))
-    return _own(ir, key) if key in ir.over.get(key, ()) else None
+    form = ir.forms.get(key)
+    if kind == 'call' and form is None and isinstance(ir.locals[operand].target, torch._ops.OpOverload) \
+            and _aliases(ir.locals[operand]):
+        view = _view(ir, key, ir.locals[operand], item[1], reads)
+        if view is not None:
+            return view
+    if kind == 'collective' or kind == 'constant' and isinstance(key[0].meta.get('val'), torch.Tensor) \
+            or isinstance(form, tuple) and any(result == key for _, result in form[1]) \
+            or form == 'functional' and key in ir.sent:
+        return _own(ir, key)
+    return None
+
+
+# torch 2.14.0 torch/_tensor_docs.py, view: "Returns a new tensor with the same data as the self tensor but of a
+# different shape.  The returned tensor shares the same data"; "When it is unclear whether a view can be performed, it
+# is advisable to use reshape, which returns a view if the shapes are compatible, and copies (equivalent to calling
+# contiguous) otherwise"
+def _based(local):
+    schema = local.target._schema
+    sets = {s for r in schema.returns if r.alias_info is not None for s in r.alias_info.before_set}
+    named = _named(local, _names(local))
+    found = [k for k, name in enumerate(named) for a in schema.arguments
+             if a.name == name and a.alias_info is not None and sets & set(a.alias_info.before_set)]
+    return found[0] if found else None
+
+
+def _view(ir, key, local, keys, reads):
+    k = _based(local)
+    if k is None or reads[k] is None or key not in ir.metas:
+        return None
+    metas = [_meta(ir, r) if p is None else
+             torch.empty(math.prod(_layout(ir, p.owner)[1]), dtype=_layout(ir, p.owner)[0], device='meta')
+             .as_strided(p.sizes, p.strides, p.offset) for r, p in zip(keys, reads)]
+    if any(m is UNKNOWN for m in metas):
+        return None
+    given = iter(metas)
+    args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
+    try:
+        result = _call(local, args, kwargs)
+    except NotImplementedError:
+        return None
+    except RuntimeError:
+        ir.contiguous.add(key)
+        return _own(ir, key)
+    if not isinstance(result, torch.Tensor) or result.dtype != metas[k].dtype:
+        return None
+    if not torch._C._is_alias_of(result, metas[k]):
+        ir.contiguous.add(key)
+        return _own(ir, key)
+    return Place(reads[k].owner, result.storage_offset(), tuple(result.shape), tuple(result.stride()), reads[k].writer)
 
 
 def _places(ir, device):
@@ -2532,15 +2578,16 @@ def _bind(context, ir, values, addresses, buffer, mapping):
 #   (_bound): partial evaluation's division of a program's values into static and dynamic.  No step tests a
 #   make()-time fact: each such fact chooses which steps are made.
 # - An operator of an out variant writes its results' places; one with none, placed because a collective reads it or it
-#   lies in another value, is copied once into its place (appendix item 7, "What stays"); any other makes its result.
-#   A window's region is its place in its landing value, filled where it lies outside the operand.  An AllReduce root's
-#   and a ReduceScatter keeper's combine waits for each received part in the group's order and adds it in, its own
+#   lies in another value, is copied once into its place (appendix item 7, "What stays"); a placed view is its place;
+#   a view node in `contiguous` is torch's contiguous into its place by copy_, its view of it; any other makes its
+#   result.  A window's region is its place in its landing value, filled where it lies outside the operand.  An
+#   AllReduce root's and a ReduceScatter keeper's combine waits for each received part in the group's order and adds it in, its own
 #   first (MSCCLang's receive-reduce-copy, torch.add's out variant); every other collective waits for its receives; a
 #   CollectivePermute member no pair targets writes XLA's zeros at its place.  Each item's publishes follow its work.
 # - Each receive's wait (_arrived) ends at MESH_PLATFORM_NS without a rise of its range's count word of copy c (R-7),
 #   that word found once from its declared transfer's entry (mesh.h mesh_transfer_at; rdma/mesh.py Publication).
 # What must stay: one execution a call, every read of a received range after its arrival, a release after its range's
-# writes; no copy but an operator's with no out variant
+# writes
 class _Dynamic:
     def __init__(self, key):
         self.key = key
@@ -2575,7 +2622,7 @@ def _count(context, state, transfer, c):
     return C.c_uint64.from_address(context.M + entry.count + 8 * (c % state.copies))
 
 
-def _called(key, operands, local, form, placed):
+def _called(ir, key, operands, local, form, placed):
     given = iter(operands)
     arguments, dynamic = _bound((local.args, local.kwargs), lambda n: next(given))
     mine = placed(key)
@@ -2583,6 +2630,10 @@ def _called(key, operands, local, form, placed):
         outs = {name: placed(result) for name, result in form[1]}
         return tuple(outs.values()) if len(outs) > 1 else mine, \
             [lambda env, inputs, t: _apply(form[0], arguments, env, outs)]
+    if key in ir.contiguous:
+        base = operands[_based(local)]
+        laid = mine.view(base.shape)
+        return mine, [lambda env, inputs, t: laid.copy_(base)]
     if form == 'functional' and mine is not None:
         return mine, [lambda env, inputs, t: mine.copy_(_apply(local.target, arguments, env, {}))]
     if mine is not None:
@@ -2635,7 +2686,7 @@ def _specialized(ir, context, plan, state, devices, placed, c, item, operands, s
         else:
             value = operands[0].narrow(*at)
     elif kind == 'call':
-        value, made = _called(key, operands, ir.locals[operand], ir.forms.get(key), placed)
+        value, made = _called(ir, key, operands, ir.locals[operand], ir.forms.get(key), placed)
         steps += made
     elif kind == 'collective':
         steps += _collected(ir, context, plan, state, placed, c, key, operands, operand)
