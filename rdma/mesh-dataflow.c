@@ -750,7 +750,8 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
   atomic_thread_fence(memory_order_seq_cst);
   return mesh_view_compare(mesh_view_installed(m,memory_order_relaxed),mesh_plan_view(state))?ESTALE:0;
 }
-/* mesh-call.h mesh_host_started */
+/* mesh-call.h mesh_host_started; where the installed view is not the plan's, mesh-flow.c plan_cancel's completion of
+   the plan's waiters */
 void mesh_host_started(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
   struct hdr *m=context->M;
   struct mesh_state *state=mesh_state_at(m,plan);
@@ -760,6 +761,27 @@ void mesh_host_started(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,
                                                                    memory_order_release,memory_order_relaxed));
   mesh_notify(&m->plans);
   atomic_thread_fence(memory_order_seq_cst);
+  if(!mesh_view_compare(mesh_view_installed(m,memory_order_relaxed),mesh_plan_view(state)))return;
+  struct mesh_sync *edge=mesh_syncs(m,state);
+  for(uint32_t e=0;e<state->waits;e++){
+    atomic_store_explicit(&edge[e].count,UINT64_MAX,memory_order_release);
+    os_sync_wake_by_address_all(&edge[e].count,sizeof edge[e].count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  }
+  const uint32_t copies=state->copies;
+  const uint64_t executions=atomic_load_explicit(&state->executions,memory_order_acquire),n=state->entries/copies;
+  const struct mesh_hop *list=mesh_hops(m,state);
+  for(uint32_t c=0;c<copies;c++){
+    const uint64_t serves=executions>c?(executions-c-1)/copies+1:0;
+    for(uint64_t j=c*n;serves && j<c*n+n;j++){
+      if(list[j].direction!=MESH_RECEIVE)continue;
+      _Atomic uint64_t *count=(_Atomic uint64_t *)(void *)((char *)m+list[j].count);
+      const uint64_t final=(uint64_t)list[j].pages*serves;
+      uint64_t was=atomic_load_explicit(count,memory_order_relaxed);
+      while(was<final && !atomic_compare_exchange_weak_explicit(count,&was,final,memory_order_release,
+                                                                memory_order_relaxed));
+      if(was<final)os_sync_wake_by_address_all(count,sizeof *count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    }
+  }
 }
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed (sub-assignment 7's 2026-11-03 wait, bounded by

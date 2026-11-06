@@ -96,9 +96,12 @@ int mesh_transfers_start(struct mesh_ctx *,uint64_t plan,uint64_t executions);
 /* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14 (mesh-collective.h struct
    mesh_function `lead`): mesh_transfers_start waits and appends the submission, its end the last submission's where
    it was `executions`, and no longer raises `executions`; mesh_host_started raises it to `execution` + 1 (release, a
-   compare-and-swap loop that never lowers it), raises and wakes `plans` and fences, issued by the program from its
-   device's command stream at the start of execution `execution` - `lead`, after every read before that point, with
-   mesh_host_publish's operands (`transfer` not read) */
+   compare-and-swap loop that never lowers it), raises and wakes `plans`, fences (seq_cst) and reads the installed
+   view: the raise before the fence, the view's read after it, paired with the view's installation, which stores the
+   view, fences and reads `executions`; where the view is not the plan's, it completes the plan's waiters as the
+   cancellation does (mesh-flow.c plan_cancel: each synchronization edge's count UINT64_MAX and each receive's count
+   its final value, woken).  It is issued by the program from its device's command stream at the start of execution
+   `execution` - `lead`, after every read before that point, with mesh_host_publish's operands (`transfer` not read) */
 void mesh_host_started(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 
 /* 2026-11-04, sub-assignment 5: mesh_plan_erased is removed, and with it its seq_cst fence pair with the ports' data
