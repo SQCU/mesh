@@ -469,3 +469,48 @@ The implementation of the second sources (mesh 2155c2b8) stopped at three places
   - Each is loaded once in make(), from the host's state_dict tensor, by torch's `copy_` of that slice into the value's
     pages.
   - The whole attribute is loaded only where the node reads it whole.
+
+## Sources for the fourth stops (2026-11-06)
+
+The implementation of the third sources (mesh 6a8a8524, 60f43ddb) raised two points about item 7 and one about item 8.
+
+### 7. A counter per range
+
+- **Point:** one send serves every destination of its range, so the counter is one per range and copy, which each
+  declared transfer's entry names. The text above said "each declared transfer".
+- **Source:** libfabric fi_cntr(3), as quoted above: "Counters record the number of requested operations that have
+  completed". The operation is the send, which is one per range.
+- **Change:** the text is corrected to one counter per range and copy at its source, and one per forward at its relay.
+  The code at 6a8a8524 stands.
+
+### 7. A cancelled plan's sends
+
+- **Stop:** nothing raises a send counter when its plan is cancelled. rdma-core forbids reusing a buffer before its
+  completion is retrieved. A node that only sends therefore ends with ETIMEDOUT, not ECANCELED.
+- **Source:** libfabric:
+  - man/fi_endpoint.3.md (https://raw.githubusercontent.com/ofiwg/libfabric/main/man/fi_endpoint.3.md), fi_cancel:
+    "Canceling an operation causes the fabric provider to search for the operation and, if it is still pending, complete
+    it as having been canceled. An error queue entry will be available in the associated error queue with error code
+    FI_ECANCELED. On the other hand, if the operation completed before the call to fi_cancel, then the completion status
+    of that operation will be available in the associated completion queue."
+  - man/fi_cntr.3.md: "fi_cntr_readerr: Reads the number of operations which have completed in error."
+- **Change:**
+  - Each counter has an error count beside its count.
+  - When the port child finds a plan cancelled, it first retrieves the completions of the sends it has posted. Each
+    raises the count, or the error count where it completed in error, as fi_cancel has a completed operation report its
+    own status.
+  - Every send of that plan the child has not posted is then completed as cancelled: it raises the error count.
+  - The program's wait returns ECANCELED once the error count is nonzero, after the count and the error count together
+    reach the execution's total.
+  - No buffer is reused before the completion of its posted send is retrieved.
+
+### 8. A slice of a view of an attribute
+
+- **Point:** a slice of a view of an attribute (`W.t()` sliced) still loads `W` whole, since the text named slices "of an
+  attribute" only.
+- **Source:** GSPMD §4.5, as above. A value made from a replicated value by views alone is replicated, and its
+  resharding is a DynamicSlice.
+- **Change:**
+  - Each distinct DynamicSlice a node reads of a value made from an attribute by views alone is its own never-freed
+    value.
+  - It is loaded once in make() by torch's `copy_` from that view of the state_dict tensor.
