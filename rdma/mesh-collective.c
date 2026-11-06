@@ -1925,7 +1925,7 @@ static int plan_view(const struct mesh_strided *v,uint64_t *bytes,uint64_t *end)
   return 0;
 }
 /* two views alike (mesh-collective.h struct mesh_declared: `from` "the same in every declared transfer of one range"):
-   their offsets, elements and dims, and their `dims` (size, stride) pairs (struct mesh_strided `pairs`) */
+   their offsets, elements and dims, and their `dims` (size, stride) pairs */
 static int plan_alike(const struct mesh_strided *a,const struct mesh_strided *b){
   if(a->offset!=b->offset || a->element!=b->element || a->dims!=b->dims)return 0;
   for(uint64_t k=0;k<2*(uint64_t)a->dims;k++)if(a->pairs[k]!=b->pairs[k])return 0;
@@ -2059,7 +2059,7 @@ static int plan_instructions(struct plan *p,const struct hdr *m){
 }
 /* MPI 4.1 §6.1.11: "A datatype may specify overlapping entries.  The use of such a datatype in any communication in
    association with a buffer updated by the operation is erroneous."  This node's destination instructions, each the
-   bytes [at, at + its bytes) of the value it lands in, by mesh-graph.h mesh_graph_intersect.  0; EINVAL; ENOMEM */
+   bytes [at, at + its bytes) of the value it lands in.  0; EINVAL; ENOMEM */
 static int plan_landings(const struct plan *p){
   uint64_t count=0,k=0;
   for(uint32_t i=0;i<p->demands;i++)
