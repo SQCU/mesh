@@ -110,12 +110,14 @@ static int map_print(struct hdr *m,size_t length){
    operand (mesh.h struct mesh_algo) is published and not retired (`published` not 0 and not `retired`, each acquire),
    0 where it is not.  Why: G4, "Its fields are what A9 and the failport's lifecycle need: the operand's publication
    (B2's single writer) and the holder the heartbeat already knows"; the record is MSCCL-IR's `<algo>` and is not
-   called the root ("Root" names the trees' roots).  What must stay: the holder's process, 0 where none */
+   called the root ("Root" names the trees' roots).  What must stay: the holder's process, 0 where none.
+   2026-11-06 ("Review of 4e78f6f4 against the requirement lines", G2: "merge duplicated patterns"; the coordinator's
+   review): the operand's openness by mesh.h mesh_algo_open (mesh 52a12eb0), hdr `client` read after it.  What must
+   stay: as above */
 static pid_t clients_open(struct hdr *h){
-  const struct mesh_algo *algo=mesh_algo(h);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  const uint64_t open=mesh_algo_open(h);
   const uint64_t client=atomic_load_explicit(&h->client,memory_order_acquire);
-  return published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published?(pid_t)(uint32_t)client:0;
+  return open?(pid_t)(uint32_t)client:0;
 }
 /* "clients": the processes of the region's open claims, each once, in the order of their first claim's head
    (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed).

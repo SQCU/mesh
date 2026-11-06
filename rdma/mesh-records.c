@@ -1403,15 +1403,18 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    exit watched as before (EV_ADD, udata 0; ESRCH retires it at once).  Why: G4, "Its fields are what A9 and the
    failport's lifecycle need: the operand's publication (B2's single writer) and the holder the heartbeat already
    knows, reused as the failport's code is" (mesh-heartbeat.c replace_turn reads the same two words as its one client
-   holder).  What must stay: the release last, after this turn's cancellations and deliveries, on this thread */
+   holder).  What must stay: the release last, after this turn's cancellations and deliveries, on this thread.
+   2026-11-06 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G2: "merge
+   duplicated patterns"; the coordinator's review; "The revisions of 55b9cbad"): the operand's openness by mesh.h
+   mesh_algo_open (mesh 52a12eb0), where this turn read `published` and `retired` itself; hdr `client` read after it.
+   What must stay: the holder read after the publication */
 static uint64_t plans_seen;
 void clients_turn(int liveness){
   const pid_t self=getpid();
   uint64_t busy=0;
-  const struct mesh_algo *algo=mesh_algo(M);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  const uint64_t open=mesh_algo_open(M);
   const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
-  if(published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published && (pid_t)(uint32_t)client!=self){
+  if(open && (pid_t)(uint32_t)client!=self){
     struct kevent64_s watch;EV_SET64(&watch,(uint32_t)client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
     if(!mesh_holds((pid_t)(uint32_t)client,atomic_load_explicit(&M->client_start,memory_order_acquire)) ||
        (kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH))mesh_retire(M,client);
@@ -1471,11 +1474,11 @@ void clients_turn(int liveness){
    2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
    revisions of 55b9cbad"): the operand's holder, hdr `client`, retired (mesh_retire) where the operand is published
    and not retired (each acquire) and the holder's process is `pid`, where the root's `owner` and `closed` were read.
-   What must stay: on main's thread */
+   What must stay: on main's thread.
+   2026-11-06 ("Review of 4e78f6f4 against the requirement lines", G2; the coordinator's review): the operand's
+   openness by mesh.h mesh_algo_open (mesh 52a12eb0), hdr `client` read after it.  What must stay: on main's thread */
 void clients_gone(pid_t pid){
-  const struct mesh_algo *algo=mesh_algo(M);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  const uint64_t open=mesh_algo_open(M);
   const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
-  if(published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published && (pid_t)(uint32_t)client==pid)
-    mesh_retire(M,client);
+  if(open && (pid_t)(uint32_t)client==pid)mesh_retire(M,client);
 }

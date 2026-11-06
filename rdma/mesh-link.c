@@ -370,12 +370,13 @@ static void region_adopt(void){
      `client_start`, read after the publication is acquired, does not hold the region (mesh_holds) and is not this
      bridge.  Why: G4, "the holder the heartbeat already knows, reused as the failport's code is" (mesh-heartbeat.c
      replace_turn reads the same words; mesh-records.c clients_turn).  What must stay: the gone holder retired before
-     the release below */
-  const struct mesh_algo *algo=mesh_algo(M);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+     the release below.
+     2026-11-06 ("Review of 4e78f6f4 against the requirement lines", G2: "merge duplicated patterns"; the
+     coordinator's review): the operand's openness by mesh.h mesh_algo_open (mesh 52a12eb0), where `published` and
+     `retired` were read here; hdr `client` read after it.  What must stay: as above */
+  const uint64_t open=mesh_algo_open(M);
   const uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
-  if(published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published &&
-     (pid_t)(uint32_t)client!=getpid() &&
+  if(open && (pid_t)(uint32_t)client!=getpid() &&
      !mesh_holds((pid_t)(uint32_t)client,atomic_load_explicit(&M->client_start,memory_order_acquire)))
     mesh_retire(M,client);
   /* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.4; the contract, "The program's claim and
