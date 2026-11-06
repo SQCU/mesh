@@ -525,7 +525,7 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    rows name one frame by the program's one allocation alone (the note before struct mesh_value).  What must stay:
    `outstanding` and `plan` as their notes state them
    design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 14: In: `lead`, the program's start
-   of execution t (mesh-call.h mesh_transfers_start's raise of `executions` past t, its receives' post) at the start of
+   of execution t (mesh-call.h mesh_host_started's raise of `executions` past t, its receives' post) at the start of
    execution t - `lead` in this node's program order, after every read the program makes before that point */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,lead;

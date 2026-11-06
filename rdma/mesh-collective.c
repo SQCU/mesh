@@ -937,7 +937,7 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
    interval, from its write to its last read"; "a value of lag 0 has one interval per execution, and a routed copy has
    one.  A lifetime that crosses the end of the u executions is a cyclic interval"; rdma/mesh_compile.py, "every value's
    positions its lifetime".  Mukerji 1994, §2.1: "we say that variable x is defined at time point t"; a received copy's
-   definition its receive's post, mesh-call.h mesh_transfers_start's raise of `executions` (MPI 4.1 §3.7: "The receiver
+   definition its receive's post, mesh-call.h mesh_host_started's raise of `executions` (MPI 4.1 §3.7: "The receiver
    should not access any part of the receive buffer after a nonblocking receive operation is called, until the receive
    completes"), at the start of execution t - `lead` (mesh-collective.h struct mesh_function); a copy of a value of lag
    k written "for execution t only after execution t - k has ended" (struct mesh_value); its last read before the
