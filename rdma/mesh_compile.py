@@ -1822,6 +1822,15 @@ TORCH.mesh_torch_publish.restype, TORCH.mesh_torch_publish.argtypes = C.c_int, [
                                                                                 C.POINTER(mesh.Section), mesh.U, mesh.Q]
 TORCH.mesh_torch_notifying.restype, TORCH.mesh_torch_notifying.argtypes = mesh.Q, []
 PUBLISH = C.cast(mesh.LIB.mesh_host_publish, C.c_void_p)
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B3 and V5; "The
+# revisions of 55b9cbad"): rdma/mesh-torch.mm mesh_torch_retire, the program's retirement after torch's work in an
+# MPSEvent's notification, given mesh_retire's address as the publish is given mesh_host_publish's (RETIRE); and
+# mesh_torch_end and mesh_torch_ended, an execution's end signalled on torch's stream and read (_Inputs).  What must
+# stay: each binding the file's declaration
+TORCH.mesh_torch_retire.restype, TORCH.mesh_torch_retire.argtypes = C.c_int, [C.c_void_p, C.c_void_p, mesh.Q]
+TORCH.mesh_torch_end.restype, TORCH.mesh_torch_end.argtypes = C.c_int, [mesh.Q]
+TORCH.mesh_torch_ended.restype, TORCH.mesh_torch_ended.argtypes = mesh.Q, []
+RETIRE = C.cast(mesh.LIB.mesh_retire, C.c_void_p)
 
 
 # 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
@@ -2314,15 +2323,29 @@ def _narrow(tensor, at):
 # `released` = `published`), and the next mesh_plan waits for that release, bounded by MESH_PLATFORM_NS, ETIMEDOUT
 # past it (B2), where it was EBUSY.  What must stay: the retirement after torch's work on the values, its wait
 # bounded, ETIMEDOUT with the operand standing; the mapping released once retired and no tensor over it remains
+# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", B3: "`_retire`'s
+# device synchronization (mesh_compile.py 2268) is an unbounded device wait, and it runs on every replan.  The record's
+# release must follow torch's work in an MPSEvent notification, as torch_mesh's allocator.mm did its release (fba41159's
+# event form, item 7).  It is then bounded by the notification wait already there"; "The revisions of 55b9cbad"),
+# reversing the device synchronization above: where a value of the program is on torch's MPS device, mesh_retire is
+# done in the notification of a torch MPSEvent recorded after torch's work so far (rdma/mesh-torch.mm
+# mesh_torch_retire: acquireEvent(false, stream), record, notify, SyncType::COMMIT, the publish's form); else, on the
+# CPU device, where a kernel has ended when its call returns (appendix item 7: "On the CPU device a kernel has ended
+# when its call returns, so the publish follows the call"), mesh_retire follows the calls.  Then every notification
+# (the publishes' and the retirement's) is waited out, bounded by MESH_PLATFORM_NS from the wait's start, ETIMEDOUT past
+# it with the operand standing (the next plan retires it again: mesh_retire stores the one value `published`), and the
+# mapping is released once no tensor over it remains (_Mapping), torch's work over it having ended.  What must stay: no
+# device synchronization; the retirement after torch's work; the wait bounded; the mapping released after it
 def _retire(context, state):
-    for device in state['devices']:
-        torch.get_device_module(device).synchronize()
-    deadline = time.monotonic_ns() + mesh.PLATFORM_NS
+    if 'mps' in state['devices']:
+        mesh.check(TORCH.mesh_torch_retire(RETIRE, context.M, context.client))
+    else:
+        mesh.LIB.mesh_retire(context.M, context.client)
+    deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
     while TORCH.mesh_torch_notifying():
-        if time.monotonic_ns() > deadline:
-            raise OSError(errno.ETIMEDOUT, 'a publish\'s notification not run within MESH_PLATFORM_NS of its device\'s '
-                                           'synchronization: the program\'s operand left standing (rdma/mesh-torch.mm)')
-    mesh.LIB.mesh_retire(context.M, context.client)
+        if time.clock_gettime_ns(time.CLOCK_MONOTONIC) > deadline:
+            raise OSError(errno.ETIMEDOUT, 'a notification after torch\'s work not run within MESH_PLATFORM_NS: the '
+                                           'program\'s operand may stand (rdma/mesh-torch.mm)')
     mapping = state['mapping']
     mapping.retired = True
     state.update(mapping=None, runs=None, devices=(), stale=True)
