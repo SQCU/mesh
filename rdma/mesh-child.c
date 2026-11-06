@@ -65,9 +65,10 @@ static void lanes_flush(struct port *port,uint64_t until){
     if(at>=until || at-heard>=MESH_FLUSH_QUIET_NS)break;
     n=l->provider.poll(c?l->provider.sent:l->provider.completion,MESH_COMPLETION_BATCH,done);
     if(n>0)heard=at;
-    /* design/problems-of-14b9a757-change-request.md, "Appendix: the stops of 36bd7cbd", 13 (Linux v6.12
-       drivers/infiniband/core/verbs.c, ib_drain_sq; rdma-core libibverbs/enum_strs.c, IBV_WC_WR_FLUSH_ERR; rdma-core
-       libibverbs/man/ibv_poll_cq.3; libfabric man/fi_cntr.3.md, fi_cntr_readerr; ISO/IEC 9899:2011 §6.10.2 ¶3, §6.2.7) */
+    /* rdma-core libibverbs/enum_strs.c: [IBV_WC_WR_FLUSH_ERR] = "Work Request Flushed Error"; rdma-core
+       libibverbs/man/ibv_poll_cq.3: "If the completion status is other than IBV_WC_SUCCESS, only the following
+       attributes are valid: wr_id, status, qp_num, and vendor_err."; libfabric man/fi_cntr.3.md: "fi_cntr_readerr:
+       Reads the number of operations which have completed in error." */
     for(int i=0;i<n;i++)if(left[c?0:1] && moved>>link_lane(l,done[i].qp_num)&1){
       left[c?0:1]--;
       if(c)atomic_fetch_add_explicit(((const struct prepared_send *)(uintptr_t)done[i].wr_id)->count+1,1,memory_order_release);
