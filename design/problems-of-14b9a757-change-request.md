@@ -587,6 +587,21 @@ Code is cited at mesh 36bd7cbd. The two stops above are replaced by items 13 and
   - Each SEND completion that `lanes_flush` takes raises its record's error count, as `sends_complete` does for a SEND
     completion in error.
   - Nothing else in `lanes_flush` or `child_leave` changes.
+- **The record's type (2026-11-06, the implementer's stop):**
+  - **Code:** `struct prepared_send` and its `_Static_assert` ("M29") are defined only in rdma/mesh-flow.c:133–145.
+    rdma/mesh-child.c includes only `mesh-bridge.h`, and the two files are separate translation units.
+  - **Source:** ISO/IEC 9899:2011, N1570 (https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf):
+    - §6.10.2 ¶3: "A preprocessing directive of the form # include "q-char-sequence" new-line causes the replacement of
+      that directive by the entire contents of the source file identified by the specified sequence between the "
+      delimiters."
+    - §6.2.7 ¶1: "two structure, union, or enumerated types declared in separate translation units are compatible if
+      their tags and members satisfy the following requirements: If one is declared with a tag, the other shall be
+      declared with the same tag."
+    - §6.2.7 ¶2: "All declarations that refer to the same object or function shall have compatible type; otherwise, the
+      behavior is undefined."
+  - **Change:** the definition of `struct prepared_send`, with its `struct flow;` declaration, its `_Static_assert` and
+    the comment before it, moves unchanged from mesh-flow.c to mesh-bridge.h, which both files include. No other
+    definition moves.
 
 ### 14. The u copies against one-copy items
 
