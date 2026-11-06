@@ -103,11 +103,19 @@ static int map_print(struct hdr *m,size_t length){
    where it is open (its owner word's low 32 bits; `owner` not 0 and `closed` 0, each read with acquire), 0 where it is
    not, where it was a claim head's.  Why: point 5, "These go: ... the claim's head record"; one program's operand at
    the layout's place (A9, "What the bridge runs: the self-timed schedule": "searches for nothing").  What must stay:
-   the owner's process, 0 where none */
+   the owner's process, 0 where none.
+   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
+   revisions of 55b9cbad"), reversing the root's `owner` and `closed`: the process of the operand's holder (hdr
+   `client`'s low 32 bits, read after the publication is acquired: mesh_plan stores it before `published`) where the
+   operand (mesh.h struct mesh_algo) is published and not retired (`published` not 0 and not `retired`, each acquire),
+   0 where it is not.  Why: G4, "Its fields are what A9 and the failport's lifecycle need: the operand's publication
+   (B2's single writer) and the holder the heartbeat already knows"; the record is MSCCL-IR's `<algo>` and is not
+   called the root ("Root" names the trees' roots).  What must stay: the holder's process, 0 where none */
 static pid_t clients_open(struct hdr *h){
-  struct mesh_program *program=mesh_program(h);
-  const uint64_t owner=atomic_load_explicit(&program->owner,memory_order_acquire);
-  return owner && !atomic_load_explicit(&program->closed,memory_order_acquire)?(pid_t)(uint32_t)owner:0;
+  const struct mesh_algo *algo=mesh_algo(h);
+  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
+  const uint64_t client=atomic_load_explicit(&h->client,memory_order_acquire);
+  return published && atomic_load_explicit(&algo->retired,memory_order_acquire)!=published?(pid_t)(uint32_t)client:0;
 }
 /* "clients": the processes of the region's open claims, each once, in the order of their first claim's head
    (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed).
