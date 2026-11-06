@@ -4071,3 +4071,380 @@ item is written strictly to its source.
   - "published and not yet released";
   - the holder's read and gone-holder test;
   - the mapping's row list in one mesh-dataflow helper over the plan's rows.
+
+## The revisions of 14b9a757
+
+The record of the unit whose work list is "Answered in the documents (2026-11-06, the coordinator, on this part's
+record)", "Review of 55b9cbad against the requirement lines" (W1–W13) and, replacing W1–W3, W9 and the share and layout
+items, "The root cause of the copies, and the revised work list" (R-1 to R-10, at mesh 56ede97e).
+- It starts from mesh 14b9a757 and metal-microbench d329555a, with the document text of 1a2dc4fd, 14b9a757 and
+  56ede97e.
+- Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every sub-agent)".
+- **The interface came first.** The coordinating implementer fixed it and committed it (31ee5d4a, 11b6453b, later notes
+  ea330a9f, 08997c49, 0a92cdd6) across rdma/mesh-collective.h, mesh.h, mesh-holders.h, mesh-bridge.h, mesh-map.h,
+  mesh-call.h, mesh-metal.h and mesh.py's mirrors.
+- **Five sub-agents then worked on disjoint files:**
+  - C: rdma/mesh-collective.c;
+  - D1: rdma/mesh-flow.c;
+  - D2: rdma/mesh-records.c, mesh-dataflow.c, mesh-link.c, mesh-stat.c, mesh-call.c;
+  - T: rdma/mesh_compile.py, mesh-torch.mm, mesh.py;
+  - E: metal-microbench tools/e2b_replay.m, metal_recording.m and .h, and mesh rdma/mesh-metal.m.
+- The coordinating implementer reviewed each commit as it landed. It sent D2 one finding (a kept region's view at
+  adoption), fixed in a172596f. It took the merges and notes the sub-agents' reports named: 78557dca, 08997c49,
+  0a92cdd6, c5e37153 and metal-microbench 9823303f.
+- Nothing was run but the compilers, `python3 -m py_compile` and the four incremental builds.
+
+### Done
+
+**R-1. The transfer descriptor is a flattened view** ("A transfer's source and destination are each a view (value,
+offset, sizes, strides). The compilation flattens each into its list of (row, offset, bytes) blocks, adjacent blocks
+merged ... The bridge's instructions are those blocks").
+- **The interface (31ee5d4a):**
+  - struct mesh_strided {offset, element, dims, size[8], stride[8]}, in bytes and C order;
+  - struct mesh_declared {source, destination, identity, kind, value, padding, from, to}, with `first` and `bytes`
+    gone;
+  - struct mesh_hop `offset`, a hop moving [page × pgsz + offset, + bytes);
+  - struct mesh_share and struct mesh_function `share`/`shares` gone (64 bytes);
+  - each range's words named by its declared transfer (struct mesh_state `transfers`, mesh_transfer_at), with
+    mesh_host_publish and mesh_host_arrived taking (plan, transfer) and mesh-metal.h's prepares taking the transfer;
+  - MESH_VERSION 119.
+- **The planner (C, 5eeee1f9):**
+  - Each view is tested at the plan (plan_view, plan_alike) and flattened in C order with adjacent extents merged
+    (plan_extents; Ross, Miller and Gropp, as PB R1 cites).
+  - Each range's instructions are the common refinement of the source's and every destination's extents cut at
+    their values' block boundaries, and of the range's own bytes cut at Q (plan_instructions, mesh_graph_grid_cut).
+  - The fill, the template, the schedule and the walk count instructions; each hop carries its frame, `offset` and
+    `bytes`.
+  - The frames' items are the sets of ranges covering a block whole, ordered by PO-1 generalized to sets (plan_sets,
+    plan_before). A block holding uncovered bytes stays its value's whole-life item, and a MESH_INVARIANT source is
+    one copy, every copy's sends naming it ("A frame's item lives from the first write to the last read over every
+    value naming it, with C3.3's lag test").
+  - One struct mesh_publication per declared transfer is written before `published`; no row publication is written.
+  - struct mesh_share's handling and its EINVALs are gone, as are "no two ranges at this node share a block of it",
+    "MESH_EXECUTION and wire" and the lag-k rule ("Ranges may share a block where their bytes are disjoint"; "Any value
+    a transfer names is sent from its own pages, whatever its copies").
+- **The bridge (D1, 80872890):** each record's span is at its hop's offset in its page.
+- **The torch path (T, f2a1efd1, 70b35eb7, f0523b8d):**
+  - each declared transfer's `from_`/`to` is torch's offset, sizes and strides × itemsize, with dims of size 1
+    dropped and nested ones merged (torch 2.14.0 torch/_prims/__init__.py collapse_view's rule), every device's places
+    computed alike at every rank;
+  - `_laid`, `_claim`, the padded layout (`_form`, `_grain`, `_size`), `_sent`/`_run_of`/`_within`, `_buffer`,
+    `_halo`'s decision, `ir.fallbacks`, `ir.shared`, `ir.share` and mesh.Share go;
+  - an AllGather's own part and a halo window's middle are written in place by their producer (`_inside`);
+  - a range sent from a parameter is published once after its load;
+  - mesh-torch.mm publishes by (plan, transfer).
+
+  copy_ calls went from 5 to 2. The two left are a no-out-variant operator's one copy (appendix item 7, "What stays")
+  and the parameters' one load (V4). Every torch.cat left is in a comment.
+- **e2b (E, a422854f, 81f1c08f):**
+  - each route's `from` = `to` = {0, the operand's bytes, dims 0};
+  - the prepares are by the declared transfer's index (`productions`, `consumptions`);
+  - mesh-metal.m reads entry `transfer` with no run-time test of the plan's facts (K2).
+
+**The answers built with R-1** ("Answered in the documents (2026-11-06)").
+- **Every member of a view plans on the view's map** (A7, corrected: "The map a view is created from is the
+  sequencer's, and the view's first message carries it ... Every member plans on those records").
+  - The interface: hdr `view_map`, `view`, `view_off`, `view_nodes`; mesh-map.h's area and mesh_view_records; struct
+    mesh_group_view `records`; plan_stale by the view.
+  - D2 (a172596f, 8de3c86e, 1acf8b31):
+    - the sequencer's VIEW carries its map's records, and view_install stores them under `view_map`, then calls
+      plan_stale;
+    - map_put and map_adopt end no plan;
+    - at adoption no view is installed (the coordinating implementer's finding: "A bridge started again is a new
+      process");
+    - mesh_nodes_read reads the view's records, its `serial` the view's identifier, ESTALE before the first view;
+    - every map index a plan holds is a place among the view's records (view_index_of);
+    - the start's ESTALE is by hdr `view`.
+  - D1 (80872890): the ports' cancellations and plan_stale compare with hdr `view`, and the peer's index is its place
+    among the view's records. The cables stay the bridge's own map's.
+- **Values sent from their own pages whatever their copies:** the interface and C, as above.
+  - An invariant is one copy, its word raised once (mesh_host_publish with UINT64_MAX − 1, T's LOADED).
+  - A lag-k source takes the plan's u copies, its host order declared in the dependences (mesh-collective.h). T found
+    no reachable case (the stops).
+- **Ranges sharing a block by disjoint bytes, with offsets in instructions:** R-1, as above.
+- **A share's one item with its lag:** replaced by R-1's frame items.
+- **mesh-metal.m's waiter with e2b:** R-7, below.
+
+**R-2. Several outputs' out variants** (W4; "one `out` per result"). T (f2a1efd1): an operator returning k tensors
+runs its out variant, each result a value of its own. This rests on torch 2.14.0 native_functions.yaml ("autogen:
+native_layer_norm.out"), torchgen's `out{i}` naming and `out` tag, and torch/_library/_out_variant.py's matching.
+
+**R-3. Publication read as RCU's publish-subscribe** (W5; "every field of the published operand is read through the
+acquired publication, never before it").
+- The interface (31ee5d4a): mesh_algo_standing; plan_from acquires first, then reads `plans`.
+- D1: plans_walk acquires, announces, fences and reads the operand again before `plans`, `table`, `nodes` and
+  `adjacent`; place_at takes the walk's `plans`; held_clear reads after mesh_algo_unreleased.
+- D2: plan_here uses mesh_algo_standing after mesh_algo_open, and mesh_holding_retained reads `plans` after the acquire.
+
+**R-4. Instantiated once** (W6; "each execution's work becomes a straight-line sequence of its kernel calls and
+publishes, with no walk of the IR and no test of a make()-time fact"). T (f2a1efd1, 70b35eb7): each compiled function
+is instantiated once a copy into straight-line steps (`_instantiate`, over mesh_graph.forward), with views of constants
+evaluated at make(). W6's branches (2156, 2598, 2605, 2606, 2635) are make()-time choices.
+
+**R-5. The alias flush where a frame changes virtual name** ("goes on the barrier between a write under one name and a
+read under another, and on no other").
+- The interface: struct mesh_value `shares`, the plan's statement.
+- E (a422854f, bfe9b4b9):
+  - each placement carries its value's `shares`;
+  - replay: takes each shared value's handover, the first command of the level after its last level, from
+    MetalPrepareDataflow's own walk, read by index;
+  - the flush (MTL4VisibilityOptionDevice | MTL4VisibilityOptionResourceAlias) goes on that barrier alone: an
+    intra-pass barrier between two executes, a producer barrier where a range ends on it, or after the later pass at a
+    cut;
+  - every other barrier is Device alone.
+
+  An indirect command's `setBarrier` takes no visibility (MTLIndirectCommandEncoder.h:102), so the flush is the
+  encoder's barrier at the same level boundary (MTL4CommandEncoder.h, `barrierAfterEncoderStages:` and
+  `barrierAfterStages:beforeQueueStages:`).
+
+**R-6. The bridge runs A9's self-timed lists** (W8; "It scans no table of plans").
+- The interface: struct mesh_algo `nodes` and `adjacent`, and mesh_algo_adjacent.
+- C (5eeee1f9): the places with an entry toward each map index, mesh_graph_rows keyed by map index, placed in the table's
+  item and written before `published`.
+- D1 (80872890): lane_take, link_run's cancellation loop and busy test, the walk's ending pass and link_close visit only
+  the places mesh_algo_adjacent gives for the peer's index, and plans_walk loads only those.
+
+**R-7. Every wait ends at MESH_PLATFORM_NS without progress, the first ETIMEDOUT ending the run** (W10).
+- The interface: mesh_plan's `deadline`, and mesh_transfers_start without one.
+- C: plan_released waits until the caller's deadline.
+- D2 (8de3c86e): each of the start's waits ends MESH_PLATFORM_NS after the last rise of its count.
+- T (f2a1efd1):
+  - make()'s retirement and mesh_plan share one deadline, taken after the compilation;
+  - `_arrived` and the inputs' wait end without a rise of their count;
+  - after the first ETIMEDOUT every later run() and inputs() raises at once.
+- E:
+  - step_wait waits for the step event's next value, MESH_PLATFORM_NS each time, with no multiple of units;
+    `platform_bound`, `end_units` and `holds` go;
+  - the waiter (mesh-metal.m, 81f1c08f) restarts its bound at each rise of the count it reads;
+  - after the first ETIMEDOUT no later wait runs;
+  - mesh_plan takes now + MESH_PLATFORM_NS.
+
+**R-8. One writer a word** (W11; "the program writes `retired`, the bridge writes only `released`, and a gone holder is
+read from the heartbeat's words").
+- The interface: mesh_algo_open false once released; mesh-holders.h mesh_algo_holder.
+- D2 (a172596f, 1acf8b31, 8de3c86e):
+  - clients_turn, clients_gone and region_adopt retire nothing;
+  - a gone holder raises hdr `plans` once;
+  - mesh_retired_release releases a retired operand or one whose holder is gone.
+- D1: a plan stands where its operand is open and its holder holds the region (plan_stands, in a walk: one
+  proc_pidinfo a walk).
+
+**R-9. Names** (W12). T: `slots` and `_claim` are gone. The coordinating implementer, on D1's finding (78557dca),
+renamed mesh-flow.c's inherited `slot_set`, `slot_position` and `slot` to `position_set`, `position_index` and
+`record_of` (the operator's "no 'lease', 'claim' or 'slot' from old code without the canonical structure and
+citation").
+
+**R-10. The duplicates** (W13).
+- "Published and not yet released" is mesh_algo_unreleased, used by C, D1 and D2 at W13's three sites.
+- The holder's read and the gone-holder test are mesh_algo_holder and mesh_holds at every site: clients_turn,
+  clients_gone, region_adopt, mesh-stat, the release and plan_stands.
+- The mapping's row list is mesh_view_values, defined by D2 and used by T's `_mapped` and E's mapping.
+- From the reports:
+  - the seqlock reader's test, written twice over `view_map`, is one form over its sequence word (mesh_seqlock_whole,
+    78557dca);
+  - C's supplied-word, phase-group and count-word arithmetic is one helper each.
+
+### Found already done
+
+- mesh_plan wrote neither `retired` nor `released` (C), and mesh-flow.c wrote no `retired` (D1).
+- mesh-call.c needed no change (D2). mesh-graph.h and mesh-graph.c needed none (C): mesh_graph_rows and
+  mesh_graph_grid_cut served.
+
+### Decisions taken where the documents are silent (each the named implementer's, with its reason)
+
+The coordinating implementer's (the interface):
+- **The view's structure and name.** struct mesh_strided, offsets and strides in bytes and C order (the order torch's
+  copy_ matches two tensors' elements).
+  - It is named for torch's strided layout, since struct mesh_view already names the mapping.
+  - Eight dims after coalescing, a compile-time shape.
+  - `bytes` goes, the views stating it.
+- **Both ends' views are every rank's.** A multicast's instructions must be the same at its source, its relays and its
+  destinations, so every rank computes them from every end's view (R-1: "Every member of a view plans on the view's map
+  ..., so both ends' blocks agree by construction"; Schneider 1990). The source view is repeated in every transfer of
+  its range, tested alike.
+- **The instructions are the common refinement**, each one extent within one block at every end, as an MSCCL-IR step
+  names one offset and one count.
+  - The range's own bytes are also cut at Q, so a relay holds the range in its bytes' order in ceil(B/Q) blocks.
+  - That costs a cut only where a source and a destination share one misalignment.
+- **A frame's item is the set of ranges covering a block whole**, ordered by D_XY = max D_ab and E_Y = max E_b
+  (transitive through b's write). A block holding uncovered bytes lives the program's whole life, as `uncovered` did.
+- **Invariant and input sources.**
+  - An invariant named by a transfer keeps one copy, its word raised once with execution UINT64_MAX − 1.
+  - A lag-k source takes the plan's u copies, its host order in the dependences: u must be every rank's, and a value's
+    lag is one node's.
+  - A destination is MESH_EXECUTION of lag 0, a landing writing its bytes every execution (C3.7).
+  - Every value a transfer names is in the window whatever its `wire`.
+- **A range's words by its declared transfer** (struct mesh_state `transfers`). Ranges sharing a block begin in one row,
+  so a row names none of them alone; the declared transfer's index is the IR's own name.
+- **R-6's list** is compressed rows by map index in struct mesh_algo `nodes` and `adjacent`.
+- **R-8:**
+  - mesh_algo_open is false once `released` is `published`, since a gone holder's operand is never retired now;
+  - mesh_algo_holder is the one holder read;
+  - the parent raises `plans` (a count) for a gone holder.
+- **R-7:** mesh_plan takes the preparation's one deadline; mesh_transfers_start takes none.
+- **A7:**
+  - a plan's serial is the installed view's identifier;
+  - a node's own map move ends no plan ("A plan then stands while its view does");
+  - at adoption no view is installed and plan_stale runs (the finding to D2).
+- **R-5's interface stays `shares`.** The flush goes on the barrier after a sharing value's last access, and the next
+  name follows by the allocator's order, so the barrier's place needs no partner (W7 had said "The plan names each
+  share's partner").
+- **mesh_host_publish and mesh_host_arrived test no entry** (08997c49, on C's finding). The caller names only a transfer
+  its node is an end of, which its compilation knows ("Compile-time, never runtime checks").
+- **The seqlock test is one form** (mesh_seqlock_whole), and mesh-flow.c's 'slot' names are renamed (78557dca, on D1's
+  findings).
+- **The torch rule's inputs.** rdma/mesh-torch.mk no longer lists mesh-section.h (c5e37153, on T's finding), since
+  mesh-torch.mm no longer includes it ("A dependency is remade only when its own inputs change").
+- **e2b's refusal of a routed host input stays, its reason restated** (9823303f, on E's finding). The plan call's rule
+  it cited is withdrawn, but e2b's dependences are each stage's dataflow (tools/prepare_e2b.py), which names no host
+  write, and no prepared manifest routes such an operand.
+- MESH_VERSION 119.
+
+C's:
+- **The fill and the weights.** The fill cuts instructions by count, one unit each, and each instruction weighs what a
+  page weighed in the schedule and times. `down[d]` in the flow solve is B, where it was pages × Q.
+- **The transfer table** lies after the supplied words and before the status, inside the GPU transport's wrap.
+- **Tests kept and not added.** A named value with `state` 1 stays EINVAL. Overlapping destination bytes are not
+  refused, since the header lists no such EINVAL.
+- **Item order.** Blocks of one set of ranges are one item a copy, their elements in (value, block) order.
+
+D1's:
+- **The view test moved to the walk.** The walk compares the operand's view (its plan 0's `serial`) with the installed
+  view once, before using the index, and link_prepare's per-plan test goes as redundant, with no `refused[p]` written.
+- **The announcement is once a walk.** Its re-read and clear are once a walk; plan_load's own re-read and EAGAIN go.
+- **One load an operand.** An operand's plans are loaded once, since `closed` only rises.
+- **`holding`**, so a pass stops reading an operand's list once no flow of it is held.
+- **No reload after a loss.** link_close keeps the operand's generation, so the same child never reloads its plans.
+- **One seqlock reader** (records_read) for the map and the view.
+
+D2's:
+- **ESTALE before the first view** in mesh_nodes_read (A7's Initial View Event).
+- **Plans' map indices are the view's records**, in arrivals_apply, orders_announce, counts_tell, orders_submit and
+  orders_deliver. The island's tree stays on the map.
+- **One store of the counter.** `installed.view` is merged into hdr `view`, one store of the bridge's counter.
+- **One raise a gone holder** (`gone_seen`), so the parent does not spin.
+- **The bridge's own-pid test goes.**
+- **The VIEW's shape test** extends to its records (an exact byte count, at most MESH_MAP_ROOM). Its size is checked
+  against MESH_TOPOLOGY_MESSAGE_BYTES by a _Static_assert.
+
+T's:
+- **mesh.Publication's mirror** (its fields before `targets`, 64 bytes), so the host's progress test reads the count
+  word.
+- **Producers that write an own part in place:**
+  - an out variant;
+  - one result of a multi-output operator;
+  - a no-out-variant operator, its one copy going there;
+  - a ReduceScatter sum.
+- **No-out-variant results** get placed pages only where a collective reads them.
+- **The deadline after the compilation.** make() compiles first, then takes its deadline.
+- **ETIMEDOUT ends the program's run.**
+- **_forms and the runner's instantiation** are on mesh_graph.forward, on the C9 hook's remarks on f2a1efd1.
+
+E's:
+- **Placements in (offset, stride).** The recorder's placements take (offset, stride), mesh_view_values' own statement
+  of where copies lie.
+- **A handover in each capture.** An earlier capture's value bound by a later capture hands over in each capture that
+  binds it.
+- **The profile** skips publishing commands, so a flush right after a skipped command is not issued; the profile's
+  values are read by nothing.
+- **A wait's bound** starts at its first read of the count.
+
+### Where the work stopped
+
+T refuses three cases at compile time, naming them. In each, a part must lie in another value's bytes, and R-1 removes
+the copy and the share that put it there.
+- **Every AllToAll.** A member's own piece lies in the result only by a copy or a share.
+  - R-1: "That removes `_laid`, `_claim`, `ir.fallbacks`, struct mesh_share with its tests on both sides, the padded
+    layout and AllToAll's buffer"; W2: "Each piece must land at its byte ranges in the result".
+  - An operand strided so its own piece sat in the result would overlap the parts that arrivals write.
+- **An AllGather's own part** whose producer writes no place of its own: a view an operator makes (`aten.view` after mm),
+  a slice, or a collective's result other than ReduceScatter's.
+- **A halo window's middle that cannot be written in place**, including a convolution over the sharded program input.
+  Its operand is a slice of a placeholder that is whole at every node, so halos landing there write the same bytes
+  twice. The brief's "an input is written there by its host producer" has no form against that fact. 2-D spatial halos
+  stop here too.
+
+Inputs and parameters as transfer sources are reached only through the halo stop. So no HOST_LAG edges are written, and
+the publish-once path is unreachable.
+
+### Where the documents are wrong, or contradict the code's facts
+
+- **Rows alias at block granularity; views are byte-granular.**
+  - R-1 and PB R2 (2026-11-06): "Two values' rows may name one frame, the page table's sharing ... with no record and
+    no rules of its own".
+  - The page table binds a row to a frame, a block, so two values can name one frame only where their bytes are whole
+    blocks at the same block offsets in both.
+  - An own piece or part at another offset has no frame to share. With the share record and the copies gone, the
+    documents give it no form: T's stops.
+- **A plan stands while its view does, and a link loss is not a view's end.**
+  - A7 (corrected): "A plan then stands while its view does, and its view while the sequencer's map does".
+  - The code's fact (D1): a port child spawned after a loss, before the next view is installed, finds the plans'
+    serial equal to the view and loads them with cursors at execution 0. It cannot know which executions landed.
+  - link_prepare's SW note relied on "the loss having moved the map's serial ... and refuses it, ESTALE". D1's
+    link_close covers the same child; a newly spawned one is open.
+- **A view's identifier can repeat** (D2): after every bridge of the island restarts, every counter is 0 again. A plan of
+  an earlier process's view with the same identifier, unretired by its program, would stand again. The documents are
+  silent.
+- **The header's own notes, corrected as found** (ea330a9f, 08997c49, 0a92cdd6):
+  - mesh_map_whole read `map` alone;
+  - the release, retirement and map-reader notes still named the bridge as a retirer and the map serial;
+  - mesh_host_publish's "Nothing where this node is not the transfer's source" contradicted "no run-time test";
+  - the waiter's note still had the per-value bound.
+
+### Open
+
+- **The C9 hook's remarks on bfe9b4b9.** MetalPrepareDataflow's level walk predates this unit and is outside the graph
+  module. design/disjoint-pages-revision-coordination.md:953 records that moving it needs libmetal_recording to link
+  libmesh. replay: now only reads that walk's facts by index (E).
+- **A layout change for a contiguous consumer.** A part written in place is a strided view, so a consumer needing it
+  contiguous fails in torch at make(). PB R1's operator for a layout change ("an operator of the consumer's own, run as
+  its out variant") is never inserted (T).
+- **Zeros at edge partitions.** The zeros in an untargeted arrival slot and the window's fill write the same bytes twice,
+  as before this unit (T).
+- **A program before the first view.** mesh_nodes_read is ESTALE before the first view, so a program started before its
+  bridge installs one fails at construction and plans again (T, D2).
+- **e2b's routed host inputs** wait on its dataflow naming the host's write (the decision above).
+- **Measurements for when runs are authorized:**
+  - instruction counts of strided views;
+  - the walk's proc_pidinfo;
+  - aliased virtual addresses across torch's encoders, as before.
+
+### Commits
+
+- mesh:
+  - the coordinating implementer's: 31ee5d4a and 11b6453b (the interface), ea330a9f, 08997c49 and 0a92cdd6 (notes),
+    78557dca (mesh_seqlock_whole; the 'slot' names), c5e37153 (mesh-torch.mk), and this record;
+  - C: 5eeee1f9;
+  - D1: 80872890;
+  - D2: 8de3c86e, a15b5c8f, 1acf8b31, a172596f;
+  - T: f0523b8d, f2a1efd1, 70b35eb7;
+  - E: 81f1c08f.
+- metal-microbench: E's a422854f and bfe9b4b9; the coordinating implementer's 9823303f.
+
+### Integration
+
+Every build was incremental. HiGHS and the LiteRT/Dawn SDK were not rebuilt.
+- **`make -C rdma`:** exit 0, no warning.
+  - The first run after C, D1 and D2 took 2.5 s and remade mesh-flow, mesh-heartbeat (its mesh.h changed), mesh-stat
+    and libmesh.dylib.
+  - The run at the end remade nothing.
+  - The codesign line's "Mesh Bridge: no identity found" is the rule's fallback to an ad-hoc signature, as before.
+- **`make -C rdma native-audit`:** exit 0, no warning, 0.5 s, mesh-flow.s, mesh-call.s and mesh-dataflow.s remade. The
+  run at the end: nothing to be done.
+- **`make -C rdma -f mesh-torch.mk TORCH=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch`:** exit 0, no
+  warning, 1.0 s. libmesh-torch.dylib was remade (mesh-torch.mm and mesh-torch.mk changed); the run at the end: up to
+  date.
+- **`make .build/e2b_replay`:** exit 0, no warning, 1.7 s. libmetal_recording, libmesh_metal and e2b_replay were remade;
+  the run at the end remade nothing.
+- **Compiled alone** with `-Wall -Wextra -Werror`, exit 0:
+  - mesh-collective.c, mesh-flow.c, mesh-records.c, mesh-dataflow.c, mesh-link.c, mesh-stat.c and mesh-call.c;
+  - mesh-graph.c, with HiGHS's include path as the Makefile gives it;
+  - the failport lifecycle files, unchanged since 14b9a757 (mesh-heartbeat.c, mesh-children.c, mesh-child.c,
+    mesh-lanes.c);
+  - mesh-ports.c and mesh-events.c;
+  - mesh-metal.m;
+  - mesh-torch.mm with `-std=c++20`;
+  - metal_recording.m with metal_native.m, and tools/e2b_replay.m.
+- **Python:** `python3 -m py_compile` passes rdma/mesh_compile.py, mesh.py and mesh_graph.py (T: pyflakes clean).
+- **Nothing was run.** No view, instruction, frame item, transfer entry, adjacency list, wait, release, flush or
+  instantiated step here has been exercised.
