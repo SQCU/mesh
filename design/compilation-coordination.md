@@ -3116,11 +3116,20 @@ points 1, 2 and 4, and are superseded with them.
        partitioning to serialization, as an operand of its own", its type R3's task graph, R4's kinds, and the
        placement and weighting operands. A9: the serialized operand, per node, in MSCCL-IR's shape. With the program
        exported whole (point 1), there is one IR of the program and one serialized operand of it.
-     - **How the bridge finds a program's plans** is A9 and R1. "The bridge consumes the lists", and "every address is
-       a constant in the plan" (C3.3). R1's method is U-Net's and VIA's queues of descriptors over registered memory,
-       which the interface knows from the endpoint's creation; it does not search for them. So the serialized
-       operand's place is a constant the region's layout names once, as the bridge's own pages are "laid out once with
-       the region" (disjoint-pages A3). Nothing walks heads to find it.
+     - **How the bridge finds a program's plans** is A9 and R1.
+       - What the bridge runs is the self-timed schedule (A9, "What the bridge runs", 2026-11-05). It is Lee and Ha's
+         strategy as BSL states it: "Each processor executes the actors assigned to it in the order specified at
+         compile time. Before firing an actor, a processor waits for the data needed by that actor to become
+         available". Its serialized form is MSCCL-IR's.
+       - Every address in it is fixed at compile time, as ExecuTorch's memory planning "assigns a memory ID to each
+         tensor and an offset in the buffer" and as CUDA graph trees keep "memory is always in the same location as it
+         were recorded".
+       - R1's method is U-Net's and VIA's queues of descriptors over registered memory, which the interface knows from
+         the endpoint's creation; it does not search for them.
+       - So the serialized operand's place is a constant the region's layout names once, as the bridge's own pages are
+         "laid out once with the region" (disjoint-pages A3). Nothing walks heads to find it.
+       - The operator, of "The bridge consumes the lists" and "every address is a constant in the plan" stated without
+         these: "sounds idiomatic. citations? literature? algorithms? data structures?"
 6. **Every value one run of pages (PB R2 and R4; DP C3.3).**
    - Wrong against: the operator's typing, "function B requires set of pages operand_b to be complete but not
      contiguous" and "domain:Async,noncontiguous,incomplete"; and the turn "collective functions only 'know' about

@@ -479,6 +479,50 @@ statement, or a fact of the code.
     compilation. For a delegate's program these are the recorder's command buffers, as now.
 - The bridge consumes the lists and the GPU runs the existing kernels. Nothing else is serialized but each entry's set
   mark (appendix item 5).
+- (2026-11-05.) **What the bridge runs: the self-timed schedule.**
+  > you can't convince me that we have complete fxgrtaph capture and an equivalent data structure to the cudagraph but
+  > then 'uhhh we have uhhh we have uhhh... list???'
+  > grounding to the literature is empahtically and very deliberately about preventing the inlining and
+  > implementation of bespoke idiomatic code that is not needed when there is some complete implementation or
+  > specification in the literatuer we cna *exactly* reuse, whether by writing strictly or importing...
+  > choose anything but choose something. i don't want for 'what the thing we actually run :)' to be a vague
+  > idiomatic inference rather than a specific citation, a specific claim, a specific anything???
+  - **The strategy** is E. A. Lee and S. Ha's self-timed strategy (Scheduling strategies for multiprocessor real-time
+    DSP, Globecom 1989), as BSL states it. Scheduling is "assigning actors in the DFG to processors, ordering execution
+    of these actors on each processor, and determining when each actor fires".
+    - Self-timed keeps the first two from compile time and leaves the third to run time: "it is best to discard the
+      exact timing information from the fully static schedule, but still retain the processor assignment and actor
+      ordering specified by the fully static schedule. This results in the self-timed scheduling strategy of [17].
+      Each processor executes the actors assigned to it in the order specified at compile time. Before firing an
+      actor, a processor waits for the data needed by that actor to become available" (BSL §2; [17] is Lee and Ha).
+    - BSL's condition for choosing it is this program's: "good estimates for the execution times of actors can be
+      obtained", which here are A3's weighting operand.
+  - **Its terms here:**
+    - The graph is A8's task graph, the program's whole graph (A1, A10), as a CUDA graph is the whole of its captured
+      work.
+    - Its processors are the sends of each adjacent node and direction, R5's cables.
+    - Its assignment is R5's routing.
+    - Its order on each processor is R5's, a subsequence of MSCCLang's heap-built topological order by bottom level.
+      Item 5's sets are the exception: their order is one permutation per execution, Threefry-drawn Fisher–Yates, the
+      same at both ends.
+    - Its firing is each entry's wait for its dependency word, C3's counted completion: BSL's "run-time
+      synchronization when they communicate data".
+  - **Its serialized form** is MSCCL-IR's, above: for each processor "a list of instructions that are sequentially
+    executed", each carrying its dependency ("a dep modifier"). The list is the self-timed order. The graph's edges are
+    the entries' dependency words, so nothing of the graph is lost.
+  - **Every address in it is fixed at compile time**, as memory planning fixes them:
+    - "a memory planning pass is run before the graph is saved to flatbuffer. This assigns a memory ID to each tensor
+      and an offset in the buffer, marking where storage for the tensor starts" (ExecuTorch, "Concepts");
+    - CUDA graph trees "add invariants to ensure that memory is always in the same location as it were recorded"
+      (PyTorch v2.11.0, docs, "CUDAGraph Trees").
+    So the bridge reads the serialized operand at a place its compilation fixed, and searches for nothing.
+  - **The operator's R3 turn**, "both of these relationships do not imply total orderings or local orderings
+    determined aot" (design/plan-to-bridge-change-request.md R3): dependencies and placement imply no order. The order
+    on each processor is the scheduler's choice ("it is required to choose nad use a scheduler", A7; R5), made at
+    compile time, as the self-timed strategy makes it.
+  - **What runs is written strictly to these sources:** the schedule to Lee and Ha's self-timed strategy, the
+    serialization to MSCCL-IR, the sets' order to Fisher–Yates over Threefry, and the firing to C3's counted
+    completion. Nothing of the bridge's execution is the code's own invention.
 
 ### A10. A program's calls are a dataflow graph, analysed at compile time
 
