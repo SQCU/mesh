@@ -3811,7 +3811,13 @@ def program(block, *example_inputs):
                                       'values by its plan\'s executions, the block\'s inputs by the block\'s')
         captured = _captured(context, irs, compiled, gm, of, constants, holders) if replayed else None
         own = [[] for _ in irs]
-        # metal_recording.h MetalRecorderOperand, for a value no tensor of its call's result is over
+        # M. Lam, PLDI 1988, p. 322: "The lifetime of a register variable is defined as the duration between the first
+        # assignment into the variable and its last use."  ExecuTorch exir/memory_planning.py:348–354: `if node.op ==
+        # "placeholder": start = 0`.  torch/fx/graph.py:1498–1502: `output_node = next(iter(reversed(self.nodes)))`.
+        # TensorFlow Lite arena_planner.cc:334–335: "Note that graph outputs will never be scheduled for deallocation."
+        # A value's interval from its first write to its last read (metal_recording.h MetalRecorderOperand); a call's
+        # input's from the capture's first command, its first command reading it, and a call's result's to the capture's
+        # last, a tensor of the result being over it
         buffers = {owned: buffer for buffer, owned in captured['owners'].items()} if captured else {}
         for _, k, handle, result, levels, values, *_ in captured['calls'] if captured else ():
             results = {captured['owners'].get(leaf.untyped_storage().data_ptr()) for leaf in pytree.tree_leaves(result)
@@ -3819,9 +3825,12 @@ def program(block, *example_inputs):
             for v, value in enumerate(irs[k].values) if handle is not None else ():
                 if value.kind == mesh.EXECUTION and not value.lag:
                     first, last = mesh.U(), mesh.U()
-                    if (k, v) not in results and (k, v) in buffers and captured['lib'].MetalRecorderOperand(
-                            handle, buffers[(k, v)], C.byref(first), C.byref(last)):
-                        value.begin, value.end = first.value, last.value
+                    bound = captured['lib'].MetalRecorderOperand(handle, buffers[(k, v)], C.byref(first),
+                                                                 C.byref(last)) if (k, v) in buffers else 0
+                    if (k, v) in results:
+                        value.begin, value.end = first.value if bound & 2 else 0, max(levels, 1) - 1
+                    elif bound & 4:
+                        value.begin, value.end = first.value if bound & 2 else 0, last.value
                     else:
                         value.begin, value.end = 0, max(levels, 1) - 1
             own[k] = values
