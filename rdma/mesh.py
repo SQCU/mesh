@@ -81,13 +81,10 @@ class Dependence(C.Structure):
     _fields_ = [('from', U), ('to', U), ('lag', U), ('kinds', U)]
 
 
-# M. Lam, Software Pipelining: An Effective Scheduling Technique for VLIW Machines, PLDI 1988, §1: "In software
-# pipelining, iterations of a loop in a source program are continuously initiated at constant intervals without having
-# to wait for preceding iterations to complete." (`lead`)
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
                 ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
-                ('lead', U), ('outstanding', Q), ('plan', Q)]
+                ('padding', U), ('outstanding', Q), ('plan', Q)]
 
 
 class View(C.Structure):

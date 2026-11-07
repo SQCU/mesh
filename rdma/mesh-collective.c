@@ -266,7 +266,7 @@ struct plan {
   const struct mesh_dependence *dependence;
   uint32_t dependences;
   struct plan_demand *demand;             /* the demands, by their first declared transfer (GO5) */
-  uint32_t demands,n,self,copies,start_lead; /* copies: u (plan_unroll); start_lead: struct mesh_function `lead` */
+  uint32_t demands,n,self,copies,start_lead; /* copies: u (plan_unroll); start_lead: u - 1 (plan_function) */
   struct mesh_view_id view;               /* JGroups ViewId.java: "Lamport time of the view", "Address of the
                                              creator of this view" */
   uint32_t *of;                           /* of[i]: declared[i]'s demand, p->demand[of[i]] */
@@ -936,10 +936,9 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
    defi[n]ed as the duration between the f[i]rst assignment into the variable and it[s] last use."  MPI 4.1 §3.7: "The
    receiver should not access any part of the receive buffer after a nonblocking receive operation is called, until the
    receive completes."  MPI 4.1 §3.9, MPI_START: "The request becomes active once the call is made."  A received copy
-   c's interval starts at the start of execution c - `lead` (M. Lam, PLDI 1988, §1: "In software pipelining, iterations
-   of a loop in a source program are continuously initiated at constant intervals without having to wait for preceding
-   iterations to complete.  That is, multiple iterations, in different stages of their computations, are in progress
-   simultaneously."). */
+   c's interval starts at the start of execution c - `start_lead`, u - 1 (design/torch-capture-change-request.md, 2:
+   S. S. Bhattacharyya, S. Sriram, E. A. Lee, 1997, (1): "start(v_i, k) ≥ end(v_j, k – delay((v_j, v_i)))", the
+   delay the plan's u copies). */
 static int plan_interval(const struct plan *plans,const struct plan_item *x,const uint64_t *operations,uint64_t *start,
                          uint64_t *end){
   if(x->kind!=PLAN_LOCAL && x->kind!=PLAN_ROUTED)return 0;
@@ -2309,7 +2308,7 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   if(!function->outstanding || function->outstanding>=UINT32_MAX)return ENOMEM;
   const uint32_t n=nodes->count;
   p->declared=declared;p->transfers=count;p->given=values;p->givens=given;p->weights=weights;
-  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;p->start_lead=function->lead;
+  p->dependence=dependence;p->dependences=dependences;p->outstanding=function->outstanding;
   struct plan_key *key=malloc(((size_t)count+1)*sizeof *key);
   uint32_t *root=NULL,*demand=NULL,*placed=malloc(((size_t)count+1)*sizeof *placed);
   size_t *trees=NULL;
@@ -2501,6 +2500,9 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
      14b9a757"): and, after the least lags, the frames' items here (plan_sets) */
   if((status=plan_trees(p)) || (status=plan_template(p,dependence,dependences)) || (status=plan_acyclic(p)) ||
      (status=plan_unroll(p)) || (status=plan_sets(p,m)))goto done;
+  /* design/torch-capture-change-request.md, 2: execution t's requests start once execution t - u has ended, at the
+     start of execution t - (u - 1) */
+  p->start_lead=p->copies-1;
   plan_walk(p);
   uint64_t entries;
   /* 2026-11-04, owner C: the receives past a 32-bit count (struct mesh_state `receives`) are ENOMEM, as every other

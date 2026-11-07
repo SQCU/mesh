@@ -2338,7 +2338,8 @@ class Replay(C.Structure):
 
 
 class Call(C.Structure):
-    _fields_ = [('replay', C.POINTER(Replay)), ('plan', mesh.Q), ('passes', mesh.Q), ('landed', C.c_void_p)]
+    _fields_ = [('replay', C.POINTER(Replay)), ('plan', mesh.Q), ('passes', mesh.Q), ('landed', C.c_void_p),
+                ('lead', mesh.Q)]
 
 
 class MetalValue(C.Structure):
@@ -2374,7 +2375,7 @@ def _recorder():
         lib.MetalRecorderReplay.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(Replay), C.c_char_p, C.c_size_t]
         lib.MetalRecorderRun.restype = C.c_int
         lib.MetalRecorderRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.U, C.POINTER(Call), mesh.U, mesh.Q,
-                                         mesh.Q, C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
+                                         C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalReplayDestroy.restype, lib.MetalReplayDestroy.argtypes = None, [C.POINTER(Replay)]
         metal.MTLCreateSystemDefaultDevice.restype = C.c_void_p
         RECORDER.append((lib, os.path.dirname(os.path.dirname(os.path.abspath(path))),
@@ -3247,7 +3248,9 @@ def _captured(context, irs, compiled, gm, of, constants, holders):
 # c at offset + c x section.pages x pgsz (mesh-collective.h mesh_view_values), and its own values after its function's
 # (`first`), then its replay built (MetalRecorderReplay) and its residency set on the recorder's queue
 # (MTL4CommandQueue.h addResidencySet:).  One struct MetalCall a call, its plan its function's
-def _replays(captured, functions, values, addresses, view, buffer, pgsz):
+# design/torch-capture-change-request.md, 2: each call's `lead` its plan's u copies (`states`, mesh.h struct mesh_state)
+# less one, the delay of its transfers' IPC edge in MetalRecorderRun's terms
+def _replays(captured, functions, states, values, addresses, view, buffer, pgsz):
     lib, recorder, error = captured['lib'], captured['recorder'], C.create_string_buffer(4096)
     queue, replays = OBJECT(recorder, _SEL(b'queue')), []
     for node, k, handle, _, _, own, *_ in captured['calls']:
@@ -3273,7 +3276,8 @@ def _replays(captured, functions, values, addresses, view, buffer, pgsz):
                                                                                          error.value.decode()))
         SET(queue, _SEL(b'addResidencySet:'), replay.residency)
         replays.append(replay)
-    calls = (Call * len(replays))(*[Call(C.pointer(replay) if replay is not None else None, functions[k].plan, 0, None)
+    calls = (Call * len(replays))(*[Call(C.pointer(replay) if replay is not None else None, functions[k].plan, 0, None,
+                                         states[k].copies - 1)
                                     for replay, (_, k, *_) in zip(replays, captured['calls'])])
     gpu = OBJECT(queue, _SEL(b'device'))
     allocators = (C.c_void_p * HOST_LAG)(*[OBJECT(gpu, _SEL(b'newCommandAllocator')) for _ in range(HOST_LAG)])
@@ -3311,7 +3315,7 @@ def _outputs(captured, copies, gm, constants, inputs):
 # and no step runs.  The error value of its start or of the recorder, raised
 def _replayed(context, replay, b):
     status = replay['lib'].MetalRecorderRun(replay['recorder'], replay['allocators'], HOST_LAG, replay['calls'],
-                                            len(replay['calls']), b, 0, replay['ended'], C.addressof(context), START,
+                                            len(replay['calls']), b, replay['ended'], C.addressof(context), START,
                                             STARTED, replay['error'], len(replay['error']))
     if status:
         raise OSError(status, 'execution %d of the program: %s' % (b, replay['error'].value.decode()))
@@ -3836,8 +3840,8 @@ def program(block, *example_inputs):
                 bound = [_bind(context, ir, values, at, buffer, state['mapping']) for ir, (_, _, values, _), at in
                          zip(irs, arrays, addresses)]
                 if captured:
-                    state['replay'] = _replays(captured, functions, [values for _, _, values, _ in arrays], addresses,
-                                               view, buffer, mesh.Header.from_address(context.M).pgsz)
+                    state['replay'] = _replays(captured, functions, views, [values for _, _, values, _ in arrays],
+                                               addresses, view, buffer, mesh.Header.from_address(context.M).pgsz)
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])

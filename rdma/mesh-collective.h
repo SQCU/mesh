@@ -527,13 +527,11 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    its tests go, and struct mesh_function's `share` and `shares` with it (64 bytes, as before 55b9cbad).  Two values'
    rows name one frame by the program's one allocation alone (the note before struct mesh_value).  What must stay:
    `outstanding` and `plan` as their notes state them
-   `lead`: execution t's start, the post of its receives, at the start of execution t - `lead` in this node's program
-   order (M. Lam, Software Pipelining: An Effective Scheduling Technique for VLIW Machines, PLDI 1988, §1: "In software
-   pipelining, iterations of a loop in a source program are continuously initiated at constant intervals without having
-   to wait for preceding iterations to complete.  That is, multiple iterations, in different stages of their
-   computations, are in progress simultaneously.") */
+   design/torch-capture-change-request.md, 2: `lead` goes (`padding` in its bytes); a transfer's IPC edge has its plan's
+   u copies as its delay (S. S. Bhattacharyya, S. Sriram, E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (1):
+   "start(v_i, k) ≥ end(v_j, k – delay((v_j, v_i)))"), which mesh_plan takes from its own u */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
-                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,lead;
+                       const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding,plan; };
 _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function,count)==32 &&
                offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56,
