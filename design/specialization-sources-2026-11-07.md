@@ -68,7 +68,7 @@ able during program execution is called poly.                                 2
 gram; in our example:
 ```
 
-`pebook.txt` L3210–3215, "Computing poly", p. 79:
+`pebook.txt` L3210–3215, "Computing poly", p. 80:
 
 ```text
 Computing poly
@@ -96,7 +96,7 @@ program point (pp, vs) is in poly, all specialized program points reachable from
 Figure 4.6: A simple specialization algorithm.
 ```
 
-`pebook.txt` L3339–3346, the infinite poly and the finite division:
+`pebook.txt` L3339–3346, the infinite poly and the finite division, p. 83:
 
 ```text
 and so forth ad nauseam. The problem is that poly becomes in nite:
