@@ -113,8 +113,7 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
 /* A source range's supplied word, from its first row's publication, which mesh_plan writes: `sends` 1, `targets[0]`
    {word: the region offset of its supplied word, count 1, stride 0} and `state` the plan's state section.  The
    offset is made relative to the transport's; the word lies inside the buffer, at 8.  Its one writer is the range's
-   producer, which writes it t + 1 after its last write of execution t (design/torch-capture-change-request.md, 5),
-   through the recorder's binding of the
+   producer, which writes it t + 1 after its last write of execution t, through the recorder's binding of the
    buffer at this offset.  EINVAL where the row names no source range (`sends` not 1), where its `state` is not the
    transport's `offset`, or where the word lies outside the buffer or is misaligned.  (2026-11-04, owner L: the
    context's `state`, where it was hdr `state`; design/compilation-coordination.md, "The region".)
