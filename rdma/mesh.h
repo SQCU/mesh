@@ -395,7 +395,8 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
      complete it as having been canceled."
    - `supplied`: `releases` uint64 words, release r this node's r-th source range in the plan's demand order.  Its
      one writer is the range's producer, which raises it to t + 1 after its last write in execution t (release): a
-     host producer stores t + 1 (mesh_host_publish), a GPU producer adds 1, its executions running in order (D9).  One
+     host producer stores t + 1 (mesh_host_publish), a GPU producer writes t + 1 by a 64-bit atomic max
+     (design/torch-capture-change-request.md, 5).  One
      word serves every execution; nothing cancels it.
    - `status`: one struct mesh_status, the GPU's alone: `behind` the later passes that found a field one behind,
      `ahead` those that found anything else, `first` the greatest ~t over them (0 none: the first failed execution is

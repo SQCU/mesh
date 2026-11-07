@@ -10,8 +10,9 @@
    (struct mesh_output_status, one a range and invocation) in sections laid out at the call (mesh_section_create).  Why:
    the areas and the cancel word are gone (mesh.h 109); the plan's state section is its own pages, placed by the plan
    (C3.2, C3.4); a receive's state is a 2-bit phase a copy and its range's count a copy (C3.7, D1); cancellations arrive
-   on the counts, and a stop is mesh_metal_waits_stop (C3.1); the recorder binds a supplied word itself and raises it by
-   one (D9); its restoring counter replaces the statuses (the contract, "Publications").  What must stay: the plan's
+   on the counts, and a stop is mesh_metal_waits_stop (C3.1); the recorder binds a supplied word itself and writes it
+   t + 1 (design/torch-capture-change-request.md, 5); its restoring counter replaces the statuses (the contract,
+   "Publications").  What must stay: the plan's
    words wrapped once, by address, with no copy; one input a received range and one supplied word a source range, as
    byte offsets in that one buffer; nothing here creates a section. */
 /* the plan's state section wrapped once for the GPU: `state` an MTLBuffer over its pages (no copy), `words` its struct
