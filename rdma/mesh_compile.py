@@ -2373,6 +2373,8 @@ def _recorder():
         lib.MetalRecorderCapture.argtypes = [C.c_void_p, ENCODE, C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalRecorderReplay.restype = C.c_int
         lib.MetalRecorderReplay.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(Replay), C.c_char_p, C.c_size_t]
+        lib.MetalRecorderOperand.restype = C.c_int
+        lib.MetalRecorderOperand.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(mesh.U), C.POINTER(mesh.U)]
         lib.MetalRecorderRun.restype = C.c_int
         lib.MetalRecorderRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.U, C.POINTER(Call), mesh.U, mesh.Q,
                                          C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
@@ -3809,10 +3811,21 @@ def program(block, *example_inputs):
                                       'values by its plan\'s executions, the block\'s inputs by the block\'s')
         captured = _captured(context, irs, compiled, gm, of, constants, holders) if replayed else None
         own = [[] for _ in irs]
-        for _, k, handle, _, levels, values, *_ in captured['calls'] if captured else ():
-            for value in irs[k].values if handle is not None else ():
+        # design/torch-capture-change-request.md, 7: "a captured buffer's interval runs from the level of the first
+        # recorded command that writes it to the level of the last that reads it" (metal_recording.h
+        # MetalRecorderOperand), for a value no tensor of its call's result is over
+        buffers = {owned: buffer for buffer, owned in captured['owners'].items()} if captured else {}
+        for _, k, handle, result, levels, values, *_ in captured['calls'] if captured else ():
+            results = {captured['owners'].get(leaf.untyped_storage().data_ptr()) for leaf in pytree.tree_leaves(result)
+                       if isinstance(leaf, torch.Tensor)}
+            for v, value in enumerate(irs[k].values) if handle is not None else ():
                 if value.kind == mesh.EXECUTION and not value.lag:
-                    value.begin, value.end = 0, max(levels, 1) - 1
+                    first, last = mesh.U(), mesh.U()
+                    if (k, v) not in results and (k, v) in buffers and captured['lib'].MetalRecorderOperand(
+                            handle, buffers[(k, v)], C.byref(first), C.byref(last)):
+                        value.begin, value.end = first.value, last.value
+                    else:
+                        value.begin, value.end = 0, max(levels, 1) - 1
             own[k] = values
         arrays = [((mesh.Declared * len(ir.declared))(*ir.declared), (mesh.Weight * len(ir.weights))(*ir.weights),
                    (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
