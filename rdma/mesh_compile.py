@@ -3811,9 +3811,7 @@ def program(block, *example_inputs):
                                       'values by its plan\'s executions, the block\'s inputs by the block\'s')
         captured = _captured(context, irs, compiled, gm, of, constants, holders) if replayed else None
         own = [[] for _ in irs]
-        # design/torch-capture-change-request.md, 7: "a captured buffer's interval runs from the level of the first
-        # recorded command that writes it to the level of the last that reads it" (metal_recording.h
-        # MetalRecorderOperand), for a value no tensor of its call's result is over
+        # metal_recording.h MetalRecorderOperand, for a value no tensor of its call's result is over
         buffers = {owned: buffer for buffer, owned in captured['owners'].items()} if captured else {}
         for _, k, handle, result, levels, values, *_ in captured['calls'] if captured else ():
             results = {captured['owners'].get(leaf.untyped_storage().data_ptr()) for leaf in pytree.tree_leaves(result)
