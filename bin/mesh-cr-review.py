@@ -139,6 +139,7 @@ def records():
     """the retrieval records' text and the two repositories' source text, one string: a quotation is found in a record
     where it was read, or in the code it states a fact of"""
     paths = sorted({p for pattern in RECORDS for p in glob.glob(os.path.join(DESIGN, pattern))})
+    paths.append(os.path.join(DESIGN, 'change-requests.md'))
     for root, patterns in ((os.path.join(MESH, 'rdma'), ('*.c', '*.h', '*.m', '*.py')),
                            ('/Users/mdot/metal-microbench', ('*.m', '*.h', '*.metal', 'tools/*.m', 'tools/*.py'))):
         paths += sorted(p for pattern in patterns for p in glob.glob(os.path.join(root, pattern)))

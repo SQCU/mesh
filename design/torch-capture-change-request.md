@@ -1,18 +1,17 @@
-# Change request: the capture, the placement of pages, completion, and the torch scope's final lowering
+# Change request: the capture, reading received data, completion, the release, offsets, lifetimes, the torch scope's final lowering, and every node's replay
 
-Code is cited at the first implementation's heads, mesh aca4f783 and metal-microbench 63b9f015, where an item says no
-other commit. This text replaces this file's text of efa3ad8c and e8d1296c. As U190 has it, the first implementation's
-differences are revisions of this text, and so are U191's and U192's corrections of Claude's account of them.
+Code is cited at mesh aca4f783 and metal-microbench 63b9f015 where a line names no other commit. This text replaces this
+file's text of 337e79b4.
 
-The sources quoted here were read, and each is recorded with where it was read:
+The quoted sources were read, and each is recorded where it was read:
 - design/replay-grounding-2026-11-06.md (RG);
 - design/final-lowering-sources-2026-11-06.md (FL);
-- design/view-sources-2026-11-06.md (VS);
-- design/packing-and-coflows-2026-11-06.md (PC);
 - design/capture-replay-sources-2026-11-07.md (CS);
 - design/completion-and-period-sources-2026-11-07.md (CP);
 - design/worklists-and-arrival-sources-2026-11-07.md (WA);
-- design/lifetimes-and-placement-sources-2026-11-07.md (LP).
+- design/lifetimes-and-placement-sources-2026-11-07.md (LP);
+- design/nccl-sources-2026-11-07.md (NS);
+- design/metal-atomic-sources-2026-11-07.md (MA).
 
 Turn numbers are those of design/operator-turns-2026-11-04-to-06.md, numbered on past U183 for later turns.
 
@@ -31,7 +30,7 @@ Turn numbers are those of design/operator-turns-2026-11-04-to-06.md, numbered on
 > finally, is the LIST OF MASKED PAGE INDICES a contiguous array iN ITS OWN SECTION OF THE MEMORY ALLOCATION, or is it a
 > struct which MUST BE CONTIGUOSU WITH THE PAGE IT IS ABOUT FOR SOME STUPID REASON?
 
-(U41, 2026-11-03 20:35, in part; design/disjoint-pages-change-request.md:250–255)
+(U41, 2026-11-03 20:35, in part)
 
 > then your code isn't correct for deliberately avoiding demonstrating the requirements of the change request.
 
@@ -200,507 +199,328 @@ be captured yet;»)
 
 (U192, 00:29)
 
-## How it is implemented
 
-As design/problems-of-14b9a757-change-request.md states it:
-- **Each change is the quoted source's mechanism, as the source states it.** A statement, branch, field, wait, copy or
-  allocation that the quoted text does not contain is not written.
-- **A commit names the source it implements.** Nothing else explains it: no decision records, no notes of reasons.
-- **A source missing here is a stop.** Where this document quotes no source for something the code needs, the
-  implementer stops and names the gap. It invents nothing to fill it.
+> "Where each of my phrases came from:" why are any of these being defined at all? why do they need definitions or
+> revisions? What is the ambiguity that anyone thought needed resulution?
 
-## Scope
+(U194, 01:21)
 
-- **Three scopes of support (U189):** arbitrary AOT-compilable torch, the LiteRT backend, and a third not yet begun.
-- **What this request covers:**
-  - what all three share: the capture and replay, the reading of landed pages, completion, the sender's release, the
-    placement of pages and their lifetimes (items 1–7);
-  - the torch scope's final lowering (item 8);
-  - the torch scope's nodes (item 9).
-- **LiteRT's scope** is tools/e2b_replay.m's and tools/prepare_e2b.py's, and it changes here only through what it
-  shares.
+> "3. "The recorder never sees the consumer's kind" is also a code fact, " why, broadly, are you trying to 'defien and
+> describe code facts'? what does the documentary format of the change request literally do in the user's repeatedly
+> communicated system of constraints? what is 'idiomaticity'? why does it matter? these have literala naswers, and
+> they have plain meaning wrt each of the numbered phrases as well.
+> "  - A page task is the consumer function captured once on a one-page view and bound at each page's place. "
+> a page is a region of memory. everything else here is idiomatic and i do not want it described again in the
+> immediate session in anything but canonical data structures, algorithms, and citations. thsi si rank, it stinks,
+> it's nasy. "At e2b's batch of 1, each partial is already one page." idiomatic, fictional, claude only, lying if
+> compared directly against the full history of this transcript in any literal sense. who told oyu taht 'e2b' is
+> 'batchsize 1' or has any invariant tensor shape features of that sort? you were not told this by me, or by the
+> measuerements and task definitions in the session, or anything that should be cited or construed from. this is the
+> idiomaticity that the current owrk is cleraly nad literally and ever emphatically *correcting* by grounding things
+> that sound self-evident by weight of repetition with *sources* that *jsutify* their history, evne by saying ' this
+> was a clumsy, inarticulate, algorithmically malformed choice that should not survive revision.'
+> i have never heard of a 'page task' in my life. i have never heard of a memory indexing scheme where 'instructions'
+> use a *minimum* memory size of a 'memory page'.
+> "- 4. The waiter. It takes each execution's waits after that execution's start (Reed–Kanodia's await on the plan's
+> submission count). I" this is undercontextualized and doesn't make sense. idiomatic; not usnig reference language or
+> explanatino of what he data model is or why there is an 'each execution wats after start'. 'waiter' as a noun is
+> nonsensical, does not make sense. didn't you say earlier that we have fx graph capture and lowering? idiomaticity?
+> " Only function A's operands are runs, and function B's are placed page by page. " idiom idiom idiom idiom. what is
+> a 'run'? a 'place'? neither of these are justified by anything.
 
-## Claude's proposal
+(U195, 01:33)
 
-### 1. The capture records every call, and the replay issues every call
+> find th4e last instruction term where the user prohibited the use of `plan` as idiomatic. use a subagent; sonnet,
+> whatever. there was extensive clarification work on the inappropriate quality of having a polysemantic shorthand of
+> a 'plan' whcih is used as a verb, noun, and a reference ofr like 10 different kinds of data structures or inputs,
+> outputs, functions, structs, schedulings, allocations?
+> this is idiomatic, in the prohibited, unworkable, and 'thing we are removing' sense. i need a better explanatino,
+> yet again.
 
-- **Code:**
-  - Before the first implementation, metal_recording.m `MetalBlitPreparation` ran a fill once, during the capture, and
-    refused every other blit command (0771d07a, :3032). The replay held dispatches only, in indirect command buffers.
-  - metal-microbench 109b11a3 records copies and fills, and the replay issues them in their recorded order between its
-    indirect command buffers' ranges, by MTL4ComputeCommandEncoder's copy and fill.
-  - Still refused during a capture at 63b9f015 (metal_recording.m):
-    - a compute-encoder call the recorder doesn't record (:3125–3131);
-    - a blit-encoder call other than `copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:` and
-      `fillBuffer:range:value:` (:3153–3157);
-    - a command-buffer call whose selector begins `encode` or names a `CommandEncoder` (:3211–3214).
-  - `encodeSignalEvent:value:` is passed to the command buffer during a capture and is not recorded (:3183–3184).
-  - The recorder's device sets `supportIndirectCommandBuffers` for three of MTLDevice.h's six compute-pipeline creation
-    methods, the synchronous ones (:2554–2569; `MetalCreatePipeline`, :491–497). A dispatch of a pipeline made any other
-    way raises at replay: "Pipeline does not support indirect commands" (:3878).
-  - A function is captured at its first execution: e2b's `capture:` block of each phase (tools/e2b_replay.m:1231);
-    rdma/mesh_compile.py `_captured` (:3178).
-  - Dawn clears a buffer at its first use, once: `Buffer::InitializeToZero` calls `ClearBuffer` and then
-    `SetInitialized(true)`, and `ClearBuffer` issues `fillBuffer:range:value:` (Dawn 79794682, BufferMTL.mm:287–294,
-    :304–306; CS §5). Since 109b11a3 the replay repeats those fills at every execution.
+(U196, 01:35)
+
+> ""Batch of 1": no one told me that. It came from my own sentence in plan-to-bridge-change-request.md:1301, which is
+> not a source." why did this end up in that document? is there a final citation descirbing a method, algorithm, data
+> model, compiler, or runtime from which this must appear? the same should be said for every other detail found so far
+> in the past document? why has this *issue* appeared so many times in a row on revisions and implementation passes?
+> is there no definition of the change request format in the repository?
+
+(U197, 01:37)
+
+> "The same is true of every detail found so far: " why are there details in the document then? i am going to keep
+> using the dialetical method until you articulate what the strictly incorrect work process is taht happens between
+> the user issuing plain language authorization to do 'thing a', and instead 'thing a and mysterious thing x, which
+> disables thing a' is issued instead?
+
+(U198, 01:41)
+
+> "2. I elaborate A instead of transcribing it. I add sentences that are none of the three kinds the format allows: "
+> consider writing a post-commit callback function you can tell yourslf to call which literally imposes a literal code
+> review by a literal subagent (wow). as a post commit call can be used evne on committing a change request 'document'
+> without implementing it, this solves all problems forever.
+
+(U199, 01:43)
+
+> once the 'change request' document hs been truncated to only the genre of requirement that the
+> specification-for-change-requests entails, have an implementatino agent revert all idiomatic edits from the previous
+> run, write again whatever must be, etc. i'm rather disappointed by the immediacy and simplicity of the 'do
+> absolutely anything but read and use the specification' behavior of the last pass.
+
+(U200, 01:57)
+
+## The specification
+
+design/change-requests.md: "A change request describes what ought to be written. It uses only non-idiomatic descriptions
+of work: each requirement cites the reference authors, theory, papers, books or source code that say exactly what to
+write, and the code is written as that source states it. Code already in these repositories and documents Claude wrote
+are not sources, since a change request exists to replace idiomatic or incomplete code with the cited method. Its body
+is the turns that led to it, quoted verbatim, and where no source says what to write it says so and invents nothing."
+
+## Requirements
+
+Each requirement names the code it replaces, the quoted source, and what is written, or it is a stop.
+
+### 1. Every call is captured and replayed
+
+- **Replaces,** in metal-microbench metal_recording.m:
+  - the calls refused during a capture: compute-encoder calls not recorded (:3125–3131), blit-encoder calls other than
+    `copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:` and `fillBuffer:range:value:` (:3153–3157), and
+    command-buffer calls named `encode…` or `…CommandEncoder` (:3211–3214);
+  - `encodeSignalEvent:value:`, passed to the command buffer and not recorded (:3183–3184);
+  - the compute-pipeline methods of MTLDevice.h that pass the program's descriptor to the device unchanged; three set
+    `supportIndirectCommandBuffers` (:2554–2569). A dispatch of a pipeline made without it raises at replay: "Pipeline
+    does not support indirect commands" (:3878).
 - **Source:**
-  - **apitrace** (3a0ee82a, MIT), README: "trace OpenGL, Direct3D, and DirectDraw APIs calls to a file;" and "replay
-    OpenGL and Direct3D calls from a file;" (RG §B.1). retrace/retrace_main.cpp:820: "loop N times (N<0 continuously)
-    replaying final frame." (CS §2)
-  - **GFXReconstruct** (f9b0fb0d, MIT):
+  - apitrace (3a0ee82a), README: "trace OpenGL, Direct3D, and DirectDraw APIs calls to a file;" and "replay OpenGL and
+    Direct3D calls from a file;" (RG §B.1)
+  - GFXReconstruct (f9b0fb0d):
     - README: "The GFXReconstruct project provides tools for the capture and replay of graphics API calls, allowing the
       graphics commands executed by an application to be recorded to a file that may later be replayed to reconstruct
       the graphics-specific behavior of the captured application." (RG §B.1)
-    - USAGE_desktop_Vulkan.md:1141–1143: "Replay proceeds normally up to and including frame `N`, and then replays
-      frame `N` again for each iteration." (CS §1)
     - docs/GFXReconstruct Architectural Principles.md:89: "If a call truly cannot be represented in its original form
-      wholly or piecewise, that case must be documented as an exception." :102: "Capture should avoid changing the
-      content of the application’s graphics commands.  Some exceptions are necessary in order to save information
-      required for replay or modify data so that replay is possible." (CS §7–8)
-    - framework/encode/vulkan_capture_manager.cpp:889–896, adding the capture-replay flag to a buffer's create info:
-      "We modify only a copy to prevent the modified pCreateInfo from being written to the capture file." (CS §8)
-  - **RenderDoc** (34fbfb43, MIT), docs/behind_scenes/how_works.rst:23: "When the capture button is hit the driver will
-    enter active capturing upon the beginning of the next frame." :30: "When replaying, the initial section of the
-    capture (up to the beginning of the frame) is read and executed verbatim." (CS §3)
-  - **Vulkan 1.4.368**, chapters/resources.adoc:1098–1100: "The expected usage for this is that a trace capture/replay
-    tool will add the VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT flag to all buffers that use
-    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT" (CS §9)
-  - **Tracing:** R. Frostig, M. J. Johnson, C. Leary, "Compiling machine learning programs via high-level tracing",
-    SysML 2018: "On a trace cache miss, JAX executes the corresponding Python function and traces its execution into a
-    graph of primitive functions with static data dependencies." (RG §B.1)
-  - **The display file:** T. H. Myer, I. E. Sutherland, "On the Design of Display Processors", CACM 11(6), 1968, p. 411:
-    "The channel takes successive data words from a display file in core until the word count goes zero, at which point
-    the central processor restarts the channel at the beginning of the display file." (RG §B.1)
-  - **Inspector and executor:** J. Saltz, R. Mirchandaney, K. Crowley, ICASE Report 90-34, 1990: "(1) inspector
-    procedures that perform execution time preprocessing and (2) executors or transformed versions of source code loop
-    structures. These transformed loop structures carry out the calculations planned in the inspector procedures."
-    (RG §B.1)
-  - **CUDA:**
-    - Runtime API, `cudaStreamBeginCapture`: "When a stream is in capture mode, all operations pushed into the stream
-      will not be executed, but will instead be captured into a graph, which will be returned via cudaStreamEndCapture."
-      Its `cudaGraphNodeType` lists "GPU kernel node", "Memcpy node", "Memset node" and "External event wait node".
-    - Programming Guide v13.5 §4.2.2.1.2.2: "A small number of APIs that enqueue asynchronous operations into streams
-      are not currently supported in graphs and will return an error if called with a stream which is being captured".
-      §4.2.2.1.2.3: "When an invalid operation is attempted during stream capture, any associated capture graphs are
-      invalidated." (CS §4)
-  - **Lam 1988, p. 318:** "The steady state of this pipeline constitutes the loop body of the object code." (CP §7)
-  - **Metal 4** (macOS SDK 26.4.1; CS §10–12):
-    - MTL4ComputeCommandEncoder.h declares 18 copy, fill, mipmap, optimizing and indirect-command-buffer commands
-      (:148–562). :323: "Encodes a command that copies data from a buffer instance into another." :456: "Encodes a
-      command that fills a buffer with a constant value for each byte."
-    - MTL4CommandQueue.h:261: `signalEvent:value:` "Schedules an operation to signal a GPU event with a specific value
-      after all GPU work prior to this point is complete." :269: `waitForEvent:value:` "Schedules an operation to wait
+      wholly or piecewise, that case must be documented as an exception." :102: "Some exceptions are necessary in order
+      to save information required for replay or modify data so that replay is possible." (CS §7–8)
+    - framework/encode/vulkan_capture_manager.cpp:889–896: "We modify only a copy to prevent the modified pCreateInfo
+      from being written to the capture file." (CS §8)
+  - RenderDoc (34fbfb43), docs/behind_scenes/how_works.rst:23 (CS §3): "In this state every API call is serialised out
+    in order and any initial contents and states are saved."
+  - NVIDIA CUDA Programming Guide v13.5 (CS §4): §4.2.2.1.2, "When a stream is being captured, work launched into the
+    stream is not enqueued for execution. It is instead appended to an internal graph that is progressively being built
+    up." §4.2.2.1.2.3, "When an invalid operation is attempted during stream capture, any associated capture graphs are
+    invalidated."
+  - Metal 4, macOS SDK 26.4.1 (CS §10–12):
+    - MTL4ComputeCommandEncoder.h:27–29: "Use instances of this abstraction to encode a compute pass into
+      ``MTL4CommandBuffer`` instances, as well as commands that copy and modify the underlying memory of various Metal
+      resources, and commands that build or refit acceleration structures."
+    - MTL4CommandQueue.h:261, `signalEvent:value:`: "Schedules an operation to signal a GPU event with a specific value
+      after all GPU work prior to this point is complete." :269, `waitForEvent:value:`: "Schedules an operation to wait
       for a GPU event of a specific value before continuing to execute any future GPU work."
-    - MTLComputePipeline.h:70–73: `supportIndirectCommandBuffers` "This flag makes this pipeline usable with indirect
-      command buffers." MTLDevice.h:834–864 declares six compute-pipeline creation methods.
-- **Change:**
-  - The capture records every call the captured program makes on the recorder's device, queues and command buffers, as
-    apitrace and GFXReconstruct record API calls "to a file". The replay issues the recorded calls in their recorded
-    order, as a captured graph holds memcpy and memset nodes beside its kernel nodes. Written at 109b11a3 for copies and
-    fills.
-  - A function has two captures: of its first execution and of its second. The first is replayed once, for execution
-    0, as RenderDoc executes "the initial section of the capture ... verbatim". The second is replayed at every later
-    execution, as GFXReconstruct "replays frame `N` again for each iteration", Lam's steady state. A call a library makes
-    once, as Dawn's first-use clear, is replayed once.
-  - Each call the recorder refuses, or passes on unrecorded, is recorded and replayed in its recorded order by its Metal
-    4 counterpart:
-    - a blit command by its MTL4ComputeCommandEncoder command;
-    - `encodeSignalEvent:value:` and `encodeWaitForEvent:value:` by the queue's `signalEvent:value:` and
-      `waitForEvent:value:`, the commands recorded before them committed first ("after all GPU work prior to this
-      point is complete"). The signal is still passed to the command buffer during the capture, as now.
-  - A call with no Metal 4 counterpart fails the capture, as CUDA invalidates a capture on an unsupported call. It is
-    then listed in this text, GFXReconstruct's documented exception.
-  - All six of MTLDevice.h's compute-pipeline creation methods create the pipeline from a copy of the program's
-    descriptor with `supportIndirectCommandBuffers` set, as GFXReconstruct sets its capture-replay flag on a copy of the
-    create info. The three with a completion handler call it with that pipeline.
-  - Deleted, at 109b11a3: the refusal of copies, the fill run during the capture, d0a72fc6's blit mode and its direct
-    kind.
+    - MTLComputePipeline.h:70–73, `supportIndirectCommandBuffers`: "This flag makes this pipeline usable with indirect
+      command buffers."
+- **Write:**
+  - Every Metal call of the captured program is recorded, and the replay issues the recorded calls in the order they
+    were recorded (apitrace; GFXReconstruct; RenderDoc's "every API call is serialised out in order"), each by the
+    call that MTL4ComputeCommandEncoder.h or MTL4CommandQueue.h declares for it. Written for copies and fills at
+    metal-microbench 109b11a3.
+  - A call for which Metal 4 declares none invalidates the capture (CUDA §4.2.2.1.2.3), and is documented in this
+    request (GFXReconstruct :89).
+  - Each compute-pipeline creation method of MTLDevice.h (:834–864) creates its pipeline from a copy of the program's
+    descriptor, with `supportIndirectCommandBuffers` set (GFXReconstruct :102; vulkan_capture_manager.cpp:889–896;
+    MTLComputePipeline.h:70–73).
+  - Deleted (U177): metal-microbench d0a72fc6's `MetalDirect` and `blits`, at 109b11a3, and its `whole` later passes,
+    at 1e55e089.
+- **Stop:** Dawn (79794682; CS §5) issues a buffer's clear in `EnsureDataInitialized` only while `NeedsInitialization()`
+  holds: `return !mIsDataInitialized && GetDevice()->IsToggleEnabled(Toggle::LazyClearResourceOnFirstUse);`
+  (src/dawn/native/Buffer.cpp:1171–1173), and `InitializeToZero` then calls `SetInitialized(true);`
+  (src/dawn/native/metal/BufferMTL.mm:287–294). No quoted source says whether the replay of a later execution issues a
+  recorded call that the program makes only while such a condition holds.
 
-### 2. A value's copies, the replay's period, and how far ahead execution t starts
+### 2. When execution t's requests into one of a value's locations start
 
-- **Code:**
-  - mesh 327bea15 and metal-microbench e618ab13: `lead` is the plan's u − 1 in `MetalRecorderRun`'s terms, so
-    execution t's requests start once execution t − u has ended. struct mesh_function's `lead` goes, and so do e2b's
-    `lead` 1 and mesh_compile.py's 0.
-  - `HOST_LAG` is 2 (tools/e2b_replay.m:77; rdma/mesh_compile.py:2128). Before preparing execution t, the host waits
-    for execution t − HOST_LAG to end, and writes execution t's inputs into copy t mod HOST_LAG (e2b_replay.m:338–344;
-    mesh_compile.py:3918). The host's write is at no level of the compiled program, so ⌈l/s⌉ gives it no q.
-  - The period is the least common multiple of every binding's copies, a received operand's phase rows taking 4u
-    (metal_recording.m `MetalReplayPeriod`; mesh_compile.py:3297).
-  - The phase row of execution t is `(t / u + 1) & 3`. After landing a page, the bridge flips one bit of the page's
-    2-bit field, `1 << (field + (round & 1))` (mesh-flow.c:1474).
+- **Replaces:** `lead` 1 in tools/e2b_replay.m and 0 in rdma/mesh_compile.py, before metal-microbench e618ab13 and mesh
+  327bea15.
 - **Source:**
-  - **M. Lam, PLDI 1988, §2.3, pp. 322–323:**
-    - "If the lifetime of a variable is l, and an iteration is initiated every s cycles, then at least ⌈l/s⌉ number of
-      values must be kept alive concurrently, in that many locations."
-    - "We observe that the minimum degree of unrolling, u, to implement the same schedule is simply max_i q_i. This
-      minimum degree of unrolling can be achieved by setting the number of registers allocated to variable v_i to be
-      the smallest factor of u that is no smaller than q_i" (RG §B.2; LP §7)
-  - **S. S. Bhattacharyya, S. Sriram, E. A. Lee, "Optimizing Synchronization in Multiprocessor DSP Systems", IEEE Trans.
-    Signal Processing 45(6), 1997** (the authors' preprint of 11 Feb. 1997; CP §4):
-    - "Each processor executes the actors assigned to it in the order specified at compile time. Before firing an
-      actor, a processor waits for the data needed by that actor to become available." (RG §B.6)
-    - §4.1, p. 9: "Thus if actors v_1, v_2, …, v_n are assigned to the same processor in that order, then G_ipc would
-      have a cycle ((v_1, v_2), (v_2, v_3), …, (v_{n – 1}, v_n), (v_n, v_1)), with delay((v_n, v_1)) = 1."
-    - p. 10, Eq. (1): "start(v_i, k) ≥ end(v_j, k – delay((v_j, v_i)))".
-    - p. 11, Lemma 3: "T = max_{cycle C in G} { Σ_{v is on C} t(v) / Delay(C) }. (4)"
-    - §4.3, p. 13: "B_fb(e) = min({Delay(C) | C is a cycle that contains e}) (5)"
-  - **R. Reiter, "Scheduling Parallel Computations", JACM 15(4), 1968, p. 595:** "π thus emerges as the minimum possible
-    period of any periodic admissible schedule." (CP §6)
-  - **design/aot-compilation-change-request.md, "Appendix: the citations the implementation omitted or ignored", item
-    2:** "The IPC edges are the plans' transfers, each with C3.3's u copies as its delay".
-- **Change:**
-  - A value has q = ⌈l/s⌉ copies, l its lifetime and s the interval between executions' starts.
-  - Execution t's requests start once execution t − d has ended, d the delay of the transfer's IPC edge, its u copies:
-    written at 327bea15 and e618ab13.
-  - A host-written input's q:
-    - The host and the GPU are two processors of the self-timed schedule. Execution t's input is an IPC edge from the
-      host's write to the GPU's reads, of delay 0. The host's wait for execution t − d's end is the edge back, of delay
-      d. Each processor's own order is a cycle of delay 1.
-    - So by (4), with t_h and t_g the host's and the GPU's times for one execution, T = max(t_h, t_g, (t_h + t_g)/d).
-      At d = 1 the cycle through both gives t_h + t_g. At d = 2, (t_h + t_g)/2 ≤ max(t_h, t_g) for every t_h and t_g,
-      so no larger d lowers T.
-    - By (5) the input's copies are then B_fb = 2. `HOST_LAG` is that q, and its 2 is this derivation's.
-  - The replay's period is u = max over the values of q, the host-written inputs' among them. Each value's copies are
-    the smallest factor of u no smaller than its q, and the host's wait's delay is its inputs' copies.
-  - Where a page's 2-bit field is read (item 3's guard of a page task), the period is 4u, since the field's four values
-    recur every four rounds of a copy. It is u otherwise. The least common multiple goes.
+  - M. Lam, "Software Pipelining: An Effective Scheduling Technique for VLIW Machines", PLDI 1988, p. 322 (LP §7):
+    "Modulo variable expansion takes advantage of the flexibility of VLIW machines in scalar computation, and reduces
+    the number of locations allocated to a variable by reusing the same location in non-overlapping iterations."
+  - S. S. Bhattacharyya, S. Sriram, E. A. Lee, "Optimizing Synchronization in Multiprocessor DSP Systems", IEEE Trans.
+    Signal Processing 45(6), 1997, preprint p. 10 (CP §4): "start(v_i, k) ≥ end(v_j, k – delay((v_j, v_i))),
+    ∀(v_j, v_i) ∈ E_ipc, ∀k > delay(v_j, v_i). (1)"
+- **Write:** execution t's requests into one of a value's u locations start once execution t − u's use of that
+  location has ended: Lam's reuse of "the same location in non-overlapping iterations", in the form of (1). Written at
+  e618ab13 and 327bea15.
+- **Stop:** the number of locations of a value the host writes, `HOST_LAG` (tools/e2b_replay.m:77;
+  rdma/mesh_compile.py:2128). Lam
+  counts a variable's locations from its lifetime (RG §B.2): "If the lifetime of a variable is l, and an iteration is
+  initiated every s cycles, then at least ⌈l/s⌉ number of values must be kept alive concurrently, in that many
+  locations." No quoted source gives the lifetime l of a value the host writes.
 
-### 3. Reading data a remote writer lands: the plan's consumer tasks
+### 3. Reading received data
 
-- **Code:**
-  - `MetalMaskReaders` makes every recorded command that reads a received operand a masked first pass (RG §B.3):
-    - each threadgroup compares the phase field of every page of the operand's copy, and returns before its stores if
-      any is behind;
-    - a compaction lists the threadgroups that returned, as the arguments of a later pass that runs after the queue's
-      `waitForEvent:value:` on the waiter's event;
-    - both forms are written from the reader's MSL source, and a reader with none raises (1e55e089).
-  - The pattern, RG §B.3: presence bits per page in a dense array apart from the data (I-structures' "presence bits"),
-    then predication and compaction into an index list for an indirect dispatch, "a topology-driven pass followed by a
-    data-driven (worklist) pass", then a coarse wait. RG's verdict on testing the whole operand in every threadgroup:
-    "Deviates, not required".
-  - Where it came from: Claude's answer to U41 on 2026-11-03, "Masking. [...] lanes or threadgroups whose input pages
-    aren't present are predicated off, and that work runs in a later pass when they are" (design/disjoint-pages-
-    change-request.md:266–268). Its sources are for predication and compaction in general: the CRAY-1's vector mask,
-    SIMT active masks, AVX-512 opmasks, Blelloch's scan (:309–325). None of them is for reading landed data, and none
-    says to treat every consumer alike.
-  - The recorder takes no consumer kind. `MESH_JOIN` and `MESH_PAGES` are in rdma/mesh-collective.h:55–56,
-    tools/e2b_replay.m:609 and rdma/mesh_compile.py:1358, not in metal_recording.{h,m}.
-  - The plan's task graph has them:
-    - its consumption is "one task for MESH_JOIN and one a page for MESH_PAGES" (mesh-collective.c:1246, :1413);
-    - its sets are the ranges "where every declared transfer of the range is MESH_PAGES" (:2360);
-    - the transfer schedule is built over that graph: design/plan-to-bridge-change-request.md R4 and R5, the coflows
-      and independent flows (PC).
-  - e2b's MESH_PAGES consumers (tools/prepare_e2b.py:2040) are R4's function B:
-    - `combine`'s TFLite ADDs of the FFN row split's and head split's partial sums (:890);
-    - `kv_merge`'s TFLite element-wise operators, the online-softmax merge of the split-KV partials (:1095);
-    - the native `maxloc_reduce` (:1461).
-    - The first two are recorded LiteRT kernels. They are among the examples of function B in Claude's answer to U71,
-      which R4 took up: "elementwise maps, and sum or max reductions (all-reduce and reduce-scatter partials)", "split-K
-      GEMM partial sums", "attention by online softmax" (design/plan-to-bridge-change-request.md:296–303).
-  - The bridge signals each landing: after landing a page it flips the page's field, then adds one to its copy's count,
-    and wakes the count's waiters when it reaches its round's target (mesh-flow.c:1474–1476).
+- **Replaces:** metal_recording.m `MetalMaskReaders`, `MetalMaskedPass` and `MetalCompactionSource`, and the later
+  passes that run after the queue's `waitForEvent:value:`.
 - **Source:**
-  - **The operator:** U71 (functions A and B); 2026-11-02 (views of arbitrarily placed pages); U41 (the data edges the
-    plan holds and the transport's completions signal; the list in its own section); U48 and U90 (e2b demonstrates
-    function B); U192 (the IR the coflow and independent-flow work built, reused for the data processing).
-  - **MPI 4.1, §4.2.2, p. 120** (WA §5.3):
-    - "The MPI_PARRIVED function can be used to determine if the message data for the indicated partition has been
-      received into the receive buffer. Upon success, the receiver becomes free to access the indicated partition (as
-      well as any others that previously completed for that operation)."
-    - "The completion of a partitioned receive operation through MPI_WAIT or MPI_TEST indicates that the receive buffer
-      contains all of the partitions."
-  - **Arvind, R. S. Nikhil, K. K. Pingali, "I-Structures: Data Structures for Parallel Computing", TOPLAS 11(4), 1989**
-    (the authors' manuscript), p. 13: "the consumer of an array can begin work on parts of the array while the producer
-    of the array is still working on other parts." (RG §B.3)
-  - **R. Nasre, M. Burtscher, K. Pingali, IPDPS 2013** (WA §1):
-    - §II-B, p. 2: "Putting new active nodes onto the worklist can be done by atomically incrementing the length of the
-      worklist and then writing an active node's identifier to that location in the worklist."
-    - p. 3: "The threads in a thread block can compute the total amount of work to be added by all threads in the
-      thread block using a prefix sum (in shared memory) and then use a single atomic instruction per thread block to
-      reserve space on the worklist."
-    - §III-A, p. 4: "The input and the output worklists are swapped (using pointers) and the accumulated work items in
-      the output worklist become the input items for the next iteration."
-  - **Metal:** the MSL header metal_command_buffer (GPUCompiler 32023.883) declares `compute_command`, with
-    `set_compute_pipeline_state`, `set_kernel_buffer(device T *buffer, uint index)` and
-    `concurrent_dispatch_threadgroups(uint3 threadgroups_per_grid, uint3 threads_per_threadgroup)` (:377–423). A kernel
-    encodes a dispatch into an indirect command buffer with them.
-- **Change:**
-  - The GPU's consumers are the plan's consumer tasks, the graph the transfer schedule is built on (U192): a MESH_JOIN
-    consumer is one task over its whole operand, and a MESH_PAGES consumer is one task a page. The recorder takes each
-    received operand's consumer kind and pages from its declared transfers, the plan's IR, and has no kind of its own.
-  - A task is enabled once the pages it reads have landed, as the bridge signals now:
-    - a join task once every page of its operand has, its copy's count at its target ("the receive buffer contains all
-      of the partitions"; U71: function A is "complete before function A can begin to execute");
-    - a page task once its page has, the page's field at its phase ("the receiver becomes free to access the indicated
-      partition"; U71: function B "can work on any pages received in any order"; I-structures: "begin work on parts of
-      the array while the producer of the array is still working on other parts").
-  - The enabled tasks are a worklist: its length and the tasks' identifiers, a dense array in its own section (U41). A
-    guard before the consumer's first recorded command reads each task's landings and puts each enabled task on it as
-    Nasre et al. state: a prefix sum over a threadgroup, one atomic increment of the length, then the identifiers
-    written.
-  - The tasks:
-    - A join task is the consumer's recorded commands on its whole operand.
-    - A page task is the consumer function captured once on a one-page view of its operand (item 1). It is replayed
-      with that view bound at each enabled page's place by page-table index (2026-11-02; U166). At e2b's batch of 1, a
-      partial is one page (design/plan-to-bridge-change-request.md:1301), so `combine`'s and `kv_merge`'s graphs are
-      already a page's.
-    - The guard encodes the enabled tasks' dispatches into an indirect command buffer (`compute_command`), each with
-      its views bound.
-  - The tasks not enabled in the first round are the next round's worklist, run after the queue's wait on the waiter's
-    event, where later passes run now ("the accumulated work items in the output worklist become the input items for
-    the next iteration"). A task the second round's guard finds not landed is the failure the status records, as the
-    later pass's is now.
-  - Deleted:
-    - the masked first pass, its comparison of every page by every threadgroup, and its compaction of threadgroups;
-    - the later pass as the reader with its grid builtins recomputed;
-    - the rewriting of the reader's MSL source, and 1e55e089's raise for a reader with none. A task binds views and
-      rewrites no source, so a torch MPS kernel can be one.
+  - the operator: U41 and U71 (the turns);
+  - MPI 4.1, §4.2.2, p. 120 (WA §5.3): "The MPI_PARRIVED function can be used to determine if the message data for the
+    indicated partition has been received into the receive buffer. Upon success, the receiver becomes free to access
+    the indicated partition (as well as any others that previously completed for that operation)." "The completion of
+    a partitioned receive operation through MPI_WAIT or MPI_TEST indicates that the receive buffer contains all of the
+    partitions."
+  - R. Nasre, M. Burtscher, K. Pingali, "Data-driven versus Topology-driven Irregular Computations on GPUs", IPDPS 2013
+    (RG §B.3): "In topology-driven implementations, all nodes are assumed to be active so the operator is applied
+    everywhere even if there is no work to do at some nodes"; "data-driven implementations are organized around a
+    worklist".
+- **Stop:** these sources say when a receiver may access one partition, or all of them. None says how the dispatch of a
+  recorded kernel is divided among partitions. Nothing is written for this item.
 
-### 4. Completion: execution t's waits are those of its started requests
+### 4. The completion of execution t's requests
 
-- **Code:**
-  - rdma/mesh-metal.m `waits_run` walks repetitions 0 to R − 1, with R fixed when the waiter starts. A wait ends with
-    ETIMEDOUT after MESH_PLATFORM_NS without progress.
-  - R also gives two things item 4 didn't cover. The thread ends after repetition R − 1, and `mesh_metal_waits_end`
-    joins it (:307–315). At a cause or after the last wait, the event is set to `final=waiter->repetitions*passes`
-    (:218), which releases every GPU wait. e2b passes its `steps` as R (tools/e2b_replay.m:2094–2095).
-  - `mesh_transfers_start` appends execution t's submission, and stores the plan's `submissions` with release
+- **Replaces:** rdma/mesh-metal.m `waits_run`, which walks executions 0 to R − 1 and then sets the event the GPU's
+  passes wait on to R × passes (:218, :222). `mesh_metal_waits_start` takes R as `repetitions` (:258), and e2b passes
+  its `steps` (tools/e2b_replay.m:2094–2095).
+- **Source:**
+  - MPI 4.1, §3.9 (RG §B.4; CP §1): "The request becomes active once the call is made." p. 110: "A persistent
+    communication request is deallocated by a call to MPI_REQUEST_FREE (Section 3.7.3). The call to MPI_REQUEST_FREE
+    can occur at any point in the program after the persistent request was created. However, the request will be
+    deallocated only after it becomes inactive." And: "Create (Start Complete)∗ Free" "where ∗ indicates zero or more
+    repetitions."
+  - D. P. Reed, R. K. Kanodia, "Synchronization with Eventcounts and Sequencers", CACM 22(2), 1979, p. 116 (CP §3): "we
+    define a primitive await(E, v) that suspends the calling process until the" … "of the eventcount E is at least v."
+  - MPI Forum fault tolerance working group, ULFM chapter draft, 9 May 2022, §16.3.1, p. 9 (CP §2): "Once a communicator
+    has been revoked at an MPI process, all subsequent non-local operations on that communicator (with the same
+    exceptions as above), are considered local and must complete by raising an error of class MPI_ERR_REVOKED at that
+    MPI process."
+- **Write:**
+  - Execution t's waits are those of the requests started for execution t, each awaited once its start is made ("The
+    request becomes active once the call is made"), for any number of executions ("zero or more repetitions"). No count
+    of executions is fixed before the first. A start is `mesh_transfers_start`'s store of `submissions`
     (rdma/mesh-dataflow.c:734–736).
+  - The waits end at the free, once the requests started before it are complete ("deallocated only after it becomes
+    inactive").
+- **Stop:** the value the event is set to at a failure, which the replaced code makes R × passes. ULFM says only that
+  later operations "must complete by raising an error", and no quoted source gives the value without R. Until a
+  revision quotes one, nothing of this item is written.
+
+### 5. The release writes its word in one 64-bit access
+
+- **Replaces:** at metal-microbench 0771d07a, `MetalRelease`: a seq_cst fence, then `atomic_fetch_add_explicit` on a
+  32-bit `atomic_uint` at the low half of a 64-bit word, whose note gives the word t + 1 after execution t's release.
+- **Source:** S. Flur et al., "Mixed-Size Concurrency: ARM, POWER, C/C++11, and SC", POPL 2017, p. 2 (RG §B.5): "the
+  effective type rules of the ISO C standard prohibit mixed-size use of atomics." PTX ISA §8.8 (RG §B.5): a release
+  pattern is "a release or acquire-release memory fence followed by a strong write on M in program order". Metal's
+  metal_atomic header, GPUCompiler 32023.883 (MA): `typedef _atomic<ulong> atomic_ulong;` (:104); the types an atomic
+  store takes are `device int *`, `threadgroup int *`, `device uint *` and `threadgroup uint *` (:168–171); the one an
+  atomic max takes is `device ulong *` (:641).
+- **Write:** the fence, then one 64-bit atomic write of the word, `atomic_max_explicit` with t + 1, the 64-bit atomic
+  write the header declares for it. Written at metal-microbench 913bdb1f and mesh ee787950.
+
+### 6. Offsets for the operands of functions typed contiguous
+
+- **Replaces:** rdma/mesh-dataflow.c `mesh_view_compose` (:187–208 at mesh f55c541c), which reserves an address range
+  and remaps operands' page-table rows over it with `mach_vm_remap`.
 - **Source:**
-  - **MPI 4.1 §3.9:**
-    - "Often a communication with the same argument list (with the exception of the buffer contents) is repeatedly
-      executed within the inner loop of a parallel computation. In such a situation, it may be possible to optimize the
-      communication by binding the list of communication arguments to a persistent communication request once and then
-      repeatedly using the request to start and complete operations." And: "The request becomes active once the call is
-      made."
-    - p. 110: "A persistent communication request is deallocated by a call to MPI_REQUEST_FREE (Section 3.7.3). The
-      call to MPI_REQUEST_FREE can occur at any point in the program after the persistent request was created. However,
-      the request will be deallocated only after it becomes inactive." And: "Create (Start Complete)∗ Free" "where ∗
-      indicates zero or more repetitions." (CP §1)
-  - **MPI Forum fault tolerance working group, ULFM chapter draft, 9 May 2022** (CP §2):
-    - §16.3.1, p. 9: "Once a communicator has been revoked at an MPI process, all subsequent non-local operations on
-      that communicator (with the same exceptions as above), are considered local and must complete by raising an error
-      of class MPI_ERR_REVOKED at that MPI process."
-    - §16.1, p. 1: "any MPI operation that involves a failed process must not block indefinitely but either succeed or
-      raise an MPI error".
-  - **D. P. Reed, R. K. Kanodia, "Synchronization with Eventcounts and Sequencers", CACM 22(2), 1979, p. 116**
-    (RG §B.4; CP §3):
-    - "An eventcount can be thought of as a nondecreasing integer variable."
-    - "The primitive advance(E) is used to signal the occurrence of an event in the class associated with the
-      eventcount E."
-    - "we define a primitive await(E, v) that suspends the calling process until the "value" of the eventcount E is at
-      least v."
-- **Change:**
-  - Execution t's waits are the awaits of the requests started for execution t, each awaited once its start has been
-    made. The waiter has no count of executions fixed before the first.
-  - The waiter takes execution t's waits after an await on the plan's submissions, which `mesh_transfers_start`
-    advances: MPI's "Start Complete", once per execution, each wait's bound counted from its start.
-  - After execution t's last wait, the event is set to (t + 1) × passes, past t's last pass, as the final value was set
-    past the last execution's.
-  - The end is the free. `mesh_metal_waits_end` marks the waiter for freeing, and its thread ends once the executions
-    started before it have completed ("deallocated only after it becomes inactive"). It is then joined.
-  - A failure completes every await, then and later: the event is set to 2^64 − 1, which every await(E, v) meets. The
-    error is the waiter's cause and the GPU's status, as now: a revoked communicator's later operations "must complete by
-    raising an error".
-  - Deleted: `repetitions`, and the final value R × passes.
+  - the operator: 2026-11-02 and U188 (the turns);
+  - Y. Pisarchyk, J. Lee, "Efficient Memory Management for Deep Neural Net Inference", arXiv:2001.03288, 2020 (LP §4):
+    §5, "We call the other memory sharing approach Offset Calculation where a large chunk of memory is pre-allocated and
+    the intermediate tensors are given parts of the memory by the offsets within the memory block." §5.2, "We first
+    iterate through tensor usage records in non-increasing order by their size (L.1,6). For each record, we check
+    already assigned tensors whose usage intervals intersect with that of the current tensor (L.10–13) to find the
+    smallest gap in memory between them such that current tensor fits into that gap (L.9,14–17)."
+  - TensorFlow Lite (6cf18d88), tensorflow/lite/delegates/gpu/common/memory_management/greedy_by_size_assignment.cc
+    (LP §3): "If no suitable gap found, we should allocate current tensor after the rightmost tensor, which usage
+    interval intersects with the current one."
+  - M. Lam, PLDI 1988, p. 322 (LP §7): variable expansion "expands the variable into a higher dimension variable, so that
+    each iteration can refer to a different location."
+- **Write:**
+  - Each operand of a function typed `contiguous_input` or `contiguous_output` is given an offset in one memory block by
+    Greedy by Size for Offset Calculation, as TensorFlow Lite's `GreedyBySizeAssignment` states it.
+  - `mesh_view_compose`'s remapping of those operands is deleted.
+- **Stop:** no quoted source says where that memory block lies among the pages of every other operand, which are
+  "arbitrary views of arbitrarily placed pages" (2026-11-02), nor how an operand's u locations, Lam's higher-dimension
+  variable, enter Greedy by Size's usage records. Until a revision quotes one, nothing of this item is written.
 
-### 5. The sender's release: every access to the supplied word has the word's size
+### 7. Lifetimes
 
-- **Code:**
-  - Before the first implementation, `MetalRelease` issued a seq_cst fence, then `atomic_fetch_add_explicit` on a
-    32-bit `atomic_uint` at the low half of the 64-bit supplied word, which the bridge reads with a 64-bit load (RG
-    §B.5).
-  - metal-microbench 913bdb1f and mesh ee787950: every release is the fence, then `atomic_max_explicit` on the word as a
-    device `atomic_ulong`, writing t + 1, with t read from execution t's step word. The kernel's source compiles with
-    the Metal toolchain at its default language version and at metal4.0.
+- **Replaces:** rdma/mesh_compile.py `program()`, which gives a call's inputs and its results the capture's whole range
+  of levels, [0, levels − 1] (aca4f783).
 - **Source:**
-  - **S. Flur et al., "Mixed-Size Concurrency: ARM, POWER, C/C++11, and SC", POPL 2017, p. 2:** "the effective type
-    rules of the ISO C standard prohibit mixed-size use of atomics." (RG §B.5)
-  - **PTX ISA §8.8:** a release pattern is "a release or acquire-release memory fence followed by a strong write on M in
-    program order" (RG §B.5).
-  - **design/disjoint-pages-change-request.md C3.7 (:938):** "A supplied word has one writer, its range's producer, which
-    stores t + 1 after its last write in execution t."
-- **Change:** written at 913bdb1f and ee787950, as above. Every access to the word is 64-bit.
-
-### 6. Placement: pages, with runs only for contiguous-typed functions
-
-- **Code:**
-  - rdma/mesh-collective.c `plan_place` places every value page by page, with `mesh_graph_chains` (Dilworth's theorem,
-    by Fulkerson's matching) and `mesh_graph_fat_cover` (Mukerji 1994 §3.2) (PC).
-  - rdma/mesh-dataflow.c `mesh_view_compose` reserves a range and remaps every typed operand's rows over it with
-    `mach_vm_remap`. That comes from design/plan-to-bridge-change-request.md R2 as 4e78f6f4 wrote it: "No value is
-    placed as one run." (RG §A).
-  - The 11-02 solver placed a contiguous-typed function's values as runs, by TensorFlow Lite's
-    `GreedyBySizeAssignment` ported, and every other value page by page (c491c514, f56e59c6, f09d353c, e172a931). It
-    was deleted by 0b3e78d7 and is held by tag `pre-return-20261103`.
-  - `plan_items` puts a value's blocks in its own item, one a copy, and in the items of the sets that cover them
-    (mesh-collective.c:887–906).
-  - The bindings take copy c at offset + c × stride (metal_recording.h:76–77,
-    `place:operand:in:offset:stride:copies:shares:`).
-  - Every e2b value is `run` 1, yet some of e2b's transfers are MESH_PAGES (e2b_replay.m:609).
-- **Source:**
-  - **The operator:** 2026-11-02 (the typing); U71 (function A's operand "contiguous and complete", function B's
-    "complete but not contiguous"); U188 (paging, and the solver for contiguous buffers).
-  - **Y. Pisarchyk, J. Lee, arXiv:2001.03288, 2020** (VS; LP §4):
-    - §3, p. 2: "Tensor Usage Record of an intermediate tensor t is defined as the triple {first_op_t, last_op_t,
-      size_t}, where size_t is t's aligned size in bytes."
-    - §5.2: "We first iterate through tensor usage records in non-increasing order by their size (L.1,6). For each
-      record, we check already assigned tensors whose usage intervals intersect with that of the current tensor
-      (L.10–13) to find the smallest gap in memory between them such that current tensor fits into that gap (L.9,14–17).
-      If such a gap is found, the current tensor is allocated to this gap. Otherwise, we allocate it after the rightmost
-      tensor whose usage interval intersect with that of the current tensor (L.19–20)."
-  - **TensorFlow Lite** (6cf18d88, Apache-2.0), tensorflow/lite/delegates/gpu/common/memory_management.h:130–131:
-    "Calculates the assignment of tensors to offsets, considering those tensors are going to be allocated in one
-    continuous memory block." (LP §3)
-  - **Lam 1988, p. 322:** variable expansion "expands the variable into a higher dimension variable, so that each
-    iteration can refer to a different location." (LP §7)
-  - **T. Kilburn, D. B. G. Edwards, M. J. Lanigan, F. H. Sumner, "One-level storage system", 1962:** "Hence a system has
-    been devised to make the core drum store combination appear to the programmer as a single level of storage, the
-    requisite transfers of information taking place automatically." (VS)
-  - **design/aot-compilation-change-request.md A8:** "each consumer's kind (R4: a join for function A, a task per page
-    for function B)".
-- **Change:**
-  - A function's operand is one run only where the function is typed `contiguous_input` or `contiguous_output`: U71's
-    function A. Function B's operand, "complete but not contiguous", is placed page by page, and so is every other
-    function's, as views of its pages by page-table index (U166). e2b's `run` 1 for a value whose consumer is
-    MESH_PAGES goes.
-  - A set is a range whose every declared transfer is MESH_PAGES, function B's, so no set covers a block of a run. A
-    run's blocks are its value's own item.
-  - A run's q copies are one usage record of q times its size, Lam's "higher dimension variable". Copy c is at the
-    record's offset + c times its size, as the bindings take it.
-  - Greedy by Size for Offset Calculation places the runs' records in "one continuous memory block", as f09d353c ported
-    TensorFlow Lite's `GreedyBySizeAssignment`. That block is one item of the page placement, live from the runs' first
-    use to their last. The chains and the fat cover place it and every other item, as now.
-  - Deleted:
-    - `mesh_view_compose`'s remapping of typed operands;
-    - R2's "No value is placed as one run", for contiguous-typed operands;
-    - this item's clause of efa3ad8c, "A run's transfers are consumed whole, as R4's join; every other operand's pages
-      are R4's tasks per page". No source states it. A consumer's kind is its declared transfer's (R4).
-
-### 7. Lifetimes: from the first write to the last read
-
-- **Code:**
-  - rdma/mesh_compile.py `program()` gave every value of a capture the capture's whole range of levels.
-  - metal-microbench 63b9f015 and mesh aca4f783: a captured buffer's interval runs from the level of the first recorded
-    command that writes it to the level of the last that reads it.
-  - A call's inputs, which the host writes, and its results, which the host reads, keep [0, levels − 1] (aca4f783).
-- **Source:**
-  - **design/problems-of-14b9a757-change-request.md item 7:** "Every block's item arrives at the first write and departs
-    at the last read of the values whose bytes it holds, in the program's order." Its item 14 colours those intervals as
-    cyclic intervals (Hendren, Gao, Altman and Mukerji, CC 1992; Mukerji 1994 §3.2).
-  - **ExecuTorch** (75af78c4, BSD), exir/memory_planning.py:348–354, `update_tensor_lifetime` (LP §1):
-    `if node.op == "placeholder": start = 0`, and every other end is `node_idx if end is None or end < node_idx else
-    end`. The output node, whose arguments are the graph's results, is the graph's last: torch/fx/graph.py:1498–1502,
-    `output_node = next(iter(reversed(self.nodes)))`.
-  - **TensorFlow Lite** (6cf18d88), tensorflow/lite/arena_planner.cc (LP §2):
-    - :262–267: "Queue all graph inputs for allocation and make sure they are never overwritten." with `allocate(0,
-      tensor_index)`;
-    - :334–335: "Note that graph outputs will never be scheduled for deallocation."
-  - **B. R. Rau, M. Lee, P. P. Tirumalai, M. S. Schlansker, "Register Allocation for Software Pipelined Loops", PLDI 1992,
-    p. 286:** "Live-in values, which are pre-loaded prior to loop entry, must remain in the registers until their
+  - M. Lam, PLDI 1988, p. 322 (CP §7): "The lifetime of a register variable is defined as the duration between the first
+    assignment into the variable and its last use."
+  - ExecuTorch (75af78c4), exir/memory_planning.py:348–354 (LP §1): `if node.op == "placeholder": start = 0`; and
+    torch/fx/graph.py:1498–1502: `output_node = next(iter(reversed(self.nodes)))`.
+  - TensorFlow Lite (6cf18d88), tensorflow/lite/arena_planner.cc (LP §2): "Queue all graph inputs for allocation and
+    make sure they are never overwritten." :334–335: "Note that graph outputs will never be scheduled for deallocation."
+  - B. R. Rau, M. Lee, P. P. Tirumalai, M. S. Schlansker, "Register Allocation for Software Pipelined Loops", PLDI 1992,
+    p. 286 (LP §5): "Live-in values, which are pre-loaded prior to loop entry, must remain in the registers until their
     lifetimes end. This adds a leading blade to the wand of recurring values which extends, on the left, all the way
     through cycle 0." "As discussed, the lifetimes of live-out values, which are used after loop exit, must be extended
-    until the loop completes." (LP §5)
-- **Change:**
-  - A captured buffer's interval runs from the level of the first recorded command that writes it to the level of the
-    last that reads it: written at 63b9f015 and aca4f783.
-  - A call's input runs from level 0 to the last command that reads it. A call's result runs from the first command
-    that writes it to level levels − 1.
-  - Only the program's invariants span the whole program.
+    until the loop completes."
+- **Write:**
+  - A captured buffer's interval runs from its first write to its last read. Written at metal-microbench 63b9f015 and
+    mesh aca4f783.
+  - A call's input's interval starts at the capture's first command, as a placeholder's `start = 0` (ExecuTorch), and
+    ends at its last read. A call's result's interval starts at its first write and ends at the capture's last
+    command, the output node being the graph's last (torch.fx) and a graph output "never ... scheduled for
+    deallocation" (TensorFlow Lite).
 
 ### 8. The torch scope's final lowering
 
-- **Code:**
-  - The torch scope runs torch's MPS kernels, one ATen operator at a time, and the capture records them as they are.
-  - Of the ATen operators, only `aten::mm` runs the engine's `dense_tensor_f16` (`matmul2d` with cooperative tensors;
-    mesh 03297e52).
-- **Source:** all read and quoted in FL.
-  - **J. Ansel et al., PyTorch 2, ASPLOS 2024, §1:** "The framework only has visibility of a single operator at a time,
-    and thus cannot automatically perform optimizations, like fusion or scheduling, that cross operator boundaries."
-  - **T. Chen et al., TVM, OSDI 2018, abstract:** "TVM solves optimization challenges specific to deep learning, such as
+- **Replaces:** the torch scope's kernels, which are torch's MPS kernels, one ATen operator at a time (mesh 03297e52).
+- **Source:** read and quoted in FL.
+  - J. Ansel et al., PyTorch 2, ASPLOS 2024, §1: "The framework only has visibility of a single operator at a time, and
+    thus cannot automatically perform optimizations, like fusion or scheduling, that cross operator boundaries."
+  - T. Chen et al., TVM, OSDI 2018, abstract: "TVM solves optimization challenges specific to deep learning, such as
     high-level operator fusion, mapping to arbitrary hardware primitives, and memory latency hiding."
-  - **J. Ragan-Kelley et al., Halide, PLDI 2013, §1:** "decoupling the algorithm definition from its execution strategy".
-  - **P. Tillet, H. T. Kung, D. Cox, Triton, MAPL 2019, §5.2.1:** "Nested tiling strategies … aim at decomposing tiles
-    into micro-tiles and eventually nano-tiles in order to fit a machine's compute capabilities and memory hierarchy as
+  - J. Ragan-Kelley et al., Halide, PLDI 2013, §1: "decoupling the algorithm definition from its execution strategy".
+  - P. Tillet, H. T. Kung, D. Cox, Triton, MAPL 2019, §5.2.1: "Nested tiling strategies … aim at decomposing tiles into
+    micro-tiles and eventually nano-tiles in order to fit a machine's compute capabilities and memory hierarchy as
     tightly as possible."
-  - **B. Spector et al., ThunderKittens (arXiv:2410.20399), §1:** "any high performance framework must prioritize keeping
+  - B. Spector et al., ThunderKittens (arXiv:2410.20399), §1: "any high performance framework must prioritize keeping
     tensor cores at high utilization whenever possible."
-  - **C. Cecka, CuTe layout algebra (arXiv:2603.02298), abstract:** "These instructions prescribe fixed, often complex
-    data layouts that must be correctly propagated through the entire execution pipeline to ensure both correctness and
+  - C. Cecka, CuTe layout algebra (arXiv:2603.02298), abstract: "These instructions prescribe fixed, often complex data
+    layouts that must be correctly propagated through the entire execution pipeline to ensure both correctness and
     optimal performance."
-  - **T. Dao et al., FlashAttention, NeurIPS 2022, abstract:** "an IO-aware exact attention algorithm that uses tiling to
+  - T. Dao et al., FlashAttention, NeurIPS 2022, abstract: "an IO-aware exact attention algorithm that uses tiling to
     reduce the number of memory reads/writes between GPU high bandwidth memory (HBM) and GPU on-chip SRAM."
-  - **Y. Xu et al., GSPMD (arXiv:2105.04663), §1:** "GSPMD will run compiler passes that complete the sharding
-    specification on the entire computation graph, and transform it into a mathematically equivalent, parallelized
-    computation to run on each device."
-  - **N. Shazeer et al., Mesh-TensorFlow, NeurIPS 2018, abstract:** "A Mesh-TensorFlow graph compiles into a SPMD program
+  - Y. Xu et al., GSPMD (arXiv:2105.04663), §1: "GSPMD will run compiler passes that complete the sharding specification
+    on the entire computation graph, and transform it into a mathematically equivalent, parallelized computation to run
+    on each device."
+  - N. Shazeer et al., Mesh-TensorFlow, NeurIPS 2018, abstract: "A Mesh-TensorFlow graph compiles into a SPMD program
     consisting of parallel operations coupled with collective communication primitives such as Allreduce."
-  - **L.-W. Chang et al., FLUX (arXiv:2406.06858), abstract:** "Flux overdecomposes communication and computation
-    operations into much finer-grained operations and further fuses them into a larger kernel to effectively hide
-    communication without compromising kernel efficiency."
-  - **S. Zheng et al., TileLink (arXiv:2503.20313), abstract:** "TileLink decouples the design space of communication and
+  - L.-W. Chang et al., FLUX (arXiv:2406.06858), abstract: "Flux overdecomposes communication and computation operations
+    into much finer-grained operations and further fuses them into a larger kernel to effectively hide communication
+    without compromising kernel efficiency."
+  - S. Zheng et al., TileLink (arXiv:2503.20313), abstract: "TileLink decouples the design space of communication and
     computation, linking these two parts via tile-centric primitives."
-  - **A. Jangda et al., CoCoNet, ASPLOS 2022, §1:** "we need to schedule the MatMul kernel to compute chunks in the order
-    the AllReduce kernel communicates them."
-  - **Triton-distributed (arXiv:2504.19442), §2.1:** "The core of our programming model includes three concepts:
-    symmetric memory, signal exchange, and async-task."
-  - **Metal Performance Primitives, MPPTensorOpsMatMul2d.h:216–218 (macOS 26.4 SDK):** "cooperative_tensor owns thread
+  - A. Jangda et al., CoCoNet, ASPLOS 2022, §1: "we need to schedule the MatMul kernel to compute chunks in the order the
+    AllReduce kernel communicates them."
+  - Triton-distributed (arXiv:2504.19442), §2.1: "The core of our programming model includes three concepts: symmetric
+    memory, signal exchange, and async-task."
+  - Metal Performance Primitives, MPPTensorOpsMatMul2d.h:216–218 (macOS 26.4 SDK): "cooperative_tensor owns thread
     private data and divides the data for entire tensor among threads (participating in the scope of operation) in
-    implementation defined manner." The same header: "User can apply post processing in-register where GEMM output is
-    computed using cooperative_tensor."
-- **Change:**
-  - The torch scope's kernels are those of a final lowering of each compiled function's graph that has, on Metal, the
-    properties these sources state:
-    - operators fused across their boundaries (PyTorch 2, TVM);
-    - tiles fitted to the machine's compute capabilities and memory hierarchy (Triton, ThunderKittens, FlashAttention),
-      held in cooperative tensors (MPP);
-    - layouts propagated through the whole pipeline (CuTe);
-    - the algorithm kept apart from its schedule (Halide);
-    - the sharding completed over the whole graph into one SPMD program with the library's collectives (GSPMD,
-      Mesh-TensorFlow);
-    - communication cut into tiles and fused or ordered with the compute that consumes it (FLUX, TileLink, CoCoNet,
-      Triton-distributed).
-  - torch's MPS kernels are not this lowering's kernels (U173).
-  - **Stop:** these sources state the properties, not which IR carries the lowering on Metal. That is the subject of the
-    next change request, and nothing is written for it from this one.
+    implementation defined manner."
+- **Stop:** these sources state properties of a final lowering, and no quoted source says which IR carries one on Metal.
+  Nothing is written for this item.
 
 ### 9. Every node replays
 
-- **Code:** mesh fcf5d18a: a node where a declared transfer names one of its values runs its steps, calling torch from
-  Python at every execution, while the other nodes replay. It cites no source.
-- **Source:**
-  - **design/aot-compilation-change-request.md A1:** "So every function of a torch program is captured and compiled
-    before the program runs, the same at every rank, and nothing runs eagerly between its compiled calls."
-  - **NCCL User Guide, "Collective Operations":** "Collective operations have to be called for each rank (hence CUDA
-    device), using the same count and the same datatype, to form a complete collective operation. Failure to do so will
-    result in undefined behavior, including hangs, crashes, or data corruption."
-  - **NCCL User Guide, "Using NCCL with CUDA Graphs":** "Starting with NCCL 2.9, NCCL operations can be captured by CUDA
-    Graphs."
-- **Change:** every node runs its captured program by replay, its transfers included, and fcf5d18a's split is deleted.
-  Item 3's tasks need no reader source, so in the torch scope this waits on item 3 alone.
-
-## What goes from the earlier texts and their implementation
-
-- The text of 1d4c2ebe, 6ddf657f and 053e4017: its placement sparse buffers, heap argument and single-VM-region point,
-  the splitting of the replay at waits, the direct encoding of dispatches and the source-less whole pass. None of them
-  cites a method.
-- From d0a72fc6:
-  - **Kept:** the one received word and one supplied word per range.
-  - **Deleted, at 109b11a3 and 1e55e089:** the direct kind, the blit mode, and the whole later pass for a source-less
-    reader.
-- From mesh 03297e52:
-  - **Kept:** the capture at make() and the replay at every execution.
-  - **Replaced:** the registration of torch's MPS kernels as the torch scope's kernels, by item 8.
-- From efa3ad8c, Claude's text of this request:
-  - item 3's "Each consumer row has a count and a dense array of the page indices that have arrived, in its own section
-    of the region, in the form of BlockMask's kv_num_block and kv_indices". BlockMask is an attention kernel's mask,
-    pre-computed "during compilation time" (WA §4.1), not a source for landed data. Item 3's worklist is Nasre et al.'s,
-    of the plan's tasks;
-  - item 3's stop for kernels with no MSL source, which its tasks no longer need;
-  - item 6's clause on runs' transfers, as item 6 says.
+- **Replaces:** mesh fcf5d18a: a node where a declared transfer names one of its values calls torch from Python at every
+  execution, while the other nodes replay.
+- **Source:** NCCL User Guide 2.32.3 (NS): "Collective operations have to be called for each rank (hence CUDA device),
+  using the same count and the same datatype, to form a complete collective operation." "Starting with NCCL 2.9, NCCL
+  operations can be captured by CUDA Graphs."
+- **Write:** every node runs its captured program by replay, its collectives included. fcf5d18a's calls of torch from
+  Python at every execution are deleted.
+- **Stop:** in the torch scope, item 3's: no quoted source says how the dispatch of a recorded kernel is divided among
+  partitions.
 
 ## Stops
 
-- Item 8: which IR carries the torch scope's final lowering.
-- Item 1: a call with no Metal 4 counterpart, once one is found. It is listed here when it is.
+- Item 1: whether the replay of a later execution issues a call the captured execution made once.
+- Item 2: the number of locations of a value the host writes.
+- Item 3: how the dispatch of a recorded kernel is divided among partitions.
+- Item 4: the value the event is set to at a failure, without R.
+- Item 6: where the memory block of offsets lies among the pages of every other operand, and how an operand's u
+  locations enter its usage records.
+- Item 8: which IR carries the torch scope's final lowering on Metal.
+- Item 9: in the torch scope, the reading of received data (item 3).
