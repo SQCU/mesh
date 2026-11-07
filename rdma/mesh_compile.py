@@ -3250,8 +3250,8 @@ def _captured(context, irs, compiled, gm, of, constants, holders):
 # c at offset + c x section.pages x pgsz (mesh-collective.h mesh_view_values), and its own values after its function's
 # (`first`), then its replay built (MetalRecorderReplay) and its residency set on the recorder's queue
 # (MTL4CommandQueue.h addResidencySet:).  One struct MetalCall a call, its plan its function's
-# design/torch-capture-change-request.md, 2: each call's `lead` its plan's u copies (`states`, mesh.h struct mesh_state)
-# less one, the delay of its transfers' IPC edge in MetalRecorderRun's terms
+# each call's `lead` its plan's u copies (`states`, mesh.h struct mesh_state) less one, the delay of its transfers' IPC
+# edge in MetalRecorderRun's terms
 def _replays(captured, functions, states, values, addresses, view, buffer, pgsz):
     lib, recorder, error = captured['lib'], captured['recorder'], C.create_string_buffer(4096)
     queue, replays = OBJECT(recorder, _SEL(b'queue')), []

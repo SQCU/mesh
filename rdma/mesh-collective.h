@@ -527,9 +527,9 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    its tests go, and struct mesh_function's `share` and `shares` with it (64 bytes, as before 55b9cbad).  Two values'
    rows name one frame by the program's one allocation alone (the note before struct mesh_value).  What must stay:
    `outstanding` and `plan` as their notes state them
-   design/torch-capture-change-request.md, 2: `lead` goes (`padding` in its bytes); a transfer's IPC edge has its plan's
-   u copies as its delay (S. S. Bhattacharyya, S. Sriram, E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (1):
-   "start(v_i, k) ≥ end(v_j, k – delay((v_j, v_i)))"), which mesh_plan takes from its own u */
+   A transfer's IPC edge has its plan's u copies as its delay (S. S. Bhattacharyya, S. Sriram, E. A. Lee, IEEE Trans.
+   Signal Processing 45(6), 1997, (1): "start(v_i, k) ≥ end(v_j, k – delay((v_j, v_i)))"), which mesh_plan takes from
+   its own u */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding,plan; };

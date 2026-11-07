@@ -936,9 +936,8 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
    defi[n]ed as the duration between the f[i]rst assignment into the variable and it[s] last use."  MPI 4.1 §3.7: "The
    receiver should not access any part of the receive buffer after a nonblocking receive operation is called, until the
    receive completes."  MPI 4.1 §3.9, MPI_START: "The request becomes active once the call is made."  A received copy
-   c's interval starts at the start of execution c - `start_lead`, u - 1 (design/torch-capture-change-request.md, 2:
-   S. S. Bhattacharyya, S. Sriram, E. A. Lee, 1997, (1): "start(v_i, k) ≥ end(v_j, k – delay((v_j, v_i)))", the
-   delay the plan's u copies). */
+   c's interval starts at the start of execution c - `start_lead`, u - 1 (S. S. Bhattacharyya, S. Sriram, E. A. Lee,
+   1997, (1): "start(v_i, k) ≥ end(v_j, k – delay((v_j, v_i)))", the delay the plan's u copies). */
 static int plan_interval(const struct plan *plans,const struct plan_item *x,const uint64_t *operations,uint64_t *start,
                          uint64_t *end){
   if(x->kind!=PLAN_LOCAL && x->kind!=PLAN_ROUTED)return 0;
@@ -2500,8 +2499,7 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
      14b9a757"): and, after the least lags, the frames' items here (plan_sets) */
   if((status=plan_trees(p)) || (status=plan_template(p,dependence,dependences)) || (status=plan_acyclic(p)) ||
      (status=plan_unroll(p)) || (status=plan_sets(p,m)))goto done;
-  /* design/torch-capture-change-request.md, 2: execution t's requests start once execution t - u has ended, at the
-     start of execution t - (u - 1) */
+  /* execution t's requests start once execution t - u has ended, at the start of execution t - (u - 1) */
   p->start_lead=p->copies-1;
   plan_walk(p);
   uint64_t entries;
