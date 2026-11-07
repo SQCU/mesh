@@ -140,6 +140,10 @@ be captured yet;»)
 
 (U189)
 
+> sure, implement this, looks citey enough and any substantial differences should be revisions to this coverage of work
+
+(U190, 22:38, answering this text at efa3ad8c)
+
 ## How it is implemented
 
 As design/problems-of-14b9a757-change-request.md states it:
