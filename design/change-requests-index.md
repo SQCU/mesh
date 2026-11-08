@@ -15,13 +15,13 @@ every change request follows is [change-requests.md](change-requests.md).
      the replay now orders by dependence depth.
   4. Withdrawn 2026-11-08: plan-to-bridge R4 writes this consumer, and item 1 lowers it.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
-  - Open, written and not yet implemented: item 6, its stop settled in mesh d62f205d from
-    design/stops-sources-2026-11-07.md.
   - Open, written and not yet implemented: item 3 in the LiteRT scope, with a partition a page (plan-to-bridge R4).
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
   - In the torch scope, item 9 waits on the lowering request's item 4.
-  - Implemented: items 1 (metal-microbench a3792f13), 4 (mesh 992f6389), 5 and 7, and item 2's first write. Item 8 is written by the lowering
+  - Implemented: items 1 (metal-microbench a3792f13), 4 (mesh 992f6389), 5, 6 (mesh a2c1532c and b880b808,
+    metal-microbench 6b3c29e5) and 7, and item 2's first write. Item 6 still needs its change in mesh_compile.py's
+    `_mapped`, `_Mapping.release` and `_replays`, which the lowering agent is making. Item 8 is written by the lowering
     request's items 1–3.
 - [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md): outstanding in part.
   - Implemented: the requirements written from its stops in mesh 593dd1c0. These are the second stops' item 8 and the
