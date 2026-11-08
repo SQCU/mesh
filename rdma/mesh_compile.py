@@ -820,8 +820,11 @@ def _readers(ir, roots, default):
 # design/plan-to-bridge-change-request.md R4 and R6; design/aot-compilation-change-request.md A8 and appendix item 5;
 # design/torch-source-lowering-change-request.md item 1
 def _consumer(ir, roots):
-    readers = [item for item in ir.program for k in item[1] if ir.over.get(k, frozenset()) & roots]
-    return mesh.PAGES if readers and all(ir.kinds.get(item[2]) == mesh.PAGES for item in readers) else mesh.JOIN
+    def read(g):
+        return [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())] if isinstance(g, int) else []
+    joined = [g for g, item in enumerate(ir.program) if ir.kinds.get(item[2]) != mesh.PAGES]
+    return mesh.PAGES if roots & mesh_graph.reach(range(len(ir.program)), read) \
+        and not roots & mesh_graph.reach(joined, read) else mesh.JOIN
 
 
 # design/plan-to-bridge-change-request.md R1; design/aot-compilation-change-request.md, appendix item 7;
@@ -1177,16 +1180,20 @@ def _place(ir):
 # design/torch-source-lowering-change-request.md item 1; design/plan-to-bridge-change-request.md R2 and R4;
 # design/aot-compilation-change-request.md, appendix item 7; mesh-collective.h struct mesh_value
 def _runs(ir, places):
-    run = set(ir.loads)
-    for kind, reads, key, operand in ir.program:
-        if ir.kinds.get(key) == mesh.PAGES or kind in ('input', 'constant', 'slice', 'narrow') \
-                or kind == 'window' and key not in ir.inside or kind == 'collective' and _local(ir, operand) is None:
-            continue
+    def accessed(g):
+        if not isinstance(g, int):
+            return []
+        kind, reads, key, operand = ir.program[g]
         form = ir.forms.get(key) if kind == 'call' else None
         written = [result for _, result in form[1]] if isinstance(form, tuple) else [key]
         parts = [part[0] for _, part in ir.roles[operand][1] if part is not None] if kind == 'collective' else []
-        run |= {owner for k in reads for owner in ir.over.get(k, ())}
-        run |= {places[k].owner for k in written + parts if k is not None and places.get(k) is not None}
+        return [owner for k in reads for owner in ir.over.get(k, ())] \
+            + [places[k].owner for k in written + parts if k is not None and places.get(k) is not None]
+    synchronous = [g for g, (kind, _, key, operand) in enumerate(ir.program)
+                   if not (ir.kinds.get(key) == mesh.PAGES or kind in ('input', 'constant', 'slice', 'narrow')
+                           or kind == 'window' and key not in ir.inside
+                           or kind == 'collective' and _local(ir, operand) is None)]
+    run = mesh_graph.reach(synchronous, accessed) | set(ir.loads)
     for key, v in ir.owned.items():
         ir.values[v].run = int(key in run)
 
