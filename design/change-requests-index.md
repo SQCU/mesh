@@ -5,24 +5,19 @@ every change request follows is [change-requests.md](change-requests.md).
 
 ## Outstanding
 
-- [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): outstanding in part.
-  1. No torch kernel; every function from source. Implemented in metal-microbench c24308dd (operator_shaders.metal)
-     and mesh 014fe04a for the pointwise, copy, product, window and pad operators and the views. Open: every other
-     operator, which is now a compile error naming it, and functions placed on the CPU, which item 1 gives no source.
-  2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d. Open: `cond` and `while_loop` on GPU data,
-     which item 2 admits and no item says how to lower.
-  3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c, and in
-     metal-microbench e4800f65, 270c6e5f and 43f37e96. Open: the order is by dependence depth, since no operand gives
-     a recorded command the length the completion-time linear program needs.
-  4. Consumption of received data inside functions. Written for data landed before the dispatch, in metal-microbench
-     c4d41929 (`dense_tensor_f16_received`). Open: consumption while partitions land during the dispatch. On the M5
-     Max the GPU did not see the CPU's ordered stores in order, and no quoted source gives a running Metal function
-     acquire visibility of CPU or NIC writes.
+- [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): outstanding.
+  1. Each function typed and scheduled as plan-to-bridge R3 and R4 write it, on every Apple silicon backend, the CPU
+     included (rewritten 2026-11-08). Open: the lowering to R4's tasks. The kernels of metal-microbench c24308dd and
+     2e262f1f and mesh 014fe04a and 40e4189d lower every operator as one task over a whole operand.
+  2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d.
+  3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c and
+     metal-microbench e4800f65, 270c6e5f and 43f37e96. Open: each task's length from the weighting operand (A3), where
+     the replay now orders by dependence depth.
+  4. Withdrawn 2026-11-08: plan-to-bridge R4 writes this consumer, and item 1 lowers it.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Open, written and not yet implemented: item 6, its stop settled in mesh d62f205d from
     design/stops-sources-2026-11-07.md.
-  - Open, a stop again: item 3 in the LiteRT scope. Unsaid are what a partition of a received operand is, a range or a
-    page; a threadgroup whose indices span two partitions; and a dispatch reading several received operands.
+  - Open, written and not yet implemented: item 3 in the LiteRT scope, with a partition a page (plan-to-bridge R4).
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
   - In the torch scope, item 9 waits on the lowering request's item 4.

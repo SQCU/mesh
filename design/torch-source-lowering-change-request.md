@@ -90,6 +90,19 @@ Turns are named by their local time.
 
 (2026-11-07 21:50)
 
+> "so functions placed on the CPU now fail to compile, though until now they ran on torch's CPU kernels. " this integratino gap is a requirement to Actually Write The Compilation Stages Which Lower Arbitrary Linal To Apple Silicon Backends.
+> i don't think that the user said to use an idiomatic expression liek 'all functions are lowered from source'; the non-idiomatic approach would cite the chain of IRs involved in compilation and say 'there is an IR drawn from the source [citation] which we further lower satisfying properties [citation] [citation] [citation]'.
+
+(2026-11-07 23:54)
+
+> i don't think *anything* is open here at all, is there? there are only non-forced errors by claudes who decided to embellish, garnish, elaborate, extend, extrapolate, or otherwise throw in extra little zingers they didn't need to write, and otherwise deviate from the standards of how change requests are formulated
+
+(2026-11-07 23:55)
+
+> okay so why did you give a subagent some asisgnemnt of something to do besides this exact content? what were you doing insteade? did you think that chagne request documents don't have a template or format for how they're written? address the root cause of the most recent waste of time and effort and launch implementation agents again
+
+(2026-11-08 00:09)
+
 ## The specification
 
 design/change-requests.md: "A change request describes what ought to be written. It uses only non-idiomatic descriptions
@@ -123,8 +136,20 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
     multiplication and convolution."
   - Apple, MPPTensorOpsMatMul2d.h:207–225, macOS 26.4 SDK (FL §14b): "User can apply post processing in-register where
     GEMM output is computed using cooperative_tensor."
-- **Write:** no torch Metal kernel is ever submitted or recorded again. Every function is lowered from source, whether
-  reference source or ours.
+  - the operator, quoted in design/plan-to-bridge-change-request.md R4: "function A requires set of pages operand_a to be
+    contiguous and complete before function A can begin to execute. function B requires set of pages operand_b to be
+    complete but not contiguous before function B is complete. function B can work on any pages received in any order
+    and can also release incomplete pages to consumer functions."
+  - the operator (2026-11-08, quoted above): "this integratino gap is a requirement to Actually Write The Compilation
+    Stages Which Lower Arbitrary Linal To Apple Silicon Backends."
+- **Write:** no torch Metal kernel is ever submitted or recorded again. Each function, on whichever Apple silicon
+  backend it is placed, the CPU included, is typed and scheduled as design/plan-to-bridge-change-request.md R3 and R4
+  write it:
+  - the synchronous, complete, contiguous consumer is one task with an edge from every page of its operand, and only its
+    operand, typed `contiguous_input` or `contiguous_output`, is one run of pages;
+  - the asynchronous, incomplete, noncontiguous consumer is one task per page, each with an edge from its own page, and
+    its outputs are pages that leave as each is produced;
+  - the IR carries each consumer's kind (design/aot-compilation-change-request.md A8).
 
 ### 2. The capture is a static dataflow graph
 
@@ -187,7 +212,8 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
   - Apple, MTLIndirectCommandBuffer.h (MO §3): "Dispatch threadgroups with concurrent execution"
 - **Write:**
   - Assignment is the placement operand together with the sharding.
-  - Order is the completion-time linear program (joint-compilation row 8).
+  - Order is the completion-time linear program (joint-compilation row 8), each task's length from the weighting
+    operand (design/aot-compilation-change-request.md A3).
   - Each dependence becomes the one Metal ordering its two ends' locations admit:
     - same threadgroup: a threadgroup barrier;
     - same encoder: an intra-pass barrier;
@@ -227,5 +253,5 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
     communication and computation, linking these two parts via tile-centric primitives."
   - Apple, MPPTensorOpsMatMul2d.h:158–160 (MO §4): "User can also take ownership of looping over reduction or
     k-dimension by choosing appropriate chunk size in k (called k-tile or tilek)"
-- **Write:** consumption as data arrives happens inside one function, on SIMD-groups of one threadgroup: each partition
-  is tested as MPI_PARRIVED states; partial results accumulate in cooperative tensors.
+- **Withdrawn** (2026-11-08). design/plan-to-bridge-change-request.md R4 writes this consumer, "one task per page, each
+  with an edge from its own page", and item 1 lowers it so. Nothing waits inside a function.

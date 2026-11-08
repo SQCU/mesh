@@ -498,7 +498,9 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   - J. Ragan-Kelley et al., Halide, PLDI 2013, §4.2 (TB §2): "For each function, it symbolically evaluates the bounds
     of each dimension based on the bounds required of its caller and the symbolic indices at which the caller invokes
     it."
-- **In the torch scope,** design/torch-source-lowering-change-request.md item 4 writes this item.
+- **A partition is a page:** the asynchronous, incomplete, noncontiguous consumer "is one task per page, each with an
+  edge from its own page" (design/plan-to-bridge-change-request.md R4).
+- **In the torch scope,** design/torch-source-lowering-change-request.md item 1 writes this item, by R4's task per page.
 - **In the LiteRT scope** (the stop of 2026-11-07, settled the same day): a recorded dispatch, `struct
   MetalRecordedDispatch` (metal-microbench metal_recording.m:8 at bed56a95), holds a pipeline, buffers, offsets and a
   grid; the sources above say when a receiver may access one partition, or all of them, and Halide computes a
