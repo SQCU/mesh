@@ -1338,6 +1338,9 @@ int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t ed
 }
 
 /* design/torch-source-lowering-change-request.md item 3 */
+static int access_conflict(const struct mesh_graph_access *a, const struct mesh_graph_access *b) {
+  return (a->write || b->write) && !(a->write == 2 && b->write == 2);
+}
 static int access_before(const void *a, const void *b) {
   const struct mesh_graph_access *x = a, *y = b;
   if (x->key != y->key) return x->key < y->key ? -1 : 1;
@@ -1352,7 +1355,7 @@ int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, si
   int result = 0;
   for (size_t i = 0; !result && i < accesses; i++)
     for (size_t j = i + 1; j < accesses && access[j].key == access[i].key && access[j].start < access[i].end; j++) {
-      if (access[j].vertex == access[i].vertex || !(access[i].write || access[j].write) || access[j].end <= access[j].start)
+      if (access[j].vertex == access[i].vertex || !access_conflict(access + i, access + j) || access[j].end <= access[j].start)
         continue;
       if (made == held) {
         const size_t grown = held ? 2 * held : 64;
@@ -1453,6 +1456,90 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
     }
   }
   free(first); free(order); free(pair); free(s.best); free(s.first); free(s.heap); free(done);
+  return result;
+}
+
+/* design/torch-source-lowering-change-request.md item 3; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans.
+   Signal Processing 45(6), 1997, §7, Fig. 4 */
+int mesh_graph_synchronization(uint32_t vertices, size_t accesses, struct mesh_graph_access *access, size_t room,
+                               uint32_t *from, uint32_t *to, size_t *edges, size_t *dependences) {
+  for (size_t a = 0; a < accesses; a++) if (access[a].vertex >= vertices) return EINVAL;
+  size_t held = accesses + 1, made = 0;
+  uint32_t *tail = NULL, *head = NULL;
+  int result = ERANGE;
+  while (result == ERANGE) {
+    free(tail); free(head);
+    tail = malloc((held + 1) * sizeof *tail); head = malloc((held + 1) * sizeof *head);
+    result = tail && head ? mesh_graph_dependences(accesses, access, held, tail, head, &made) : ENOMEM;
+    held = made;
+  }
+  uint64_t *delay = result ? NULL : calloc(made + 1, sizeof *delay);
+  unsigned char *synchronization = result ? NULL : malloc(made + 1), *redundant = result ? NULL : malloc(made + 1);
+  if (!result && (!delay || !synchronization || !redundant)) result = ENOMEM;
+  if (!result) {
+    memset(synchronization, 1, made + 1);
+    result = mesh_graph_redundant(vertices, made, tail, head, delay, synchronization, redundant);
+  }
+  size_t kept = 0;
+  for (size_t e = 0; !result && e < made; e++) {
+    if (redundant[e]) continue;
+    if (kept < room) { from[kept] = tail[e]; to[kept] = head[e]; }
+    kept++;
+  }
+  if (!result) { *edges = kept; *dependences = made; if (kept > room) result = ERANGE; }
+  free(tail); free(head); free(delay); free(synchronization); free(redundant);
+  return result;
+}
+
+/* design/torch-source-lowering-change-request.md item 3; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
+int mesh_graph_schedule(uint32_t vertices, size_t accesses, struct mesh_graph_access *access, const unsigned char *after,
+                        int self_timed, uint32_t *level, uint32_t *place, size_t *dependences, size_t *synchronizations) {
+  if (vertices == UINT32_MAX || accesses >= SIZE_MAX / 4) return ENOMEM;
+  const size_t reserve = 2 * (size_t)vertices + 1;
+  size_t room = accesses + reserve, edges = 0, made = 0;
+  uint32_t *from = malloc((room + 1) * sizeof *from), *to = malloc((room + 1) * sizeof *to);
+  uint32_t *weight = malloc((room + 1) * sizeof *weight);
+  size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((room + 1) * sizeof *order);
+  double *priority = malloc(((size_t)vertices + 1) * sizeof *priority);
+  int result = from && to && weight && first && order && priority ? 0 : ENOMEM;
+  while (!result) {
+    result = self_timed ? mesh_graph_synchronization(vertices, accesses, access, room - reserve, from, to, &edges, &made)
+                        : mesh_graph_dependences(accesses, access, room - reserve, from, to, &edges);
+    if (result != ERANGE) break;
+    room = edges + reserve;
+    uint32_t *f = realloc(from, (room + 1) * sizeof *f), *t = f ? realloc(to, (room + 1) * sizeof *t) : NULL;
+    uint32_t *w = t ? realloc(weight, (room + 1) * sizeof *w) : NULL;
+    size_t *o = w ? realloc(order, (room + 1) * sizeof *o) : NULL;
+    if (f) from = f;
+    if (t) to = t;
+    if (w) weight = w;
+    if (o) order = o;
+    result = o ? 0 : ENOMEM;
+  }
+  if (!result && !self_timed) made = edges;
+  for (size_t e = 0; !result && e < edges; e++) weight[e] = 1;
+  const size_t dependent = edges;
+  for (uint32_t v = 1; !result && !self_timed && v < vertices; v++) {
+    from[edges] = v - 1; to[edges] = v; weight[edges++] = 0;
+    if (after && after[v]) { from[edges] = v - 1; to[edges] = v; weight[edges++] = 1; }
+  }
+  if (!result) {
+    mesh_graph_rows(vertices, edges, depth_head, to, first, order);
+    for (uint32_t v = 0; v < vertices; v++) {
+      level[v] = 0;
+      for (size_t k = first[v]; k < first[v + 1]; k++) {
+        const size_t e = order[k];
+        if (from[e] >= v) { result = EDEADLK; break; }
+        if (level[from[e]] + weight[e] > level[v]) level[v] = level[from[e]] + weight[e];
+      }
+      if (result) break;
+      priority[v] = -(double)level[v];
+    }
+  }
+  if (!result && self_timed) result = mesh_graph_heap_order(vertices, priority, dependent, from, to, place);
+  for (uint32_t v = 0; !result && !self_timed && v < vertices; v++) place[v] = v;
+  if (!result) { *dependences = made; *synchronizations = dependent; }
+  free(from); free(to); free(weight); free(first); free(order); free(priority);
   return result;
 }
 

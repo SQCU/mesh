@@ -89,6 +89,12 @@ int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, si
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §7, Fig. 4 */
 int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
                          const unsigned char *synchronization, unsigned char *redundant);
+/* design/torch-source-lowering-change-request.md item 3 */
+int mesh_graph_synchronization(uint32_t vertices, size_t accesses, struct mesh_graph_access *access, size_t room,
+                               uint32_t *from, uint32_t *to, size_t *edges, size_t *dependences);
+/* design/torch-source-lowering-change-request.md item 3 */
+int mesh_graph_schedule(uint32_t vertices, size_t accesses, struct mesh_graph_access *access, const unsigned char *after,
+                        int self_timed, uint32_t *level, uint32_t *place, size_t *dependences, size_t *synchronizations);
 /* MPI 4.1 §6.1.11 */
 struct mesh_graph_interval { uint64_t key, start, end; };
 int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval);
