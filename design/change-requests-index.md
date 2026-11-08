@@ -10,14 +10,17 @@ every change request follows is [change-requests.md](change-requests.md).
   1. No torch kernel; every function from source.
   2. The capture is a static dataflow graph.
   3. Self-timed lowering of dependences into Metal orderings.
-  4. Consumption of received data inside functions.
+  4. Consumption of received data inside functions. Written for data landed before the dispatch, in metal-microbench
+     c4d41929 (`dense_tensor_f16_received`). Open: consumption while partitions land during the dispatch. On the M5
+     Max the GPU did not see the CPU's ordered stores in order, and no quoted source gives a running Metal function
+     acquire visibility of CPU or NIC writes.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
-  - Open, written and not yet implemented: items 1, 3 (in the LiteRT scope), 4 and 6. Their stops were settled in mesh
+  - Open, written and not yet implemented: items 1, 3 (in the LiteRT scope) and 6. Their stops were settled in mesh
     d62f205d, from design/stops-sources-2026-11-07.md.
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
   - In the torch scope, item 9 waits on the lowering request's item 4.
-  - Implemented: items 5 and 7, item 2's first write, and item 1's copies and fills. Item 8 is written by the lowering
+  - Implemented: items 5 and 7, item 2's first write, item 1's copies and fills, and item 4 (mesh 992f6389). Item 8 is written by the lowering
     request's items 1–3.
 - [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md): outstanding in part.
   - Open, written in mesh 593dd1c0 and not yet implemented: the second stops' item 8 and the third stops' "loading only
