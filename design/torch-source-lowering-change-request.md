@@ -213,7 +213,10 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
 - **Write:**
   - Assignment is the placement operand together with the sharding.
   - Order is the completion-time linear program (joint-compilation row 8), each task's length from the weighting
-    operand (design/aot-compilation-change-request.md A3).
+    operand (design/aot-compilation-change-request.md A3). It is the order `plan_schedule` (rdma/mesh-collective.c:830,
+    :834) already computes, `mesh_graph_completion_times` (rdma/mesh-graph.c:950) then `mesh_graph_heap_order`
+    (:1068), published with the AOT compiled static link schedule. The replay's command list is that order. The second
+    linear program over the GPU's commands (metal-microbench 3b719f10, `MetalOrder`) is deleted.
   - Each dependence becomes the one Metal ordering its two ends' locations admit:
     - same threadgroup: a threadgroup barrier;
     - same encoder: an intra-pass barrier;
