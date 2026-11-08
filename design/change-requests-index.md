@@ -6,9 +6,9 @@ every change request follows is [change-requests.md](change-requests.md).
 ## Outstanding
 
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
-  - Item 3 in the LiteRT scope: implemented in metal-microbench a8ed7bd6, with a partition a page. Open: holding a run
-    of threadgroups for the supplied words of the pages it reads (plan-to-bridge R4), where a8ed7bd6 stops; and C9's
-    finding on 2c802b93.
+  - Item 3 in the LiteRT scope: implemented in metal-microbench a8ed7bd6, 55ef743b and 28650030, and mesh b02f97a4
+    and ec5aeb35. A run is held for the ranges that land the pages it reads. Open: a hold still orders later independent
+    work on the same queue, which the lowering request's item 3 forbids. This is in progress.
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
   - In the torch scope, item 9 waits on the lowering request's item 4.
@@ -24,9 +24,8 @@ every change request follows is [change-requests.md](change-requests.md).
   - Problems 4 and 11: their sections of sources say what is written. The request records no commit implementing
     them.
 - [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md): outstanding in part.
-  - Open: R4's consumption of a received operand one partition at a time. In the torch scope this is the lowering
-    request's item 4. In the LiteRT scope it is the torch-capture request's item 3, written in d62f205d and not yet
-    implemented.
+  - R4's consumption of a received operand one partition at a time: in the torch scope, the lowering request's item 1,
+    implemented; in the LiteRT scope, the torch-capture request's item 3, implemented but for its open part.
 
 ## Implemented
 
