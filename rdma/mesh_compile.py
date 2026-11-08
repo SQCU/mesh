@@ -67,7 +67,7 @@ class IR:
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
         self.publishes, self.inputs, self.declares, self.waits = {}, {}, {}, {}
-        self.attributes, self.loads, self.kinds, self.page, self.tasks, self.hull = {}, set(), {}, None, 0, None
+        self.attributes, self.loads, self.kinds, self.page, self.hull = {}, set(), {}, None, None
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
 
     # GSPMD section 3.1
@@ -1222,24 +1222,9 @@ def _runs(ir, places):
         ir.values[v].run = int(key in run)
 
 
-# design/aot-compilation-change-request.md A3; O. Sinnen, Task Scheduling for Parallel Systems, Wiley, 2007;
-# metal_recording.h tasks: and weigh:lengths:
-Weights = collections.namedtuple('Weights', 'tasks transfers')
-
-
+# design/aot-compilation-change-request.md A3
 def unit(ir):
-    return Weights([1.0] * ir.tasks, [mesh.Weight(1.0, 1.0, 1.0, 1.0) for _ in ir.declared])
-
-
-def _weighed(ir, function):
-    made = function.weights(ir)
-    if not isinstance(made, Weights) or len(made.tasks) != ir.tasks or len(made.transfers) != len(ir.declared) \
-            or not all(isinstance(w, (int, float)) for w in made.tasks) \
-            or not all(isinstance(w, mesh.Weight) for w in made.transfers):
-        raise ValueError('the weighting function gave %r for %d tasks and %d declared transfers: A3\'s operand is "a '
-                         'weight on each task; a weight on each edge", a Weights of one number a task and one mesh.Weight '
-                         'a declared transfer' % (type(made).__name__, ir.tasks, len(ir.declared)))
-    return made
+    return [mesh.Weight(1.0, 1.0, 1.0, 1.0) for _ in ir.declared]
 
 
 # mesh.h MESH_NAME; mesh-dataflow.h struct mesh_ctx
@@ -1461,10 +1446,6 @@ def _recorder():
         lib.MetalRecorderReplay.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(Replay), C.c_char_p, C.c_size_t]
         lib.MetalRecorderOperand.restype = C.c_int
         lib.MetalRecorderOperand.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(mesh.U), C.POINTER(mesh.U)]
-        lib.MetalRecorderTasks.restype, lib.MetalRecorderTasks.argtypes = mesh.U, [C.c_void_p, C.c_void_p]
-        lib.MetalRecorderWeigh.restype = C.c_int
-        lib.MetalRecorderWeigh.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(C.c_double), mesh.U, C.c_char_p,
-                                           C.c_size_t]
         lib.MetalRecorderRun.restype = C.c_int
         lib.MetalRecorderRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.U, C.POINTER(Call), mesh.U, mesh.Q,
                                          C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
@@ -2937,13 +2918,6 @@ def _captured(context, irs, compiled, gm, of, constants, holders):
         if not handle:
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: the capture: %s'
                           % (node.name, k, error.value.decode()))
-        ir.tasks = lib.MetalRecorderTasks(recorder, handle)
-        made = _weighed(ir, compiled[k].function)
-        if lib.MetalRecorderWeigh(recorder, handle, (C.c_double * max(ir.tasks, 1))(*made.tasks), ir.tasks, error,
-                                  len(error)):
-            raise OSError(errno.EINVAL, 'call %s of compiled function %d: the weighing: %s'
-                          % (node.name, k, error.value.decode()))
-        ir.weights = list(made.transfers)
         levels = LEVELS(recorder, _SEL(b'levels:'), handle)
         own = (MetalValue * max(VALUES(recorder, _SEL(b'values:level:into:'), handle, 0, None), 1))()
         count = VALUES(recorder, _SEL(b'values:level:into:'), handle, 0, C.cast(own, C.c_void_p))
@@ -3302,6 +3276,10 @@ def program(block, *example_inputs):
             ir = partition(record.gm, operand, nodes, page)
             ir.calls = entries[k]
             lower(ir)
+            ir.weights = list(record.function.weights(ir))
+            if len(ir.weights) != len(ir.declared) or not all(isinstance(w, mesh.Weight) for w in ir.weights):
+                raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight '
+                                 'each (A3)' % (len(ir.weights), len(ir.declared)))
             irs.append(ir)
         for j, k in enumerate(calls):
             absent = sorted(r for r in reads[j] if irs[calls[r]].device is None)
@@ -3322,9 +3300,6 @@ def program(block, *example_inputs):
             raise NotImplementedError('a compiled function called more than once in the block: its replay binds its '
                                       'values by its plan\'s executions, the block\'s inputs by the block\'s')
         captured = _captured(context, irs, compiled, gm, of, constants, holders) if replayed else None
-        for ir, record in zip(irs, compiled):
-            if ir.weights is None:
-                ir.weights = list(_weighed(ir, record.function).transfers)
         own = [[] for _ in irs]
         # M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; torch/fx/graph.py:1498–1502; TensorFlow
         # Lite arena_planner.cc:334–335; metal_recording.h MetalRecorderOperand
