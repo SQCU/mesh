@@ -720,26 +720,7 @@ def _merged(pad, padding, slicing):
     return slicing._replace(operands=padding.operands, windows=tuple(windows), merged=pad, configure=configure)
 
 
-# GSPMD section 3.5, sharding completion: it "runs the propagation pass on the entire graph in multiple iterations, and
-# alternates between forward propagation (input to output) and backward propagation (output to input)"; it "preserves
-# initial user annotations" and "changes the sharding on a tensor only when it finds a more fine-grained sharding
-# (possibily by combining with existing compatible sharding)", so it reaches a fixed point.  Priorities: "Elementwise
-# operators are assigned the highest priority to propagate through in both directions" and "Operators like Dot ... are
-# assigned lower priority": level 0 propagates through elementwise operators alone to its fixed point, level 1 through
-# Dot as well (design/compilation-coordination.md, A-T2), and through the windowed and data formatting operators, whose
-# consistent shardings still exchange halos (section 4.3), so not of the priority section 3.5 gives because "there is
-# no communication if their inputs/outputs are sharded consistently" (T4-6).  An operator's operands are taken in its
-# rule's order, those it propagates through alone (Rule `propagate`).  A sharding is carried onto no dimension its mesh
-# dimension does not divide: section 4.1 pads such a dimension, which partition refuses (T4-9).  Its rounds are the
-# graph module's (rdma/mesh_graph.py propagate), each operator's edges the operands its rule propagates through at the
-# level, its visits the rule's carry (_carry) and refinement (_merge), forward into the operator's output and backward
-# into the operand
-# 2026-11-05 (design/aot-compilation-change-request.md A10: "The same holds wherever mesh's code walks a graph"; the C9
-# hook's remark on cc4a3e12, "a fixed-point traversal of the dataflow graph's operator edges ... it moves into the
-# graph module"; design/compilation-coordination.md, "The revisions of abecd389", T4-3): the rounds' loop over the
-# graph's order and its reverse goes, for mesh_graph.propagate, where the coordinator's ruling on C9's remark of
-# d9efd96b kept the pass whole here (A2's own pass: its rules stay here).  What must stay: the levels, the order of the
-# visits and each refinement as before
+# design/joint-compilation.md §3, row 1
 def _complete(ir, operators, annotated):
     def refine(node, candidate):
         candidate = tuple(m if m < 0 or size and size % ir.shape[m] == 0 else -1
@@ -2385,17 +2366,7 @@ def _recorder():
     return RECORDER[0]
 
 
-# The engine's MPP kernel as torch's MPS mm: Metal Performance Primitives, MPPTensorOpsMatMul2d.h (macOS 26.4 SDK):
-# "User can apply post processing in-register where GEMM output is computed using cooperative_tensor."; torch 2.14.0
-# torch/library.py, impl: "Register an implementation for a device type for this operator. ... Some valid types are:
-# "cpu", "cuda", "xla", "mps", "ipu", "xpu"."; torch/mps/__init__.py, compile_shader: "Compiles compute shader from
-# source and allows one to invoke kernels defined there from the comfort of Python runtime".  dense_tensor_f16
-# (metal-microbench matrix_shaders.metal, after matrix_arithmetic.metal, as the engine's matrixMSL is) computes
-# out[m][n] = sum_k self[m][k] mat2[k][n] for half operands where self's k and mat2's k are of unit stride, any strides of
-# out (its MMB_MATRIX_OUTPUT_TRANSPOSED form where out's n is not), its constants this call's shape and strides, one
-# library a shape (ENGINE), threadgroups of 2 x 2 SIMD-groups over 64 x 64 tiles of out (MMB_MATRIX_ROWS,
-# MMB_MATRIX_GROUP_ROWS).  Any other mm is torch's own MPS kernel, bmm's of one batch (torch 2.14.0
-# torch/_torch_docs.py, bmm: "input and mat2 must be 3-D tensors each containing the same number of matrices").
+# design/joint-compilation.md §3, row 11
 ENGINE = {}
 
 

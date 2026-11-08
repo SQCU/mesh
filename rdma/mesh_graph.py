@@ -143,13 +143,6 @@ def matching(left, neighbours):
     return {a: b for a, b in mate.items() if b is not nil}
 
 
-# Composition (design/joint-compilation.md §3, row 2): called by mesh_compile.py before mesh_plan; fixes which calls commute
+# design/joint-compilation.md §3, row 2
 def width(vertices, neighbours):
-    """The width of a partial order on ``vertices``, the most of them no two of which are ordered, ``neighbours(a)``
-    giving the vertices ordered after a (the order whole, as closure gives it).  By Dilworth's theorem it is the fewest
-    chains covering them (R. P. Dilworth, A decomposition theorem for partially ordered sets, Annals of Mathematics 51,
-    1950), their number less a maximum matching of the bipartite graph with an edge from a to b for each a ordered
-    before b (D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered sets, Proc. AMS 7, 1956),
-    matched by Hopcroft and Karp's phases (matching).  (design/aot-compilation-change-request.md A10: "the width by
-    Fulkerson's matching in Hopcroft and Karp's phases".)"""
     return len(vertices) - len(matching(vertices, neighbours))

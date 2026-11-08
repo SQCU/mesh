@@ -1,62 +1,8 @@
-"""Online share allocator: writes the configuration operand of a mesh function's next call.
-
-metal-microbench docs/principles.md §4, "Adaptive configuration without synchronization or cold
-start".  A share group of W units at grain g is split over n ranks from a given config_t0.  Rank
-i's segment time is nearly linear in its share, t_i = a_i + b_i x_i with x_i = kappa c_i: c_i the
-units it applied in the call, kappa the call's cost scale (1 for columns, MB per unit for KV
-positions).  After each call every caller passes the same segment times and gets the same shares
-back, so the next call's configuration is one more value in the dataflow: no root, no lock.
-Composition (design/joint-compilation.md §3, row 9): across calls; its output is the next call's configuration, which reaches
-mesh_plan only through a new compilation.
-
-1. Recursive least squares with forgetting factor lambda on theta_i = (a_i, b_i), regressor
-   u = (1, x_i) [Haykin 2014, Table 10.1]: pi = P u, k = pi / (lambda + u'pi),
-   theta += k (t_i - theta'u), P = (P - k pi') / lambda.  trace(P) is capped at its prior's, the
-   bound the constant-trace modification holds it at [Goodwin & Sin 1984], so P cannot wind up
-   while a share stands still and still shrinks under excitation.  b_i is floored at the
-   roofline time per unit.
-2. g_i = t_i + b_i (kappa' s_i - kappa c_i): the observed time moved along the model to the
-   continuous iterate s at the next call's scale kappa'.  It is the gradient of
-   F(s) = sum_i integral t_i, whose minimum on sum s = W is equal finish [Beckmann 1956]; at
-   kappa' = kappa and s = c it is the observed time itself.
-3. A projected online gradient step preconditioned by b [Zinkevich 2003]:
-   s'_i = s_i - eta (g_i - mu) / (b_i kappa'), mu keeping sum s' = W.  It is equal_finish below
-   with a_i = eta g_i - b_i kappa' s_i and T = eta mu; eta = 1 is the equal-finish solve.
-4. c_i = low_i + g floor((s'_i - low_i) / g), then each leftover grain to the rank finishing
-   earliest with it, a_i + b_i (c_i + g), ties to the lower rank [Beaumont et al. 2001, Alg. 3.1]:
-   the least largest finish on the grain, which the largest remainders are not (W 12, b (1, 2.4):
-   [8, 4] finishes at 9.6, [9, 3] at 9).  s' stays the iterate; c is the next call's operand and
-   regressor.
-
-equal_finish(W, g, low, high, a, b) is steps 3-4 alone: rank i finishing at a_i + b_i s_i, the
-shares s_i = (T - a_i) / b_i with sum s = W; ranks outside their bounds are held at them and T
-re-solved, the side with the larger total violation first [Bitran & Hax 1981].  The mesh's
-programs take config_t0 from it (metal-microbench tools/mesh/programs.py).
-
-min_max(W, g, low, high, cost, shared) is step 4 for any nondecreasing finish cost[i](c_i): each
-grain in turn to the rank finishing earliest with it, optimal for the largest finish [Ibaraki &
-Katoh 1988]; shared(c), when given, is the time of the collectives the shares wait for, priced
-by the largest share: the same fill under each cap m on the largest share, the least
-max cost + shared kept [HAP, EuroSys 2024, §2.4].  A rank's high bound is what it can hold
-(its window over its bytes per unit).
-
-capacity(W, g, low, high) is each rank's largest share of W at grain g within [low_i, high_i]: its
-high bound, or W less every other rank's low bound, whichever is less.  A partitioned dimension's
-local buffers are shaped to it, so that any parts the bounds allow fit without a shape change
-(torch_mesh/partition.py; design/heterogeneity.md R14).
-
-O(n) plain floats in a fixed order (min_max O((W/g)^2 n)): identical inputs give identical
-shares on every rank.
-"""
+"""design/joint-compilation.md §3, row 9"""
 import math
 
 
 class Allocator:
-    """shares: config_t0, units per rank (multiples of grain); W = sum(shares).  low: each rank's
-    minimum (a multiple of grain, at least grain).  prior: per rank (a, b, var_a, var_b) in the
-    units of the times, x at scale 1.  floor: per rank, the least b (roofline time per unit).
-    forget: lambda in (0, 1].  step: eta in (0, 1].  .shares is the next call's configuration
-    operand; .a and .b are the estimates, for the run record."""
 
     def __init__(self, shares, grain, low, prior, floor, forget, step):
         self.shares, self.grain, self.low, self.floor = list(shares), grain, list(low), list(floor)
@@ -72,8 +18,6 @@ class Allocator:
         self.trace = [p00 + p11 for p00, _, p11 in self.P]
 
     def __call__(self, times, scale=1.0, next_scale=1.0):
-        """Steps on each rank's segment time of the call that ran .shares at cost scale `scale`;
-        returns the shares of the next call, whose cost scale is `next_scale`."""
         n, lam, eta = len(self.shares), self.forget, self.step
         g, w = [], []
         for i in range(n):
@@ -101,9 +45,6 @@ class Allocator:
 
 
 def equal_finish(total, grain, low, high, a, b):
-    """Shares of `total` units at `grain` over ranks finishing at a_i + b_i s_i, within
-    [low_i, high_i] (multiples of grain): (c, s, T), c the integer shares, s the continuous ones
-    and T their common finish (steps 3-4 above)."""
     n, held = len(a), {}
     while True:
         free = [i for i in range(n) if i not in held]
@@ -124,9 +65,6 @@ def equal_finish(total, grain, low, high, a, b):
 
 
 def min_max(total, grain, low, high, cost, shared=None):
-    """Shares of `total` units at `grain` within [low_i, high_i] (multiples of grain) over ranks
-    finishing at cost[i](c_i), nondecreasing, plus shared(c) when given: (c, T), T the largest
-    finish (above).  Grains that fit no rank are left unplaced."""
     n = len(low)
 
     def fill(cap):
@@ -147,6 +85,4 @@ def min_max(total, grain, low, high, cost, shared=None):
 
 
 def capacity(total, grain, low, high):
-    """Each rank's largest share of `total` units at `grain` within [low_i, high_i] (multiples of
-    grain): min(high_i, total - sum of the other ranks' low bounds)."""
     return [min(high[i], total - sum(low) + low[i]) // grain * grain for i in range(len(low))]
