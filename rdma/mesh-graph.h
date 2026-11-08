@@ -72,6 +72,10 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
 /* design/joint-compilation.md §3, row 8 */
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place);
+/* M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2, step 3; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
+   Res. 22(3), 1997, §2; design/integration-finishing-change-request.md item 2 */
+int mesh_graph_heap_cuts(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from, const uint32_t *to,
+                         const unsigned char *counted, uint32_t *listed, uint32_t *before, uint32_t *count);
 /* design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the self-timed
    buffer bound"; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997 (BSL) */
 /* BSL §3; R. E. Tarjan, SIAM J. Comput. 1(2), 1972 */

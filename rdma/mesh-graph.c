@@ -1130,6 +1130,25 @@ int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edge
   return result;
 }
 
+/* M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2, step 3; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
+   Res. 22(3), 1997, §2; design/integration-finishing-change-request.md item 2 */
+int mesh_graph_heap_cuts(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from, const uint32_t *to,
+                         const unsigned char *counted, uint32_t *listed, uint32_t *before, uint32_t *count) {
+  uint32_t *place = malloc(((size_t)vertices + 1) * sizeof *place), *at = malloc(((size_t)vertices + 1) * sizeof *at);
+  int result = place && at ? mesh_graph_heap_order(vertices, priority, edges, from, to, place) : ENOMEM;
+  if (!result) {
+    for (uint32_t v = 0; v < vertices; v++) at[place[v]] = v;
+    uint32_t made = 0, seen = 0;
+    for (uint32_t k = 0; k < vertices; k++) {
+      if (counted[at[k]]) { seen++; continue; }
+      listed[made] = at[k]; before[made++] = seen;
+    }
+    *count = made;
+  }
+  free(place); free(at);
+  return result;
+}
+
 /* design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the self-timed
    buffer bound"; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997 (BSL) */
 struct graph_scratch { size_t *first, *order, *at; uint32_t *index, *low, *stack, *frame, *component; double *distance; };
