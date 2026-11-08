@@ -4,9 +4,11 @@ import collections
 import ctypes as C
 import errno
 import functools
+import hashlib
 import math
 import operator
 import os
+import subprocess
 import time
 import weakref
 
@@ -64,7 +66,7 @@ class IR:
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
         self.publishes, self.inputs, self.declares, self.waits = {}, {}, {}, {}
-        self.attributes, self.loads = {}, set()
+        self.attributes, self.loads, self.kinds, self.page = {}, set(), {}, None
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
 
     # GSPMD section 3.1
@@ -660,6 +662,7 @@ def partition(gm, placement, nodes):
     _inside(ir)
     ir.places = {device: _places(ir, device) for device in ir.coords}
     _over(ir)
+    _kinds(ir)
     return ir
 
 
@@ -763,6 +766,42 @@ def _over(ir):
     ir.over = mesh_graph.forward(list(items), lambda key: items[key][1], rule)
 
 
+# design/torch-source-lowering-change-request.md item 1; design/plan-to-bridge-change-request.md R4;
+# design/aot-compilation-change-request.md A8; J. Gibbons, The third homomorphism theorem, J. Functional Programming,
+# 1996; L. Meertens, Algorithmics, CWI Monographs 1, 1986; G. Graefe, Query evaluation techniques for large databases,
+# ACM Comput. Surv. 25(2), 1993; PyTorch 2.14 documentation, Broadcasting semantics
+COPIES = {A.clone, A._to_copy, A._unsafe_view}
+
+
+def _whole(ir, places, items, key):
+    place = places.get(key)
+    if place is None:
+        return items[key][0] == 'input' and _value(key[0]).is_contiguous()
+    shape = _layout(ir, place.owner)[1]
+    return place.offset == 0 and place.sizes == shape and place.strides == _contiguous(shape)
+
+
+def _paged(ir, places, items, key, reads, local):
+    packet = getattr(local.target, 'overloadpacket', None)
+    if packet not in POINTWISE and packet is not A.copy and packet not in COPIES or not reads \
+            or not all(isinstance(k[0].meta.get('val'), torch.Tensor) for k in (key, *reads)):
+        return False
+    dtype, shape = _layout(ir, key)
+    for operand, size in (_layout(ir, k) for k in reads):
+        if operand.itemsize != dtype.itemsize or (math.prod(size) != math.prod(shape) if packet in COPIES
+                                                  else size != shape):
+            return False
+    return places.get(key) is not None and places[key].owner == key \
+        and all(_whole(ir, places, items, k) for k in (key, *reads))
+
+
+def _kinds(ir):
+    places, items = ir.places[min(ir.coords)], {item[2]: item for item in ir.program if item[0] != 'output'}
+    for kind, reads, key, operand in ir.program:
+        if kind == 'call':
+            ir.kinds[key] = mesh.PAGES if _paged(ir, places, items, key, reads, ir.locals[operand]) else mesh.JOIN
+
+
 # GSPMD sections 3.1 and 4.4
 def _groups(ir, dims):
     groups = {}
@@ -778,15 +817,11 @@ def _readers(ir, roots, default):
     return (min(s for s, _ in spans), max(e for _, e in spans)) if spans else (default, default)
 
 
-# design/plan-to-bridge-change-request.md R4 and R6; design/aot-compilation-change-request.md, appendix item 5; J.
-# Gibbons, J. Functional Programming 1996; L. Meertens, Algorithmics, CWI Monographs 1, 1986
+# design/plan-to-bridge-change-request.md R4 and R6; design/aot-compilation-change-request.md A8 and appendix item 5;
+# design/torch-source-lowering-change-request.md item 1
 def _consumer(ir, roots):
-    readers = [(item, k) for item in ir.program for k in item[1] if ir.over.get(k, frozenset()) & roots]
-    if readers and all(item[0] == 'call' and isinstance(ir.locals[item[3]].target, torch._ops.OpOverload)
-                       and ir.locals[item[3]].target.overloadpacket in ELEMENTWISE
-                       and _shape(ir, k) == _shape(ir, item[2]) for item, k in readers):
-        return mesh.PAGES
-    return mesh.JOIN
+    readers = [item for item in ir.program for k in item[1] if ir.over.get(k, frozenset()) & roots]
+    return mesh.PAGES if readers and all(ir.kinds.get(item[2]) == mesh.PAGES for item in readers) else mesh.JOIN
 
 
 # design/plan-to-bridge-change-request.md R1; design/aot-compilation-change-request.md, appendix item 7;
@@ -975,7 +1010,7 @@ def _all_gather(ir, c, groups, key, made):
     n = _shape(ir, key)[d]
     last = max(received, _readers(ir, {made}, received)[1])
     for group in groups:
-        ranges = [ir.transfer(e, [f for f in group if f != e], mesh.JOIN, _strided(ir, ir.places[e][key]),
+        ranges = [ir.transfer(e, [f for f in group if f != e], _consumer(ir, {made}), _strided(ir, ir.places[e][key]),
                               {f: _strided(ir, _narrowed(ir.places[f][made], d, p * n, n)) for f in group if f != e})
                   for p, e in enumerate(group)]
         for e, transfers in zip(group, ranges):
@@ -1014,7 +1049,7 @@ def _all_to_all(ir, c, groups, key, made):
     ni, nj, received = _shape(ir, key)[i], _shape(ir, key)[j] // k, 3 * c.position + 1
     _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], key,
               lambda e, q: _narrowed(ir.places[e][key], j, q * nj, nj),
-              lambda f, p, q: (_narrowed(ir.places[f][made], i, p * ni, ni), made, None), mesh.JOIN,
+              lambda f, p, q: (_narrowed(ir.places[f][made], i, p * ni, ni), made, None), _consumer(ir, {made}),
               max(received, _readers(ir, {made}, received)[1]))
 
 
@@ -1042,7 +1077,7 @@ def _collective_permute(ir, c, groups, key, made):
                          'with one source or one target (XLA\'s source_target_pairs)' % (c.node.name, pairs, k))
     landed = ir.inside[made][0]
     _exchange(ir, c, groups, pairs, key, lambda e, q: ir.places[e][key],
-              lambda f, p, q: (ir.places[f][made], landed, None), mesh.JOIN,
+              lambda f, p, q: (ir.places[f][made], landed, None), _consumer(ir, {landed}),
               max(3 * c.position + 1, _readers(ir, {landed}, 3 * c.position + 1)[1]))
 
 
@@ -1136,6 +1171,24 @@ def _place(ir):
                 for key, place in places.items() if place is not None and place.owner in ir.owned}
     for i, owner in ir.at.items():
         ir.declared[i].value = ir.owned[owner]
+    _runs(ir, places)
+
+
+# design/torch-source-lowering-change-request.md item 1; design/plan-to-bridge-change-request.md R2 and R4;
+# design/aot-compilation-change-request.md, appendix item 7; mesh-collective.h struct mesh_value
+def _runs(ir, places):
+    run = set(ir.loads)
+    for kind, reads, key, operand in ir.program:
+        if ir.kinds.get(key) == mesh.PAGES or kind in ('input', 'constant', 'slice', 'narrow') \
+                or kind == 'window' and key not in ir.inside or kind == 'collective' and _local(ir, operand) is None:
+            continue
+        form = ir.forms.get(key) if kind == 'call' else None
+        written = [result for _, result in form[1]] if isinstance(form, tuple) else [key]
+        parts = [part[0] for _, part in ir.roles[operand][1] if part is not None] if kind == 'collective' else []
+        run |= {owner for k in reads for owner in ir.over.get(k, ())}
+        run |= {places[k].owner for k in written + parts if k is not None and places.get(k) is not None}
+    for key, v in ir.owned.items():
+        ir.values[v].run = int(key in run)
 
 
 # design/aot-compilation-change-request.md A3
@@ -1410,19 +1463,63 @@ def _library():
     return OPERATORS['library']
 
 
-# MTLComputeCommandEncoder.h dispatchThreads:threadsPerThreadgroup:
+# design/torch-source-lowering-change-request.md item 1; metal-microbench operator_shaders.metal; Metal Shading Language
+# Specification 4.1, §1.5 and §1.6.2; torch 2.14.0 torch/mps/__init__.py, compile_shader
+COMPILE = ('c++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-unknown-attributes', '-x', 'c++',
+           '-dynamiclib')
+
+
+def _cpu():
+    if 'cpu' not in OPERATORS:
+        root = _repository()
+        with open(os.path.join(root, 'operator_shaders.metal'), 'rb') as source:
+            text = source.read()
+        digest = hashlib.sha256(b'\0'.join((text,) + tuple(word.encode() for word in COMPILE))).hexdigest()
+        built = os.path.join(root, '.build', 'operator_shaders-%s.dylib' % digest[:16])
+        if not os.path.exists(built):
+            os.makedirs(os.path.dirname(built), exist_ok=True)
+            made = '%s.%d' % (built, os.getpid())
+            done = subprocess.run(COMPILE + ('-', '-o', made), input=text, capture_output=True)
+            if done.returncode:
+                raise OSError(errno.ENOEXEC, 'the CPU build of %s: %s' % (source.name, done.stderr.decode()[-4000:]))
+            os.replace(made, built)
+        OPERATORS['cpu'] = C.CDLL(built)
+    return OPERATORS['cpu']
+
+
+# metal-microbench operator_shaders.metal Grid; Python documentation, ctypes, Arrays
+def _grid(name, count, arguments):
+    if ('cpu', name) not in OPERATORS:
+        entry = getattr(_cpu(), name + '_grid')
+        entry.restype, entry.argtypes = None, [C.c_void_p, C.c_uint]
+        OPERATORS['cpu', name] = entry
+    entry = OPERATORS['cpu', name]
+    held = [value if isinstance(value, torch.Tensor) else
+            ((C.c_float if any(isinstance(x, float) for x in value) else C.c_int64) * len(value))(*value)
+            for value in arguments]
+    pointers = (C.c_void_p * len(held))(*[value.data_ptr() if isinstance(value, torch.Tensor) else C.addressof(value)
+                                          for value in held])
+    return lambda held=held: entry(pointers, count)
+
+
+# MTLComputeCommandEncoder.h dispatchThreads:threadsPerThreadgroup:; design/torch-source-lowering-change-request.md
+# item 1
 def _dispatch(name, count, *arguments):
-    for value in arguments:
-        if isinstance(value, torch.Tensor) and value.device.type not in ('mps', 'meta'):
-            raise NotImplementedError('%s on the %s: no source lowers it (design/torch-source-lowering-change-request.md '
-                                      'item 1)' % (name, value.device.type))
+    devices = {value.device.type for value in arguments if isinstance(value, torch.Tensor)}
     if count >= 1 << 32:
         raise NotImplementedError('%s over %d elements: past a grid\'s 32-bit thread position' % (name, count))
+    if not count or devices == {'meta'}:
+        return []
+    if devices == {'cpu'}:
+        return [_grid(name, count, arguments)]
+    if devices != {'mps'}:
+        raise NotImplementedError('%s over tensors of the %s: one task\'s operands are on the one backend it runs on'
+                                  % (name, ' and the '.join(sorted(devices))))
     if name not in OPERATORS:
         OPERATORS[name] = getattr(_library(), name)
     kernel = OPERATORS[name]
-    group = min(256, kernel.max_threads_per_threadgroup, max(count, 1))
-    return [functools.partial(kernel, *arguments, threads=count, group_size=group)] if count else []
+    group = min(256, kernel.max_threads_per_threadgroup, count)
+    return [functools.partial(kernel, *arguments, threads=count, group_size=group)]
 
 
 def _each(thunks):
@@ -1511,11 +1608,7 @@ def _fill(out, value, step=0):
 
 
 def _copying(target, given, outs):
-    packet = target.overloadpacket
-    if packet is A._to_copy and given['device'] is not None and torch.device(given['device']).type != 'mps':
-        raise NotImplementedError('%s to the %s: no source moves it (design/torch-source-lowering-change-request.md '
-                                  'item 1)' % (target, torch.device(given['device']).type))
-    return _assign(outs[0], given['src']) if packet is A.copy else _copy(outs[0], given['self'])
+    return _assign(outs[0], given['src']) if target.overloadpacket is A.copy else _copy(outs[0], given['self'])
 
 
 # PyTorch 2.14 documentation, torch.einsum
@@ -1545,7 +1638,7 @@ def _contract(out, operands, labels, output, addend=None, alpha=1, beta=0):
 # design/torch-source-lowering-change-request.md item 1
 def _engined(self, mat2, out):
     return self.dtype == mat2.dtype == out.dtype == torch.float16 and self.numel() and mat2.numel() \
-        and self.stride(1) == 1 and mat2.stride(0) == 1
+        and self.stride(1) == 1 and mat2.stride(0) == 1 and out.device.type == 'mps'
 
 
 def _matrix(out, a, b, bias=None):
@@ -2006,10 +2099,12 @@ def _sourced(gm):
     for node in gm.graph.nodes:
         if node.op == 'call_function':
             _lowering(Local(node.op, node.target, node.args, node.kwargs))
-            other = _devices(node) - {'mps'}
-            if other and getattr(node.target, 'overloadpacket', node.target) not in VIEWS:
-                raise NotImplementedError('%s (%s) on the %s: no source lowers it (design/torch-source-lowering-change-'
-                                          'request.md item 1)' % (node.name, node.target, other.pop()))
+            devices = _devices(node)
+            if len(devices) > 1:
+                raise NotImplementedError('%s (%s) moves a value between the %s inside one function: design/torch-'
+                                          'source-lowering-change-request.md item 1 types and schedules a function on '
+                                          'the backend it is placed on, and names no backend for a move between two'
+                                          % (node.name, node.target, ' and the '.join(sorted(devices))))
 
 
 # dlpack.h DLManagedTensorVersioned `deleter`; torch v2.14.0 torch/csrc/utils/tensor_new.cpp tensor_fromDLPackImpl,
@@ -2024,18 +2119,41 @@ class _Mapping:
             self.view = mesh.View()
 
 
-# mesh-collective.h mesh_view_values; design/torch-capture-change-request.md item 6
-def _mapped(context, functions, count, values):
+# mesh-collective.h mesh_view_values; mesh-call.h mesh_section_address; mesh-section.h struct mesh_section;
+# design/torch-capture-change-request.md item 6; design/plan-to-bridge-change-request.md R2
+mesh.LIB.mesh_section_address.restype = C.c_void_p
+mesh.LIB.mesh_section_address.argtypes = [mesh.CONTEXT, mesh.Section, mesh.U]
+
+
+def _mapped(context, functions, count, values, row):
     view = mesh.View()
     first = (mesh.Q * (sum(len(v) for v in values) + 1))()
     offsets = (mesh.Q * max(sum(v.section.count for function in values for v in function), 1))()
     mesh.LIB.mesh_view_values(C.byref(context), functions, count, first, offsets, C.byref(view))
     at, addresses = 0, []
     for function in values:
-        addresses.append([[view.address + offsets[first[at + i] + c] for c in range(v.section.count)]
+        addresses.append([[view.address + offsets[first[at + i] + c] for c in range(v.section.count)] if v.run else
+                          [[mesh.LIB.mesh_section_address(C.byref(context), v.section, c * v.section.stride + k)
+                            for k in range(-(-v.section.bytes // row))] for c in range(v.section.count)]
                           for i, v in enumerate(function)])
         at += len(function)
+    if not all(address for function in addresses for value in function for copy in value if isinstance(copy, list)
+               for address in copy):
+        raise OSError(errno.EFAULT, 'a page-table row of the program\'s values with no page (mesh-call.h '
+                                    'mesh_section_address)')
     return view, addresses
+
+
+# MTLDevice.h newBufferWithBytesNoCopy:length:options:deallocator:; design/plan-to-bridge-change-request.md R1 and R2
+def _hull(values, addresses, row):
+    starts, ends = [], []
+    for function, made in zip(values, addresses):
+        for v, at in zip(function, made):
+            for copy in at:
+                pages = copy if isinstance(copy, list) else [copy]
+                starts += pages
+                ends += [a + (row if isinstance(copy, list) else v.section.bytes) for a in pages]
+    return mesh.View(min(starts), -(-(max(ends) - min(starts)) // row) * row) if starts else mesh.View()
 
 
 HELD = {}
@@ -2085,13 +2203,21 @@ def _dlpack_tensor(device, data, offset, owner, dtype, shape, mapping):
         raise
 
 
-# design/disjoint-pages-change-request.md C3.3 and C3.8
-def _bind(context, ir, values, addresses, buffer, mapping):
+def _tensor(device, address, buffer, base, dtype, shape, mapping):
+    if device == 'cpu':
+        return _dlpack_tensor('cpu', address, 0, None, dtype, shape, mapping)
+    return _dlpack_tensor('mps', buffer, address - base, buffer, dtype, shape, mapping)
+
+
+# design/disjoint-pages-change-request.md C3.3 and C3.8; design/plan-to-bridge-change-request.md R2 and R4;
+# design/torch-source-lowering-change-request.md item 1
+def _bind(ir, values, addresses, buffer, base, row, mapping):
     copies = []
     for v, (dtype, numel, device), at in zip(values, ir.layouts, addresses):
-        copies.append([_dlpack_tensor('cpu', a, 0, None, dtype, (numel,), mapping) if device == 'cpu' else
-                       _dlpack_tensor('mps', buffer, a - mapping.view.address, buffer, dtype, (numel,), mapping)
-                       for a in at])
+        n = row // dtype.itemsize
+        copies.append([_tensor(device, copy, buffer, base, dtype, (numel,), mapping) if v.run else
+                       _Paged([_tensor(device, a, buffer, base, dtype, (min(n, numel - k * n),), mapping)
+                               for k, a in enumerate(copy)]) for copy in at])
     places, given = _homes(ir, copies)
     hosts = {i: [copy.view(shape) if ir.layouts[v][2] == 'cpu' else
                  _dlpack_tensor('cpu', a, 0, None, ir.layouts[v][0], shape, mapping) for copy, a in
@@ -2102,7 +2228,8 @@ def _bind(context, ir, values, addresses, buffer, mapping):
 
 # torch 2.14.0 torch/_torch_docs.py as_strided
 def _homes(ir, copies):
-    places = {key: [copy.as_strided(sizes, strides, copy.storage_offset() + offset) for copy in copies[v]]
+    places = {key: [copy.as_strided(sizes, strides, copy.storage_offset() + offset)
+                    if isinstance(copy, torch.Tensor) else copy for copy in copies[v]]
               for key, (v, offset, sizes, strides) in ir.homes.items()}
     return places, {i: [copy.view(shape) for copy in copies[v]] for i, (v, shape) in ir.inputs.items()}
 
@@ -2168,12 +2295,38 @@ def _count(context, state, word, c):
     return C.c_uint64.from_address(context.M + word + 8 * (c % state.copies))
 
 
+# design/torch-source-lowering-change-request.md item 1; design/plan-to-bridge-change-request.md R2 and R4; mesh-section.h
+# struct mesh_section
+class _Paged:
+    def __init__(self, pages):
+        self.pages = pages
+
+
+def _page(value, k, n):
+    if isinstance(value, _Paged):
+        return value.pages[k]
+    if not isinstance(value, torch.Tensor):
+        return value
+    flat = value.view(-1)
+    return flat.narrow(0, k * n, min(n, flat.numel() - k * n))
+
+
+def _pages(ir, key, local, arguments, dynamic, out):
+    dtype, shape = _layout(ir, key)
+    n = ir.page // dtype.itemsize
+    return [step for k in range(-(-math.prod(shape) // n))
+            for step in _launched(ir, local, lambda env, k=k: pytree.tree_map(lambda v: _page(v, k, n), arguments(env)),
+                                  dynamic, [_page(out, k, n)])]
+
+
 # torch 2.14.0 torch/_tensor_docs.py, view and copy_; design/torch-source-lowering-change-request.md item 1
 def _called(ir, key, operands, local, form, placed):
     _lowering(local)
     given = iter(operands)
     arguments, dynamic = _bound((local.args, local.kwargs), lambda n: next(given))
     mine = placed(key)
+    if ir.kinds.get(key) == mesh.PAGES:
+        return mine, _pages(ir, key, local, arguments, dynamic, mine)
     if isinstance(form, tuple):
         outs = [placed(result) for _, result in form[1]]
         return tuple(outs) if len(outs) > 1 else mine, _launched(ir, local, arguments, dynamic, outs)
@@ -2190,15 +2343,29 @@ def _called(ir, key, operands, local, form, placed):
             return _call(local, *arguments(None)), []
         return _Dynamic(key), [lambda env, inputs, t: env.__setitem__(key, _call(local, *arguments(env)))]
     made, spec = pytree.tree_flatten(_call(local, *_metas(arguments(_Stand(ir) if dynamic else None))))
-    outs = [torch.empty_strided(m.shape, m.stride(), dtype=m.dtype, device='mps') for m in made]
+    outs = [torch.empty_strided(m.shape, m.stride(), dtype=m.dtype, device=v.device)
+            for m, v in zip(made, pytree.tree_leaves(key[0].meta.get('val')))]
     return pytree.tree_unflatten(outs, spec), _launched(ir, local, arguments, dynamic, outs)
 
 
 # OpenXLA operation semantics, CollectivePermute; MPICH alltoall_intra_pairwise.c, MPIR_Localcopy
+def _local(ir, collective):
+    if collective not in ir.roles:
+        return None
+    me = ir.roles[collective][0]
+    pairs = [tuple(pair) for pair in collective.dim] if collective.kind == 'collective-permute' else []
+    if collective.kind == 'reduce-scatter' or collective.kind == 'all-reduce' and me == 0:
+        return 'reduce'
+    if (me, me) in pairs:
+        return 'copy'
+    return 'fill' if pairs and me not in [q for _, q in pairs] else None
+
+
 def _collected(ir, context, plan, state, placed, c, item, operands):
     _, reads, key, collective = item
     me, receives = ir.roles[collective]
-    if collective.kind == 'reduce-scatter' or collective.kind == 'all-reduce' and me == 0:
+    local = _local(ir, collective)
+    if local == 'reduce':
         waits = [[lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
                   _arrived(context, plan, i, t, count)] if state is not None else [] for i, _ in receives]
         total, first, steps = placed(key), operands[0], []
@@ -2211,16 +2378,11 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
             steps += wait + [lambda env, inputs, t, add=add: _each(add)]
             first = total
         return steps
-    if collective.kind == 'collective-permute':
-        place, pairs, places = placed(key), [tuple(pair) for pair in collective.dim], ir.places[ir.device]
-        if (me, me) in pairs:
-            if places[reads[0]][:4] == places[key][:4]:
-                return []
-            thunks = _assign(place, operands[0])
-            return [lambda env, inputs, t: _each(thunks)]
-        if me not in [q for _, q in pairs]:
-            return _filled(place, 0)
-    return []
+    places = ir.places[ir.device]
+    if local == 'copy' and places[reads[0]][:4] != places[key][:4]:
+        thunks = _assign(placed(key), operands[0])
+        return [lambda env, inputs, t: _each(thunks)]
+    return _filled(placed(key), 0) if local == 'fill' else []
 
 
 # torch 2.14.0 torch/_tensor_docs.py, fill_; design/torch-source-lowering-change-request.md item 1
@@ -2428,15 +2590,23 @@ def _captured(context, irs, compiled, gm, of, constants, holders):
     if not recorder:
         raise OSError(errno.ENODEV, 'the recorder: %s' % error.value.decode())
     owners, standins, counted = {}, {}, _Mapping(mesh.View())
+
+    def standin(owned, bytes, dtype, numel):
+        buffer = _labelled(_metal_device(), bytes, 'function %d value %d' % owned[:2]
+                           + (' page %d' % owned[2] if len(owned) > 2 else ''))
+        owners[buffer] = owned
+        made = _dlpack_tensor('mps', buffer, 0, buffer, dtype, (numel,), counted)
+        PUT(buffer, SELECTOR[b'release'])
+        return made
     for k, ir in enumerate(irs):
         if ir.device is None:
             continue
         copies = []
         for v, (dtype, numel, _) in enumerate(ir.layouts):
-            buffer = _labelled(_metal_device(), dtype.itemsize * numel, 'function %d value %d' % (k, v))
-            owners[buffer] = (k, v)
-            copies.append([_dlpack_tensor('mps', buffer, 0, buffer, dtype, (numel,), counted)])
-            PUT(buffer, SELECTOR[b'release'])
+            n = ir.page // dtype.itemsize
+            copies.append([standin((k, v), dtype.itemsize * numel, dtype, numel)] if ir.values[v].run else
+                          [_Paged([standin((k, v, p), ir.page, dtype, min(n, numel - p * n))
+                                   for p in range(-(-numel // n))])])
         standins[k] = _homes(ir, copies)
     calls = []
 
@@ -2485,21 +2655,22 @@ def _captured(context, irs, compiled, gm, of, constants, holders):
 
 # ExecuTorch, "Concepts", Memory planning; torch 2.14.0 torch/_inductor/cudagraph_trees.py; M. Lam, PLDI 1988, §2.3;
 # metal_recording.h place:value:; mesh-collective.h mesh_view_values; MTL4CommandQueue.h addResidencySet:; mesh.h struct
-# mesh_state; design/torch-capture-change-request.md item 6
-def _replays(captured, functions, states, values, addresses, view, buffer):
+# mesh_state; design/torch-capture-change-request.md item 6; design/torch-source-lowering-change-request.md item 1
+def _replays(captured, functions, states, values, addresses, base, buffer):
     lib, recorder, error = captured['lib'], captured['recorder'], C.create_string_buffer(4096)
     queue, replays = OBJECT(recorder, _SEL(b'queue')), []
 
     def offsets(at):
-        return (C.c_uint64 * len(at))(*[a - view.address for a in at])
+        return (C.c_uint64 * len(at))(*[a - base for a in at])
     for node, k, handle, _, _, own, *_ in captured['calls']:
         if handle is None:
             replays.append(None)
             continue
-        for operand, (j, v) in captured['owners'].items():
-            value = values[j][v]
+        for operand, owned in captured['owners'].items():
+            value, at = values[owned[0]][owned[1]], addresses[owned[0]][owned[1]]
             PLACE_OPERAND(recorder, _SEL(b'place:operand:in:offsets:copies:ahead:shares:'), handle, operand, buffer,
-                          offsets(addresses[j][v]), value.section.count, 0, bool(value.shares))
+                          offsets(at if len(owned) == 2 else [pages[owned[2]] for pages in at]), value.section.count,
+                          0, bool(value.shares))
         first = len(values[k]) - len(own)
         for i in range(len(own)):
             value = values[k][first + i]
@@ -2811,12 +2982,12 @@ def program(block, *example_inputs):
                                   'ended': 0, 'inputs': [None] * len(given), 'timeout': None, 'replay': None}
 
     def make():
-        nodes = mesh.Nodes()
+        nodes, header = mesh.Nodes(), mesh.Header.from_address(context.M)
         mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
-        irs = []
+        irs, page = [], header.pgsz * header.block
         for k, (record, operand) in enumerate(zip(compiled, operands)):
             ir = partition(record.gm, operand, nodes)
-            ir.calls = entries[k]
+            ir.calls, ir.page = entries[k], page
             lower(ir)
             ir.weights = list(record.function.weights(ir))
             if len(ir.weights) != len(ir.declared) or not all(isinstance(w, mesh.Weight) for w in ir.weights):
@@ -2845,21 +3016,24 @@ def program(block, *example_inputs):
         own = [[] for _ in irs]
         # M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; torch/fx/graph.py:1498–1502; TensorFlow
         # Lite arena_planner.cc:334–335; metal_recording.h MetalRecorderOperand
-        buffers = {owned: buffer for buffer, owned in captured['owners'].items()} if captured else {}
+        buffers = {}
+        for buffer, owned in captured['owners'].items() if captured else ():
+            buffers.setdefault(owned[:2], []).append(buffer)
+
+        def interval(handle, buffer, levels, result):
+            first, last = mesh.U(), mesh.U()
+            bound = captured['lib'].MetalRecorderOperand(handle, buffer, C.byref(first), C.byref(last))
+            if result or bound & 4:
+                return first.value if bound & 2 else 0, max(levels, 1) - 1 if result else last.value
+            return 0, max(levels, 1) - 1
         for _, k, handle, result, levels, values, *_ in captured['calls'] if captured else ():
             results = {captured['owners'].get(leaf.untyped_storage().data_ptr()) for leaf in pytree.tree_leaves(result)
                        if isinstance(leaf, torch.Tensor)}
             for v, value in enumerate(irs[k].values) if handle is not None else ():
                 if value.kind == mesh.EXECUTION and not value.lag:
-                    first, last = mesh.U(), mesh.U()
-                    bound = captured['lib'].MetalRecorderOperand(handle, buffers[(k, v)], C.byref(first),
-                                                                 C.byref(last)) if (k, v) in buffers else 0
-                    if (k, v) in results:
-                        value.begin, value.end = first.value if bound & 2 else 0, max(levels, 1) - 1
-                    elif bound & 4:
-                        value.begin, value.end = first.value if bound & 2 else 0, last.value
-                    else:
-                        value.begin, value.end = 0, max(levels, 1) - 1
+                    spans = [interval(handle, buffer, levels, (k, v) in results) for buffer in buffers.get((k, v), ())]
+                    value.begin, value.end = (min(s for s, _ in spans), max(e for _, e in spans)) if spans else \
+                        (0, max(levels, 1) - 1)
             own[k] = values
         arrays = [((mesh.Declared * len(ir.declared))(*ir.declared), (mesh.Weight * len(ir.weights))(*ir.weights),
                    (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
@@ -2880,15 +3054,15 @@ def program(block, *example_inputs):
             views = [mesh.State.from_address(context.M + f.plan) for f in functions]
             if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
                 raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
-            view, addresses = _mapped(context, functions, len(irs), [values for _, _, values, _ in arrays])
-            state['mapping'].view = view
-            buffer = _placed_buffer(view) if 'mps' in state['devices'] else None
+            listed = [values for _, _, values, _ in arrays]
+            view, addresses = _mapped(context, functions, len(irs), listed, page)
+            state['mapping'].view, hull = view, _hull(listed, addresses, page)
+            buffer = _placed_buffer(hull) if 'mps' in state['devices'] else None
             try:
-                bound = [_bind(context, ir, values, at, buffer, state['mapping']) for ir, (_, _, values, _), at in
-                         zip(irs, arrays, addresses)]
+                bound = [_bind(ir, values, at, buffer, hull.address, page, state['mapping'])
+                         for ir, values, at in zip(irs, listed, addresses)]
                 if captured:
-                    state['replay'] = _replays(captured, functions, views, [values for _, _, values, _ in arrays],
-                                               addresses, view, buffer)
+                    state['replay'] = _replays(captured, functions, views, listed, addresses, hull.address, buffer)
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
@@ -2904,11 +3078,8 @@ def program(block, *example_inputs):
                                           lambda key: ir.attributes[key][1],
                                           lambda key, values: _hosted(ir, ir.attributes[key], values))
                 for key in loaded:
-                    if places[key][0].device.type == host[key].device.type == 'cpu':
-                        places[key][0].copy_(host[key])
-                    else:
-                        _each(_assign(places[key][0], host[key]))
-                        launched = True
+                    _each(_assign(places[key][0], host[key]))
+                    launched = launched or places[key][0].device.type == 'mps'
             if launched:
                 torch.mps.synchronize()
             runs = None if captured else [
