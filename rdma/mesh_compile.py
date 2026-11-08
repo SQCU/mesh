@@ -1396,6 +1396,7 @@ OPERATORS = {}
 ELEMENTS = {torch.float32: 0, torch.float16: 1, torch.bfloat16: 2, torch.int64: 3, torch.int32: 4, torch.int16: 5,
             torch.int8: 6, torch.uint8: 7, torch.bool: 8}
 FLOATING = (torch.float32, torch.float16, torch.bfloat16)
+INTEGRAL = (torch.int64, torch.int32, torch.int16, torch.int8, torch.uint8, torch.bool)
 
 
 def _library():
@@ -1429,9 +1430,9 @@ def _each(thunks):
         thunk()
 
 
-def _typed(target, operands, outs):
+def _typed(target, operands, outs, results=FLOATING):
     found = [value.dtype for value in operands if isinstance(value, torch.Tensor) and value.dtype not in ELEMENTS] \
-        + [value.dtype for value in outs if value.dtype not in FLOATING]
+        + [value.dtype for value in outs if value.dtype not in results]
     if found:
         raise NotImplementedError('%s of %s: no source computes it (design/torch-source-lowering-change-request.md item '
                                   '1)' % (target, found[0]))
@@ -1449,18 +1450,31 @@ def _broadcast(value, out):
     return list(value.expand(out.shape).stride()) if isinstance(value, torch.Tensor) else [0] * out.dim()
 
 
-def _pointwise(op, out, a, b=0, alpha=1):
-    tensor = next(x for x in (a, b) if isinstance(x, torch.Tensor))
-    g = [ELEMENTS[out.dtype], *[ELEMENTS[x.dtype] if isinstance(x, torch.Tensor) else -1 for x in (a, b)], op,
-         out.dim(), *out.shape, *out.stride(), *_broadcast(a, out), *_broadcast(b, out)]
-    scalars = [0.0 if isinstance(x, torch.Tensor) else float(x) for x in (a, b)] + [float(alpha)]
-    return _dispatch('elementwise', out.numel(), out, *[x if isinstance(x, torch.Tensor) else tensor for x in (a, b)],
-                     g, scalars)
+def _scalar(value, integral):
+    return (int(value) if isinstance(value, (bool, int)) else 0) if integral else float(value)
+
+
+def _pointwise(op, out, a, b=None, c=None, alpha=1):
+    operands = [a, b, c]
+    tensor = next(x for x in operands if isinstance(x, torch.Tensor))
+    integral = out.dtype in INTEGRAL and all(x.dtype in INTEGRAL if isinstance(x, torch.Tensor) else isinstance(x, int)
+                                            for x in operands if x is not None)
+    g = [ELEMENTS[out.dtype], *[ELEMENTS[x.dtype] if isinstance(x, torch.Tensor) else -2 if x is None else -1
+                                for x in operands], op, int(integral), out.dim(), *out.shape, *out.stride(),
+         *[s for x in operands for s in _broadcast(x, out)]]
+    plain = [x for x in operands if x is not None and not isinstance(x, torch.Tensor)]
+    floats = [0.0 if x is None or isinstance(x, torch.Tensor) else float(x) for x in operands] + [float(alpha)]
+    longs = [0 if x is None or isinstance(x, torch.Tensor) else _scalar(x, True) for x in operands] + [_scalar(alpha, True)]
+    if integral and any(not isinstance(x, int) for x in plain + [alpha]):
+        raise NotImplementedError('elementwise %d into %s of a scalar no integer holds' % (op, out.dtype))
+    return _dispatch('elementwise', out.numel(), out, *[x if isinstance(x, torch.Tensor) else tensor for x in operands],
+                     g, floats, longs)
 
 
 # metal-microbench operator_shaders.metal pointwise
-POINTWISE = {A.add: 0, A.sub: 1, A.mul: 2, A.div: 3, A.neg: 6, A.relu: 7, A.tanh: 8, A.sigmoid: 9, A.exp: 10,
-             A.gelu: 11, A.silu: 13}
+POINTWISE = {A.add: 0, A.sub: 1, A.mul: 2, A.div: 3, A.floor_divide: 4, A.neg: 6, A.relu: 7, A.tanh: 8, A.sigmoid: 9,
+             A.exp: 10, A.gelu: 11, A.silu: 13, A.eq: 14, A.ne: 15, A.lt: 16, A.le: 17, A.gt: 18, A.ge: 19, A.pow: 20,
+             A.rsqrt: 21, A.sqrt: 22, A.log: 23, A.abs: 24, A.clamp: 25, A.clamp_min: 25, A.clamp_max: 25, A.where: 26}
 
 
 def _arithmetic(target, given, outs):
@@ -1469,17 +1483,16 @@ def _arithmetic(target, given, outs):
         op = {'floor': 4, 'trunc': 5}[given['rounding_mode']]
     if packet is A.gelu and given['approximate'] != 'none':
         op = 12
-    operands = [given['self'], given.get('other', 0)]
-    _typed(target, operands, outs)
+    operands = [given['condition'], given['self'], given['other']] if packet is A.where else \
+        [given['self'], given.get('min'), given.get('max')] if op == 25 else \
+        [given['self'], given['exponent'], None] if packet is A.pow else [given['self'], given.get('other'), None]
+    _typed(target, operands, outs, ELEMENTS)
     return _pointwise(op, outs[0], *operands, given.get('alpha', 1))
 
 
 # torch 2.14.0 torch/_tensor_docs.py, copy_ and view
 def _copy(out, value):
-    if out.dtype not in ELEMENTS or value.dtype not in ELEMENTS or out.dtype != value.dtype \
-            and out.dtype not in FLOATING and value.dtype not in FLOATING:
-        raise NotImplementedError('a copy of %s into %s: no source converts it (design/torch-source-lowering-change-'
-                                  'request.md item 1)' % (value.dtype, out.dtype))
+    _typed('a copy', [value], [out], ELEMENTS)
     g = [ELEMENTS[out.dtype], ELEMENTS[value.dtype], out.dim(), *out.shape, *out.stride(), value.dim(), *value.shape,
          *value.stride()]
     return _dispatch('copy', out.numel(), out, value, g)
@@ -1489,13 +1502,12 @@ def _assign(out, value):
     return _copy(out, value.expand(out.shape))
 
 
-# torch 2.14.0 torch/_tensor_docs.py, fill_
-def _fill(out, value):
-    if out.dtype not in ELEMENTS:
-        raise NotImplementedError('a fill of %s: no source writes it (design/torch-source-lowering-change-request.md '
-                                  'item 1)' % (out.dtype,))
+# torch 2.14.0 torch/_tensor_docs.py, fill_; PyTorch 2.14 documentation, torch.arange
+def _fill(out, value, step=0):
+    _typed('a fill', [], [out], ELEMENTS)
+    integral = out.dtype in INTEGRAL
     return _dispatch('fill', out.numel(), out, [ELEMENTS[out.dtype], out.dim(), *out.shape, *out.stride()],
-                     [float(value)])
+                     [float(value), float(step)], [int(value) if integral else 0, int(step) if integral else 0])
 
 
 def _copying(target, given, outs):
@@ -1550,10 +1562,16 @@ def _folded(value):
         return None
 
 
-# PyTorch 2.14 documentation, torch.mm, torch.bmm, torch.matmul and torch.nn.functional.linear; PyTorch v2.11.0
-# aten/src/ATen/native/LinearAlgebra.cpp, _matmul_impl
+# PyTorch 2.14 documentation, torch.mm, torch.bmm, torch.matmul, torch.addmm and torch.nn.functional.linear; PyTorch
+# v2.11.0 aten/src/ATen/native/LinearAlgebra.cpp, _matmul_impl
 def _product(target, given, outs):
     packet, (out,) = target.overloadpacket, outs
+    if packet is A.addmm:
+        c, a, b, alpha, beta = given['self'], given['mat1'], given['mat2'], given['alpha'], given['beta']
+        _typed(target, [c, a, b], outs)
+        if alpha == 1 and beta == 1:
+            return _matrix(out, a, b, c)
+        return _contract(out, [a, b], [('n', 'k'), ('k', 'm')], ('n', 'm'), c if beta != 0 else None, alpha, beta)
     if packet is A.linear:
         x, w, bias = given['input'], given['weight'], given['bias']
         _typed(target, [x, w, bias], outs)
@@ -1595,7 +1613,22 @@ def _summation(target, given, outs):
     letters = left.replace('...', '').replace(',', '')
     output = labelled(right, out.dim()) if arrow else \
         ellipsis + tuple(sorted(c for c in set(letters) if letters.count(c) == 1))
-    return _contract(out, operands, [labelled(term, value.dim()) for term, value in zip(terms, operands)], output)
+    labels = [labelled(term, value.dim()) for term, value in zip(terms, operands)]
+    if len(operands) <= 4:
+        return _contract(out, operands, labels, output)
+    sizes = {}
+    for value, own in zip(operands, labels):
+        for size, label in zip(value.shape, own):
+            sizes[label] = max(sizes.get(label, 1), size)
+    thunks, made, own = [], operands[0], labels[0]
+    for j in range(1, len(operands)):
+        later = {label for others in labels[j + 1:] for label in others} | set(output)
+        kept = output if j == len(operands) - 1 else tuple(dict.fromkeys(l for l in own + labels[j] if l in later))
+        step = out if j == len(operands) - 1 else \
+            torch.empty([sizes[label] for label in kept], dtype=out.dtype, device=out.device)
+        thunks += _contract(step, [made, operands[j]], [own, labels[j]], kept)
+        made, own = step, kept
+    return thunks
 
 
 # PyTorch 2.14 documentation, torch.nn.Conv1d to torch.nn.Conv3d and torch.nn.ConvTranspose1d to
@@ -1667,12 +1700,286 @@ def _padded(target, given, outs):
     return _dispatch('pad', out.numel(), out, x, g, [float(given.get('value') or 0)])
 
 
+# PyTorch 2.14 documentation, torch.full, torch.zeros, torch.ones, torch.empty, torch.arange, torch.scalar_tensor,
+# Tensor.new_full, Tensor.new_zeros, Tensor.new_ones, Tensor.new_empty and Tensor.fill_
+FILLS = {A.full: 'fill_value', A.full_like: 'fill_value', A.new_full: 'fill_value', A.scalar_tensor: 's',
+         A.fill: 'value', A.zeros: 0, A.zeros_like: 0, A.new_zeros: 0, A.zero: 0, A.ones: 1, A.ones_like: 1,
+         A.new_ones: 1}
+EMPTY = (A.empty, A.empty_like, A.new_empty, A.empty_strided)
+
+
+def _factory(target, given, outs):
+    packet, (out,) = target.overloadpacket, outs
+    if packet in EMPTY:
+        return []
+    if packet is A.arange:
+        return _fill(out, given.get('start', 0), given.get('step', 1))
+    value = given[FILLS[packet]] if isinstance(FILLS[packet], str) else FILLS[packet]
+    return _assign(out, value) if isinstance(value, torch.Tensor) else _fill(out, value)
+
+
+# PyTorch 2.14 documentation, torch.sum, torch.mean, torch.amax and torch.amin
+REDUCTIONS = {A.sum: 0, A.mean: 1, A.amax: 2, A.amin: 3}
+
+
+def _reduced(target, given, outs):
+    (out,), x = outs, given['self']
+    _typed(target, [x], outs, ELEMENTS)
+    dims = given.get('dim')
+    dims = sorted({d % max(x.dim(), 1) for d in _ints(dims, 1)}) if dims not in (None, []) else list(range(x.dim()))
+    free = [d for d in range(x.dim()) if d not in dims]
+    strides = [out.stride(d) for d in free] if given.get('keepdim') else list(out.stride())
+    g = [ELEMENTS[out.dtype], ELEMENTS[x.dtype], REDUCTIONS[target.overloadpacket], int(out.dtype in INTEGRAL), len(free),
+         len(dims), *[x.shape[d] for d in free], *strides, *[x.stride(d) for d in free], *[x.shape[d] for d in dims],
+         *[x.stride(d) for d in dims]]
+    return _dispatch('reduce', out.numel(), out, x, g)
+
+
+def _lines(x, out, d):
+    other = [j for j in range(x.dim()) if j != d]
+    return [x.shape[d] if x.dim() else 1, out.stride(d) if x.dim() else 0, x.stride(d) if x.dim() else 0, len(other),
+            *[x.shape[j] for j in other], *[out.stride(j) for j in other], *[x.stride(j) for j in other]]
+
+
+# PyTorch 2.14 documentation, torch.nn.Softmax and torch.nn.LogSoftmax
+SOFTMAX = {A.softmax: 0, A._softmax: 0, A.log_softmax: 1, A._log_softmax: 1}
+
+
+def _softened(target, given, outs):
+    (out,), x = outs, given['self']
+    _typed(target, [x], outs)
+    lines = _lines(x, out, given['dim'] % max(x.dim(), 1))
+    return _dispatch('softmax', x.numel() // max(lines[0], 1), out, x,
+                     [ELEMENTS[out.dtype], ELEMENTS[x.dtype], SOFTMAX[target.overloadpacket], *lines])
+
+
+# PyTorch 2.14 documentation, torch.cumsum
+def _scanned(target, given, outs):
+    (out,), x = outs, given['self']
+    _typed(target, [x], outs, ELEMENTS)
+    lines = _lines(x, out, given['dim'] % max(x.dim(), 1))
+    return _dispatch('scan', x.numel() // max(lines[0], 1), out, x,
+                     [ELEMENTS[out.dtype], ELEMENTS[x.dtype], int(out.dtype in INTEGRAL), *lines])
+
+
+# PyTorch 2.14 documentation, torch.sort and torch.topk
+def _ranked(target, given, outs):
+    (values, indices), x = outs, given['self']
+    _typed(target, [x], [values], ELEMENTS)
+    d = given['dim'] % max(x.dim(), 1)
+    other = [j for j in range(x.dim()) if j != d]
+    length = x.shape[d] if x.dim() else 1
+    k, descending = (given['k'], given['largest']) if target.overloadpacket is A.topk else (length, given['descending'])
+    g = [ELEMENTS[values.dtype], ELEMENTS[x.dtype], int(x.dtype in INTEGRAL), int(descending), k, length,
+         *[t.stride(d) if x.dim() else 0 for t in (x, values, indices)], len(other), *[x.shape[j] for j in other],
+         *[t.stride(j) for t in (x, values, indices) for j in other]]
+    return _dispatch('rank', x.numel(), values, indices, x, g)
+
+
+def _flat(value):
+    try:
+        return value.view(-1)
+    except RuntimeError:
+        raise NotImplementedError('a normalization\'s statistics or weight of strides %s: the source reads them as one '
+                                  'run' % (value.stride(),))
+
+
+# PyTorch 2.14 documentation, torch.nn.LayerNorm, torch.nn.GroupNorm and torch.nn.BatchNorm2d; torch 2.14.0
+# torch/_refs/__init__.py, native_layer_norm, native_group_norm and _normalize; torch/_decomp/decompositions.py,
+# native_batch_norm_helper
+NORMS = (A.layer_norm, A.native_layer_norm, A.group_norm, A.native_group_norm, A.batch_norm,
+         A._native_batch_norm_legit_no_training)
+
+
+def _normalized(target, given, outs):
+    packet, x, out = target.overloadpacket, given['input'], outs[0]
+    weight, bias = given.get('weight'), given.get('bias')
+    _typed(target, [x, weight, bias, given.get('running_mean'), given.get('running_var')], outs[:1])
+    if packet in (A.layer_norm, A.native_layer_norm):
+        inner = math.prod(given['normalized_shape'])
+        groups, layout = x.numel() // max(inner, 1), (inner, x.numel() // max(inner, 1), 1, inner)
+        step = inner
+    elif packet in (A.group_norm, A.native_group_norm):
+        n, c, count = x.shape[0], x.shape[1], given['num_groups'] if packet is A.group_norm else given['group']
+        spatial = x.numel() // max(n * c, 1)
+        groups, step = n * count, c // count * spatial
+        layout = (step, groups, spatial, c)
+    else:
+        if given.get('training'):
+            raise NotImplementedError('%s in training: its running statistics are updated in place, which no '
+                                      'source here writes' % (target,))
+        n, c = x.shape[0], x.shape[1]
+        spatial = x.numel() // max(n * c, 1)
+        groups, step, layout = c, spatial, (spatial, c, spatial, c)
+    made = [_flat(o) for o in outs[1:]] if len(outs) == 3 and outs[1].numel() == groups else \
+        [torch.empty(groups, dtype=torch.float32, device=x.device) for _ in range(2)]
+    mean, rstd = made
+    known = packet in (A.batch_norm, A._native_batch_norm_legit_no_training)
+    rm, rv = (_flat(given['running_mean']), _flat(given['running_var'])) if known else (mean, rstd)
+    first = [ELEMENTS[mean.dtype], ELEMENTS[rstd.dtype], ELEMENTS[x.dtype], int(known), ELEMENTS[rm.dtype],
+             ELEMENTS[rv.dtype], mean.stride(0), rstd.stride(0), rm.stride(0), rv.stride(0), 1, 0, step, step, x.dim(),
+             *x.shape, *x.stride()]
+    w, b = _flat(weight) if weight is not None else None, _flat(bias) if bias is not None else None
+    second = [ELEMENTS[out.dtype], ELEMENTS[x.dtype], ELEMENTS[mean.dtype], ELEMENTS[rstd.dtype],
+              ELEMENTS[w.dtype] if w is not None else -1, ELEMENTS[b.dtype] if b is not None else -1, *layout,
+              mean.stride(0), rstd.stride(0), w.stride(0) if w is not None else 0, b.stride(0) if b is not None else 0,
+              x.dim(), *x.shape, *out.stride(), *x.stride()]
+    return _dispatch('moments', groups, mean, rstd, x, rm, rv, first, [float(given['eps'])]) + \
+        _dispatch('normalize', x.numel(), out, x, mean, rstd, w if w is not None else x, b if b is not None else x,
+                  second)
+
+
+# PyTorch 2.14 documentation, torch.gather, torch.index_select, torch.nn.functional.embedding and Tensor Indexing API;
+# NumPy User Guide, Indexing on ndarrays, Advanced indexing
+def _take(out, x, dims, indices):
+    if len(indices) > 4:
+        raise NotImplementedError('an index of %d tensors: the source takes at most four (metal-microbench '
+                                  'operator_shaders.metal take)' % len(indices))
+    g = [ELEMENTS[out.dtype], ELEMENTS[x.dtype], out.dim(), x.dim(), *[ELEMENTS[t.dtype] for t, _ in indices],
+         *[-1] * (4 - len(indices)), *out.shape, *out.stride()]
+    for d, (mode, source) in enumerate(dims):
+        g += [mode, source, x.stride(d), x.shape[d]]
+    for _, strides in indices:
+        g += list(strides)
+    return _dispatch('take', out.numel(), out, x, *[t for t, _ in indices], *[x] * (4 - len(indices)), g)
+
+
+def _advanced(x, indices):
+    tensors = [(j, t) for j, t in enumerate(indices) if t is not None]
+    for _, t in tensors:
+        if t.dtype not in (torch.int64, torch.int32):
+            raise NotImplementedError('an index of %s: only integer indices have static shapes' % (t.dtype,))
+    shape = tuple(torch.broadcast_shapes(*[t.shape for _, t in tensors]))
+    positions = [j for j, _ in tensors]
+    adjacent = positions == list(range(positions[0], positions[-1] + 1))
+    start = positions[0] if adjacent else 0
+    rest = [j for j in range(x.dim()) if j not in positions]
+    places = {j: (j if j < start else j - len(positions) + len(shape)) if adjacent else len(shape) + rest.index(j)
+              for j in rest}
+    return tensors, shape, start, places
+
+
+def _taken(target, given, outs):
+    packet, (out,) = target.overloadpacket, outs
+    _typed(target, [], outs, ELEMENTS)
+    if packet is A.embedding:
+        x, index = given['weight'], given['indices']
+        return _take(out, x, [(0, 0), (-1, index.dim())], [(index, [*index.stride(), 0])])
+    x = given['self']
+    if packet is A.index:
+        tensors, shape, start, places = _advanced(x, list(given['indices']))
+        modes = {j: k for k, (j, _) in enumerate(tensors)}
+        strides = [[0] * start + list(t.expand(shape).stride()) + [0] * (out.dim() - start - len(shape))
+                   for _, t in tensors]
+        return _take(out, x, [(modes[j], 0) if j in modes else (-1, places[j]) for j in range(x.dim())],
+                     [(t, s) for (_, t), s in zip(tensors, strides)])
+    d, index = given['dim'] % max(x.dim(), 1), given['index']
+    if packet is A.gather:
+        return _take(out, x, [(0, 0) if j == d else (-1, j) for j in range(x.dim())], [(index, index.stride())])
+    return _take(out, x, [(0, 0) if j == d else (-1, j) for j in range(x.dim())],
+                 [(index, [index.stride(0) if index.dim() and j == d else 0 for j in range(out.dim())])])
+
+
+# PyTorch 2.14 documentation, Tensor.scatter_, Tensor.scatter_add_, Tensor.scatter_reduce_, Tensor.index_put_,
+# Tensor.index_add_, Tensor.index_copy_ and Tensor.index_fill_; PyTorch v2.11.0
+# aten/src/ATen/native/TensorAdvancedIndexing.cpp, scatter_reduce_two and scatter_reduce_exclude_self_helper
+SCATTERS = {'last': 0, 'sum': 1, 'add': 1, 'prod': 2, 'multiply': 2, 'mean': 3, 'amax': 4, 'amin': 5}
+
+
+def _scatter(out, base, src, targets, candidates, limits, near, far, op, include, alpha=1):
+    if len(targets) > 4:
+        raise NotImplementedError('a scatter of %d index tensors: the source takes at most four (metal-microbench '
+                                  'operator_shaders.metal scatter)' % len(targets))
+    integral = out.dtype in INTEGRAL
+    tensor = isinstance(src, torch.Tensor)
+    g = [ELEMENTS[out.dtype], ELEMENTS[base.dtype], ELEMENTS[src.dtype] if tensor else -1, op, int(include),
+         int(integral), out.dim(), len(candidates), len(targets), *[ELEMENTS[t.dtype] for t, *_ in targets],
+         *[-1] * (4 - len(targets)), *out.shape, *out.stride(), *base.stride(), *limits, *candidates, *near, *far]
+    for _, dim, wrap, across, along in targets:
+        g += [dim, wrap, *across, *along]
+    return _dispatch('scatter', out.numel(), out, base, src if tensor else base, *[t for t, *_ in targets],
+                     *[base] * (4 - len(targets)), g, [0.0 if tensor else float(src), float(alpha)],
+                     [0 if tensor else _scalar(src, True), _scalar(alpha, True)])
+
+
+def _scattered(target, given, outs):
+    packet, (out,), x = target.overloadpacket, outs, given['self']
+    _typed(target, [x], outs, ELEMENTS)
+    if packet is A.index_put:
+        tensors, shape, start, places = _advanced(x, list(given['indices']))
+        made = [x.shape[j] for j in range(x.dim()) if j in places and places[j] < start] + list(shape) + \
+            [x.shape[j] for j in range(x.dim()) if j in places and places[j] >= start + len(shape)]
+        values = given['values'].expand(made)
+        near = [values.stride(places[j]) if j in places else 0 for j in range(x.dim())]
+        far = [values.stride(start + i) for i in range(len(shape))]
+        targets = [(t, j, x.shape[j], [0] * x.dim(), list(t.expand(shape).stride())) for j, t in tensors]
+        return _scatter(out, x, values, targets, shape, list(x.shape), near, far,
+                        SCATTERS['sum' if given['accumulate'] else 'last'], True)
+    d, index = given['dim'] % max(x.dim(), 1), given['index']
+    src = given.get('src', given.get('source', given.get('value')))
+    if packet in (A.index_add, A.index_copy, A.index_fill):
+        far = [src.stride(d) if src.dim() else 0] if isinstance(src, torch.Tensor) else [0]
+        near = [src.stride(j) if isinstance(src, torch.Tensor) and src.dim() and j != d else 0 for j in range(x.dim())]
+        targets = [(index, d, x.shape[d], [0] * x.dim(), [index.stride(0) if index.dim() else 0])]
+        return _scatter(out, x, src, targets, [index.numel()], list(x.shape), near, far,
+                        SCATTERS['sum' if packet is A.index_add else 'last'], True, given.get('alpha', 1))
+    reduce = given.get('reduce')
+    op = SCATTERS['sum' if packet is A.scatter_add else reduce if reduce is not None else 'last']
+    near = [src.stride(j) if isinstance(src, torch.Tensor) and j != d else 0 for j in range(x.dim())]
+    far = [src.stride(d) if isinstance(src, torch.Tensor) else 0]
+    targets = [(index, d, x.shape[d], [index.stride(j) if j != d else 0 for j in range(x.dim())], [index.stride(d)])]
+    return _scatter(out, x, src, targets, [index.shape[d]],
+                    [index.shape[j] if j != d else x.shape[j] for j in range(x.dim())], near, far, op,
+                    given.get('include_self', True))
+
+
+# PyTorch 2.14 documentation, torch.nn.functional.scaled_dot_product_attention
+def _attended(target, given, outs):
+    (out,), q, k, v, mask = outs, given['query'], given['key'], given['value'], given['attn_mask']
+    _typed(target, [q, k, v, mask], outs)
+    if given['dropout_p']:
+        raise NotImplementedError('%s with dropout_p %r: its dropout draws random numbers, which no source here '
+                                  'draws' % (target, given['dropout_p']))
+    lead, (length, size), (other, value) = q.shape[:-2], q.shape[-2:], (k.shape[-2], v.shape[-1])
+    group = q.shape[-3] // k.shape[-3] if given['enable_gqa'] else 1
+    heads = lead if group == 1 else (*lead[:-1], k.shape[-3])
+    keys, values = k.expand(*heads, other, size), v.expand(*heads, other, value)
+    masks = mask.expand(*lead, length, other) if mask is not None else None
+    n = len(lead)
+    g = [ELEMENTS[out.dtype], ELEMENTS[q.dtype], ELEMENTS[k.dtype], ELEMENTS[v.dtype],
+         ELEMENTS[mask.dtype] if mask is not None else -1, int(given['is_causal']), length, other, size, value, group, n,
+         *lead, *[t.stride()[j] if t is not None else 0 for t in (out, q, keys, values, masks) for j in range(n)],
+         *out.stride()[-2:], *q.stride()[-2:], *keys.stride()[-2:], *values.stride()[-2:],
+         *(masks.stride()[-2:] if masks is not None else (0, 0))]
+    scale = given['scale'] if given['scale'] is not None else 1 / math.sqrt(size)
+    return _dispatch('attention', out.numel(), out, q, k, v, mask if mask is not None else q, g, [float(scale)])
+
+
+# PyTorch 2.14 documentation, torch.cat
+def _concatenated(target, given, outs):
+    (out,), d = outs, given['dim'] % max(outs[0].dim(), 1)
+    thunks, at = [], 0
+    for t in given['tensors']:
+        if t.dim() == 1 and t.shape[0] == 0 and out.dim() != 1:
+            continue
+        thunks += _copy(out.narrow(d, at, t.shape[d]), t)
+        at += t.shape[d]
+    return thunks
+
+
 # design/torch-source-lowering-change-request.md item 1
 SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A._to_copy, A._unsafe_view, A.copy),
                                                                     _copying),
-           **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear), _product), A.einsum: _summation,
+           **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys((*CONVOLUTION, *TRANSPOSED, A.convolution), _convolving),
-           **dict.fromkeys((*MAXIMUM, *AVERAGE, *INDEXED), _pooled), **dict.fromkeys(PAD, _padded)}
+           **dict.fromkeys((*MAXIMUM, *AVERAGE, *INDEXED), _pooled), **dict.fromkeys(PAD, _padded),
+           **dict.fromkeys((*FILLS, *EMPTY, A.arange), _factory), **dict.fromkeys(REDUCTIONS, _reduced),
+           **dict.fromkeys(SOFTMAX, _softened), A.cumsum: _scanned, A.sort: _ranked, A.topk: _ranked,
+           **dict.fromkeys(NORMS, _normalized),
+           **dict.fromkeys((A.gather, A.index_select, A.embedding, A.index), _taken),
+           **dict.fromkeys((A.scatter, A.scatter_add, A.scatter_reduce, A.index_put, A.index_add, A.index_copy,
+                            A.index_fill), _scattered),
+           A.scaled_dot_product_attention: _attended, A.cat: _concatenated}
 # PyTorch 2.14 documentation, Tensor Views
 VIEWS = {A.as_strided, A.detach, A.diagonal, A.expand, A.expand_as, A.movedim, A.narrow, A.permute, A.select,
          A.squeeze, A.transpose, A.t, A.adjoint, A.real, A.imag, A.view_as_real, A.unflatten, A.unfold, A.unsqueeze,
