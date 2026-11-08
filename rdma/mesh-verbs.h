@@ -26,7 +26,7 @@
    virtual-address boundary.  The window is mapped at a bank-aligned base and is required to fit in
    one bank, which makes every region cut interior to that bank and a straddle impossible. */
 #define MESH_BANK ((size_t)1<<32)
-/* design/prepared-machine.md#M09; RDMA-FIRST.md, "The ledger", registerable */
+/* design/prepared-machine.md#M09; RDMA-FIRST.md#the-ledger */
 #define MESH_REGION ((size_t)1<<30)
 /* device_gid's and port_bandwidth's inputs, verbatim from tag pre-return-20261103 etc/bridge/thunderbolt.h (5eabe91e) */
 #define MESH_GID_ADDRESSES 16
@@ -150,7 +150,7 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct m
      1:1 by the provider, and it is the only thing the MR table has to cover.  The addressable arena
      grows without it. */
   size_t stride=(size_t)m->block*m->pgsz,span=wire->length;
-  /* design/prepared-machine.md#M09; RDMA-FIRST.md, "The ledger", registerable */
+  /* design/prepared-machine.md#M09; RDMA-FIRST.md#the-ledger */
   const size_t most=device->extent?device->extent:MESH_REGION;
   size_t extent=(most<span?most:span)/stride*stride;
   size_t regions=extent?(span+extent-1)/extent:0;
