@@ -11,7 +11,8 @@ The quoted sources were read, and each is recorded where it was read:
 - design/worklists-and-arrival-sources-2026-11-07.md (WA);
 - design/lifetimes-and-placement-sources-2026-11-07.md (LP);
 - design/nccl-sources-2026-11-07.md (NS);
-- design/metal-atomic-sources-2026-11-07.md (MA).
+- design/metal-atomic-sources-2026-11-07.md (MA);
+- design/tiling-and-bounds-sources-2026-11-07.md (TB).
 
 Turn numbers are those of design/operator-turns-2026-11-04-to-06.md, numbered on past U183 for later turns.
 
@@ -268,6 +269,69 @@ be captured yet;»)
 
 (U200, 01:57)
 
+> re point 2: let's treat this as something analogous to the use of cudagraphs in pytorch where we have a foreign
+> function api something like a python host can use, compile, and replay for programs invariant up to certain limits
+> without recompilation or python-sided or torch-sided overhead thereafter
+
+(2026-09-11 19:29, in part)
+
+> why are we letting torch control any resources (after tracing, compilation, lowering, etc, which should be AOT and
+> produce serialized objects we cna resume without needing to repeatedly re-compile anything btw) when *we* control
+> *our* own code and calling context?
+
+(2026-10-28 11:45, in part)
+
+> " [...] mesh_compile.py lowers each operator to torch's MPS kernels." did anyone ever say to do this?
+
+(2026-11-06 13:33, in part)
+
+> "- Capture a later execution, after warm-up executions that run outside the capture:" pytorch has aot compile
+> through a literal export function. try again, look deeper and wider through the literature before coming back to me
+> with 'suggestions' like these.
+
+(2026-11-07 14:43)
+
+> ideally from here we should start to see an explanation of the necessary scope of a lowerer which turns fxgraphs or
+> aot outputs into a metal runtime which is complementary to the actual-typing-of-the-linear-algebra rather than
+> reproducing errors or misgivings in whatever mps torch backend might already exist. and whether this is a
+> complicated and huge task or a trivial feature extension (e.g. naming a replacement pytorch backend which subclasses
+> and extensively replaces mediocre behavior within an existing backend; plausibly 500-1500 loc)
+
+(2026-11-07 16:19, in part)
+
+> " Today torch's eager MPS kernels are only captured, never lowered." why would we capture a torch mps kernel when
+> torch sucks balls? what was the fxgraph thing again? i'm sort of confused why i keep seeing 'and we also have torch
+> eager mps kernels, which are obviously bad...'. what data flow produces them? please explain in less idiomatic
+> terms?
+
+(2026-11-07 19:16)
+
+> "6. Recording: these closures run once, inside MetalRecorderCapture, which records the Metal commands torch issues.
+> 7. Replay: MetalRecorderReplay re-encodes the commands as Metal 4 indirect command buffers. These replay on every
+> execution, bound to the mesh's pages." btw the user almost certainly wrote multiple times that there are more mps
+> apis and data types and operations than the indirect command buffer, and that the failure to use the full documented
+> api for the scopes of behavior where the api's features are relevant was 'idiomatic' and 'without citation or source
+> or ...'. [...] (why capture and replay mps from a bad pointwise lowering of metal when you have the entire fxgraph
+> already???) [...] "So matrix multiply became ours, and every other operator stayed torch's eager MPS kernel. Since
+> then, no lowering of the FX graph has been written, " is this what the user turns said to do, is what they wanted,
+> etc?
+
+(2026-11-07 19:25, in part)
+
+> wrt this specific asked/built gap, which repo types, algorithms, and data structures were implicitly invoked by the
+> user or assisatnt turns proximate to that work and not spoken explicitly & w/ citations to the explicit external
+> literature? i am only interested in the *citational* failures inherent to this history here as they are the most
+> strongly predictive of what goals were recognized and misapplied or misgeneralized in the repo so far (so we can, as
+> usual, construct change request documents of the simple and citationally-closed form...)
+
+(2026-11-07 19:34)
+
+> this is an *annoying* but *easy* problem. no huge research or testing-heavy changes are required! the scope of
+> impact of these 'change requests' is remarkably small and simple! this is the best case we could ever find from code
+> review. [...] "Want me to write them? " sure
+
+(2026-11-07 20:02, in part)
+
 ## The specification
 
 design/change-requests.md: "A change request describes what ought to be written. It uses only non-idiomatic descriptions
@@ -370,8 +434,14 @@ Each requirement names the code it replaces, the quoted source, and what is writ
     (RG §B.3): "In topology-driven implementations, all nodes are assumed to be active so the operator is applied
     everywhere even if there is no work to do at some nodes"; "data-driven implementations are organized around a
     worklist".
-- **Stop:** these sources say when a receiver may access one partition, or all of them. None says how the dispatch of a
-  recorded kernel is divided among partitions. Nothing is written for this item.
+  - J. Ragan-Kelley et al., Halide, PLDI 2013, §4.2 (TB §2): "For each function, it symbolically evaluates the bounds
+    of each dimension based on the bounds required of its caller and the symbolic indices at which the caller invokes
+    it."
+- **Stop:** these sources say when a receiver may access one partition, or all of them. Halide computes a function's
+  bounds from "the bounds required of its caller and the symbolic indices at which the caller invokes it". A recorded
+  dispatch, `struct MetalRecordedDispatch` (metal-microbench metal_recording.m:8 at bed56a95), holds a pipeline,
+  buffers, offsets and a grid, and no quoted source gives those indices for a kernel written as MSL source. None says
+  how the dispatch of a recorded kernel is divided among partitions. Nothing is written for this item.
 
 ### 4. The completion of execution t's requests
 
@@ -465,8 +535,12 @@ Each requirement names the code it replaces, the quoted source, and what is writ
 
 ### 8. The torch scope's final lowering
 
-- **Replaces:** the torch scope's kernels, which are torch's MPS kernels, one ATen operator at a time (mesh 03297e52).
-- **Source:** read and quoted in FL.
+- **Replaces,** at mesh 97a6bb8c, the torch scope's kernels, which are torch's MPS kernels, one ATen operator at a time
+  (mesh 03297e52):
+  - rdma/mesh_compile.py `_apply` (:1521), by which `_called` (:1540) and `_steps` (:1697) run every node's operator;
+  - `_kernels` (:1394), which registers `_mm_out` and `_mm` (:1382, :1390) by `torch.library.impl` for `aten::mm.out`
+    and `aten::mm` on `mps` (:1399–1400).
+- **Source:** read and quoted in FL, and Koes and Goldstein in TB.
   - J. Ansel et al., PyTorch 2, ASPLOS 2024, §1: "The framework only has visibility of a single operator at a time, and
     thus cannot automatically perform optimizations, like fusion or scheduling, that cross operator boundaries."
   - T. Chen et al., TVM, OSDI 2018, abstract: "TVM solves optimization challenges specific to deep learning, such as
@@ -499,8 +573,30 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   - Metal Performance Primitives, MPPTensorOpsMatMul2d.h:216–218 (macOS 26.4 SDK): "cooperative_tensor owns thread
     private data and divides the data for entire tensor among threads (participating in the scope of operation) in
     implementation defined manner."
-- **Stop:** these sources state properties of a final lowering, and no quoted source says which IR carries one on Metal.
-  Nothing is written for this item.
+  - J. Ansel et al., PyTorch 2, ASPLOS 2024, §4.3: "Lowering is done by symbolically interpreting the FX graph and
+    applying lowering functions which do the conversion for a single operator." "If an unknown operator is
+    encountered, it is automatically converted into a fallback kernel node which runs the original PyTorch code."
+    §4.4: "ExternKernelSchedulerNode represents calls to library code or user-defined kernels." §4.7: "CUDA Graphs
+    records and replays kernel launches at the CUDA driver level and is lower overhead than even the C++ wrapper code."
+  - D. R. Koes, S. C. Goldstein, "Near-optimal instruction selection on DAGs", CGO 2008, §3: "Given an expression DAG
+    which represents the computation of a basic block and a set of architecture specific instruction tiles, we wish to
+    find an optimal tiling of the DAG which corresponds to the minimum cost instruction sequence." "The set of tiles
+    consists of a collection of expression trees each with an assigned cost." "The optimal tiling is the legal and
+    complete tiling where the sum of the costs of the tiles is minimized."
+- **Write,** in rdma/mesh_compile.py at mesh 97a6bb8c:
+  - Each function's FX graph is lowered "by symbolically interpreting the FX graph and applying lowering functions
+    which do the conversion for a single operator" (PyTorch 2 §4.3). A node whose operator a kernel of metal-microbench
+    matrix_shaders.metal computes is converted into an ExternKernelSchedulerNode, a call of that kernel in the library
+    that `torch.mps.compile_shader` makes of matrix_arithmetic.metal and matrix_shaders.metal (:1371, :1396–1398).
+  - Any other node is "an unknown operator", "converted into a fallback kernel node which runs the original PyTorch
+    code": `_apply`.
+  - `_kernels`'s `torch.library.impl` registrations are deleted.
+  - `_captured` (:1775) records the launches of those kernels and of the fallback kernel nodes: "CUDA Graphs records
+    and replays kernel launches" (PyTorch 2 §4.7).
+- **Stop:** a kernel of matrix_shaders.metal that computes more than one operator, as `gelu_mul` does (metal-microbench
+  matrix_shaders.metal:185 and its `matrixActivation`, matrix_arithmetic.metal:6, at bed56a95), is a tile whose
+  expression tree has more than one node. Koes and Goldstein choose among tilings by "the sum of the costs of
+  the tiles", and no quoted source gives the cost of a kernel. Nothing is written for such a kernel.
 
 ### 9. Every node replays
 
@@ -518,9 +614,10 @@ Each requirement names the code it replaces, the quoted source, and what is writ
 
 - Item 1: whether the replay of a later execution issues a call the captured execution made once.
 - Item 2: the number of locations of a value the host writes.
-- Item 3: how the dispatch of a recorded kernel is divided among partitions.
+- Item 3: how the dispatch of a recorded kernel is divided among partitions, and the symbolic indices of a kernel
+  written as MSL source.
 - Item 4: the value the event is set to at a failure, without R.
 - Item 6: where the memory block of offsets lies among the pages of every other operand, and how an operand's u
   locations enter its usage records.
-- Item 8: which IR carries the torch scope's final lowering on Metal.
+- Item 8: the cost of a kernel that computes more than one operator.
 - Item 9: in the torch scope, the reading of received data (item 3).
