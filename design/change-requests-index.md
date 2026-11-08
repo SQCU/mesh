@@ -1,33 +1,18 @@
 # Change requests: which are outstanding
 
-As of 2026-11-08, after mesh e6eda244 and metal-microbench 03298a79. Each entry names a change request, whether it is
+As of 2026-11-08, after mesh 792cbb7c and metal-microbench faa18aba. Each entry names a change request, whether it is
 outstanding, and what of it is outstanding. The standard every change request follows is
 [change-requests.md](change-requests.md).
 
 ## Outstanding
 
-- [integration-finishing-change-request.md](integration-finishing-change-request.md): outstanding in part.
-  - Item 1: every bridge is configured as the repository installs it and runs. The job io.mesh.bridge was disabled on
-    all five machines and is enabled; the mini's stale /usr/local/mesh/bridge.conf (2026-09-17) is removed; each
-    machine's ~/.mesh-bridge.conf states region=/mesh0, its arena (82 GiB on the Ultras, 16 GiB on the mini, as the
-    deleted etc/bridge profiles set them) and mesh_block_pages=1, and no window, so the window is mesh-bridge.sh's
-    default, a bank's pages; the mini's configuration.plist is rewritten by the same start. The window was refused on
-    every port at the provider's advertised max_mr_size; device_up now registers it in 1 GiB regions as M09 states
-    (mesh b59c579a, e6eda244), four a port, and all five maps list all five nodes. The five-rank E2B decode
-    (metal-microbench tools/mesh/placements/even-5.json, 03298a79) is prepared on every node and planned on every rank
-    (mesh_plan needs 199,500 wired pages, which the window holds). Outstanding: the run to its end, and item 7, each
-    commit's feedback, written 2026-11-08 from every rank's prefill timeout, "prefill: Operation timed out: no
-    feedback of its commits" (output_data/e2b-five-2026-11-08), whose cause design/commit-feedback-sources-2026-11-08.md
-    §3 measures.
-  - Items 2-6: implemented. Item 2 in metal-microbench c0a067fc and 6b8f7c3c with mesh b482a825; item 3 in mesh
-    01632014; item 4 in mesh e34e7a5e and metal-microbench c0a067fc, which C9 passes for MetalMaskedPass; item 5 in
-    metal-microbench 5d5efc09; item 6 here.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench 5600d84b, 66a18fab, c0a067fc and 6b8f7c3c, and mesh
     56e33484, e34e7a5e and b482a825. A received operand's reader is masked, the threadgroups whose pages have not
     landed are compacted into a worklist and run by a later pass's indirect dispatch, and the later passes are placed
     by the heap order over the commands' dependence levels and their ranges' published completion times. Checked on
-    this Mac by the scratch mask harness; the E2B check on the five machines stops at the prefill (above).
+    this Mac by the scratch mask harness, and by the five-rank E2B decode on the five machines, 71 later passes a step
+    (integration-finishing item 1).
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
   - In the torch scope, item 9 waits on the lowering request's item 4, which is withdrawn.
@@ -48,6 +33,26 @@ outstanding, and what of it is outstanding. The standard every change request fo
 
 ## Implemented
 
+- [integration-finishing-change-request.md](integration-finishing-change-request.md): implemented.
+  1. Every bridge is configured as the repository installs it and runs. The job io.mesh.bridge was disabled on all
+     five machines and is enabled; the mini's stale /usr/local/mesh/bridge.conf (2026-09-17) is removed; each
+     machine's ~/.mesh-bridge.conf states region=/mesh0, its arena (82 GiB on the Ultras, 16 GiB on the mini, as the
+     deleted etc/bridge profiles set them) and mesh_block_pages=1, and no window, so the window is mesh-bridge.sh's
+     default, a bank's pages; the mini's configuration.plist is rewritten by the same start. The window was refused
+     on every port at the provider's advertised max_mr_size; device_up registers it in 1 GiB regions as M09 states
+     (mesh b59c579a, e6eda244), four a port, and all five maps list all five nodes. The five-rank E2B decode
+     (metal-microbench tools/mesh/placements/even-5.json, 03298a79) runs to its end on all five machines: in
+     output_data/e2b-five-2026-11-08 and its three repeats in output_data/e2b-five-2026-11-08-repeats, every rank's
+     prefill and decode end, every rank exits 0 and decodes the same 256 tokens, 33.7 tok/s (29.7 ms a step, the
+     median of three).
+  2. Implemented in metal-microbench c0a067fc and 6b8f7c3c with mesh b482a825.
+  3. Implemented in mesh 01632014.
+  4. Implemented in mesh e34e7a5e and metal-microbench c0a067fc, which C9 passes for MetalMaskedPass.
+  5. Implemented in metal-microbench 5d5efc09.
+  6. This index.
+  7. Implemented in metal-microbench 32cda1e1: one MTL4CommitOptions a commit, its handler added for that commit, in
+     tools/e2b_replay.m and metal_recording.m; with mesh 792cbb7c and metal-microbench faa18aba for C9's finding on
+     32cda1e1. Every rank's prefill timeout of 2026-11-08 does not recur.
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): implemented; checked on this Mac,
   and built on the five mesh machines.
   1. Each function typed and scheduled as plan-to-bridge R3 and R4 write it, on every Apple silicon backend, the CPU
