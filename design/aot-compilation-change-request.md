@@ -1024,6 +1024,9 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 
 ### 7. Torch's existing kernels on the GPU
 
+Superseded by design/torch-source-lowering-change-request.md item 1 (2026-11-07): no torch Metal kernel is submitted
+or recorded.
+
 > no inlining new numerical backends instead of writing collective and transfer and so on code which schedule the use of
 > existing code, basically.
 

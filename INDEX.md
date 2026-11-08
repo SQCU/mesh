@@ -19,6 +19,8 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 - [design/change-requests.md](design/change-requests.md): what a change request is and how one is written. A change
   request says what code to write, and for each part it names the paper, book or program that says just how to write it.
+- [design/change-requests-index.md](design/change-requests-index.md): every change request, and which are outstanding.
+  Each entry names what of it is still open, written or superseded.
 
 ## The bridge and transport
 
