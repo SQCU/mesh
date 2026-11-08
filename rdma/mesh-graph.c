@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 /* design/plan-to-bridge-change-request.md R5, Code; HiGHS 1.15.1, highs/interfaces/highs_c_api.h */
@@ -1652,4 +1653,29 @@ int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*inters
 
 void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context) {
   for (uint32_t j = 0; j < count; j++) visit(context, row[j]);
+}
+
+/* G. E. Blelloch, Prefix sums and their applications, 1990; M. Harris, S. Sengupta and J. D. Owens, GPU Gems 3, ch. 39,
+   2007; R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Metal Shading Language Specification 4.1, §6.10.2;
+   MTL4ComputeCommandEncoder.h:90-112 */
+int mesh_graph_compaction_source(uint32_t items, uint32_t simds, char *text, size_t room) {
+  const int made = snprintf(text, room, "#include <metal_stdlib>\n"
+    "kernel void mesh_compact(device const uint *mesh_flags [[buffer(0)]],device uint *mesh_list [[buffer(1)]],"
+    "device uint *mesh_arguments [[buffer(2)]],uint mesh_tl [[thread_index_in_threadgroup]],uint mesh_lanes [[threads_per_threadgroup]],"
+    "uint mesh_sl [[thread_index_in_simdgroup]],uint mesh_sg [[simdgroup_index_in_threadgroup]]){"
+    "threadgroup uint mesh_counts[%u];uint mesh_left=0u;"
+    "for(uint mesh_at=0u;mesh_at<%uu;mesh_at+=mesh_lanes){uint mesh_g=mesh_at+mesh_tl;"
+    "bool mesh_off=metal::select(false,mesh_flags[metal::min(mesh_g,%uu)]==0u,mesh_g<%uu);"
+    "uint mesh_own=metal::simd_prefix_exclusive_sum(metal::select(0u,1u,mesh_off));"
+    "uint mesh_simd=metal::popcount(static_cast<metal::simd_vote::vote_t>(metal::simd_ballot(mesh_off)));"
+    "if(mesh_sl==0u)mesh_counts[mesh_sg]=mesh_simd;metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+    "if(mesh_sg==0u){uint mesh_count=metal::select(0u,mesh_counts[metal::min(mesh_sl,%uu)],mesh_sl<%uu);"
+    "uint mesh_before=metal::simd_prefix_exclusive_sum(mesh_count);uint mesh_total=metal::simd_sum(mesh_count);"
+    "if(mesh_sl<%uu)mesh_counts[mesh_sl]=mesh_before;if(mesh_sl==0u)mesh_counts[%u]=mesh_total;}"
+    "metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+    "if(mesh_off)mesh_list[mesh_left+mesh_counts[mesh_sg]+mesh_own]=mesh_g;mesh_left+=mesh_counts[%u];"
+    "metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);}"
+    "if(mesh_tl==0u){mesh_arguments[0]=mesh_left;mesh_arguments[1]=1u;mesh_arguments[2]=1u;}}\n",
+    simds + 1, items, items - 1, items, simds - 1, simds, simds, simds, simds);
+  return made < 0 ? EINVAL : (size_t)made >= room ? ERANGE : 0;
 }

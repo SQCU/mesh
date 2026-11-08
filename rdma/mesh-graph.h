@@ -115,6 +115,9 @@ int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*inters
                               const void *context, uint64_t align, uint64_t *offset, uint64_t *total);
 
 void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context);
+/* G. E. Blelloch, Prefix sums and their applications, 1990; M. Harris, S. Sengupta and J. D. Owens, GPU Gems 3, ch. 39,
+   2007; R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013 */
+int mesh_graph_compaction_source(uint32_t items, uint32_t simds, char *text, size_t room);
 
 #ifdef __cplusplus
 }
