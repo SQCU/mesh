@@ -1222,9 +1222,25 @@ def _runs(ir, places):
         ir.values[v].run = int(key in run)
 
 
-# design/aot-compilation-change-request.md A3
+# design/aot-compilation-change-request.md A3; design/integration-finishing-change-request.md item 3; O. Sinnen, Task
+# Scheduling for Parallel Systems, Wiley, 2007; mesh-collective.c plan_schedule
+Weights = collections.namedtuple('Weights', 'tasks transfers')
+
+
 def unit(ir):
-    return [mesh.Weight(1.0, 1.0, 1.0, 1.0) for _ in ir.declared]
+    return Weights([1.0] * (3 * len(ir.declared)), [1.0] * len(ir.declared))
+
+
+def _weighed(ir, function):
+    made, count = function.weights(ir), len(ir.declared)
+    if not isinstance(made, Weights) or len(made.tasks) != 3 * count or len(made.transfers) != count \
+            or not all(isinstance(w, (int, float)) for w in [*made.tasks, *made.transfers]):
+        raise ValueError('the weighting function gave %r for %d declared transfers: A3\'s operand is "a weight on each '
+                         'task; a weight on each edge", a Weights of one number a task of mesh_plan (a declared '
+                         'transfer\'s producer, source read and consumer, in that order) and one number an edge (a '
+                         'declared transfer\'s, a page)' % (type(made).__name__, count))
+    return [mesh.Weight(produced=made.tasks[3 * i], consumed=made.tasks[3 * i + 2], read=made.tasks[3 * i + 1],
+                        page=made.transfers[i]) for i in range(count)]
 
 
 # mesh.h MESH_NAME; mesh-dataflow.h struct mesh_ctx
@@ -3276,10 +3292,7 @@ def program(block, *example_inputs):
             ir = partition(record.gm, operand, nodes, page)
             ir.calls = entries[k]
             lower(ir)
-            ir.weights = list(record.function.weights(ir))
-            if len(ir.weights) != len(ir.declared) or not all(isinstance(w, mesh.Weight) for w in ir.weights):
-                raise ValueError('the weighting function gave %d entries for %d declared transfers; one mesh.Weight '
-                                 'each (A3)' % (len(ir.weights), len(ir.declared)))
+            ir.weights = _weighed(ir, record.function)
             irs.append(ir)
         for j, k in enumerate(calls):
             absent = sorted(r for r in reads[j] if irs[calls[r]].device is None)
