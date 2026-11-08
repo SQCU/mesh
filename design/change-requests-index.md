@@ -7,8 +7,9 @@ every change request follows is [change-requests.md](change-requests.md).
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): outstanding.
   1. Each function typed and scheduled as plan-to-bridge R3 and R4 write it, on every Apple silicon backend, the CPU
-     included (rewritten 2026-11-08). Open: the lowering to R4's tasks. The kernels of metal-microbench c24308dd and
-     2e262f1f and mesh 014fe04a and 40e4189d lower every operator as one task over a whole operand.
+     included (rewritten 2026-11-08). Implemented in mesh 502bf42c and 8cac6d69 and metal-microbench 3bc0e2a4: the IR's
+     kinds, one task per page for the asynchronous consumer, and the same source compiled for the CPU. Open: each
+     capture's weighing by A3's task weights, without which the MPS replay raises since metal-microbench 3b719f10.
   2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d.
   3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c and
      metal-microbench e4800f65, 270c6e5f and 43f37e96. Open: each task's length from the weighting operand (A3), where
@@ -20,8 +21,7 @@ every change request follows is [change-requests.md](change-requests.md).
     then.
   - In the torch scope, item 9 waits on the lowering request's item 4.
   - Implemented: items 1 (metal-microbench a3792f13), 4 (mesh 992f6389), 5, 6 (mesh a2c1532c and b880b808,
-    metal-microbench 6b3c29e5) and 7, and item 2's first write. Item 6 still needs its change in mesh_compile.py's
-    `_mapped`, `_Mapping.release` and `_replays`, which the lowering agent is making. Item 8 is written by the lowering
+    metal-microbench 6b3c29e5, completed in mesh 356bed56) and 7, and item 2's first write. Item 8 is written by the lowering
     request's items 1–3.
 - [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md): outstanding in part.
   - Implemented: the requirements written from its stops in mesh 593dd1c0. These are the second stops' item 8 and the
