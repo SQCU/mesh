@@ -2437,6 +2437,11 @@ def _count(context, state, word, c):
     return C.c_uint64.from_address(context.M + word + 8 * (c % state.copies))
 
 
+# mesh.h struct mesh_state `times`; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2
+def _time(context, state, transfer):
+    return C.c_double.from_address(context.M + state.times + 8 * transfer).value
+
+
 # design/torch-source-lowering-change-request.md item 1; design/plan-to-bridge-change-request.md R2 and R4; mesh-section.h
 # struct mesh_section
 class _Paged:
@@ -2621,7 +2626,9 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
         _typed(collective.kind, [first], [total])
         flat, row = total.view(-1), ir.page // total.element_size()
         steps = _once(_fill(total, _identity(A.sum, total.dtype)) + _pointwise(0, total, total, first))
-        for i, (received, j) in receives:
+        # L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2
+        listed = receives if state is None else sorted(receives, key=lambda received: _time(context, state, received[0]))
+        for i, (received, j) in listed:
             wait = [lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
                     _arrived(context, plan, i, t, count)] if state is not None else []
             steps += wait + _once([thunk for a, b, page in _received(placed(received), j, flat.numel(), row)

@@ -42,7 +42,8 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
   const struct mesh_publication *entry=mesh_transfer_at(context->M,transport->words,transfer);
   const uint64_t at=transport->offset;
   *input=(struct mesh_metal_input){.phases=entry->phases-at,.group=mesh_group_bytes(entry->pages),.count=entry->count-at,
-    .pages=entry->pages,.copies=transport->words->copies};
+    .pages=entry->pages,.copies=transport->words->copies,
+    .time=((const double *)(const void *)((const char *)context->M+transport->words->times))[transfer]};
   return 0;
 }
 

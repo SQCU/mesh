@@ -6,7 +6,8 @@
 struct mesh_metal_transport { void *state; struct mesh_state *words; uint64_t offset,bytes; };
 int mesh_metal_transport_create(struct mesh_ctx *,uint64_t plan,void *device,struct mesh_metal_transport *);
 void mesh_metal_transport_destroy(struct mesh_metal_transport *);
-struct mesh_metal_input { uint64_t phases,group,count; uint32_t pages,copies; };
+/* L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2 (`time`) */
+struct mesh_metal_input { uint64_t phases,group,count; uint32_t pages,copies; double time; };
 int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,uint32_t transfer,struct mesh_metal_input *);
 struct mesh_metal_publication { uint64_t supplied; };
 int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,uint32_t transfer,
@@ -22,9 +23,10 @@ void mesh_metal_waits_stop(struct mesh_metal_waiter *);
 int mesh_metal_waits_end(struct mesh_metal_waiter *);
 int mesh_metal_status(struct mesh_metal_transport *,int cause,uint64_t *first);
 _Static_assert(sizeof(struct mesh_metal_transport)==32,"mesh_metal_transport");
-_Static_assert(sizeof(struct mesh_metal_input)==32 && offsetof(struct mesh_metal_input,group)==8 &&
+_Static_assert(sizeof(struct mesh_metal_input)==40 && offsetof(struct mesh_metal_input,group)==8 &&
   offsetof(struct mesh_metal_input,count)==16 && offsetof(struct mesh_metal_input,pages)==24 &&
-  offsetof(struct mesh_metal_input,copies)==28,"mesh_metal_input: metal_recording.h struct MetalRemote");
+  offsetof(struct mesh_metal_input,copies)==28 && offsetof(struct mesh_metal_input,time)==32,
+  "mesh_metal_input: metal_recording.h struct MetalRemote");
 _Static_assert(sizeof(struct mesh_metal_publication)==8,"mesh_metal_publication");
 _Static_assert(sizeof(struct mesh_metal_wait)==24 && offsetof(struct mesh_metal_wait,pages)==8 &&
   offsetof(struct mesh_metal_wait,copies)==12 && offsetof(struct mesh_metal_wait,pass)==16,

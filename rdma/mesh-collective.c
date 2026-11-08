@@ -129,7 +129,9 @@ struct plan {
   uint32_t *head,*lag;
   uint32_t *between;
   uint32_t *farthest;
-  uint64_t phases,counts,completions,supplied,publications,status,hops,words;
+  uint64_t phases,counts,completions,supplied,publications,status,hops,times,words;
+  /* L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2 */
+  double *completed;
   /* design/aot-compilation-change-request.md A10 */
   uint64_t deliveries,submits,syncs,rows,room,outstanding,submit_room,spanned,nodes,forwarded;
   uint32_t waits,tells,calls,*wait_row;
@@ -409,7 +411,8 @@ static void plan_layout(struct plan *p){
   p->syncs=plan_align(p->submits+p->submit_room*sizeof(struct mesh_submission));
   p->rows=plan_align(p->syncs+((uint64_t)p->waits+p->tells)*sizeof(struct mesh_sync));
   p->hops=plan_align(p->rows+((uint64_t)p->calls+1)*sizeof(uint32_t));
-  p->words=p->hops+p->entries*p->copies*sizeof(struct mesh_hop);
+  p->times=plan_align(p->hops+p->entries*p->copies*sizeof(struct mesh_hop));
+  p->words=p->times+(uint64_t)p->transfers*sizeof(double);
 }
 static uint64_t plan_supplied(const struct plan *p,const struct plan_demand *d){
   return p->base+p->supplied+(uint64_t)d->release*sizeof(uint64_t);
@@ -901,6 +904,11 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
     /* design/plan-to-bridge-change-request.md R5 */
     status=mesh_graph_completion_times((uint32_t)instructions,w,resource,n+2*p->pairs,(size_t)dependencies,before,after,
                                        completion);
+    /* L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2; C.-Y. Chen,
+       arXiv 2205.02474, 2022, (1a) */
+    if(!status && !(p->completed=calloc((size_t)count+1,sizeof *p->completed)))status=ENOMEM;
+    for(uint32_t i=0;!status && i<count;i++)for(uint32_t q=0;q<consumer[i].count;q++)
+      if(completion[consumer[i].first+q]>p->completed[i])p->completed[i]=completion[consumer[i].first+q];
     if(!status){
       for(uint64_t j=0;j<instructions;j++)completion[j]=-completion[j];
       status=mesh_graph_heap_order((uint32_t)instructions,completion,(size_t)dependencies,before,after,place);
@@ -1573,6 +1581,7 @@ static void plan_free(struct plan *p){
   free(p->wait_row);free(p->demand);free(p->of);free(p->parent);
   free(p->tree);free(p->run);free(p->members);free(p->lead);free(p->comm);free(p->child);free(p->value);free(p->read);
   free(p->here);free(p->first);free(p->head);free(p->lag);free(p->between);free(p->farthest);free(p->entry);
+  free(p->completed);
 }
 
 /* os/os_sync_wait_on_address.h, os_sync_wait_on_address_with_timeout; L. Lamport, Distributed Computing 1(2), 1986 */
@@ -1687,6 +1696,8 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     state->syncs=base+p->syncs;
     state->calls=p->calls;
     state->rows=base+p->rows;
+    state->times=base+p->times;
+    if(p->completed)memcpy(mesh_at(m,at)+p->times,p->completed,(size_t)p->transfers*sizeof *p->completed);
     struct mesh_sync *sync=mesh_syncs(m,state);
     for(uint32_t k=0;k<p->waits+p->tells;k++){
       sync[k].node=p->sync[k].node;sync[k].function=p->sync[k].function;sync[k].entry=p->sync[k].entry;
