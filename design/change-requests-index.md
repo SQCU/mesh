@@ -14,11 +14,13 @@ every change request follows is [change-requests.md](change-requests.md).
      into two functions ordered by an event.
   2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d.
   3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c and
-     metal-microbench e4800f65, 270c6e5f and 43f37e96. Open: each task's length from the weighting operand (A3), where
-     the replay now orders by dependence depth.
+     metal-microbench e4800f65, 270c6e5f and 43f37e96; the order from the completion-time linear program with each
+     task's length from the weighting operand, in metal-microbench 3b719f10 and mesh 14b2061d.
   4. Withdrawn 2026-11-08: plan-to-bridge R4 writes this consumer, and item 1 lowers it.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
-  - Open, written and not yet implemented: item 3 in the LiteRT scope, with a partition a page (plan-to-bridge R4).
+  - Item 3 in the LiteRT scope: implemented in metal-microbench a8ed7bd6, with a partition a page. Open: holding a run
+    of threadgroups for the supplied words of the pages it reads (plan-to-bridge R4), where a8ed7bd6 stops; and C9's
+    finding on 2c802b93.
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
   - In the torch scope, item 9 waits on the lowering request's item 4.
