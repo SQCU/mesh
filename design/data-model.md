@@ -11,7 +11,10 @@ that range. Explain the hardware first, then how we use it to share work.
 
 ## 1. The M-series accelerator
 
-A Studio's M5 Ultra is two dies with 64 GPU cores (the chain's 64 threadgroups, one a core,
+The repositories support every Apple silicon device with RDMA over Thunderbolt (TN3205). Devices differ in how many
+dies they have. An M5 Max is 1×2 dies and an M5 Ultra 2×2 (operator, 2026-11-07). At least four M5 Ultra devices are in
+the collective. A machine model that counts nodes misses this: design/compiler-and-runtime.md §1 gives one with dies
+and links. A Studio's M5 Ultra has 64 GPU cores (the chain's 64 threadgroups, one a core,
 output_data/chain-20261022/t134-studios-rank0.log). Each core has one large on-chip cache for its registers, threadgroup
 memory, stack and buffer data. The core hands it out as a shader runs. If a shader needs more than fits, the core runs
 fewer SIMD groups to keep the data on chip (Apple tech talks 111375 and 111431). On an M2 Pro's GPU, the system-level
@@ -31,7 +34,7 @@ The M-series analogue is a TensorOps matrix multiply that several SIMD groups of
 result stays in their registers. On the M5 it runs on a neural accelerator in each GPU core (Apple tech talk 111432).
 There is no tile copy engine and no cluster. No threadgroup reads another's threadgroup memory. Threadgroups trade data
 through device memory. Within one dispatch they see each other's writes only in coherent(device) memory. Plain memory
-works on one die and fails across the Ultra's two (output_data/chain-20261022/RESULTS.md). So there is no tile path to
+works on one die and fails across the Ultra's dies (output_data/chain-20261022/RESULTS.md). So there is no tile path to
 congest. The pressure is inside the core, where all data shares one cache.
 
 Apple gives the M5 Ultra 1.2 TB/s of memory bandwidth, for the Studios' 64-core model and its 80-core model alike
