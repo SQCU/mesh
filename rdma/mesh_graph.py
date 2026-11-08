@@ -143,6 +143,7 @@ def matching(left, neighbours):
     return {a: b for a, b in mate.items() if b is not nil}
 
 
+# Composition (design/joint-compilation.md §3, row 2): called by mesh_compile.py before mesh_plan; fixes which calls commute
 def width(vertices, neighbours):
     """The width of a partial order on ``vertices``, the most of them no two of which are ordered, ``neighbours(a)``
     giving the vertices ordered after a (the order whole, as closure gives it).  By Dilworth's theorem it is the fewest

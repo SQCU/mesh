@@ -6,6 +6,8 @@ i's segment time is nearly linear in its share, t_i = a_i + b_i x_i with x_i = k
 units it applied in the call, kappa the call's cost scale (1 for columns, MB per unit for KV
 positions).  After each call every caller passes the same segment times and gets the same shares
 back, so the next call's configuration is one more value in the dataflow: no root, no lock.
+Composition (design/joint-compilation.md §3, row 9): across calls; its output is the next call's configuration, which reaches
+mesh_plan only through a new compilation.
 
 1. Recursive least squares with forgetting factor lambda on theta_i = (a_i, b_i), regressor
    u = (1, x_i) [Haykin 2014, Table 10.1]: pi = P u, k = pi / (lambda + u'pi),

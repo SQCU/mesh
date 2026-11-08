@@ -99,6 +99,9 @@ double mesh_graph_log(double x);
    parents parent[k * vertices ..] (the root its own, a vertex off the tree UINT32_MAX), its share share[k] (the
    rounds that chose it over all rounds). Their count; UINT32_MAX where eps is not positive, a root is no vertex, a leaf
    has no route, or more than room trees are found. */
+/* Composition (design/joint-compilation.md §3, row 3): joint over every demand; each round's tree is a shortest-path tree under the
+   round's lengths, nested inside the multiplicative-weights rounds; first of mesh_plan's sequence, its trees held fixed by
+   every later step */
 uint32_t mesh_graph_flow(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const double *capacity,
                          uint32_t count, const uint32_t *root, const double *up, const double *down,
                          int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
@@ -141,6 +144,7 @@ double mesh_graph_trees_rate(uint32_t vertices, uint32_t trees, const uint32_t *
    unit takes the quickest route and many spread over every route with rate, a slower route taking fewer of the first
    (makespan of equal jobs on uniform machines with release times, which earliest finish solves exactly). count[p]
    its units; their completion time. A part of no rate takes none. */
+/* Composition (design/joint-compilation.md §3, row 4): sequential, after mesh_graph_flow, with the trees held fixed */
 double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count);
 /* Units in list order over `machines` parallel machines by earliest finish (Graham's list scheduling: R. L. Graham,
    "Bounds for certain multiprocessing anomalies", Bell System Technical Journal 45 (1966); each machine of its own
@@ -150,6 +154,8 @@ double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate
    parties computing from the same operands assign one list alike). machine[k] its machine (UINT32_MAX where no machine
    has rate), carried[l] (room for `machines`) the bytes each takes; their completion time, INFINITY where a unit has no
    machine. A machine of no rate takes none. */
+/* Composition (design/joint-compilation.md §3, row 10): at run time, inside each transfer (rdma/mesh-flow.c); not joined with
+   mesh_plan's objective */
 double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t units, const uint64_t *bytes,
                                 uint32_t *machine, uint64_t *carried);
 /* 2026-11-04, sub-assignment 2: mesh_graph_happens_before (b399746f), a bit table of the paths over a template
@@ -166,6 +172,7 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
    lag(context, k) >= 0 (E. W. Dijkstra, A note on two problems in connexion with graphs, Numerische Mathematik 1,
    1959): lags[s * targets + x], UINT32_MAX where no walk joins them.  A source that is its own target is given its
    least cycle.  0; ENOMEM */
+/* Composition (design/joint-compilation.md §3, row 5): computed, with no free choice; sequential in mesh_plan */
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
                     uint32_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
                     const uint32_t *source,uint32_t targets,const uint32_t *target,uint32_t *lags);
@@ -195,6 +202,8 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
    2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G1; "The
    revisions of 55b9cbad"): the items' linear extension is mesh_graph_order's, so EDEADLK where `before`'s pairs hold
    a cycle, which a strict partial order cannot (nothing written).  What must stay: the chains' numbering */
+/* Composition (design/joint-compilation.md §3, row 8): with mesh_graph_fat_cover, joint over every value's copies; sequential after
+   the order and the synchronization */
 int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
                       const void *context, uint64_t *chain, uint64_t *chains);
 /* C. Mukerji, Register allocation using cyclic interval graphs, M.Sc. thesis, McGill University, 1994:
@@ -206,6 +215,8 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
      sum of need[j] over j < i; *colors the colors used.
    - §3.2.6, Main Fatcover, Establish All Covers Of C_i and Choose A Cover For C_i; Appendix A, Algorithm A.0.1.
    0; ENOMEM */
+/* Composition (design/joint-compilation.md §3, row 8): joint over every value's copies; sequential after the order and the
+   synchronization */
 int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *start, const uint64_t *end,
                          const uint64_t *need, uint64_t *color, uint64_t *colors);
 /* design/plan-to-bridge-change-request.md R5 (mesh 0e56d8da), "How: the program" and "How: solving it": the completion
@@ -226,6 +237,8 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
    names none, an edge runs from a vertex to itself, or the program has no solution (a cycle of positive length);
    EDOM where HiGHS reports an error or a status other than optimal or infeasible; ENOMEM, also where the program's
    rows pass HiGHS's 32-bit indices */
+/* Composition (design/joint-compilation.md §3, row 6): lexicographic, C_max then the sum of the C_j; joint over every transfer on
+   every resource, R4's precedence edges included; sequential after the routes, the split and the lags */
 int mesh_graph_completion_times(uint32_t vertices, const double *length, const uint32_t *resource, uint32_t resources,
                                 size_t edges, const uint32_t *from, const uint32_t *to, double *completion);
 /* M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023, section 5.2, step 3: "Sort
@@ -236,6 +249,7 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
    (design/compilation-coordination.md, "The documents' revisions of edd4b583", GO3; R5's "the least C̄_j first" is
    its consumer's priority -C̄: "The revisions of 46ae8fdf", LP7).  place[v] out, v's place in the order.  0; EINVAL
    where an edge names no vertex or the edges hold a cycle (a vertex left unplaced); ENOMEM */
+/* Composition (design/joint-compilation.md §3, row 6): the order read from mesh_graph_completion_times' completion times */
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place);
 /* 2026-11-05 (design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the
@@ -262,6 +276,8 @@ int mesh_graph_components(uint32_t vertices, size_t edges, const uint32_t *from,
    Lemma 1: deadlock), 0 where they hold no cycle.  [15] is E. L. Lawler, Combinatorial Optimization: Networks and
    Matroids, 1976: a binary search on λ, each step Bellman and Ford's test for a cycle of positive length under the
    lengths time[from[e]] - λ delay[e]; *mean the search's upper end, at which no cycle is positive.  0; EINVAL; ENOMEM */
+/* Composition (design/joint-compilation.md §3, row 7): with mesh_graph_convert_sc and mesh_graph_determine_delays, sequential after
+   the order: the period held, with the least added delays */
 int mesh_graph_cycle_mean(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
                           const uint64_t *delay, double *mean);
 /* BSL Fig. 8, Function MinDelay(X, e, λ, B): "Perform a binary search in the range [0, 1, …, B] to find the minimum
