@@ -16,6 +16,9 @@ int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(co
 int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                           const void *context, uint32_t root,
                           int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer);
+/* T. H. Cormen, C. E. Leiserson, R. L. Rivest and C. Stein, Introduction to Algorithms, 3rd ed., MIT Press, 2009, §22.1 */
+void mesh_graph_neighbours(size_t edges, uint32_t (*end)(const void *context, size_t e, uint32_t side), const void *context,
+                           uint32_t from, void (*visit)(void *consumer, uint32_t to), void *consumer);
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Y. J. Chu and T. H. Liu, Scientia Sinica 14, 1965; J. Edmonds, J. Res. Nat. Bur. Standards 71B, 1967 */
 int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,

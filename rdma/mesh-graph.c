@@ -64,6 +64,11 @@ int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*hea
   return status;
 }
 
+void mesh_graph_neighbours(size_t edges, uint32_t (*end)(const void *context, size_t e, uint32_t side), const void *context,
+                           uint32_t from, void (*visit)(void *consumer, uint32_t to), void *consumer) {
+  for (size_t e = 0; e < edges; e++) if (end(context, e, 0) == from) visit(consumer, end(context, e, 1));
+}
+
 struct within { uint32_t N,root,depth; const uint32_t *from,*order,*into; const uint32_t *in; const double *weight,*rest;
                 int32_t *now,*best; double cost; };
 static int within_walk(const struct within *s,uint32_t v){
