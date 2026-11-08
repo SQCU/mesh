@@ -5,16 +5,14 @@
 #include <time.h>
 #include "mesh-metal.h"
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7; design/disjoint-pages-revision-coordination.md,
-   "The region" and "The GPU's side of the plan's words" */
+/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
 static int state_area(uint64_t from,uint64_t at,uint64_t count,uint64_t size,uint64_t align,uint64_t len,uint64_t *end){
   if(at<from || at%align || at>len || count>(len-at)/size)return EINVAL;
   if(at+count*size>*end)*end=at+count*size;
   return 0;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7; design/disjoint-pages-revision-coordination.md,
-   "The region" and "The GPU's side of the plan's words" */
+/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
 /* design/aot-compilation-change-request.md, appendix item 6 */
 int mesh_metal_transport_create(struct mesh_ctx *context,uint64_t plan,void *device,struct mesh_metal_transport *transport){
   *transport=(struct mesh_metal_transport){0};
@@ -38,8 +36,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,uint64_t plan,void *dev
   return 0;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.7; design/disjoint-pages-revision-coordination.md,
-   "The region" (struct mesh_publication), D1 and "The GPU's side of the plan's words" */
+/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.7 */
 int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint32_t transfer,
   struct mesh_metal_input *input){
   const struct mesh_publication *entry=mesh_transfer_at(context->M,transport->words,transfer);
@@ -49,16 +46,14 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
   return 0;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7; design/disjoint-pages-revision-coordination.md,
-   "The region" (struct mesh_publication), D9 and "Publications" */
+/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
 int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint32_t transfer,
   struct mesh_metal_publication *publication){
   publication->supplied=mesh_transfer_at(context->M,transport->words,transfer)->targets[0].word-transport->offset;
   return 0;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.6; design/disjoint-pages-revision-coordination.md,
-   D1, D7 and "The GPU's side of the plan's words" */
+/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.6 */
 #define MESH_METAL_SLICE_NS UINT64_C(10000000)
 struct mesh_metal_waiter {
   pthread_t thread;
@@ -73,8 +68,7 @@ struct mesh_metal_waiter {
   struct mesh_metal_wait wait[];
 };
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.6; design/disjoint-pages-revision-coordination.md,
-   D1 and D7 */
+/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.6 */
 /* os_sync_wait_on_address.h os_sync_wait_on_address_with_timeout */
 static void *waits_run(void *argument){
   struct mesh_metal_waiter *waiter=argument;
@@ -109,7 +103,6 @@ static void *waits_run(void *argument){
   return NULL;
 }
 
-/* design/disjoint-pages-revision-coordination.md, "The GPU's side of the plan's words" */
 int mesh_metal_waits_start(struct mesh_metal_transport *transport,void *event,const struct mesh_metal_wait *waits,
   size_t count,uint32_t passes,uint64_t repetitions,struct mesh_metal_waiter **out){
   *out=NULL;
@@ -142,7 +135,6 @@ int mesh_metal_waits_start(struct mesh_metal_transport *transport,void *event,co
   return 0;
 }
 
-/* design/disjoint-pages-revision-coordination.md, "The GPU's side of the plan's words" */
 void mesh_metal_waits_stop(struct mesh_metal_waiter *waiter){
   const int saved=errno;
   atomic_store_explicit(&waiter->stop,1,memory_order_release);
@@ -151,7 +143,6 @@ void mesh_metal_waits_stop(struct mesh_metal_waiter *waiter){
   errno=saved;
 }
 
-/* design/disjoint-pages-revision-coordination.md, "The GPU's side of the plan's words" */
 int mesh_metal_waits_end(struct mesh_metal_waiter *waiter){
   if(!waiter)return 0;
   pthread_join(waiter->thread,NULL);
@@ -161,8 +152,7 @@ int mesh_metal_waits_end(struct mesh_metal_waiter *waiter){
   return cause;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.1; design/disjoint-pages-revision-coordination.md, "The
-   region" (struct mesh_status) */
+/* design/disjoint-pages-change-request.md, Appendix C, C3.1 */
 int mesh_metal_status(struct mesh_metal_transport *transport,int cause,uint64_t *first){
   if(first)*first=UINT64_MAX;
   struct mesh_state *words=transport->words;
@@ -177,7 +167,6 @@ int mesh_metal_status(struct mesh_metal_transport *transport,int cause,uint64_t 
   return 0;
 }
 
-/* design/disjoint-pages-revision-coordination.md, "The GPU's side of the plan's words" */
 void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
   [(id)transport->state release];
   *transport=(struct mesh_metal_transport){0};
