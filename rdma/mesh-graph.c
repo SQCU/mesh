@@ -1675,6 +1675,19 @@ void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(voi
   for (uint32_t j = 0; j < count; j++) visit(context, row[j]);
 }
 
+/* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2; B. R. Rau, MICRO 1994;
+   design/torch-source-lowering-change-request.md item 3 */
+size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32_t *tail, uint32_t row, uint32_t count,
+                          uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot) {
+  size_t made = 0;
+  for (size_t q = first[row]; q < first[row + 1]; q++) {
+    const uint32_t from = tail[order[q]], delay = lag - 1 - from / count;
+    if (t < delay) continue;
+    source[made] = from % count; slot[made++] = (uint32_t)((t - delay) % lag);
+  }
+  return made;
+}
+
 /* G. E. Blelloch, Prefix sums and their applications, 1990; M. Harris, S. Sengupta and J. D. Owens, GPU Gems 3, ch. 39,
    2007; R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Metal Shading Language Specification 4.1, §6.10.2;
    MTL4ComputeCommandEncoder.h:90-112 */
