@@ -3,6 +3,7 @@
 import collections
 import ctypes as C
 import errno
+import functools
 import math
 import operator
 import os
@@ -1335,13 +1336,23 @@ START = C.cast(mesh.LIB.mesh_transfers_start, C.c_void_p)
 RECORDER = []
 
 
+def _inserted():
+    path = next((p for p in os.environ.get('DYLD_INSERT_LIBRARIES', '').split(':')
+                 if os.path.basename(p) == 'libmetal_recording.dylib'), None)
+    if path is None:
+        raise OSError(errno.ENOENT, 'no recorder in the process: the program starts with DYLD_INSERT_LIBRARIES='
+                                    '<metal-microbench>/.build/libmetal_recording.dylib, whose repository holds the '
+                                    'operators\' sources')
+    return path
+
+
+def _repository():
+    return os.path.dirname(os.path.dirname(os.path.abspath(_inserted())))
+
+
 def _recorder():
     if not RECORDER:
-        path = next((p for p in os.environ.get('DYLD_INSERT_LIBRARIES', '').split(':')
-                     if os.path.basename(p) == 'libmetal_recording.dylib'), None)
-        if path is None:
-            raise OSError(errno.ENOENT, 'no recorder in the process: the program starts with DYLD_INSERT_LIBRARIES='
-                                        '<metal-microbench>/.build/libmetal_recording.dylib')
+        path = _inserted()
         lib, metal = C.CDLL(path), C.CDLL('/System/Library/Frameworks/Metal.framework/Metal')
         lib.MetalRecorderOpen.restype, lib.MetalRecorderOpen.argtypes = C.c_void_p, [C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalRecorderCapture.restype = C.c_void_p
@@ -1355,8 +1366,7 @@ def _recorder():
                                          C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalReplayDestroy.restype, lib.MetalReplayDestroy.argtypes = None, [C.POINTER(Replay)]
         metal.MTLCreateSystemDefaultDevice.restype = C.c_void_p
-        RECORDER.append((lib, os.path.dirname(os.path.dirname(os.path.abspath(path))),
-                         metal.MTLCreateSystemDefaultDevice))
+        RECORDER.append((lib, metal.MTLCreateSystemDefaultDevice))
     return RECORDER[0]
 
 
@@ -1379,25 +1389,319 @@ def _engine(self, mat2, out):
     return out
 
 
-def _mm_out(self, mat2, *, out):
-    if self.dtype == mat2.dtype == out.dtype == torch.float16 and self.numel() and mat2.numel() \
-            and self.stride(1) == 1 and mat2.stride(0) == 1:
-        return _engine(self, mat2, out)
-    torch.bmm(self.unsqueeze(0), mat2.unsqueeze(0), out=out.unsqueeze(0))
-    return out
+# design/torch-source-lowering-change-request.md item 1; metal-microbench operator_shaders.metal; torch 2.14.0
+# torch/mps/__init__.py, compile_shader
+OPERATORS = {}
+ELEMENTS = {torch.float32: 0, torch.float16: 1, torch.bfloat16: 2, torch.int64: 3, torch.int32: 4, torch.int16: 5,
+            torch.int8: 6, torch.uint8: 7, torch.bool: 8}
+FLOATING = (torch.float32, torch.float16, torch.bfloat16)
 
 
-def _mm(self, mat2):
-    return _mm_out(self, mat2, out=torch.empty(self.shape[0], mat2.shape[1], dtype=self.dtype, device=self.device))
-
-
-def _kernels(root):
-    if 'source' not in ENGINE:
+def _library():
+    if 'library' not in OPERATORS:
+        root = _repository()
         with open(os.path.join(root, 'matrix_arithmetic.metal')) as arithmetic, \
-                open(os.path.join(root, 'matrix_shaders.metal')) as shaders:
+                open(os.path.join(root, 'matrix_shaders.metal')) as shaders, \
+                open(os.path.join(root, 'operator_shaders.metal')) as operators:
             ENGINE['source'] = arithmetic.read() + '\n' + shaders.read()
-        torch.library.impl('aten::mm.out', 'mps')(_mm_out)
-        torch.library.impl('aten::mm', 'mps')(_mm)
+            OPERATORS['library'] = torch.mps.compile_shader(operators.read())
+    return OPERATORS['library']
+
+
+# MTLComputeCommandEncoder.h dispatchThreads:threadsPerThreadgroup:
+def _dispatch(name, count, *arguments):
+    for value in arguments:
+        if isinstance(value, torch.Tensor) and value.device.type not in ('mps', 'meta'):
+            raise NotImplementedError('%s on the %s: no source lowers it (design/torch-source-lowering-change-request.md '
+                                      'item 1)' % (name, value.device.type))
+    if count >= 1 << 32:
+        raise NotImplementedError('%s over %d elements: past a grid\'s 32-bit thread position' % (name, count))
+    if name not in OPERATORS:
+        OPERATORS[name] = getattr(_library(), name)
+    kernel = OPERATORS[name]
+    group = min(256, kernel.max_threads_per_threadgroup, max(count, 1))
+    return [functools.partial(kernel, *arguments, threads=count, group_size=group)] if count else []
+
+
+def _each(thunks):
+    for thunk in thunks:
+        thunk()
+
+
+def _typed(target, operands, outs):
+    found = [value.dtype for value in operands if isinstance(value, torch.Tensor) and value.dtype not in ELEMENTS] \
+        + [value.dtype for value in outs if value.dtype not in FLOATING]
+    if found:
+        raise NotImplementedError('%s of %s: no source computes it (design/torch-source-lowering-change-request.md item '
+                                  '1)' % (target, found[0]))
+
+
+# torch 2.14.0 torch/_C/__init__.pyi, FunctionSchema `arguments`, Argument `default_value`
+def _operands(target, args, kwargs):
+    schema = target._schema.arguments
+    return {**{a.name: a.default_value for a in schema if a.has_default_value()},
+            **dict(zip((a.name for a in schema), args)), **kwargs}
+
+
+# PyTorch 2.14 documentation, Broadcasting semantics
+def _broadcast(value, out):
+    return list(value.expand(out.shape).stride()) if isinstance(value, torch.Tensor) else [0] * out.dim()
+
+
+def _pointwise(op, out, a, b=0, alpha=1):
+    tensor = next(x for x in (a, b) if isinstance(x, torch.Tensor))
+    g = [ELEMENTS[out.dtype], *[ELEMENTS[x.dtype] if isinstance(x, torch.Tensor) else -1 for x in (a, b)], op,
+         out.dim(), *out.shape, *out.stride(), *_broadcast(a, out), *_broadcast(b, out)]
+    scalars = [0.0 if isinstance(x, torch.Tensor) else float(x) for x in (a, b)] + [float(alpha)]
+    return _dispatch('elementwise', out.numel(), out, *[x if isinstance(x, torch.Tensor) else tensor for x in (a, b)],
+                     g, scalars)
+
+
+# metal-microbench operator_shaders.metal pointwise
+POINTWISE = {A.add: 0, A.sub: 1, A.mul: 2, A.div: 3, A.neg: 6, A.relu: 7, A.tanh: 8, A.sigmoid: 9, A.exp: 10,
+             A.gelu: 11, A.silu: 13}
+
+
+def _arithmetic(target, given, outs):
+    packet, op = target.overloadpacket, POINTWISE[target.overloadpacket]
+    if packet is A.div and given.get('rounding_mode') is not None:
+        op = {'floor': 4, 'trunc': 5}[given['rounding_mode']]
+    if packet is A.gelu and given['approximate'] != 'none':
+        op = 12
+    operands = [given['self'], given.get('other', 0)]
+    _typed(target, operands, outs)
+    return _pointwise(op, outs[0], *operands, given.get('alpha', 1))
+
+
+# torch 2.14.0 torch/_tensor_docs.py, copy_ and view
+def _copy(out, value):
+    if out.dtype not in ELEMENTS or value.dtype not in ELEMENTS or out.dtype != value.dtype \
+            and out.dtype not in FLOATING and value.dtype not in FLOATING:
+        raise NotImplementedError('a copy of %s into %s: no source converts it (design/torch-source-lowering-change-'
+                                  'request.md item 1)' % (value.dtype, out.dtype))
+    g = [ELEMENTS[out.dtype], ELEMENTS[value.dtype], out.dim(), *out.shape, *out.stride(), value.dim(), *value.shape,
+         *value.stride()]
+    return _dispatch('copy', out.numel(), out, value, g)
+
+
+def _assign(out, value):
+    return _copy(out, value.expand(out.shape))
+
+
+# torch 2.14.0 torch/_tensor_docs.py, fill_
+def _fill(out, value):
+    if out.dtype not in ELEMENTS:
+        raise NotImplementedError('a fill of %s: no source writes it (design/torch-source-lowering-change-request.md '
+                                  'item 1)' % (out.dtype,))
+    return _dispatch('fill', out.numel(), out, [ELEMENTS[out.dtype], out.dim(), *out.shape, *out.stride()],
+                     [float(value)])
+
+
+def _copying(target, given, outs):
+    packet = target.overloadpacket
+    if packet is A._to_copy and given['device'] is not None and torch.device(given['device']).type != 'mps':
+        raise NotImplementedError('%s to the %s: no source moves it (design/torch-source-lowering-change-request.md '
+                                  'item 1)' % (target, torch.device(given['device']).type))
+    return _assign(outs[0], given['src']) if packet is A.copy else _copy(outs[0], given['self'])
+
+
+# PyTorch 2.14 documentation, torch.einsum
+def _contract(out, operands, labels, output, addend=None, alpha=1, beta=0):
+    if len(operands) > 4:
+        raise NotImplementedError('a contraction of %d operands: the source takes at most four (metal-microbench '
+                                  'operator_shaders.metal contraction)' % len(operands))
+    sizes = dict(zip(output, out.shape))
+    for value, own in zip(operands, labels):
+        for size, label in zip(value.shape, own):
+            sizes[label] = max(sizes.get(label, 1), size)
+    summed = [label for label in dict.fromkeys(label for own in labels for label in own) if label not in output]
+
+    def strides(value, own, letters):
+        return [sum(s for n, s, label in zip(value.shape, value.stride(), own) if label == letter and n != 1)
+                for letter in letters]
+    g = [ELEMENTS[out.dtype], ELEMENTS[addend.dtype] if addend is not None else -1, len(operands),
+         *[ELEMENTS[value.dtype] for value in operands], *[-1] * (4 - len(operands)), len(output), len(summed),
+         *[sizes[label] for label in output], *[sizes[label] for label in summed], *out.stride(),
+         *_broadcast(addend, out)]
+    for value, own in zip(operands, labels):
+        g += strides(value, own, output) + strides(value, own, summed)
+    buffers = [*operands, *[operands[0]] * (4 - len(operands)), addend if addend is not None else operands[0]]
+    return _dispatch('contraction', out.numel(), out, *buffers, g, [float(alpha), float(beta)])
+
+
+# design/torch-source-lowering-change-request.md item 1
+def _engined(self, mat2, out):
+    return self.dtype == mat2.dtype == out.dtype == torch.float16 and self.numel() and mat2.numel() \
+        and self.stride(1) == 1 and mat2.stride(0) == 1
+
+
+def _matrix(out, a, b, bias=None):
+    if _engined(a, b, out):
+        _library()
+        return [functools.partial(_engine, a, b, out)] + (_pointwise(0, out, out, bias) if bias is not None else [])
+    return _contract(out, [a, b], [('n', 'k'), ('k', 'm')], ('n', 'm'), bias, 1, int(bias is not None))
+
+
+def _folded(value):
+    try:
+        return value.view(-1, value.shape[-1])
+    except RuntimeError:
+        return None
+
+
+# PyTorch 2.14 documentation, torch.mm, torch.bmm, torch.matmul and torch.nn.functional.linear; PyTorch v2.11.0
+# aten/src/ATen/native/LinearAlgebra.cpp, _matmul_impl
+def _product(target, given, outs):
+    packet, (out,) = target.overloadpacket, outs
+    if packet is A.linear:
+        x, w, bias = given['input'], given['weight'], given['bias']
+        _typed(target, [x, w, bias], outs)
+        rows, folded = _folded(x), _folded(out)
+        if w.dim() == 2 and rows is not None and folded is not None:
+            return _matrix(folded, rows, w.t(), bias)
+        lead = tuple(('batch', i) for i in range(x.dim() - 1))
+        return _contract(out, [x, w], [lead + ('k',), ('m', 'k')[2 - w.dim():]], lead + ('m',) * (w.dim() == 2), bias,
+                         1, int(bias is not None))
+    a, b = given['self'], given['mat2'] if packet in (A.mm, A.bmm) else given['other']
+    _typed(target, [a, b], outs)
+    if packet is A.mm or packet is A.matmul and a.dim() == b.dim() == 2:
+        return _matrix(out, a, b)
+    if packet is A.matmul and a.dim() > 2 and b.dim() == 2 and _folded(a) is not None and _folded(out) is not None:
+        return _matrix(_folded(out), _folded(a), b)
+    batch = out.dim() - (a.dim() > 1) - (b.dim() > 1)
+
+    def side(value, matrix):
+        rank = value.dim() - len(matrix)
+        return tuple(('batch', batch - rank + i) for i in range(rank)) + matrix
+    return _contract(out, [a, b], [side(a, ('n', 'k') if a.dim() > 1 else ('k',)),
+                                   side(b, ('k', 'm') if b.dim() > 1 else ('k',))],
+                     tuple(('batch', i) for i in range(batch)) + ('n',) * (a.dim() > 1) + ('m',) * (b.dim() > 1))
+
+
+# PyTorch 2.14 documentation, torch.einsum
+def _summation(target, given, outs):
+    (out,), operands = outs, list(given['tensors'])
+    _typed(target, operands, outs)
+    left, arrow, right = given['equation'].replace(' ', '').partition('->')
+    terms = left.split(',')
+    covered = max([value.dim() - len(term.replace('...', '')) for term, value in zip(terms, operands) if '...' in term],
+                  default=0)
+    ellipsis = tuple(('...', i) for i in range(covered))
+
+    def labelled(term, rank):
+        head, dots, tail = term.partition('...')
+        return tuple(head) + (ellipsis[covered - (rank - len(head) - len(tail)):] if dots else ()) + tuple(tail)
+    letters = left.replace('...', '').replace(',', '')
+    output = labelled(right, out.dim()) if arrow else \
+        ellipsis + tuple(sorted(c for c in set(letters) if letters.count(c) == 1))
+    return _contract(out, operands, [labelled(term, value.dim()) for term, value in zip(terms, operands)], output)
+
+
+# PyTorch 2.14 documentation, torch.nn.Conv1d to torch.nn.Conv3d and torch.nn.ConvTranspose1d to
+# torch.nn.ConvTranspose3d; PyTorch v2.11.0 aten/src/ATen/native/Convolution.cpp, convolution_same
+def _convolving(target, given, outs):
+    packet, (out,) = target.overloadpacket, outs
+    x, w, bias = given['input'], given['weight'], given['bias']
+    _typed(target, [x, w, bias], outs)
+    transposed = given['transposed'] if packet is A.convolution else packet in TRANSPOSED
+    k = w.dim() - 2
+    stride, dilation, padding = _ints(given['stride'], k), _ints(given['dilation'], k), given['padding']
+    lows = (0,) * k if padding == 'valid' else tuple(d * (n - 1) // 2 for d, n in zip(dilation, w.shape[2:])) \
+        if padding == 'same' else _ints(padding, k)
+    if x.dim() == k + 1:
+        x, out = x.unsqueeze(0), out.unsqueeze(0)
+
+    def spatial(values, fill):
+        return [fill] * (3 - k) + list(values)
+
+    def strides(value):
+        return list(value.stride()[:2]) + spatial(value.stride()[2:], 0)
+    g = [ELEMENTS[out.dtype], ELEMENTS[x.dtype], ELEMENTS[w.dtype], ELEMENTS[bias.dtype] if bias is not None else -1,
+         int(transposed), given['groups'], x.shape[0], out.shape[1], x.shape[1], *spatial(out.shape[2:], 1),
+         *spatial(x.shape[2:], 1), *spatial(w.shape[2:], 1), *spatial(stride, 1), *spatial(lows, 0),
+         *spatial(dilation, 1), *strides(out), *strides(x), *strides(w), bias.stride(0) if bias is not None else 0]
+    return _dispatch('convolution', out.numel(), out, x, w, bias if bias is not None else w, g)
+
+
+# PyTorch v2.11.0 aten/src/ATen/native/cpu/MaxPoolKernel.cpp, cpu_max_pool; aten/src/ATen/native/cpu/AvgPoolKernel.cpp,
+# cpu_avg_pool2d and cpu_avg_pool3d
+INDEXED = {A.max_pool2d_with_indices: 2, A.max_pool3d_with_indices: 3}
+
+
+def _pooled(target, given, outs):
+    packet, x = target.overloadpacket, given['self']
+    k, out, index = {**MAXIMUM, **AVERAGE, **INDEXED}[packet], outs[0], outs[1] if len(outs) > 1 else None
+    _typed(target, [x], outs[:1])
+    lows, dilation, lead = _ints(given['padding'], k), _ints(given.get('dilation', 1), k), x.dim() - k
+
+    def spatial(values, fill):
+        return [fill] * (3 - k) + list(values)
+
+    def strides(value):
+        return [0] * (2 - lead) + list(value.stride()[:lead]) + spatial(value.stride()[lead:], 0)
+    g = [ELEMENTS[out.dtype], ELEMENTS[x.dtype], int(packet not in AVERAGE), int(index is not None),
+         int(given.get('count_include_pad', True)), given.get('divisor_override') or 0, lead,
+         *[1] * (2 - lead), *x.shape[:lead], *spatial(out.shape[lead:], 1), *spatial(x.shape[lead:], 1),
+         *spatial(_ints(given['kernel_size'], k), 1), *spatial(_ints(given['stride'] or given['kernel_size'], k), 1),
+         *spatial(lows, 0), *spatial(dilation, 1), *strides(out), *strides(x),
+         *(strides(index) if index is not None else [0] * 5)]
+    return _dispatch('pool', out.numel(), out, index if index is not None else out, x, g)
+
+
+# PyTorch v2.11.0 aten/src/ATen/native/cpu/PaddingKernel.cpp, ReflectionPad and ReplicationPad;
+# aten/src/ATen/native/PadNd.cpp, constant_pad_nd and _pad_circular_symint
+MODES = {'constant': 0, 'reflect': 1, 'replicate': 2, 'circular': 3}
+
+
+def _padded(target, given, outs):
+    (out,), x = outs, given['self']
+    _typed(target, [x], outs)
+    pad, n = list(given['pad']), x.dim()
+    low, high, mode = [0] * n, [0] * n, [0] * n
+    for j in range(len(pad) // 2):
+        low[n - 1 - j], high[n - 1 - j], mode[n - 1 - j] = pad[2 * j], pad[2 * j + 1], MODES[given.get('mode', 'constant')]
+    extent = [max(size - max(-a, 0) - max(-b, 0), 1) for size, a, b in zip(x.shape, low, high)]
+    g = [ELEMENTS[out.dtype], ELEMENTS[x.dtype], n, *out.shape, *out.stride(), *x.shape, *x.stride(), *low, *mode,
+         *[max(-a, 0) for a in low], *extent]
+    return _dispatch('pad', out.numel(), out, x, g, [float(given.get('value') or 0)])
+
+
+# design/torch-source-lowering-change-request.md item 1
+SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A._to_copy, A._unsafe_view, A.copy),
+                                                                    _copying),
+           **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear), _product), A.einsum: _summation,
+           **dict.fromkeys((*CONVOLUTION, *TRANSPOSED, A.convolution), _convolving),
+           **dict.fromkeys((*MAXIMUM, *AVERAGE, *INDEXED), _pooled), **dict.fromkeys(PAD, _padded)}
+# PyTorch 2.14 documentation, Tensor Views
+VIEWS = {A.as_strided, A.detach, A.diagonal, A.expand, A.expand_as, A.movedim, A.narrow, A.permute, A.select,
+         A.squeeze, A.transpose, A.t, A.adjoint, A.real, A.imag, A.view_as_real, A.unflatten, A.unfold, A.unsqueeze,
+         A.view, A.view_as, A.unbind, A.split, A.split_with_sizes, A.tensor_split, A.hsplit, A.vsplit, A.swapaxes,
+         A.swapdims, A.chunk, A.slice, A.alias, operator.getitem}
+
+
+def _lowering(local):
+    packet = getattr(local.target, 'overloadpacket', local.target)
+    if packet in SOURCES:
+        return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, args, kwargs), outs)
+    if packet in VIEWS:
+        return lambda args, kwargs, outs: _copy(outs[0], _call(local, args, kwargs))
+    raise NotImplementedError('%s: no source lowers it (design/torch-source-lowering-change-request.md item 1)'
+                              % (local.target,))
+
+
+def _devices(node):
+    values = [v for n in [node, *node.all_input_nodes] for v in pytree.tree_leaves(n.meta.get('val'))]
+    return {v.device.type for v in values if isinstance(v, torch.Tensor)}
+
+
+def _sourced(gm):
+    for node in gm.graph.nodes:
+        if node.op == 'call_function':
+            _lowering(Local(node.op, node.target, node.args, node.kwargs))
+            other = _devices(node) - {'mps'}
+            if other and getattr(node.target, 'overloadpacket', node.target) not in VIEWS:
+                raise NotImplementedError('%s (%s) on the %s: no source lowers it (design/torch-source-lowering-change-'
+                                          'request.md item 1)' % (node.name, node.target, other.pop()))
 
 
 # dlpack.h DLManagedTensorVersioned `deleter`; torch v2.14.0 torch/csrc/utils/tensor_new.cpp tensor_fromDLPackImpl,
@@ -1518,9 +1822,29 @@ def _bound(structure, value_of):
     return arguments, True
 
 
-def _apply(target, arguments, env, outs):
-    args, kwargs = arguments(env)
-    return target(*args, **kwargs, **outs)
+# design/torch-source-lowering-change-request.md item 1
+class _Stand(dict):
+    def __init__(self, ir):
+        super().__init__()
+        self.ir = ir
+
+    def __missing__(self, key):
+        dtype, shape = _layout(self.ir, key)
+        return torch.empty(shape, dtype=dtype, device='meta')
+
+
+def _metas(value):
+    return pytree.tree_map(lambda v: torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device='meta')
+                           if isinstance(v, torch.Tensor) else v, value)
+
+
+def _launched(ir, local, arguments, dynamic, outs):
+    lower = _lowering(local)
+    lower(*_metas(arguments(_Stand(ir) if dynamic else None)), _metas(outs))
+    if not dynamic:
+        thunks = lower(*arguments(None), outs)
+        return [lambda env, inputs, t: _each(thunks)]
+    return [lambda env, inputs, t: _each(lower(*arguments(env), outs))]
 
 
 def _aliases(local):
@@ -1536,26 +1860,30 @@ def _count(context, state, word, c):
     return C.c_uint64.from_address(context.M + word + 8 * (c % state.copies))
 
 
-# torch 2.14.0 torch/_tensor_docs.py, view and copy_
+# torch 2.14.0 torch/_tensor_docs.py, view and copy_; design/torch-source-lowering-change-request.md item 1
 def _called(ir, key, operands, local, form, placed):
+    _lowering(local)
     given = iter(operands)
     arguments, dynamic = _bound((local.args, local.kwargs), lambda n: next(given))
     mine = placed(key)
     if isinstance(form, tuple):
-        outs = {name: placed(result) for name, result in form[1]}
-        return tuple(outs.values()) if len(outs) > 1 else mine, \
-            [lambda env, inputs, t: _apply(form[0], arguments, env, outs)]
+        outs = [placed(result) for _, result in form[1]]
+        return tuple(outs) if len(outs) > 1 else mine, _launched(ir, local, arguments, dynamic, outs)
     if key in ir.contiguous:
         base = operands[_based(local)]
-        laid = mine.view(base.shape)
-        return mine, [lambda env, inputs, t: laid.copy_(base)]
+        thunks = _assign(mine.view(base.shape), base)
+        return mine, [lambda env, inputs, t: _each(thunks)]
     if mine is not None and ir.places[ir.device][key].owner == key:
-        return mine, [lambda env, inputs, t: mine.copy_(_apply(local.target, arguments, env, {}))]
+        return mine, _launched(ir, local, arguments, dynamic, [mine])
     if mine is not None:
         return mine, []
-    if not dynamic and _aliases(local):
-        return _apply(local.target, arguments, None, {}), []
-    return _Dynamic(key), [lambda env, inputs, t: env.__setitem__(key, _apply(local.target, arguments, env, {}))]
+    if _aliases(local):
+        if not dynamic:
+            return _call(local, *arguments(None)), []
+        return _Dynamic(key), [lambda env, inputs, t: env.__setitem__(key, _call(local, *arguments(env)))]
+    made, spec = pytree.tree_flatten(_call(local, *_metas(arguments(_Stand(ir) if dynamic else None))))
+    outs = [torch.empty_strided(m.shape, m.stride(), dtype=m.dtype, device='mps') for m in made]
+    return pytree.tree_unflatten(outs, spec), _launched(ir, local, arguments, dynamic, outs)
 
 
 # OpenXLA operation semantics, CollectivePermute; MPICH alltoall_intra_pairwise.c, MPIR_Localcopy
@@ -1570,27 +1898,27 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
             n = first.shape[collective.dim] // (len(receives) + 1)
             first = first.narrow(collective.dim, me * n, n)
         for wait, (_, (received, j)) in zip(waits, receives):
-            steps += wait + [lambda env, inputs, t, a=first, b=placed(received)[j]: torch.add(a, b, out=total)]
+            _typed(collective.kind, [first, placed(received)[j]], [total])
+            add = _pointwise(0, total, first, placed(received)[j])
+            steps += wait + [lambda env, inputs, t, add=add: _each(add)]
             first = total
         return steps
     if collective.kind == 'collective-permute':
         place, pairs, places = placed(key), [tuple(pair) for pair in collective.dim], ir.places[ir.device]
         if (me, me) in pairs:
-            return [] if places[reads[0]][:4] == places[key][:4] else \
-                [lambda env, inputs, t, a=operands[0]: place.copy_(a)]
+            if places[reads[0]][:4] == places[key][:4]:
+                return []
+            thunks = _assign(place, operands[0])
+            return [lambda env, inputs, t: _each(thunks)]
         if me not in [q for _, q in pairs]:
-            return _filled(state, place, 0)
+            return _filled(place, 0)
     return []
 
 
-# PyTorch v2.11.0 aten/src/ATen/native/mps/operations/ConstantOps.mm, aten/src/ATen/mps/MPSStream.mm;
-# MTLIndirectCommandBuffer.h MTLIndirectCommandType
-def _filled(state, part, fill):
-    if state is None:
-        raise NotImplementedError('a fill of a value\'s part with %r: torch\'s MPS fill is a blit (ConstantOps.mm '
-                                  'fill_mps_tensor_), which an indirect command buffer does not hold '
-                                  '(MTLIndirectCommandBuffer.h MTLIndirectCommandType)' % (fill,))
-    return [lambda env, inputs, t: part.fill_(fill)]
+# torch 2.14.0 torch/_tensor_docs.py, fill_; design/torch-source-lowering-change-request.md item 1
+def _filled(part, fill):
+    thunks = _fill(part, fill)
+    return [lambda env, inputs, t: _each(thunks)]
 
 
 # torch 2.14.0 torch/distributed/_functional_collectives.py, wait_tensor; MPI 4.1 section 7.1; libfabric
@@ -1635,12 +1963,14 @@ def _copied(ir, read, key, cut, source, target):
     if ir.places[ir.device][key].writer != key:
         return []
     at = None if cut is None else _cut(ir, 'slice', cut, _layout(ir, read)[1], ir.device)
+
+    def part(value):
+        return value if at is None else value.narrow(*at)
     if isinstance(source, _Dynamic):
-        if at is None:
-            return [lambda env, inputs, t: target.copy_(env[read])]
-        return [lambda env, inputs, t: target.copy_(env[read].narrow(*at))]
-    source = source if at is None else source.narrow(*at)
-    return [lambda env, inputs, t: target.copy_(source)]
+        _assign(target, part(_Stand(ir)[read]))
+        return [lambda env, inputs, t: _each(_assign(target, part(env[read])))]
+    thunks = _assign(target, part(source))
+    return [lambda env, inputs, t: _each(thunks)]
 
 
 def _specialized(ir, context, plan, state, devices, placed, c, item, operands, steps):
@@ -1660,7 +1990,7 @@ def _specialized(ir, context, plan, state, devices, placed, c, item, operands, s
         q = ir.coords[ir.device][m]
         below, above = min(length, max(0, -starts[q])), min(length, max(0, size - starts[q]))
         for start, extent in ((0, below), (above, length - above)):
-            steps += _filled(state, value.narrow(dim, start, extent), fill) if fill is not None and extent else []
+            steps += _filled(value.narrow(dim, start, extent), fill) if fill is not None and extent else []
     elif kind in ('slice', 'narrow', 'window') and value is None:
         at = _cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device)
         if isinstance(operands[0], _Dynamic):
@@ -1771,10 +2101,11 @@ def _label(buffer, name):
 
 
 # torch 2.14.0 torch/export/__init__.py, aten/src/ATen/mps/MPSStream.mm, aten/src/ATen/native/mps/OperationUtils.mm;
-# metal-microbench metal_recording.h capture:, metal_recording.m MetalDelegateValues and MetalMaskReaders
+# metal-microbench metal_recording.h capture:, metal_recording.m MetalDelegateValues and MetalMaskReaders;
+# design/torch-source-lowering-change-request.md item 1
 def _captured(context, irs, compiled, gm, of, constants, holders):
-    lib, root, made = _recorder()
-    _kernels(root)
+    lib, made = _recorder()
+    _library()
     error = C.create_string_buffer(4096)
     device = made()
     recorder = lib.MetalRecorderOpen(device, error, len(error))
@@ -1830,7 +2161,7 @@ def _captured(context, irs, compiled, gm, of, constants, holders):
         count = VALUES(recorder, _SEL(b'values:level:into:'), handle, 0, C.cast(own, C.c_void_p))
         calls.append((node, k, handle, result[0], levels, [mesh.Value(
             section=mesh.Section(bytes=v.bytes), kind=v.kind, state=v.state, begin=v.begin, end=v.end, run=1)
-            for v in own[:count]], env))
+            for v in own[:count]], env, steps))
         return result[0]
     _Program(gm, capture).run(*[standins[k][1][i][0] if k is not None else constant
                                 for i, (constant, k) in enumerate(zip(constants, holders))])
@@ -2106,6 +2437,7 @@ class _Export(torch.fx.Interpreter):
                 .run_decompositions({})
             gm = exported.module(check_guards=False)
             _RemoveRuntimeAssertionsPass()(gm)
+            _sourced(gm)
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
             result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
             self.compiled.append(Compiled(function, signature, gm, flat, result, exported.call_spec.out_spec))
@@ -2218,20 +2550,23 @@ def program(block, *example_inputs):
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
-            # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5
-            for ir, (places, _, _, _), at in zip(irs, bound, addresses):
+            # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5;
+            # design/torch-source-lowering-change-request.md item 1
+            launched = False
+            for ir, (places, _, _, _) in zip(irs, bound):
                 loaded = ir.loads & places.keys()
                 needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
                 host = mesh_graph.forward([key for key in ir.attributes if key in needed],
                                           lambda key: ir.attributes[key][1],
                                           lambda key, values: _hosted(ir, ir.attributes[key], values))
                 for key in loaded:
-                    if captured:
-                        v, offset, sizes, strides = ir.homes[key]
-                        _dlpack_tensor('cpu', at[v][0], 0, None, ir.layouts[v][0], (ir.layouts[v][1],),
-                                       state['mapping']).as_strided(sizes, strides, offset).copy_(host[key].cpu())
-                    else:
+                    if places[key][0].device.type == host[key].device.type == 'cpu':
                         places[key][0].copy_(host[key])
+                    else:
+                        _each(_assign(places[key][0], host[key]))
+                        launched = True
+            if launched:
+                torch.mps.synchronize()
             runs = None if captured else [
                 dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
                      plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan),
