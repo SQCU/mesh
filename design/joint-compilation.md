@@ -7,8 +7,9 @@ Quotations are from these records, each copied by script from the source's lines
 - design/modes-and-strategies-sources-2026-11-07.md (MS);
 - design/staging-sources-2026-11-07.md (ST).
 
-Code is cited at mesh 551b8799 and metal-microbench e57e44a3. Where a method's citation appears only in the code's
-own comment and not in a record, the text says "as the code cites it".
+Code is cited at mesh 1d721f39 and metal-microbench e57e44a3. The references in the table's last column are the ones
+the code's comments gave. Those comments are replaced by citations of this table, so the references are kept here.
+Unless a record is named, a reference has not been retrieved.
 
 ## 1. Three compiled schedules, one problem
 
@@ -49,67 +50,72 @@ The literature names four compositions.
   compilation pass on each stage-mesh pair, to query the execution cost of this assignment", and the intra-op pass
   "reports the cost back to the inter-op pass" (J §2). Alpa states the price of the decomposition: "While the joint
   execution plan is not guaranteed globally optimal, they demonstrate strong performance empirically" (J §2).
+  - An algorithm that calls a subroutine is not nested in this sense. An example is a method whose every step solves a
+    shortest-path problem. Nesting needs a second optimization problem that stands as the first one's constraint.
 - **Sequential.** Each subproblem is solved with the earlier ones' choices held fixed. Repeated, this is coordinate
   descent, which solves "optimization problems by successively performing approximate minimization along coordinate
   directions or coordinate hyperplanes" (J §8). Done once, in a fixed order, it is Unity's "sequentially" (J §1).
-- **Across calls.** A call's measured outcome adjusts the next call's variables. This is the online method rdma/allocate.py
-  uses: a projected online gradient step, as the code cites it (Zinkevich 2003).
+- **Across calls.** A call's measured outcome adjusts the next call's variables (row 9).
 
-Several objectives over the same variables can also be combined lexicographically: R5's "one lexicographic linear
-program (H. Isermann, Linear lexicographic optimization, OR Spektrum 4, 1982)", as the code cites it.
+Several objectives over the same variables can also be combined lexicographically (row 8).
 
 ## 3. The optimizers in the code, and how each composes
 
+`mesh_plan` calls its steps in this order (mesh-collective.c:2735–2760; within `plan_function`, :2500–2501):
+1. `plan_function`, which computes the routes (row 3), the split (row 4) and the lags (row 5);
+2. `plan_graph`, the synchronization (row 6);
+3. `plan_place`, the locations (row 7);
+4. `plan_schedule`, the order (row 8).
+
+Rows 1 and 2 run in mesh_compile.py before `mesh_plan`. Row 9 runs between calls, and row 10 runs at run time.
+
 Each row gives:
 - the function;
-- its variables, which are the free choices it settles;
-- its author's objective, as the code cites it;
-- how it composes with the rest now.
+- its variables, the free choices it settles;
+- its objective, as the code states it;
+- how it composes now;
+- the references the code's comments gave.
 
-| # | Function | Variables | Objective | Composition now |
-|---|---|---|---|---|
-| 1 | mesh_compile.py, sharding by `mesh_graph.propagate` | each operator's sharding | none stated: the caller's placement, propagated through each operator by its rule | before `mesh_plan`; fixed input to everything after |
-| 2 | `mesh_graph.width`, called by mesh_compile.py | a chain cover of the calls' partial order | least chains: the width "by Fulkerson's matching in Hopcroft and Karp's phases" (Dilworth) | before `mesh_plan`; fixes which calls commute |
-| 3 | `mesh_graph_flow`, called by `mesh_plan` | each demand's trees and their shares (`parent`, `share`) | a concurrent flow by multiplicative weights; CollectivePermute's pairs are "routed jointly by Garg and Koenemann's rounds" (mesh_compile.py) | joint over every demand. Each round's tree is a shortest-path tree under the current lengths (Dijkstra's selection, mesh-graph.c:307–320), nested inside the rounds. First of `mesh_plan`'s sequence |
-| 4 | `mesh_graph_fill` | units per route (`count`) | "makespan of equal jobs on uniform machines with release times, which earliest finish solves exactly" | sequential: after row 3, with the trees fixed |
-| 5 | `mesh_graph_lags` | none (computed) | least total lag over walks (Dijkstra 1959) | sequential |
-| 6 | `mesh_graph_completion_times`, then `mesh_graph_heap_order` | completion times C_j, hence the transfers' order | minimize C_max, then ΣC_j (Chen 2022; Hall et al. 1997; Queyranne 1993; Isermann 1982), by HiGHS | lexicographic over two objectives; joint over every transfer on every resource (cables and devices), R4's precedence edges included; sequential after rows 3–5 |
-| 7 | `mesh_graph_cycle_mean`, `mesh_graph_convert_sc`, `mesh_graph_determine_delays` | added synchronization edges and their delays | BSL: the period T = max over cycles of Σt(v)/Delay(C) (CP §4, Lemma 3) held, with the least added delays | sequential after row 6 |
-| 8 | `mesh_graph_chains`, then `mesh_graph_fat_cover` | each copy's location (its colour) | fewest colours for cyclic lifetimes (Hendren et al.'s Fatcover) | joint over every value's copies; sequential after rows 6–7 |
-| 9 | rdma/allocate.py | each rank's share of the next call | equal finish, the minimum of F(s) = Σ∫t_i (Beckmann 1956), by projected online gradient (Zinkevich 2003) with recursive least squares (Haykin 2014) and grain rounding (Beaumont et al. 2001) | across calls: its output is the next call's configuration |
-| 10 | `mesh_graph_list_schedule`, called by rdma/mesh-flow.c | units per link within one transfer | Graham's list scheduling, so links of unequal rate "end together" | at run time, inside each transfer; not joined with `mesh_plan` |
-| 11 | kernel parameters (the MPP matmul's tile constants, mesh_compile.py `_engine`) | none chosen | none | fixed per shape; not joined |
+| # | Function | Variables | Objective | Composition now | References |
+|---|---|---|---|---|---|
+| 1 | mesh_compile.py `_complete`, by `mesh_graph.propagate` | each operator's sharding | none stated: the caller's placement, propagated through each operator by its rule at two priority levels | before `mesh_plan`; fixed input to every later row | GSPMD (J §5), its sections 3.5, 4.1 and 4.3 |
+| 2 | `mesh_graph.width`, called by mesh_compile.py | a chain cover of the calls' partial order | the fewest chains, equal to the width | before `mesh_plan`; fixes which calls commute | R. P. Dilworth, Annals of Mathematics 51, 1950; D. R. Fulkerson, Proc. AMS 7, 1956; J. E. Hopcroft and R. M. Karp, SIAM J. Comput. 2(4), 1973 |
+| 3 | `mesh_graph_flow` | each demand's trees and their shares (`parent`, `share`) | a concurrent flow by multiplicative weights; every round computes, for each demand, a shortest-path tree under that round's lengths (mesh-graph.c:307–320) | joint over every demand; first step of `mesh_plan` | Garg and Könemann, as mesh_compile.py names the rounds |
+| 4 | `mesh_graph_fill` | units per route (`count`) | earliest finish of equal units over routes with latency and rate | sequential: after row 3, its trees fixed | none given |
+| 5 | `mesh_graph_lags` | none (computed) | least total lag over walks | sequential, after row 4 | E. W. Dijkstra, Numerische Mathematik 1, 1959 |
+| 6 | `mesh_graph_cycle_mean`, `mesh_graph_min_delay`, `mesh_graph_convert_sc`, `mesh_graph_determine_delays` | added synchronization edges and their delays | the period T = max over cycles of Σt(v)/Delay(C) (CP §4, Lemma 3) held, with the least added delays | sequential, after row 5 | BSL 1997 §9, Figs. 6 and 8 (CP §4); E. L. Lawler, Combinatorial Optimization: Networks and Matroids, 1976 |
+| 7 | `mesh_graph_chains`, then `mesh_graph_fat_cover` | each copy's location (its colour) | the fewest chains; then the fewest colours for cyclic lifetimes | joint over every value's copies; sequential, after row 6 | Dilworth 1950, Fulkerson 1956 and Hopcroft–Karp 1973 as in row 2; E. A. Dinic, Soviet Math. Doklady 11, 1970; C. Mukerji, Register allocation using cyclic interval graphs, M.Sc. thesis, McGill University, 1994, §3.2.6 and Algorithm A.0.1 |
+| 8 | `mesh_graph_completion_times`, then `mesh_graph_heap_order` | completion times C_j, hence the transfers' order | minimize C_max, then ΣC_j | lexicographic over two objectives; joint over every transfer on every resource (cables and devices), R4's precedence edges included; sequential and last, after row 7 | C.-Y. Chen, arXiv 2205.02474, 2022; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997; M. Queyranne, Math. Programming 58, 1993; Q. Huangfu and J. A. J. Hall, Math. Program. Comput. 10(1), 2018 (HiGHS); H. Isermann, OR Spektrum 4, 1982; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 |
+| 9 | rdma/allocate.py | each rank's share of the next call | equal finish, the minimum of F(s) = Σ∫t_i | across calls: its output is the next call's configuration | as allocate.py gave them: Beckmann 1956; Zinkevich 2003; Haykin 2014, Table 10.1; Goodwin & Sin 1984; Beaumont et al. 2001, Alg. 3.1; Bitran & Hax 1981 |
+| 10 | `mesh_graph_list_schedule`, called by rdma/mesh-flow.c | units per link within one transfer | earliest finish on links of unequal rate | a separate stage at run time, after `mesh_plan`, inside each transfer; not joined with `mesh_plan`'s objective | R. L. Graham, Bell System Technical Journal 45, 1966 |
+| 11 | kernel parameters: the MPP matmul's tile constants (mesh_compile.py `_engine`) | none chosen | none | fixed per shape; not joined | Apple, MPPTensorOpsMatMul2d.h, macOS 26.4 SDK |
 
-## 4. What is joint, nested and sequential today
+## 4. What is joint and sequential today
 
 - **Joint within one solve:**
   - the routes, over every demand (row 3);
-  - the order, over every transfer and resource (row 6);
-  - the locations, over every copy (row 8).
-- **Nested:**
-  - a shortest-path tree inside each multiplicative-weights round (row 3);
-  - the list schedule inside each transfer at run time (row 10). Its objective is not part of `mesh_plan`'s.
-- **Sequential, one pass, no return.** The order is rows 1 and 2, then `mesh_plan`'s rows 3, 4, 5, 6, 7 and 8.
-  - A later row never revises an earlier row's choice: the routes are not revisited for the order, and the order is not
-    revisited for the locations.
-  - The row order is therefore an unstated priority among the authors' objectives, with sharding first and routes
-    second.
+  - the locations, over every copy (row 7);
+  - the order, over every transfer and resource (row 8).
+- **Nested, in §2's sense:** none.
+- **Sequential, one pass, no return.** Rows 1 and 2, then rows 3, 4, 5, 6, 7 and 8 in that order.
+  - A later row never revises an earlier row's choice.
+  - The row order is therefore an unstated priority among the objectives.
 - **Across calls:** the shares (row 9) reach the next call through a new compilation. data-model.md §5: "Results from
   whole calls let us adjust shares and routes for later calls."
 - **Not joined:**
+  - the run-time list schedule (row 10);
   - the kernel parameters (row 11);
-  - the sharding (row 1), which has no objective of its own;
-  - the run-time list schedule (row 10).
+  - the sharding (row 1), which has no objective of its own.
 
 ## 5. Methods the literature gives for making the joint choice explicit
 
 These name the methods that exist. They are not requirements; the change requests that follow choose among them.
 
 - **Nest the outer free choices in the inner optimizer's cost,** as Alpa does (J §2). The sharding (row 1) and the
-  shares (row 9) are outer choices. Each candidate is evaluated by `mesh_plan`'s C_max (row 6) as its cost. This is
-  bilevel optimization (J §7).
+  shares (row 9) are outer choices. Each candidate is evaluated by row 8's C_max as its cost. This is bilevel
+  optimization (J §7).
 - **Search one representation that holds all three schedules,** as Unity's parallel computation graph does (J §1).
 - **Repeat the sequence as coordinate descent** (J §8), in place of one pass. Each row is re-solved with the others
   fixed until no row's choice changes.
-- **Encode routing and scheduling in one program,** as TACCL does with its MILP (J §4). TACCL also shows the
-  decomposition that `mesh_plan` makes: routing first, then order, then a feasible schedule.
+- **Encode routing and scheduling in one program,** as TACCL does with its MILP (J §4). TACCL also makes the
+  decomposition `mesh_plan` makes: routing first, then order.
