@@ -1212,9 +1212,8 @@ def _runs(ir, places):
             paged, pages = _paging(ir.locals[operand].target)
             reads = [] if paged is None else [k for j, k in enumerate(reads) if j not in paged]
             written = [] if pages else written
-        parts = [part[0] for _, part in ir.roles[operand][1] if part is not None] if kind == 'collective' else []
         return [owner for k in reads for owner in ir.over.get(k, ())] \
-            + [places[k].owner for k in written + parts if k is not None and places.get(k) is not None]
+            + [places[k].owner for k in written if k is not None and places.get(k) is not None]
     synchronous = [g for g, (kind, _, key, operand) in enumerate(ir.program)
                    if not (kind in ('input', 'constant', 'slice', 'narrow') or kind == 'window' and key not in ir.inside
                            or kind == 'collective' and _local(ir, operand) is None)]
@@ -2599,22 +2598,34 @@ def _local(ir, collective):
     return 'fill' if pairs and me not in [q for _, q in pairs] else None
 
 
+# design/plan-to-bridge-change-request.md R4; design/homomorphism-sources-2026-11-08.md; J. Gibbons, The third
+# homomorphism theorem, J. Functional Programming 6(4), 1996, (2) and Definition 3.1; mesh-section.h struct mesh_section
+def _received(value, j, size, row):
+    first, end = j * size, (j + 1) * size
+    cuts = [first, *range((first // row + 1) * row, end, row), end]
+    for a, b in zip(cuts, cuts[1:]):
+        page = value.pages[a // row].narrow(0, a % row, b - a) if isinstance(value, _Paged) else \
+            value.view(-1).narrow(0, a, b - a)
+        yield a - first, b - first, page
+
+
 def _collected(ir, context, plan, state, placed, c, item, operands):
     _, reads, key, collective = item
     me, receives = ir.roles[collective]
     local = _local(ir, collective)
     if local == 'reduce':
-        waits = [[lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
-                  _arrived(context, plan, i, t, count)] if state is not None else [] for i, _ in receives]
-        total, first, steps = placed(key), operands[0], []
+        total, first = placed(key), operands[0]
         if collective.kind == 'reduce-scatter':
             n = first.shape[collective.dim] // (len(receives) + 1)
             first = first.narrow(collective.dim, me * n, n)
-        for wait, (_, (received, j)) in zip(waits, receives):
-            _typed(collective.kind, [first, placed(received)[j]], [total])
-            add = _pointwise(0, total, first, placed(received)[j])
-            steps += wait + [lambda env, inputs, t, add=add: _each(add)]
-            first = total
+        _typed(collective.kind, [first], [total])
+        flat, row = total.view(-1), ir.page // total.element_size()
+        steps = _once(_fill(total, _identity(A.sum, total.dtype)) + _pointwise(0, total, total, first))
+        for i, (received, j) in receives:
+            wait = [lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
+                    _arrived(context, plan, i, t, count)] if state is not None else []
+            steps += wait + _once([thunk for a, b, page in _received(placed(received), j, flat.numel(), row)
+                                   for thunk in _pointwise(0, flat[a:b], flat[a:b], page)])
         return steps
     places = ir.places[ir.device]
     if local == 'copy' and places[reads[0]][:4] != places[key][:4]:
