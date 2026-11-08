@@ -21,6 +21,9 @@ other projects, such as a game bot, and old dated records; they are not listed h
   request says what code to write, and for each part it names the paper, book or program that says just how to write it.
 - [design/change-requests-index.md](design/change-requests-index.md): every change request, and which are outstanding.
   Each entry names what of it is still open, written or superseded.
+- [design/commentary-review.md](design/commentary-review.md): the commentary written after each commit on the design
+  documents it changes. It notes quotations, statements, code locations and requirements in each repository's
+  .git/review-commentary/, and it never blocks, delays or redirects the work.
 
 ## The bridge and transport
 

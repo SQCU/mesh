@@ -17,6 +17,13 @@
             "timeout": 900,
             "statusMessage": "Comment review of the commit",
             "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-comment-review.py"
+          },
+          {
+            "type": "command",
+            "if": "Bash(git *commit*)",
+            "timeout": 10,
+            "statusMessage": "Commentary review of the commit, started in the background",
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-commentary-review.py >/dev/null 2>&1; exit 0"
           }
         ]
       }
