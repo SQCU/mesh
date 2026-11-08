@@ -1308,8 +1308,8 @@ OBJECT = _message(C.c_void_p)
 VALUE = _message(C.c_uint64)
 LEVELS = _message(C.c_uint32, C.c_void_p)
 VALUES = _message(C.c_ulong, C.c_void_p, C.c_uint32, C.c_void_p)
-PLACE_OPERAND = _message(None, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_ulong, C.c_ulong, C.c_ulong, C.c_bool)
-PLACE_VALUE = _message(None, C.c_void_p, C.c_ulong, C.c_void_p, C.c_ulong, C.c_ulong, C.c_ulong, C.c_bool)
+PLACE_OPERAND = _message(None, C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_ulong, C.c_bool)
+PLACE_VALUE = _message(None, C.c_void_p, C.c_ulong, C.c_void_p, C.c_void_p, C.c_ulong, C.c_bool)
 SIGNAL = _message(None, C.c_void_p, C.c_uint64)
 WAIT = _message(C.c_bool, C.c_uint64, C.c_uint64)
 
@@ -2013,27 +2013,27 @@ def _sourced(gm):
 
 
 # dlpack.h DLManagedTensorVersioned `deleter`; torch v2.14.0 torch/csrc/utils/tensor_new.cpp tensor_fromDLPackImpl,
-# aten/src/ATen/DLConvertor.cpp fromDLPackImpl; mesh-dataflow.h mesh_view_release; G. E. Collins, A method for
-# overlapping and erasure of lists, CACM 3(12), 1960; design/aot-compilation-change-request.md, appendix item 7
+# aten/src/ATen/DLConvertor.cpp fromDLPackImpl; G. E. Collins, A method for overlapping and erasure of lists, CACM
+# 3(12), 1960; design/aot-compilation-change-request.md, appendix item 7; design/torch-capture-change-request.md item 6
 class _Mapping:
     def __init__(self, view):
         self.view, self.tensors, self.retired = view, 0, False
 
     def release(self):
         if self.retired and not self.tensors and self.view.address:
-            mesh.LIB.mesh_view_release(self.view)
             self.view = mesh.View()
 
 
-# mesh-collective.h mesh_view_values
+# mesh-collective.h mesh_view_values; design/torch-capture-change-request.md item 6
 def _mapped(context, functions, count, values):
-    header, view = mesh.Header.from_address(context.M), mesh.View()
-    offsets = (mesh.Q * max(sum(len(v) for v in values), 1))()
-    mesh.check(mesh.LIB.mesh_view_values(C.byref(context), functions, count, offsets, C.byref(view)))
+    view = mesh.View()
+    first = (mesh.Q * (sum(len(v) for v in values) + 1))()
+    offsets = (mesh.Q * max(sum(v.section.count for function in values for v in function), 1))()
+    mesh.LIB.mesh_view_values(C.byref(context), functions, count, first, offsets, C.byref(view))
     at, addresses = 0, []
     for function in values:
-        addresses.append([[view.address + offsets[at + i] + c * v.section.pages * header.pgsz
-                           for c in range(v.section.count)] for i, v in enumerate(function)])
+        addresses.append([[view.address + offsets[first[at + i] + c] for c in range(v.section.count)]
+                          for i, v in enumerate(function)])
         at += len(function)
     return view, addresses
 
@@ -2485,25 +2485,26 @@ def _captured(context, irs, compiled, gm, of, constants, holders):
 
 # ExecuTorch, "Concepts", Memory planning; torch 2.14.0 torch/_inductor/cudagraph_trees.py; M. Lam, PLDI 1988, §2.3;
 # metal_recording.h place:value:; mesh-collective.h mesh_view_values; MTL4CommandQueue.h addResidencySet:; mesh.h struct
-# mesh_state
-def _replays(captured, functions, states, values, addresses, view, buffer, pgsz):
+# mesh_state; design/torch-capture-change-request.md item 6
+def _replays(captured, functions, states, values, addresses, view, buffer):
     lib, recorder, error = captured['lib'], captured['recorder'], C.create_string_buffer(4096)
     queue, replays = OBJECT(recorder, _SEL(b'queue')), []
+
+    def offsets(at):
+        return (C.c_uint64 * len(at))(*[a - view.address for a in at])
     for node, k, handle, _, _, own, *_ in captured['calls']:
         if handle is None:
             replays.append(None)
             continue
         for operand, (j, v) in captured['owners'].items():
             value = values[j][v]
-            PLACE_OPERAND(recorder, _SEL(b'place:operand:in:offset:stride:copies:ahead:shares:'), handle, operand,
-                          buffer, addresses[j][v][0] - view.address, value.section.pages * pgsz, value.section.count,
-                          0, bool(value.shares))
+            PLACE_OPERAND(recorder, _SEL(b'place:operand:in:offsets:copies:ahead:shares:'), handle, operand, buffer,
+                          offsets(addresses[j][v]), value.section.count, 0, bool(value.shares))
         first = len(values[k]) - len(own)
         for i in range(len(own)):
             value = values[k][first + i]
-            PLACE_VALUE(recorder, _SEL(b'place:value:in:offset:stride:copies:shares:'), handle, i, buffer,
-                        addresses[k][first + i][0] - view.address, value.section.pages * pgsz, value.section.count,
-                        bool(value.shares))
+            PLACE_VALUE(recorder, _SEL(b'place:value:in:offsets:copies:shares:'), handle, i, buffer,
+                        offsets(addresses[k][first + i]), value.section.count, bool(value.shares))
         replay = Replay()
         status = lib.MetalRecorderReplay(recorder, handle, C.byref(replay), error, len(error))
         PUT(handle, SELECTOR[b'release'])
@@ -2887,7 +2888,7 @@ def program(block, *example_inputs):
                          zip(irs, arrays, addresses)]
                 if captured:
                     state['replay'] = _replays(captured, functions, views, [values for _, _, values, _ in arrays],
-                                               addresses, view, buffer, mesh.Header.from_address(context.M).pgsz)
+                                               addresses, view, buffer)
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
