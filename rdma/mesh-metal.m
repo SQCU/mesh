@@ -71,7 +71,7 @@ struct mesh_metal_waiter {
 /* os_sync_wait_on_address.h os_sync_wait_on_address_with_timeout */
 /* MPI 4.1 §3.9 and p. 110; rdma/mesh-dataflow.c mesh_transfers_start; D. P. Reed and R. K. Kanodia, CACM 22(2), 1979,
    p. 116; Linux v6.12 kernel/sched/completion.c:52-78, complete_all, and Documentation/scheduler/completion.rst:252;
-   MPI Forum ULFM chapter draft, 2022-05-09, §16.3.1; W. Bland et al., IJHPCA 27(3), 2013, §5.4 */
+   MPI Forum ULFM chapter draft, 2022, §16.3.1; W. Bland et al., IJHPCA 27(3), 2013, §5.4 */
 static void *waits_run(void *argument){
   struct mesh_metal_waiter *waiter=argument;
   @autoreleasepool{
