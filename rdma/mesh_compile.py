@@ -2387,6 +2387,31 @@ class _Program(torch.fx.Interpreter):
 
 
 Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec')
+# design/torch-source-lowering-change-request.md item 2; PyTorch docs/source/notes/cuda.md L1683; torch 2.14.0
+# torch/_higher_order_ops/cond.py and torch/_higher_order_ops/while_loop.py
+CONTROL = (torch.ops.higher_order.cond, torch.ops.higher_order.while_loop)
+
+
+def _static(gm):
+    def held(module, node):
+        return operator.attrgetter(node.target)(module) if node.op == 'get_attr' else None
+    for module in mesh_graph.walk([gm], lambda m: [held(m, n) for n in m.graph.nodes
+                                                   if isinstance(held(m, n), torch.fx.GraphModule)]):
+        for node in module.graph.nodes:
+            if node.op != 'call_function' or node.target not in CONTROL:
+                continue
+            data = [node.args[0]]
+            if node.target is torch.ops.higher_order.while_loop:
+                test = held(module, node.args[0]).graph
+                read = mesh_graph.reach([test.output_node()], lambda n: n.all_input_nodes)
+                data = [o for p, o in zip([n for n in test.nodes if n.op == 'placeholder'],
+                                          [*node.args[2], *node.args[3]]) if p in read]
+            on = {v.meta['val'].device.type if isinstance(v, Node) and isinstance(v.meta.get('val'), torch.Tensor)
+                  else 'cpu' for v in data}
+            if on - {'mps'}:
+                raise ValueError('%s (%s): dynamic control flow based on CPU data is not compiled '
+                                 '(design/torch-source-lowering-change-request.md item 2; PyTorch '
+                                 'docs/source/notes/cuda.md L1683)' % (node.name, node.target))
 
 
 def _metadata(value):
@@ -2437,6 +2462,7 @@ class _Export(torch.fx.Interpreter):
                 .run_decompositions({})
             gm = exported.module(check_guards=False)
             _RemoveRuntimeAssertionsPass()(gm)
+            _static(gm)
             _sourced(gm)
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
             result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
