@@ -632,7 +632,8 @@ def partition(gm, placement, nodes):
                              'most once (GSPMD section 3.1)' % (name, mapping, len(ir.shape)))
         ir.sharding[node] = tuple(m if m >= 0 and ir.shape[m] > 1 else -1 for m in mapping)
         annotated.add(node)
-    # GSPMD section 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram
+    # GSPMD sections 3.1, 3.5 and 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram;
+    # design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 8
     replicated = mesh_graph.forward(ir.order, lambda node: node.all_input_nodes,
                                     lambda node, operands: node.op == 'get_attr' or node.op == 'call_function'
                                     and bool(operands) and all(operands) and _aliases(ir.locals[node]))
@@ -1947,7 +1948,9 @@ def _completed(ir, context, plan, state, c, collective):
     return steps
 
 
-# GSPMD section 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram
+# GSPMD section 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram; Megatron-LM core_r0.12.0
+# megatron/core/tensor_parallel/layers.py:125–169, _initialize_affine_weight_cpu;
+# design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8, and "Sources for the third stops", 8
 def _hosted(ir, item, values):
     kind, reads, _, operand = item
     if kind == 'constant':
@@ -1955,6 +1958,11 @@ def _hosted(ir, item, values):
     if kind == 'call':
         given, local = iter(values), ir.locals[operand]
         return _call(local, *map_arg((local.args, local.kwargs), lambda n: next(given)))
+    if kind == 'slice':
+        (partition_dim, m), world_size = operand, ir.shape[operand[1]]
+        weight_list = torch.split(values[0], _layout(ir, reads[0])[1][partition_dim] // world_size, dim=partition_dim)
+        (piece,) = weight_list[ir.coords[ir.device][m]::world_size]
+        return piece
     return values[0].narrow(*_cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device))
 
 
@@ -2576,8 +2584,10 @@ def program(block, *example_inputs):
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
-            # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5;
-            # design/torch-source-lowering-change-request.md item 1
+            # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5; Megatron-LM core_r0.12.0
+            # megatron/core/tensor_parallel/layers.py:156–165; design/problems-of-14b9a757-change-request.md, "Sources
+            # for the second stops", 8, and "Sources for the third stops", 8; design/torch-source-lowering-change-
+            # request.md item 1
             launched = False
             for ir, (places, _, _, _) in zip(irs, bound):
                 loaded = ir.loads & places.keys()
