@@ -26,6 +26,8 @@
    virtual-address boundary.  The window is mapped at a bank-aligned base and is required to fit in
    one bank, which makes every region cut interior to that bank and a straddle impossible. */
 #define MESH_BANK ((size_t)1<<32)
+/* design/prepared-machine.md#M09; RDMA-FIRST.md, "The ledger", registerable */
+#define MESH_REGION ((size_t)1<<30)
 /* device_gid's and port_bandwidth's inputs, verbatim from tag pre-return-20261103 etc/bridge/thunderbolt.h (5eabe91e) */
 #define MESH_GID_ADDRESSES 16
 #define MESH_GID_ENTRIES 256
@@ -148,7 +150,9 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct m
      1:1 by the provider, and it is the only thing the MR table has to cover.  The addressable arena
      grows without it. */
   size_t stride=(size_t)m->block*m->pgsz,span=wire->length;
-  size_t extent=(capabilities.max_mr_size<span?capabilities.max_mr_size:span)/stride*stride;
+  /* design/prepared-machine.md#M09; RDMA-FIRST.md, "The ledger", registerable */
+  const size_t most=device->extent?device->extent:MESH_REGION;
+  size_t extent=(most<span?most:span)/stride*stride;
   size_t regions=extent?(span+extent-1)/extent:0;
   /* extent is a whole number of blocks and the window is one bank, so no region cut falls inside a
      block and no region crosses a 4 GiB boundary: wire_span's divide is the only addressing form. */
@@ -166,7 +170,12 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct m
     device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
     if(!device->regions[device->region_count]){
       error=errno?errno:EIO;*refused=error;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
-        device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));goto done;
+        device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));
+      /* design/prepared-machine.md#M09 */
+      if(!device->region_count && extent>capabilities.max_mr_size){
+        free(device->regions);device->regions=NULL;device->extent=(size_t)capabilities.max_mr_size;
+      }
+      goto done;
     }
     device->region_count++;
   }
