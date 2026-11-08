@@ -205,3 +205,38 @@ class Partial(torch._C._distributed.Partial):
     which would trigger necessary communication operations under the hood (i.e.
     ``allreduce``, ``reduce_scatter``).
 ```
+
+`torch/export/graph_signature.py` L81–85, L121–128, the kinds of inputs and outputs (file `/private/tmp/claude-501/-Users-mdot-metal-microbench/66e06aa7-8a9f-469f-a879-1939b883b550/scratchpad/lit6/torch/torch_export_graph_signature.py`):
+
+```python
+class InputKind(Enum):
+    USER_INPUT = auto()
+    PARAMETER = auto()
+    BUFFER = auto()
+    CONSTANT_TENSOR = auto()
+class OutputKind(Enum):
+    USER_OUTPUT = auto()
+    LOSS_OUTPUT = auto()
+    BUFFER_MUTATION = auto()
+    PARAMETER_MUTATION = auto()
+    GRADIENT_TO_PARAMETER = auto()
+    GRADIENT_TO_USER_INPUT = auto()
+    USER_INPUT_MUTATION = auto()
+```
+
+`torch/export/graph_signature.py` L255–266, the docstring's functional signature:
+
+```text
+            %add_1 : [num_users=1] = call_function[target=torch.ops.aten.add.Tensor](args = (%mul, %mul_1), kwargs = {})
+            %add_2 : [num_users=1] = call_function[target=torch.ops.aten.add.Tensor](args = (%b_my_buffer2, 1.0), kwargs = {})
+            return (add_2, add_1)
+
+    Resulting ExportGraphSignature of the functional Graph would be::
+
+        # inputs
+        p_my_parameter: PARAMETER target='my_parameter'
+        b_my_buffer1: BUFFER target='my_buffer1' persistent=True
+        b_my_buffer2: BUFFER target='my_buffer2' persistent=True
+        x1: USER_INPUT
+        x2: USER_INPUT
+```
