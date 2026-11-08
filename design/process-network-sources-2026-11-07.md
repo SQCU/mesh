@@ -248,3 +248,13 @@ class OutputKind(Enum):
         add_2: BUFFER_MUTATION target='my_buffer2'
         add_1: USER_OUTPUT
 ```
+
+`dpn.txt` L47–49 (abstract, p. 1) and L214–215 (p. 4), Kahn process networks and a functional process, copied from the cited lines:
+
+```text
+Dataflow process networks are shown to be a special case of Kahn process networks, a model of
+computation where a number of concurrent processes communicate through unidirectional FIFO
+channels, where writes to the channel are non-blocking, and reads are blocking. In dataflow pro-
+        A functional process F : S → S maps a set of input sequences into a set of output
+sequences. Given an increasing chain of sets of sequences χ , it will map this set into another set
+```
