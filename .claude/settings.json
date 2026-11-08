@@ -17,6 +17,13 @@
             "timeout": 1200,
             "statusMessage": "Change-request review of the commit",
             "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-cr-review.py"
+          },
+          {
+            "type": "command",
+            "if": "Bash(git *commit*)",
+            "timeout": 900,
+            "statusMessage": "Comment review of the commit",
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-comment-review.py"
           }
         ]
       }
