@@ -1337,6 +1337,125 @@ int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t ed
   return result;
 }
 
+/* design/torch-source-lowering-change-request.md item 3 */
+static int access_before(const void *a, const void *b) {
+  const struct mesh_graph_access *x = a, *y = b;
+  if (x->key != y->key) return x->key < y->key ? -1 : 1;
+  if (x->start != y->start) return x->start < y->start ? -1 : 1;
+  return (x->vertex > y->vertex) - (x->vertex < y->vertex);
+}
+int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, size_t room, uint32_t *from, uint32_t *to,
+                           size_t *edges) {
+  if (accesses) qsort(access, accesses, sizeof *access, access_before);
+  size_t made = 0, held = 0, count = 0;
+  uint64_t *pair = NULL;
+  int result = 0;
+  for (size_t i = 0; !result && i < accesses; i++)
+    for (size_t j = i + 1; j < accesses && access[j].key == access[i].key && access[j].start < access[i].end; j++) {
+      if (access[j].vertex == access[i].vertex || !(access[i].write || access[j].write) || access[j].end <= access[j].start)
+        continue;
+      if (made == held) {
+        const size_t grown = held ? 2 * held : 64;
+        uint64_t *more = grown < SIZE_MAX / sizeof *more ? realloc(pair, grown * sizeof *more) : NULL;
+        if (!more) { result = ENOMEM; break; }
+        pair = more; held = grown;
+      }
+      const uint32_t a = access[i].vertex, b = access[j].vertex;
+      pair[made++] = a < b ? (uint64_t)a << 32 | b : (uint64_t)b << 32 | a;
+    }
+  if (!result && made) qsort(pair, made, sizeof *pair, completion_edge_before);
+  for (size_t k = 0; !result && k < made; k++) {
+    if (k && pair[k] == pair[k - 1]) continue;
+    if (count < room) { from[count] = (uint32_t)(pair[k] >> 32); to[count] = (uint32_t)pair[k]; }
+    count++;
+  }
+  if (!result) { *edges = count; if (count > room) result = ERANGE; }
+  free(pair);
+  return result;
+}
+
+/* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2, Definition 3, §7,
+   Theorem 3 and Fig. 4; E. W. Dijkstra, Numerische Mathematik 1, 1959 */
+struct redundant_entry { uint64_t at; size_t first; uint32_t vertex; };
+struct redundant_search { uint64_t *best; size_t *first; struct redundant_entry *heap; size_t count; };
+static int redundant_before(const struct redundant_entry *x, const struct redundant_entry *y) {
+  return x->at < y->at || (x->at == y->at && x->vertex < y->vertex);
+}
+static void redundant_push(struct redundant_search *s, uint64_t at, uint32_t vertex, size_t first) {
+  const struct redundant_entry e = {at, first, vertex};
+  size_t k = s->count++;
+  while (k && redundant_before(&e, s->heap + (k - 1) / 2)) { s->heap[k] = s->heap[(k - 1) / 2]; k = (k - 1) / 2; }
+  s->heap[k] = e;
+}
+static struct redundant_entry redundant_pop(struct redundant_search *s) {
+  const struct redundant_entry top = s->heap[0], last = s->heap[--s->count];
+  size_t k = 0;
+  for (size_t c = 1; c < s->count; c = 2 * k + 1) {
+    if (c + 1 < s->count && redundant_before(s->heap + c + 1, s->heap + c)) c++;
+    if (!redundant_before(s->heap + c, &last)) break;
+    s->heap[k] = s->heap[c]; k = c;
+  }
+  if (s->count) s->heap[k] = last;
+  return top;
+}
+static void redundant_offer(struct redundant_search *s, uint32_t y, uint64_t at, size_t first) {
+  uint64_t *best = s->best + 2 * (size_t)y;
+  size_t *by = s->first + 2 * (size_t)y;
+  if (by[0] == first) {
+    if (at < best[0]) { best[0] = at; redundant_push(s, at, y, first); }
+  } else if (at < best[0]) {
+    best[1] = best[0]; by[1] = by[0]; best[0] = at; by[0] = first;
+    redundant_push(s, at, y, first);
+  } else if (at < best[1]) {
+    best[1] = at; by[1] = first;
+    redundant_push(s, at, y, first);
+  }
+}
+int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
+                         const unsigned char *synchronization, unsigned char *redundant) {
+  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices || from[e] == to[e]) return EINVAL;
+  if (vertices == UINT32_MAX || edges >= SIZE_MAX / (4 * sizeof(struct redundant_entry))) return ENOMEM;
+  const size_t n = (size_t)vertices + 1;
+  size_t *first = malloc(n * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
+  uint64_t *pair = malloc((edges + 1) * sizeof *pair);
+  struct redundant_search s = {malloc(2 * n * sizeof *s.best), malloc(2 * n * sizeof *s.first),
+                               malloc((3 * edges + 1) * sizeof *s.heap), 0};
+  unsigned char *done = malloc(2 * n);
+  int result = first && order && pair && s.best && s.first && s.heap && done ? 0 : ENOMEM;
+  size_t synchronizations = 0;
+  for (size_t e = 0; !result && e < edges; e++) if (synchronization[e]) pair[synchronizations++] = (uint64_t)from[e] << 32 | to[e];
+  if (!result && synchronizations) qsort(pair, synchronizations, sizeof *pair, completion_edge_before);
+  for (size_t k = 1; !result && k < synchronizations; k++) if (pair[k] == pair[k - 1]) result = EINVAL;
+  if (!result) {
+    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
+    for (size_t e = 0; e < edges; e++) redundant[e] = 0;
+  }
+  for (uint32_t u = 0; !result && u < vertices; u++) {
+    int any = 0;
+    for (size_t k = first[u]; k < first[u + 1]; k++) any |= synchronization[order[k]] != 0;
+    if (!any) continue;
+    for (size_t v = 0; v < 2 * (size_t)vertices; v++) { s.best[v] = UINT64_MAX; s.first[v] = SIZE_MAX; done[v] = 0; }
+    s.count = 0;
+    for (size_t k = first[u]; k < first[u + 1]; k++) redundant_offer(&s, to[order[k]], delay[order[k]], order[k]);
+    while (s.count) {
+      const struct redundant_entry x = redundant_pop(&s);
+      const size_t at = 2 * (size_t)x.vertex;
+      const int label = s.best[at] == x.at && s.first[at] == x.first && !done[at] ? 0
+                      : s.best[at + 1] == x.at && s.first[at + 1] == x.first && !done[at + 1] ? 1 : -1;
+      if (label < 0) continue;
+      done[at + (size_t)label] = 1;
+      for (size_t k = first[x.vertex]; k < first[x.vertex + 1]; k++)
+        if (delay[order[k]] <= UINT64_MAX - x.at) redundant_offer(&s, to[order[k]], x.at + delay[order[k]], x.first);
+    }
+    for (size_t k = first[u]; k < first[u + 1]; k++) {
+      const size_t e = order[k], at = 2 * (size_t)to[e];
+      if (synchronization[e]) redundant[e] = (s.first[at] == e ? s.best[at + 1] : s.best[at]) <= delay[e];
+    }
+  }
+  free(first); free(order); free(pair); free(s.best); free(s.first); free(s.heap); free(done);
+  return result;
+}
+
 static int intersect_before(const void *a, const void *b) {
   const struct mesh_graph_interval *x = a, *y = b;
   if (x->key != y->key) return x->key < y->key ? -1 : 1;

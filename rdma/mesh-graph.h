@@ -82,6 +82,13 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
 int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
                                 const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
                                 const uint32_t *added_to, uint64_t *added_delay);
+/* design/torch-source-lowering-change-request.md item 3 */
+struct mesh_graph_access { uint64_t key, start, end; uint32_t vertex, write; };
+int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, size_t room, uint32_t *from, uint32_t *to,
+                           size_t *edges);
+/* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §7, Fig. 4 */
+int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
+                         const unsigned char *synchronization, unsigned char *redundant);
 /* MPI 4.1 §6.1.11 */
 struct mesh_graph_interval { uint64_t key, start, end; };
 int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval);
