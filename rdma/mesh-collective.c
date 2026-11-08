@@ -1286,8 +1286,8 @@ static int plan_entry_order(const void *a,const void *b){
      production at its source, P(d), weighing the weighting operand's `produced` (design/aot-compilation-change-
      request.md, A3); then each demand's source read, S(d), where a dependence names it, weighing `read`; then each
      declared transfer's consumption at its destination, in declared order, one task weighing `consumed` for MESH_JOIN
-     (function A, design/plan-to-bridge-change-request.md, R4) and one a page, each weighing `consumed`, for MESH_PAGES
-     (function B).  Its edges, in this order: for each declared transfer in declared order, page by page, page k's
+     (a synchronous, complete, contiguous consumer, design/plan-to-bridge-change-request.md, R4) and one a page, each weighing `consumed`, for MESH_PAGES
+     (an asynchronous, incomplete, noncontiguous consumer).  Its edges, in this order: for each declared transfer in declared order, page by page, page k's
      edge from P to the consumption (to page k's task for MESH_PAGES), of cost `page`, its route the tree path the
      fill gave page k, from the source down to the destination (mesh_graph_climb, plan_path_step); each P(d) -> S(d);
      each dependence of lag 0 in the dependences' order, from each task of its `from` event to each of its `to`
@@ -2356,9 +2356,9 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     }
     p->of[i]=placed[i]==i?p->demands-1:p->of[placed[i]];
     struct plan_demand *d=p->demand+p->of[i];
-    /* a set where every declared transfer of the range is MESH_PAGES, function B at every destination; any MESH_JOIN
+    /* a set where every declared transfer of the range is MESH_PAGES, an asynchronous, incomplete, noncontiguous consumer at every destination; any MESH_JOIN
        destination keeps the schedule's order (design/compilation-coordination.md, S1; design/aot-compilation-change-
-       request.md, appendix item 5: "Function A's operands (joins) keep the schedule's order"), each of its pages at its
+       request.md, appendix item 5: "A synchronous, complete, contiguous consumer's operands (joins) keep the schedule's order"), each of its pages at its
        own place in R5's one global order (R5: "A set's pages ... keep their places in that order") */
     if(t->kind!=MESH_PAGES)d->set=0;
     /* one range: its bytes alike, each destination once, its production and its source's read weighing alike

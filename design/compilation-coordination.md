@@ -173,9 +173,9 @@ int mesh_graph_contention_schedule(uint32_t tasks, const double *weight, const u
 ### The plan call (mesh-collective.h, C)
 
 ```c
-/* plan-to-bridge R4: the kind of a declared transfer's consumer at its destination.  MESH_JOIN: function A, one task
-   with an edge from every page of the range.  MESH_PAGES: function B, one task per page, each with an edge from its
-   own page */
+/* plan-to-bridge R4: the kind of a declared transfer's consumer at its destination.  MESH_JOIN: a synchronous,
+   complete, contiguous consumer, one task with an edge from every page of the range.  MESH_PAGES: an asynchronous,
+   incomplete, noncontiguous consumer, one task per page, each with an edge from its own page */
 enum { MESH_JOIN, MESH_PAGES };
 /* `order` (the hand priority, lower first) is gone: R5's schedule orders every cable's sends; `kind` in its place */
 struct mesh_declared { uint32_t source,destination,identity,kind,value,padding; size_t bytes; };
@@ -457,7 +457,7 @@ file, calls streams_cancel).
 - **P1. Placement, e2b:** its existing hand partition (tools/prepare_e2b.py's ranks, as the manifest gives them), read
   by e2b's placement function and passed as the declared transfers' sources and destinations, as now. Every e2b
   consumer is MESH_JOIN: each e2b range is released whole by its producer's one supplied word (mesh_host_publish; the
-  GPU's add of 1), so no e2b function streams its outputs page by page, which is what makes a consumer function B.
+  GPU's add of 1), so no e2b function streams its outputs page by page, which is what makes a consumer asynchronous, incomplete and noncontiguous.
 - **P2. Weights, e2b and torch:** unit weights, every task and every edge 1 (`produced`, `consumed`, `read`, `page`
   all 1), from a weighting function the program is given. The operand's type is real; its values carry no information
   until a chooser exists (A3; the appendix's α–β function is not built).
@@ -712,9 +712,9 @@ declarations above.
 
 #### Item 5, independent flows in uniformly random order
 
-- **S1. Which pages.** A range is a set where every declared transfer of it is MESH_PAGES (function B at every
-  destination, R4). A range with any MESH_JOIN destination keeps the schedule's order (the appendix: "Function A's
-  operands (joins) keep the schedule's order").
+- **S1. Which pages.** A range is a set where every declared transfer of it is MESH_PAGES (an asynchronous, incomplete, noncontiguous
+  consumer at every destination, R4). A range with any MESH_JOIN destination keeps the schedule's order (the appendix:
+  "A synchronous, complete, contiguous consumer's operands (joins) keep the schedule's order").
 - **S2. The set's unit is one tree's pages.** A set range's pages on tree j (the fill's cut, mesh_graph_fill: tree
   j's run) are one set on every edge of tree j, `set` = j + 1, j the tree's index in the solve's trees grouped by
   demand (mesh-collective.c p->tree order, the same at every rank). Every edge of tree j carries the same run of pages
@@ -854,7 +854,7 @@ Text extracted with `pdftotext -layout` into the session scratchpad's papers/ fo
 - **P3** (review W3's finding 3: no program declared a MESH_PAGES consumer, so item 5 was unreachable; P1's and
   A-T8's reason, one publish a range, is the producer's, while R4's kind is the consumer's: "function B can work on any
   pages received in any order"). In the torch lowering, a declared transfer is MESH_PAGES where its consumer at the
-  destination is R4's function B: each AllReduce partial to the root, consumed by the root's combine (R4: "reductions'
+  destination is R4's asynchronous, incomplete, noncontiguous consumer: each AllReduce partial to the root, consumed by the root's combine (R4: "reductions'
   partial sums"; Gibbons, ⊕ associative and commutative), and a range whose every reader there is an operator of
   GSPMD's elementwise set (a map over pages, the appendix item 5's "a pointwise nonlinearity after a ffn"); MESH_JOIN
   otherwise (a Dot, a cat, a slice, a clone). A-T8 is reversed for those. Every consumer still reads a range only once
@@ -1163,14 +1163,14 @@ declared transfer (route, destination d) the kind MESH_PAGES for `"pages"` and M
   pending ORDERs (the head's `first` and `sequence` advanced as its executions are published), and each plan's
   `submitted`, `released`, `taken` and sequence words.
 
-#### Item 5, e2b's function B consumers (E2)
+#### Item 5, e2b's asynchronous, incomplete, noncontiguous consumers (E2)
 
-- **EB1. The kinds** (tools/prepare_e2b.py). A kept send route's consumer at each destination is function B,
+- **EB1. The kinds** (tools/prepare_e2b.py). A kept send route's consumer at each destination is an asynchronous, incomplete, noncontiguous consumer,
   `"pages"`, where the route is a piece of a section cut over several contributors and its destinations' consumer is
   the sum of the pieces (prepare_e2b.py combine: the FFN row split's contributions and the head split's attention
   partials, added by ADD at each rank holding the stream): R4, "reductions' partial sums", ⊕ associative and
   commutative (Gibbons 1996); the item: "e2b's reductions of partial sums are function B". Every other route's
-  consumers are `"join"` (function A): a whole operand broadcast, a single owner's activation, the split-KV partials
+  consumers are `"join"` (synchronous, complete, contiguous consumers): a whole operand broadcast, a single owner's activation, the split-KV partials
   and normalizers (kv_merge), the vocabulary's routes. The kinds are given once the routes' destinations are cut (the
   publication's readers), one a destination.
 - **EB2. e2b's IR** (tools/e2b_replay.m): e2b_placement carries `kinds` with each route; e2b_ir gives each declared
@@ -1178,9 +1178,9 @@ declared transfer (route, destination d) the kind MESH_PAGES for `"pages"` and M
   2, naming it: prepare the directory again), as a stage without its dataflow list is. P1's "every e2b consumer
   MESH_JOIN" is reversed, with a dated note: the kind is the consumer's (R4; P3's reason), not the producer's one
   publish.
-- **EB3. Not declared function B:** the split-KV merge (kv_merge) reads each rank's partial with its normalizer's
-  rescale, a combine R4's FlashAttention example would make function B; the item names e2b's reductions of partial
-  sums, so it stays function A (open for the operator).
+- **EB3. Not declared asynchronous, incomplete and noncontiguous:** the split-KV merge (kv_merge) reads each rank's partial with its normalizer's
+  rescale, a combine R4's FlashAttention example would make asynchronous, incomplete and noncontiguous; the item names e2b's reductions of partial
+  sums, so it stays synchronous, complete and contiguous (open for the operator).
 
 ### What each source said, where it was read
 
@@ -1335,8 +1335,8 @@ no bytecode written). Nothing was run.
   (pages x tree edges).
 - **Item 5's reach in e2b** (X2 #1): in the 1-row decode each partial is one page, so each set is one page on each
   cable and Algorithm P draws nothing; the permutation shows only where a partial holds two pages or more on a cable.
-- **Function B not declared**: e2b's split-KV merge (kv_merge, EB3) and the vocabulary's maxloc routes (X3 #7) stay
-  function A, the item naming e2b's "reductions of partial sums".
+- **Asynchronous, incomplete, noncontiguous consumers not declared**: e2b's split-KV merge (kv_merge, EB3) and the
+  vocabulary's maxloc routes (X3 #7) stay synchronous, complete and contiguous, the item naming e2b's "reductions of partial sums".
 - **Knuth vol. 3 §5.4.1 not read**: the merge is the item's statement, the least of the k first elements by
   comparison.
 - Carried from the earlier parts: "A plan's identity across a map move"; U1's premise; the torch MPS path (K1); torch
@@ -1373,7 +1373,7 @@ document states it, found already done, or stopped, with the document's words at
   - GO4's and GO4′'s argument (the groups in order of their least places a topological order with each group whole,
     so any permutation within a group one too) is withdrawn at each note; see stop 3.
 - **EK. Every program declares each consumer's kind** (aot-compilation, appendix item 5): "Every program declares each
-  consumer's kind. A consumer that reduces partial sums, or otherwise takes pages in any order, is function B (R4)."
+  consumer's kind. A consumer that reduces partial sums, or otherwise takes pages in any order, is an asynchronous, incomplete, noncontiguous consumer (R4)."
   - tools/prepare_e2b.py: prepare()'s set `summed` is `reduced`, the (partial, rank) pairs whose consumer at that rank
     reduces the partial with the other ranks': the pieces a combine sums (EB1, as before); kv_merge's split-KV partials
     and normalizers at each rank that merges them (R4's example, "online softmax (M. Milakov and N. Gimelshein ...)":
@@ -1388,7 +1388,7 @@ document states it, found already done, or stopped, with the document's words at
 - R4's correction: "Ordering coflows to minimize their completion time is Varys's smallest-effective-bottleneck first
   ... R5 does not require it." No code implements or names Varys; a join's pages carry its consumer's bottom level
   (GO2).
-- R4: "A's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
+- R4: "The synchronous, complete, contiguous consumer's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
   assignment gives each tensor one contiguous range". mesh_plan's items are each value's copies, each coloured by
   mesh_graph_left_edge to one run [colour, colour + size) (plan_place).
 - A4: "AllGather is one broadcast from each source over its packed trees (Blink §3.1). AllToAll is point-to-point
@@ -1476,8 +1476,8 @@ first, and tools/prepare_e2b.py compiles (py_compile; its __pycache__ entries we
 ### What this changes among the earlier parts' open items
 
 - "No cycle on a cable" (W3 #6), which GO4 answered, is open again: stop 3.
-- "Item 5's reach in e2b" and "Function B not declared" (EB3, X3 #7): kv_merge's partials and normalizers and the
-  vocabulary's contributions are function B (EK).
+- "Item 5's reach in e2b" and "Asynchronous, incomplete, noncontiguous consumers not declared" (EB3, X3 #7): kv_merge's partials and normalizers and the
+  vocabulary's contributions have asynchronous, incomplete, noncontiguous consumers (EK).
 - "GO5" stands, with stop 2; "DL2's head-of-line wait" stands, with stop 1.
 
 ## The revisions of 46ae8fdf
@@ -1622,7 +1622,7 @@ Two sub-agents, each its files' one owner: L (rdma/mesh-graph.{h,c}, rdma/mesh-c
 - **TC1 to TC6 (sub-agent T, A4).** TC1: a ReduceScatter's `dim` the tensor dimension it scatters, slice q to the
   member at place q in the device mesh's order. TC2: a CollectivePermute's `dim` its (source place, target place)
   pairs within the group, as XLA's source_target_pairs. TC3: a CollectivePermute's transfers MESH_JOIN (their consumer
-  a clone, function A under P3). TC4: the permuted result torch.clone of what arrives, a tensor of its own, over no
+  a clone, a synchronous, complete, contiguous consumer under P3). TC4: the permuted result torch.clone of what arrives, a tensor of its own, over no
   placed page. TC5: a pair p -> p keeps the member's value with no transfer; a member no pair targets holds zeros, as
   XLA's operation semantics state (checked on OpenXLA's page); the keeper adds its own slice first, then the landed
   slices in group order. TC6: the R4 citations above.
@@ -1639,7 +1639,7 @@ Two sub-agents, each its files' one owner: L (rdma/mesh-graph.{h,c}, rdma/mesh-c
   capture); and what finite number the analysis gives where dependent calls are issued ahead as futures (Pathways §4.5,
   which A10 cites): Bernstein's conditions and commutativity analysis order such calls, and bound nothing. Nothing was
   built for the bound; the order constraints are found done above.
-- **Stop 2. Function B's output pages.** R4: "B is one task per page, each with an edge from its own page, and its
+- **Stop 2. The asynchronous, incomplete, noncontiguous consumer's output pages.** R4: "The asynchronous, incomplete, noncontiguous consumer is one task per page, each with an edge from its own page, and its
   outputs are pages that leave as each is produced." The code gives each demand one production task, P(d), and a range
   one supplied word, which its producer raises after its last write in an execution (C3.7: "One word serves every
   execution"), so a range's pages leave together. A page leaving as it is produced needs a release of each page, which
@@ -1698,7 +1698,7 @@ Its rules are design/disjoint-pages-revision-coordination.md, "Rules (every sub-
 (the two documents in full, then mesh AGENTS.md, design/rubric-actionable.md, metal-microbench AGENTS.md,
 docs/principles.md, docs/measurement.md) and its file table. What the code did not yet do was found by reading both
 documents in full against the code, beginning with the clauses revised after "The revisions of 46ae8fdf": plan-to-bridge
-R4 (function B's outputs) and R5 (the second objective; HiGHS from its pinned source), and the AOT document's A4, A10
+R4 (the asynchronous, incomplete, noncontiguous consumer's outputs) and R5 (the second objective; HiGHS from its pinned source), and the AOT document's A4, A10
 and appendix items 2 and 5. That part's M1 (a cable's share of a set), M4 (the writer's wait) and M5 (each port's copy
 of the channel) are overturned by name in the documents and are reversed below. Each decision taken where the documents
 are silent is marked as the implementer's (HB, LX, SW, CH2, PM the coordinating implementer's; TA and TT sub-agent T3's)
@@ -1806,7 +1806,7 @@ the three integration builds.
 
 ### Found already done (the code at f3f7cf46 and 4b0d2da2 does what the document states)
 
-- **R4, function B's outputs** ("An output page is available once its presence is set, as an element of an I-structure
+- **R4, the asynchronous, incomplete, noncontiguous consumer's outputs** ("An output page is available once its presence is set, as an element of an I-structure
   is ... Here the presence is C3's supplied word ... A producer's store releases whatever pages its work has written, any
   number at once and in any order. The bridge reads the words in place and sends each released page (R1)"; "The
   receiving side reads landings by masks (C3)"; "The release follows the producing work. The existing kernels write their
@@ -1990,7 +1990,7 @@ unchanged and compiling against the new mesh.h; tools/e2b_replay.m compiled alon
 
 - "The revisions of 46ae8fdf", stop 1 (A10's analysis): answered by A10's revised text and built for torch (TT); its
   bound reaches no plan, and the program on a delegate has none (stop 1 above).
-- That part's stop 2 (function B's output pages): answered by R4's revised text and found already done.
+- That part's stop 2 (the asynchronous, incomplete, noncontiguous consumer's output pages): answered by R4's revised text and found already done.
 - That part's stop 3 (no cycle where the deal splits a set): answered by item 5's revised text (σ one renaming over every
   lane, "So the deal fixes positions, not members") and built (PM); M1 is reversed. PM2's reach is recorded.
 - That part's M4 (the one wait at the writer) and M5 (each port's copy of the channel): gone (CH2). The channel's room
@@ -2246,7 +2246,7 @@ fetch of the pinned HiGHS source and the three integration builds.
   gathered, where it was refused. T4-15: broadcast labels aligned from the right. T4-16: in-place operators by their
   functional equivalents (PyTorch 2 §3.9), writes to inputs, attributes or views refused. T4-17: a Pad merged only
   where its Slice is its one reader. T4-18: the mask's fill 0 for convolution and average pooling, −inf (or the
-  integer minimum) for max pooling, the pad's value for Pad. T4-19: `_consumer` gives function B only where the read
+  integer minimum) for max pooling, the pad's value for Pad. T4-19: `_consumer` gives an asynchronous, incomplete, noncontiguous consumer only where the read
   value's local shape is its reader's. T4-20: a get_attr held whole as a placeholder; call_module and non-tensor values
   by the general rule. T4-21: matmul's labels in general, `bmm`, einsum by its equation, at most one mesh dimension a
   partial. T4-22: `ir.reduced` keyed by the partial's key.
@@ -3140,7 +3140,7 @@ points 1, 2 and 4, and are superseded with them.
      - Place every value's pages anywhere, by the fewest chains of the interference order. That is Dilworth's theorem,
        computed by Fulkerson's bipartite matching, a function of rdma/mesh-graph.h or mesh_graph.py with caller
        operands.
-     - Give an operand typed as one run (R4's function A, or a torch MPS operator's operand, item 7) its run as a
+     - Give an operand typed as one run (the operand of R4's synchronous, complete, contiguous consumer, or a torch MPS operator's operand, item 7) its run as a
        mapping written when the plan is made: consecutive virtual pages over its pages, as `ncclMeshPageTableCompose`'s
        `mach_vm_remap` view was on 2026-11-02 (PB R2).
      - Greedy by size goes, with `mesh_graph_left_edge`'s colouring.

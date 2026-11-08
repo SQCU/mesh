@@ -52,9 +52,10 @@
      where there are several); their `bytes` agree.  A range is the operand's whole value, one declared transfer per
      destination: no page cut.  The ranges (demands) are numbered by their first declared transfer.
    - `kind` (design/plan-to-bridge-change-request.md, R4): the kind of the transfer's consumer at its destination,
-     MESH_JOIN (function A, a blocking operator over its whole operand: one task, with an edge from every page of the
-     range) or MESH_PAGES (function B, a homomorphism over pages taken in any order, J. Gibbons, J. Functional
-     Programming, 1996, as R4 cites it: one task a page, each with an edge from its own page); any other EINVAL.  The
+     MESH_JOIN (a synchronous, complete, contiguous consumer, a blocking operator over its whole operand: one task, with
+     an edge from every page of the range) or MESH_PAGES (an asynchronous, incomplete, noncontiguous consumer, a
+     homomorphism over pages taken in any order, J. Gibbons, J. Functional Programming, 1996, as R4 cites it: one task a
+     page, each with an edge from its own page); any other EINVAL.  The
      kind reaches the task graph alone: the bridge's lists carry none (R4, R5).
      2026-11-04, owner C (design/compilation-coordination.md, "The plan call", T6): `order`, the hand priority (lower
      first, the range's the least of its transfers'), is gone with plan_demand_order, `kind` in its place.  Why: R5's
@@ -147,7 +148,7 @@
    gone, R5's linear program the method now); both ends' lists of a node pair the same hops in the same order; every
    copy's the same order.
    The sets (design/aot-compilation-change-request.md, appendix item 5; design/compilation-coordination.md, S1, S2 and
-   "The revisions of 67ca86f8", SP): a range every one of whose declared transfers is MESH_PAGES (function B at every destination, R4) is a set on
+   "The revisions of 67ca86f8", SP): a range every one of whose declared transfers is MESH_PAGES (an asynchronous, incomplete, noncontiguous consumer at every destination, R4) is a set on
    each of its trees: every entry of a page on tree j (j the tree's index in the solve's trees grouped by demand, the
    same at every rank) has `set` j + 1; every other entry, a range with any MESH_JOIN destination among them, has `set`
    0.  Every entry, a set's among them, is at its own place (R5: "A set's pages ... keep their places in that order.
@@ -290,7 +291,7 @@
      pages are numbered from the region's first row and from the first block of each space: there is no claim, no
      first fit and no ENOMEM from fragmentation.
    - A value is its ordered page-table rows (R2, corrected; mesh-section.h).  A value typed to be seen as one run
-     (`run` 1: R4's function A's operand, or a torch MPS operator's operand, design/aot-compilation-change-request.md
+     (`run` 1: the operand of R4's synchronous, complete, contiguous consumer, or a torch MPS operator's operand, design/aot-compilation-change-request.md
      appendix item 7) is given its run as a mapping written when the plan is made: consecutive virtual pages over its
      pages (R2, corrected: "Such an operand's run is address translation, fixed when the plan is made"; mesh's
      `ncclMeshPageTableCompose` view, `mach_vm_remap`, design/page-maps-2026-11-02.md at 6255e92b; mesh-dataflow.h
@@ -412,9 +413,9 @@ struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,
 _Static_assert(sizeof(struct mesh_value)==64 && offsetof(struct mesh_value,run)==48 &&
                offsetof(struct mesh_value,shares)==52 && offsetof(struct mesh_value,padding1)==56,
                "mesh_value: rdma/mesh.py Value");
-/* plan-to-bridge R4: the kind of a declared transfer's consumer at its destination.  MESH_JOIN: function A, one task
-   with an edge from every page of the range.  MESH_PAGES: function B, one task per page, each with an edge from its
-   own page */
+/* plan-to-bridge R4: the kind of a declared transfer's consumer at its destination.  MESH_JOIN: a synchronous,
+   complete, contiguous consumer, one task with an edge from every page of the range.  MESH_PAGES: an asynchronous,
+   incomplete, noncontiguous consumer, one task per page, each with an edge from its own page */
 enum { MESH_JOIN, MESH_PAGES };
 /* `order` (the hand priority, lower first) is gone: R5's schedule orders every cable's sends; `kind` in its place.
    2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7; "The revisions

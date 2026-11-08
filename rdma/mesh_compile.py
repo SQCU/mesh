@@ -244,7 +244,7 @@ class IR:
     # design/compilation-coordination.md, K1).  Each destination's declared transfer's index
     # 2026-11-04, owner T2 (the coordinator's ruling P3 on review W3's finding 3): every transfer MESH_JOIN (A-T8,
     # the producer's one mesh_host_publish as the reason) goes: the kind is R4's test of the consumer, so a range of
-    # function B is a set at the bridge (design/aot-compilation-change-request.md, appendix item 5).  What must stay:
+    # asynchronous, incomplete, noncontiguous consumers is a set at the bridge (design/aot-compilation-change-request.md, appendix item 5).  What must stay:
     # each range released whole by one mesh_host_publish, and read only once it is complete
     # 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
     # revisions of 4e78f6f4"): no value is made for a range; each declared transfer's `value` and `first` are this
@@ -1355,12 +1355,12 @@ def _readers(ir, roots, default):
 
 
 # the coordinator's ruling P3 on review W3's finding 3: the kind of the declared transfers of `node`'s range by R4's
-# test of its consumer at each destination (design/plan-to-bridge-change-request.md R4): MESH_PAGES, function B, where
+# test of its consumer at each destination (design/plan-to-bridge-change-request.md R4): MESH_PAGES, an asynchronous, incomplete, noncontiguous consumer, where
 # every reader there of a key of `node` over the plan's pages is an operator of GSPMD's elementwise set (ELEMENTWISE: a
 # map over the range's pages, f of a union of pages the union of f of each, a homomorphism as R4 states it: over lists
 # with its combine associative, J. Gibbons, J. Functional Programming 1996, and over pages in any order a bag
 # homomorphism of the Boom hierarchy, its combine commutative too, L. Meertens, Algorithmics, CWI Monographs 1, 1986;
-# the appendix item 5's "a pointwise nonlinearity after a ffn"); MESH_JOIN, function A, otherwise (a Dot, a slice, a
+# the appendix item 5's "a pointwise nonlinearity after a ffn"); MESH_JOIN, a synchronous, complete, contiguous consumer, otherwise (a Dot, a slice, a
 # cat, a collective, the output's clone).  Every node runs the same program items, so every rank computes the same
 # kinds (R6)
 # 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", TC6): the homomorphism cited
@@ -1368,7 +1368,7 @@ def _readers(ir, roots, default):
 # What must stay: the kinds as before
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of abecd389", T4-19): an elementwise reader is the
 # operator its Local calls, and reads the key over the plan's pages page by page only where that key's local shape is
-# its result's, since a broadcast operand (T4-15) is read whole by every page of the result (R4's function A: "set of
+# its result's, since a broadcast operand (T4-15) is read whole by every page of the result (R4's synchronous, complete, contiguous consumer: "set of
 # pages operand_a to be contiguous and complete").  What must stay: the kinds as before for operands of one shape
 # 2026-11-05 (design/compilation-coordination.md, "The revisions of e4a7398e", OV): the readers of the keys over
 # `roots` (_readers), where they were those of `node`'s keys in `placed`.  What must stay: the kinds as before
@@ -1580,7 +1580,7 @@ def _inside(ir):
 # to the root; the root's combine of each landed partial with its own is MSCCLang's receive-reduce-copy (M. Cowan et
 # al., ASPLOS 2023, section 4.2: it "receives a chunk, reduces it with a source chunk, and locally copies it to the
 # destination") by the function's own add; its sum is one range to every other member.  Each partial's transfer is
-# MESH_PAGES: its consumer, the root's combine, is R4's function B ("reductions' partial sums", their combine the add,
+# MESH_PAGES: its consumer, the root's combine, is R4's asynchronous, incomplete, noncontiguous consumer ("reductions' partial sums", their combine the add,
 # associative, Gibbons 1996, and commutative, Meertens's bag homomorphisms, CWI Monographs 1, 1986, as R4 cites them;
 # 2026-11-05, owner T, TC6: where this said "associative and commutative" uncited); the sum's kind is its readers'
 # (_consumer; the coordinator's ruling P3).  A partial and
@@ -1644,7 +1644,7 @@ def _all_reduce(ir, c, groups, key, made):
 # participants following a specified order"): each member's shard one range to every other member, written over its
 # range's pages by torch's copy_ (a range lies on its placed pages, design/disjoint-pages-change-request.md C3.2; the
 # shard is torch's own, A-T4); each receiver's result torch.cat of the shards in the group's order, so each transfer is
-# MESH_JOIN (a cat, R4's function A: the coordinator's ruling P3).  Events: each member's production of its range (its
+# MESH_JOIN (a cat, R4's synchronous, complete, contiguous consumer: the coordinator's ruling P3).  Events: each member's production of its range (its
 # item's sends) and each other member's consumption of it (after arrival)
 # 2026-11-05 (design/aot-compilation-change-request.md, appendix item 7: "have each sent value's producer make it in its
 # sent pages, so nothing copies it there"; design/compilation-coordination.md, "The revisions of e4a7398e", IP): where
@@ -1749,7 +1749,7 @@ def _all_to_all(ir, c, groups, key, made):
 # to a chosen root vertex"), with that member as the root.  Slice q of each member's partial, along tensor dimension
 # `dim` (the record's, TC1), is the slice member q of the group keeps (its place in the device mesh's order, GSPMD
 # section 3.1), one declared transfer p -> q for each other member p, written by torch's copy_ as an AllToAll's piece
-# is.  Each is MESH_PAGES: its consumer, q's combine, is R4's function B ("reductions' partial sums", their combine the
+# is.  Each is MESH_PAGES: its consumer, q's combine, is R4's asynchronous, incomplete, noncontiguous consumer ("reductions' partial sums", their combine the
 # add, as _all_reduce's), MSCCLang's receive-reduce-copy (M. Cowan et al., ASPLOS 2023, section 4.2) by torch.add, q's
 # own slice first and then each landed slice in the group's order (TC5, _all_reduce's root's order); q's result is that
 # sum, a tensor of its own over no page of the plan.  `key` is the members' partials' key, whose sharding their
@@ -1801,7 +1801,7 @@ def _reduce_scatter(ir, c, groups, key, made):
 # member's local value of `key` (a halo's piece, _region; its shape _shape's), written by torch's copy_ as an AllToAll's
 # piece is; the destination's result is a tensor
 # of its own, torch.clone of its arrival, as an AllToAll's is torch.cat's, so it lies over no page of the plan (TC4) and
-# each transfer is MESH_JOIN, its consumer the clone (TC3; the coordinator's ruling P3 names the clone function A).  A
+# each transfer is MESH_JOIN, its consumer the clone (TC3; the coordinator's ruling P3 names the clone a synchronous, complete, contiguous consumer).  A
 # pair p -> p keeps the member's own value, no transfer; a member no pair targets holds "a tensor consisting of 0(s)"
 # of the input's shape (OpenXLA, as above; TC5).  Events as an AllToAll's
 # 2026-11-05, owner T (design/compilation-coordination.md, "The revisions of 46ae8fdf", CP): new, where `lower`
@@ -1828,7 +1828,7 @@ def _reduce_scatter(ir, c, groups, key, made):
 # design/compilation-coordination.md, "The revisions of e4a7398e", CP-1): the destination's result is its arrival's
 # pages, where it was torch.clone of them, so its consumption spans its readers (_readers of `made`, the region's
 # concatenation that reads it), where it ended at the arrival; its kind stays MESH_JOIN, its consumer that
-# concatenation (R4's function A).  What must stay: one transfer a pair
+# concatenation (R4's synchronous, complete, contiguous consumer).  What must stay: one transfer a pair
 # 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 7, and "The
 # revisions of 4e78f6f4"): the halo's piece sent from its place where it is a run of its base's value (_part: a
 # narrow of a value made by an out variant), else copied once (a slice, which has no out variant); the arrival landing

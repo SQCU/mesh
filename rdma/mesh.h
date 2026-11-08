@@ -282,7 +282,7 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    copy (its range's P), each of them one field of its range's group and one arrival on its count.  What must stay:
    offsets 0-51 where they are, 56 bytes
    2026-11-04, owner L2 (the appendix, item 5): `set` and `padding1` appended, where every hop was one of a sequence in
-   the schedule's order.  Why: the pages of function B's operands are written as a set, not a sequence (R4, item 5).
+   the schedule's order.  Why: the pages of asynchronous, incomplete, noncontiguous consumers' operands are written as a set, not a sequence (R4, item 5).
    What must stay: offsets 0-47 as at 110; both ends' entries of a hop the same `set`.
    2026-11-04, owner L2 (review W3's finding 12, the coordinator's ruling; S7′): a set contiguous on its node pair's
    list and permuted per cable, where this note said contiguous on its cable and permuted whole.  Why: the deal spreads
