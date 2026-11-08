@@ -5,20 +5,6 @@ every change request follows is [change-requests.md](change-requests.md).
 
 ## Outstanding
 
-- [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): implemented; checked on this Mac
-  only, since no mesh machine has answered.
-  1. Each function typed and scheduled as plan-to-bridge R3 and R4 write it, on every Apple silicon backend, the CPU
-     included (rewritten 2026-11-08). Implemented in mesh 502bf42c and 8cac6d69 and metal-microbench 3bc0e2a4: the IR's
-     kinds, one task per page for the asynchronous consumer, the same source compiled for the CPU, and each capture
-     weighed by A3's task weights (mesh 14b2061d). Reductions, softmax and attention as R4's homomorphisms, one task
-     per page combined by their sources' ⊕ (design/homomorphism-sources-2026-11-08.md), and a move between backends
-     split into functions ordered by an event: mesh 2abc7125, metal-microbench 71a23822. The all-reduce root's and
-     reduce-scatter's sum of received partials, one task per received page: mesh 3e176a9d.
-  2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d.
-  3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c and
-     metal-microbench e4800f65, 270c6e5f and 43f37e96; the order from the completion-time linear program with each
-     task's length from the weighting operand, in metal-microbench 3b719f10 and mesh 14b2061d.
-  4. Withdrawn 2026-11-08: plan-to-bridge R4 writes this consumer, and item 1 lowers it.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench a8ed7bd6, with a partition a page. Open: holding a run
     of threadgroups for the supplied words of the pages it reads (plan-to-bridge R4), where a8ed7bd6 stops; and C9's
@@ -44,6 +30,20 @@ every change request follows is [change-requests.md](change-requests.md).
 
 ## Implemented
 
+- [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): implemented; checked on this Mac
+  only, since no mesh machine has answered.
+  1. Each function typed and scheduled as plan-to-bridge R3 and R4 write it, on every Apple silicon backend, the CPU
+     included (rewritten 2026-11-08). Implemented in mesh 502bf42c and 8cac6d69 and metal-microbench 3bc0e2a4: the IR's
+     kinds, one task per page for the asynchronous consumer, the same source compiled for the CPU, and each capture
+     weighed by A3's task weights (mesh 14b2061d). Reductions, softmax and attention as R4's homomorphisms, one task
+     per page combined by their sources' ⊕ (design/homomorphism-sources-2026-11-08.md), and a move between backends
+     split into functions ordered by an event: mesh 2abc7125, metal-microbench 71a23822. The all-reduce root's and
+     reduce-scatter's sum of received partials, one task per received page: mesh 3e176a9d.
+  2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d.
+  3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c and
+     metal-microbench e4800f65, 270c6e5f and 43f37e96; the order from the completion-time linear program with each
+     task's length from the weighting operand, in metal-microbench 3b719f10 and mesh 14b2061d.
+  4. Withdrawn 2026-11-08: plan-to-bridge R4 writes this consumer, and item 1 lowers it.
 - [aot-compilation-change-request.md](aot-compilation-change-request.md): A1–A10 are implemented, and its appendix's
   departures were addressed in commits of 2026-11-05. Appendix item 7, the torch path on torch's existing kernels, is
   superseded by the lowering request's item 1.
