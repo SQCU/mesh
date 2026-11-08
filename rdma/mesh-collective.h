@@ -68,6 +68,7 @@ int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_func
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 uint64_t mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
-int mesh_view_values(struct mesh_ctx *,const struct mesh_function *functions,uint32_t count,uint64_t *offset,
-                     struct mesh_view *view);
+/* design/torch-capture-change-request.md item 6 */
+void mesh_view_values(struct mesh_ctx *,const struct mesh_function *functions,uint32_t count,uint64_t *first,
+                      uint64_t *offset,struct mesh_view *view);
 #endif

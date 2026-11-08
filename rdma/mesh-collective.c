@@ -427,7 +427,7 @@ static uint64_t plan_completion(const struct plan *p,const struct plan_demand *d
 enum { PLAN_ALONE, PLAN_LOCAL, PLAN_ROUTED };
 struct plan_item { uint64_t element,blocks; uint32_t kind,function,index,copy,space; };
 struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,elements; uint32_t split,table;
-                        struct mesh_range range[2]; };
+                        struct mesh_range range[2]; uint64_t *at,blocks; uint32_t run,space; };
 
 /* ExecuTorch exir/memory_planning.py, update_tensor_lifetime */
 static int plan_alone(const void *context,uint32_t a,uint32_t b){
@@ -458,13 +458,15 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
     }
     for(uint32_t j=0;j<p->givens;j++){
       const struct mesh_value *v=p->given+j;
-      if((p->named[j]?1u:v->wire)!=space)continue;
+      if(v->run || (p->named[j]?1u:v->wire)!=space)continue;
       const uint32_t kind=v->kind==MESH_EXECUTION && !v->lag?PLAN_LOCAL:PLAN_ALONE;
       p->item[j]=p->uncovered[j]?(uint32_t)x->items:MESH_ABSENT;
       for(uint32_t c=0;p->uncovered[j] && c<plan_copies(p,j);c++)plan_item_put(x,kind,f,j,c,p->uncovered[j],space);
     }
     if(!space){p->state=(uint32_t)x->items;plan_item_put(x,PLAN_ALONE,f,0,0,plan_blocks(m,p->words),0);}
   }
+  /* design/torch-capture-change-request.md item 6; TensorFlow Lite 6cf18d88, tensorflow/lite/arena_planner.cc:433-436 */
+  if(x->blocks && x->space==space){x->run=(uint32_t)x->items;plan_item_put(x,PLAN_ALONE,UINT32_MAX,0,0,x->blocks,space);}
   if(!space){
     x->table=(uint32_t)x->items;
     plan_item_put(x,PLAN_ALONE,UINT32_MAX,0,0,plan_blocks(m,plan_table(count,plans[0].n,places)),0);
@@ -476,41 +478,117 @@ static void plan_items(struct plan *plans,uint32_t count,const struct hdr *m,str
 /* C. Mukerji, M.Sc. thesis, McGill University, 1994, §2.1, §3.1; L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji,
    ACAPS Technical Memo 33, §2.2; M. Lam, PLDI 1988, §2.3; MPI 4.1 §3.7, §3.9;
    S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (1) */
+static void plan_landing(const struct plan *p,uint32_t j,int received,uint32_t far,uint64_t n,uint64_t c,
+                         uint64_t *start,uint64_t *end){
+  const uint64_t u=p->copies,ring=u*n;
+  uint64_t back=p->start_lead,from=0,last=n-1,length;
+  if(j!=MESH_ABSENT){
+    last=p->given[j].end;
+    if(!received){back=p->given[j].lag?p->given[j].lag-1:0;from=p->given[j].lag?0:p->given[j].begin;}
+  }
+  const uint64_t ahead=far-1;
+  const int whole=far==UINT32_MAX || __builtin_mul_overflow(back+ahead,n,&length) ||
+                  __builtin_add_overflow(length,last-from+1,&length) || length>=ring;
+  *start=((c+u-back%u)%u)*n+from;
+  *end=(*start+(whole?ring:length)-1)%ring;
+}
 static int plan_interval(const struct plan *plans,const struct plan_item *x,const uint64_t *operations,uint64_t *start,
                          uint64_t *end){
   if(x->kind!=PLAN_LOCAL && x->kind!=PLAN_ROUTED)return 0;
   const struct plan *p=plans+x->function;
-  const uint64_t n=operations[x->function],u=p->copies,ring=u*n,c=x->copy;
+  const uint64_t n=operations[x->function],c=x->copy;
   if(x->kind==PLAN_LOCAL){
     *start=c*n+p->given[x->index].begin;
     *end=c*n+p->given[x->index].end;
     return 1;
   }
-  uint64_t back=p->start_lead,from=0,last=n-1,length;
   const uint32_t j=p->demand[p->value[p->here[p->member[p->set_first[x->index]]]].demand].mine;
   int received=j==MESH_ABSENT;
   for(uint32_t k=p->set_first[x->index];k<p->set_first[x->index+1];k++)
     received|=p->demand[p->value[p->here[p->member[k]]].demand].source!=p->self;
-  if(j!=MESH_ABSENT){
-    last=p->given[j].end;
-    if(!received){back=p->given[j].lag?p->given[j].lag-1:0;from=p->given[j].lag?0:p->given[j].begin;}
-  }
-  const uint64_t ahead=p->set_far[x->index]-1;
-  const int whole=p->set_far[x->index]==UINT32_MAX || __builtin_mul_overflow(back+ahead,n,&length) ||
-                  __builtin_add_overflow(length,last-from+1,&length) || length>=ring;
-  *start=((c+u-back%u)%u)*n+from;
-  *end=(*start+(whole?ring:length)-1)%ring;
+  plan_landing(p,j,received,p->set_far[x->index],n,c,start,end);
   return 1;
+}
+/* design/torch-capture-change-request.md item 6; L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, ACAPS Technical
+   Memo 33, §2.2; C. Mukerji, M.Sc. thesis, McGill University, 1994, §2.1, §3.1 */
+static void plan_location(const struct plan *p,uint32_t j,uint64_t n,uint64_t c,uint64_t *start,uint64_t *end){
+  const struct mesh_value *v=p->given+j;
+  if(v->kind!=MESH_EXECUTION || v->lag){*start=0;*end=(uint64_t)p->copies*n-1;return;}
+  if(!p->named[j]){*start=c*n+v->begin;*end=c*n+v->end;return;}
+  int received=0;
+  uint32_t far=0;
+  for(uint32_t i=0;i<p->demands;i++){
+    const struct plan_demand *d=p->demand+i;
+    if(d->mine!=j)continue;
+    received|=d->source!=p->self;
+    if(p->farthest[d->value]>far)far=p->farthest[d->value];
+  }
+  plan_landing(p,j,received,far,n,c,start,end);
+}
+struct plan_arcs { const uint64_t *start,*end; const uint32_t *function; };
+static int plan_intersect(const void *context,size_t a,size_t b){
+  const struct plan_arcs *x=context;
+  return x->function[a]!=x->function[b] || mesh_graph_arcs_overlap(x->start[a],x->end[a],x->start[b],x->end[b]);
+}
+/* design/torch-capture-change-request.md item 6; TensorFlow Lite 6cf18d88,
+   tensorflow/lite/delegates/gpu/common/memory_management/greedy_by_size_assignment.cc:68-143 and
+   tensorflow/lite/arena_planner.h:141-149; GaijinEntertainment/DagorEngine 2baf1947,
+   prog/gameLibs/render/daFrameGraph/backend/resourceScheduling/heapLayout.h:19 */
+static int plan_block(struct plan *plans,uint32_t count,const struct hdr *m,const uint64_t *operations,
+                      struct plan_placement *x){
+  size_t records=0;
+  for(uint32_t f=0;f<count;f++)for(uint32_t j=0;j<plans[f].givens;j++)
+    if(plans[f].given[j].run)records+=plan_copies(plans+f,j);
+  uint64_t *size=malloc((records+1)*sizeof *size),*start=malloc((records+1)*sizeof *start),
+           *end=malloc((records+1)*sizeof *end),*offset=malloc((records+1)*sizeof *offset),total=0;
+  uint32_t *function=malloc((records+1)*sizeof *function);
+  x->at=malloc((records+1)*sizeof *x->at);
+  int status=!size || !start || !end || !offset || !function || !x->at?ENOMEM:0;
+  for(uint32_t f=0,r=0;!status && f<count;f++){
+    struct plan *p=plans+f;
+    const uint64_t n=operations[f],ring=(uint64_t)p->copies*n;
+    for(uint32_t j=0;j<p->givens;j++){
+      const struct mesh_value *v=p->given+j;
+      if(!v->run)continue;
+      if(p->named[j] || v->wire)x->space=1;
+      p->item[j]=r;
+      for(uint32_t c=0;c<plan_copies(p,j);c++,r++){
+        uint64_t last;
+        plan_location(p,j,n,c,start+r,&last);
+        end[r]=(last+1)%ring;
+        size[r]=v->section.bytes;
+        function[r]=f;
+      }
+    }
+  }
+  const struct plan_arcs arcs={start,end,function};
+  const uint64_t quantum=plan_quantum(m);
+  if(!status)status=mesh_graph_greedy_by_size(records,size,plan_intersect,&arcs,quantum,offset,&total);
+  for(size_t r=0;!status && r<records;r++)x->at[r]=offset[r]/quantum;
+  if(!status)x->blocks=plan_blocks(m,total);
+  free(size);free(start);free(end);free(offset);free(function);
+  return status;
 }
 static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct plan_placement *x){
   *x=(struct plan_placement){0};
+  uint64_t *operations=malloc(((size_t)count+1)*sizeof *operations);
+  if(!operations)return ENOMEM;
+  for(uint32_t f=0;f<count;f++){
+    operations[f]=1;
+    for(uint32_t j=0;j<plans[f].givens;j++){
+      const struct mesh_value *v=plans[f].given+j;
+      if(v->kind==MESH_EXECUTION && (uint64_t)v->end+1>operations[f])operations[f]=(uint64_t)v->end+1;
+    }
+  }
+  const int blocked=plan_block(plans,count,m,operations,x);
+  if(blocked){free(operations);return blocked;}
   plan_items(plans,count,m,x,1);
   plan_items(plans,count,m,x,0);
-  if(x->items>=UINT32_MAX || x->elements>=SIZE_MAX/sizeof(uint64_t))return ENOMEM;
+  if(x->items>=UINT32_MAX || x->elements>=SIZE_MAX/sizeof(uint64_t)){free(operations);return ENOMEM;}
   x->item=malloc(((size_t)x->items+1)*sizeof *x->item);
   x->count=malloc(((size_t)x->items+1)*sizeof *x->count);
   x->chain=malloc(((size_t)x->elements+1)*sizeof *x->chain);
-  if(!x->item || !x->count || !x->chain)return ENOMEM;
+  if(!x->item || !x->count || !x->chain){free(operations);return ENOMEM;}
   x->items=x->elements=0;
   plan_items(plans,count,m,x,1);
   x->split=(uint32_t)x->items;
@@ -519,18 +597,11 @@ static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct pla
   x->range[0]=mesh_arena_range(m,0);
   const int one=x->range[0].first==x->range[1].first && x->range[0].count==x->range[1].count;
   const uint32_t first[3]={0,one?(uint32_t)x->items:x->split,(uint32_t)x->items};
-  uint64_t *operations=malloc(((size_t)count+1)*sizeof *operations),*counts=malloc(((size_t)x->items+1)*sizeof *counts),
+  uint64_t *counts=malloc(((size_t)x->items+1)*sizeof *counts),
            *start=malloc(((size_t)x->items+1)*sizeof *start),*end=malloc(((size_t)x->items+1)*sizeof *end),
            *out=malloc(((size_t)x->elements+1)*sizeof *out);
   uint32_t *index=malloc(((size_t)x->items+1)*sizeof *index);
-  int status=!operations || !counts || !start || !end || !out || !index?ENOMEM:0;
-  for(uint32_t f=0;!status && f<count;f++){
-    operations[f]=1;
-    for(uint32_t j=0;j<plans[f].givens;j++){
-      const struct mesh_value *v=plans[f].given+j;
-      if(v->kind==MESH_EXECUTION && (uint64_t)v->end+1>operations[f])operations[f]=(uint64_t)v->end+1;
-    }
-  }
+  int status=!counts || !start || !end || !out || !index?ENOMEM:0;
   for(uint32_t s=0;!status && s<2;s++){
     if(first[s]==first[s+1])continue;
     uint64_t blocks=0;
@@ -564,9 +635,10 @@ static uint32_t plan_page(const struct plan_placement *x,uint32_t block,uint32_t
   return (uint32_t)(x->range[x->item[i].space].first+x->chain[x->item[i].element+k]*block);
 }
 
-/* design/plan-to-bridge-change-request.md R2 */
+/* design/plan-to-bridge-change-request.md R2; design/torch-capture-change-request.md item 6 */
 static uint32_t plan_frame(const struct plan *p,const struct plan_placement *x,uint32_t block,uint32_t j,uint32_t c,
                            uint32_t k){
+  if(p->given[j].run)return plan_page(x,block,x->run,x->at[p->item[j]+c]+k);
   if(p->block_first[j]==MESH_ABSENT)return plan_page(x,block,p->item[j]+c,k);
   const uint32_t at=p->block_first[j]+k,s=p->block_set[at];
   return plan_page(x,block,s==MESH_ABSENT?p->item[j]+c:p->set_item+s*p->copies+c,p->block_element[at]);
@@ -1217,14 +1289,14 @@ static int plan_cover_order(const void *a,const void *b){
   return (x->block>y->block)-(x->block<y->block);
 }
 /* P. Druschel and L. L. Peterson, Fbufs, SOSP 1993; V. S. Pai, P. Druschel and W. Zwaenepoel, IO-Lite, ACM TOCS 18(1),
-   2000; design/disjoint-pages-change-request.md C3.3 */
+   2000; design/disjoint-pages-change-request.md C3.3; design/torch-capture-change-request.md item 6 */
 static int plan_sets(struct plan *p,const struct hdr *m){
   const uint64_t quantum=plan_quantum(m);
   uint64_t blocks=0,touches=0,relays=0;
   if(!(p->block_first=malloc(((size_t)p->givens+1)*sizeof *p->block_first)))return ENOMEM;
   for(uint32_t j=0;j<p->givens;j++){
     p->block_first[j]=MESH_ABSENT;
-    if(!p->named[j])continue;
+    if(!p->named[j] || p->given[j].run)continue;
     p->block_first[j]=(uint32_t)blocks;
     if((blocks+=plan_blocks(m,p->given[j].section.bytes))>=UINT32_MAX)return ENOMEM;
   }
@@ -1232,7 +1304,7 @@ static int plan_sets(struct plan *p,const struct hdr *m){
     const struct plan_demand *d=p->demand+i;
     if(d->value==MESH_ABSENT)continue;
     if(d->mine==MESH_ABSENT)relays++;
-    else touches+=d->instructions;
+    else if(!p->given[d->mine].run)touches+=d->instructions;
   }
   struct plan_touch *touch=malloc((touches+1)*sizeof *touch);
   struct plan_cover *cover=malloc((blocks+1)*sizeof *cover);
@@ -1244,7 +1316,7 @@ static int plan_sets(struct plan *p,const struct hdr *m){
   uint64_t t=0,covers=0,members=0;
   for(uint32_t i=0;i<p->demands;i++){
     const struct plan_demand *d=p->demand+i;
-    if(d->mine==MESH_ABSENT)continue;
+    if(d->mine==MESH_ABSENT || p->given[d->mine].run)continue;
     for(uint64_t k=0;k<d->instructions;k++){
       const uint64_t at=p->at[d->at+k];
       touch[t++]=(struct plan_touch){at,at+p->cut[d->cut+k+1]-p->cut[d->cut+k],d->mine,d->value};
@@ -1709,7 +1781,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
   mesh_notify(&m->plans);
 done:
   for(uint32_t f=0;plans && f<count;f++)plan_free(plans+f);
-  free(plans);free(row);free(order);free(placed.item);free(placed.count);free(placed.chain);free(page);
+  free(plans);free(row);free(order);free(placed.item);free(placed.count);free(placed.chain);free(placed.at);free(page);
   free(adjacency);free(toward);free(place);free(rows_by);free(listed);
   return status;
 }

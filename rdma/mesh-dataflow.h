@@ -29,11 +29,8 @@ void mesh_retire(struct hdr *,uint64_t client);
    NVIDIA, CUDA Programming Guide §4.2.3.1, cudaGraphExecDestroy() */
 void mesh_plan_retire(struct mesh_ctx *,uint64_t plan);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
-/* design/plan-to-bridge-change-request.md R2; sys/mman.h:247 mmap; mach/mach_vm.h:270 mach_vm_remap */
+/* design/torch-capture-change-request.md item 6 */
 struct mesh_view { void *address; size_t bytes; };
-int mesh_view_compose(struct mesh_ctx *,const uint32_t *rows,size_t count,struct mesh_view *view);
-/* sys/mman.h:256 munmap */
-void mesh_view_release(struct mesh_view);
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 /* P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004;

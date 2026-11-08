@@ -6,8 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -74,60 +72,33 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
   }
 }
 
-/* design/plan-to-bridge-change-request.md R2; sys/mman.h mmap, munmap; mach/mach_vm.h mach_vm_remap;
-   mach/vm_statistics.h VM_FLAGS_FIXED, VM_FLAGS_OVERWRITE; mach/vm_inherit.h VM_INHERIT_NONE; mach/kern_return.h */
-int mesh_view_compose(struct mesh_ctx *c,const uint32_t *rows,size_t count,struct mesh_view *view){
-  *view=(struct mesh_view){NULL,0};
-  if(!count)return 0;
+/* design/torch-capture-change-request.md item 6; TensorFlow Lite 6cf18d88,
+   tensorflow/lite/delegates/gpu/common/memory_management.h:130-131 and tensorflow/lite/simple_memory_arena.cc:441-445 */
+static uint64_t mesh_view_row(struct hdr *m,const struct mesh_value *v,uint32_t copy){
+  return atomic_load_explicit(&mesh_page(m)[v->section.first+copy*v->section.stride].address,memory_order_relaxed);
+}
+void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,uint32_t count,uint64_t *first,
+                      uint64_t *offset,struct mesh_view *view){
   struct hdr *m=c->M;
-  const size_t block=(size_t)m->block*m->pgsz,bytes=count*block;
-  char *base=mmap(NULL,bytes,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
-  if(base==MAP_FAILED)return errno;
-  for(size_t k=0,run;k<count;k+=run){
-    mach_vm_address_t at=(mach_vm_address_t)(uintptr_t)(base+k*block);
-    const uint64_t first=atomic_load_explicit(&mesh_page(m)[rows[k]].address,memory_order_relaxed);
-    for(run=1;k+run<count &&
-              atomic_load_explicit(&mesh_page(m)[rows[k+run]].address,memory_order_relaxed)==first+run*block;run++);
-    const uintptr_t source=(uintptr_t)m+first;
-    vm_prot_t current,maximum;
-    const kern_return_t mapped=mach_vm_remap(mach_task_self(),&at,run*block,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,
-                                             mach_task_self(),source,FALSE,&current,&maximum,VM_INHERIT_NONE);
-    if(mapped!=KERN_SUCCESS){
-      munmap(base,bytes);
-      return mapped==KERN_NO_SPACE || mapped==KERN_RESOURCE_SHORTAGE?ENOMEM:EINVAL;
-    }
-  }
-  *view=(struct mesh_view){base,bytes};
-  return 0;
-}
-/* sys/mman.h munmap */
-void mesh_view_release(struct mesh_view view){
-  if(view.address)munmap(view.address,view.bytes);
-}
-int mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,uint32_t count,uint64_t *offset,
-                     struct mesh_view *view){
-  const size_t block=(size_t)c->M->block*c->M->pgsz;
-  size_t rows=0,values=0;
+  const uint64_t block=(uint64_t)m->block*m->pgsz;
+  uint64_t low=UINT64_MAX,high=0,at=0,values=0;
   for(uint32_t f=0;f<count;f++)
-    for(uint32_t i=0;i<functions[f].values;i++,values++){
-      const struct mesh_section s=functions[f].value[i].section;
-      offset[values]=functions[f].value[i].run?rows*block:UINT64_MAX;
-      if(functions[f].value[i].run)rows+=(size_t)s.count*s.stride;
-    }
-  uint32_t *row=malloc((rows?rows:1)*sizeof *row);
-  int error=row?0:ENOMEM;
-  for(uint32_t f=0,at=0;!error && f<count;f++)
     for(uint32_t i=0;i<functions[f].values;i++){
-      const struct mesh_section s=functions[f].value[i].section;
-      for(uint32_t k=0;functions[f].value[i].run && k<s.count*s.stride;k++)row[at++]=s.first+k;
+      const struct mesh_value *v=functions[f].value+i;
+      for(uint32_t k=0;v->run && k<v->section.count;k++){
+        const uint64_t a=mesh_view_row(m,v,k),z=a+(uint64_t)v->section.stride*block;
+        if(a<low)low=a;
+        if(z>high)high=z;
+      }
     }
-  if(!error)error=mesh_view_compose(c,row,rows,view);
-  free(row);
-  if(error){
-    *view=(struct mesh_view){NULL,0};
-    for(size_t i=0;i<values;i++)offset[i]=UINT64_MAX;
-  }
-  return error;
+  for(uint32_t f=0;f<count;f++)
+    for(uint32_t i=0;i<functions[f].values;i++){
+      const struct mesh_value *v=functions[f].value+i;
+      first[values++]=at;
+      for(uint32_t k=0;k<v->section.count;k++)offset[at++]=v->run?mesh_view_row(m,v,k)-low:UINT64_MAX;
+    }
+  first[values]=at;
+  *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
 }
 
 /* design/algorithm-sources.md#device-operands */
