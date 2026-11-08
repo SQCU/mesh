@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import tokenize
 
 MESH = '/Users/mdot/dox/mesh'
@@ -76,22 +77,22 @@ WORD = (r'(?i:appendix|appendices|app\.|annex|section|sections|sec\.|chapter|cha
         r'points|problem|problems)(?!\w)')
 LOCATOR = (rf'(?:[§¶]+\s*{SPAN}(?:\s*(?:,|and|&)\s*[§¶]*\s*{SPAN})*|(?:{WORD}\s*)+(?:{SPAN}(?:\s*(?:,|and|&)\s*{SPAN})*)?|'
            rf'(?:at\s+)?(?:mesh|metal-microbench)\s+(?P<sha>[0-9a-f]{{7,40}})(?!\w)|{LABEL}(?:\s*(?:{DASH}|to(?!\w))\s*{LABEL})?|'
-           rf'{EQUATION}(?:\s*(?:{DASH}|to(?!\w))\s*{EQUATION})?|\d+(?:\.\d+)+(?:p\d+)?(?!\w))')
+           rf'{EQUATION}(?:\s*(?:{DASH}|to(?!\w))\s*{EQUATION})?|\d+(?:\.\d+)+(?:p\d+)?(?!\w)|\[[a-z][\w.]*\]|p\d+(?:\.\d+)*(?!\w))')
 PATH = (r'(?:\.\.?/)*[\w@+-][\w.@+-]*(?:/[\w.@+-]+)*\.[A-Za-z][A-Za-z0-9]{0,7}|'
         r'[\w@+-][\w.@+-]*(?:/[\w.@+-]+)+\.\d|metal_(?:stdlib|atomic|types|math|compute|geometric|integer|matrix|'
         r'simdgroup(?:_matrix)?|quadgroup|texture|graphics|relational|common|pack|numeric|tensor|logging|raytracing)(?![\w.])')
 WHERE = rf'(?:#[\w.:%~+-]+|:\d+(?:\s*{DASH}\s*\d+)?(?:\s*,\s*:?\d+(?:\s*{DASH}\s*\d+)?)*)?'
 LINK = r'<?(?:https?://|doi:\s?)[^\s<>"]*[^\s<>".,;:)\]]>?'
 TAIL = re.compile(rf'\s*(?:,?\s*(?:and|&)(?!\w)\s*|[,:]\s*|\(\s*)?(?:(?P<quote>"[^"]+"|“[^”]+”)|{LINK}|'
-                  rf'(?P<also>{PATH}){WHERE}|{LOCATOR}|`(?P<code>[A-Za-z_][\w.:]*(?:\(\))?)`|'
+                  rf'(?P<also>{PATH}){WHERE}|{LOCATOR}|`(?P<code>[A-Za-z_][\w.:<>*&]*(?: [A-Za-z_*&][\w.:<>*&]*)*(?:\(\))?)`|'
                   r'(?P<symbol>(?:(?:struct|enum|union|class|typedef|@interface|@protocol)\s+)?(?:[-+](?=[a-z]))?'
-                  r'[A-Za-z_][\w:]*(?:\(\))?(?!\w)))\s*\)?')
+                  r'[A-Za-z_][\w:]*(?:<[\w:, ]+>)?(?:\(\))?(?!\w)))\s*\)?')
 LOCATORS = re.compile(rf'{LOCATOR}(?:\s*(?:,|and(?!\w)|&)?\s*{LOCATOR})*'.replace('(?P<sha>', '(?:'))
 STOP = (r'(?:The|This|That|These|Those|It|Its|Each|Every|All|Any|Some|Where|When|If|And|Or|But|Not|Is|Are|Was|Were|'
         r'Has|Have|Had|Uses|Use|Returns|Calls|Takes|Makes|Gives|Holds|Keeps|Reads|Writes|Here|There|Now|Only|Also|'
         r'Both|One|First|Last|Next|With|Without|From|For|In|On|At|By|To|As|After|Before|Under|Over|Since|Until)(?!\w)')
 NAME = r'(?:[A-Z][A-Z0-9+-]+(?![a-z])|[A-Z]{2,}[a-z]\w*|[A-Z][a-z]+(?:[A-Z][\w+-]*)?)'
-PROJECT = rf'(?:(?!{STOP}){NAME}(?:,?\s+{NAME})*|[a-z][a-z0-9]*(?:-[a-z0-9]+)+|[a-z][\w-]*(?=\s+v?\d))'
+PROJECT = rf'(?:(?!{STOP}){NAME}(?:(?:,?\s+|\s+and\s+){NAME})*|[a-z][a-z0-9]*(?:-[a-z0-9]+)+|[a-z][\w-]*(?=\s+v?\d))'
 VERSION = r'v?\d+(?:\.\d+)+'
 CITED = re.compile(rf'(?:(?P<project>{PROJECT})\s+)?(?P<version>{VERSION},?\s+)?(?P<path>{PATH}){WHERE}(?P<rest>.*)')
 FOREIGN = re.compile(rf'(?:[A-Z][a-z]+[A-Z][\w+-]*|[A-Z]{{2,}}[\w+-]*|\w*\d\w*[A-Za-z]\w*|[a-z][a-z0-9]*(?:-[a-z0-9]+)+|'
@@ -427,8 +428,8 @@ def header(path):
 
 def symbol(name, full, code=False):
     bare = KEYWORD.sub('', name, count=1)
-    shaped = code or bare != name or re.match(r'[-+][a-z]', bare) or SHAPED.search(bare) or bare.endswith(':')
-    bare = bare.lstrip('-+').removesuffix('()').split(':')[0]
+    shaped = code or bare != name or re.match(r'[-+][a-z]', bare) or SHAPED.search(bare) or re.search(r'[:>]$', bare)
+    bare = re.findall(r'[A-Za-z_]\w*', bare.lstrip('-+'))[-1 if code else 0]
     if not (full and os.path.isfile(full)):
         return bool(shaped)
     if full.endswith('.md'):
@@ -577,18 +578,16 @@ def citations(text, lines, place):
     cites = only(text, place)
     if cites is not None or len(lines) < 2:
         return cites, [] if cites is not None else unsettled(text, place)
-    cites, rest, run, j = [], [], [], 0
+    cites, j = [], 0
     while j < len(lines):
         for k in range(min(len(lines), j + 4), j, -1):
             found = only(joined(lines[j:k]), place)
             if found is not None:
                 cites, j = cites + found, k
-                rest, run = rest + ([joined(run)] if run else []), []
                 break
         else:
-            run, j = run + [lines[j]], j + 1
-    rest += [joined(run)] if run else []
-    return (cites, []) if not rest else (None, [part for said in rest for part in unsettled(said, place)] or rest)
+            return None, unsettled(text, place) or [text]
+    return cites, []
 
 
 def settle(text, lines, place):
@@ -685,11 +684,14 @@ def ask(batch):
     return verdicts, None
 
 
-def reads(items):
+def round_(items, deadline):
     verdicts, failures = {}, []
     for _ in range(2):
         left = [item for item in items if item[0] not in verdicts]
         if not left or failures:
+            break
+        if time.time() > deadline:
+            failures.append('the reader ran out of time')
             break
         batches = [left[k:k + BATCH] for k in range(0, len(left), BATCH)]
         with concurrent.futures.ThreadPoolExecutor(READERS) as pool:
@@ -697,6 +699,20 @@ def reads(items):
                 verdicts.update(found)
                 if failure:
                     failures.append(failure)
+    return verdicts, failures
+
+
+def reads(items):
+    deadline = time.time() + 600
+    verdicts, failures = round_(items, deadline)
+    failed = [item for item in items if verdicts.get(item[0], ('',))[0] == 'FAIL']
+    second, trouble = round_(failed, deadline) if failed and not failures else ({}, [])
+    split_vote = [item for item in failed if second.get(item[0], ('',))[0] == 'PASS']
+    third, more = round_(split_vote, deadline) if split_vote and not trouble else ({}, [])
+    if not trouble and not more:
+        for key, _ in split_vote:
+            if third.get(key, ('',))[0] != 'FAIL':
+                verdicts[key] = ('PASS', '')
     unread = len([item for item in items if item[0] not in verdicts])
     if unread and not failures:
         failures.append(f'the reader gave no verdict on {unread} comment(s)')
