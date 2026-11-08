@@ -18,6 +18,7 @@ from torch._export.passes.remove_runtime_assertions import _RemoveRuntimeAsserti
 from torch._library._out_variant import _is_functional, get_out_arg_names, to_out_variant
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.node import Node, map_arg
+from torch.fx.passes.split_module import split_module
 
 import mesh
 import mesh_graph
@@ -66,7 +67,7 @@ class IR:
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
         self.publishes, self.inputs, self.declares, self.waits = {}, {}, {}, {}
-        self.attributes, self.loads, self.kinds, self.page, self.tasks = {}, set(), {}, None, 0
+        self.attributes, self.loads, self.kinds, self.page, self.tasks, self.hull = {}, set(), {}, None, 0, None
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
 
     # GSPMD section 3.1
@@ -610,13 +611,15 @@ def _partition(ir, operators):
 
 
 # design/aot-compilation-change-request.md A2 and A4; GSPMD sections 3, 3.1 and 4.6
-def partition(gm, placement, nodes):
+def partition(gm, placement, nodes, page):
     if not isinstance(placement, Placement):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
     ir, operators, annotated = IR(gm, placement, nodes), {}, set()
+    ir.page = page
     for node in ir.order:
         if node.op == 'call_function':
-            ir.locals[node] = Local(node.op, node.target, node.args, node.kwargs)
+            ir.locals[node] = Local(node.op, node.target, node.args, {k: v for k, v in node.kwargs.items() if k != 'device'}
+                                    if getattr(node.target, 'overloadpacket', None) is A._to_copy else node.kwargs)
             operators[node] = _operator(node, ir.locals[node])
         if node.op != 'output':
             ir.sharding[node] = (-1,) * _value(node).dim() if isinstance(node.meta.get('val'), torch.Tensor) else None
@@ -776,23 +779,35 @@ COPIES = {A.clone, A._to_copy, A._unsafe_view}
 def _whole(ir, places, items, key):
     place = places.get(key)
     if place is None:
-        return items[key][0] == 'input' and _value(key[0]).is_contiguous()
+        return items[key][0] in ('input', 'call') and len(key) == 2 \
+            and isinstance(key[0].meta.get('val'), torch.Tensor) and key[0].meta['val'].is_contiguous()
     shape = _layout(ir, place.owner)[1]
     return place.offset == 0 and place.sizes == shape and place.strides == _contiguous(shape)
 
 
 def _paged(ir, places, items, key, reads, local):
     packet = getattr(local.target, 'overloadpacket', None)
-    if packet not in POINTWISE and packet is not A.copy and packet not in COPIES or not reads \
-            or not all(isinstance(k[0].meta.get('val'), torch.Tensor) for k in (key, *reads)):
+    if not reads or not all(isinstance(k[0].meta.get('val'), torch.Tensor) for k in (key, *reads)) \
+            or places.get(key) is not None and places[key].owner != key \
+            or places.get(key) is None and packet is not A.scaled_dot_product_attention:
         return False
     dtype, shape = _layout(ir, key)
+    if packet in REDUCTIONS:
+        return _whole(ir, places, items, reads[0])
+    if packet in SOFTMAX:
+        return _layout(ir, reads[0]) == (dtype, shape) and _whole(ir, places, items, reads[0])
+    if packet is A.scaled_dot_product_attention:
+        (kd, ks), (vd, vs) = _layout(ir, reads[1]), _layout(ir, reads[2])
+        nk, nv = ir.page // kd.itemsize, ir.page // vd.itemsize
+        return nk % ks[-1] == 0 and nv % vs[-1] == 0 and nk // ks[-1] == nv // vs[-1] \
+            and _whole(ir, places, items, reads[1]) and _whole(ir, places, items, reads[2])
+    if packet not in POINTWISE and packet is not A.copy and packet not in COPIES:
+        return False
     for operand, size in (_layout(ir, k) for k in reads):
         if operand.itemsize != dtype.itemsize or (math.prod(size) != math.prod(shape) if packet in COPIES
                                                   else size != shape):
             return False
-    return places.get(key) is not None and places[key].owner == key \
-        and all(_whole(ir, places, items, k) for k in (key, *reads))
+    return all(_whole(ir, places, items, k) for k in (key, *reads))
 
 
 def _kinds(ir):
@@ -820,11 +835,18 @@ def _readers(ir, roots, default):
 # design/plan-to-bridge-change-request.md R4 and R6; design/aot-compilation-change-request.md A8 and appendix item 5;
 # design/torch-source-lowering-change-request.md item 1
 def _consumer(ir, roots):
-    def read(g):
-        return [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())] if isinstance(g, int) else []
-    joined = [g for g, item in enumerate(ir.program) if ir.kinds.get(item[2]) != mesh.PAGES]
-    return mesh.PAGES if roots & mesh_graph.reach(range(len(ir.program)), read) \
-        and not roots & mesh_graph.reach(joined, read) else mesh.JOIN
+    def read(whole):
+        def reads(g):
+            if not isinstance(g, int):
+                return []
+            _, keys, key, operand = ir.program[g]
+            if whole and ir.kinds.get(key) == mesh.PAGES:
+                paged = _paging(ir.locals[operand].target)[0]
+                keys = [] if paged is None else [k for j, k in enumerate(keys) if j not in paged]
+            return [owner for k in keys for owner in ir.over.get(k, ())]
+        return reads
+    return mesh.PAGES if roots & mesh_graph.reach(range(len(ir.program)), read(False)) \
+        and not roots & mesh_graph.reach(range(len(ir.program)), read(True)) else mesh.JOIN
 
 
 # design/plan-to-bridge-change-request.md R1; design/aot-compilation-change-request.md, appendix item 7;
@@ -1186,12 +1208,15 @@ def _runs(ir, places):
         kind, reads, key, operand = ir.program[g]
         form = ir.forms.get(key) if kind == 'call' else None
         written = [result for _, result in form[1]] if isinstance(form, tuple) else [key]
+        if ir.kinds.get(key) == mesh.PAGES:
+            paged, pages = _paging(ir.locals[operand].target)
+            reads = [] if paged is None else [k for j, k in enumerate(reads) if j not in paged]
+            written = [] if pages else written
         parts = [part[0] for _, part in ir.roles[operand][1] if part is not None] if kind == 'collective' else []
         return [owner for k in reads for owner in ir.over.get(k, ())] \
             + [places[k].owner for k in written + parts if k is not None and places.get(k) is not None]
     synchronous = [g for g, (kind, _, key, operand) in enumerate(ir.program)
-                   if not (ir.kinds.get(key) == mesh.PAGES or kind in ('input', 'constant', 'slice', 'narrow')
-                           or kind == 'window' and key not in ir.inside
+                   if not (kind in ('input', 'constant', 'slice', 'narrow') or kind == 'window' and key not in ir.inside
                            or kind == 'collective' and _local(ir, operand) is None)]
     run = mesh_graph.reach(synchronous, accessed) | set(ir.loads)
     for key, v in ir.owned.items():
@@ -1534,7 +1559,7 @@ def _dispatch(name, count, *arguments):
     devices = {value.device.type for value in arguments if isinstance(value, torch.Tensor)}
     if count >= 1 << 32:
         raise NotImplementedError('%s over %d elements: past a grid\'s 32-bit thread position' % (name, count))
-    if not count or devices == {'meta'}:
+    if not count or 'meta' in devices:
         return []
     if devices == {'cpu'}:
         return [_grid(name, count, arguments)]
@@ -1839,9 +1864,10 @@ def _factory(target, given, outs):
 
 # PyTorch 2.14 documentation, torch.sum, torch.mean, torch.amax and torch.amin
 REDUCTIONS = {A.sum: 0, A.mean: 1, A.amax: 2, A.amin: 3}
+WHOLE = 1 << 62
 
 
-def _reduced(target, given, outs):
+def _reduced(target, given, outs, data=None, page=(0, WHOLE, 0)):
     (out,), x = outs, given['self']
     _typed(target, [x], outs, ELEMENTS)
     dims = given.get('dim')
@@ -1850,8 +1876,8 @@ def _reduced(target, given, outs):
     strides = [out.stride(d) for d in free] if given.get('keepdim') else list(out.stride())
     g = [ELEMENTS[out.dtype], ELEMENTS[x.dtype], REDUCTIONS[target.overloadpacket], int(out.dtype in INTEGRAL), len(free),
          len(dims), *[x.shape[d] for d in free], *strides, *[x.stride(d) for d in free], *[x.shape[d] for d in dims],
-         *[x.stride(d) for d in dims]]
-    return _dispatch('reduce', out.numel(), out, x, g)
+         *[x.stride(d) for d in dims], *page]
+    return _dispatch('reduce', out.numel(), out, x if data is None else data, g)
 
 
 def _lines(x, out, d):
@@ -1864,12 +1890,14 @@ def _lines(x, out, d):
 SOFTMAX = {A.softmax: 0, A._softmax: 0, A.log_softmax: 1, A._log_softmax: 1}
 
 
-def _softened(target, given, outs):
+def _softened(target, given, outs, data=None, page=(0, WHOLE, 0), stats=None):
     (out,), x = outs, given['self']
     _typed(target, [x], outs)
     lines = _lines(x, out, given['dim'] % max(x.dim(), 1))
-    return _dispatch('softmax', x.numel() // max(lines[0], 1), out, x,
-                     [ELEMENTS[out.dtype], ELEMENTS[x.dtype], SOFTMAX[target.overloadpacket], *lines])
+    made, read = data if data is not None else (out, x)
+    return _dispatch('softmax', x.numel() // max(lines[0], 1), made, read,
+                     [ELEMENTS[out.dtype], ELEMENTS[x.dtype], SOFTMAX[target.overloadpacket], *lines, *page],
+                     stats if stats is not None else made)
 
 
 # PyTorch 2.14 documentation, torch.cumsum
@@ -2053,7 +2081,7 @@ def _scattered(target, given, outs):
 
 
 # PyTorch 2.14 documentation, torch.nn.functional.scaled_dot_product_attention
-def _attended(target, given, outs):
+def _attended(target, given, outs, data=None, page=(0, WHOLE, 0, 0), stats=None):
     (out,), q, k, v, mask = outs, given['query'], given['key'], given['value'], given['attn_mask']
     _typed(target, [q, k, v, mask], outs)
     if given['dropout_p']:
@@ -2069,9 +2097,11 @@ def _attended(target, given, outs):
          ELEMENTS[mask.dtype] if mask is not None else -1, int(given['is_causal']), length, other, size, value, group, n,
          *lead, *[t.stride()[j] if t is not None else 0 for t in (out, q, keys, values, masks) for j in range(n)],
          *out.stride()[-2:], *q.stride()[-2:], *keys.stride()[-2:], *values.stride()[-2:],
-         *(masks.stride()[-2:] if masks is not None else (0, 0))]
+         *(masks.stride()[-2:] if masks is not None else (0, 0)), *page]
     scale = given['scale'] if given['scale'] is not None else 1 / math.sqrt(size)
-    return _dispatch('attention', out.numel(), out, q, k, v, mask if mask is not None else q, g, [float(scale)])
+    keyed, valued = data if data is not None else (k, v)
+    return _dispatch('attention', out.numel(), out, q, keyed, valued, mask if mask is not None else q, g, [float(scale)],
+                     stats if stats is not None else out)
 
 
 # PyTorch 2.14 documentation, torch.cat
@@ -2122,15 +2152,103 @@ def _devices(node):
 
 
 def _sourced(gm):
+    moves = False
     for node in gm.graph.nodes:
         if node.op == 'call_function':
             _lowering(Local(node.op, node.target, node.args, node.kwargs))
-            devices = _devices(node)
-            if len(devices) > 1:
-                raise NotImplementedError('%s (%s) moves a value between the %s inside one function: design/torch-'
-                                          'source-lowering-change-request.md item 1 types and schedules a function on '
-                                          'the backend it is placed on, and names no backend for a move between two'
-                                          % (node.name, node.target, ' and the '.join(sorted(devices))))
+            moves = moves or len(_devices(node)) > 1
+    return moves
+
+
+# design/aot-compilation-change-request.md A2; design/torch-source-lowering-change-request.md items 1 and 3; torch 2.14.0
+# torch/fx/passes/split_module.py, split_module
+def _parts(gm):
+    def device(node):
+        found = [v.device.type for v in pytree.tree_leaves(node.meta.get('val')) if isinstance(v, torch.Tensor)]
+        return found[0] if found else None
+    stages = mesh_graph.forward(list(gm.graph.nodes), lambda node: node.all_input_nodes,
+                                lambda node, stages: max(stages, default=0)
+                                + (node.op == 'call_function' and len(_devices(node)) > 1))
+    keys = {}
+    for node in gm.graph.nodes:
+        if node.op not in ('placeholder', 'get_attr', 'output'):
+            keys[node] = (stages[node], device(node) or next((keys[i][1] for i in node.all_input_nodes if i in keys),
+                                                             None))
+    ids = {key: j for j, key in enumerate(dict.fromkeys(keys.values()))}
+    return {node: ids[key] for node, key in keys.items()}, {j: key[1] for key, j in ids.items()}
+
+
+def _restricted(placement):
+    def placed(gm, examples):
+        made = placement(gm, examples)
+        names = {node.name for node in gm.graph.nodes if node.op == 'placeholder'}
+        return made._replace(splits={k: v for k, v in made.splits.items() if k in names}) \
+            if isinstance(made, Placement) else made
+    return placed
+
+
+def _replaced(graph, node, value):
+    values = {node: value}
+
+    def taken(at):
+        users = [user for user in at.users if user.op == 'call_function' and user.target is operator.getitem
+                 and isinstance(values[at], (tuple, list))]
+        values.update({user: values[at][user.args[1]] for user in users})
+        return users
+    order = mesh_graph.walk([node], taken)
+    for at in order:
+        for user in [user for user in at.users if user not in values]:
+            if isinstance(values[at], Node):
+                user.replace_input_with(at, values[at])
+            else:
+                user.args = pytree.tree_map(lambda a: values[at] if a is at else a, user.args)
+                user.kwargs = pytree.tree_map(lambda a: values[at] if a is at else a, user.kwargs)
+    for at in reversed(order):
+        graph.erase_node(at)
+
+
+def _split(gm, exporter):
+    made = {}
+    for n in list(gm.graph.nodes):
+        k = exporter.of.get(n)
+        if k is None or not exporter.compiled[k].moves:
+            continue
+        record = exporter.compiled[k]
+        if k not in made:
+            assignment, devices = _parts(record.gm)
+            parent = split_module(record.gm, record.gm, lambda node: assignment.get(node, 0), keep_original_order=True)
+            for p in [p for p in parent.graph.nodes if p.op == 'call_module']:
+                part, held = getattr(parent, p.target), [a for a in p.args if isinstance(a, Node) and a.op == 'get_attr']
+                inputs = [q for q in part.graph.nodes if q.op == 'placeholder']
+                for a, q in zip(p.args, inputs):
+                    if a in held:
+                        setattr(part, 'held_' + a.target.replace('.', '_'), operator.attrgetter(a.target)(parent))
+                        with part.graph.inserting_before(next(r for r in part.graph.nodes if r.op != 'placeholder')):
+                            q.replace_all_uses_with(part.graph.get_attr('held_' + a.target.replace('.', '_')))
+                        part.graph.erase_node(q)
+                p.args = tuple(a for a in p.args if a not in held)
+                part.recompile()
+            names = {}
+            for name, part in parent.named_children():
+                names[name] = '%s_%d_%s' % (n.target.replace('.', '_'), k, name)
+                gm.add_submodule(names[name], Function(part, _restricted(record.function.placement),
+                                                       record.function.weights, devices[int(name.split('_')[-1])]))
+            made[k] = parent, names
+        parent, names = made[k]
+        env = dict(zip([p for p in parent.graph.nodes if p.op == 'placeholder'],
+                       pytree.tree_flatten((n.args, n.kwargs))[0]))
+        with gm.graph.inserting_before(n):
+            for p in parent.graph.nodes:
+                if p.op == 'call_module':
+                    env[p] = gm.graph.call_module(names[p.target], map_arg(p.args, env.__getitem__),
+                                                  map_arg(p.kwargs, env.__getitem__))
+                elif p.op == 'call_function':
+                    env[p] = gm.graph.call_function(p.target, map_arg(p.args, env.__getitem__),
+                                                    map_arg(p.kwargs, env.__getitem__))
+                elif p.op == 'output':
+                    result = pytree.tree_unflatten(list(map_arg(p.args[0], env.__getitem__)), record.spec)
+        _replaced(gm.graph, n, result)
+    gm.recompile()
 
 
 # dlpack.h DLManagedTensorVersioned `deleter`; torch v2.14.0 torch/csrc/utils/tensor_new.cpp tensor_fromDLPackImpl,
@@ -2299,8 +2417,7 @@ def _metas(value):
                            if isinstance(v, torch.Tensor) else v, value)
 
 
-def _launched(ir, local, arguments, dynamic, outs):
-    lower = _lowering(local)
+def _launched(ir, lower, arguments, dynamic, outs):
     lower(*_metas(arguments(_Stand(ir) if dynamic else None)), _metas(outs))
     if not dynamic:
         thunks = lower(*arguments(None), outs)
@@ -2337,12 +2454,101 @@ def _page(value, k, n):
     return flat.narrow(0, k * n, min(n, flat.numel() - k * n))
 
 
-def _pages(ir, key, local, arguments, dynamic, out):
+def _pages(ir, key, local, arguments, dynamic, out, reads):
     dtype, shape = _layout(ir, key)
     n = ir.page // dtype.itemsize
     return [step for k in range(-(-math.prod(shape) // n))
-            for step in _launched(ir, local, lambda env, k=k: pytree.tree_map(lambda v: _page(v, k, n), arguments(env)),
+            for step in _launched(ir, _lowering(local), lambda env, k=k: pytree.tree_map(lambda v: _page(v, k, n),
+                                                                                         arguments(env)),
                                   dynamic, [_page(out, k, n)])]
+
+
+def _once(thunks):
+    return [lambda env, inputs, t: _each(thunks)]
+
+
+# design/homomorphism-sources-2026-11-08.md; L. Meertens, Algorithmics, CWI Monographs 1, 1986, "Inserted-in", (i);
+# J. Gibbons, The third homomorphism theorem, J. Functional Programming 6(4), 1996, (2) and Definition 3.1
+def _identity(packet, dtype):
+    if packet in (A.sum, A.mean):
+        return 0
+    if dtype.is_floating_point:
+        return -math.inf if packet is A.amax else math.inf
+    if dtype is torch.bool:
+        return int(packet is A.amin)
+    return torch.iinfo(dtype).min if packet is A.amax else torch.iinfo(dtype).max
+
+
+def _reductions(ir, key, local, arguments, dynamic, out, reads):
+    dtype, shape = _layout(ir, reads[0])
+    n, numel, whole = ir.page // dtype.itemsize, math.prod(shape), torch.empty(shape, dtype=dtype, device='meta')
+
+    def paged(k):
+        def lower(args, kwargs, outs):
+            given = _operands(local.target, args, kwargs)
+            return _reduced(local.target, {**given, 'self': whole}, outs, _page(given['self'], k, n),
+                            (k * n, min(k * n + n, numel), 1))
+        return lower
+    return _once(_fill(out, _identity(local.target.overloadpacket, out.dtype))) + \
+        [step for k in range(-(-numel // n)) for step in _launched(ir, paged(k), arguments, dynamic, [out])]
+
+
+# M. Milakov and N. Gimelshein, Online normalizer calculation for softmax, arXiv:1805.02867, 2018, Algorithm 3 and §3.1,
+# (4); design/homomorphism-sources-2026-11-08.md
+def _softmaxes(ir, key, local, arguments, dynamic, out, reads):
+    dtype, shape = _layout(ir, reads[0])
+    n, numel = ir.page // dtype.itemsize, math.prod(shape)
+    whole, made = torch.empty(shape, dtype=dtype, device='meta'), torch.empty(shape, dtype=_layout(ir, key)[0],
+                                                                              device='meta')
+    dim = _operands(local.target, local.args, local.kwargs)['dim'] % max(len(shape), 1)
+    stats = torch.empty(numel // max(shape[dim] if shape else 1, 1), 2, dtype=torch.float32, device=_device(ir, key))
+
+    def paged(k, phase):
+        def lower(args, kwargs, outs):
+            given = _operands(local.target, args, kwargs)
+            read = _page(given['self'], k, n)
+            return _softened(local.target, {**given, 'self': whole}, [made], (outs[0] if phase == 2 else read, read),
+                             (k * n, min(k * n + n, numel), phase), stats)
+        return lower
+    return _once(_fill(stats[:, 0], -math.inf) + _fill(stats[:, 1], 0)) + \
+        [step for phase in (1, 2) for k in range(-(-numel // n))
+         for step in _launched(ir, paged(k, phase), arguments, dynamic, [_page(out, k, n)])]
+
+
+# T. Dao et al., FlashAttention, NeurIPS 2022, §3.1 and Algorithm 1, lines 10 to 13;
+# design/homomorphism-sources-2026-11-08.md
+def _attentions(ir, key, local, arguments, dynamic, out, reads):
+    (kd, ks), (vd, vs) = _layout(ir, reads[1]), _layout(ir, reads[2])
+    nk, numel = ir.page // kd.itemsize, math.prod(ks)
+    nv = nk // ks[-1] * vs[-1]
+    keys, values = torch.empty(ks, dtype=kd, device='meta'), torch.empty(vs, dtype=vd, device='meta')
+    stats = torch.empty(out.numel(), 2, dtype=torch.float32, device=out.device)
+
+    def paged(p):
+        def lower(args, kwargs, outs):
+            given = _operands(local.target, args, kwargs)
+            return _attended(local.target, {**given, 'key': keys, 'value': values}, outs,
+                             (_page(given['key'], p, nk), _page(given['value'], p, nv)),
+                             (p * nk, min(p * nk + nk, numel), p * nv, 1), stats)
+        return lower
+    return _once(_fill(out, math.nan) + _fill(stats[:, 0], -math.inf) + _fill(stats[:, 1], 0)) + \
+        [step for p in range(-(-numel // nk)) for step in _launched(ir, paged(p), arguments, dynamic, [out])]
+
+
+# design/plan-to-bridge-change-request.md R4
+def _paging(target):
+    packet = getattr(target, 'overloadpacket', None)
+    if packet in REDUCTIONS:
+        return {0}, False
+    if packet in SOFTMAX:
+        return {0}, True
+    if packet is A.scaled_dot_product_attention:
+        return {1, 2}, False
+    return None, True
+
+
+HOMOMORPHISMS = {**dict.fromkeys(REDUCTIONS, _reductions), **dict.fromkeys(SOFTMAX, _softmaxes),
+                 A.scaled_dot_product_attention: _attentions}
 
 
 # torch 2.14.0 torch/_tensor_docs.py, view and copy_; design/torch-source-lowering-change-request.md item 1
@@ -2352,26 +2558,32 @@ def _called(ir, key, operands, local, form, placed):
     arguments, dynamic = _bound((local.args, local.kwargs), lambda n: next(given))
     mine = placed(key)
     if ir.kinds.get(key) == mesh.PAGES:
-        return mine, _pages(ir, key, local, arguments, dynamic, mine)
+        lowering = HOMOMORPHISMS.get(getattr(local.target, 'overloadpacket', None), _pages)
+        mine = mine if mine is not None else _made(ir, key, local, arguments, dynamic)[0][0]
+        return mine, lowering(ir, key, local, arguments, dynamic, mine, ir.program[ir.producer[key]][1])
     if isinstance(form, tuple):
         outs = [placed(result) for _, result in form[1]]
-        return tuple(outs) if len(outs) > 1 else mine, _launched(ir, local, arguments, dynamic, outs)
+        return tuple(outs) if len(outs) > 1 else mine, _launched(ir, _lowering(local), arguments, dynamic, outs)
     if key in ir.contiguous:
         base = operands[_based(local)]
         thunks = _assign(mine.view(base.shape), base)
         return mine, [lambda env, inputs, t: _each(thunks)]
     if mine is not None and ir.places[ir.device][key].owner == key:
-        return mine, _launched(ir, local, arguments, dynamic, [mine])
+        return mine, _launched(ir, _lowering(local), arguments, dynamic, [mine])
     if mine is not None:
         return mine, []
     if _aliases(local):
         if not dynamic:
             return _call(local, *arguments(None)), []
         return _Dynamic(key), [lambda env, inputs, t: env.__setitem__(key, _call(local, *arguments(env)))]
+    outs, spec = _made(ir, key, local, arguments, dynamic)
+    return pytree.tree_unflatten(outs, spec), _launched(ir, _lowering(local), arguments, dynamic, outs)
+
+
+def _made(ir, key, local, arguments, dynamic):
     made, spec = pytree.tree_flatten(_call(local, *_metas(arguments(_Stand(ir) if dynamic else None))))
-    outs = [torch.empty_strided(m.shape, m.stride(), dtype=m.dtype, device=v.device)
-            for m, v in zip(made, pytree.tree_leaves(key[0].meta.get('val')))]
-    return pytree.tree_unflatten(outs, spec), _launched(ir, local, arguments, dynamic, outs)
+    return [torch.empty_strided(m.shape, m.stride(), dtype=m.dtype, device=v.device)
+            for m, v in zip(made, pytree.tree_leaves(key[0].meta.get('val')))], spec
 
 
 # OpenXLA operation semantics, CollectivePermute; MPICH alltoall_intra_pairwise.c, MPIR_Localcopy
@@ -2476,6 +2688,28 @@ def _copied(ir, read, key, cut, source, target):
     return [lambda env, inputs, t: _each(thunks)]
 
 
+# design/torch-source-lowering-change-request.md items 1 and 3; torch 2.14.0 torch/mps/event.py, Event.record and
+# Event.synchronize; MTLBuffer.h contents; MTLResource.h storageMode
+def _moved(value, device, hull):
+    if not isinstance(value, torch.Tensor) or device is None or value.device.type == device:
+        return value
+    span = value.element_size() * (1 + sum((s - 1) * t for s, t in zip(value.shape, value.stride()))) \
+        if value.numel() else 0
+    base, anchor, mapping = hull or (None, None, _Mapping(mesh.View()))
+    if device == 'cpu':
+        event = torch.mps.Event()
+        event.record()
+        event.synchronize()
+        storage = value.untyped_storage().data_ptr()
+        return _dlpack_tensor('cpu', OBJECT(storage, _SEL(b'contents')) + value.data_ptr() - storage, 0, None,
+                              torch.uint8, (span,), mapping).view(value.dtype).as_strided(value.shape, value.stride())
+    address = value.data_ptr()
+    if anchor is None or not base <= address <= address + span <= base + anchor.numel():
+        raise OSError(errno.EFAULT, 'a value of %d bytes at %#x moved to the GPU from outside the program\'s pages'
+                      % (span, address))
+    return anchor[address - base:address - base + span].view(value.dtype).as_strided(value.shape, value.stride())
+
+
 def _specialized(ir, context, plan, state, devices, placed, c, item, operands, steps):
     kind, reads, key, operand = item
     value = placed(key)
@@ -2483,7 +2717,8 @@ def _specialized(ir, context, plan, state, devices, placed, c, item, operands, s
         steps += _completed(ir, context, plan, state, c, collective)
     if kind == 'input':
         value = _Dynamic(key)
-        steps.append(lambda env, inputs, t: env.__setitem__(key, inputs[operand]))
+        device = key[0].meta['val'].device.type if isinstance(key[0].meta.get('val'), torch.Tensor) else None
+        steps.append(lambda env, inputs, t: env.__setitem__(key, _moved(inputs[operand], device, ir.hull)))
     elif kind == 'constant' and value is None:
         value = operator.attrgetter(operand)(ir.gm)
     elif kind == 'copy':
@@ -2781,9 +3016,9 @@ def _unreplayed(context, state, deadline):
 # 3; J. Reed, Z. DeVito, H. He, A. Ussery and J. Ansel, MLSys 2022; torch v2.14.0 torch/fx/_symbolic_trace.py,
 # Tracer.is_leaf_module; torch/nn/modules/module.py, _forward_unimplemented
 class Function(torch.nn.Module):
-    def __init__(self, module, placement, weights):
+    def __init__(self, module, placement, weights, device=None):
         super().__init__()
-        self.module, self.placement, self.weights = module, placement, weights
+        self.module, self.placement, self.weights, self.device = module, placement, weights, device
 
 
 class Tracer(torch.fx.Tracer):
@@ -2906,7 +3141,7 @@ class _Program(torch.fx.Interpreter):
         return super().run_node(n)
 
 
-Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec')
+Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec moves')
 # design/torch-source-lowering-change-request.md item 2; PyTorch docs/source/notes/cuda.md L1683; torch 2.14.0
 # torch/_higher_order_ops/cond.py and torch/_higher_order_ops/while_loop.py
 CONTROL = (torch.ops.higher_order.cond, torch.ops.higher_order.while_loop)
@@ -2950,12 +3185,12 @@ class _Export(torch.fx.Interpreter):
         super().__init__(gm)
         self.mode, self.compiled, self.of, self.origin, self.calls, self.reads = mode, [], {}, {}, [], []
 
-    def fake(self, value):
+    def fake(self, value, device=None):
         if not isinstance(value, torch.Tensor):
             return value
         with self.mode:
             return torch.empty_strided(tuple(value.shape), tuple(value.stride()), dtype=value.dtype,
-                                       device=value.device)
+                                       device=device or value.device)
 
     def run_node(self, n):
         function = self.module.get_submodule(n.target) if n.op == 'call_module' else None
@@ -2978,15 +3213,21 @@ class _Export(torch.fx.Interpreter):
         signature = (spec, tuple(_metadata(v) for v in flat))
         found = [k for k, c in enumerate(self.compiled) if c.function is function and c.signature == signature]
         if not found:
+            if function.device is not None:
+                args, kwargs = pytree.tree_map(lambda v: self.fake(v, function.device), (args, kwargs))
             exported = torch.export.export(function.module, tuple(args), dict(kwargs), strict=False) \
                 .run_decompositions({})
             gm = exported.module(check_guards=False)
             _RemoveRuntimeAssertionsPass()(gm)
             _static(gm)
-            _sourced(gm)
+            moves = _sourced(gm)
+            if moves and function.device is not None:
+                raise NotImplementedError('%s: a part of a split function still moves a value between backends'
+                                          % (n.name,))
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
             result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
-            self.compiled.append(Compiled(function, signature, gm, flat, result, exported.call_spec.out_spec))
+            self.compiled.append(Compiled(function, signature, gm, pytree.tree_flatten((args, kwargs))[0], result,
+                                          exported.call_spec.out_spec, moves))
             found = [len(self.compiled) - 1]
         self.of[n], self.origin[n] = found[0], len(self.calls)
         self.reads.append({self.origin[a] for a in n.all_input_nodes if a in self.origin})
@@ -3003,6 +3244,10 @@ def program(block, *example_inputs):
     gm = torch.fx.GraphModule(tracer.root, graph)
     exporter = _Export(gm, FakeTensorMode())
     exporter.run(*[exporter.fake(x) for x in example_inputs])
+    if any(record.moves for record in exporter.compiled):
+        _split(gm, exporter)
+        exporter = _Export(gm, FakeTensorMode())
+        exporter.run(*[exporter.fake(x) for x in example_inputs])
     compiled, of, calls, reads = exporter.compiled, exporter.of, exporter.calls, exporter.reads
     entries = _analyse(gm, of, [record.function.module for record in compiled])
     operands = [record.function.placement(record.gm, record.examples) for record in compiled]
@@ -3019,8 +3264,8 @@ def program(block, *example_inputs):
         mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
         irs, page = [], header.pgsz * header.block
         for k, (record, operand) in enumerate(zip(compiled, operands)):
-            ir = partition(record.gm, operand, nodes)
-            ir.calls, ir.page = entries[k], page
+            ir = partition(record.gm, operand, nodes, page)
+            ir.calls = entries[k]
             lower(ir)
             irs.append(ir)
         for j, k in enumerate(calls):
@@ -3093,6 +3338,10 @@ def program(block, *example_inputs):
             try:
                 bound = [_bind(ir, values, at, buffer, hull.address, page, state['mapping'])
                          for ir, values, at in zip(irs, listed, addresses)]
+                anchor = _dlpack_tensor('mps', buffer, 0, buffer, torch.uint8, (hull.bytes,), state['mapping']) \
+                    if buffer else None
+                for ir in irs:
+                    ir.hull = hull.address, anchor, state['mapping']
                 if captured:
                     state['replay'] = _replays(captured, functions, views, listed, addresses, hull.address, buffer)
             finally:
