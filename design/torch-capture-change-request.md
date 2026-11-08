@@ -12,7 +12,8 @@ The quoted sources were read, and each is recorded where it was read:
 - design/lifetimes-and-placement-sources-2026-11-07.md (LP);
 - design/nccl-sources-2026-11-07.md (NS);
 - design/metal-atomic-sources-2026-11-07.md (MA);
-- design/tiling-and-bounds-sources-2026-11-07.md (TB).
+- design/tiling-and-bounds-sources-2026-11-07.md (TB);
+- design/stops-sources-2026-11-07.md (SS), retrieved 2026-11-07 for the stops of items 1, 2, 3, 4 and 6.
 
 Turn numbers are those of design/operator-turns-2026-11-04-to-06.md, numbered on past U183 for later turns.
 
@@ -406,11 +407,38 @@ Each requirement names the code it replaces, the quoted source, and what is writ
     MTLComputePipeline.h:70–73).
   - Deleted (U177): metal-microbench d0a72fc6's `MetalDirect` and `blits`, at 109b11a3, and its `whole` later passes,
     at 1e55e089.
-- **Stop:** Dawn (79794682; CS §5) issues a buffer's clear in `EnsureDataInitialized` only while `NeedsInitialization()`
-  holds: `return !mIsDataInitialized && GetDevice()->IsToggleEnabled(Toggle::LazyClearResourceOnFirstUse);`
-  (src/dawn/native/Buffer.cpp:1171–1173), and `InitializeToZero` then calls `SetInitialized(true);`
-  (src/dawn/native/metal/BufferMTL.mm:287–294). No quoted source says whether the replay of a later execution issues a
-  recorded call that the program makes only while such a condition holds.
+- **A call the program makes only while a condition holds** (the stop of 2026-11-07, settled the same day):
+  - **Replaces:** metal-microbench metal_recording.m at 2f18ac91: `MetalDelegateValues` (:1720–1771) classes a buffer
+    the captured calls read before writing as `METAL_INVARIANT`, and `MetalDelegateCopies` (:2749–2786) copies its
+    contents once, whether or not the captured calls also write it.
+  - **Source:**
+    - Dawn (79794682; CS §5) issues a buffer's clear in `EnsureDataInitialized` only while `NeedsInitialization()`
+      holds: `return !mIsDataInitialized && GetDevice()->IsToggleEnabled(Toggle::LazyClearResourceOnFirstUse);`
+      (src/dawn/native/Buffer.cpp:1171–1173); `InitializeToZero` then calls `SetInitialized(true);`
+      (src/dawn/native/metal/BufferMTL.mm:287–294); the clear is `fillBuffer:range:value:` (:304–306).
+    - RenderDoc (34fbfb43; CS §3), how_works.rst:17, :21, :30 and :38: "In some cases the driver might choose to
+      optimise out some of the data-upload calls and lazy initialise the contents of some resources to save on
+      background overhead." "In this state every API call is serialised out in order and any initial contents and
+      states are saved." "When replaying, the initial section of the capture (up to the beginning of the frame) is read
+      and executed verbatim." "When replaying from the beginning of a frame (and not a partial subset of the frame) the
+      initial states of all resources are applied, and the initial pipeline state is restored." resource_manager.h:650:
+      "Apply the initial contents for the resources that need them, used at the start of a frame".
+    - GFXReconstruct (f9b0fb0d; CS §1), USAGE_desktop_Vulkan.md:1231–1233: "For trimmed capture files, a snapshot of
+      the Vulkan API state is written at the start of the file. This state snapshot includes the data for all buffers
+      and images that were live at the time that capture started." vulkan_replay_frame_loop_consumer.h:182–183:
+      "Tracks a device-local copy of each buffer's contents at the start of the loop range so that GPU writes made to
+      the buffer during the loop can be undone before each repetition."
+    - CUDA C++ Programming Guide v13.0 §6.2.8.7.5 (CS §4): "A graph is a snapshot of a workflow, including kernels,
+      parameters, and dependencies, in order to replay it as rapidly and efficiently as possible."
+  - **Write:**
+    - The replay of every execution issues such a call where it was recorded: every call is serialised, and the replay
+      executes the serialised calls verbatim (RenderDoc :21, :30; CUDA's snapshot). Dawn's clear is a recorded fill,
+      replayed at every execution; its condition is not evaluated at replay.
+    - The contents at the capture's start of each buffer the captured calls read before writing are saved with the
+      capture (RenderDoc :21; GFXReconstruct's snapshot). A buffer the captured calls also write has them applied
+      before each execution's replay, so that the execution's writes are undone (RenderDoc :38;
+      `ApplyInitialContents`; vulkan_replay_frame_loop_consumer.h:182–183). A buffer the captured calls never write
+      keeps `MetalDelegateCopies`' one copy.
 
 ### 2. When execution t's requests into one of a value's locations start
 
@@ -426,11 +454,31 @@ Each requirement names the code it replaces, the quoted source, and what is writ
 - **Write:** execution t's requests into one of a value's u locations start once execution t − u's use of that
   location has ended: Lam's reuse of "the same location in non-overlapping iterations", in the form of (1). Written at
   e618ab13 and 327bea15.
-- **Stop:** the number of locations of a value the host writes, `HOST_LAG` (tools/e2b_replay.m:77;
-  rdma/mesh_compile.py:2128). Lam
-  counts a variable's locations from its lifetime (RG §B.2): "If the lifetime of a variable is l, and an iteration is
-  initiated every s cycles, then at least ⌈l/s⌉ number of values must be kept alive concurrently, in that many
-  locations." No quoted source gives the lifetime l of a value the host writes.
+- **The number of locations of a value the host writes** (the stop of 2026-11-07, settled the same day in part):
+  - **Replaces:** `HOST_LAG` (tools/e2b_replay.m:77; rdma/mesh_compile.py:2128), the constant 2.
+  - **Source:**
+    - Lam (CP §7): "If the lifetime of a variable is l, and an iteration is initiated every s cycles, then at least
+      ⌈l/s⌉ number of values must be kept alive concurrently, in that many locations."
+    - Bhattacharyya, Sriram and Lee 1997, §4.2 and §4.3, pp. 12–14 (SS §1): "If we only have execution time estimates
+      available instead of exact values, and we set t(v) in the previous section to be these estimated values, then we
+      obtain the estimated iteration period by calculating λ_max." "Since the effect of placing such a restriction
+      includes "artificially" constraining src(e) from getting more than Bff(e) invocations ahead of snk(e), its effect
+      on the estimated throughput can be modelled by adding the reverse edge d_m(snk(e), src(e)), where
+      m = Bff(e) – delay(e), to Gipc". "Bff(e) must be chosen large enough so that the maximum cycle mean remains
+      unchanged upon adding d_m(snk(e), src(e))." "An efficient albeit suboptimal procedure to determine Bff is to note
+      that if Bff(e) ≥ Σ_{x∈V} t(x) ⁄ λ_max (6) holds for each feedforward edge e, then the maximum cycle mean of the
+      resulting graph does not exceed λ_max." "Then, doing a binary search on Bff(e) for each feedforward edge, and
+      computing the maximum cycle mean at each search step and ascertaining that it is less than λ_max results in a
+      buffer assignment for the feedforward edges." Lemma 3 (CP §4): λ_max is the maximum cycle mean of the IPC graph.
+  - **Write:** the host's write of a value for execution t is src(e) and the GPU's reads of it snk(e) of a feedforward
+    edge e of the node's IPC graph, the host and the GPU being two of its processors (each a cycle with one delay, CP §4
+    p. 9). The value's number of locations is Bff(e): the smallest m for which adding d_m(snk(e), src(e)) leaves λ_max
+    unchanged, found by the binary search from (6)'s value, with t(v) the execution time estimates. This is Lam's
+    ⌈l/s⌉, l being the execution time along the cycle the reverse edge closes and s being λ_max.
+  - **Stop:** the execution time estimates t(v) of the host's write and of the GPU's passes. Bhattacharyya, Sriram
+    and Lee "assume that "good" estimates are available for the execution times of actors" (§1; SS §1) and say
+    nothing of their source; no quoted source says how they are obtained here. Until one is quoted, Bff(e) is
+    not computed and `HOST_LAG` stands.
 
 ### 3. Reading received data
 
@@ -450,12 +498,58 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   - J. Ragan-Kelley et al., Halide, PLDI 2013, §4.2 (TB §2): "For each function, it symbolically evaluates the bounds
     of each dimension based on the bounds required of its caller and the symbolic indices at which the caller invokes
     it."
-- **Stop:** these sources say when a receiver may access one partition, or all of them. Halide computes a function's
-  bounds from "the bounds required of its caller and the symbolic indices at which the caller invokes it". A recorded
-  dispatch, `struct MetalRecordedDispatch` (metal-microbench metal_recording.m:8 at bed56a95), holds a pipeline,
-  buffers, offsets and a grid, and no quoted source gives those indices for a kernel written as MSL source. None says
-  how the dispatch of a recorded kernel is divided among partitions. Nothing is written for this item. In the torch
-  scope, design/torch-source-lowering-change-request.md item 4 writes it.
+- **In the torch scope,** design/torch-source-lowering-change-request.md item 4 writes this item.
+- **In the LiteRT scope** (the stop of 2026-11-07, settled the same day): a recorded dispatch, `struct
+  MetalRecordedDispatch` (metal-microbench metal_recording.m:8 at bed56a95), holds a pipeline, buffers, offsets and a
+  grid; the sources above say when a receiver may access one partition, or all of them, and Halide computes a
+  function's bounds from "the symbolic indices at which the caller invokes it". The indices of a kernel written as
+  MSL source, and the division of its dispatch among partitions, are these:
+  - **Source:**
+    - Dawn (79794682), src/dawn/native/metal/ShaderModuleMTL.mm:553–556 (SS §6): `library = AcquireNSPRef([mtlDevice
+      newLibraryWithSource:mslSource.Get() options:compileOptions.Get() error:&error]);` MTLDevice.h:786 (SS §3):
+      `- (nullable id <MTLLibrary>)newLibraryWithSource:(NSString *)source options:(nullable MTLCompileOptions *)options
+      error:(__autoreleasing NSError **)error;` The LiteRT stages' kernels are Tint's MSL, passed there
+      (design/lowering-sources-2026-11-06.md).
+    - J. Lee, *Virtualizing Data Parallel Systems for Portability, Productivity, and Performance*, Ph.D. dissertation,
+      University of Michigan, 2015, Chapter III (SKMD; SS §4). §3.2, p. 17: "The kernel transformer changes the original
+      kernel to the Partition-ready kernel, which enables the kernel to operate on a subset of work-groups. After
+      kernel transformation, the buffer manager performs static analysis on kernels to determine the memory access
+      pattern of each work-group. If the memory access range of each work-group can be analyzed statically, the buffer
+      manager will transfer only necessary data back and forth from each device once the partitioning decision is
+      made. On the other hand, if the memory access range cannot be analyzed, the entire input should be transferred
+      to each device". §3.2.1, p. 19: "it adds a parameter WG from and WG to to represent the range of the flattened
+      work-group indices to be computed on a device. In other words, SKMD runs (WG from − WG to + 1) work-groups and
+      skips the rest on a device. If a kernel launches more than a one dimensional NDRange, flattening code is
+      inserted as shown at line 11 in Figure 4.1. After flattening, each work-item identifies its work-group index
+      (flattened id) and checks if it is allowed to execute the kernel." Figure 3.4, p. 20, lines 8–14: `int idx =
+      get_group_id(0); int idy = get_group_id(1); int size_x = get_num_groups(0); int flattened_id = idx + idy *
+      size_x; if (flattened_id < WG_from || flattened_id > WG_to) return;` §3.2.2, p. 25: "For index space analysis,
+      the buffer manager uses data flow analysis focusing on the index operand of store and load instructions [...].
+      Using use-def chains, the buffer manager computes the function of index. If the function is affine and
+      represented as a · (W0 · w0 + l0), it is defined as a Contiguous Kernel. In this equation, a is a constant or an
+      induction variable of loop, and wi, li, and Wi represents work-group ID, work-item ID, and size of work-group in
+      the i-th dimension, respectively. For this type of kernel, it is safe to transfer a subset of data to each device
+      proportional to assigned work-groups." "if the index space of the kernel cannot be determined statically, or the
+      affine function fails to be recognized as above, the buffer manager gives up optimizing data transfer and
+      defines it as a discontiguous kernel. In this case, the entire input and output will be transferred back and
+      forth between the host and external devices".
+    - MPI 4.1 §4.2.1, p. 118 (SS §8): `MPI_PRECV_INIT(buf, partitions, count, datatype, source, tag, comm, info,
+      request)`, "count: number of elements received per partition"; §4.2.3, p. 121 (WA §5.3): "Partitions are
+      contiguous in memory, there is no padding in between them."
+  - **Write:**
+    - A recorded kernel's source is the `source` of the recorded `newLibraryWithSource:options:error:` call (item 1
+      records every call). The index function of each of its loads and stores is computed from that source by
+      use-def chains; a kernel whose index functions are affine, a · (W0 · w0 + l0), is a contiguous kernel, and any
+      other is discontiguous (Lee §3.2.2).
+    - A recorded dispatch of a contiguous kernel is divided among partitions as the partition-ready transformation
+      divides it: the kernel takes WG_from and WG_to, flattens its threadgroup index, and returns outside the range
+      (Figure 3.4). The range dispatched for partition p of a received operand is the threadgroups whose index
+      functions' values over their threads lie in elements [p · count, (p + 1) · count) of the receive buffer
+      ("Partitions are contiguous in memory"; count elements per partition), and it is dispatched once MPI_PARRIVED
+      holds for p: "the receiver becomes free to access the indicated partition".
+    - A recorded dispatch of a discontiguous kernel waits for the whole operand, as Lee transfers "the entire input"
+      for one: MPI_WAIT, "the receive buffer contains all of the partitions".
+    - `MetalMaskReaders`, `MetalMaskedPass` and `MetalCompactionSource` are deleted.
 
 ### 4. The completion of execution t's requests
 
@@ -481,9 +575,27 @@ Each requirement names the code it replaces, the quoted source, and what is writ
     (rdma/mesh-dataflow.c:734–736).
   - The waits end at the free, once the requests started before it are complete ("deallocated only after it becomes
     inactive").
-- **Stop:** the value the event is set to at a failure, which the replaced code makes R × passes. ULFM says only that
-  later operations "must complete by raising an error", and no quoted source gives the value without R. Until a
-  revision quotes one, nothing of this item is written.
+- **The value the event is set to at a failure** (the stop of 2026-11-07, settled the same day):
+  - **Replaces:** `waits_run`'s R × passes (rdma/mesh-metal.m:218, :222) and `repetitions` (:258).
+  - **Source:**
+    - Linux v6.12, kernel/sched/completion.c:52–78 (SS §2): "complete_all: - signals all threads waiting on this
+      completion" "This will wake up all threads waiting on this particular completion event." "Since complete_all()
+      sets the completion of @x permanently to done to allow multiple waiters to finish, a call to reinit_completion()
+      must be used on @x if @x is to be used again." `x->done = UINT_MAX;` Documentation/scheduler/completion.rst:252:
+      "or calls complete_all() to signal all current and future waiters".
+    - Reed and Kanodia (CP §3): "An eventcount can be thought of as a nondecreasing integer variable." await(E, v)
+      "suspends the calling process until the "value" of the eventcount E is at least v."
+    - Metal, macOS 26.4 SDK (SS §3): MTL4CommandQueue.h:266–267 `signalEvent:(id<MTLEvent>)event value:(uint64_t)value`;
+      :274–275 `waitForEvent:(id<MTLEvent>)event value:(uint64_t)value`; MTLEvent.h:64 `uint64_t signaledValue`. Apple's
+      MTLSharedEvent documentation (RG): "When you set the value of a shared event, its value is changed only if you
+      provide a larger value than the value currently stored in the event."
+    - ULFM §16.3.1 (CP §2): after a revoke, operations "must complete by raising an error of class MPI_ERR_REVOKED";
+      Bland et al. 2013 §5.4 (CP §2c): "After a communication object has been revoked, it can never be repaired."
+  - **Write:** at a failure the event the GPU's passes wait on is set to UINT64_MAX, the greatest value of its
+    `uint64_t`, as `complete_all` sets `done` to UINT_MAX: every wait on it, present and future, for any value, is
+    satisfied (await(E, v) returns once E ≥ v), with no count of executions. The host's waits raise the error (this
+    item's Write). The event is not signalled again (`reinit_completion` is `complete_all`'s condition for reuse; a
+    revoked object "can never be repaired"); the next view's requests take a new event.
 
 ### 5. The release writes its word in one 64-bit access
 
@@ -519,9 +631,39 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   - Each operand of a function typed `contiguous_input` or `contiguous_output` is given an offset in one memory block by
     Greedy by Size for Offset Calculation, as TensorFlow Lite's `GreedyBySizeAssignment` states it.
   - `mesh_view_compose`'s remapping of those operands is deleted.
-- **Stop:** no quoted source says where that memory block lies among the pages of every other operand, which are
-  "arbitrary views of arbitrarily placed pages" (2026-11-02), nor how an operand's u locations, Lam's higher-dimension
-  variable, enter Greedy by Size's usage records. Until a revision quotes one, nothing of this item is written.
+- **Where the block lies, and how u locations enter the usage records** (the stop of 2026-11-07, settled the same
+  day):
+  - **Source:**
+    - TensorFlow Lite (6cf18d88; LP §2), arena_planner.h:141–149: "Raw memory buffer that is allocated for all
+      temporary and graph outputs that are declared kTfLiteArenaRw." `SimpleMemoryArena arena_;` "Raw memory buffer
+      that is allocated for persistent tensors that are declared as kTfLiteArenaRwPersistent."
+      `SimpleMemoryArena persistent_arena_;` arena_planner.cc:433–436: `arena_.Commit(&arena_reallocated)` and
+      `persistent_arena_.Commit(&persistent_arena_reallocated)`, each its own. simple_memory_arena.cc:441–445: "Resize
+      the arena to the high water mark (calculated by Allocate), retaining old contents and alignment in the process.
+      Since Alloc pointers are offset based, they will remain valid in the new memory block."
+      memory_management.h:130–131 (LP §3): "Calculates the assignment of tensors to offsets, considering those tensors
+      are going to be allocated in one continuous memory block."
+    - Hendren, Gao, Altman and Mukerji, ACAPS Memo 33, §2.2, p. 5 (quoted in design/problems-of-14b9a757-change-request.md
+      item 14): "each variable in the original loop will be split into several variables depending the unrolling
+      factor. Then, the interval graph can be constructed where each new variable in the unrolled loop is associated
+      with a cyclic interval."
+    - Mukerji 1994, §3.1, p. 29 (the same item): "Cyclic intervals wrap around from one iteration to the next, it is
+      one long interval. However, in the interval graphs, we choose to depict it as two intervals instead."
+    - Dagor Engine daFrameGraph, heapLayout.h:19 and heapLayout.cpp:13–23 (the same item): "An arc of the frame ring
+      whose end is not after its start wraps the ring"; `do_arcs_overlap`, quoted there in full.
+    - TensorFlow Lite greedy_by_size_assignment.cc:93–97 (LP §3): the test that skips a placed record,
+      `usage_records[allocated_id].last_task < rec->first_task || usage_records[allocated_id].first_task >
+      rec->last_task`.
+  - **Write:**
+    - The memory block is its own allocation, of Greedy by Size's `total_size`, committed apart from every other
+      operand's pages as `arena_` and `persistent_arena_` are committed apart: one run of consecutive pages of the
+      space, in which no page of another operand lies. Nothing else constrains its place, the other operands being
+      "arbitrary views of arbitrarily placed pages" (2026-11-02).
+    - An operand's u locations are u usage records, one per location, each with the operand's size and the interval
+      of that location's lifetime over the u executions of the unrolled steady state (Memo 33 §2.2). A record whose
+      interval wraps from the last execution into the first is one interval depicted as two (Mukerji §3.1); the
+      intersection test of greedy_by_size_assignment.cc:93–94 is `do_arcs_overlap` on the ring of the u executions, and
+      nothing else of `GreedyBySizeAssignment` changes.
 
 ### 7. Lifetimes
 
@@ -599,11 +741,13 @@ Each requirement names the code it replaces, the quoted source, and what is writ
 
 ## Stops
 
-- Item 1: whether the replay of a later execution issues a recorded call that the program makes only while a
-  condition holds, as Dawn's `NeedsInitialization()`.
-- Item 2: the number of locations of a value the host writes.
-- Item 3, in the LiteRT scope: how the dispatch of a recorded kernel is divided among partitions, and the symbolic
-  indices of a kernel written as MSL source.
-- Item 4: the value the event is set to at a failure, without R.
-- Item 6: where the memory block of offsets lies among the pages of every other operand, and how an operand's u
-  locations enter its usage records.
+As of 2026-11-07, after the sources of SS:
+
+- Item 2: the execution time estimates t(v) of the host's write and of the GPU's passes, from which Bhattacharyya,
+  Sriram and Lee's Bff(e) is computed. No quoted source says how they are obtained here.
+
+Settled on 2026-11-07, each by the sources named in its item: item 1 (a call made only while a condition holds:
+RenderDoc, GFXReconstruct, CUDA); item 2's form (Bff(e) of a feedforward edge); item 3 in the LiteRT scope (Lee 2015's
+partition-ready kernels and index-space analysis, with MPI 4.1's partitions); item 4 (Linux `complete_all` with Reed and
+Kanodia's eventcount, on Metal's 64-bit event); item 6 (TensorFlow Lite's separate arenas; Memo 33 §2.2, Mukerji §3.1
+and Dagor's `do_arcs_overlap` for the u records).
