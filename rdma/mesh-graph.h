@@ -118,6 +118,14 @@ void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(voi
 /* G. E. Blelloch, Prefix sums and their applications, 1990; M. Harris, S. Sengupta and J. D. Owens, GPU Gems 3, ch. 39,
    2007; R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013 */
 int mesh_graph_compaction_source(uint32_t items, uint32_t simds, char *text, size_t room);
+/* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
+   RISC-V V 1.0, the mask register v0; R. M. Russell, CACM 21(1), 1978, the vector mask register; Metal Shading Language
+   Specification 4.1, §6.10.1 and §6.10.2 simd_ballot; MTL4ComputeCommandEncoder.h:90-112;
+   design/torch-capture-change-request.md item 3 */
+int mesh_graph_worklist_source(uint32_t later, const uint32_t groups[3], const uint32_t block[3], const uint32_t *extent,
+                               uint32_t simds, uint32_t operands, uint32_t classes, const uint32_t *slots,
+                               const char *const builtin[5], char *parameters, size_t parameters_room, char *code,
+                               size_t code_room);
 
 #ifdef __cplusplus
 }

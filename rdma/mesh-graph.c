@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <float.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1678,4 +1679,83 @@ int mesh_graph_compaction_source(uint32_t items, uint32_t simds, char *text, siz
     "if(mesh_tl==0u){mesh_arguments[0]=mesh_left;mesh_arguments[1]=1u;mesh_arguments[2]=1u;}}\n",
     simds + 1, items, items - 1, items, simds - 1, simds, simds, simds, simds);
   return made < 0 ? EINVAL : (size_t)made >= room ? ERANGE : 0;
+}
+
+static int graph_text(char *text, size_t room, size_t *at, const char *format, ...) {
+  if (*at >= room) return ERANGE;
+  va_list arguments;
+  va_start(arguments, format);
+  const int made = vsnprintf(text + *at, room - *at, format, arguments);
+  va_end(arguments);
+  if (made < 0) return EINVAL;
+  if ((size_t)made >= room - *at) return ERANGE;
+  *at += (size_t)made;
+  return 0;
+}
+/* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
+   RISC-V V 1.0, the mask register v0; R. M. Russell, CACM 21(1), 1978, the vector mask register; Metal Shading Language
+   Specification 4.1, §6.10.1 and §6.10.2 simd_ballot; MTL4ComputeCommandEncoder.h:90-112 */
+int mesh_graph_worklist_source(uint32_t later, const uint32_t groups[3], const uint32_t block[3], const uint32_t *extent,
+                               uint32_t simds, uint32_t operands, uint32_t classes, const uint32_t *slots,
+                               const char *const builtin[5], char *parameters, size_t parameters_room, char *code,
+                               size_t code_room) {
+  size_t p = 0, c = 0;
+  int status = graph_text(code, code_room, &c, "threadgroup uint mesh_mask_votes[%u];uint mesh_mask_tl=%s;uint3 mesh_mask_tg=%s;",
+                          simds, builtin[0], builtin[1]);
+  if (!status) status = later ? graph_text(code, code_room, &c, "uint mesh_mask_group=mesh_mask_list[mesh_mask_tg.x];"
+    "uint3 mesh_mask_origin=uint3(mesh_mask_group%%%uu,(mesh_mask_group/%uu)%%%uu,mesh_mask_group/%uu);",
+    groups[0], groups[0], groups[1], groups[0] * groups[1]) : graph_text(code, code_room, &c, "uint3 mesh_mask_origin=mesh_mask_tg;");
+  if (!status) status = classes > 1 ? graph_text(code, code_room, &c, "uint mesh_mask_class=mesh_mask_select[%uu+mesh_mask_origin.x];",
+    classes * operands * 2) : graph_text(code, code_room, &c, "uint mesh_mask_class=0u;");
+  if (!status && extent) status = graph_text(code, code_room, &c, "uint3 mesh_mask_extent=metal::min(uint3(%uu,%uu,%uu),"
+    "uint3(%uu,%uu,%uu)-mesh_mask_origin*uint3(%uu,%uu,%uu));", block[0], block[1], block[2], extent[0], extent[1], extent[2],
+    block[0], block[1], block[2]);
+  if (!status) status = extent && !later ?
+    graph_text(code, code_room, &c, "uint mesh_mask_lanes=mesh_mask_extent.x*mesh_mask_extent.y*mesh_mask_extent.z;") :
+    graph_text(code, code_room, &c, "uint mesh_mask_lanes=%uu;", block[0] * block[1] * block[2]);
+  if (!status) status = graph_text(code, code_room, &c, "uint mesh_mask_vote=0u;");
+  for (uint32_t d = 0; !status && d < operands; d++) status = graph_text(code, code_room, &c,
+    "{uint4 mesh_mask_row=mesh_mask_expect_%u[0];"
+    "uint2 mesh_mask_span=uint2(mesh_mask_select[(mesh_mask_class*%uu+%uu)*2u],"
+    "mesh_mask_select[(mesh_mask_class*%uu+%uu)*2u+1u]);"
+    "for(uint mesh_mask_at=mesh_mask_span.x/64u+mesh_mask_tl;mesh_mask_at*64u<mesh_mask_span.y;"
+    "mesh_mask_at+=mesh_mask_lanes){"
+    "uint4 mesh_mask_word=mesh_mask_phases_%u[mesh_mask_at];"
+    "uint4 mesh_mask_field=uint4(mesh_mask_at*64u)+uint4(0u,16u,32u,48u);"
+    "uint4 mesh_mask_low=metal::select(metal::min(uint4(mesh_mask_span.x)-mesh_mask_field,uint4(16u)),uint4(0u),"
+    "uint4(mesh_mask_span.x)<=mesh_mask_field);"
+    "uint4 mesh_mask_high=metal::select(metal::min(uint4(mesh_mask_span.y)-mesh_mask_field,uint4(16u)),uint4(0u),"
+    "uint4(mesh_mask_span.y)<=mesh_mask_field);"
+    "uint4 mesh_mask_fields=(metal::select((uint4(1u)<<(metal::min(mesh_mask_high,uint4(15u))*2u))-1u,uint4(0xffffffffu),"
+    "mesh_mask_high>=16u)&~metal::select((uint4(1u)<<(metal::min(mesh_mask_low,uint4(15u))*2u))-1u,uint4(0xffffffffu),"
+    "mesh_mask_low>=16u))&uint4(0x55555555u);"
+    "uint4 mesh_mask_unequal=mesh_mask_word^uint4(mesh_mask_row.x);"
+    "mesh_mask_unequal=(mesh_mask_unequal|(mesh_mask_unequal>>1u))&mesh_mask_fields;"
+    "uint4 mesh_mask_ahead=mesh_mask_word^uint4(mesh_mask_row.y);"
+    "mesh_mask_ahead=(mesh_mask_ahead|(mesh_mask_ahead>>1u))&mesh_mask_unequal;"
+    "mesh_mask_vote|=metal::select(0u,1u,metal::any(mesh_mask_unequal!=0u))|metal::select(0u,2u,metal::any(mesh_mask_ahead!=0u));}}",
+    d, operands, d, operands, d, d);
+  if (!status) status = graph_text(code, code_room, &c,
+    "mesh_mask_vote=metal::select(0u,1u,metal::simd_ballot((mesh_mask_vote&1u)!=0u).any())|"
+    "metal::select(0u,2u,metal::simd_ballot((mesh_mask_vote&2u)!=0u).any());"
+    "if(%s==0u)mesh_mask_votes[%s]=mesh_mask_vote;metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+    "mesh_mask_vote=0u;for(uint mesh_mask_s=0u;mesh_mask_s<%s;mesh_mask_s++)mesh_mask_vote|=mesh_mask_votes[mesh_mask_s];",
+    builtin[2], builtin[3], builtin[4]);
+  if (!status) status = later ? graph_text(code, code_room, &c, "if((mesh_mask_vote&1u)!=0u){if(mesh_mask_tl==0u){"
+    "metal::atomic_fetch_add_explicit(mesh_mask_status+metal::select(0u,1u,(mesh_mask_vote&2u)!=0u),1u,metal::memory_order_relaxed);"
+    "metal::atomic_fetch_max_explicit(mesh_mask_status+2,~mesh_mask_repetition,metal::memory_order_relaxed);}return;}") :
+    graph_text(code, code_room, &c, "if(mesh_mask_tl==0u)mesh_mask_flags[mesh_mask_tg.x+%uu*(mesh_mask_tg.y+%uu*mesh_mask_tg.z)]="
+    "metal::select(0u,1u,(mesh_mask_vote&1u)==0u);if((mesh_mask_vote&1u)!=0u)return;", groups[0], groups[1]);
+  if (!status) status = graph_text(code, code_room, &c,
+    "metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,static_cast<metal::thread_scope>(3));");
+  for (uint32_t d = 0; !status && d < operands; d++) status = graph_text(parameters, parameters_room, &p,
+    "%svolatile coherent(system) device const uint4 *mesh_mask_phases_%u [[buffer(%u)]], "
+    "device const uint4 *mesh_mask_expect_%u [[buffer(%u)]]", d ? ", " : "", d, slots[2 * d], d, slots[2 * d + 1]);
+  if (!status) status = graph_text(parameters, parameters_room, &p, "%sdevice const uint *mesh_mask_select [[buffer(%u)]]",
+    operands ? ", " : "", slots[2 * operands + 3]);
+  if (!status) status = later ? graph_text(parameters, parameters_room, &p, ", device const uint *mesh_mask_list [[buffer(%u)]], "
+    "device metal::atomic_uint *mesh_mask_status [[buffer(%u)]], constant uint &mesh_mask_repetition [[buffer(%u)]]",
+    slots[2 * operands], slots[2 * operands + 1], slots[2 * operands + 2]) :
+    graph_text(parameters, parameters_room, &p, ", device uint *mesh_mask_flags [[buffer(%u)]]", slots[2 * operands]);
+  return status;
 }
