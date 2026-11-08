@@ -126,7 +126,7 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
 - **Write:** no torch Metal kernel is ever submitted or recorded again. Every function is lowered from source, whether
   reference source or ours.
 
-### 2. The capture is fully functional, with no dynamic control flow
+### 2. The capture is a static dataflow graph
 
 - **Keeps:** rdma/mesh_compile.py `program` (:2122), whose `_Export` (:2072) exports each function with
   `torch.export.export` (:2105).
@@ -181,25 +181,19 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
     with a timeout specified in milliseconds."
   - Apple, Metal Shading Language Specification 4.1, §6.10.1 (MSL §4): "A barrier function (threadgroup_barrier or
     simdgroup_barrier) acts as an execution and memory barrier. All threads in a threadgroup (or SIMD-group) executing
-    the kernel must encounter the threadgroup_barrier (or simdgroup_barrier) function."
+    the kernel must encounter the threadgroup_barrier (or simdgroup_barrier) function." §4.4 (MSL §2): "A GPU compute
+    unit can execute multiple threads concurrently in a threadgroup, and a GPU can execute a separate threadgroup for
+    each of its compute units."
+  - Apple, MTLIndirectCommandBuffer.h (MO §3): "Dispatch threadgroups with concurrent execution"
 - **Write:**
-  - Assignment is the placement `program` takes (rdma/mesh_compile.py:2122) together with the sharding `partition` gives
-    (:610).
-  - Order is the order `mesh_graph_heap_order` (rdma/mesh-graph.c:1068) gives from the completion times of
-    `mesh_graph_completion_times` (:950).
-  - No ordering is written for an independent pair: the operator's "non-ordered relations".
-  - A dependence between threads of one threadgroup is a threadgroup barrier, which "All threads in a threadgroup (or
-    SIMD-group) executing the kernel must encounter".
-  - A dependence between commands of one command encoder is an intra-pass barrier, which orders "any subsequent work you
-    encode in the *current command encoder*".
-  - A dependence between command encoders of one command queue is a fence. The producing encoder "updates a
-    ``MTLFence`` instance after all previously-encoded commands in the current command encoder, corresponding to
-    `afterEncoderStages`, complete"; in the consuming encoder, "any subsequent work you encode via this current command
-    encoder, corresponding to `beforeEncoderStages`, doesn't begin until all prior updates to the fence is complete".
-    Since no ordering is written for an independent pair, a producer or consumer barrier, which orders "any work you
-    encode using *subsequent command encoders*", isn't written for it.
-  - A dependence between command queues, devices or the host is an event, an MTLSharedEvent where it is "shared across
-    devices", whose signaledValue the host waits on.
+  - Assignment is the placement operand together with the sharding.
+  - Order is the completion-time linear program (joint-compilation row 8).
+  - Each dependence becomes the one Metal ordering its two ends' locations admit:
+    - same threadgroup: a threadgroup barrier;
+    - same encoder: an intra-pass barrier;
+    - same queue: a fence;
+    - other queue, device or host: an event.
+  - Independent pairs get no ordering, and Metal then permits them to overlap.
   - Only the edges of a synchronization graph that preserves the inter-processor communication graph are written: "the
     synchronization edges alone determine the interaction between processors".
 
@@ -211,8 +205,10 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
   - MPI 4.1, §4.2.2, p. 120 (WA §5.3): "The MPI_PARRIVED function can be used to determine if the message data for the
     indicated partition has been received into the receive buffer. Upon success, the receiver becomes free to access
     the indicated partition (as well as any others that previously completed for that operation)."
-  - Apple, Metal Shading Language Specification 4.1, §2.22.3 (MSL §1): "The cooperative_tensor represents a tensor with
-    elements that are partitioned across a set of participating threads in thread memory."
+  - Apple, Metal Shading Language Specification 4.1, §5.2.3 (MSL §3): "SIMD-groups execute concurrently within a given
+    threadgroup and make independent forward progress with respect to each other, in the absence of threadgroup
+    barrier operations." §2.22.3 (MSL §1): "The cooperative_tensor represents a tensor with elements that are
+    partitioned across a set of participating threads in thread memory."
   - Apple, MPPTensorOpsMatMul2d.h:296–321 (FL §14c): "It is undefined behavior if the number of SIMD groups
     dispatched does not match the number of SIMD groups that the operation was configured with." "The operation will be
     executed cooperatively by N SIMD groups. Must be used when all threads in a threadgroup are cooperatively performing
@@ -231,14 +227,5 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
     communication and computation, linking these two parts via tile-centric primitives."
   - Apple, MPPTensorOpsMatMul2d.h:158–160 (MO §4): "User can also take ownership of looping over reduction or
     k-dimension by choosing appropriate chunk size in k (called k-tile or tilek)"
-- **Write,** for a function that reads a received operand, as FLUX fuses "AllGather signal checking" into "the prologue
-  of the GEMM kernel":
-  - Each tile of the function is the work of one threadgroup, whose SIMD-groups are its tensor operation's execution
-    scope: "Must be used when all threads in a threadgroup are cooperatively performing the operation."
-  - "GEMM tile computation is blocked by the function WaitSignal until the value contained in the signal is set to
-    true": a tile waits for each partition it reads, as MPI_PARRIVED states: "Upon success, the receiver becomes free to
-    access the indicated partition".
-  - The wait carries acquire semantics, as TileLink's do.
-  - The tile loops over k in chunks, as "User can also take ownership of looping over reduction or k-dimension by
-    choosing appropriate chunk size in k (called k-tile or tilek)", into a cooperative_tensor destination: "User can
-    apply post processing in-register where GEMM output is computed using cooperative_tensor."
+- **Write:** consumption as data arrives happens inside one function, on SIMD-groups of one threadgroup: each partition
+  is tested as MPI_PARRIVED states; partial results accumulate in cooperative tensors.

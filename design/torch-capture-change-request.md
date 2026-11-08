@@ -454,7 +454,8 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   bounds from "the bounds required of its caller and the symbolic indices at which the caller invokes it". A recorded
   dispatch, `struct MetalRecordedDispatch` (metal-microbench metal_recording.m:8 at bed56a95), holds a pipeline,
   buffers, offsets and a grid, and no quoted source gives those indices for a kernel written as MSL source. None says
-  how the dispatch of a recorded kernel is divided among partitions. Nothing is written for this item.
+  how the dispatch of a recorded kernel is divided among partitions. Nothing is written for this item. In the torch
+  scope, design/torch-source-lowering-change-request.md item 4 writes it.
 
 ### 4. The completion of execution t's requests
 
@@ -582,8 +583,7 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   - Metal Performance Primitives, MPPTensorOpsMatMul2d.h:216–218 (macOS 26.4 SDK): "cooperative_tensor owns thread
     private data and divides the data for entire tensor among threads (participating in the scope of operation) in
     implementation defined manner."
-- **Stop:** these sources state properties of a final lowering, and no quoted source says which IR carries one on Metal.
-  Nothing is written for this item.
+- **Written** in design/torch-source-lowering-change-request.md, items 1–3.
 
 ### 9. Every node replays
 
@@ -594,18 +594,16 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   operations can be captured by CUDA Graphs."
 - **Write:** every node runs its captured program by replay, its collectives included. fcf5d18a's calls of torch from
   Python at every execution are deleted.
-- **Stop:** in the torch scope, item 3's: no quoted source says how the dispatch of a recorded kernel is divided among
-  partitions.
+- **Written,** in the torch scope, with design/torch-source-lowering-change-request.md item 4, which writes what item 3
+  stops on.
 
 ## Stops
 
 - Item 1: whether the replay of a later execution issues a recorded call that the program makes only while a
   condition holds, as Dawn's `NeedsInitialization()`.
 - Item 2: the number of locations of a value the host writes.
-- Item 3: how the dispatch of a recorded kernel is divided among partitions, and the symbolic indices of a kernel
-  written as MSL source.
+- Item 3, in the LiteRT scope: how the dispatch of a recorded kernel is divided among partitions, and the symbolic
+  indices of a kernel written as MSL source.
 - Item 4: the value the event is set to at a failure, without R.
 - Item 6: where the memory block of offsets lies among the pages of every other operand, and how an operand's u
   locations enter its usage records.
-- Item 8: which IR carries the torch scope's final lowering on Metal.
-- Item 9: in the torch scope, the reading of received data (item 3).
