@@ -8,8 +8,10 @@ every change request follows is [change-requests.md](change-requests.md).
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): outstanding.
   1. Each function typed and scheduled as plan-to-bridge R3 and R4 write it, on every Apple silicon backend, the CPU
      included (rewritten 2026-11-08). Implemented in mesh 502bf42c and 8cac6d69 and metal-microbench 3bc0e2a4: the IR's
-     kinds, one task per page for the asynchronous consumer, and the same source compiled for the CPU. Open: each
-     capture's weighing by A3's task weights, without which the MPS replay raises since metal-microbench 3b719f10.
+     kinds, one task per page for the asynchronous consumer, the same source compiled for the CPU, and each capture
+     weighed by A3's task weights (mesh 14b2061d). Open: online softmax, attention over key and value blocks and
+     reductions' partial sums as R4's homomorphisms, combined by their sources' ⊕; and a move between backends, split
+     into two functions ordered by an event.
   2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d.
   3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c and
      metal-microbench e4800f65, 270c6e5f and 43f37e96. Open: each task's length from the weighting operand (A3), where
