@@ -32,7 +32,9 @@ So a comment passes only if it contains nothing but citations of external docume
   2022;
 - an API header and line: MTL4ComputeCommandEncoder.h:109, or a library source path such as torch/export/__init__.py;
 - a specification's URL.
-Several citations may be joined by ";". Anything else in a comment is a finding:
+A section may be named by its number, label, anchor or quoted title, and a header's place by a line or a symbol it
+declares. Citations, and the parts of one, may be joined by ";", "," or "and". Anything else in a comment is a
+finding:
 - prose, explanation, rationale, contracts and specifications;
 - quotations;
 - dated revision notes, "What must stay" clauses, TODOs.
@@ -76,7 +78,8 @@ LOCATOR = (rf'(?:[§¶]+\s*{SPAN}(?:\s*(?:,|and|&)\s*[§¶]*\s*{SPAN})*|(?:{WORD
            rf'(?:at\s+)?(?:mesh|metal-microbench)\s+(?P<sha>[0-9a-f]{{7,40}})(?!\w)|{LABEL}(?:\s*(?:{DASH}|to(?!\w))\s*{LABEL})?|'
            rf'{EQUATION}(?:\s*(?:{DASH}|to(?!\w))\s*{EQUATION})?|\d+(?:\.\d+)+(?:p\d+)?(?!\w))')
 PATH = (r'(?:\.\.?/)*[\w@+-][\w.@+-]*(?:/[\w.@+-]+)*\.[A-Za-z][A-Za-z0-9]{0,7}|'
-        r'[\w@+-][\w.@+-]*(?:/[\w.@+-]+)+\.\d')
+        r'[\w@+-][\w.@+-]*(?:/[\w.@+-]+)+\.\d|metal_(?:stdlib|atomic|types|math|compute|geometric|integer|matrix|'
+        r'simdgroup(?:_matrix)?|quadgroup|texture|graphics|relational|common|pack|numeric|tensor|logging|raytracing)(?![\w.])')
 WHERE = rf'(?:#[\w.:%~+-]+|:\d+(?:\s*{DASH}\s*\d+)?(?:\s*,\s*:?\d+(?:\s*{DASH}\s*\d+)?)*)?'
 LINK = r'<?(?:https?://|doi:\s?)[^\s<>"]*[^\s<>".,;:)\]]>?'
 TAIL = re.compile(rf'\s*(?:,?\s*(?:and|&)(?!\w)\s*|[,:]\s*|\(\s*)?(?:(?P<quote>"[^"]+"|“[^”]+”)|{LINK}|'
@@ -104,7 +107,7 @@ SURNAME = r"(?:(?:van|von|de|der|den|du|da|di|del|della|la|le|dos|das|ter|ten|zu
 AUTHORS = re.compile(rf'(?:{INITIALS}\s?{SURNAME}(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+|\s*&\s*){INITIALS}\s?{SURNAME})*'
                      rf'(?:,?\s+et\s+al\.?)?|{SURNAME}\s+et\s+al\.?)\s*,\s*')
 ARXIV = re.compile(r'\d{4}\.\d{4,5}(?:v\d+)?')
-VENUE = re.compile(r"[A-Z][\w'’.:+&/-]*|\(?\d+[A-Z]?\)?(?:\(\d+\))?(?:[:–-]\d+)?|arXiv:?|\d{4}\.\d{4,5}(?:v\d+)?|doi:\S+|of|on|"
+VENUE = re.compile(r"[A-Z][\w'’.:+&/-]*|\([A-Z][\w-]*\)|\(?\d+[A-Z]?\)?(?:\(\d+\))?(?:[:–-]\d+)?|arXiv:?|\d{4}\.\d{4,5}(?:v\d+)?|doi:\S+|of|on|"
                    r'and|for|in|the|to|a|an|de|des|du|der|für|und|et|la|le|thesis|dissertation|report|preprint|'
                    r'manuscript|draft|edition|ed\.|edn\.|eds\.|vol\.|no\.|pp?\.|tech\.|rep\.|proc\.|trans\.')
 YEAR = re.compile(r'\(?(?:1[5-9]|20)\d\d[a-z]?\)?')
@@ -482,8 +485,11 @@ def bibliographic(part):
     m = AUTHORS.match(part)
     if not m:
         return False
-    dated = numbered = pointed = False
-    for segment in split(part[m.end():], ','):
+    segments = split(part[m.end():], ',')
+    titled = len(segments) > 1 and not all(VENUE.fullmatch(t) for t in segments[0].split()) and bool(
+        re.fullmatch(r"[\w'’:()/-]+(?: [\w'’:()/-]+){0,14}", segments[0]))
+    dated = numbered = pointed = named = False
+    for segment in segments[titled:]:
         if not segment:
             return False
         if LOCATORS.fullmatch(segment):
@@ -494,7 +500,8 @@ def bibliographic(part):
             return False
         dated = dated or any(YEAR.fullmatch(t) or ARXIV.fullmatch(t) for t in tokens)
         numbered = numbered or any(t[:1].isdigit() for t in tokens)
-    return dated or numbered and pointed
+        named = named or any(t[:1].isupper() or t.startswith('arXiv') for t in tokens if not YEAR.fullmatch(t))
+    return (dated or numbered and pointed) and (named or not titled)
 
 
 def citation(part, place):
@@ -562,32 +569,38 @@ def only(text, place):
     return cites
 
 
+def unsettled(text, place):
+    return [part for part in split(text) if part and cited(part, place) is None]
+
+
 def citations(text, lines, place):
     cites = only(text, place)
     if cites is not None or len(lines) < 2:
-        return cites
-    cites, j = [], 0
+        return cites, [] if cites is not None else unsettled(text, place)
+    cites, rest, run, j = [], [], [], 0
     while j < len(lines):
         for k in range(min(len(lines), j + 4), j, -1):
             found = only(joined(lines[j:k]), place)
             if found is not None:
                 cites, j = cites + found, k
+                rest, run = rest + ([joined(run)] if run else []), []
                 break
         else:
-            return None
-    return cites
+            run, j = run + [lines[j]], j + 1
+    rest += [joined(run)] if run else []
+    return (cites, []) if not rest else (None, [part for said in rest for part in unsettled(said, place)] or rest)
 
 
 def settle(text, lines, place):
-    cites = citations(text, lines, place)
+    cites, rest = citations(text, lines, place)
     if cites is not None:
         gone = missing(p for p, absent in cites if absent)
-        return ('fail', '; '.join(gone)) if gone else ('pass', '')
+        return ('fail', '; '.join(gone), '') if gone else ('pass', '', '')
     gone = missing(m.group(1) for m in PATHS.finditer(text)
                    if not foreign(text, m.start()) and (lambda r: r[0] and not r[1])(located(m.group(1), place)))
     unquoted = re.sub(r'"[^"]*"|“[^”]*”', '""', text)
     marks = [reason for pattern, reason in MARKERS if pattern.search(unquoted)]
-    return 'fail' if marks else 'read', '; '.join(marks + gone)
+    return 'fail' if marks else 'read', '; '.join(marks + gone), '; '.join(rest)
 
 
 def review(shown, text, changed, place):
@@ -695,12 +708,12 @@ def short(text, n):
 
 
 def report(groups):
-    undecided = [((g, k), f[2]) for g, (_, found) in enumerate(groups) for k, f in enumerate(found) if f[3] == 'read']
+    undecided = [((g, k), f[5]) for g, (_, found) in enumerate(groups) for k, f in enumerate(found) if f[3] == 'read']
     verdicts, failures = reads(undecided) if undecided else ({}, [])
     reports = []
     for g, (label, found) in enumerate(groups):
         lines = []
-        for k, (shown, first, said, verdict, reason) in enumerate(found):
+        for k, (shown, first, said, verdict, reason, _) in enumerate(found):
             read = verdicts.get((g, k))
             if verdict == 'read' and read:
                 if read[0] == 'FAIL':
