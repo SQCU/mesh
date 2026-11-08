@@ -9,9 +9,10 @@ every change request follows is [change-requests.md](change-requests.md).
   1. Each function typed and scheduled as plan-to-bridge R3 and R4 write it, on every Apple silicon backend, the CPU
      included (rewritten 2026-11-08). Implemented in mesh 502bf42c and 8cac6d69 and metal-microbench 3bc0e2a4: the IR's
      kinds, one task per page for the asynchronous consumer, the same source compiled for the CPU, and each capture
-     weighed by A3's task weights (mesh 14b2061d). Open: online softmax, attention over key and value blocks and
-     reductions' partial sums as R4's homomorphisms, combined by their sources' ⊕; and a move between backends, split
-     into two functions ordered by an event.
+     weighed by A3's task weights (mesh 14b2061d). Reductions, softmax and attention as R4's homomorphisms, one task
+     per page combined by their sources' ⊕ (design/homomorphism-sources-2026-11-08.md), and a move between backends
+     split into functions ordered by an event: mesh 2abc7125, metal-microbench 71a23822. Open: the all-reduce root's
+     sum of received partials, still one task over whole parts.
   2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d.
   3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c and
      metal-microbench e4800f65, 270c6e5f and 43f37e96; the order from the completion-time linear program with each
