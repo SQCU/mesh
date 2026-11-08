@@ -28,7 +28,8 @@ every change request follows is [change-requests.md](change-requests.md).
     them.
 - [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md): outstanding in part.
   - Open: R4's consumption of a received operand one partition at a time. In the torch scope this is the lowering
-    request's item 4. In the LiteRT scope it is the torch-capture request's item 3, a stop.
+    request's item 4. In the LiteRT scope it is the torch-capture request's item 3, written in d62f205d and not yet
+    implemented.
 
 ## Implemented
 
