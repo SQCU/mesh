@@ -98,6 +98,13 @@ int mesh_graph_schedule(uint32_t vertices, size_t accesses, struct mesh_graph_ac
 /* MPI 4.1 §6.1.11 */
 struct mesh_graph_interval { uint64_t key, start, end; };
 int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval);
+/* GaijinEntertainment/DagorEngine 2baf1947, prog/gameLibs/render/daFrameGraph/backend/resourceScheduling/heapLayout.h:19
+   and heapLayout.cpp:13-23, do_arcs_overlap */
+int mesh_graph_arcs_overlap(uint64_t a_start, uint64_t a_end, uint64_t b_start, uint64_t b_end);
+/* TensorFlow Lite 6cf18d88, tensorflow/lite/delegates/gpu/common/memory_management/greedy_by_size_assignment.h:43-45,
+   GreedyBySizeAssignment; design/torch-capture-change-request.md item 6 */
+int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*intersect)(const void *context, size_t a, size_t b),
+                              const void *context, uint64_t align, uint64_t *offset, uint64_t *total);
 
 void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context);
 

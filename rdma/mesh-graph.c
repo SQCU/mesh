@@ -1555,6 +1555,71 @@ int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval) {
   return 0;
 }
 
+/* GaijinEntertainment/DagorEngine 2baf1947, prog/gameLibs/render/daFrameGraph/backend/resourceScheduling/heapLayout.cpp:13-23,
+   do_arcs_overlap */
+int mesh_graph_arcs_overlap(uint64_t a_start, uint64_t a_end, uint64_t b_start, uint64_t b_end) {
+  const int a_wraps = a_end <= a_start;
+  const int b_wraps = b_end <= b_start;
+  if (a_wraps && b_wraps) return 1;
+  if (a_wraps) return a_end > b_start || b_end > a_start;
+  if (b_wraps) return b_end > a_start || a_end > b_start;
+  return a_end > b_start && b_end > a_start;
+}
+
+/* TensorFlow Lite 6cf18d88, tensorflow/lite/delegates/gpu/common/memory_management/internal.h:35-43,
+   TensorUsageWithIndex, and internal.cc:28-31, CompareBySize */
+struct greedy_record { uint64_t tensor_size; size_t idx; };
+static int greedy_compare_by_size(const void *a, const void *b) {
+  const struct greedy_record *first = a, *second = b;
+  if (first->tensor_size != second->tensor_size) return first->tensor_size > second->tensor_size ? -1 : 1;
+  return (first->idx > second->idx) - (first->idx < second->idx);
+}
+/* TensorFlow Lite 6cf18d88, tensorflow/lite/delegates/gpu/common/util.h:26-44, DivideRoundUp and AlignByN */
+static uint64_t greedy_align_by_n(uint64_t number, uint64_t n) {
+  const uint64_t q = number / n;
+  return (number % n == 0 ? q : q + 1) * n;
+}
+/* TensorFlow Lite 6cf18d88, tensorflow/lite/delegates/gpu/common/memory_management/greedy_by_size_assignment.cc:68-143,
+   GreedyBySizeAssignment, and internal.h:31, kNotAssigned; Y. Pisarchyk and J. Lee, arXiv:2001.03288, 2020, §5.2 */
+int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*intersect)(const void *context, size_t a, size_t b),
+                              const void *context, uint64_t align, uint64_t *offset, uint64_t *total) {
+  struct greedy_record *ordered_records = malloc((records + 1) * sizeof *ordered_records);
+  size_t *ordered_allocs = malloc((records + 1) * sizeof *ordered_allocs), allocs = 0;
+  int result = ordered_records && ordered_allocs ? 0 : ENOMEM;
+  *total = 0;
+  for (size_t i = 0; !result && i < records; i++) ordered_records[i] = (struct greedy_record){size[i], i};
+  if (!result) qsort(ordered_records, records, sizeof *ordered_records, greedy_compare_by_size);
+  for (size_t r = 0; !result && r < records; r++) {
+    const size_t idx = ordered_records[r].idx;
+    uint64_t best_diff = UINT64_MAX, best_offset = UINT64_MAX, prev_offset = 0;
+    for (size_t k = 0; k < allocs; k++) {
+      const size_t allocated_id = ordered_allocs[k];
+      if (!intersect(context, allocated_id, idx)) continue;
+      const uint64_t cur_offset = offset[allocated_id];
+      if (cur_offset >= prev_offset) {
+        const uint64_t diff = cur_offset - prev_offset;
+        if (diff >= size[idx] && diff < best_diff) {
+          best_diff = diff;
+          best_offset = prev_offset;
+        }
+      }
+      const uint64_t aligned = greedy_align_by_n(cur_offset + size[allocated_id], align);
+      if (aligned > prev_offset) prev_offset = aligned;
+    }
+    if (*total + allocs * (align - 1) < prev_offset) { result = EINVAL; break; }
+    if (best_offset == UINT64_MAX) best_offset = prev_offset;
+    size_t it = 0;
+    while (it < allocs && offset[ordered_allocs[it]] <= best_offset) it++;
+    memmove(ordered_allocs + it + 1, ordered_allocs + it, (allocs - it) * sizeof *ordered_allocs);
+    ordered_allocs[it] = idx;
+    allocs++;
+    offset[idx] = best_offset;
+    if (best_offset + size[idx] > *total) *total = best_offset + size[idx];
+  }
+  free(ordered_records); free(ordered_allocs);
+  return result;
+}
+
 void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context) {
   for (uint32_t j = 0; j < count; j++) visit(context, row[j]);
 }
