@@ -39,6 +39,31 @@ int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(co
   return 0;
 }
 
+int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                          const void *context, uint32_t root,
+                          int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
+  if (root >= vertices) return EINVAL;
+  uint32_t *parent = malloc(((size_t)vertices + 1) * sizeof *parent);
+  uint32_t *order = malloc(((size_t)vertices + 1) * sizeof *order);
+  size_t *next = malloc(((size_t)vertices + 1) * sizeof *next);
+  unsigned char *color = calloc((size_t)vertices + 1, 1);
+  int status = !parent || !order || !next || !color ? ENOMEM : 0, crossed = 0;
+  uint32_t count = 0;
+  if (!status) parent[root] = UINT32_MAX;
+  for (uint32_t v = root; !status && v != UINT32_MAX;) {
+    if (!color[v]) { color[v] = 1; next[v] = first[v]; order[count++] = v; }
+    if (next[v] == first[v + 1]) { color[v] = 2; v = parent[v]; continue; }
+    const uint32_t w = head(context, next[v]++);
+    if (color[w] == 1) status = EDEADLK;
+    else if (color[w] == 2) crossed = 1;
+    else { parent[w] = v; v = w; }
+  }
+  if (!status && crossed) status = EINVAL;
+  for (uint32_t k = 0; !status && k < count; k++) status = visit(consumer, order[k], parent[order[k]]);
+  free(parent); free(order); free(next); free(color);
+  return status;
+}
+
 struct within { uint32_t N,root,depth; const uint32_t *from,*order,*into; const uint32_t *in; const double *weight,*rest;
                 int32_t *now,*best; double cost; };
 static int within_walk(const struct within *s,uint32_t v){
