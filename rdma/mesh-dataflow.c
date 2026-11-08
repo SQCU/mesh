@@ -14,8 +14,6 @@
 #include <limits.h>
 #include <time.h>
 /* design/algorithm-sources.md#programtensor */
-
-/* design/algorithm-sources.md#programtensor */
 /* design/plan-to-bridge-change-request.md R8; P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser,
    Practical lock-freedom, 2004 */
 void mesh_retire(struct hdr *m,uint64_t client){
