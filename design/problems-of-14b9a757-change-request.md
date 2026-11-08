@@ -355,6 +355,9 @@ lack of a quoted source. Each source is given here verbatim, with the change it 
     before execution 0, awaited, then retired.
   - The per-execution functions name the invariant's pages as a value that is never freed (item 7).
   - LOADED and the execution UINT64_MAX − 1 are deleted.
+- **Superseded** (2026-11-07) by the second stops' item 8 below: no transfer has an invariant as its source, so the
+  function called once is not needed. The DistributedDataParallel docstring above is API documentation; the method
+  source for loading each node's slice once at construction is Megatron-LM's, quoted there.
 
 ### 11. A plan loaded after its cancellation
 
@@ -411,6 +414,9 @@ The implementation of the sources above (mesh 0f48775f, c840ff2f, bce1ed90, 028b
   - This costs pages only. It writes no byte twice.
   - It stands until a source for sharing across the steady state is quoted. Hendren, Gao, Altman and Mukerji's cyclic
     interval graphs (1992) is named as that source, not yet read.
+- **Settled** (2026-11-06, recorded 2026-11-07) by the appendix's item 14: Mukerji 1994 and the ACAPS Memo 33 were read
+  and are quoted there; the items of one plan at a node are colored as one cyclic interval graph by Main Fatcover, and
+  this stop is closed by that item's Change.
 
 ### 8. An invariant's transfer
 
@@ -421,10 +427,17 @@ The implementation of the sources above (mesh 0f48775f, c840ff2f, bce1ed90, 028b
     Tensor computation, a state_dict containing tensor values of all lifted parameters and buffers, and various
     metadata."
   - GSPMD §4.5 (quoted at item 4): "DynamicSlice to shard replicated dimensions".
+  - Megatron-LM, tag core_r0.12.0, megatron/core/tensor_parallel/layers.py:125–169, `_initialize_affine_weight_cpu`
+    (design/stops-sources-2026-11-07.md §5; added 2026-11-07): "Build the master weight on all processes and scatter
+    the relevant chunk." `weight_list = torch.split(master_weight, per_partition_per_stride_size, dim=partition_dim)`
+    `my_weight_list = weight_list[rank::world_size]` `cpu_weight = torch.cat(my_weight_list, dim=partition_dim).to_dense()`
+    `weight.data.copy_(cpu_weight)`. It is called from each parallel layer's constructor (:220, :779, :1085).
 - **Change:**
   - No transfer has an invariant as its source.
   - Each node loads, once in make() before execution 0, the DynamicSlice of its own copy that its placement needs, into
-    its own never-freed pages (item 7).
+    its own never-freed pages (item 7): the whole state_dict tensor is held at every node (`ExportedProgram`; Megatron's
+    master weight "on all processes"), the node's slice is taken from it by the partition dimension and the node's
+    rank, and copied into the node's pages by torch's `copy_`, at construction (Megatron-LM :156–165).
   - The plan refuses a transfer whose source is MESH_INVARIANT (EINVAL at the plan).
   - LOADED and the execution UINT64_MAX − 1 are deleted. The function called once is not needed.
 
@@ -462,10 +475,16 @@ The implementation of the second sources (mesh 2155c2b8) stopped at three places
   value, which a DynamicSlice would need.
 - **Source:** GSPMD §4.5 (quoted at item 4): "DynamicSlice to shard replicated dimensions"; torch's `ExportedProgram`
   (quoted at the second stops' item 8): every rank holds the state_dict.
+  - GSPMD §3.1 and §3.5 (design/stops-sources-2026-11-07.md §7; added 2026-11-07): "Replicated. All devices have the
+    same full data." "XLA operators typically preserve some dimensions from inputs to outputs. We simply propagate
+    sharding of such a dimension from inputs to outputs, and vice versa." "We decided to keep the sharding propagation
+    simple, so it does not try to create new sharding patterns on dimensions."
 - **Change:**
-  - An invariant's sharding at the partitioner is replicated: every node holds it whole.
-  - A value made from invariants by views alone is replicated too, since a view of a replicated value is replicated at
-    every node.
+  - An invariant's sharding at the partitioner is replicated: every node holds it whole ("All devices have the same
+    full data").
+  - A value made from invariants by views alone is replicated too: a view preserves its operand's dimensions, the
+    sharding of a preserved dimension is propagated from input to output, and propagation creates no new sharding
+    pattern (GSPMD §3.5), so a replicated operand's view is replicated at every node.
   - A collective whose operand is such a value is a resharding from replicated, so it is the DynamicSlice of its
     result's sharding, at each node, with no transfer.
 
@@ -474,10 +493,13 @@ The implementation of the second sources (mesh 2155c2b8) stopped at three places
 - **Stop:** make() loads each attribute whole, and its DynamicSlices are views of it. No source said how to load only
   the slices where one node's placement needs several of one attribute.
 - **Source:** GSPMD §4.5, as above. Each resharding is its own DynamicSlice instruction, and so its own value.
+  Megatron-LM `_initialize_affine_weight_cpu` (quoted at the second stops' item 8; added 2026-11-07): the slice is
+  `torch.split` of the whole tensor by the partition dimension, the rank's pieces `weight_list[rank::world_size]`, and
+  `weight.data.copy_(...)` into the layer's own weight, at construction.
 - **Change:**
   - Each distinct DynamicSlice a node's program reads of an attribute is its own never-freed value at that node.
   - Each is loaded once in make(), from the host's state_dict tensor, by torch's `copy_` of that slice into the value's
-    pages.
+    pages, as Megatron-LM copies the rank's pieces into the layer's weight.
   - The whole attribute is loaded only where the node reads it whole.
 
 ## Sources for the fourth stops (2026-11-06)
