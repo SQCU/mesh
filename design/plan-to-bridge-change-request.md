@@ -2044,7 +2044,7 @@ code, and each method is used as its source states it.
       approximates (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979, problem SR2), have no use
       here. The chains replace C3.3's colouring.
   - **Contiguity is a type of particular operands, given as a mapping (R4).**
-    - The types are function A's operand, and a torch MPS operator's strided operand
+    - The types are a synchronous, complete, contiguous consumer's operand, and a torch MPS operator's strided operand
       (design/aot-compilation-change-request.md appendix item 7).
     - Such an operand's run is address translation, fixed when the plan is made. Every page's place is a constant of
       the plan (C3.3: "every address is a constant in the plan"), so the map from the operand's consecutive virtual
@@ -2156,15 +2156,15 @@ code, and each method is used as its source states it.
 
 - The code must schedule both kinds of function, and must not tell the bridge which is which.
 - **Method,** as Claude's turn that introduced the two kinds gave it:
-  - Function A is a blocking operator over a dense operand: databases' blocking operator, as against a pipelined one (G.
+  - The synchronous, complete, contiguous consumer (the turns' "function A") is a blocking operator over a dense operand: databases' blocking operator, as against a pipelined one (G.
     Graefe, Query evaluation techniques for large databases, ACM Comput. Surv., 1993). Its operand is a coflow, which
     finishes when its last flow does (M. Chowdhury and I. Stoica, Coflow: a networking abstraction for cluster
     applications, HotNets 2012). In this change it is ordered by R5's method, in which a join's pages carry their
     consumer's bottom level. Ordering coflows to minimize their completion time is Varys's smallest-effective-bottleneck
     first (M. Chowdhury, Y. Zhong and I. Stoica, Efficient coflow scheduling with Varys, SIGCOMM 2014). R5 does not
-    require it. (Corrected 2026-11-05: the first text said A's operand is scheduled by Varys, which no requirement asked
+    require it. (Corrected 2026-11-05: the first text said that consumer's operand is scheduled by Varys, which no requirement asked
     the code to do.)
-  - Function B is a streaming homomorphism over pages: f(x ∪ y) = f(x) ⊕ f(y). Gibbons states homomorphisms over
+  - The asynchronous, incomplete, noncontiguous consumer (the turns' "function B") is a streaming homomorphism over pages: f(x ∪ y) = f(x) ⊕ f(y). Gibbons states homomorphisms over
     lists, with ⊕ associative (J. Gibbons, The third homomorphism theorem, J. Functional Programming, 1996). Taking
     pages in any order also needs ⊕ commutative: the bag homomorphisms of the Bird–Meertens formalism's Boom hierarchy
     (L. Meertens, Algorithmics: towards programming as a mathematical activity, CWI Monographs 1, 1986), which Claude's
@@ -2173,10 +2173,10 @@ code, and each method is used as its source states it.
     FlashAttention over key and value blocks (T. Dao et al., NeurIPS 2022), PagedAttention over non-contiguous blocks
     (W. Kwon et al., SOSP 2023), and reductions' partial sums.
   - **In the task graph (R3):**
-    - A is one task with an edge from every page of its operand.
-    - B is one task per page, each with an edge from its own page, and its outputs are pages that leave as each is
+    - The synchronous, complete, contiguous consumer is one task with an edge from every page of its operand.
+    - The asynchronous, incomplete, noncontiguous consumer is one task per page, each with an edge from its own page, and its outputs are pages that leave as each is
       produced.
-    - **Nothing synchronizes B's outputs one page at a time, and nothing interrupts a backend when a page lands.**
+    - **Nothing synchronizes the asynchronous, incomplete, noncontiguous consumer's outputs one page at a time, and nothing interrupts a backend when a page lands.**
       > one at a time? who says any part of this code is synchronized s.t. there is a global sync point which
       > interrupts numeric backends each and every time any page has been received from dma? synchronizaiton s.t. only
       > one page at a time is ever made available to the dma bridge after any numeric backend function concludes?
@@ -2195,13 +2195,13 @@ code, and each method is used as its source states it.
         them. No kernel is written (aot-compilation A9).
       - (Corrected 2026-11-05: Claude's message of that day said "one at a time", which nothing requires.)
     - Their weights come from the weighting operand.
-    - A's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
+    - The synchronous, complete, contiguous consumer's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
       assignment gives each tensor one contiguous range (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020; C3.3;
       rdma/mesh-collective.c).
-    - (Corrected 2026-11-05.) Only A's operand, and an operand whose consumer needs one strided progression, is seen
+    - (Corrected 2026-11-05.) Only the synchronous, complete, contiguous consumer's operand, and an operand whose consumer needs one strided progression, is seen
       as one run. That run is a mapping written when the plan is made, and its pages are placed anywhere, as every
-      value's are (R2's correction). The bullet above gave every value's copy one run of placed pages. That imposes A's
-      type on B's operands and on every transfer, which the operator's typing forbids: "function B requires set of
+      value's are (R2's correction). The bullet above gave every value's copy one run of placed pages. That imposes the synchronous, complete, contiguous consumer's
+      type on the asynchronous, incomplete, noncontiguous consumer's operands and on every transfer, which the operator's typing forbids: "function B requires set of
       pages operand_b to be complete but not contiguous", "domain:Async,noncontiguous,incomplete" (above).
 - **Code:** the IR carries each consumer's kind (aot-compilation A8). The bridge's lists carry no kind, only which
   entries are a set's (aot-compilation, appendix item 5).
@@ -2256,9 +2256,9 @@ code, and each method is used as its source states it.
       solver returns. (Corrected 2026-11-05: the text before minimized C_max alone.)
     - C_j ≥ d_j for every j: Chen's (1b), with every release time zero within one execution.
     - C_j ≥ C_i + d_j for every edge i → j of the graph: Chen's (1c), "the precedence constraint", and Hall et al.'s
-      (3). R4's edges are among them. Function A's task has an edge from every page of its operand, which with (1c) is
-      Chen's (1a): "the completion time of coflow k is bounded by all its flows". Each of function B's tasks has one
-      edge, from its own page, so B's pages are independent flows.
+      (3). R4's edges are among them. The synchronous, complete, contiguous consumer's task has an edge from every page of its operand, which with (1c) is
+      Chen's (1a): "the completion time of coflow k is bounded by all its flows". Each of the asynchronous, incomplete, noncontiguous consumer's tasks has one
+      edge, from its own page, so its pages are independent flows.
     - For each resource, and each set S of the instructions on it: Σ_{j∈S} d_j C_j ≥ ½(d(S)² + d²(S)), where d(S) is
       Σ_{j∈S} d_j and d²(S) is Σ_{j∈S} d_j². A resource is a cable in one direction, or a node's device. This is Hall et
       al.'s (5), "introduced by Queyranne (1993)". Chen's (1d) and (1e) take it for each input and output port, here

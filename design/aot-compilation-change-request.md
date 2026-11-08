@@ -468,7 +468,7 @@ statement, or a fact of the code.
 - The compilation must carry one IR from partitioning to serialization, as an operand of its own.
 - **The operand's type:**
   - the task graph of design/plan-to-bridge-change-request.md R3 (Sinnen, 2007);
-  - each consumer's kind (R4: a join for function A, a task per page for function B);
+  - each consumer's kind (R4: a join for a synchronous, complete, contiguous consumer, a task per page for an asynchronous, incomplete, noncontiguous consumer);
   - the placement operand (A2) and the weighting operand (A3).
 - **Method:** MSCCLang carries its instruction DAG the same way, from lowering to scheduling (Cowan et al., 2023, §4 and
   §5).
@@ -891,7 +891,7 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
 > pages, with no expected difference in the mean or variance of the total time spent transmitting or operating the
 > related functions even though the accesses are technically different each time. i am not joking around here.
 
-- **What is serialized:** the pages of function B's operands (design/plan-to-bridge-change-request.md R4: one task per
+- **What is serialized:** the pages of asynchronous, incomplete, noncontiguous consumers' operands (design/plan-to-bridge-change-request.md R4: one task per
   page, any order) are written as sets, not as a sequence. A set is one demand's pages on one of its trees, as the code
   numbers them (rdma/mesh-collective.c: tree j's entries have `set` j + 1), so a set's pages have one producer and one
   route. The bridge sees sets and sequences, and no kind (R4).
@@ -942,7 +942,7 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     Journal 7(2), 1968; E. G. Coffman, M. J. Elphick and A. Shoshani, System deadlocks, ACM Comput. Surv. 3(2), 1971).
   - **The permutation keeps that order when it is one renaming σ of the set's members**, over the set's positions on
     every channel the set crosses: every hop, every relaying node, every parallel cable. It also covers the set's
-    consumer tasks, since function B takes its pages in any order (R4) and the task at the set's i-th place takes the
+    consumer tasks, since an asynchronous, incomplete, noncontiguous consumer takes its pages in any order (R4) and the task at the set's i-th place takes the
     member σ puts there. Indexes inside shapes need not be compiled:
     > the use of cudagraphs style 'shapes are compiled but indexes inside of shapes might not need to be'
   - **Why σ keeps a topological order.** A set's members have one producer, one route and a consumer that takes them
@@ -989,9 +989,9 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     gives a set's positions to several cables of one pair and each cable keeps only its own members (the
     implementation's M1). The coordination's record, "The revisions of 46ae8fdf", stop 3, gives the cycle.)
 
-- **Function A's operands** (joins) keep the schedule's order.
+- **A synchronous, complete, contiguous consumer's operands** (joins) keep the schedule's order.
 - **Every program declares each consumer's kind.** A consumer that reduces partial sums, or otherwise takes pages in
-  any order, is function B (R4). A program that declares every consumer function A avoids demonstrating this
+  any order, is an asynchronous, incomplete, noncontiguous consumer (R4). A program that declares every consumer synchronous, complete and contiguous avoids demonstrating this
   requirement. For the program the code runs today, tools/prepare_e2b.py does the declaring:
   > then your code isn't correct for deliberately avoiding demonstrating the requirements of the change request.
 
@@ -1092,7 +1092,7 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     > if i say that tensors whose outputs or inputs cover arbitrary noncontiguous blocks of pages, then all functions
     > which do not explicitly require contiguity at runtime for their exact inputs and outputs do not overconstrain the
     > allocator and data movements by imposing contiguity.
-    - A value is a list of pages, each placed anywhere. Contiguity is a type of particular operands, as R4's function A
+    - A value is a list of pages, each placed anywhere. Contiguity is a type of particular operands, as R4's synchronous, complete, contiguous consumer
       states it (design/plan-to-bridge-change-request.md R4).
     - Torch's MPS operators consume a strided view within one buffer. MPSGraph takes an `MTLBuffer` with a shape, and
       optionally "rowBytes for the fastest moving dimension" (MPSGraphTensorData.h, `initWithMTLBuffer:shape:dataType:`
@@ -1103,7 +1103,7 @@ do. Where this appendix and design/compilation-coordination.md differ, this appe
     - So an operand of a torch MPS operator is seen in one strided progression of virtual addresses. Its pages are
       placed anywhere, as every value's are, and the progression is a mapping written when the plan is made, which the
       GPU translates as it does for every buffer (design/plan-to-bridge-change-request.md R2, corrected). A value read
-      only by page-wise consumers (transfers, function B) needs no mapping.
+      only by page-wise consumers (transfers, asynchronous, incomplete, noncontiguous consumers) needs no mapping.
   - **What stays, being torch's:**
     - an operator with no out variant, whose result is copied once into its placed pages where it must be there;
     - a kernel's own scratch inside torch;
