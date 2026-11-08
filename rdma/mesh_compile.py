@@ -2442,6 +2442,24 @@ def _time(context, state, transfer):
     return C.c_double.from_address(context.M + state.times + 8 * transfer).value
 
 
+# mesh-graph.h mesh_graph_heap_order; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997,
+# §2.1
+mesh.LIB.mesh_graph_heap_order.restype = C.c_int
+mesh.LIB.mesh_graph_heap_order.argtypes = [mesh.U, C.POINTER(C.c_double), C.c_size_t, C.POINTER(mesh.U), C.POINTER(mesh.U),
+                                           C.POINTER(mesh.U)]
+
+
+def _listed(context, state, receives):
+    count = len(receives)
+    place = (mesh.U * max(count, 1))()
+    priority = (C.c_double * max(count, 1))(*[-_time(context, state, i) for i, _ in receives])
+    mesh.check(mesh.LIB.mesh_graph_heap_order(count, priority, 0, None, None, place))
+    listed = [None] * count
+    for k in range(count):
+        listed[place[k]] = receives[k]
+    return listed
+
+
 # design/torch-source-lowering-change-request.md item 1; design/plan-to-bridge-change-request.md R2 and R4; mesh-section.h
 # struct mesh_section
 class _Paged:
@@ -2626,8 +2644,7 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
         _typed(collective.kind, [first], [total])
         flat, row = total.view(-1), ir.page // total.element_size()
         steps = _once(_fill(total, _identity(A.sum, total.dtype)) + _pointwise(0, total, total, first))
-        # L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2
-        listed = receives if state is None else sorted(receives, key=lambda received: _time(context, state, received[0]))
+        listed = receives if state is None else _listed(context, state, receives)
         for i, (received, j) in listed:
             wait = [lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
                     _arrived(context, plan, i, t, count)] if state is not None else []
