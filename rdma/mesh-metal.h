@@ -14,9 +14,10 @@ int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport
 struct mesh_metal_wait { uint64_t count; uint32_t pages,copies,pass,padding; };
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.3, and D.3.7;
    os/os_sync_wait_on_address.h:268 os_sync_wait_on_address_with_timeout */
+/* MPI 4.1 §3.9 and p. 110; Linux v6.12 kernel/sched/completion.c:52-78, complete_all; MTL4CommandQueue.h:274-275 */
 struct mesh_metal_waiter;
 int mesh_metal_waits_start(struct mesh_metal_transport *,void *event,const struct mesh_metal_wait *,size_t waits,
-                           uint32_t passes,uint64_t repetitions,struct mesh_metal_waiter **);
+                           uint32_t passes,struct mesh_metal_waiter **);
 void mesh_metal_waits_stop(struct mesh_metal_waiter *);
 int mesh_metal_waits_end(struct mesh_metal_waiter *);
 int mesh_metal_status(struct mesh_metal_transport *,int cause,uint64_t *first);

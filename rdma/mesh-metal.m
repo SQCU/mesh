@@ -58,10 +58,9 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
 struct mesh_metal_waiter {
   pthread_t thread;
   void *event;
-  char *words;
-  uint64_t repetitions;
+  char *words,*region;
   uint32_t passes;
-  _Atomic uint32_t stop;
+  _Atomic uint32_t stop,freed;
   int cause;
   _Atomic uint64_t *_Atomic waiting;
   size_t waits;
@@ -70,16 +69,34 @@ struct mesh_metal_waiter {
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.6 */
 /* os_sync_wait_on_address.h os_sync_wait_on_address_with_timeout */
+/* MPI 4.1 §3.9 and p. 110; rdma/mesh-dataflow.c mesh_transfers_start; D. P. Reed and R. K. Kanodia, CACM 22(2), 1979,
+   p. 116; Linux v6.12 kernel/sched/completion.c:52-78, complete_all, and Documentation/scheduler/completion.rst:252;
+   MPI Forum ULFM chapter draft, 2022-05-09, §16.3.1; W. Bland et al., IJHPCA 27(3), 2013, §5.4 */
 static void *waits_run(void *argument){
   struct mesh_metal_waiter *waiter=argument;
   @autoreleasepool{
     id<MTLSharedEvent> event=(id<MTLSharedEvent>)waiter->event;
-    const uint64_t passes=waiter->passes,final=waiter->repetitions*passes;
+    const struct mesh_state *state=(const struct mesh_state *)(const void *)waiter->words;
+    const struct mesh_submission *queue=(const struct mesh_submission *)(const void *)(waiter->region+state->submits);
+    _Atomic uint64_t *plans=&((struct hdr *)(void *)waiter->region)->plans;
+    const uint64_t passes=waiter->passes,room=state->submit_room;
     uint64_t since=0,set=0,last=0;
     const _Atomic uint64_t *read=NULL;
-    int cause=0;
-    for(uint64_t t=0;t<waiter->repetitions && waiter->waits && !cause;t++)
-      for(size_t i=0;i<waiter->waits && !cause;){
+    int cause=0,freed=0;
+    for(uint64_t t=0;!cause && !freed;t++){
+      while(!cause){
+        const uint32_t ended=atomic_load_explicit(&waiter->freed,memory_order_acquire);
+        const uint64_t notice=atomic_load_explicit(plans,memory_order_acquire),
+                       k=atomic_load_explicit(&state->submissions,memory_order_acquire);
+        if(k && queue[(k-1)%room].end>t)break;
+        atomic_store_explicit(&waiter->waiting,plans,memory_order_release);
+        if(atomic_load_explicit(&waiter->stop,memory_order_acquire))cause=ECANCELED;
+        else if(ended){freed=1;break;}
+        else if(os_sync_wait_on_address_with_timeout(plans,notice,sizeof *plans,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                  OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_METAL_SLICE_NS)<0 && errno==EINVAL)
+          cause=EINVAL;
+      }
+      for(size_t i=0;i<waiter->waits && !cause && !freed;){
         const struct mesh_metal_wait *wait=waiter->wait+i;
         const uint64_t value=t*passes+wait->pass+1,target=(t/wait->copies+1)*wait->pages;
         if(value-1>set){[event setSignaledValue:value-1];set=value-1;}
@@ -97,24 +114,23 @@ static void *waits_run(void *argument){
                   OS_CLOCK_MACH_ABSOLUTE_TIME,left<MESH_METAL_SLICE_NS?left:MESH_METAL_SLICE_NS)<0 && errno==EINVAL)
           cause=EINVAL;
       }
-    if(set<final)[event setSignaledValue:final];
+      if(!cause && !freed && (t+1)*passes>set){[event setSignaledValue:(t+1)*passes];set=(t+1)*passes;}
+    }
+    if(cause)[event setSignaledValue:UINT64_MAX];
     waiter->cause=cause;
   }
   return NULL;
 }
 
 int mesh_metal_waits_start(struct mesh_metal_transport *transport,void *event,const struct mesh_metal_wait *waits,
-  size_t count,uint32_t passes,uint64_t repetitions,struct mesh_metal_waiter **out){
+  size_t count,uint32_t passes,struct mesh_metal_waiter **out){
   *out=NULL;
-  uint64_t final;
-  if(!transport->state || !event || transport->bytes<sizeof(uint64_t) ||
-     __builtin_mul_overflow(repetitions,(uint64_t)passes,&final))return EINVAL;
+  if(!transport->state || !event || transport->bytes<sizeof(uint64_t))return EINVAL;
   const uint64_t last=transport->bytes-sizeof(uint64_t);
   for(size_t i=0;i<count;i++){
     const struct mesh_metal_wait *wait=waits+i;
     if(!wait->copies || !wait->pages || wait->pass>=passes || (i && wait->pass<waits[i-1].pass) ||
-       wait->count%sizeof(uint64_t) || wait->count>last || wait->copies-1>(last-wait->count)/sizeof(uint64_t) ||
-       (repetitions && (repetitions-1)/wait->copies+1>UINT64_MAX/wait->pages))
+       wait->count%sizeof(uint64_t) || wait->count>last || wait->copies-1>(last-wait->count)/sizeof(uint64_t))
       return EINVAL;
   }
   if(count>(SIZE_MAX-sizeof(struct mesh_metal_waiter))/sizeof *waits)return ENOMEM;
@@ -122,11 +138,12 @@ int mesh_metal_waits_start(struct mesh_metal_transport *transport,void *event,co
   if(!waiter)return ENOMEM;
   waiter->event=[(id)event retain];
   waiter->words=(char *)transport->words;
-  waiter->repetitions=repetitions;
+  waiter->region=(char *)transport->words-transport->offset;
   waiter->passes=passes;
   waiter->cause=0;
   waiter->waits=count;
   atomic_init(&waiter->stop,0);
+  atomic_init(&waiter->freed,0);
   atomic_init(&waiter->waiting,NULL);
   if(count)memcpy(waiter->wait,waits,count*sizeof *waits);
   const int status=pthread_create(&waiter->thread,NULL,waits_run,waiter);
@@ -145,6 +162,9 @@ void mesh_metal_waits_stop(struct mesh_metal_waiter *waiter){
 
 int mesh_metal_waits_end(struct mesh_metal_waiter *waiter){
   if(!waiter)return 0;
+  atomic_store_explicit(&waiter->freed,1,memory_order_release);
+  _Atomic uint64_t *word=atomic_load_explicit(&waiter->waiting,memory_order_acquire);
+  if(word)os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   pthread_join(waiter->thread,NULL);
   const int cause=waiter->cause;
   [(id)waiter->event release];
