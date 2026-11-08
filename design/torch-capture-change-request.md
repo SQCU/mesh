@@ -612,7 +612,8 @@ Each requirement names the code it replaces, the quoted source, and what is writ
 
 ## Stops
 
-- Item 1: whether the replay of a later execution issues a call the captured execution made once.
+- Item 1: whether the replay of a later execution issues a recorded call that the program makes only while a
+  condition holds, as Dawn's `NeedsInitialization()`.
 - Item 2: the number of locations of a value the host writes.
 - Item 3: how the dispatch of a recorded kernel is divided among partitions, and the symbolic indices of a kernel
   written as MSL source.
