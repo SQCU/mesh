@@ -1,7 +1,8 @@
 # Change requests: which are outstanding
 
-As of 2026-11-08, after mesh e6eda244 and metal-microbench 03298a79. Each entry names a change request, whether it is outstanding, and what of it is open. The standard
-every change request follows is [change-requests.md](change-requests.md).
+As of 2026-11-08, after mesh e6eda244 and metal-microbench 03298a79. Each entry names a change request, whether it is
+outstanding, and what of it is outstanding. The standard every change request follows is
+[change-requests.md](change-requests.md).
 
 ## Outstanding
 
@@ -14,8 +15,10 @@ every change request follows is [change-requests.md](change-requests.md).
     every port at the provider's advertised max_mr_size; device_up now registers it in 1 GiB regions as M09 states
     (mesh b59c579a, e6eda244), four a port, and all five maps list all five nodes. The five-rank E2B decode
     (metal-microbench tools/mesh/placements/even-5.json, 03298a79) is prepared on every node and planned on every rank
-    (mesh_plan needs 199,500 wired pages, which the window holds). Open, a stop: every rank stops at the prefill,
-    "prefill: Operation timed out: no feedback of its commits" (output_data/e2b-five-2026-11-08).
+    (mesh_plan needs 199,500 wired pages, which the window holds). Outstanding: the run to its end, and item 7, each
+    commit's feedback, written 2026-11-08 from every rank's prefill timeout, "prefill: Operation timed out: no
+    feedback of its commits" (output_data/e2b-five-2026-11-08), whose cause design/commit-feedback-sources-2026-11-08.md
+    §3 measures.
   - Items 2-6: implemented. Item 2 in metal-microbench c0a067fc and 6b8f7c3c with mesh b482a825; item 3 in mesh
     01632014; item 4 in mesh e34e7a5e and metal-microbench c0a067fc, which C9 passes for MetalMaskedPass; item 5 in
     metal-microbench 5d5efc09; item 6 here.
