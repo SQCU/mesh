@@ -332,6 +332,19 @@ be captured yet;»)
 
 (2026-11-07 20:02, in part)
 
+> "Each function's FX graph is lowered the way PyTorch 2 §4.3 states it, one operator at a time:" find a better compiler to cite thanks
+
+(2026-11-07 20:46)
+
+> this is so plainly a self-inflicted harmful choice that we need to walk right back out of it. 
+> 1: we hve a data structure of a partially or totally parsed call graph
+> 2: all we really have to do is make it into something which is runnable by mps
+> 3: mps is not a pointwise eager launch abstract computer. it is actually like, a specific api which has many well written programs it supports.
+> 4: we are not here to repeat any and every bad decision torch makes in a default built in compiler. we can read about any compiler we want to and any compiler algorihtms we want to. you iwll notice this already happened for a lot of other topics? like the co-flow independent flow thing? what existingcitations have you simply not remembered orc ontextualized as related to this problem?
+> 5:what further citations do they entail?
+
+(2026-11-07 20:48)
+
 ## The specification
 
 design/change-requests.md: "A change request describes what ought to be written. It uses only non-idiomatic descriptions
@@ -535,12 +548,8 @@ Each requirement names the code it replaces, the quoted source, and what is writ
 
 ### 8. The torch scope's final lowering
 
-- **Replaces,** at mesh 97a6bb8c, the torch scope's kernels, which are torch's MPS kernels, one ATen operator at a time
-  (mesh 03297e52):
-  - rdma/mesh_compile.py `_apply` (:1521), by which `_called` (:1540) and `_steps` (:1697) run every node's operator;
-  - `_kernels` (:1394), which registers `_mm_out` and `_mm` (:1382, :1390) by `torch.library.impl` for `aten::mm.out`
-    and `aten::mm` on `mps` (:1399–1400).
-- **Source:** read and quoted in FL, and Koes and Goldstein in TB.
+- **Replaces:** the torch scope's kernels, which are torch's MPS kernels, one ATen operator at a time (mesh 03297e52).
+- **Source:** read and quoted in FL.
   - J. Ansel et al., PyTorch 2, ASPLOS 2024, §1: "The framework only has visibility of a single operator at a time, and
     thus cannot automatically perform optimizations, like fusion or scheduling, that cross operator boundaries."
   - T. Chen et al., TVM, OSDI 2018, abstract: "TVM solves optimization challenges specific to deep learning, such as
@@ -573,30 +582,8 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   - Metal Performance Primitives, MPPTensorOpsMatMul2d.h:216–218 (macOS 26.4 SDK): "cooperative_tensor owns thread
     private data and divides the data for entire tensor among threads (participating in the scope of operation) in
     implementation defined manner."
-  - J. Ansel et al., PyTorch 2, ASPLOS 2024, §4.3: "Lowering is done by symbolically interpreting the FX graph and
-    applying lowering functions which do the conversion for a single operator." "If an unknown operator is
-    encountered, it is automatically converted into a fallback kernel node which runs the original PyTorch code."
-    §4.4: "ExternKernelSchedulerNode represents calls to library code or user-defined kernels." §4.7: "CUDA Graphs
-    records and replays kernel launches at the CUDA driver level and is lower overhead than even the C++ wrapper code."
-  - D. R. Koes, S. C. Goldstein, "Near-optimal instruction selection on DAGs", CGO 2008, §3: "Given an expression DAG
-    which represents the computation of a basic block and a set of architecture specific instruction tiles, we wish to
-    find an optimal tiling of the DAG which corresponds to the minimum cost instruction sequence." "The set of tiles
-    consists of a collection of expression trees each with an assigned cost." "The optimal tiling is the legal and
-    complete tiling where the sum of the costs of the tiles is minimized."
-- **Write,** in rdma/mesh_compile.py at mesh 97a6bb8c:
-  - Each function's FX graph is lowered "by symbolically interpreting the FX graph and applying lowering functions
-    which do the conversion for a single operator" (PyTorch 2 §4.3). A node whose operator a kernel of metal-microbench
-    matrix_shaders.metal computes is converted into an ExternKernelSchedulerNode, a call of that kernel in the library
-    that `torch.mps.compile_shader` makes of matrix_arithmetic.metal and matrix_shaders.metal (:1371, :1396–1398).
-  - Any other node is "an unknown operator", "converted into a fallback kernel node which runs the original PyTorch
-    code": `_apply`.
-  - `_kernels`'s `torch.library.impl` registrations are deleted.
-  - `_captured` (:1775) records the launches of those kernels and of the fallback kernel nodes: "CUDA Graphs records
-    and replays kernel launches" (PyTorch 2 §4.7).
-- **Stop:** a kernel of matrix_shaders.metal that computes more than one operator, as `gelu_mul` does (metal-microbench
-  matrix_shaders.metal:185 and its `matrixActivation`, matrix_arithmetic.metal:6, at bed56a95), is a tile whose
-  expression tree has more than one node. Koes and Goldstein choose among tilings by "the sum of the costs of
-  the tiles", and no quoted source gives the cost of a kernel. Nothing is written for such a kernel.
+- **Stop:** these sources state properties of a final lowering, and no quoted source says which IR carries one on Metal.
+  Nothing is written for this item.
 
 ### 9. Every node replays
 
@@ -620,5 +607,5 @@ Each requirement names the code it replaces, the quoted source, and what is writ
 - Item 4: the value the event is set to at a failure, without R.
 - Item 6: where the memory block of offsets lies among the pages of every other operand, and how an operand's u
   locations enter its usage records.
-- Item 8: the cost of a kernel that computes more than one operator.
+- Item 8: which IR carries the torch scope's final lowering on Metal.
 - Item 9: in the torch scope, the reading of received data (item 3).
