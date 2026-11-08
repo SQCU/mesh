@@ -13,7 +13,8 @@ The quoted sources were read, and each is recorded where it was read:
 - design/nccl-sources-2026-11-07.md (NS);
 - design/metal-atomic-sources-2026-11-07.md (MA);
 - design/tiling-and-bounds-sources-2026-11-07.md (TB);
-- design/stops-sources-2026-11-07.md (SS), retrieved 2026-11-07 for the stops of items 1, 2, 3, 4 and 6.
+- design/stops-sources-2026-11-07.md (SS), retrieved 2026-11-07 for the stops of items 1, 2, 3, 4 and 6;
+- design/list-scheduling-sources-2026-11-08.md (LS), retrieved 2026-11-08 for item 3.
 
 Turn numbers are those of design/operator-turns-2026-11-04-to-06.md, numbered on past U183 for later turns.
 
@@ -482,8 +483,10 @@ Each requirement names the code it replaces, the quoted source, and what is writ
 
 ### 3. Reading received data
 
-- **Replaces:** metal_recording.m `MetalMaskReaders`, `MetalMaskedPass` and `MetalCompactionSource`, and the later
-  passes that run after the queue's `waitForEvent:value:`.
+- **Replaces,** in the LiteRT scope: metal-microbench a8ed7bd6's and 28650030's holds, metal_recording.m
+  `MetalReceivedReaders`, `MetalPartitionReady` and `MetalHold` at 59b3a3d4. A recorded dispatch that reads a received
+  operand, or each run of it that the partition-ready kernel divides, waited at the queue for every range that lands a
+  page it reads before any of its threadgroups ran.
 - **Source:**
   - the operator: U41 and U71 (the turns);
   - MPI 4.1, §4.2.2, p. 120 (WA §5.3): "The MPI_PARRIVED function can be used to determine if the message data for the
@@ -498,14 +501,12 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   - J. Ragan-Kelley et al., Halide, PLDI 2013, §4.2 (TB §2): "For each function, it symbolically evaluates the bounds
     of each dimension based on the bounds required of its caller and the symbolic indices at which the caller invokes
     it."
-- **A partition is a page:** the asynchronous, incomplete, noncontiguous consumer "is one task per page, each with an
-  edge from its own page" (design/plan-to-bridge-change-request.md R4).
+- **A partition** is MPI_PRECV_INIT's "count: number of elements received per partition" (MPI 4.1 §4.2.1, p. 118; SS
+  §8): the bytes of one of the plan's pages, which metal_recording.m `receive:page:` takes.
 - **In the torch scope,** design/torch-source-lowering-change-request.md item 1 writes this item, by R4's task per page.
-- **In the LiteRT scope** (the stop of 2026-11-07, settled the same day): a recorded dispatch, `struct
-  MetalRecordedDispatch` (metal-microbench metal_recording.m:8 at bed56a95), holds a pipeline, buffers, offsets and a
-  grid; the sources above say when a receiver may access one partition, or all of them, and Halide computes a
-  function's bounds from "the symbolic indices at which the caller invokes it". The indices of a kernel written as
-  MSL source, and the division of its dispatch among partitions, are these:
+- **In the LiteRT scope** (revised 2026-11-08; the text of 2026-11-07 divided a dispatch by the partition-ready kernel
+  and held each run at the queue): a recorded dispatch, `struct MetalRecordedDispatch` (metal-microbench
+  metal_recording.m:10 at 59b3a3d4), holds a pipeline, buffers, offsets and a grid.
   - **Source:**
     - Dawn (79794682), src/dawn/native/metal/ShaderModuleMTL.mm:553–556 (SS §6): `library = AcquireNSPRef([mtlDevice
       newLibraryWithSource:mslSource.Get() options:compileOptions.Get() error:&error]);` MTLDevice.h:786 (SS §3):
@@ -513,45 +514,82 @@ Each requirement names the code it replaces, the quoted source, and what is writ
       error:(__autoreleasing NSError **)error;` The LiteRT stages' kernels are Tint's MSL, passed there
       (design/lowering-sources-2026-11-06.md).
     - J. Lee, *Virtualizing Data Parallel Systems for Portability, Productivity, and Performance*, Ph.D. dissertation,
-      University of Michigan, 2015, Chapter III (SKMD; SS §4). §3.2, p. 17: "The kernel transformer changes the original
-      kernel to the Partition-ready kernel, which enables the kernel to operate on a subset of work-groups. After
-      kernel transformation, the buffer manager performs static analysis on kernels to determine the memory access
-      pattern of each work-group. If the memory access range of each work-group can be analyzed statically, the buffer
-      manager will transfer only necessary data back and forth from each device once the partitioning decision is
-      made. On the other hand, if the memory access range cannot be analyzed, the entire input should be transferred
-      to each device". §3.2.1, p. 19: "it adds a parameter WG from and WG to to represent the range of the flattened
-      work-group indices to be computed on a device. In other words, SKMD runs (WG from − WG to + 1) work-groups and
-      skips the rest on a device. If a kernel launches more than a one dimensional NDRange, flattening code is
-      inserted as shown at line 11 in Figure 4.1. After flattening, each work-item identifies its work-group index
-      (flattened id) and checks if it is allowed to execute the kernel." Figure 3.4, p. 20, lines 8–14: `int idx =
-      get_group_id(0); int idy = get_group_id(1); int size_x = get_num_groups(0); int flattened_id = idx + idy *
-      size_x; if (flattened_id < WG_from || flattened_id > WG_to) return;` §3.2.2, p. 25: "For index space analysis,
-      the buffer manager uses data flow analysis focusing on the index operand of store and load instructions [...].
-      Using use-def chains, the buffer manager computes the function of index. If the function is affine and
-      represented as a · (W0 · w0 + l0), it is defined as a Contiguous Kernel. In this equation, a is a constant or an
-      induction variable of loop, and wi, li, and Wi represents work-group ID, work-item ID, and size of work-group in
-      the i-th dimension, respectively. For this type of kernel, it is safe to transfer a subset of data to each device
+      University of Michigan, 2015, Chapter III (SKMD; SS §4). §3.2, p. 17: "the buffer manager performs static
+      analysis on kernels to determine the memory access pattern of each work-group. If the memory access range of each
+      work-group can be analyzed statically, the buffer manager will transfer only necessary data back and forth from
+      each device once the partitioning decision is made. On the other hand, if the memory access range cannot be
+      analyzed, the entire input should be transferred to each device". §3.2.2, p. 25: "For index space analysis, the
+      buffer manager uses data flow analysis focusing on the index operand of store and load instructions [...]. Using
+      use-def chains, the buffer manager computes the function of index. If the function is affine and represented as
+      a · (W0 · w0 + l0), it is defined as a Contiguous Kernel. In this equation, a is a constant or an induction
+      variable of loop, and wi, li, and Wi represents work-group ID, work-item ID, and size of work-group in the i-th
+      dimension, respectively. For this type of kernel, it is safe to transfer a subset of data to each device
       proportional to assigned work-groups." "if the index space of the kernel cannot be determined statically, or the
       affine function fails to be recognized as above, the buffer manager gives up optimizing data transfer and
       defines it as a discontiguous kernel. In this case, the entire input and output will be transferred back and
       forth between the host and external devices".
-    - MPI 4.1 §4.2.1, p. 118 (SS §8): `MPI_PRECV_INIT(buf, partitions, count, datatype, source, tag, comm, info,
-      request)`, "count: number of elements received per partition"; §4.2.3, p. 121 (WA §5.3): "Partitions are
-      contiguous in memory, there is no padding in between them."
+    - MPI 4.1 §4.2.3, p. 121 (WA §5.3): "Partitions are contiguous in memory, there is no padding in between them."
+    - Predication (RG §B.3): R. M. Russell, "The CRAY-1 Computer System", CACM 21(1), 1978: "the 64-bit vector mask
+      (VM) register controls vector element designation in vector merge and test instructions. Each bit of the VM
+      register corresponds to a vector register element." The RISC-V Vector Extension 1.0: "The mask value used to
+      control execution of a masked vector instruction is always supplied by vector register `v0`." Apple, Metal
+      Shading Language Specification 4.1, §6.10.2, `simd_ballot`: "The function sets the bits that correspond to
+      inactive threads to 0." §6.10.1, p. 216: "If threadgroup_barrier (or simdgroup_barrier) is inside a conditional
+      statement and if any thread enters the conditional statement and executes the barrier function, then all
+      threads in the threadgroup (or SIMD-group) need to enter the conditional and execute the barrier function."
+    - Stream compaction (RG §B.3): M. Harris, S. Sengupta and J. D. Owens, "Parallel Prefix Sum (Scan) with CUDA",
+      GPU Gems 3, ch. 39, 2007: "Informally, stream compaction is a filtering operation: from an input vector, it
+      selects a subset of this vector and packs that subset into a dense output vector." "Stream compaction requires
+      two steps, a scan and a scatter." G. E. Blelloch, "Prefix Sums and Their Applications", 1990, p. 46: "The basic
+      idea is to determine a new index for each element and then permute the elements to these new indices using an
+      exclusive write."
+    - The worklist: Nasre, Burtscher and Pingali, above, and p. 3 (RG §B.3): "The threads in a thread block can
+      compute the total amount of work to be added by all threads in the thread block using a prefix sum (in shared
+      memory)".
+    - The presence of each element (RG §B.3): Arvind, R. S. Nikhil and K. K. Pingali, "I-Structures: Data Structures
+      for Parallel Computing", TOPLAS 11(4), 1989, pp. 12–13: "a consumer that tries to read some A[i] while it is
+      still empty is made to wait until the corresponding (f i) has completed. One way to achieve this synchronization
+      is to use I-structure storage, where each location has "presence bits" to indicate whether the value is present
+      or absent." p. 13: "the consumer of an array can begin work on parts of the array while the producer of the
+      array is still working on other parts."
+    - The later pass's dispatch, Apple, MTL4ComputeCommandEncoder.h:90–112, macOS SDK 26.4.1 (LS §3): "Encodes a
+      compute dispatch command with a grid that aligns to threadgroup boundaries, using an indirect buffer for
+      arguments." "This method allows you to supply the threadgroups-per-grid counts indirectly via an ``MTLBuffer``
+      index. This enables you to calculate this value in the GPU timeline from a shader function, enabling GPU-driven
+      workflows." Its wait, MTL4CommandQueue.h:269 (CS §10–12, as item 1 quotes it): "Schedules an operation to wait
+      for a GPU event of a specific value before continuing to execute any future GPU work."
+    - The later passes' order (LS §1 and §2): L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res.
+      22(3), 1997, §2.1, p. 5 of the preprint: "first, we obtain an optimal solution to the linear program,
+      C̄1, ..., C̄n; and then we schedule the jobs in order of non-decreasing C̄j, where ties are broken by choosing an
+      order that is consistent with the precedence relation." R. L. Graham, Bell System Technical Journal 45(9), 1966,
+      §1.1, p. 1564: "We are given a linear ordering L: (T_k1, ···, T_km) of T called a task list (or priority
+      list)."
   - **Write:**
     - A recorded kernel's source is the `source` of the recorded `newLibraryWithSource:options:error:` call (item 1
       records every call). The index function of each of its loads and stores is computed from that source by
       use-def chains; a kernel whose index functions are affine, a · (W0 · w0 + l0), is a contiguous kernel, and any
       other is discontiguous (Lee §3.2.2).
-    - A recorded dispatch of a contiguous kernel is divided among partitions as the partition-ready transformation
-      divides it: the kernel takes WG_from and WG_to, flattens its threadgroup index, and returns outside the range
-      (Figure 3.4). The range dispatched for partition p of a received operand is the threadgroups whose index
-      functions' values over their threads lie in elements [p · count, (p + 1) · count) of the receive buffer
-      ("Partitions are contiguous in memory"; count elements per partition), and it is dispatched once MPI_PARRIVED
-      holds for p: "the receiver becomes free to access the indicated partition".
-    - A recorded dispatch of a discontiguous kernel waits for the whole operand, as Lee transfers "the entire input"
-      for one: MPI_WAIT, "the receive buffer contains all of the partitions".
-    - `MetalMaskReaders`, `MetalMaskedPass` and `MetalCompactionSource` are deleted.
+    - The pages a threadgroup of a contiguous kernel reads are the partitions its index functions' values over its
+      threads fall in ("Partitions are contiguous in memory"). A threadgroup of a discontiguous kernel reads every
+      partition, as Lee transfers "the entire input" for one.
+    - Each recorded dispatch that reads a received operand runs first predicated by a mask (Russell; RISC-V V). Each
+      threadgroup tests the presence of the elements it reads (I-structures' "presence bits"): the phase fields of the
+      receives that land its pages, and no other. A threadgroup any of whose fields shows its page not landed returns
+      before any store and writes its flag. It passes or returns as a unit, its threads' votes joined by `simd_ballot`
+      (MSL §6.10.1 and §6.10.2).
+    - A compaction after the first pass packs the flagged threadgroups into a dense list by a scan and a scatter, and
+      writes the list's length as the later pass's threadgroup count (Harris, Sengupta and Owens; Blelloch). The list is
+      the worklist of a data-driven pass (Nasre, Burtscher and Pingali).
+    - The later pass runs the list by a dispatch with an indirect buffer (MTL4ComputeCommandEncoder.h:90–112), after the
+      queue's wait for the event that the landings raise (MTL4CommandQueue.h:269). Each of its threadgroups tests its
+      fields again. It waits for the ranges that land a page some threadgroup of the dispatch reads, and for no other.
+    - The later passes are a task list (Graham) in the order of non-decreasing completion times of the transfers they
+      read, the times mesh_plan's linear program computes and publishes. Ties are broken by the order the capture
+      records the passes in (Hall et al.). The recorded calls keep the order they were recorded in (item 1).
+    - a8ed7bd6's `MetalReceivedReaders` and `MetalPartitionReady`, and 28650030's `MetalHold`, are deleted.
+  - **Stop:** later passes that the completion times list in an order other than the capture's. The replay's one queue
+    takes its later passes in the capture's order, and no source quoted here says how a later pass is placed against the
+    recorded calls that depend on it. The replay stops there and names both passes.
 
 ### 4. The completion of execution t's requests
 
@@ -747,6 +785,8 @@ As of 2026-11-07, after the sources of SS:
 
 - Item 2: the execution time estimates t(v) of the host's write and of the GPU's passes, from which Bhattacharyya,
   Sriram and Lee's Bff(e) is computed. No quoted source says how they are obtained here.
+- Item 3 in the LiteRT scope (2026-11-08): later passes that their transfers' completion times list in an order other
+  than the capture's. No quoted source says how a later pass is placed against the recorded calls that depend on it.
 
 Settled on 2026-11-07, each by the sources named in its item: item 1 (a call made only while a condition holds:
 RenderDoc, GFXReconstruct, CUDA); item 2's form (Bff(e) of a feedforward edge); item 3 in the LiteRT scope (Lee 2015's
