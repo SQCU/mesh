@@ -146,7 +146,7 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
 - **Replaces:** the order of the torch scope's GPU commands, which is the order `_captured` (:1775) recorded them in.
 - **Keeps,** in rdma/mesh-graph.c: `mesh_graph_completion_times` (:950) and `mesh_graph_heap_order` (:1068), called from
   `plan_schedule` (rdma/mesh-collective.c:830, :834); `mesh_graph_convert_sc` (:1263) and `mesh_graph_determine_delays`
-  (:1304), called from `plan_graph` (rdma/mesh-collective.c:999–1000).
+  (:1304), called from `plan_graph` (rdma/mesh-collective.c:999–1000); rdma/mesh_compile.py `partition` (:610).
 - **Source:**
   - the operator (2026-11-07 21:26): "we know what the ordering relationships are so we can use any canonical lowering
     strategy for turning dependency relations into ordered vs non-ordered relations between function inputs and outputs
@@ -219,8 +219,6 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
     the operation." :207–225 (FL §14b):
     "cooperative_tensor owns thread private data and divides the data for entire tensor among threads (participating in
     the scope of operation) in implementation defined manner."
-  - A. Jangda et al., CoCoNet, ASPLOS 2022, §1 (FL §12): "we need to schedule the MatMul kernel to compute chunks in the
-    order the AllReduce kernel communicates them."
   - L.-W. Chang et al., FLUX (arXiv:2406.06858), abstract (FL §10): "Flux overdecomposes communication and computation
     operations into much finer-grained operations and further fuses them into a larger kernel to effectively hide
     communication without compromising kernel efficiency." §1: "In the fused kernel, each dependent computation and
@@ -244,5 +242,3 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
   - The tile loops over k in chunks, as "User can also take ownership of looping over reduction or k-dimension by
     choosing appropriate chunk size in k (called k-tile or tilek)", into a cooperative_tensor destination: "User can
     apply post processing in-register where GEMM output is computed using cooperative_tensor."
-  - Chunks are computed in the order the AOT compiled static link schedule delivers them: "we need to schedule the
-    MatMul kernel to compute chunks in the order the AllReduce kernel communicates them".
