@@ -240,3 +240,11 @@ class OutputKind(Enum):
         x1: USER_INPUT
         x2: USER_INPUT
 ```
+
+`torch/export/graph_signature.py` L268–270, the same signature's outputs:
+
+```text
+        # outputs
+        add_2: BUFFER_MUTATION target='my_buffer2'
+        add_1: USER_OUTPUT
+```
