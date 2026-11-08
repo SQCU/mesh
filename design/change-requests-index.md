@@ -11,18 +11,22 @@ every change request follows is [change-requests.md](change-requests.md).
      operator, which is now a compile error naming it, and functions placed on the CPU, which item 1 gives no source.
   2. The capture is a static dataflow graph. Implemented in mesh b4a6e67d. Open: `cond` and `while_loop` on GPU data,
      which item 2 admits and no item says how to lower.
-  3. Self-timed lowering of dependences into Metal orderings.
+  3. Self-timed lowering of dependences into Metal orderings. Implemented in mesh 38e2b7e6 and 775f142c, and in
+     metal-microbench e4800f65, 270c6e5f and 43f37e96. Open: the order is by dependence depth, since no operand gives
+     a recorded command the length the completion-time linear program needs.
   4. Consumption of received data inside functions. Written for data landed before the dispatch, in metal-microbench
      c4d41929 (`dense_tensor_f16_received`). Open: consumption while partitions land during the dispatch. On the M5
      Max the GPU did not see the CPU's ordered stores in order, and no quoted source gives a running Metal function
      acquire visibility of CPU or NIC writes.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
-  - Open, written and not yet implemented: items 1, 3 (in the LiteRT scope) and 6. Their stops were settled in mesh
-    d62f205d, from design/stops-sources-2026-11-07.md.
+  - Open, written and not yet implemented: item 6, its stop settled in mesh d62f205d from
+    design/stops-sources-2026-11-07.md.
+  - Open, a stop again: item 3 in the LiteRT scope. Unsaid are what a partition of a received operand is, a range or a
+    page; a threadgroup whose indices span two partitions; and a dispatch reading several received operands.
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
   - In the torch scope, item 9 waits on the lowering request's item 4.
-  - Implemented: items 5 and 7, item 2's first write, item 1's copies and fills, and item 4 (mesh 992f6389). Item 8 is written by the lowering
+  - Implemented: items 1 (metal-microbench a3792f13), 4 (mesh 992f6389), 5 and 7, and item 2's first write. Item 8 is written by the lowering
     request's items 1–3.
 - [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md): outstanding in part.
   - Implemented: the requirements written from its stops in mesh 593dd1c0. These are the second stops' item 8 and the
