@@ -23,6 +23,7 @@ from torch.fx.node import Node, map_arg
 from torch.utils._mode_utils import no_dispatch
 
 import mesh
+import mesh_code
 import mesh_disk
 import mesh_graph
 
@@ -1874,6 +1875,9 @@ class _Region:
 
     def scatter(self, output, indices, value, predicate):
         self.add(('scatter', output, tuple(indices), value, predicate), BOOL)
+
+    def extract_if(self, input, kind, indices, predicate, fallback):
+        return self.add(('extract_if', input, tuple(indices), predicate, fallback), kind)
 
 
 # N. Juffa, Stack Overflow answer 35148199, 2016; torch 2.14.0 c10/metal/special_math.h, erf
@@ -5925,6 +5929,54 @@ def _scattered(target, given, outs):
                     given.get('include_self', True), message=str(target))
 
 
+# docs/provider.md#fragment-coded-weights
+def _fragment(target, given, outs):
+    (out,), codes, tiles = outs, given['codes'], given['tiles']
+    if not codes.numel():
+        return _fill(out, 0)
+    fields = [given[k] for k in ('rows', 'columns', 'tiles', 'bands', 'row_scale', 'col_scale')]
+    fields += [tiles.view(torch.float16)[..., 1::2], codes]
+    r, t = _Region(), _compute(out.dtype, torch.float32)
+
+    def c(value):
+        return r.const(value, U32)
+
+    def op(name, a, b):
+        return r(name, U32, a, b)
+
+    def read(k, *indices):
+        return r('extract', _class(fields[k]), *indices, integer=k)
+    row, col = (_convert(r, read(k, r.index(k)), _class(fields[k]), U64) for k in (0, 1))
+    rr, cc = (r('cast', U32, r('rem', U64, x, r.const(32, U64))) for x in (row, col))
+    tr, tc = (r('div', U64, x, r.const(32, U64)) for x in (row, col))
+    word = read(2, tr, tc)
+    width = op('and', op('shr', word, c(12)), c(15))
+    lane = op('or', op('or', op('and', op('div', rr, c(8)), c(1)), op('shl', op('and', cc, c(3)), c(1))),
+              op('or', op('shl', op('and', op('div', rr, c(8)), c(2)), c(2)),
+                 op('shl', op('and', cc, c(4)), c(2))))
+    pair = op('add', op('mul', op('and', rr, c(7)), c(2)), op('div', cc, c(8)))
+    bit = op('mul', pair, width)
+    shift, half = op('rem', bit, c(16)), op('mul', op('and', rr, c(1)), c(16))
+    base = op('add', op('and', read(3, tr), c(0x0fffffff)), op('and', word, c(0xfff)))
+    at = r('add', U64, r('mul', U64, r('cast', U64, op('add', base, op('div', bit, c(16)))), r.const(32, U64)),
+           r('cast', U64, lane))
+    live = r('ne', BOOL, width, c(0))
+    crossing = r('gt', BOOL, op('add', shift, width), c(16))
+    low = r.extract_if(7, U32, [at], live, c(0))
+    high = r.extract_if(7, U32, [r('add', U64, at, r.const(32, U64))], r('and', BOOL, live, crossing), c(0))
+    low, high = (op('and', op('shr', x, half), c(0xffff)) for x in (low, high))
+    joined = op('or', low, op('shl', high, c(16)))
+    power = op('shl', c(1), width)
+    symbol = op('and', op('shr', joined, shift), op('sub', power, c(1)))
+    odd = r('sub', I32, r('cast', I32, op('add', op('mul', symbol, c(2)), c(1))), r('cast', I32, power))
+    decoded = r('mul', t, r('cast', t, odd), r('mul', t, r.const(.5, t), r('cast', t, read(6, tr, tc))))
+    value = r('select', t, live, decoded, r.const(0, t))
+    value = r('mul', t, r('mul', t, value, _convert(r, read(4, row), _class(fields[4]), t)),
+              _convert(r, read(5, col), _class(fields[5]), t))
+    r.done(_store(r, value, t, out))
+    return [_Generic(out.shape, [(x, None) for x in fields], [(out, _same(out.dim()))], r)]
+
+
 # T. Dao et al., FlashAttention, NeurIPS 2022, Algorithms 1 and 2;
 # H. Liu et al., Ring Attention, arXiv:2310.01889, section 3 and Algorithm 1
 def _heads(x, group, kv):
@@ -6445,7 +6497,7 @@ def _trips(test, body, carried, additional):
 
 # design/torch-source-lowering-change-request.md item 1; design/compilation-composition-change-request.md, "Complete
 # replacement workgroup": each call's structured operations, a view's materialization its copy
-SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A._to_copy, A._unsafe_view, A.copy,
+SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A._to_copy, A._unsafe_view, A.copy,
                                                                      A.copy_), _copying),
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys(FACTORIZATIONS, _factorized),
@@ -7046,6 +7098,12 @@ class _Builder:
             elif call == 'extract':
                 given = _array(mesh.U, [h[x] for x in record[2]])
                 h.append(lib.metal_ir_extract(p, r, record[1], len(record[2]), given))
+            elif call == 'extract_if':
+                extract = lib.metal_ir_extract_if
+                extract.restype, extract.argtypes = mesh.U, [C.c_void_p, mesh.U, mesh.U, mesh.U,
+                                                             C.POINTER(mesh.U), mesh.U, mesh.U]
+                given = _array(mesh.U, [h[x] for x in record[2]])
+                h.append(extract(p, r, record[1], len(record[2]), given, h[record[3]], h[record[4]]))
             elif call == 'scatter':
                 given = _array(mesh.U, [h[x] for x in record[2]])
                 lib.metal_ir_scatter(p, r, record[1], len(record[2]), given, h[record[3]], h[record[4]])
@@ -7294,11 +7352,12 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': None})
             return result
         ops, result = _instantiate(ir, instance(k, j)[0], inputs, compiled[k].spec, row)
-        # the caller's placement operand (Function `device`): a function placed on the Neural Engine has every
-        # operation there (metal_ir.h METAL_IR_ANE), its values in the same placed storage
-        if compiled[k].function.device == 'ane':
+        # docs/provider.md#fragment-coded-weights
+        target = compiled[k].function.device
+        if target is not None:
+            place = ANE if target == 'ane' else CPU if torch.device(target).type == 'cpu' else GPU
             for g in ops:
-                _placed([g], ANE, g.node)
+                _placed([g], place, g.node)
         builder = _Builder(compiler, owners, role, row, (k << 48) | (j << 32))
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[GPU]), C.byref(machines[CPU]))
@@ -7651,10 +7710,10 @@ def _ended(replay):
 # 3; J. Reed, Z. DeVito, H. He, A. Ussery and J. Ansel, MLSys 2022; torch v2.14.0 torch/fx/_symbolic_trace.py,
 # Tracer.is_leaf_module; torch/nn/modules/module.py, _forward_unimplemented
 class Function(torch.nn.Module):
-    def __init__(self, module, placement, weights, device=None, loss=None):
+    def __init__(self, module, placement, weights, device=None, loss=None, source_device=None):
         super().__init__()
         self.module, self.placement, self.weights, self.device = module, placement, weights, device
-        self.loss = loss
+        self.loss, self.source_device = loss, source_device
 
 
 # torch 2.14.0 torch/export/experimental/__init__.py _export_forward_backward;
@@ -7872,6 +7931,7 @@ def _static(gm):
             if node.op == 'call_function' and node.target is A._assert_tensor_metadata.default:
                 args, kwargs = map_arg((node.args, node.kwargs), lambda n: n.meta['val'])
                 node.target(*args, **kwargs)
+                node.meta['val'] = None
             if node.op != 'call_function' or node.target not in CONTROL:
                 continue
             data = [node.args[0]]
@@ -8009,8 +8069,8 @@ class _Export(torch.fx.Interpreter):
         signature = (spec, tuple(_metadata(v) for v in flat), aliases)
         found = [k for k, c in enumerate(self.compiled) if c.function is function and c.signature == signature]
         if not found:
-            if function.device is not None:
-                held = 'cpu' if function.device == 'ane' else function.device
+            if function.source_device is not None or function.device is not None:
+                held = function.source_device or ('cpu' if function.device == 'ane' else function.device)
                 args, kwargs = pytree.tree_map(lambda v: self.fake(v, held), (args, kwargs))
             exported = _exported(function, args, kwargs)
             gm = exported.module(check_guards=False)

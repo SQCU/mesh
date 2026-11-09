@@ -54,24 +54,30 @@ class Layer(torch.nn.Module):
 
 
 class Program(torch.nn.Module):
-    def __init__(self, nodes, engines, widths, projection_device):
+    def __init__(self, nodes, engines, widths, projection_device, coded=None):
         super().__init__()
         import mesh_compile as mesh
         def placement(gm, examples):
             return mesh.Placement(list(range(len(nodes))), nodes, {})
-        def compiled(module, device):
-            return mesh.Function(module.to('cpu' if device == 'ane' else device), placement, mesh.unit, device=device)
+        def compiled(module, device, encoded=False):
+            return mesh.Function(module if encoded else module.to('cpu' if device == 'ane' else device),
+                                 placement, mesh.unit, device=device, source_device='cpu' if encoded else None)
         layers = []
-        for _ in range(LAYERS):
+        for layer in range(LAYERS):
             projection = compiled(Projection((torch.randn(K, K) / K ** 0.5).half()), projection_device)
-            weights = [(torch.randn(K, K) / K ** 0.5).half()] if KIND == 'linear' else [
+            weights = None if coded is not None else [(torch.randn(K, K) / K ** 0.5).half()] if KIND == 'linear' else [
                 (torch.randn(N, K) / K ** 0.5).half(), (torch.randn(N, K) / K ** 0.5).half(),
                 (torch.randn(K, N) / N ** 0.5).half()]
             parts, offset = [], 0
             for device, count in zip(engines, widths, strict=True):
-                matrices = [weight[:, offset:offset + count] if j == 2 else weight[offset:offset + count]
-                            for j, weight in enumerate(weights)]
-                parts.append(compiled(Shared(matrices), device))
+                if coded is not None:
+                    import mesh_code
+                    part = mesh_code.FFN(coded[layer], offset, count)
+                else:
+                    matrices = [weight[:, offset:offset + count] if j == 2 else weight[offset:offset + count]
+                                for j, weight in enumerate(weights)]
+                    part = Shared(matrices)
+                parts.append(compiled(part, device, coded is not None))
                 offset += count
             layers.append(Layer(projection, parts, compiled(Combine(), projection_device)))
         self.layers = torch.nn.ModuleList(layers)
@@ -83,9 +89,20 @@ class Program(torch.nn.Module):
 
 
 def main():
+    global K, N
     from tp import arguments, execute
     args = arguments('Compiled projections and FFN or linear partitions across configured CPU, MPS and ANE engines.',
                      int(os.environ.get('STEPS', '40')))
+    coded = None
+    if os.environ.get('CODES'):
+        import mesh_code
+        exported = mesh_code.load(os.environ['CODES'])
+        first = int(os.environ.get('FIRST', '0'))
+        coded = [[exported['model.language_model.layers.%d.mlp.%s_proj' % (layer, part)]
+                  for part in ('gate', 'up', 'down')] for layer in range(first, first + LAYERS)]
+        N, K = coded[0][0].shape
+        if KIND != 'ffn':
+            raise ValueError('CODES supplies the gate/up/down matrices of the OP=ffn workload')
     engines = os.environ.get('ENGINES', 'mps,cpu,ane').split(',')
     width = K if KIND == 'linear' else N
     widths = [int(x) for x in os.environ['PARTS'].split(',')] if 'PARTS' in os.environ else [
@@ -94,7 +111,7 @@ def main():
         raise ValueError('PARTS supplies one nonnegative width per engine, summing to %d' % width)
     torch.manual_seed(0)
     x = torch.randn(ROWS, K).half() / 4
-    block = None if args.load else Program(args.nodes, engines, widths, args.device)
+    block = None if args.load else Program(args.nodes, engines, widths, args.device, coded)
     return execute(block, (x,), args)
 
 
