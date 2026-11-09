@@ -5831,6 +5831,10 @@ def _scatter(out, base, src, targets, candidates, limits, near, far, op, include
         results += [r.const(0, t)] * (parts - len(results))
     else:
         results = [r.const(_component(src, k), t) for k in range(parts)]
+    if op == 1 and alpha != 1:
+        results = list(_complex_value(r, t, 'mul', results,
+                       [r.const(_component(alpha, q), t) for q in (0, 1)], 1, None)) if parts == 2 else \
+            [r('mul', t, r.const(alpha, t), results[0])]
     r.done(*results, *([r.const(1, I64)] if op == 3 else []))
     made.append(_Generic(shape, inputs, [(v, _same(dims)) for v in values], r))
     if op:
@@ -5872,9 +5876,6 @@ def _scatter(out, base, src, targets, candidates, limits, near, far, op, include
         b.append(_convert(e, e('extract', _class(component), *coords, integer=len(inputs)), _class(component), t))
         inputs.append((component, None))
     own = include and op != 0
-    if op == 1 and alpha != 1:
-        a = list(_complex_value(e, t, 'mul', a, [e.const(_component(alpha, q), t) for q in (0, 1)], 1, None)) \
-            if parts == 2 else [e('mul', t, e.const(alpha, t), a[0])]
     result = combined(e, b, a) if own else a
     if op == 3:
         total = e('add', I64, e.arg(parts, values[parts]), e.const(int(own), I64))
