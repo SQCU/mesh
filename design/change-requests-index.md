@@ -145,8 +145,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   files. Mesh5942f839 carries export constants and explicitly immutable coded definitions through the same initial
   storage owner before lowering, excluding captured mutation and compiled writes. Ordinary mutable parameters and
   buffers retain state semantics. Fresh CPU/GPU preservation results pass against unchanged references, but
-  plain/zero/ragged neural compilation still fails with region access other than a struct member. The compiler's
-  retained producer/preparation proof is under examination; supplying annotations alone does not close the handoff.
+  plain/zero/ragged neural compilation still fails with region access other than a struct member. Exact typed
+  inspection identifies operation0 as the dynamic input permutation gather, preceding operation1's constant
+  decoder. The remaining failure is in Core ML's region-access consumer; it cannot establish whether decoder
+  preparation succeeded. That consumer and the independent materialization evidence remain assigned.
   Both F16 literal-weight cases remain exact but CPU-preferred, including the convolution itself. Build28 removes
   the duplicated preparation payload: the larger artifact falls from8,410,794 to4,204,077bytes. The zero-operation
   alias/constant diagnostic also remains exact with its existing externally supplied literal initialization;
