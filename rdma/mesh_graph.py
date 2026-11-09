@@ -185,6 +185,10 @@ class Scope(C.Structure):
     _fields_ = [('once', C.c_uint32), ('counter', C.c_uint32), ('delta', C.c_int64)]
 
 
+class Span(C.Structure):
+    _fields_ = [(n, C.c_uint64) for n in ('first', 'count', 'begin', 'end')]
+
+
 class Signature(C.Structure):
     _fields_ = [('processors', C.c_uint32), ('tasks', C.c_uint32), ('operations', C.c_size_t),
                 ('dependences', C.c_size_t), ('synchronized', C.c_size_t), ('uncovered', C.c_size_t),
@@ -195,7 +199,8 @@ class Signature(C.Structure):
                 ('least', C.POINTER(C.c_uint64)), ('previous', C.POINTER(C.c_size_t)),
                 ('waited', C.POINTER(C.c_size_t)), ('first', C.POINTER(C.c_size_t)), ('order', C.POINTER(C.c_size_t)),
                 ('unknown', C.POINTER(C.c_uint64)), ('alias', C.POINTER(C.c_uint32)), ('digest', C.c_ubyte * 32), ('controls', C.c_size_t), ('events', C.c_size_t),
-                ('control', C.POINTER(Control)), ('event', C.POINTER(Event)), ('scope', C.POINTER(Scope))]
+                ('control', C.POINTER(Control)), ('event', C.POINTER(Event)), ('scope', C.POINTER(Scope)),
+                ('spans', C.c_size_t), ('span', C.POINTER(Span))]
 
 
 PRINTERS = ('mesh_graph_matrix_market', 'mesh_graph_dot', 'mesh_graph_space_time')

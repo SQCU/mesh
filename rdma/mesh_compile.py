@@ -15,7 +15,6 @@ import weakref
 
 import torch
 import torch.utils._pytree as pytree
-from torch._export.passes.remove_runtime_assertions import _RemoveRuntimeAssertionsPass
 from torch._library._out_variant import _is_functional, get_out_arg_names, to_out_variant
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.node import Node, map_arg
@@ -1497,6 +1496,10 @@ class MetalSent(C.Structure):
     _fields_ = [('counter', C.c_void_p), ('sends', mesh.Q), ('copies', mesh.Q)]
 
 
+class CheckFailure(C.Structure):
+    _fields_ = [('identity', mesh.Q), ('batch', mesh.Q), ('info', C.c_int64), ('code', mesh.U), ('padding', mesh.U)]
+
+
 START = C.cast(mesh.LIB.mesh_transfers_start, C.c_void_p)
 TRANSPORT = []
 
@@ -1576,6 +1579,8 @@ def _recorder():
         lib.MetalProgramHorizon.restype, lib.MetalProgramHorizon.argtypes = mesh.U, [C.c_void_p]
         lib.MetalProgramEnd.restype = C.c_int
         lib.MetalProgramEnd.argtypes = [C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
+        lib.MetalProgramCheckFailure.restype = C.c_int
+        lib.MetalProgramCheckFailure.argtypes = [C.c_void_p, C.POINTER(CheckFailure)]
         lib.MetalReplayDestroy.restype, lib.MetalReplayDestroy.argtypes = None, [C.POINTER(Replay)]
         lib.MetalProgramSignature.restype = C.c_int
         lib.MetalProgramSignature.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, C.POINTER(mesh_graph.Signature),
@@ -2933,7 +2938,7 @@ FACTORIZATIONS = (A.linalg_lu_factor_ex, A._linalg_solve_ex, A.linalg_solve_ex, 
                   A.cholesky_solve, A.cholesky_inverse)
 
 
-def _factorized(target, given, outs):
+def _factorization(target, given, outs):
     packet, ops = target.overloadpacket, []
     a = given.get('A', given.get('self'))
     if packet is A.linalg_lu_factor_ex:
@@ -2973,6 +2978,50 @@ def _factorized(target, given, outs):
     ops += _linalg_lu_solve(lu, pivots, b.unsqueeze(-1) if vector else b,
                            result.unsqueeze(-1) if vector else result, given.get('left', True))
     return ops
+
+
+class _Check:
+    def __init__(self, info, code, message=''):
+        self.info, self.code, self.place, self.node = info, code, CPU, 0
+        self.message = message
+
+
+def _factorized(target, given, outs):
+    ops = _factorization(target, given, outs)
+    if given.get('check_errors'):
+        ops.append(_Check(outs[-1], 2 if target.overloadpacket is A.linalg_cholesky_ex else 1))
+    return ops
+
+
+def _checked(target, given, outs):
+    code = 2 if given['api_name'] in ('linalg.cholesky', 'linalg.cholesky_ex', 'cholesky') else 1
+    return [_Check(given['info'], code, given['api_name'])]
+
+
+ASSERTIONS = (A._assert_async, A._assert_scalar, A._assert_tensor_metadata,
+              A.sym_constrain_range, A.sym_constrain_range_for_size)
+
+
+def _asserted(target, given, outs):
+    if target.overloadpacket is A._assert_tensor_metadata:
+        return []
+    value = given.get('self', given.get('size'))
+    if not isinstance(value, torch.Tensor):
+        target(**given)
+        return []
+    predicate = _temporary(value.shape, torch.bool)
+    if target.overloadpacket in (A.sym_constrain_range, A.sym_constrain_range_for_size):
+        ops = _fill(predicate, True)
+        for name, comparison in (('min', 'ge'), ('max', 'le')):
+            if given.get(name) is not None:
+                bound = _temporary(value.shape, torch.bool)
+                ops += _elementwise(comparison, bound, value, given[name])
+                ops += _elementwise('logical_and', predicate, predicate, bound)
+    else:
+        ops = _elementwise('ne', predicate, value, 0)
+    info = _temporary(value.shape, torch.int32)
+    ops += _elementwise('where', info, predicate, 0, 1)
+    return ops + [_Check(info, 4, given.get('assert_msg', str(target)))]
 
 
 # Reference-LAPACK SRC/dlarfg.f, zlarfg.f, dgeqr2.f, zgeqr2.f, dorg2r.f and zung2r.f
@@ -5205,6 +5254,8 @@ SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A.
                                                                      A.copy_), _copying),
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys(FACTORIZATIONS, _factorized),
+           A._linalg_check_errors: _checked,
+           **dict.fromkeys(ASSERTIONS, _asserted),
            **dict.fromkeys(ORTHOGONAL, _orthogonal), A.triu: _triangular_part, A.tril: _triangular_part,
            A.linalg_matrix_exp: _matrix_exp,
            A._linalg_eigh: _eigen_hermitian,
@@ -5480,9 +5531,11 @@ def _called(ir, key, operands, local, form, placed):
 
 
 def _made(ir, key, local, args, kwargs):
+    if isinstance(local.target, torch._ops.OpOverload) and not local.target._schema.returns:
+        return [None], pytree.tree_structure(None)
     made, spec = pytree.tree_flatten(_call(local, args, kwargs) if isinstance(local.target, torch._ops.OpOverload)
                                      else key[0].meta['val'])
-    return [_held(m) for m in made], spec
+    return [_held(m) if m is not None else None for m in made], spec
 
 
 # torch/__init__.py SymInt, SymBool and SymFloat (Python int, bool and float semantics): a scalar a higher-order
@@ -5657,6 +5710,7 @@ def _retire(context, state):
         status = replay['lib'].MetalProgramEnd(replay['program'], replay['ended'], replay['error'], len(replay['error']))
         if status == errno.ETIMEDOUT:
             raise OSError(status, replay['error'].value.decode())
+    failure = _execution_error(replay, status, replay['error'].value.decode()) if status else None
     mesh.LIB.mesh_retire(context.M, context.client)
     _released(state['owned'])
     mapping = state['mapping']
@@ -5665,7 +5719,7 @@ def _retire(context, state):
         mapping.retired = True
         mapping.release()
     if status:
-        raise OSError(status, replay['error'].value.decode())
+        raise failure
 
 
 # the preparation's resources, each with its release, made in order and released in the reverse order, on retirement
@@ -5793,6 +5847,12 @@ class _Builder:
     # metal_ir.h `identity`: the producer's identity of an operation and of the values it first names, (function,
     # call ordinal, FX node position) of the call's graph, kept through every transformation (metal_ir_operation_info)
     def generic(self, g):
+        if isinstance(g, _Check):
+            self.identity = self.base | g.node
+            operation = self.lib.metal_ir_check(self.p, self.value(g.info), g.code, self.identity)
+            if g.message:
+                self.lib.metal_ir_check_message(self.p, operation, g.message.encode())
+            return operation
         if isinstance(g, _Sort):
             self.identity = self.base | g.node
             sort = self.lib.metal_ir_sort
@@ -5918,6 +5978,8 @@ def _compiler():
                                          C.POINTER(U), C.POINTER(U), C.POINTER(U), C.POINTER(Expr), U, C.POINTER(Term),
                                          U, U, Q]),
                 ('metal_ir_states', None, [P, U, U, C.POINTER(U), C.POINTER(Q)]),
+                ('metal_ir_check', U, [P, U, U, Q]),
+                ('metal_ir_check_message', None, [P, U, C.c_char_p]),
                 ('metal_ir_region', U, [P, U, U]), ('metal_ir_parameter', U, [P, U, U]),
                 ('metal_ir_literal', U, [P, U, U, Q]), ('metal_ir_binary', U, [P, U, U, U, U]),
                 ('metal_ir_unary', U, [P, U, U, U]), ('metal_ir_convert', U, [P, U, U, U]),
@@ -6339,11 +6401,22 @@ def _specialize(programs, horizon, bound, gm, constants, holders, every):
 
 
 # mesh-call.h mesh_transfers_start; MPI 4.1 §3.9, MPI_START; NCCL User Guide, CUDA Stream Semantics
+def _execution_error(replay, status, message):
+    failure = CheckFailure()
+    if status == errno.EDOM and not replay['lib'].MetalProgramCheckFailure(replay['program'], C.byref(failure)):
+        kind = torch.linalg.LinAlgError if failure.code in (1, 2, 3) else RuntimeError
+        error = kind(message)
+        error.operation_identity, error.batch, error.info, error.code = \
+            failure.identity, failure.batch, failure.info, failure.code
+        return error
+    return OSError(status, message)
+
+
 def _replayed(context, replay, b):
     status = replay['lib'].MetalProgramRun(replay['program'], replay['allocators'], b, 1, replay['ended'],
                                            C.addressof(context), START, STARTED, replay['error'], len(replay['error']))
     if status:
-        raise OSError(status, 'execution %d of the program: %s' % (b, replay['error'].value.decode()))
+        raise _execution_error(replay, status, 'execution %d of the program: %s' % (b, replay['error'].value.decode()))
     return replay['outputs'][b % len(replay['outputs'])]
 
 
@@ -6568,6 +6641,9 @@ def _static(gm):
     for module in mesh_graph.walk([gm], lambda m: [held(m, n) for n in m.graph.nodes
                                                    if isinstance(held(m, n), torch.fx.GraphModule)]):
         for node in module.graph.nodes:
+            if node.op == 'call_function' and node.target is A._assert_tensor_metadata.default:
+                args, kwargs = map_arg((node.args, node.kwargs), lambda n: n.meta['val'])
+                node.target(*args, **kwargs)
             if node.op != 'call_function' or node.target not in CONTROL:
                 continue
             data = [node.args[0]]
@@ -6620,7 +6696,7 @@ def _metadata(value):
 # torch/export/exported_program.py, run_decompositions and ExportedProgram.module; torch/export/_trace.py,
 # _export_for_training; torch/_export/non_strict_utils.py, fakify; torch/_subclasses/fake_tensor.py;
 # torch/_subclasses/fake_impls.py, constructors; torch/_subclasses/meta_utils.py, describe_tensor; torch/_guards.py,
-# detect_fake_mode; torch/_export/passes/remove_runtime_assertions.py, _RemoveRuntimeAssertionsPass; R. Frostig, M. J.
+# detect_fake_mode; R. Frostig, M. J.
 # Johnson and C. Leary, SysML 2018; mesh-collective.h struct mesh_function
 class _Export(torch.fx.Interpreter):
     def __init__(self, gm, mode):
@@ -6673,7 +6749,6 @@ class _Export(torch.fx.Interpreter):
                 args, kwargs = pytree.tree_map(lambda v: self.fake(v, held), (args, kwargs))
             exported = _decomposed(torch.export.export(function.module, tuple(args), dict(kwargs), strict=False))
             gm = exported.module(check_guards=False)
-            _RemoveRuntimeAssertionsPass()(gm)
             _static(gm)
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
             result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
@@ -7000,7 +7075,7 @@ def _save_program(context, state, path):
     error = C.create_string_buffer(4096)
     status = replay['lib'].MetalProgramEnd(replay['program'], replay['ended'], error, len(error))
     if status:
-        raise OSError(status, error.value.decode())
+        raise _execution_error(replay, status, error.value.decode())
     plan = _saved_bytes(mesh.LIB.mesh_plan_save, C.byref(context), _program(), retained['functions'],
                        len(retained['functions']), _array(mesh.U, calls), len(calls), analysed.orders, analysed.causes,
                        analysed.norders, analysed.chains, C.byref(retained['planned']), diagnostic=False)

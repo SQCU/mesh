@@ -109,6 +109,7 @@ def load(path):
         lane = {p: [made.order[k] for k in range(made.first[p], made.first[p + 1])] for p in range(made.processors)}
         metadata = {'controls': [mesh_graph.Control.from_buffer_copy(c) for c in made.control[:made.controls]],
                     'events': [mesh_graph.Event.from_buffer_copy(e) for e in made.event[:made.events]],
+                    'spans': [mesh_graph.Span.from_buffer_copy(x) for x in made.span[:made.spans]],
                     'scopes': [mesh_graph.Scope.from_buffer_copy(x) for x in made.scope[:made.operations]] if made.scope else []}
     finally:
         mesh_graph.free(made)
@@ -186,6 +187,8 @@ def generate(operations, program, observe, point=None, metadata=None):
     rules = counter_rules(operations, program, metadata.get('scopes', ()))
     alternatives, once, once_last = control_walk(operations, program, metadata)
     completion = next((e for e in metadata.get('events', ()) if e.role == 1), None)
+    spans = metadata.get('spans', ())
+    act = 'ustack(); exit(1);' if observe else 'ustack(); stop(); exit(1);'
     slots = max(1, completion.lookback) if completion else 1
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
              '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])
@@ -207,8 +210,32 @@ def generate(operations, program, observe, point=None, metadata=None):
         if group:
             lines.append('BEGIN { once[%d] = %d; onceLast[%d] = %d; }' % (k, group, k, k in once_last))
     argument = completion.argument if completion else 4
+    if spans:
+        lines += ['uint64_t invocation, runFirst[uint64_t], runCount[uint64_t], runBegin[uint64_t], runEnd[uint64_t];']
+        for k, span in enumerate(spans):
+            begin, end = (bisect.bisect_left(program, getattr(span, name)) for name in ('begin', 'end'))
+            lines.append('BEGIN { runFirst[%d] = %d; runCount[%d] = %d; runBegin[%d] = %d; runEnd[%d] = %d; }' %
+                         (k, span.first, k, span.count, k, begin, k, end))
+        lines.append('pid$target::MetalProgramRun:entry /invocation >= %d || arg2 != runFirst[invocation] || '
+                     'arg3 != runCount[invocation] || cur != runBegin[invocation]/ '
+                     '{ printf("mesh-sync-monitor: unexpected invocation %%d first %%d count %%d at operation %%d\\n", '
+                     'invocation, arg2, arg3, cur); %s }' % (len(spans), act))
     lines.append('pid$target::MetalProgramRun:entry { self->inrun = 1; self->exec = arg2; self->ended = arg%d; '
                  'self->spanfirst = arg2; self->spanend = arg2 + arg3; }' % argument)
+    if spans:
+        lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0/ '
+                     '{ this->spanok = cur == runEnd[invocation]; }')
+        for origin, choices in alternatives.items():
+            for target, needed in choices:
+                condition = ' && '.join('seenOnce[%d]' % group for group in sorted(needed)) or '1'
+                lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && !this->spanok && '
+                             'cur == %d && runEnd[invocation] == %d && (%s)/ { this->spanok = 1; }' %
+                             (origin, target, condition))
+        lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && !this->spanok/ '
+                     '{ printf("mesh-sync-monitor: unexpected invocation end %%d at operation %%d expected %%d\\n", '
+                     'invocation, cur, runEnd[invocation]); %s }' % act)
+        lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && this->spanok/ '
+                     '{ cur = runEnd[invocation]; invocation++; }')
     if completion:
         for back in range(slots):
             lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && self->spanend - self->spanfirst > %d/ '
@@ -216,7 +243,6 @@ def generate(operations, program, observe, point=None, metadata=None):
                 'spanFirst[this->slot] = self->spanfirst; spanEnd[this->slot] = self->spanend; }' % (back, back, slots))
     lines.append('pid$target::MetalProgramRun:return /self->inrun/ { self->inrun = 0; '
                  'printf("mesh-sync-monitor: run %d\\n", (int)arg1); }')
-    act = 'ustack(); exit(1);' if observe else 'ustack(); stop(); exit(1);'
     ended = (PRIMITIVES.index('queue_signal'), PRIMITIVES.index('host_signal'))
 
     trip, wait = PRIMITIVES.index('trip_test'), PRIMITIVES.index('host_wait')
@@ -230,7 +256,8 @@ def generate(operations, program, observe, point=None, metadata=None):
             expected = (f'(this->va && this->va <= self->spanfirst ? '
                 f'(this->va > spanFirst[{slot}] && this->va <= spanEnd[{slot}] ? spanEvent[{slot}] : 0) : self->ended)')
             ordinary = f'(o[{index}] == {completion.object} ? this->ob == {expected} : ({ordinary}))'
-        return (f'{index} < {total} && (!once[{index}] || !seenOnce[once[{index}]]) && '
+        bound = f'{index} < runEnd[invocation] && ' if spans else ''
+        return (f'{index} < {total} && {bound}(!once[{index}] || !seenOnce[once[{index}]]) && '
                 f'(e[{index}] == this->c || (this->c == {wait} && e[{index}] == {trip})) && '
                 f'x[{index}] >= self->exec && (!this->hasva || '
                 f'(family[{index}] ? eventcount[family[{index}]] + delta[{index}] : v[{index}]) == this->va) && '
@@ -295,6 +322,9 @@ def generate(operations, program, observe, point=None, metadata=None):
                      ',\n'.join(UNLISTED), act))
     lines.append('END { printf("mesh-sync-monitor: program %%d of %d\\n", cur); printf("mesh-sync-monitor: shifted %%d\\n", '
                  'shifted); }' % total)
+    if spans:
+        lines.append('END /invocation != %d/ { printf("mesh-sync-monitor: unexpected invocation count %%d of %d\\n", '
+                     'invocation); exit(1); }' % (len(spans), len(spans)))
     return '\n'.join(lines) + '\n', executions
 
 

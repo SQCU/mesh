@@ -1912,7 +1912,7 @@ static int signature_enforces(const struct mesh_graph_operation *operation, cons
 void mesh_graph_signature_free(struct mesh_graph_signature *s) {
   free(s->processor); free(s->task); free(s->operation); free(s->dependence); free(s->edge); free(s->position);
   free(s->count); free(s->least); free(s->previous); free(s->waited); free(s->first); free(s->order); free(s->unknown);
-  free(s->alias);free(s->control);free(s->event);free(s->scope);
+  free(s->alias);free(s->control);free(s->event);free(s->scope);free(s->span);
   memset(s, 0, sizeof *s);
 }
 
@@ -1950,6 +1950,17 @@ int mesh_graph_signature_program(struct mesh_graph_signature *s,size_t controls,
   if(scope)memcpy(p,scope,s->operations*sizeof *p);
   free(s->control);free(s->event);free(s->scope);
   s->controls=controls;s->events=events;s->control=c;s->event=e;s->scope=p;
+  return signature_digest(s);
+}
+int mesh_graph_signature_spans(struct mesh_graph_signature *s,size_t spans,const struct mesh_graph_span *span){
+  if(spans && !span)return EINVAL;
+  for(size_t k=0;k<spans;k++)if(span[k].count>UINT64_MAX-span[k].first || span[k].begin>span[k].end ||
+    span[k].end>s->operations || (k && (span[k].first!=span[k-1].first+span[k-1].count ||
+    span[k].begin!=span[k-1].end)))return EINVAL;
+  struct mesh_graph_span *p=malloc((spans+1)*sizeof *p);
+  if(!p)return ENOMEM;
+  if(spans)memcpy(p,span,spans*sizeof *p);
+  free(s->span);s->span=p;s->spans=spans;
   return signature_digest(s);
 }
 /* everything a signature holds beyond its processors, tasks, dependences, operations, pairs, least delays and aliases,
@@ -2258,20 +2269,22 @@ static size_t record_parts(const struct mesh_graph_signature *s, struct record_p
   for (int k = 0; k < 7; k++) at = record_align(at + part[k].size);
   return at;
 }
-struct program_record { uint64_t magic, controls, events, scopes; };
-#define GRAPH_PROGRAM_RECORD UINT64_C(0x314d41524748534d)
-static size_t program_parts(const struct mesh_graph_signature *s,struct record_part part[3]){
+struct program_record { uint64_t magic, controls, events, scopes, spans; };
+#define GRAPH_PROGRAM_RECORD UINT64_C(0x324d41524748534d)
+static size_t program_parts(const struct mesh_graph_signature *s,struct record_part part[4]){
   part[0]=(struct record_part){s->control,s->controls*sizeof *s->control};
   part[1]=(struct record_part){s->event,s->events*sizeof *s->event};
   part[2]=(struct record_part){s->scope,s->scope?s->operations*sizeof *s->scope:0};
-  return s->controls || s->events || s->scope?sizeof(struct program_record)+part[0].size+part[1].size+part[2].size:0;
+  part[3]=(struct record_part){s->span,s->spans*sizeof *s->span};
+  return s->controls || s->events || s->scope || s->spans?
+    sizeof(struct program_record)+part[0].size+part[1].size+part[2].size+part[3].size:0;
 }
 static size_t record_size(const struct mesh_graph_signature *s){
-  struct record_part original[7],program[3];return record_parts(s,original)+program_parts(s,program);
+  struct record_part original[7],program[4];return record_parts(s,original)+program_parts(s,program);
 }
 int mesh_graph_record(const struct mesh_graph_signature *s, void *record, size_t room, size_t *made) {
   struct record_part part[7];
-  struct record_part program[3];
+  struct record_part program[4];
   const size_t primary=record_parts(s,part),metadata=program_parts(s,program);
   *made = primary+metadata;
   if (*made > room) return ERANGE;
@@ -2284,9 +2297,9 @@ int mesh_graph_record(const struct mesh_graph_signature *s, void *record, size_t
   size_t at = sizeof *head;
   for (int k = 0; k < 7; k++) { memcpy((char *)record + at, part[k].data, part[k].size); at = record_align(at + part[k].size); }
   if(metadata){
-    const struct program_record body={GRAPH_PROGRAM_RECORD,s->controls,s->events,s->scope?s->operations:0};
+    const struct program_record body={GRAPH_PROGRAM_RECORD,s->controls,s->events,s->scope?s->operations:0,s->spans};
     memcpy((char *)record+at,&body,sizeof body);at+=sizeof body;
-    for(int k=0;k<3;k++){if(program[k].size)memcpy((char *)record+at,program[k].data,program[k].size);at+=program[k].size;}
+    for(int k=0;k<4;k++){if(program[k].size)memcpy((char *)record+at,program[k].data,program[k].size);at+=program[k].size;}
   }
   return 0;
 }
@@ -2309,22 +2322,28 @@ static int record_restore(const void *record, struct mesh_graph_signature *s, in
   size_t at = sizeof *head;
   for (int k = 0; !result && k < 7; k++) { memcpy(part[k].data, (const char *)record + at, part[k].size); at = record_align(at + part[k].size); }
   if(!result && primary<head->bytes){
-    struct program_record body;
-    if(head->bytes-primary<sizeof body)result=EINVAL;
+    struct program_record body={0};
+    const size_t legacy=4*sizeof(uint64_t);
+    if(head->bytes-primary<legacy)result=EINVAL;
     else{
-      memcpy(&body,(const char *)record+primary,sizeof body);at=primary+sizeof body;
+      memcpy(&body,(const char *)record+primary,legacy);at=primary+legacy;
+      if(body.magic==GRAPH_PROGRAM_RECORD){
+        if(head->bytes-at<sizeof body.spans)result=EINVAL;
+        else{memcpy(&body.spans,(const char *)record+at,sizeof body.spans);at+=sizeof body.spans;}
+      }
       const size_t room=(size_t)head->bytes-at;
-      if(body.magic!=GRAPH_PROGRAM_RECORD || body.controls>room/sizeof *s->control ||
+      if((body.magic!=GRAPH_PROGRAM_RECORD && body.magic!=UINT64_C(0x314d41524748534d)) || body.controls>room/sizeof *s->control ||
          body.events>room/sizeof *s->event || (body.scopes && body.scopes!=s->operations) ||
-         body.scopes>room/sizeof *s->scope)result=EINVAL;
-      else{
-        s->controls=(size_t)body.controls;s->events=(size_t)body.events;
+         body.scopes>room/sizeof *s->scope || body.spans>room/sizeof *s->span)result=EINVAL;
+      if(!result){
+        s->controls=(size_t)body.controls;s->events=(size_t)body.events;s->spans=(size_t)body.spans;
         s->control=malloc((s->controls+1)*sizeof *s->control);s->event=malloc((s->events+1)*sizeof *s->event);
         s->scope=body.scopes?malloc((s->operations+1)*sizeof *s->scope):NULL;
-        struct record_part program[3];
-        if(!s->control || !s->event || (body.scopes && !s->scope))result=ENOMEM;
-        else if(program_parts(s,program)!=head->bytes-primary)result=EINVAL;
-        else for(int k=0;k<3;k++){
+        s->span=s->spans?malloc(s->spans*sizeof *s->span):NULL;
+        struct record_part program[4];
+        if(!s->control || !s->event || (body.scopes && !s->scope) || (s->spans && !s->span))result=ENOMEM;
+        else if(program_parts(s,program)-sizeof body!=room)result=EINVAL;
+        else for(int k=0;k<4;k++){
           if(program[k].size)memcpy(program[k].data,(const char *)record+at,program[k].size);at+=program[k].size;
         }
       }
@@ -2521,6 +2540,23 @@ int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_g
       if(g->scope)for(size_t o=0;o<g->operations;o++)s->scope[map[o]]=g->scope[o];
     }
   }
+  if(!result && (a->spans || b->spans)){
+    const struct mesh_graph_signature *g=b->spans?b:a;const size_t *map=b->spans?ib:ia;
+    s->spans=g->spans;s->span=malloc(s->spans*sizeof *s->span);
+    if(!s->span)result=ENOMEM;
+    if(a->spans && b->spans && a->spans!=b->spans)result=EINVAL;
+    for(size_t k=0;!result && k<s->spans;k++){
+      struct mesh_graph_span x=g->span[k];
+      x.begin=x.begin?map[x.begin-1]+1:0;x.end=x.end?map[x.end-1]+1:0;
+      if(a->spans && b->spans){
+        const struct mesh_graph_span y=a->span[k];
+        if(x.first!=y.first || x.count!=y.count){result=EINVAL;break;}
+        const uint64_t begin=y.begin?ia[y.begin-1]+1:0,end=y.end?ia[y.end-1]+1:0;
+        if(begin<x.begin)x.begin=begin;if(end>x.end)x.end=end;
+      }
+      s->span[k]=x;
+    }
+  }
   if (!result) result = signature_derive(s);
   free(pa); free(pb); free(ia); free(ib); free(matched); free(cursor); free(key); free(taken);
   if (result) mesh_graph_signature_free(s);
@@ -2626,6 +2662,11 @@ int mesh_graph_matrix_market(const struct mesh_graph_signature *s, char *text, s
   for(size_t o=0;s->scope && o<s->operations;o++)if(s->scope[o].once || s->scope[o].counter)
     graph_put(&t,"%% scope operation %zu once %u counter %u delta %lld\n",o,s->scope[o].once,s->scope[o].counter,
       (long long)s->scope[o].delta);
+  for(size_t k=0;k<s->spans;k++){
+    const struct mesh_graph_span *x=s->span+k;
+    graph_put(&t,"%% span %zu first %llu count %llu begin %llu end %llu\n",k,(unsigned long long)x->first,
+      (unsigned long long)x->count,(unsigned long long)x->begin,(unsigned long long)x->end);
+  }
   graph_put(&t, "%% totals operations %zu synchronized %zu image %zu stronger %zu false %zu unmatched %zu satisfied %zu "
                 "transformed %zu redundant %zu uncovered %zu unwaited %zu\n", s->operations, s->synchronized,
             s->states[MESH_GRAPH_IMAGE], s->states[MESH_GRAPH_STRONGER], s->states[MESH_GRAPH_FALSE],
