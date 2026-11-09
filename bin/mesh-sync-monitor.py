@@ -282,7 +282,8 @@ def generate(operations, program, observe, point=None, metadata=None):
                                              operation.processor, family, delta, bindings)
         else:
             labels[(source, kind, index)] = (index,)
-    transitions = mesh_graph.trace_groups(machine, labels)
+    matches = mesh_graph.trace_matches(machine, labels)
+    metadata['_matches'] = matches
     act = 'printf("mesh-sync-monitor: failure target pid %d\\n", pid); ustack(); ' + (
         'exit(1);' if observe else 'stop(); exit(1);')
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
@@ -309,10 +310,11 @@ def generate(operations, program, observe, point=None, metadata=None):
                     lines.append('%s /this->checked && spanEvent[%d] == this->ob/ { this->completion = 1; }' % (at, slot))
         if lane is not None:
             lines.append('%s /this->checked/ { this->lnid = lm[this->ln] ? lm[this->ln] : lanecount + 1; }' % at)
-        for source, target, token, index, ob, ln, mask in transitions:
+        for group, ((token, _, ob, ln), rows, words) in enumerate(matches):
             if token != kind:
                 continue
-            clause = ['this->sources != 0']
+            source, _, _, index, _, _, _ = rows[0]
+            clause = []
             if kind == 'op':
                 operation = operations[program[index]]
                 if operation.primitive != primitive and not (operation.primitive == trip and primitive == wait):
@@ -345,26 +347,36 @@ def generate(operations, program, observe, point=None, metadata=None):
                 else:
                     clause.append('arg1 == 0')
                 value_clause, printed = '1', (-1 - index * 2 - (kind == 'leave'), -1, -1, span.first)
-            lines.append('%s /this->checked/ { this->sources = stamp[epoch %% 2, %d] == epoch ? '
-                         '(active[epoch %% 2, %d] & 0x%xULL) : 0, this->matching = %s, this->tally = 0; }' %
-                         (at, source // 64, source // 64, mask, ' && '.join(clause)))
+            lines.append('%s /this->checked/ { this->matching = %s, this->tally = 0; }' %
+                         (at, ' && '.join(clause) or '1'))
             if family:
                 bindings = machine['states'][source][4]
                 for logical, ordinal in zip(machine['objects'], bindings):
                     if logical in family_objects[family] and ordinal:
                         lines.append('%s /this->checked && this->matching && signals[%d] > this->tally/ '
                                      '{ this->tally = signals[%d]; }' % (at, ordinal, ordinal))
-            shift = target % 64 - source % 64
-            shifted = 'this->sources %s %d' % ('<<' if shift >= 0 else '>>', abs(shift))
-            lines.append('%s /this->checked && this->matching && (%s)/ { this->ok = 1, '
-                'active[(epoch + 1) %% 2, %d] = (stamp[(epoch + 1) %% 2, %d] == epoch + 1 ? '
-                'active[(epoch + 1) %% 2, %d] : 0) | (%s), stamp[(epoch + 1) %% 2, %d] = epoch + 1, '
-                'this->ordinary = this->ordinary || %d; '
-                'printf("mesh-sync-monitor: transitions %%d %d %%x %d %d %d %d %%d %d %%d\\n", '
-                'epoch - 1, this->sources, %s, tid); }' %
-                (at, value_clause, target // 64, target // 64, target // 64, shifted, target // 64, bool(ob),
-                 source // 64 * 64, target - source, index - source if kind == 'op' else printed[0] - source,
-                 printed[1], printed[2], printed[3], 'this->va' if val is not None else '-1'))
+            if value_clause != '1':
+                lines.append('%s /this->checked && this->matching/ { this->matching = %s; }' % (at, value_clause))
+            for word, targets in words.items():
+                source_mask = 0
+                assignments = []
+                for target, shifts in targets.items():
+                    terms = []
+                    for shift, mask in shifts.items():
+                        source_mask |= mask
+                        term = '(this->sources & 0x%xULL)' % mask
+                        terms.append('(%s %s %d)' % (term, '<<' if shift >= 0 else '>>', abs(shift)) if shift else term)
+                    assignments.extend(('active[(epoch + 1) %% 2, %d] = (stamp[(epoch + 1) %% 2, %d] == epoch + 1 ? '
+                        'active[(epoch + 1) %% 2, %d] : 0) | (%s)' % (target, target, target, ' | '.join(terms)),
+                        'stamp[(epoch + 1) %% 2, %d] = epoch + 1' % target))
+                lines.append('%s /this->checked && this->matching/ { this->sources = stamp[epoch %% 2, %d] == epoch ? '
+                    '(active[epoch %% 2, %d] & 0x%xULL) : 0, this->ok = this->ok || this->sources != 0, '
+                    'this->ordinary = this->ordinary || (this->sources != 0 && %d), %s; }' %
+                    (at, word, word, source_mask, bool(ob), ', '.join(assignments)))
+                lines.append('%s /this->checked && this->matching && this->sources/ { '
+                    'printf("mesh-sync-monitor: match %%d %d %d %%x %d %d %%d %d %%d\\n", '
+                    'epoch - 1, this->sources, %s, tid); }' %
+                    (at, group, word * 64, printed[1], printed[2], printed[3], 'this->va' if val is not None else '-1'))
         if obj is not None:
             lines.append('%s /this->checked && this->ok && this->ordinary/ '
                 '{ om[this->ob] = this->obid, objectcount = this->obid > objectcount ? this->obid : objectcount; }' % at)
@@ -482,9 +494,29 @@ def cover(path):
     return 0 if full else 1
 
 
-def trace_log(text):
+def trace_log(text, matches=()):
     records, accepting, failures = [], [], []
     for line in text.splitlines():
+        match = re.fullmatch(r'mesh-sync-monitor: match (\d+) (\d+) (\d+) ([0-9a-f]+) ' +
+                             r'(-?\d+) ' * 4 + r'(-?\d+)', line)
+        if match:
+            step, group, base, mask, primitive, obj, value, execution, thread = match.groups()
+            step, group, base, primitive, obj, value, execution, thread = map(int,
+                (step, group, base, primitive, obj, value, execution, thread))
+            if group >= len(matches):
+                raise ValueError('trace match names no compiled operand group')
+            for source, target, kind, index, _, _, allowed in matches[group][1]:
+                if source // 64 != base // 64:
+                    continue
+                bits = int(mask, 16) & allowed
+                token = index if kind == 'op' else -1 - index * 2 - (kind == 'leave')
+                while bits:
+                    bit = (bits & -bits).bit_length() - 1
+                    current = base + bit
+                    records.append((step, current, current + target - source, current + token - source,
+                                    primitive, obj, value, execution, thread))
+                    bits &= bits - 1
+
         match = re.fullmatch(r'mesh-sync-monitor: transitions (\d+) (\d+) ([0-9a-f]+) ' +
                              r'(-?\d+) ' * 6 + r'(-?\d+)', line)
         if match:
@@ -612,7 +644,7 @@ def main(argv):
     sys.stdout.write(done.stdout)
     sys.stderr.write(done.stderr)
     observed, walk = [], []
-    records, accepting, failures = trace_log(done.stdout)
+    records, accepting, failures = trace_log(done.stdout, metadata['_matches'])
     if done.returncode:
         failures.append('dtrace exited %d' % done.returncode)
     try:

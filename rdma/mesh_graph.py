@@ -308,6 +308,20 @@ def trace_groups(machine, labels):
     return list(groups.values())
 
 
+def trace_matches(machine, labels):
+    groups = collections.defaultdict(list)
+    for row in trace_groups(machine, labels):
+        source, _, kind, index, ob, lane, _ = row
+        groups[(kind, labels[source, kind, index], ob, lane)].append(row)
+    result = []
+    for key, rows in groups.items():
+        words = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int)))
+        for source, target, _, _, _, _, mask in rows:
+            words[source // 64][target // 64][target % 64 - source % 64] |= mask
+        result.append((key, rows, words))
+    return result
+
+
 def trace_paths(records, accepting):
     at = collections.defaultdict(list)
     for record in records:
