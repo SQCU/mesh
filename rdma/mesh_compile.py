@@ -1872,6 +1872,9 @@ class _Region:
         self('yield', BOOL, *results)
         return self
 
+    def scatter(self, output, indices, value, predicate):
+        self.add(('scatter', output, tuple(indices), value, predicate), BOOL)
+
 
 # N. Juffa, Stack Overflow answer 35148199, 2016; torch 2.14.0 c10/metal/special_math.h, erf
 def _erf(r, a, t):
@@ -2248,10 +2251,10 @@ def _arithmetic(target, given, outs):
 # torch 2.14.0 torch/_tensor_docs.py, copy_ and view: views of one element count correspond by their row-major
 # element index, the source's coordinates computed in the region
 def _coordinates(r, linear, shape):
-    made, rest = [], linear
+    made, rest, kind = [], linear, r.kinds[linear]
     for d in reversed(range(len(shape))):
-        made.append(r('rem', I32, rest, r.const(shape[d], I32)))
-        rest = r('div', I32, rest, r.const(shape[d], I32))
+        made.append(r('rem', kind, rest, r.const(shape[d], kind)))
+        rest = r('div', kind, rest, r.const(shape[d], kind))
     return made[::-1]
 
 
@@ -5584,7 +5587,7 @@ def _histogram(target, given, outs):
     zeros = _temporary([bins], out.dtype)
     ops += _fill(zeros, 0)
     targets = [(index.as_strided([bins, x.numel()], [0, 1], 0), 0, bins, [0], [1])]
-    return ops + _scatter(out, zeros, 1.0, targets, [x.numel()], [bins], [0], [0], SCATTERS['sum'], True)
+    return ops + _scatter(out, zeros, 1.0, targets, [x.numel()], [bins], [0], [0], SCATTERS['sum'], True, checked=False)
 
 
 # PyTorch 2.14 documentation, torch.nn.LayerNorm, torch.nn.GroupNorm and torch.nn.BatchNorm2d; torch 2.14.0
@@ -5756,84 +5759,132 @@ def _taken(target, given, outs):
                  [(index, [index.stride(0) if index.dim() and j == d else 0 for j in range(out.dim())])])
 
 
-# PyTorch 2.14 documentation, Tensor.scatter_, Tensor.scatter_add_, Tensor.scatter_reduce_, Tensor.index_put_,
-# Tensor.index_add_, Tensor.index_copy_ and Tensor.index_fill_; PyTorch v2.11.0
-# aten/src/ATen/native/TensorAdvancedIndexing.cpp, scatter_reduce_two and scatter_reduce_exclude_self_helper: each
-# result element reduces the candidates whose indices name it (loops (result..., candidate...), the candidates
-# REDUCTION, states its accumulator and match count), then joins them with its base element
+# docs/provider.md#sorted-indexed-updates
 SCATTERS = {'last': 0, 'sum': 1, 'add': 1, 'prod': 2, 'multiply': 2, 'mean': 3, 'amax': 4, 'amin': 5}
 
 
-def _scatter(out, base, src, targets, candidates, limits, near, far, op, include, alpha=1):
+def _scatter(out, base, src, targets, candidates, limits, near, far, op, include, alpha=1,
+             negative=False, checked=True, message='indexed update: index out of bounds'):
     integral, parts = out.dtype in INTEGRAL, 2 if out.is_complex() else 1
     t = _compute(out.dtype, *([src.dtype] if isinstance(src, torch.Tensor) else [])) if integral else \
         F64 if out.dtype in (torch.float64, torch.complex128) else F32
 
     def split(x):
         return [torch.view_as_real(x)[..., k] for k in range(2)] if x.is_complex() else [x]
-    n, m = out.dim(), len(candidates)
-    accs, count = [_temporary(out.shape, STORED[t]) for _ in range(parts)], _temporary(out.shape, torch.int32)
-    shape = list(out.shape) + list(candidates)
-    r, inputs, match = _Region(), [], None
-    for index, dim, wrap, across, along in targets:
-        view = _indexing(index.as_strided(shape, list(across) + list(along), index.storage_offset()))
-        hit = r('eq', BOOL, _wrapped(r, len(inputs), view, wrap), r.index(dim))
-        match = hit if match is None else r('and', BOOL, match, hit)
-        inputs.append((view, _same(n + m)))
-    within = [r('lt', BOOL, r.index(d), r.const(limits[d], I32)) for d in range(n) if limits[d] < out.shape[d]]
-    if within:
-        match = r('and', BOOL, match, _all(r, within))
-    if isinstance(src, torch.Tensor):
-        v = []
-        for view in split(src.as_strided(shape, list(near) + list(far), src.storage_offset())):
-            v.append(_load(r, len(inputs), view, t))
-            inputs.append((view, _same(n + m)))
-        v += [r.const(0, t)] * (parts - len(v))
-    else:
-        v = [r.const(_component(src, k), t) for k in range(parts)]
-    r.done(*[r('select', t, match, x, r.const(0, t)) for x in v], _convert(r, match, BOOL, I32))
 
-    def combined(c, a, b):
+    def combined(r, a, b):
         if op in (1, 3):
-            return [c('add', t, x, y) for x, y in zip(a, b)]
+            return [r('add', t, x, y) for x, y in zip(a, b)]
         if op == 2:
-            return list(_complex_value(c, t, 'mul', a, b, 1, None)) if parts == 2 else [c('mul', t, a[0], b[0])]
-        return [_extremum(c, a[0], b[0], t, op == 4)] if op in (4, 5) else b
+            return list(_complex_value(r, t, 'mul', a, b, 1, None)) if parts == 2 else [r('mul', t, a[0], b[0])]
+        return [_extremum(r, a[0], b[0], t, op == 4)] if op in (4, 5) else b
 
-    def join(c, a, b):
-        none = c.const(0, I32)
-        values = [c('select', t, c('eq', BOOL, b[parts], none), x, c('select', t, c('eq', BOOL, a[parts], none), y, z))
-                  for x, y, z in zip(a[:parts], b[:parts], combined(c, a[:parts], b[:parts]))]
-        return values + [c('add', I32, a[parts], b[parts])]
-    states = [(t, 0)] * parts + [(I32, 0)]
-    imap = _rows(n + m, range(n))
-    made = [_Generic(shape, inputs, [(acc, imap) for acc in accs] + [(count, imap)], r,
-                     [PARALLEL] * n + [REDUCTION] * m, [REGION] * (parts + 1), [t] * parts + [I32], None, states,
-                     _joined(states, join), _identities(states))]
-    e = _Region()
-    bases = split(base)
-    a, k = [e.arg(q, acc) for q, acc in enumerate(accs)], e.arg(parts, count)
-    b = [_load(e, parts + 1 + q, x, t) for q, x in enumerate(bases)]
-    own = include and op != 0
-    if op == 0:
-        result = a
-    elif op == 1:
-        scaled = a if alpha == 1 else \
-            list(_complex_value(e, t, 'mul', a, [e.const(_component(alpha, q), t) for q in (0, 1)], 1, None)) \
-            if parts == 2 else [e('mul', t, e.const(alpha, t), a[0])]
-        result = combined(e, b, scaled) if own else scaled
-    elif op == 2:
-        result = combined(e, b, a) if own else a
-    elif op == 3:
-        total = combined(e, b, a) if own else a
-        counted = _convert(e, e('add', I32, k, e.const(int(own), I32)), I32, t)
-        result = [e('floordiv' if integral else 'div', t, x, counted) for x in total]
+    n, count = out.dim(), math.prod(candidates)
+    indexed = sorted(d for _, d, _, _, _ in targets)
+    batches = [d for d in range(n) if d not in indexed and any(across[d] for _, _, _, across, _ in targets)]
+    payload = [d for d in range(n) if d not in indexed and d not in batches]
+    bs, ps = [limits[d] for d in batches], [limits[d] for d in payload]
+    if not count or not math.prod(bs + ps):
+        return _assign(out, base)
+    keyshape, shape = bs + [count], bs + ps + [count]
+    keydims, dims, volume = len(bs), len(shape), math.prod(out.shape[d] for d in indexed)
+    keys, valid = _temporary(bs + list(candidates), torch.int64), _temporary(bs + list(candidates), torch.bool)
+    r, inputs, terms, tests = _Region(), [], {}, []
+    for index, d, extent, across, along in targets:
+        view = index.as_strided(keys.shape, [across[j] for j in batches] + list(along), index.storage_offset())
+        raw = _load(r, len(inputs), view, I64)
+        inputs.append((view, _same(keys.dim())))
+        inside = r('and', BOOL, r('ge', BOOL, raw, r.const(-extent if negative else 0, I64)),
+                   r('lt', BOOL, raw, r.const(extent, I64)))
+        at = r('select', I64, r('lt', BOOL, raw, r.const(0, I64)), r('add', I64, raw, r.const(extent, I64)), raw) \
+            if negative else raw
+        terms[d], tests = r('select', I64, inside, at, r.const(0, I64)), tests + [inside]
+    inside, linear = _all(r, tests), r.const(0, I64)
+    for d in indexed:
+        linear = r('add', I64, r('mul', I64, linear, r.const(out.shape[d], I64)), terms[d])
+    r.done(r('select', I64, inside, linear, r.const(volume, I64)), inside)
+    made = [_Generic(keys.shape, inputs, [(keys, _same(keys.dim())), (valid, _same(keys.dim()))], r)]
+    if checked:
+        every = _temporary([], torch.bool)
+        made += _fold(A.all.default, {'self': valid}, [every])
+        made += _asserted(A._assert_async.msg, {'self': every, 'assert_msg': message}, [])
+    if not out.numel():
+        return made + _assign(out, base)
+    keys = keys.reshape(keyshape)
+    ordered, permutation = _temporary(keyshape, torch.int64), _temporary(keyshape, torch.int64)
+    made.append(_Sort(keys, keydims, count, False, ordered, permutation))
+    values = [_temporary(shape, STORED[t]) for _ in range(parts)]
+    if op == 3:
+        values.append(_temporary(shape, torch.int64))
+    r = _Region()
+    keymap = _rows(dims, [*range(keydims), dims - 1])
+    inputs = [(permutation, keymap)]
+    coords = _coordinates(r, r.arg(0, permutation), candidates)
+    if isinstance(src, torch.Tensor):
+        view = src.as_strided(bs + ps + list(candidates), [near[d] for d in batches + payload] + list(far),
+                              src.storage_offset())
+        results = []
+        for component in split(view):
+            x = r('extract', _class(component), *[r.index(d) for d in range(dims - 1)], *coords, integer=len(inputs))
+            results.append(_convert(r, x, _class(component), t))
+            inputs.append((component, None))
+        results += [r.const(0, t)] * (parts - len(results))
     else:
-        result = combined(e, a, b) if own else a
-    empty = e('eq', BOOL, k, e.const(0, I32))
-    e.done(*[_store(e, e('select', t, empty, y, x), t, o) for x, y, o in zip(result, b, split(out))])
-    return made + [_Generic(out.shape, [(acc, _same(n)) for acc in accs] + [(count, _same(n))] +
-                            [(x, _same(n)) for x in bases], [(o, _same(n)) for o in split(out)], e)]
+        results = [r.const(_component(src, k), t) for k in range(parts)]
+    r.done(*results, *([r.const(1, I64)] if op == 3 else []))
+    made.append(_Generic(shape, inputs, [(v, _same(dims)) for v in values], r))
+    if op:
+        flags = _temporary(keyshape, torch.bool)
+        r = _Region()
+        at = r.index(keydims)
+        previous = r('select', I32, r('eq', BOOL, at, r.const(0, I32)), at, r('sub', I32, at, r.const(1, I32)))
+        prior = r('extract', I64, *[r.index(d) for d in range(keydims)], previous, integer=0)
+        r.done(r('or', BOOL, r('eq', BOOL, at, r.const(0, I32)), r('ne', BOOL, r.arg(0, ordered), prior)))
+        made.append(_Generic(keyshape, [(ordered, _same(len(keyshape)))], [(flags, _same(len(keyshape)))], r))
+        flags = flags.reshape(bs + [1] * len(ps) + [count]).expand(shape)
+        kinds = [t] * parts + ([I64] if op == 3 else []) + [BOOL]
+        identity = _identity(A.amax if op == 4 else A.amin, STORED[t]) if op in (4, 5) else int(op == 2)
+        identities = [identity] + [0] * (parts - 1) + ([0] if op == 3 else []) + [False]
+        scanned = [_temporary(shape, STORED[k]) for k in kinds]
+
+        def join(c, a, b):
+            joined = combined(c, a[:parts], b[:parts])
+            if op == 3:
+                joined += [c('add', I64, a[parts], b[parts])]
+            return [c('select', kind, b[-1], y, z) for kind, y, z in zip(kinds[:-1], b[:-1], joined)] + \
+                [c('or', BOOL, a[-1], b[-1])]
+        made += _scan(values + [flags], dims - 1, scanned, kinds, identities, join)
+        values = scanned[:-1]
+    made += _assign(out, base)
+    e, inputs = _Region(), [(v, _same(dims)) for v in values] + [(ordered, keymap)]
+    linear = e.arg(len(values), ordered)
+    next_at = e('select', I32, e('eq', BOOL, e.index(dims - 1), e.const(count - 1, I32)), e.index(dims - 1),
+                e('add', I32, e.index(dims - 1), e.const(1, I32)))
+    next_key = e('extract', I64, *[e.index(d) for d in range(keydims)], next_at, integer=len(values))
+    last = e('or', BOOL, e('eq', BOOL, e.index(dims - 1), e.const(count - 1, I32)), e('ne', BOOL, linear, next_key))
+    last = e('and', BOOL, last, e('lt', BOOL, linear, e.const(volume, I64)))
+    at = {d: e.index(k) for k, d in enumerate(batches + payload)}
+    position = e('select', I64, last, linear, e.const(0, I64))
+    at.update(zip(indexed, _coordinates(e, position, [out.shape[d] for d in indexed])))
+    coords = [at[d] for d in range(n)]
+    a, b = [e.arg(k, v) for k, v in enumerate(values[:parts])], []
+    for component in split(base):
+        b.append(_convert(e, e('extract', _class(component), *coords, integer=len(inputs)), _class(component), t))
+        inputs.append((component, None))
+    own = include and op != 0
+    if op == 1 and alpha != 1:
+        a = list(_complex_value(e, t, 'mul', a, [e.const(_component(alpha, q), t) for q in (0, 1)], 1, None)) \
+            if parts == 2 else [e('mul', t, e.const(alpha, t), a[0])]
+    result = combined(e, b, a) if own else a
+    if op == 3:
+        total = e('add', I64, e.arg(parts, values[parts]), e.const(int(own), I64))
+        result = [e('floordiv' if integral else 'div', t, x, _convert(e, total, I64, t)) for x in result]
+    outputs = split(out)
+    result = [_store(e, x, t, v) for x, v in zip(result, outputs)]
+    for k, x in enumerate(result):
+        e.scatter(k, coords, x, last)
+    e.done(*result)
+    return made + [_Generic(shape, inputs, [(v, None) for v in outputs], e)]
 
 
 def _scattered(target, given, outs):
@@ -5848,16 +5899,21 @@ def _scattered(target, given, outs):
         far = [values.stride(start + i) for i in range(len(shape))]
         targets = [(t, j, x.shape[j], [0] * x.dim(), list(t.expand(shape).stride())) for j, t in tensors]
         return _scatter(out, x, values, targets, shape, list(x.shape), near, far,
-                        SCATTERS['sum' if given['accumulate'] else 'last'], True)
+                        SCATTERS['sum' if given['accumulate'] else 'last'], True, negative=True, message=str(target))
     d, index = given['dim'] % max(x.dim(), 1), given['index']
     src = given.get('src', given.get('source', given.get('value')))
+    if not x.dim():
+        x, out, index = x.view(1), out.view(1), index.reshape(-1)
+        if isinstance(src, torch.Tensor):
+            src = src.reshape(-1)
     if packet in (A.index_add, A.index_copy, A.index_fill, A.index_reduce):
         far = [src.stride(d) if src.dim() else 0] if isinstance(src, torch.Tensor) else [0]
         near = [src.stride(j) if isinstance(src, torch.Tensor) and src.dim() and j != d else 0 for j in range(x.dim())]
         targets = [(index, d, x.shape[d], [0] * x.dim(), [index.stride(0) if index.dim() else 0])]
         op = given['reduce'] if packet is A.index_reduce else 'sum' if packet is A.index_add else 'last'
         return _scatter(out, x, src, targets, [index.numel()], list(x.shape), near, far, SCATTERS[op],
-                        given.get('include_self', True), given.get('alpha', 1))
+                        given.get('include_self', True), given.get('alpha', 1), negative=packet is A.index_fill,
+                        message=str(target))
     reduce = given.get('reduce')
     op = SCATTERS['sum' if packet is A.scatter_add else reduce if reduce is not None else 'last']
     near = [src.stride(j) if isinstance(src, torch.Tensor) and j != d else 0 for j in range(x.dim())]
@@ -5865,7 +5921,7 @@ def _scattered(target, given, outs):
     targets = [(index, d, x.shape[d], [index.stride(j) if j != d else 0 for j in range(x.dim())], [index.stride(d)])]
     return _scatter(out, x, src, targets, [index.shape[d]],
                     [index.shape[j] if j != d else x.shape[j] for j in range(x.dim())], near, far, op,
-                    given.get('include_self', True))
+                    given.get('include_self', True), message=str(target))
 
 
 # T. Dao et al., FlashAttention, NeurIPS 2022, Algorithms 1 and 2;
@@ -6989,6 +7045,10 @@ class _Builder:
             elif call == 'extract':
                 given = _array(mesh.U, [h[x] for x in record[2]])
                 h.append(lib.metal_ir_extract(p, r, record[1], len(record[2]), given))
+            elif call == 'scatter':
+                given = _array(mesh.U, [h[x] for x in record[2]])
+                lib.metal_ir_scatter(p, r, record[1], len(record[2]), given, h[record[3]], h[record[4]])
+                h.append(None)
             else:
                 given = _array(mesh.U, [h[x] for x in record[1]])
                 lib.metal_ir_yield(p, r, len(record[1]), given)
@@ -7145,6 +7205,7 @@ def _compiler():
                 ('metal_ir_unary', U, [P, U, U, U]), ('metal_ir_convert', U, [P, U, U, U]),
                 ('metal_ir_bitcast', U, [P, U, U, U]), ('metal_ir_builtin', U, [P, U, U, U, C.POINTER(U)]),
                 ('metal_ir_extract', U, [P, U, U, U, C.POINTER(U)]), ('metal_ir_builtin_named', U, [C.c_char_p]),
+                ('metal_ir_scatter', None, [P, U, U, U, C.POINTER(U), U, U]),
                 ('metal_ir_yield', None, [P, U, U, C.POINTER(U)]),
                 ('metal_ir_lower', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]), ('metal_ir_values', U, [P]),
@@ -7565,7 +7626,7 @@ def _execution_error(replay, status, message):
     failure = CheckFailure()
     if status == errno.EDOM and not replay['lib'].MetalProgramCheckFailure(replay['program'], C.byref(failure)):
         kind = torch.linalg.LinAlgError if failure.code in (1, 2, 3) else RuntimeError
-        error = kind(message)
+        error = OSError(failure.info, message) if failure.code == 5 else kind(message)
         error.operation_identity, error.batch, error.info, error.code = \
             failure.identity, failure.batch, failure.info, failure.code
         return error
