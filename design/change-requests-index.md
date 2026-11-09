@@ -91,8 +91,13 @@ outstanding, and what of it is outstanding. The standard every change request fo
     60f43ddb, completed in 76d26e3b.
   - Settled: the second stops' u copies, by its appendix item 14. Superseded: the first stops' item 8.
   - Problem 4: mesh 30afa696 implements the replicated window without halo exchange and the middle's local copy
-    where needed; the former blanket statement that no implementation commit exists was stale. The request's
-    multi-spatial-dimension composition gap still needs reconciliation with the cited method and current lowering.
+    where needed; the former blanket statement that no implementation commit exists was stale. The 2026-11-09
+    workgroup review also finds the appendix's multi-spatial-dimension composition in the current source:
+    `_partition` visits dimensions in increasing order and gives each `_region` the previous region's result;
+    its halo slices therefore span the earlier dimension's halos and carry the corners. View-to-view transfers
+    consume those shapes, one-shard dimensions are skipped, and replicated windows remain local. The clause-by-clause
+    source record is the replacement run's `6_effects.status.md`; no two-dimensional sharded-window operational run
+    is recorded. This corrects the code-status gap without claiming that execution evidence.
   - Problem 11: mesh 028b27d6 removes cancelled plans before replacement children can load them, with an acquire
     read of `removed` in `plans_load`; that implementation remains in the current source. The former no-commit
     statement was stale. This structural review did not perform a link-loss workload.
