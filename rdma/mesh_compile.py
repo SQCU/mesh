@@ -50,7 +50,7 @@ Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 Calls = collections.namedtuple('Calls', 'outstanding orders causes norders chains')
 # GSPMD section 4.1, "Static operator configurations"
 Local = collections.namedtuple('Local', 'op target args kwargs annotation', defaults=(None,))
-AttentionOrigin = collections.namedtuple('AttentionOrigin', 'query')
+AttentionOrigin = collections.namedtuple('AttentionOrigin', 'query key page cuts', defaults=(0, 0, ()))
 # GSPMD sections 3.2, 3.5, 4 and 4.6
 Rule = collections.namedtuple('Rule', 'kind level operands labels out propagate contracting windows fused merged '
                                       'configure')
@@ -716,7 +716,13 @@ def _partition(ir, operators):
             if rule.kind == 'attention':
                 q, m = len(local) - 2, local[-2]
                 start = ir.coords[ir.device][m] * ir.local(node, local)[q] if m >= 0 and ir.device is not None else 0
-                ir.locals[node] = ir.locals[node]._replace(annotation=AttentionOrigin(start))
+                key = rule.operands[1]
+                part = ir.sharding[key][-2]
+                owned = ir.coords[ir.device][part] * ir.local(key, ir.sharding[key])[-2] \
+                    if part >= 0 and ir.device is not None else 0
+                keycuts = tuple(range(0, _value(key).shape[-2], max(1, ir.local(key, ir.sharding[key])[-2]))) \
+                    if part >= 0 else ()
+                ir.locals[node] = ir.locals[node]._replace(annotation=AttentionOrigin(start, owned, ir.page, keycuts))
             reads = tuple(keys)
             if rule.merged is not None:
                 ir.emit(('call', reads, (rule.merged, 'merged', node), rule.merged))
@@ -5803,12 +5809,8 @@ def _scattered(target, given, outs):
                     given.get('include_self', True))
 
 
-# PyTorch 2.14 documentation, torch.nn.functional.scaled_dot_product_attention; Milakov and Gimelshein 2018; T. Dao et
-# al., FlashAttention, NeurIPS 2022, section 3.1 and Algorithm 1, lines 10 to 13: the scores one SUM over the head
-# dimension, loops (lead..., kv head, group, l, t | f), then the output's states (m, s, acc) one REDUCTION over the
-# keys t, each key contributing (score, 1, v), joined by Algorithm 1's rescaling, finalized to acc / s; with dropout_p,
-# Algorithm 2, lines 11 to 15 (the row sum before dropout, the dropped probabilities scaled by 1 / (1 - p)): the key's
-# contribution (score, 1, keep v / (1 - p)), keep a Philox draw (_draws) over (lead..., l, t) below 1 - p
+# T. Dao et al., FlashAttention, NeurIPS 2022, Algorithms 1 and 2;
+# H. Liu et al., Ring Attention, arXiv:2310.01889, section 3 and Algorithm 1
 def _heads(x, group, kv):
     if x.dim() < 3:
         return x.unsqueeze(0).unsqueeze(0)
@@ -5818,57 +5820,82 @@ def _heads(x, group, kv):
     return x.as_strided(shape, stride, x.storage_offset())
 
 
-def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, query_origin=0):
+def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=AttentionOrigin(0)):
     length, size, other, value = q.shape[-2], q.shape[-1], k.shape[-2], v.shape[-1]
     t = _compute(q.dtype, k.dtype, v.dtype, torch.float32)
     qs, ks, vs = _heads(q, group, False), _heads(k, group, True), _heads(v, group, True)
     b = len(qs.shape) - 2
-    scores = _temporary([*qs.shape[:-2], length, other], STORED[t])
-    domain = [*qs.shape[:-2], length, other, size]
-    r = _Region()
-    r.done(r('mul', t, _load(r, 0, qs, t), _load(r, 1, ks, t)))
-    ops = [_Generic(domain, [(qs, _rows(b + 3, [*range(b), b, b + 2])), (ks, _onto(ks, [*range(b), b + 1, b + 2], domain))],
-                    [(scores, _rows(b + 3, [*range(b), b, b + 1]))], r, [PARALLEL] * (b + 2) + [REDUCTION], [SUM],
-                    [t], precision=REASSOCIATE | CONTRACT)]
-    shape = [*qs.shape[:-2], length, value, other]
-    r = _Region()
-    score = r('mul', t, r.arg(0, scores), r.const(scale, t))
-    inputs = [(scores, _rows(b + 3, [*range(b), b, b + 2])), (vs, _onto(vs, [*range(b), b + 2, b + 1], shape))]
-    if mask is not None:
-        ms = _heads(mask, group, False)
-        inputs.append((ms, _onto(ms, [*range(b), b, b + 2], shape)))
-        given = r.arg(2, ms)
-        score = r('select', t, given, score, r.const(-math.inf, t)) if mask.dtype is torch.bool else \
-            r('add', t, score, _convert(r, given, _class(mask), t))
-    if causal:
-        query = r('add', I32, r.index(b), r.const(query_origin, I32))
-        score = r('select', t, r('gt', BOOL, r.index(b + 2), query), r.const(-math.inf, t), score)
-    value = _load(r, 1, vs, t)
-    if dropout:
-        at = r.const(0, I32)
-        for d, n in [*zip(range(b), qs.shape[:b]), (b, length), (b + 2, other)]:
-            at = r('add', I32, r('mul', I32, at, r.const(n, I32)), r.index(d))
-        keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, b + 3, at)[0]), r.const(1 - dropout, F32))
-        kept = r('mul', t, value, r.const(1 / (1 - dropout), t)) if dropout < 1 else r.const(0, t)
-        value = r('select', t, keep, kept, r.const(0, t))
-    r.done(score, r.const(1, t), value)
-    states = [(t, -math.inf), (t, 0), (t, 0)]
-
-    def join(c, a, b):
-        top = c('select', t, c('gt', BOOL, b[0], a[0]), b[0], a[0])
-        e1, e2 = c('exp', t, c('sub', t, a[0], top)), c('exp', t, c('sub', t, b[0], top))
-        joined = [top, c('add', t, c('mul', t, a[1], e1), c('mul', t, b[1], e2)),
-                  c('add', t, c('mul', t, a[2], e1), c('mul', t, b[2], e2))]
-        absent_a, absent_b = c('eq', BOOL, a[0], c.const(-math.inf, t)), c('eq', BOOL, b[0], c.const(-math.inf, t))
-        return [c('select', t, absent_b, x, c('select', t, absent_a, y, z)) for x, y, z in zip(a, b, joined)]
-    smap = _rows(b + 3, range(b + 2))
-    f = _Region()
-    total = f('arg', t, integer=1)
-    f.done(f('select', t, f('eq', BOOL, total, f.const(0, t)), f.const(math.nan, t),
-             f('div', t, f('arg', t, integer=2), total)))
-    ops.append(_Generic(shape, inputs, [(_heads(out, group, False), smap)], r, [PARALLEL] * (b + 2) + [REDUCTION],
-                        [REGION], [t], None, states, _joined(states, join), f, REASSOCIATE))
-    return ops
+    if not other:
+        return _fill(out, 0)
+    rows = max(1, origin.page // max(k.element_size() * size, v.element_size() * value, 1)) if origin.page else other
+    edges = sorted(set([*range(0, other, rows), *origin.cuts, min(origin.key, other), other]))
+    blocks = list(zip(edges, edges[1:]))
+    first = next((j for j, (lo, _) in enumerate(blocks) if lo == origin.key), 0)
+    blocks = blocks[first:] + blocks[:first]
+    shape = [*qs.shape[:-2], length]
+    score_storage = _temporary([*shape, min(rows, other)], STORED[t])
+    m, s, bm, bs, alpha = [_temporary(shape, STORED[t]) for _ in range(5)]
+    acc = _temporary([*shape, value], STORED[t])
+    generator = _generator() if dropout else None
+    ops = []
+    for j, (lo, hi) in enumerate(blocks):
+        count = hi - lo
+        kb, vb = ks.narrow(-2, lo, count), vs.narrow(-2, lo, count)
+        scores = score_storage.narrow(-1, 0, count)
+        domain = [*shape, count, size]
+        r = _Region()
+        r.done(r('mul', t, _load(r, 0, qs, t), _load(r, 1, kb, t)))
+        ops.append(_Generic(domain,
+            [(qs, _rows(b + 3, [*range(b), b, b + 2])), (kb, _onto(kb, [*range(b), b + 1, b + 2], domain))],
+            [(scores, _rows(b + 3, range(b + 2)))], r, [PARALLEL] * (b + 2) + [REDUCTION], [SUM], [t],
+            precision=REASSOCIATE | CONTRACT))
+        r, inputs = _Region(), [(scores, _same(b + 2))]
+        score = r('mul', t, r.arg(0, scores), r.const(scale, t))
+        if mask is not None:
+            ms = _heads(mask, group, False).narrow(-1, lo, count)
+            inputs.append((ms, _onto(ms, list(range(b + 2)), scores.shape)))
+            given = r.arg(1, ms)
+            score = r('select', t, given, score, r.const(-math.inf, t)) if mask.dtype is torch.bool else \
+                r('add', t, score, _convert(r, given, _class(mask), t))
+        if causal:
+            query = r('add', I32, r.index(b), r.const(origin.query, I32))
+            key = r('add', I32, r.index(b + 1), r.const(lo, I32))
+            score = r('select', t, r('gt', BOOL, key, query), r.const(-math.inf, t), score)
+        r.done(score)
+        ops.append(_Generic(scores.shape, inputs, [(scores, _same(b + 2))], r))
+        ops.append(_statistics(scores, b + 1, bm if j else m, bs if j else s, t))
+        if j:
+            r = _Region()
+            old, new = [r.arg(d, x) for d, x in enumerate((m, s))], [r.arg(d + 2, x) for d, x in enumerate((bm, bs))]
+            top, total = _online(r, old, new, t)
+            factor = r('select', t, r('eq', BOOL, old[0], r.const(-math.inf, t)), r.const(0, t),
+                       r('exp', t, r('sub', t, old[0], top)))
+            r.done(top, total, factor)
+            ops.append(_Generic(shape, [(x, _same(b + 1)) for x in (m, s, bm, bs)],
+                                [(x, _same(b + 1)) for x in (m, s, alpha)], r))
+            ops += _elementwise('mul', acc, acc, alpha.unsqueeze(-1))
+        domain = [*shape, value, count]
+        inputs = [(scores, _rows(b + 3, [*range(b), b, b + 2])),
+                  (vb, _onto(vb, [*range(b), b + 2, b + 1], domain)), (m, _rows(b + 3, range(b + 1)))]
+        r = _Region()
+        score, top = r.arg(0, scores), r.arg(2, m)
+        weight = r('select', t, r('eq', BOOL, top, r.const(-math.inf, t)), r.const(0, t),
+                   r('exp', t, r('sub', t, score, top)))
+        if dropout:
+            at = r.const(0, I32)
+            for d, n in [*zip(range(b), qs.shape[:b]), (b, length), (b + 2, other)]:
+                index = r('add', I32, r.index(d), r.const(lo if d == b + 2 else 0, I32))
+                at = r('add', I32, r('mul', I32, at, r.const(n, I32)), index)
+            keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, b + 3, at, generator)[0]), r.const(1 - dropout, F32))
+            kept = r('mul', t, weight, r.const(1 / (1 - dropout), t)) if dropout < 1 else r.const(0, t)
+            weight = r('select', t, keep, kept, r.const(0, t))
+        r.done(r('mul', t, weight, _load(r, 1, vb, t)))
+        ops.append(_Generic(domain, inputs, [(acc, _rows(b + 3, range(b + 2)))], r,
+                            [PARALLEL] * (b + 2) + [REDUCTION], [SUM], [t], [ACCUMULATE if j else IDENTITY],
+                            precision=REASSOCIATE | CONTRACT))
+    return ops + _epilogue(_heads(out, group, False), acc, t, [(s, _rows(b + 2, range(b + 1)))],
+        lambda r, numerator, total: r('select', t, r('eq', BOOL, total, r.const(0, t)), numerator,
+                                      r('div', t, numerator, total)))
 
 
 def _attending(given):
@@ -5881,10 +5908,10 @@ def _attending(given):
             mask.expand(*lead, q.shape[-2], k.shape[-2]) if mask is not None else None), given['is_causal'], scale, group
 
 
-def _attended(target, given, outs, query_origin=0):
+def _attended(target, given, outs, origin=AttentionOrigin(0)):
     _typed(target, [given['query'], given['key'], given['value'], given['attn_mask']], outs)
     operands, causal, scale, group = _attending(given)
-    return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']), query_origin)
+    return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']), origin)
 
 
 # J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw, Parallel random numbers: as easy as 1, 2, 3, SC 2011, §3.1 and
@@ -5933,8 +5960,8 @@ def _philox(r, counter, key):
 
 # the draws of operation `out`'s elements: the generator's words as inputs (their constant maps), the element's row-major
 # index the counter's first word
-def _draws(r, out, inputs, loops=None, element=None):
-    state, site = _generator()
+def _draws(r, out, inputs, loops=None, element=None, generator=None):
+    state, site = _generator() if generator is None else generator
     for word in range(3):
         inputs.append((state, _rows(out.dim() if loops is None else loops, [{None: word}])))
     k0, k1, execution = [r('bitcast', U32, r.arg(len(inputs) - 3 + word, state)) for word in range(3)]
@@ -6190,7 +6217,7 @@ def _concatenated(target, given, outs):
 
 # a branch graph module's structured operations over the given operands (its placeholders), each call's result a
 # temporary of its meta value, an alias the view itself; its results
-def _interpreted(module, given):
+def _interpreted(module, given, page):
     env, ops, inputs = {}, [], iter(given)
     for node in module.graph.nodes:
         if node.op == 'placeholder':
@@ -6208,7 +6235,7 @@ def _interpreted(module, given):
                 continue
             made, spec = pytree.tree_flatten(node.meta['val'])
             outs = [_held(m) for m in made]
-            ops += _lowering(local)(args, kwargs, outs)
+            ops += _lowering(local, page)(args, kwargs, outs)
             env[node] = pytree.tree_unflatten(outs, spec)
         elif node.op == 'output':
             return ops, pytree.tree_leaves(map_arg(node.args[0], env.__getitem__))
@@ -6243,14 +6270,14 @@ def _flagged(value, flag):
 
 # torch 2.14.0 torch/_higher_order_ops/cond.py: one IF over the predicate, each arm its branch's operations and the
 # copies of its results into the cond's
-def _conditional(target, args, kwargs, outs):
+def _conditional(target, args, kwargs, outs, page):
     predicate, first, second, operands = args
     if not isinstance(predicate, torch.Tensor):
-        ops, results = _interpreted(first if predicate else second, list(operands))
+        ops, results = _interpreted(first if predicate else second, list(operands), page)
         return ops + [op for out, value in zip(outs, results) for op in _copy(out, value)]
     arms = []
     for module in (first, second):
-        body, results = _interpreted(module, list(operands))
+        body, results = _interpreted(module, list(operands), page)
         for out, value in zip(outs, results):
             body += _copy(out, value)
         arms.append(body)
@@ -6259,17 +6286,17 @@ def _conditional(target, args, kwargs, outs):
 
 # torch 2.14.0 torch/_higher_order_ops/while_loop.py: the carried values in the loop's results, the test's verdict a
 # flag computed before the range and again at its end, the body's results copied into the carried state each trip
-def _iterated(target, args, kwargs, outs):
+def _iterated(target, args, kwargs, outs, page):
     test, body, carried, additional = args
     flag, ops = _temporary([], torch.int32), []
     for out, value in zip(outs, carried):
         ops += _copy(out, value) if isinstance(value, torch.Tensor) else _fill(out, value)
 
     def tested():
-        made, (verdict,) = _interpreted(test, [*outs, *additional])
+        made, (verdict,) = _interpreted(test, [*outs, *additional], page)
         return made + [_flagged(verdict, flag)]
     ops += tested()
-    made, results = _interpreted(body, [*outs, *additional])
+    made, results = _interpreted(body, [*outs, *additional], page)
     for out, value in zip(outs, results):
         made += _copy(out, value) if isinstance(value, torch.Tensor) else _fill(out, value)
     return ops + [_Control(WHILE, [made + tested()], flag, _trips(test, body, carried, additional))]
@@ -6379,10 +6406,10 @@ SYMBOLIC = {operator.add: 'add', operator.sub: 'sub', operator.mul: 'mul', opera
             torch.sym_not: 'logical_not'}
 
 
-def _lowering(local):
+def _lowering(local, page):
     packet = getattr(local.target, 'overloadpacket', local.target)
     if packet is A.scaled_dot_product_attention:
-        origin = local.annotation.query if isinstance(local.annotation, AttentionOrigin) else 0
+        origin = local.annotation if isinstance(local.annotation, AttentionOrigin) else AttentionOrigin(0, 0, page)
         return lambda args, kwargs, outs: _attended(local.target, _operands(local.target, args, kwargs), outs, origin)
     if packet in (A._linalg_det, A._linalg_slogdet):
         metadata = _given(local, _names(local))['A'].meta['val']
@@ -6404,9 +6431,9 @@ def _lowering(local):
                     else lower(local.target, given, outs))
         return lifted
     if packet is torch.ops.higher_order.cond:
-        return lambda args, kwargs, outs: _conditional(local.target, args, kwargs, outs)
+        return lambda args, kwargs, outs: _conditional(local.target, args, kwargs, outs, page)
     if packet is torch.ops.higher_order.while_loop:
-        return lambda args, kwargs, outs: _iterated(local.target, args, kwargs, outs)
+        return lambda args, kwargs, outs: _iterated(local.target, args, kwargs, outs, page)
     if packet in SOURCES:
         return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, args, kwargs), outs)
     if packet in VIEWS:
@@ -6570,7 +6597,7 @@ def _key(value):
 # structured operations over its operands' placed views, its result its own place, a placed view of an operand it
 # writes in place, an alias, or a temporary the compilation realizes
 def _called(ir, key, operands, local, form, placed):
-    lower = _lowering(local)
+    lower = _lowering(local, ir.page)
     given = iter(operands)
     args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
     mine = placed(key)
