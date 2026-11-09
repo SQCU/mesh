@@ -895,6 +895,8 @@ def _formed(ir, item, operands):
     if kind != 'call':
         return _meta(ir, key)
     local = ir.locals[operand]
+    if local.target in CONTROL:
+        return ir.describe(key, _meta(ir, key))
     if local.target is operator.getitem and isinstance(ir.forms.get(reads[0]), tuple) \
             and len(ir.forms[reads[0]][1]) > 1:
         ir.taken[key] = ir.forms[reads[0]][1][local.args[1]][1]
@@ -6400,7 +6402,7 @@ def _interpreted(module, given, page):
             env[node] = operator.attrgetter(node.target)(module)
         elif node.op == 'call_function':
             args, kwargs = map_arg((node.args, node.kwargs), env.__getitem__)
-            local = Local(node.op, node.target, args, kwargs)
+            local = Local(node.op, node.target, node.args, node.kwargs)
             if node.target in SYMBOLIC and not any(isinstance(a, torch.Tensor) for a in args):
                 env[node] = node.target(*args)
                 continue
@@ -7974,12 +7976,13 @@ def _decomposed(exported):
     known = {**decomposition_table, **LAZY}
     exported, done = exported.run_decompositions({**table, **LAZY}), set()
     while True:
-        wanted = {n.target for n in exported.graph.nodes if n.op == 'call_function' and not _lowered(n.target)
+        wanted = {n.target for module in exported.graph_module.modules() if isinstance(module, torch.fx.GraphModule)
+                  for n in module.graph.nodes if n.op == 'call_function' and not _lowered(n.target)
                   and n.target in known} - done
         if not wanted:
             return exported
         done |= wanted
-        exported = exported.run_decompositions({op: known[op] for op in wanted})
+        exported = exported.run_decompositions({op: known[op] for op in done})
 
 def _metadata(value):
     return (tuple(value.shape), tuple(value.stride()), value.storage_offset(), value.dtype, value.device,
