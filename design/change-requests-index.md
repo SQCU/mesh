@@ -122,12 +122,16 @@ outstanding, and what of it is outstanding. The standard every change request fo
   plan reports intended placement, not observed device use.
   Build24 also executes a mixed GPU/CPU/GPU artifact with relative error 4.298e-9, but its signature has one false
   edge: the new prefix submission is attributed to its numeric consumer instead of the actual GPU producer.
-  The executor is repairing that retained provenance; numerical success does not close synchronization or overlap.
+  Build25 repairs the retained provenance and passes external observation, with one image edge and no false edge.
+  GPU-prefix events and whole-call completion retain their distinct owners; overlap throughput remains unmeasured.
   The historical fragment-1 input now has a typed codec producer (mesha743225e), retained selected/basis operands,
   and explicit source-device versus compiled-target placement. Its first nonzero numerical cases fail on CPU and
   GPU because the handoff equation included row parity twice. Mesh13d6d475 corrects that one inverse lane formula
-  against the historical packer; numerical reruns and target-demanded constant realization remain open. The
-  independent reference is unchanged. Zero-width output is exact. Online KV attention,
+  against the historical packer. Build25 passes unchanged-reference numerical checks: plain CPU/GPU, int8 rotation,
+  Hadamard and ragged FFN all have relative error at most 1.828e-7; zero-width output is exact. A separate signed I4
+  strided/offset view over constant root storage also restores exactly. Target-demanded compilation of invariant
+  coded definitions remains open. The F16 neural case reaches convolution but exposes a missing required pad
+  operand; that emitter correction awaits the next build. No ANE execution or throughput closure follows. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
   relative error 2.217e-7, including an exactly zero fully masked row; causal attention has error 6.092e-8. The two
@@ -178,6 +182,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
   observation; the three-trip trace observes 37 program operations. General nested activation frames and named-control
   trip-distance feedback are still missing handoffs. The currently unconsumed anonymous compiler control-edge
   relation is being replaced by that consumed relation; the concrete three-trip success does not close it.
+  Build25 connects named-control feedback through signature v7 and entry/trip frames. The three concrete cases
+  still pass external observation; the three-trip realized graph has four image edges and no false/redundant edge.
+  Review then finds that materialization selects one accepting state path from the surviving family. Preserving
+  that family, and actual nested-WHILE/inner-zero-trip evidence, remain assigned. Compiler feedback also repeats
+  exact conflict analysis already performed for ordinary edges; the owners are completing one retained conflict
+  result consumed by ordinary ordering, feedback and predicate reads.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
   bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
   the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
