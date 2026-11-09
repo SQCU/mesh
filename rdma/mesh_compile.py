@@ -974,9 +974,16 @@ def _formed(ir, item, operands):
         return _meta(ir, key)
     local = ir.locals[operand]
     if local.target in CONTROL:
-        return ir.describe(key, _meta(ir, key))
+        result = ir.describe(key, _meta(ir, key))
+        made = []
+        for j, value in enumerate(pytree.tree_leaves(result)):
+            k = key + ('out', j)
+            ir.metas[k], ir.added[k], ir.results[k] = _held(value), (ir.producer[key],) * 2, key
+            made.append((j, k))
+        ir.forms[key] = (None, tuple(made))
+        return result
     if local.target is operator.getitem and isinstance(ir.forms.get(reads[0]), tuple) \
-            and len(ir.forms[reads[0]][1]) > 1:
+            and isinstance(ir.prototypes.get(reads[0]), (tuple, list)):
         ir.taken[key] = ir.forms[reads[0]][1][local.args[1]][1]
     if any(o is UNKNOWN for o in operands):
         return ir.describe(key, _meta(ir, key))
@@ -6861,7 +6868,7 @@ def _called(ir, key, operands, local, form, placed):
     mine = placed(key)
     if isinstance(form, tuple):
         outs = [placed(result) for _, result in form[1]]
-        return tuple(outs) if len(outs) > 1 else mine, lower(args, kwargs, outs)
+        return pytree.tree_unflatten(outs, pytree.tree_structure(ir.prototypes[key])), lower(args, kwargs, outs)
     if key in ir.contiguous:
         base = operands[_based(local)]
         return mine, _assign(mine.view(base.shape), base)
