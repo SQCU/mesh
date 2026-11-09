@@ -62,7 +62,9 @@ outstanding, and what of it is outstanding. The standard every change request fo
   handoffs and whole-control local storage reduces the tiny GPU eig from154 dispatch records to5 (4 GPU commands
   and a typed CHECK). Its restored artifact falls from12,340,083 to420,912 bytes; eigen residual2.504e-8 remains
   correct. One Program-owned effect/carriedness cache now supplies transformation and retention. This is structural
-  and numerical evidence, not measured throughput. CPU composition still requires compatible-grid local fusion.
+  and numerical evidence, not measured throughput. Build19 (metalc5e70a2f / meshc626df13) retains compatible CPU
+  member groups and their locals; the 81-operation matrix exponential restores as one native task, with relative
+  error 2.667e-6 and a 192,895-byte artifact. GPU eig still has five dispatch records and residual 3.541e-8.
   General eigenvalues now compose Householder Hessenberg reduction, implicit shifted QR and shared triangular
   substitution. The first rotation case exposed an in-place complex component-order defect: exit0 accompanied
   a56.802 residual. Yielding both typed components in one logical iteration corrects the shared producer; the
@@ -70,10 +72,19 @@ outstanding, and what of it is outstanding. The standard every change request fo
   results to contractions and adds pre-contraction scaling. Build18 executes these changes through CPU rotation
   (residual6.384e-8) and GPU full complex QR (reconstruction8.080e-8, orthogonality2.574e-7,2 dispatches).
   Mesh5b61507c adds fixed-output least-squares driver composition through the existing QR/LQ, pivoted QR/RZ and
-  SVD lowerings, with original driver and output-layout metadata. Its same-driver numerical checks remain pending.
+  SVD lowerings, with original driver and output-layout metadata. Build19 same-driver solution errors are 3.589e-7
+  for native CPU tall GELS, 4.300e-7 for GPU wide complex GELS and 9.644e-8 for native CPU rank-deficient GELSY;
+  residual/rank fields agree. GPU wide GELSD has a close solution but incorrectly reports rank two instead of one.
+  Compiler review found fusion typing a physical F32 input from a later BOOL semantic parameter after composing
+  a comparison prologue. This shared type-handoff defect remains under repair; numerical success is not inferred
+  from process exit or the solution alone.
   Metal9dc15107 supplies eighteen authored binary64 elementary functions through SoftFloat pairs and sourced
-  FDlibm range reduction and approximations. Tint reads that library into IR; connected target compilation and
-  numerical range/ULP evidence are pending. Neither source checkpoint closes the assigned numerical domain.
+  FDlibm range reduction and approximations. Build19 exports, compiles and restores these plus shared log1p/expm1
+  as one GPU dispatch. A 32-lane extreme/special-value vector differs from Torch CPU by at most two ULPs, including
+  huge trigonometric arguments through maxdouble; the tiny negative log1p result agrees with libm where Torch
+  rounds it to zero. These finite examples do not establish a full-domain accuracy bound. The restored training
+  and collective callers now use upstream joint forward/backward export and current public program/save/load;
+  their capture and partition checks are exposing additional producer/consumer gaps, and runtime remains pending.
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
@@ -101,6 +112,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   through both frontends, artifacts and signature choices; equal dispatch ranges no longer stand in for ancestry.
   A deliberate mismatched existing CPU client/signature could not exercise fail-stop: macOS denied destructive
   DTrace before client execution. No stopped client remained and no machine security configuration was changed.
+  Build19 retains submission actions and binds their meaning to the actual recorder image UUID. Fused eig passes
+  external observation of 12 program operations and seven static kernel records, with one image edge and no
+  redundant edges. Conditional thresholds, nested guards, composed instruction order and realized-alternative
+  validation still require their corresponding operational evidence.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
   bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
   the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
@@ -146,9 +161,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
 - [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md): outstanding in part.
   - R4's consumption of a received operand one partition at a time has historical implementations in the torch
     scope through the lowering request's item 1 and in LiteRT through torch-capture item 3. In the replacement,
-    native CPU work executes, but its received-operand acquisition still covers whole transfer ranges before
-    entry. The compiler must carry the existing per-member/group footprints and page masks into the compiled
-    CPU iteration, including its branches and loops. This readiness granularity remains open.
+    build19 carries per-group footprints/page masks into native first-pass, compaction and deferred work, and
+    retains a shared CPU/GPU dispatch order. Received IF/unrolled-trip selections use that same construction.
+    Direct received predicates at nonunrolled WHILE entry still need a scoped acquisition handoff. Removing the
+    replay scheduling solve also dropped its prepared receive-completion priority; the compiler-owned late
+    specialization must preserve that operand and the already planned lifetimes. Transport/overlap evidence
+    remains pending, so these source changes do not close R4.
 
 ## Implemented
 
