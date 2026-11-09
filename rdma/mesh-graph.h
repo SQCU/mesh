@@ -58,6 +58,21 @@ double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate
 /* design/joint-compilation.md §3, row 10 */
 double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t units, const uint64_t *bytes,
                                 uint32_t *machine, uint64_t *carried);
+/* design/torch-capture-change-request.md, "Source for item 2's execution-time estimates"; OpenXLA,
+   xla/service/gpu/model/gpu_performance_model_base.{h,cc} and gpu_performance_model.cc (read 2026-11-09):
+   CalculateEffectiveFlopsPerNs, ComputeTime, ReadTimeWithDRAMHeuristic, AdjustBandwidth, WriteTime,
+   CombineComputeAndMemoryAccessTime, EstimateRunTimeForInstructionImpl (read time summed over the operands),
+   kL2CacheSpeedup 2.5, kL1CacheSpeedup 8, kMemoryComputeParallelism 0.95, kKernelLaunchOverhead per launch; S. Williams,
+   A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009, §3-4: one machine's operands (a resource's clock in GHz,
+   cores, FPUs a core, DRAM bandwidth in bytes/s, L2 bytes, L1 bytes a core, memory transactions a clock, launch
+   overhead in ns), from its specifications or measurements. An actor's estimate t(v) in ns: its flops over `blocks`
+   blocks of `threads` threads, each operand read `net` distinct and `total` accessed bytes at its coalescing
+   `utilization`, `written` bytes, `launches` kernel launches */
+struct mesh_graph_machine { double clock, bandwidth, l2, l1, transactions, launch; uint32_t cores, fpus; };
+struct mesh_graph_read { uint64_t net, total; double utilization; };
+struct mesh_graph_actor { double flops; uint64_t blocks, threads, written, launches; size_t reads;
+                          const struct mesh_graph_read *read; };
+double mesh_graph_actor_time(const struct mesh_graph_machine *machine, const struct mesh_graph_actor *actor);
 /* design/joint-compilation.md §3, row 5 */
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
                     uint64_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
@@ -240,30 +255,11 @@ void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(voi
    design/torch-source-lowering-change-request.md item 3 */
 size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32_t *tail, uint32_t row, uint32_t count,
                           uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot);
-/* G. E. Blelloch, Prefix sums and their applications, 1990; M. Harris, S. Sengupta and J. D. Owens, GPU Gems 3, ch. 39,
-   2007; R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013 */
-int mesh_graph_compaction_source(uint32_t items, uint32_t simds, char *text, size_t room);
-/* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
-   RISC-V V 1.0, the mask register v0; R. M. Russell, CACM 21(1), 1978, the vector mask register; Metal Shading Language
-   Specification 4.1, §6.10.1 and §6.10.2 simd_ballot; MTL4ComputeCommandEncoder.h:90-112;
-   design/torch-capture-change-request.md item 3; MPI 4.1 §4.2.2 MPI_PARRIVED; design/disjoint-pages-change-request.md
-   C3.1. One scan of each operand's phase fields; `later` 0 flags each threadgroup ready or not for the compacted
-   worklist, `later` 1 repeats the scan until the group's own pages have landed, or fails where a field is ahead or an
-   operand's receive count has reached (e / row.w + 1) row.z while a field is still not landed. Each expected record is
-   two uint4 rows: phases/pages/copies, then as ulong2 {count - phases, group}. The second row derives the count address
-   from the same state binding, indexed by e % copies; both forms use 2 operands + 4 slots. e is operand d's producer
-   execution, design/compilation-composition-change-request.md item 6. The step word (8 bytes, `constant ulong`) is the
-   consumer row's execution e_b = b every_b + ordinal_b (ordinal_b < every_b, one call a capture); generation[d] gives
-   e = (e_b / every) producer + ordinal in 64 bits, every = every_b, producer = the producing function's every_f,
-   ordinal = the producing call's ordinal_f (metal_recording.h struct MetalGeneration, MetalGenerated). The row's own
-   range is {1, 1, 0} (e = e_b). The host binds the operand's phases copy and expected row for the same e. A failure
-   raises status word 0 (behind) or 1 (ahead) and the 64-bit atomic max of ~e_b at byte 8 (mesh.h struct mesh_status
-   `first`, its two last words) */
+/* design/compilation-composition-change-request.md item 6: the producer execution e a consumer's execution
+   e_b = b every_b + ordinal_b reads, e = (e_b / every) producer + ordinal in 64 bits, every = every_b, producer the
+   producing function's every_f, ordinal the producing call's ordinal_f; {1, 1, 0} the consumer's own (e = e_b). Its
+   readiness: mesh-metal.h struct mesh_metal_readiness, compiled by metal-microbench metal_transport.mm */
 struct mesh_graph_generation { uint32_t every, producer, ordinal; };
-int mesh_graph_worklist_source(uint32_t later, const uint32_t groups[3], const uint32_t block[3], const uint32_t *extent,
-                               uint32_t simds, uint32_t operands, uint32_t classes, const uint32_t *slots,
-                               const struct mesh_graph_generation *generation, const char *const builtin[5],
-                               char *parameters, size_t parameters_room, char *code, size_t code_room);
 
 #ifdef __cplusplus
 }

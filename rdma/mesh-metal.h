@@ -65,18 +65,24 @@ int mesh_metal_status(struct mesh_ctx *,uint64_t plan,int cause,uint64_t *first)
    declared transfer of planned call `owner`'s plan whose landing it is (metal_recording.h METAL_NATIVE_ARRIVED) */
 struct mesh_metal_range { struct mesh_metal_input input; struct mesh_graph_generation generation; uint32_t partitions;
                           uint64_t page; const uint32_t *field; uint64_t at; uint32_t transfer,owner; };
-/* the range transfer `transfer` of planned call `owner` lands for planned call `call`'s value placed at `section`, its
-   partition 0 at byte `at` of its storage: the plan's words, `field` (room for `room`; ERANGE with range->input set
-   where its pages exceed it), the generation ({1, 1, 0} where owner is call, else {every of call, every of owner,
-   ordinal of owner}), the section's rows as partitions of block x pgsz bytes */
+/* Two stages, before and after mesh_plan (design/compilation-composition-change-request.md, "Complete replacement
+   workgroup": structure from the declared program, words from the plan). Declared: the range transfer `transfer` of
+   call `owner` lands for call `call`'s value of `bytes` bytes, partition 0 at byte `at` of its storage, `calls` the
+   program's calls as mesh_plan takes them: its partitions of block x pgsz bytes (mesh_plan's rows), generation {1, 1, 0}
+   where owner is call, else {every of call, every of owner, ordinal of owner} (mesh-collective.h struct
+   mesh_planned_call, from the same calls), input zero and field NULL. Prepared: the declared range's plan words and
+   `field` (room for `room`; ERANGE with range->input set where its pages exceed it) from `planned`, the value placed
+   at `section` */
+int mesh_metal_range_declare(struct mesh_ctx *,const uint32_t *calls,uint32_t ncalls,uint32_t call,uint32_t owner,
+                             uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range);
 int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_planned *planned,
-                             uint32_t call,uint32_t owner,uint32_t transfer,struct mesh_section section,uint64_t at,
-                             uint32_t *field,uint32_t room,struct mesh_metal_range *range);
+                             struct mesh_section section,uint32_t *field,uint32_t room,struct mesh_metal_range *range);
 /* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
    design/disjoint-pages-change-request.md C3.1, "Landings and cancellations both arrive on the count"; rdma/mesh-flow.c
    count_raise. The readiness obligation of a dispatch reading `ranges` received ranges, every quantity static but the
-   view binding (mesh_metal_transport `state`) and the dispatch's execution e_b (its step word). Threadgroup g reads
-   transport fields [span[2 (class_of[g_x] ranges + d)], span[... + 1]) of range d (equal ends: none). For range d at
+   view binding (mesh_metal_transport `state`) and the dispatch's execution e_b (its step word). Threadgroup g, linear
+   index l = g_x + groups_x (g_y + groups_y g_z), reads transport fields [span[2 (class_of[l] ranges + d)],
+   span[... + 1]) of range d (equal ends: none). For range d at
    e: r = e / copies, c = e mod copies; field f is the 2-bit field at bit 2 (f mod 16) of the 32-bit word at view byte
    phases + c group + 4 (f / 16); f has landed where it is mesh.h mesh_phase(r + 1) and is ahead where it is neither
    that nor mesh_phase(r); the range is due where its count word, view byte count + 8 c, is at least (r + 1) pages.
@@ -87,26 +93,27 @@ int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,con
    group. A ready group's reads follow a system-scope sequentially consistent fence after its last test */
 struct mesh_metal_readiness { uint32_t ranges,classes,groups,padding; const struct mesh_metal_range *range;
                               uint32_t *span,*class_of; uint64_t status; };
-/* `readiness` names its ranges, groups (groups[0]), status and room for span (2 groups ranges entries) and class_of
-   (groups); the classes, class_of and spans from the dispatch's footprints (mesh-graph.h struct mesh_graph_footprint
-   over a grid of groups[3] threadgroups, their terms in `term`), footprint k's binding a view of range[k] (UINT32_MAX:
-   of no received range):
-   each class one distinct row of the partitions threadgroups x = g_x reach over every (g_y, g_z) (all of a range no
-   footprint names, since the dispatch reads every range it lists), its span of range d the least and one past the
-   greatest field whose partition is within that row's bounds of d */
+/* `readiness` names its ranges, groups (the grid's threadgroups, groups[0] groups[1] groups[2]), status and room for
+   span (2 groups ranges entries) and class_of (groups); the classes, class_of and spans from the dispatch's footprints
+   (mesh-graph.h struct mesh_graph_footprint, their terms in `term`, evaluated at each threadgroup), footprint k's
+   binding a view of range[k] (UINT32_MAX: of no received range): each class one distinct row of the partitions a
+   threadgroup reaches (all of a range no footprint names, since the dispatch reads every range it lists), its span of
+   range d the least and one past the greatest field whose partition is within that row's bounds of d */
 int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh_graph_footprint *footprint,
                     const struct mesh_graph_term *term,const uint32_t *range,struct mesh_metal_readiness *readiness);
 /* design/disjoint-pages-change-request.md C3.1, C3.2 and C3.7; PTX ISA §8.8; S. Flur et al., POPL 2017: the release
    of a published range's execution e, after all of e's stores to it: a system-scope sequentially consistent fence;
    where the status word's behind and ahead are both 0, the supplied word (view byte `supplied`, mesh_metal_publication)
-   raised to the 64-bit maximum with e + 1; the same fence. `total` 0: once, after the writers; else each writing
-   threadgroup's stores are system-coherent and it adds its `contribution` bytes to an arrival counter, the group whose
-   addition completes `total` resets the counter to 0 and releases. `transfer` the declared transfer of the writer's
-   own call (metal_recording.h METAL_NATIVE_PUBLISH for a CPU writer) */
-struct mesh_metal_release { uint64_t supplied,status,total,contribution; uint32_t transfer,padding; };
-/* planned call `call`'s release of its transfer `transfer` of `total` bytes, `contribution` 0 for the lowering */
+   raised to the 64-bit maximum with e + 1; the same fence. The range's GPU stores are system-coherent; each writing
+   threadgroup of every dispatch writing the range adds 1 to one arrival counter after its stores, the one whose
+   addition completes `total` (the lowering's count of those threadgroups, a reader's first and later pass counted
+   once) resets the counter to 0 and releases. `transfer` the declared transfer of the writer's own call
+   (metal_recording.h METAL_NATIVE_PUBLISH for a CPU writer) */
+struct mesh_metal_release { uint64_t supplied,status,total; uint32_t transfer,padding; };
+/* declared before mesh_plan as {.transfer} (planned call `call`'s transfer, `total` 0 until the lowering counts it);
+   prepared after it: the supplied and status words of that call's plan */
 int mesh_metal_release_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_planned *planned,
-                               uint32_t call,uint32_t transfer,uint64_t total,struct mesh_metal_release *release);
+                               uint32_t call,struct mesh_metal_release *release);
 /* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3: the lifetime obligation of a range
    planned call `call`'s transfer `transfer` sends from this node (its sent ranges and the received ranges it forwards):
    no writer of its copy for execution e runs before execution e - copies's sends ended (`sent`); `extent` the bytes
@@ -120,7 +127,7 @@ int mesh_metal_sending_prepare(struct mesh_ctx *,struct mesh_metal_transport *,c
 _Static_assert(sizeof(struct mesh_metal_range)==88 &&
   offsetof(struct mesh_metal_range,generation)==40 && offsetof(struct mesh_metal_range,page)==56 &&
   offsetof(struct mesh_metal_range,at)==72 && offsetof(struct mesh_metal_range,transfer)==80 &&
-  sizeof(struct mesh_metal_readiness)==48 && sizeof(struct mesh_metal_release)==40 &&
+  sizeof(struct mesh_metal_readiness)==48 && sizeof(struct mesh_metal_release)==32 &&
   sizeof(struct mesh_metal_sending)==48 && offsetof(struct mesh_metal_sending,extent)==24,"mesh-metal.h records");
 _Static_assert(sizeof(struct mesh_metal_transport)==24,"mesh_metal_transport: rdma/mesh_compile.py Transport");
 _Static_assert(sizeof(struct mesh_metal_input)==40 && offsetof(struct mesh_metal_input,group)==8 &&

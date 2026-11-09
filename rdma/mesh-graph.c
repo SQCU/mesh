@@ -532,6 +532,37 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
   return end;
 }
 
+/* OpenXLA gpu_performance_model_base.cc: AdjustBandwidth */
+static double actor_bandwidth(const struct mesh_graph_machine *x, double bandwidth, uint64_t blocks){
+  const double most=(double)blocks*x->clock*1.0e9*x->transactions;
+  return bandwidth<most?bandwidth:most;
+}
+/* OpenXLA gpu_performance_model_base.cc: ReadTimeWithDRAMHeuristic, in seconds */
+static double actor_read(const struct mesh_graph_machine *x, uint64_t blocks, const struct mesh_graph_read *r){
+  double dram=x->bandwidth*r->utilization,rest=x->bandwidth;
+  if((double)r->net<x->l2){
+    rest*=2.5;
+    if((double)r->net<x->l1*x->cores)rest*=8;
+  }
+  else rest*=r->utilization;
+  dram=actor_bandwidth(x,dram,blocks);rest=actor_bandwidth(x,rest,blocks);
+  const uint64_t from_dram=r->net<r->total?r->net:r->total,from_cache=r->total-from_dram;
+  return (double)from_dram/dram+(double)from_cache/rest;
+}
+/* OpenXLA gpu_performance_model_base.cc: CalculateEffectiveFlopsPerNs, ComputeTime, WriteTime and
+   CombineComputeAndMemoryAccessTime; gpu_performance_model.cc EstimateRunTimeForInstructionImpl and EstimateRunTimes'
+   kKernelLaunchOverhead a launch */
+double mesh_graph_actor_time(const struct mesh_graph_machine *x, const struct mesh_graph_actor *a){
+  const uint64_t fpus=a->threads<x->fpus?a->threads:x->fpus,cores=a->blocks<x->cores?a->blocks:x->cores;
+  const double per_ns=x->clock*2*(double)cores*(double)fpus;
+  const double compute=a->flops>0?a->flops/per_ns:0;
+  double memory=(double)a->written/x->bandwidth;
+  for(size_t k=0;k<a->reads;k++)memory+=actor_read(x,a->blocks,a->read+k);
+  memory*=1.0e9;
+  const double least=compute<memory?compute:memory;
+  return compute+memory-least*0.95+(double)a->launches*x->launch;
+}
+
 /* design/disjoint-pages-change-request.md, Appendix C, C3.3; design/rubrics.md:422 (C9) */
 static void heap_up(uint32_t *heap, uint32_t *position, int (*before)(const void *context, uint32_t a, uint32_t b),
                     const void *context, size_t i) {
@@ -2444,129 +2475,4 @@ size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32
     source[made] = from % count; slot[made++] = (uint32_t)((t - delay) % lag);
   }
   return made;
-}
-
-/* G. E. Blelloch, Prefix sums and their applications, 1990; M. Harris, S. Sengupta and J. D. Owens, GPU Gems 3, ch. 39,
-   2007; R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Metal Shading Language Specification 4.1, §6.10.2;
-   MTL4ComputeCommandEncoder.h:90-112 */
-int mesh_graph_compaction_source(uint32_t items, uint32_t simds, char *text, size_t room) {
-  const int made = snprintf(text, room, "#include <metal_stdlib>\n"
-    "kernel void mesh_compact(device const uint *mesh_flags [[buffer(0)]],device uint *mesh_list [[buffer(1)]],"
-    "device uint *mesh_arguments [[buffer(2)]],uint mesh_tl [[thread_index_in_threadgroup]],uint mesh_lanes [[threads_per_threadgroup]],"
-    "uint mesh_sl [[thread_index_in_simdgroup]],uint mesh_sg [[simdgroup_index_in_threadgroup]]){"
-    "threadgroup uint mesh_counts[%u];uint mesh_left=0u;"
-    "for(uint mesh_at=0u;mesh_at<%uu;mesh_at+=mesh_lanes){uint mesh_g=mesh_at+mesh_tl;"
-    "bool mesh_off=metal::select(false,mesh_flags[metal::min(mesh_g,%uu)]==0u,mesh_g<%uu);"
-    "uint mesh_own=metal::simd_prefix_exclusive_sum(metal::select(0u,1u,mesh_off));"
-    "uint mesh_simd=metal::popcount(static_cast<metal::simd_vote::vote_t>(metal::simd_ballot(mesh_off)));"
-    "if(mesh_sl==0u)mesh_counts[mesh_sg]=mesh_simd;metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
-    "if(mesh_sg==0u){uint mesh_count=metal::select(0u,mesh_counts[metal::min(mesh_sl,%uu)],mesh_sl<%uu);"
-    "uint mesh_before=metal::simd_prefix_exclusive_sum(mesh_count);uint mesh_total=metal::simd_sum(mesh_count);"
-    "if(mesh_sl<%uu)mesh_counts[mesh_sl]=mesh_before;if(mesh_sl==0u)mesh_counts[%u]=mesh_total;}"
-    "metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
-    "if(mesh_off)mesh_list[mesh_left+mesh_counts[mesh_sg]+mesh_own]=mesh_g;mesh_left+=mesh_counts[%u];"
-    "metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);}"
-    "if(mesh_tl==0u){mesh_arguments[0]=mesh_left;mesh_arguments[1]=1u;mesh_arguments[2]=1u;}}\n",
-    simds + 1, items, items - 1, items, simds - 1, simds, simds, simds, simds);
-  return made < 0 ? EINVAL : (size_t)made >= room ? ERANGE : 0;
-}
-
-/* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
-   RISC-V V 1.0, the mask register v0; R. M. Russell, CACM 21(1), 1978, the vector mask register; Metal Shading Language
-   Specification 4.1, §6.10.1 and §6.10.2 simd_ballot; MTL4ComputeCommandEncoder.h:90-112; MPI 4.1 §4.2.2
-   MPI_PARRIVED; design/disjoint-pages-change-request.md C3.1, "Landings and cancellations both arrive on the count";
-   rdma/mesh-flow.c count_raise */
-int mesh_graph_worklist_source(uint32_t later, const uint32_t groups[3], const uint32_t block[3], const uint32_t *extent,
-                               uint32_t simds, uint32_t operands, uint32_t classes, const uint32_t *slots,
-                               const struct mesh_graph_generation *generation, const char *const builtin[5],
-                               char *parameters, size_t parameters_room, char *code, size_t code_room) {
-  for (uint32_t d = 0; later && d < operands; d++) if (!generation[d].every) return EINVAL;
-  struct graph_sink p = {parameters, parameters_room, 0, 0}, c = {code, code_room, 0, 0};
-  graph_put(&c, "threadgroup uint mesh_mask_votes[%u];uint mesh_mask_tl=%s;uint3 mesh_mask_tg=%s;", simds, builtin[0],
-            builtin[1]);
-  if (later) graph_put(&c, "uint mesh_mask_group=mesh_mask_list[mesh_mask_tg.x];"
-    "uint3 mesh_mask_origin=uint3(mesh_mask_group%%%uu,(mesh_mask_group/%uu)%%%uu,mesh_mask_group/%uu);",
-    groups[0], groups[0], groups[1], groups[0] * groups[1]);
-  else graph_put(&c, "uint3 mesh_mask_origin=mesh_mask_tg;");
-  if (classes > 1) graph_put(&c, "uint mesh_mask_class=mesh_mask_select[%uu+mesh_mask_origin.x];", classes * operands * 2);
-  else graph_put(&c, "uint mesh_mask_class=0u;");
-  if (extent) graph_put(&c, "uint3 mesh_mask_extent=metal::min(uint3(%uu,%uu,%uu),"
-    "uint3(%uu,%uu,%uu)-mesh_mask_origin*uint3(%uu,%uu,%uu));", block[0], block[1], block[2], extent[0], extent[1], extent[2],
-    block[0], block[1], block[2]);
-  if (extent && !later) graph_put(&c, "uint mesh_mask_lanes=mesh_mask_extent.x*mesh_mask_extent.y*mesh_mask_extent.z;");
-  else graph_put(&c, "uint mesh_mask_lanes=%uu;", block[0] * block[1] * block[2]);
-  for (uint32_t d = 0; later && d < operands; d++)
-    graph_put(&c, "ulong mesh_mask_generation_%u=(mesh_mask_repetition/%uul)*%uul+%uul;", d, generation[d].every,
-              generation[d].producer, generation[d].ordinal);
-  if (later) for (uint32_t d = 0; d < operands; d++) graph_put(&c,
-    "uint4 mesh_mask_row_%u=mesh_mask_expect_%u[0];"
-    "ulong2 mesh_mask_offset_%u=as_type<ulong2>(mesh_mask_expect_%u[1]);"
-    "volatile coherent(system) device const ulong *mesh_mask_count_%u="
-    "reinterpret_cast<volatile coherent(system) device const ulong *>("
-    "reinterpret_cast<volatile coherent(system) device const uchar *>(mesh_mask_phases_%u)+"
-    "as_type<long>(mesh_mask_offset_%u.x)-long(mesh_mask_generation_%u%%mesh_mask_row_%u.w)*long(mesh_mask_offset_%u.y));",
-    d, d, d, d, d, d, d, d, d, d);
-  graph_put(&c, "uint mesh_mask_vote=0u;%s", later ? "for(;;){mesh_mask_vote=0u;" : "{");
-  if (later) {
-    for (uint32_t d = 0; d < operands; d++)
-      graph_put(&c, "bool mesh_mask_due_%u="
-                    "mesh_mask_count_%u[mesh_mask_generation_%u%%mesh_mask_row_%u.w]>="
-                    "(ulong(mesh_mask_generation_%u)/mesh_mask_row_%u.w+1ul)*ulong(mesh_mask_row_%u.z);", d, d, d, d, d, d, d);
-    graph_put(&c,
-      "metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,static_cast<metal::thread_scope>(3));");
-  }
-  for (uint32_t d = 0; d < operands; d++) {
-    graph_put(&c,
-    "{uint4 mesh_mask_row=mesh_mask_expect_%u[0];"
-    "uint2 mesh_mask_span=uint2(mesh_mask_select[(mesh_mask_class*%uu+%uu)*2u],"
-    "mesh_mask_select[(mesh_mask_class*%uu+%uu)*2u+1u]);"
-    "for(uint mesh_mask_at=mesh_mask_span.x/64u+mesh_mask_tl;mesh_mask_at*64u<mesh_mask_span.y;"
-    "mesh_mask_at+=mesh_mask_lanes){"
-    "uint4 mesh_mask_word=mesh_mask_phases_%u[mesh_mask_at];"
-    "uint4 mesh_mask_field=uint4(mesh_mask_at*64u)+uint4(0u,16u,32u,48u);"
-    "uint4 mesh_mask_low=metal::select(metal::min(uint4(mesh_mask_span.x)-mesh_mask_field,uint4(16u)),uint4(0u),"
-    "uint4(mesh_mask_span.x)<=mesh_mask_field);"
-    "uint4 mesh_mask_high=metal::select(metal::min(uint4(mesh_mask_span.y)-mesh_mask_field,uint4(16u)),uint4(0u),"
-    "uint4(mesh_mask_span.y)<=mesh_mask_field);"
-    "uint4 mesh_mask_fields=(metal::select((uint4(1u)<<(metal::min(mesh_mask_high,uint4(15u))*2u))-1u,uint4(0xffffffffu),"
-    "mesh_mask_high>=16u)&~metal::select((uint4(1u)<<(metal::min(mesh_mask_low,uint4(15u))*2u))-1u,uint4(0xffffffffu),"
-    "mesh_mask_low>=16u))&uint4(0x55555555u);"
-    "uint4 mesh_mask_unequal=mesh_mask_word^uint4(mesh_mask_row.x);"
-    "mesh_mask_unequal=(mesh_mask_unequal|(mesh_mask_unequal>>1u))&mesh_mask_fields;"
-    "uint4 mesh_mask_ahead=mesh_mask_word^uint4(mesh_mask_row.y);"
-    "mesh_mask_ahead=(mesh_mask_ahead|(mesh_mask_ahead>>1u))&mesh_mask_unequal;"
-    "mesh_mask_vote|=metal::select(0u,1u,metal::any(mesh_mask_unequal!=0u))|metal::select(0u,2u,metal::any(mesh_mask_ahead!=0u));",
-    d, operands, d, operands, d, d);
-    if (later) graph_put(&c, "mesh_mask_vote|=metal::select(0u,4u,mesh_mask_due_%u&&metal::any(mesh_mask_unequal!=0u));", d);
-    graph_put(&c, "}}");
-  }
-  graph_put(&c,
-    "mesh_mask_vote=metal::select(0u,1u,metal::simd_ballot((mesh_mask_vote&1u)!=0u).any())|"
-    "metal::select(0u,2u,metal::simd_ballot((mesh_mask_vote&2u)!=0u).any())|"
-    "metal::select(0u,4u,metal::simd_ballot((mesh_mask_vote&4u)!=0u).any());"
-    "if(%s==0u)mesh_mask_votes[%s]=mesh_mask_vote;metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
-    "mesh_mask_vote=0u;for(uint mesh_mask_s=0u;mesh_mask_s<%s;mesh_mask_s++)mesh_mask_vote|=mesh_mask_votes[mesh_mask_s];",
-    builtin[2], builtin[3], builtin[4]);
-  if (later) graph_put(&c, "metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
-    "if((mesh_mask_vote&1u)==0u)break;"
-    "if((mesh_mask_vote&6u)!=0u){if(mesh_mask_tl==0u){"
-    "metal::atomic_fetch_add_explicit(mesh_mask_status+metal::select(0u,1u,(mesh_mask_vote&2u)!=0u),1u,metal::memory_order_relaxed);"
-    "metal::atomic_max_explicit(reinterpret_cast<device metal::atomic_ulong *>(mesh_mask_status+2),~mesh_mask_repetition,"
-    "metal::memory_order_relaxed);}return;}}");
-  else graph_put(&c, "}if(mesh_mask_tl==0u)mesh_mask_flags[mesh_mask_tg.x+%uu*(mesh_mask_tg.y+%uu*mesh_mask_tg.z)]="
-    "metal::select(0u,1u,(mesh_mask_vote&1u)==0u);if((mesh_mask_vote&1u)!=0u)return;", groups[0], groups[1]);
-  graph_put(&c,
-    "metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,static_cast<metal::thread_scope>(3));");
-  for (uint32_t d = 0; d < operands; d++) graph_put(&p,
-    "%svolatile coherent(system) device const uint4 *mesh_mask_phases_%u [[buffer(%u)]], "
-    "device const uint4 *mesh_mask_expect_%u [[buffer(%u)]]", d ? ", " : "", d, slots[2 * d], d, slots[2 * d + 1]);
-  graph_put(&p, "%sdevice const uint *mesh_mask_select [[buffer(%u)]]", operands ? ", " : "", slots[2 * operands + 3]);
-  if (later) {
-    graph_put(&p, ", device const uint *mesh_mask_list [[buffer(%u)]], "
-      "device metal::atomic_uint *mesh_mask_status [[buffer(%u)]], constant ulong &mesh_mask_repetition [[buffer(%u)]]",
-      slots[2 * operands], slots[2 * operands + 1], slots[2 * operands + 2]);
-  } else graph_put(&p, ", device uint *mesh_mask_flags [[buffer(%u)]]", slots[2 * operands]);
-  size_t made;
-  const int status = graph_end(&p, &made);
-  return status ? status : graph_end(&c, &made);
 }

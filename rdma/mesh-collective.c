@@ -356,6 +356,10 @@ static void plan_name(const struct plan *p,uint32_t v,const char *what,uint64_t 
 static int plan_unroll(struct plan *p){
   const uint32_t values=p->values;
   p->copies=p->horizon*p->calls;
+  /* M. Lam, PLDI 1988, §2.3: a transferred value its host writes `lag` executions ahead (design/aot-compilation-change-
+     request.md, appendix item 2) takes the plan's copies (plan_copies), at least its lag, so that the copy of execution
+     e + lag - 1 the host writes is not one the sends of execution e still read */
+  for(uint32_t j=0;j<p->givens;j++)if(p->named[j] && p->given[j].lag>p->copies)p->copies=p->given[j].lag;
   if(!values)return 0;
   const struct plan_value *last=p->value+values-1;
   const uint32_t sources=last->source+1+last->reads;
@@ -1594,7 +1598,7 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     const struct mesh_value *v=values+j;
     if(!v->section.bytes || v->kind>MESH_EXECUTION || v->wire>1 || v->state>1 || v->run>1 ||
        (v->state && (v->wire || v->kind!=MESH_INVARIANT)) ||
-       (v->lag && (v->kind!=MESH_EXECUTION || v->wire || v->state)))return EINVAL;
+       (v->lag && (v->kind!=MESH_EXECUTION || v->state)))return EINVAL;
     if(plan_blocks(m,v->section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
   }
   /* design/plan-to-bridge-change-request.md R4; design/aot-compilation-change-request.md A3 */
