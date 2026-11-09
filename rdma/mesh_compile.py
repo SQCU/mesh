@@ -3010,6 +3010,53 @@ def _checked(target, given, outs):
     return [_Check(given['info'], code, given['api_name'])]
 
 
+def _determinant(target, given, outs, transpose=False):
+    a, logarithm = given['A'], target.overloadpacket is A._linalg_slogdet
+    value, lu, pivots = outs[0], outs[-2], outs[-1]
+    info = _temporary(a.shape[:-2], torch.int32)
+    ops = _linalg_lu(a.transpose(-2, -1) if transpose else a, lu, pivots, info)
+    ops += _fill(value, 1)
+    if logarithm:
+        ops += _fill(outs[1], 0)
+    for j in range(a.shape[-1]):
+        diagonal = lu[..., j, j]
+        swap, negative = _temporary(value.shape, torch.bool), _temporary(value.shape, value.dtype)
+        if logarithm:
+            magnitude, safe = _temporary(value.shape, a.real.dtype), _temporary(value.shape, a.real.dtype)
+            zero, phase = _temporary(value.shape, torch.bool), _temporary(value.shape, a.dtype)
+            ops += _elementwise('abs', magnitude, diagonal)
+            ops += _elementwise('eq', zero, magnitude, 0)
+            ops += _elementwise('where', safe, zero, 1, magnitude)
+            ops += _elementwise('div', phase, diagonal, safe)
+            ops += _elementwise('mul', value, value, phase)
+            ops += _elementwise('log', magnitude, magnitude)
+            ops += _elementwise('add', outs[1], outs[1], magnitude)
+        else:
+            ops += _elementwise('mul', value, value, diagonal)
+        ops += _elementwise('ne', swap, pivots[..., j], j + 1)
+        ops += _elementwise('neg', negative, value)
+        ops += _elementwise('where', value, swap, negative, value)
+    return ops
+
+
+def _unpacked_lu(target, given, outs):
+    a, (permutation, lower, upper) = given['A'], outs
+    m, n = a.shape[-2:]
+    packed, pivots = _temporary(a.shape, a.dtype), _temporary((*a.shape[:-2], min(m, n)), torch.int32)
+    info = _temporary(a.shape[:-2], torch.int32)
+    ops = _linalg_lu(a, packed, pivots, info, given['pivot'])
+    ops += _triangular_part(A.tril.default, {'self': packed[..., :, :min(m, n)], 'diagonal': -1}, [lower])
+    ops += _fill(lower.diagonal(dim1=-2, dim2=-1), 1)
+    ops += _triangular_part(A.triu.default, {'self': packed[..., :min(m, n), :]}, [upper])
+    if permutation.numel():
+        ops += _linalg_identity(permutation)
+        current = permutation
+        for j in reversed(range(min(m, n))):
+            current = _linalg_swap(current, pivots[..., j], j, ops)
+        ops += _copy(permutation, current)
+    return ops
+
+
 ASSERTIONS = (A._assert_async, A._assert_scalar, A._assert_tensor_metadata,
               A.sym_constrain_range, A.sym_constrain_range_for_size)
 
@@ -3512,6 +3559,49 @@ def _singular(target, given, outs):
         ops += _copy(u, right if wide else left)
         ops += _copy(vh, _linalg_transpose(left if wide else right, ops, True, True))
     return ops
+
+
+def _pseudoinverse(target, given, outs, default_tolerance_dtype=torch.float64):
+    a, (out,), ops = given['self'], outs, []
+    if not a.numel():
+        return _copy(out, a.transpose(-2, -1))
+    batch, (m, n), k = a.shape[:-2], a.shape[-2:], min(a.shape[-2:])
+    values = _temporary((*batch, k), a.real.dtype)
+    if given['hermitian']:
+        vectors = _temporary(a.shape, a.dtype)
+        ops += _eigen_hermitian(A._linalg_eigh.default, {'A': a, 'UPLO': 'L', 'compute_v': True}, [values, vectors])
+        left, right = vectors, _linalg_transpose(vectors, ops, True, True)
+    else:
+        u, vh = _temporary((*batch, m, k), a.dtype), _temporary((*batch, k, n), a.dtype)
+        ops += _singular(A._linalg_svd.default, {'A': a, 'full_matrices': False, 'compute_uv': True}, [u, values, vh])
+        left, right = _linalg_transpose(vh, ops, True, True), _linalg_transpose(u, ops, True, True)
+    absolute, maximum = _temporary(values.shape, values.dtype), _temporary(batch, values.dtype)
+    ops += _elementwise('abs', absolute, values)
+    ops += _reduced(A.amax.default, {'self': absolute, 'dim': [-1], 'keepdim': False}, [maximum])
+    batch = out.shape[:-2]
+    atol, rtol = given.get('atol'), given.get('rtol', given.get('rcond'))
+    tolerance_dtype = values.dtype
+    for value in (atol, rtol):
+        tolerance_dtype = torch.promote_types(tolerance_dtype, value.dtype if isinstance(value, torch.Tensor)
+                                               else default_tolerance_dtype)
+    atol = 0 if atol is None else atol
+    if rtol is None:
+        default = max(m, n) * torch.finfo(a.real.dtype).eps
+        positive = _temporary(batch, torch.bool)
+        rtol = _temporary(batch, tolerance_dtype)
+        ops += _elementwise('gt', positive, atol, 0)
+        ops += _elementwise('where', rtol, positive, 0, default)
+    tolerance = _temporary(batch, tolerance_dtype)
+    ops += _elementwise('mul', tolerance, maximum, rtol)
+    ops += _elementwise('maximum', tolerance, tolerance, atol)
+    keep, reciprocal = _temporary((*batch, k), torch.bool), _temporary((*batch, k), values.dtype)
+    ops += _elementwise('gt', keep, absolute, tolerance.unsqueeze(-1))
+    ops += _elementwise('where', reciprocal, keep, values, 1)
+    ops += _elementwise('reciprocal', reciprocal, reciprocal)
+    ops += _elementwise('where', reciprocal, keep, reciprocal, 0)
+    scaled = _temporary((*batch, *left.shape[-2:]), left.dtype)
+    ops += _elementwise('mul', scaled, left, reciprocal.unsqueeze(-2))
+    return ops + _product(A.matmul.default, {'self': scaled, 'other': right}, [out])
 
 
 # an index that may leave [0, size): its in-range test and the index clamped into range, so the extraction is defined
@@ -5341,6 +5431,8 @@ SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A.
                                                                      A.copy_), _copying),
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys(FACTORIZATIONS, _factorized),
+           A._linalg_det: _determinant, A._linalg_slogdet: _determinant,
+           A.linalg_lu: _unpacked_lu, A.linalg_pinv: _pseudoinverse,
            A._linalg_check_errors: _checked,
            **dict.fromkeys(ASSERTIONS, _asserted),
            **dict.fromkeys(ORTHOGONAL, _orthogonal), A.triu: _triangular_part, A.tril: _triangular_part,
@@ -5419,6 +5511,16 @@ SYMBOLIC = {operator.add: 'add', operator.sub: 'sub', operator.mul: 'mul', opera
 
 def _lowering(local):
     packet = getattr(local.target, 'overloadpacket', local.target)
+    if packet in (A._linalg_det, A._linalg_slogdet):
+        metadata = _given(local, _names(local))['A'].meta['val']
+        transpose = metadata.is_contiguous() and not metadata.is_complex()
+        return lambda args, kwargs, outs: _determinant(local.target, _operands(local.target, args, kwargs), outs,
+                                                       transpose)
+    if packet is A.linalg_pinv:
+        metadata = _given(local, _names(local))['self'].meta['val']
+        dtype = torch.float32 if metadata.device.type in ('mps', 'metal') else torch.float64
+        return lambda args, kwargs, outs: _pseudoinverse(local.target, _operands(local.target, args, kwargs), outs,
+                                                        dtype)
     if local.target in SYMBOLIC:
         return lambda args, kwargs, outs: _elementwise(SYMBOLIC[local.target], outs[0], *args)
     if packet in LINEAR:

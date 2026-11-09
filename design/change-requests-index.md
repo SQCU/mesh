@@ -45,9 +45,14 @@ outstanding, and what of it is outstanding. The standard every change request fo
   separate typed CHECK operation. Restored GPU inverse and matrix exponential have the same accuracy; full real3x2
   QR has reconstruction error7.006e-8 and orthogonality error1.681e-7. Singular CPU inverse reports typed info2/EDOM
   instead of numerical success. Public Torch exception translation still needs operational evidence.
-  These cases do not establish all shapes, complex algorithms, convergence/extreme scales or performance.
-  Complex eigendecomposition exposed an Acquire null dereference during finalization: indirect compute kernels
-  were misclassified as transport later passes. Its typed Later-identity correction awaits rebuilt execution.
+  At metaldbfd53dd / mesh69a971ce, restored native CPU complex Hermitian eigendecomposition has reconstruction
+  error1.269e-7; real full SVD2.799e-8 and rank-deficient complex full SVD1.701e-8, with orthogonality errors below
+  1.8e-7. Restored I64/F64/BOOL sort and gather preserve exact values and stable indices, including wide values;
+  direct binary64 FMA preserves single rounding, overflow cancellation, subnormals and special values in eight
+  concrete lanes. A zero-operation graph preserves transposed/sliced input aliases and a constant across restore.
+  These cases do not establish all shapes, convergence/extreme scales or performance. GPU eigendecomposition now
+  passes repaired Later identity and typed symbol allocation, but crashes inside AGX pipeline creation during
+  concurrent final compilation. Compiler/serializer ownership and duplicate compilation remain under revision.
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
@@ -62,9 +67,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
   host signal at mesh 53bc3b17, with numerical agreement. The restored GPU projection also passes external
   observation of five program operations; its three kernel records are static compiler data. Bridge and
   structured-control observation and fail-stop interception remain open. Typed invocation spans are emitted and
-  consumed. The three-span argmax observation stops at preflight on four genuinely redundant synchronization
-  edges: allocator completion and GPU fences duplicate the same cross-execution dependences. Removing the
-  redundant fence through the retained allocator-completion fact remains assigned; observation has not passed.
+  consumed. At metalcc3618ff / mesh69a971ce, three-span argmax passes observation of17 program operations, with9
+  static kernel records,2 image edges and no redundant edges. Retained allocator-completion facts remove the
+  GPU fences that duplicated its required completion waits; argmax numerical mismatch counts remain0.
+  Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
+  bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
+  the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
   These limited observations do not close items1–6.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench 5600d84b, 66a18fab, c0a067fc and 6b8f7c3c, and mesh
