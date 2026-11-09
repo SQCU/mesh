@@ -581,7 +581,7 @@ def _operator(node, local):
                     general.configure)
     elif packet in (A.view, A._unsafe_view, A.expand) and len(operands) == 1:
         rule = _view_rule(node, local, operands, shapes, out)
-    elif packet in (A.alias, A.detach, A.clone, A._to_copy) and len(operands) == 1 and shapes[0] == out:
+    elif packet in (A.alias, A.detach, A.clone, A.lift_fresh_copy, A._to_copy) and len(operands) == 1 and shapes[0] == out:
         rule = Rule('format', 0, operands, [tuple(range(len(out)))], tuple(range(len(out))), (0,), (), (), False,
                     None, general.configure)
     elif packet is A.scaled_dot_product_attention:
@@ -1099,7 +1099,7 @@ def _over(ir):
 # design/aot-compilation-change-request.md A8; J. Gibbons, The third homomorphism theorem, J. Functional Programming,
 # 1996; L. Meertens, Algorithmics, CWI Monographs 1, 1986; G. Graefe, Query evaluation techniques for large databases,
 # ACM Comput. Surv. 25(2), 1993; PyTorch 2.14 documentation, Broadcasting semantics
-COPIES = {A.clone, A._to_copy, A._unsafe_view}
+COPIES = {A.clone, A.lift_fresh_copy, A._to_copy, A._unsafe_view}
 
 
 def _whole(ir, places, items, key):
@@ -6628,8 +6628,8 @@ def _trips(test, body, carried, additional):
 
 # design/torch-source-lowering-change-request.md item 1; design/compilation-composition-change-request.md, "Complete
 # replacement workgroup": each call's structured operations, a view's materialization its copy
-SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A._to_copy, A._unsafe_view, A.copy,
-                                                                     A.copy_), _copying),
+SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWISE, _arithmetic),
+           **dict.fromkeys((*COPIES, A.copy, A.copy_), _copying),
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys(FACTORIZATIONS, _factorized),
            A._linalg_det: _determinant, A._linalg_slogdet: _determinant,
@@ -7014,7 +7014,8 @@ def _hosted(ir, item, values):
 
 # torch/export/graph_signature.py InputKind.CONSTANT_TENSOR; mesh_code.Matrix._mesh_constants
 def _constant_origins(exported, module):
-    values = [exported.constants[name] for name in exported.graph_signature.lifted_tensor_constants]
+    values = [value for name, value in exported.constants.items()
+              if name not in exported.graph_signature.non_persistent_buffers]
     values += [operator.attrgetter(name)(child) for child in module.modules()
                for name in getattr(child, '_mesh_constants', ())]
     written = _storages(module, [*exported.graph_signature.buffers_to_mutate.values(),
@@ -8202,10 +8203,18 @@ LAZY = {A._conj.default: A._conj_physical.default, A._neg_view.default: A.neg.de
 
 def _decomposed(exported):
     from torch._decomp import decomposition_table
-    for module in exported.graph_module.modules():
+    state = {value.untyped_storage()._cdata for value in exported.state_dict.values()
+             if isinstance(value, torch.Tensor)}
+    state |= {exported.constants[name].untyped_storage()._cdata
+              for name in exported.graph_signature.non_persistent_buffers}
+    for path, module in exported.graph_module.named_modules():
         if not isinstance(module, torch.fx.GraphModule):
             continue
         for node in module.graph.nodes:
+            if node.op == 'get_attr':
+                value = operator.attrgetter(node.target)(module)
+                if isinstance(value, torch.Tensor) and value.untyped_storage()._cdata not in state:
+                    exported.constants.setdefault('.'.join(p for p in (path, node.target) if p), value)
             if node.op == 'call_function' and node.target is A.linalg_lstsq.default:
                 source = node.args[0].meta['val']
                 node.kwargs = {**node.kwargs, 'driver': _lstsq_driver(source, node.kwargs.get('driver'))}

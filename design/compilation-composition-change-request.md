@@ -605,6 +605,21 @@ and layout; no second layout schema is inferred from names. Paths serve source p
 One compiler Program retains the regions of an outer call. The plan owner projects its communication segments
 from that ordered IR and these ports; it does not reparse FX or create separate recorder captures for each body.
 
+The partition IR resolves those ports to its existing values through `ports`, `entry_ports`, `exit_ports` and
+`call_ports`. `_link_values` is the single resolver for initial, borrowed, carried, yielded and zero-trip links;
+its results are `(scope, value-key)` pairs consumed by the existing layout, place and home owners. A control result
+leaf is retained in the same `forms`/`added`/`results` representation as other multi-result operations before
+instantiation. The produced leaf and each consumer's sliced or resharded view remain distinct keys. Logical value
+links do not authorize physical aliasing; actual source alias identity, copies and completion remain operands.
+
+A WHILE retains its test once in `[first,middle)` and its body once in `[middle,last)`. After each body, execution
+returns to that same test; N body executions therefore entail N+1 tests, including the final false test's effects.
+The loop's initial and repeated tests share its lexical test region and communication activation stream. The
+compiler and native/signature consumers use these retained boundaries and their derived entry/predicate actions,
+without a second traversal of source FX or duplicated test lowering. This is a structured-control contract, not a
+requirement for a runtime control stack or general CALL/RET interpreter: final lowering may emit direct branches
+and backedges and fuse compatible work, retaining only waits demanded by actual dependencies and semantics.
+
 **Connected edit boundary.** Frontend owns recursive region partition/instantiation and the original port links;
 compiler owns shared typed region/generation operands and their transformed effects; executor owns scoped
 `mesh_plan` consumption, native activation/copy/completion and the saved signature connection. A communicating
