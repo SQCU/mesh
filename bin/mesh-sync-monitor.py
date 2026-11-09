@@ -193,7 +193,7 @@ class SubmissionOwner:
         self.library.MetalSubmissionNormalize.argtypes = [C.POINTER(Config), C.POINTER(State)]
         self.library.MetalSubmissionNormalize.restype = None
         self.library.MetalSubmissionEvents.argtypes = [C.POINTER(mesh_graph.Submission), C.POINTER(mesh_graph.Action),
-            C.POINTER(State), C.POINTER(Effect), C.POINTER(mesh_graph.Operation), C.POINTER(mesh_graph.Scope)]
+            C.POINTER(mesh_graph.Action), C.POINTER(State), C.POINTER(Effect), C.POINTER(mesh_graph.Operation), C.POINTER(mesh_graph.Scope)]
         self.library.MetalSubmissionEvents.restype = C.c_size_t
         self.Config, self.State, self.Effect = Config, State, Effect
         self.metadata, self.operations, self.program = metadata, operations, program
@@ -214,7 +214,8 @@ class SubmissionOwner:
         C = mesh_graph.C
         action = mesh_graph.Action.from_buffer_copy(self.metadata['actions'][index])
         vertex, execution = C.c_uint32(values[-2]), C.c_uint64(values[-1])
-        mesh_graph.LIB.mesh_graph_action_owner(C.byref(action), C.byref(vertex), C.byref(execution), C.byref(action))
+        prefix = mesh_graph.Action()
+        mesh_graph.LIB.mesh_graph_action_owner(C.byref(action), C.byref(vertex), C.byref(execution), C.byref(prefix))
         source = self.metadata['submissions'][action.submission]
         config = self.Config(source.lag, source.positions, source.window, source.flags)
         commits = (C.c_uint64 * source.lag)(*values[8:8 + source.lag])
@@ -224,7 +225,7 @@ class SubmissionOwner:
         if status:
             raise ValueError('compiled submission action %d: %s' % (index, os.strerror(status)))
         emitted, scopes = (mesh_graph.Operation * 3)(), (mesh_graph.Scope * 3)()
-        count = self.library.MetalSubmissionEvents(C.byref(source), C.byref(action), C.byref(state), C.byref(effect), emitted, scopes)
+        count = self.library.MetalSubmissionEvents(C.byref(source), C.byref(action), C.byref(prefix), C.byref(state), C.byref(effect), emitted, scopes)
         if count > 3:
             raise ValueError('submission owner exceeded its event record')
         outputs = []
