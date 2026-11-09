@@ -323,7 +323,7 @@ def main(argv):
     if len(argv) < 3 or argv[1] not in ('generate', 'run', 'cover'):
         sys.stderr.write('usage: mesh-sync-monitor.py generate SIGNATURE.record [--observe]\n'
                          '       mesh-sync-monitor.py run SIGNATURE.record [--observe] [--bridge PID --group GROUP] '
-                         '(-p PID | -- COMMAND ...)\n'
+                         '[--env NAME=VALUE ...] (-p PID | -- COMMAND ...)\n'
                          '       (pid probes are made when dtrace attaches: a program that loads libmetal_recording and '
                          'libmesh after it starts is attached with -p once loaded)\n'
                          '       mesh-sync-monitor.py cover SIGNATURE.record\n')
@@ -332,15 +332,25 @@ def main(argv):
     if mode == 'cover':
         return cover(path)
     pid, command, observe, bridge, group = None, None, False, None, None
+    environment = []
     while rest:
         if rest[0] == '-p': pid, rest = rest[1], rest[2:]
         elif rest[0] == '--observe': observe, rest = True, rest[1:]
         elif rest[0] == '--bridge': bridge, rest = rest[1], rest[2:]
         elif rest[0] == '--group': group, rest = int(rest[1], 0), rest[2:]
+        elif rest[0] == '--env':
+            if len(rest) < 2 or not re.match(r'^[A-Za-z_][A-Za-z_0-9]*=', rest[1]):
+                sys.stderr.write('mesh-sync-monitor: --env requires NAME=VALUE\n')
+                return 2
+            environment.append(rest[1])
+            rest = rest[2:]
         elif rest[0] == '--': command, rest = rest[1:], []
         else:
             sys.stderr.write('mesh-sync-monitor: unknown argument %s\n' % rest[0])
             return 2
+    if mode == 'run' and (not (pid or command) or (pid and environment)):
+        sys.stderr.write('mesh-sync-monitor: run needs -p PID or -- COMMAND; --env applies only to COMMAND\n')
+        return 2
     compiled, processors, tasks, dependences, operations, lane = load(path)
     point, unpointed = count_wait_point(LIBMESH)
     if unpointed:
@@ -397,7 +407,7 @@ def main(argv):
         watcher = subprocess.Popen(['sudo', 'dtrace', '-q', '-s', bridge_path, bridge], stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
     target = ['-p', pid] if pid else ['-c', ' '.join(command)]
-    done = subprocess.run(['sudo', 'dtrace'] + ([] if observe else ['-w']) + ['-Z', '-s', target_path] + target,
+    done = subprocess.run(['sudo'] + environment + ['dtrace'] + ([] if observe else ['-w']) + ['-Z', '-s', target_path] + target,
                           capture_output=True, text=True)
     raised, bridge_text = [], ''
     if watcher:
