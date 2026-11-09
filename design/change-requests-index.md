@@ -14,7 +14,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   assigns replacement of duplicated specialization, command orchestration and representation bodies.
   Item 6 requires completing IR handoffs before helper extraction and divides that connected refactoring into
   eight implementation units. The implementation now carries plan identities and edges into native preparation,
-  capture dependencies into replay, and typed effects through transformations. The connected source changes,
+  capture dependencies into replay, and typed effects through transformations. Native rows reference published
+  plan calls; signature composition consumes the retained plan signature. Graph contraction, projection,
+  component analysis and shader-call traversal use the existing graph module, and both shader consumers use
+  the parser's retained call graph. A10's concurrency bound is separate from the horizon used to size retained
+  storage. The connected source changes,
   revisions, direct builds and remaining work are recorded in that run's `integration.md` and review records;
   these do not establish completion of the full assigned domain or runtime and performance requirements.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.

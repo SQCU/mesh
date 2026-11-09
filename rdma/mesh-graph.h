@@ -21,9 +21,10 @@ int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)
 /* the depth-first unfolding of rows (first, head) from `root`: each path from root is one instance, visited in preorder
    with its vertex, the row entry k it was reached by (SIZE_MAX for the root) and its parent instance (UINT32_MAX for the
    root); instances are numbered in visit order from 0; a vertex reached by several paths is visited once per path;
-   EDEADLK on a back edge (a cycle), ENOMEM past `limit` instances, the visit's nonzero return ends the search with it */
+   EDEADLK on a back edge (a cycle), EOVERFLOW where an instance would need number UINT32_MAX (the parent sentinel),
+   the visit's nonzero return ends the search with it */
 int mesh_graph_unfold(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                      const void *context, uint32_t root, uint32_t limit,
+                      const void *context, uint32_t root,
                       int (*visit)(void *consumer, uint32_t vertex, size_t k, uint32_t parent), void *consumer);
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Y. J. Chu and T. H. Liu, Scientia Sinica 14, 1965; J. Edmonds, J. Res. Nat. Bur. Standards 71B, 1967 */

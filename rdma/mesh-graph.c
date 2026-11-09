@@ -68,7 +68,7 @@ int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)
    Compilers, 2nd ed., §7.2.1, activation trees: the path stack marks its vertices open, so a vertex recurs once per
    path and never twice on one */
 int mesh_graph_unfold(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                      const void *context, uint32_t root, uint32_t limit,
+                      const void *context, uint32_t root,
                       int (*visit)(void *consumer, uint32_t vertex, size_t k, uint32_t parent), void *consumer) {
   if (root >= vertices) return EINVAL;
   uint32_t *at = malloc(((size_t)vertices + 1) * sizeof *at), *instance = malloc(((size_t)vertices + 1) * sizeof *instance);
@@ -76,14 +76,14 @@ int mesh_graph_unfold(uint32_t vertices, const size_t *first, uint32_t (*head)(c
   unsigned char *open = calloc((size_t)vertices + 1, 1);
   int status = at && instance && next && open ? 0 : ENOMEM;
   uint32_t depth = 0, made = 0;
-  if (!status) status = limit ? visit(consumer, root, SIZE_MAX, UINT32_MAX) : ENOMEM;
+  if (!status) status = visit(consumer, root, SIZE_MAX, UINT32_MAX);
   if (!status) { at[0] = root; next[0] = first[root]; instance[0] = made++; open[root] = 1; depth = 1; }
   while (!status && depth) {
     const uint32_t v = at[depth - 1];
     if (next[depth - 1] == first[v + 1]) { open[v] = 0; depth--; continue; }
     const size_t k = next[depth - 1]++;
     const uint32_t w = head(context, k);
-    status = w >= vertices ? EINVAL : open[w] ? EDEADLK : made == limit ? ENOMEM : visit(consumer, w, k, instance[depth - 1]);
+    status = w >= vertices ? EINVAL : open[w] ? EDEADLK : made == UINT32_MAX ? EOVERFLOW : visit(consumer, w, k, instance[depth - 1]);
     if (status) break;
     at[depth] = w; next[depth] = first[w]; instance[depth] = made++; open[w] = 1; depth++;
   }
