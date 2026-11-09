@@ -137,6 +137,13 @@ outstanding, and what of it is outstanding. The standard every change request fo
   coded definitions remains open. Build26 verifies selected packed projection (algorithm1) for a signed I4 view
   with offset5 and strides[1033,2], with exact output. The repaired F16 neural convolution executes exactly at
   8x128x64 and 1x2048x1024 for the supplied power-of-two inputs, but both preferred plans still select CPU.
+  Build27 replaces the native scalar constant evaluator with one compiled preparation task and retains the
+  materialized argument's axes and source bindings in artifact v19. CPU plain/rotation/Hadamard/ragged coded
+  programs remain numerically correct in the checked cases. Separate pure decoder producers still reach Core ML
+  as runtime operations: plain/zero/ragged neural compilation fails with region access other than a struct member.
+  Completing the retained producer-definition closure is assigned; rejecting these operands is not completion.
+  Literal F16 neural weights also remain CPU-preferred after staging, and the historical artifact doubles because
+  both source and materialized weights are retained. Target preparation and storage ownership remain under revision.
   No ANE execution or throughput closure follows. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
@@ -202,9 +209,15 @@ outstanding, and what of it is outstanding. The standard every change request fo
   falls from181,732 to63,338bytes and from43,109 to14,429 DIF instructions. This completes a representation handoff,
   rather than merely packaging the same repeated checks into smaller clauses. Actual build26 observation now
   enables: outer3/inner2,0,2 passes with85 observed program operations,11 image edges and no false/redundant edge.
-  The outer-zero case is numerically exact but fails materialization: a completion refers to task12 before any
-  retained activation, leaving one false edge. That provenance defect remains assigned; the checker is unchanged.
-  These runs use --observe and do not exercise destructive fail-stop interception.
+  The first outer-zero observation fails because completion names a lexical task that did not activate.
+  Build27 (metal63c465ab / mesh22f409d0) completes that handoff: instruction-local task ownership and the existing
+  issued/encoded actions retain active work, issued GPU work and completed work separately. Both nested cases now
+  pass; outer-zero observes8 operations and one image edge. Mixed GPU/CPU/GPU observes10 operations and one image
+  edge; three-span argmax observes17 operations and two image edges, with zero numerical mismatches. All four have
+  no false/redundant synchronization edge. Event-role selection uses the configured identity after composition,
+  and the optimized runtime gains no provenance bookkeeping. These runs use --observe and do not exercise
+  destructive fail-stop interception. Trip-carried numerical dependencies do not by themselves establish new
+  communication generations inside distributed loops; that producer/consumer handoff remains under review.
   Metalcc580af4 / mesh8ce87a05 also retain one exact conflict result, including self conflicts and predicate reads,
   consumed by ordinary dependencies, control feedback and predicate phases. Artifact v18 retains it on save/load.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
