@@ -145,6 +145,7 @@ class IR:
         self.trims = {}
         self.transfer_sites = {}
         self.initial, self.constant_values = None, set()
+        self.ports, self.entry_ports, self.exit_ports, self.call_ports = {}, {}, {}, {}
 
     def emit(self, item):
         self.program.append(item)
@@ -931,6 +932,7 @@ def partition(gm, placement, nodes, page, region=None):
     ir.places = {device: _places(ir, device) for device in ir.coords}
     _over(ir)
     _kinds(ir)
+    _port_values(ir)
     for child, path in nested.items():
         splits = {name[len(path):]: mapping for name, mapping in placement.splits.items() if name.startswith(path)}
         for link in ir.region.links:
@@ -940,6 +942,43 @@ def partition(gm, placement, nodes, page, region=None):
                     splits.setdefault(link.target.node.name, mapping)
         partition(child.gm, placement._replace(splits=splits), nodes, page, region=child)
     return ir
+
+
+# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
+def _port_values(ir):
+    def result(key, port):
+        form = ir.forms.get(key)
+        return form[1][port.index][1] if isinstance(form, tuple) else key
+
+    for node, ports in ir.region.ports.items():
+        key = (node, ir.sharding.get(node))
+        if key in ir.producer:
+            ir.ports.update((port, result(key, port)) for port in ports)
+    for kind, reads, key, operand in ir.program:
+        if kind == 'input':
+            ir.entry_ports.update((port, result(key, port)) for port in ir.region.ports[key[0]])
+        elif kind == 'output':
+            ir.exit_ports.update((port, result(operand[1][port.node], port)) for port in ir.region.outputs
+                                 if port.node is not None)
+        elif kind == 'call' and ir.locals[operand].target in CONTROL:
+            nodes = []
+            map_arg((ir.locals[operand].args, ir.locals[operand].kwargs), nodes.append)
+            for node, read in zip(nodes, reads):
+                ir.call_ports.update(((operand, port), result(read, port)) for port in ir.region.ports[node])
+
+
+def _link_values(root, link):
+    source, target = root.region.regions[link.source.scope], root.region.regions[link.target.scope]
+    if link.source.node is None:
+        read = None
+    elif link.kind in ('yield', 'carried'):
+        read = source.ir.exit_ports[link.source]
+    else:
+        control = link.target.node if link.kind == 'zero-exit' else target.control
+        read = source.ir.call_ports[control, link.source]
+    written = target.ir.ports[link.target] if link.kind in ('yield', 'zero-exit') \
+        else target.ir.entry_ports[link.target]
+    return (source.id, read), (target.id, written)
 
 
 # torch 2.14.0 torch/_export/verifier.py
