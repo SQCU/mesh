@@ -99,7 +99,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
   computation where the compiled schedule requires overlap; and efficient typed indexed updates replacing Torch's
   current output-by-update scan. Restored CP/EP/mixed-engine callers do not by themselves close those obligations.
   The historical optional fragment-1 coded-weight input still needs its typed codec handoff. Online KV attention,
-  local result layouts and global dropout coordinates now have source checkpoints but await their numerical run.
+  local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
+  grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
+  relative error 2.217e-7, including an exactly zero fully masked row; causal attention has error 6.092e-8. The two
+  operations become 22 typed operations and a 454,799-byte artifact. This does not establish distributed or dropout
+  execution. Build21 also passes fresh publication/lowering/finalization of all five E2B stages after extending the
+  retained resource/control cost DAG; dispatch projections share one DAG evaluation per supplied machine.
   Missing machine operands remain explicit in cost estimates. No corresponding operational/performance closure is
   recorded. Claude quota exhausted during this workgroup; the operator-authorized Codex continuation remains active.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
@@ -132,6 +137,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   observation then refuses both signatures before client execution because two trip-test waits have no dependency
   image. Review finds that the host predicate read was attributed to the preceding GPU task instead of represented
   as its own computation. That handoff and the fences made redundant by a completed drain remain under repair.
+  Build21 retains the host predicate-read task and potential initial/retest writers. The fresh nested program
+  restores with correct three-trip, untaken and zero-trip results. Static signature validation has no false edges;
+  external observation passes the untaken and zero-trip executions. The three-trip execution still fails because
+  its realized graph reports three redundant synchronization edges. This failure remains assigned; numerical
+  correctness and the successful alternatives do not close repeated-trip observation.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
   bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
   the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
@@ -179,8 +189,8 @@ outstanding, and what of it is outstanding. The standard every change request fo
     scope through the lowering request's item 1 and in LiteRT through torch-capture item 3. In the replacement,
     build19 carries per-group footprints/page masks into native first-pass, compaction and deferred work, and
     retains a shared CPU/GPU dispatch order. Received IF/unrolled-trip selections use that same construction.
-    Metaleb9826a3 adds scoped acquisition for direct received predicates at nonunrolled WHILE entry; its next linked
-    build and runtime evidence remain pending. Build20 restores the prepared receive-completion priority through
+    Metaleb9826a3 adds scoped acquisition for direct received predicates at nonunrolled WHILE entry; it is linked in
+    build21, but received-operand runtime evidence remains pending. Build20 restores the receive-completion priority through
     compiler-owned legal insertion bounds and a final permutation over the retained relation. Recorder lifetimes
     use stable preparation anchors, extending every movable pass operand over its permitted interval; normal load
     restores the permutation without another solve. Metale1791a34 also persists last-use handover records and orders
