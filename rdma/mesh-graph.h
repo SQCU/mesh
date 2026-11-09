@@ -174,6 +174,12 @@ _Static_assert(sizeof(struct mesh_graph_view) == 48, "mesh_graph_view");
 enum { MESH_GRAPH_READ_AFTER_WRITE, MESH_GRAPH_WRITE_AFTER_READ, MESH_GRAPH_WRITE_AFTER_WRITE, MESH_GRAPH_GIVEN };
 struct mesh_graph_cause { uint64_t key; uint32_t kind, given; };
 _Static_assert(sizeof(struct mesh_graph_cause) == 16, "mesh_graph_cause");
+struct mesh_graph_conflict { uint32_t from, to, kind, given; uint64_t key; };
+/* design/compilation-composition-change-request.md: retained exact intersections, including self conflicts;
+   caller owns *conflict and releases it with free. */
+int mesh_graph_conflicts_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
+                               const uint32_t *supplied_from, const uint32_t *supplied_to,
+                               struct mesh_graph_conflict **conflict, size_t *count);
 int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
                                  const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
                                  uint32_t *to, struct mesh_graph_cause *cause, size_t *edges);

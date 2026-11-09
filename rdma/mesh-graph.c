@@ -1659,26 +1659,26 @@ static int view_hull_before(const void *a, const void *b) {
   if (x->key != y->key) return x->key < y->key ? -1 : 1;
   return (x->start > y->start) - (x->start < y->start);
 }
-struct view_edge { uint32_t from, to, kind, given; uint64_t key; };
 static int view_edge_before(const void *a, const void *b) {
-  const struct view_edge *x = a, *y = b;
+  const struct mesh_graph_conflict *x = a, *y = b;
   if (x->from != y->from) return x->from < y->from ? -1 : 1;
   if (x->to != y->to) return x->to < y->to ? -1 : 1;
   if (x->kind != y->kind) return x->kind < y->kind ? -1 : 1;
   if (x->key != y->key) return x->key < y->key ? -1 : 1;
   return (x->given > y->given) - (x->given < y->given);
 }
-int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
-                                 const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
-                                 uint32_t *to, struct mesh_graph_cause *cause, size_t *edges) {
+static int view_conflicts(size_t views, const struct mesh_graph_view *view, size_t supplied,
+                          const uint32_t *supplied_from, const uint32_t *supplied_to, int self,
+                          struct mesh_graph_conflict **conflict, size_t *edges) {
+  *conflict = NULL; *edges = 0;
   for (size_t e = 0; e < supplied; e++) if (supplied_from[e] >= supplied_to[e]) return EINVAL;
-  if (supplied >= SIZE_MAX / sizeof(struct view_edge) - 64 || views >= SIZE_MAX / sizeof(struct view_hull)) return ENOMEM;
+  if (supplied >= SIZE_MAX / sizeof(struct mesh_graph_conflict) - 64 || views >= SIZE_MAX / sizeof(struct view_hull)) return ENOMEM;
   struct view_hull *hull = malloc((views + 1) * sizeof *hull);
   size_t made = supplied, held = supplied + 64, count = 0;
-  struct view_edge *edge = malloc(held * sizeof *edge);
+  struct mesh_graph_conflict *edge = malloc(held * sizeof *edge);
   int result = hull && edge ? 0 : ENOMEM;
   for (size_t e = 0; !result && e < supplied; e++)
-    edge[e] = (struct view_edge){supplied_from[e], supplied_to[e], MESH_GRAPH_GIVEN, (uint32_t)e, 0};
+    edge[e] = (struct mesh_graph_conflict){supplied_from[e], supplied_to[e], MESH_GRAPH_GIVEN, (uint32_t)e, 0};
   for (size_t v = 0; !result && v < views; v++) {
     const struct mesh_strided *s = &view[v].view;
     const struct view_part p = {s->offset, s->element, s->pairs, s->dims};
@@ -1690,40 +1690,61 @@ int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *vie
   if (!result && !ctx) result = ENOMEM;
   if (!result && views) qsort(hull, views, sizeof *hull, view_hull_before);
   for (size_t i = 0; !result && i < views; i++)
-    for (size_t j = i + 1; !result && j < views && hull[j].key == hull[i].key && hull[j].start < hull[i].end; j++) {
+    for (size_t j = i + !self; !result && j < views && hull[j].key == hull[i].key && hull[j].start < hull[i].end; j++) {
       const struct mesh_graph_view *a = view + hull[i].index, *b = view + hull[j].index;
-      if (a->vertex == b->vertex || !(a->write || b->write) || (a->write == 2 && b->write == 2)) continue;
+      if ((!self && a->vertex == b->vertex) || !(a->write || b->write) || (a->write == 2 && b->write == 2)) continue;
       const struct view_part pa = {a->view.offset, a->view.element, a->view.pairs, a->view.dims},
                              pb = {b->view.offset, b->view.element, b->view.pairs, b->view.dims};
       int empty = !a->view.element || !b->view.element;
       for (uint32_t d = 0; d < a->view.dims; d++) empty |= !a->view.pairs[2 * d];
       for (uint32_t d = 0; d < b->view.dims; d++) empty |= !b->view.pairs[2 * d];
       if (empty) continue;
-      const int meets = view_meets(ctx, &pa, &pb);
+      const int meets = a == b ? 1 : view_meets(ctx, &pa, &pb);
       if (meets < 0) { result = -meets; break; }
       if (!meets) continue;
-      if (made == held) {
-        struct view_edge *more = realloc(edge, 2 * held * sizeof *more);
-        if (!more) { result = ENOMEM; break; }
-        edge = more; held *= 2;
-      }
       const struct mesh_graph_view *lo = a->vertex < b->vertex ? a : b, *hi = a->vertex < b->vertex ? b : a;
-      const uint32_t kind = lo->write && hi->write ? MESH_GRAPH_WRITE_AFTER_WRITE :
-                            lo->write ? MESH_GRAPH_READ_AFTER_WRITE : MESH_GRAPH_WRITE_AFTER_READ;
-      edge[made++] = (struct view_edge){lo->vertex, hi->vertex, kind, 0, a->key};
+      uint32_t kind = lo->write && hi->write ? MESH_GRAPH_WRITE_AFTER_WRITE :
+                       lo->write ? MESH_GRAPH_READ_AFTER_WRITE : MESH_GRAPH_WRITE_AFTER_READ;
+      const unsigned directions = 1 + (lo->vertex == hi->vertex && kind != MESH_GRAPH_WRITE_AFTER_WRITE);
+      for (unsigned direction = 0; direction < directions; direction++) {
+        if (made == held) {
+          if (held > SIZE_MAX / 2 / sizeof *edge) { result = ENOMEM; break; }
+          struct mesh_graph_conflict *more = realloc(edge, 2 * held * sizeof *more);
+          if (!more) { result = ENOMEM; break; }
+          edge = more; held *= 2;
+        }
+        edge[made++] = (struct mesh_graph_conflict){lo->vertex, hi->vertex, kind, 0, a->key};
+        kind = kind == MESH_GRAPH_READ_AFTER_WRITE ? MESH_GRAPH_WRITE_AFTER_READ : MESH_GRAPH_READ_AFTER_WRITE;
+      }
     }
   if (!result && made) qsort(edge, made, sizeof *edge, view_edge_before);
   for (size_t k = 0; !result && k < made; k++) {
     if (k && !view_edge_before(edge + k, edge + k - 1)) continue;
-    if (count < room) {
-      from[count] = edge[k].from; to[count] = edge[k].to;
-      cause[count] = (struct mesh_graph_cause){edge[k].key, edge[k].kind, edge[k].given};
-    }
-    count++;
+    edge[count++] = edge[k];
   }
-  if (!result) { *edges = count; if (count > room) result = ERANGE; }
+  if (!result) { *edges = count; *conflict = edge; edge = NULL; }
   if (ctx) isl_ctx_free(ctx);
   free(hull); free(edge);
+  return result;
+}
+
+int mesh_graph_conflicts_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
+                               const uint32_t *supplied_from, const uint32_t *supplied_to,
+                               struct mesh_graph_conflict **conflict, size_t *count) {
+  return view_conflicts(views, view, supplied, supplied_from, supplied_to, 1, conflict, count);
+}
+
+int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
+                                 const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
+                                 uint32_t *to, struct mesh_graph_cause *cause, size_t *edges) {
+  struct mesh_graph_conflict *conflict = NULL;
+  int result = view_conflicts(views, view, supplied, supplied_from, supplied_to, 0, &conflict, edges);
+  for (size_t e = 0; !result && e < *edges && e < room; e++) {
+    from[e] = conflict[e].from; to[e] = conflict[e].to;
+    cause[e] = (struct mesh_graph_cause){conflict[e].key, conflict[e].kind, conflict[e].given};
+  }
+  if (!result && *edges > room) result = ERANGE;
+  free(conflict);
   return result;
 }
 
