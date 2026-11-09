@@ -586,6 +586,52 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
   return result;
 }
 
+/* design/compilation-composition-change-request.md item 6.2: vertex contraction by mesh_graph_lags over the graph with
+   each kept vertex v split into its tail v and head vertices + v, so a walk leaves a kept vertex and ends at the first
+   kept vertex it reaches, its interior all contracted */
+struct contract_graph { const struct mesh_graph_dependence *edge; const size_t *order; const unsigned char *kept;
+                        uint32_t vertices; };
+static uint32_t contract_tail(const void *context, size_t e) {
+  return ((const struct mesh_graph_dependence *)context)[e].from;
+}
+static uint32_t contract_head(const void *context, size_t k) {
+  const struct contract_graph *g = context;
+  const uint32_t to = g->edge[g->order[k]].to;
+  return g->kept[to] ? g->vertices + to : to;
+}
+static uint64_t contract_lag(const void *context, size_t k) {
+  const struct contract_graph *g = context;
+  return g->edge[g->order[k]].delay;
+}
+int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
+                        const unsigned char *kept, size_t room, struct mesh_graph_dependence *contracted, size_t *made) {
+  for (size_t e = 0; e < edges; e++) if (edge[e].from >= vertices || edge[e].to >= vertices) return EINVAL;
+  if (vertices >= UINT32_MAX / 2 || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
+  uint32_t keeps = 0;
+  for (uint32_t v = 0; v < vertices; v++) keeps += kept[v] != 0;
+  if ((size_t)keeps * keeps >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
+  size_t *first = malloc((2 * (size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
+  uint32_t *source = malloc(((size_t)keeps + 1) * sizeof *source), *target = malloc(((size_t)keeps + 1) * sizeof *target);
+  uint64_t *lags = malloc(((size_t)keeps * keeps + 1) * sizeof *lags);
+  int result = first && order && source && target && lags ? 0 : ENOMEM;
+  for (uint32_t v = 0, k = 0; !result && v < vertices; v++)
+    if (kept[v]) { source[k] = v; target[k++] = vertices + v; }
+  const struct contract_graph g = {edge, order, kept, vertices};
+  if (!result) {
+    mesh_graph_rows(2 * vertices, edges, contract_tail, edge, first, order);
+    if (keeps) result = mesh_graph_lags(2 * vertices, first, contract_head, contract_lag, &g, keeps, source, keeps, target, lags);
+  }
+  size_t count = 0;
+  for (size_t p = 0; !result && p < (size_t)keeps * keeps; p++) {
+    if (lags[p] == UINT64_MAX) continue;
+    if (count < room) contracted[count] = (struct mesh_graph_dependence){source[p / keeps], source[p % keeps], lags[p]};
+    count++;
+  }
+  if (!result) { *made = count; if (count > room) result = ERANGE; }
+  free(first); free(order); free(source); free(target); free(lags);
+  return result;
+}
+
 /* design/plan-to-bridge-change-request.md R2; design/disjoint-pages-change-request.md, A3 and C3.3 */
 struct chains_net {
   uint32_t items;

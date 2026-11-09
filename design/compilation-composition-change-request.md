@@ -287,6 +287,14 @@ received operands from the operator's assigned domain. In this revision, the rec
 by completing the representation and its consuming lowering, including later-pass identity remapping and the
 native execution-step binding. Deleting the refusal without those consumers is not completion.
 
+The operator, during the integrated review, verbatim:
+
+> how much of the code in these sections is still inlining or duplicating 'responsibilities' from or for other aglorithms used or implemented elsehwere in the smae code? are w running into integratino errors where two interfaces 'don't line up well' because they are literally serializing and deserializing equivalent or related types over and over again in sprawling inlined code that, if modularized, would be mostly one-liners and compact invocations of existing functions and types?
+
+> okay so all of these inlined algorihtm isseus should be handled by modulearizing our code a lot ore than it is right now. for example the literal graph algorithms header which was introduced ages ago in the repository, and is the only sensible place to put graph algorithms (and the only place ot import them as a header).
+
+> commit first before 'finishing' anyof this stuff. commits aren't special breakpoints.
+
 ## Reusable form
 
 The same change-request form can name several existing requests in one requirement:

@@ -65,7 +65,7 @@ def paths(vertices, neighbours):
     return [walk([v], neighbours) for v in vertices if v not in entered and list(neighbours(v))]
 
 
-LIB =C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
+LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
 NONE = 2 ** 32 - 1
 KINDS = ('queue', 'host', 'bridge', 'kernel')
 PRIMITIVES = ('submit', 'queue_signal', 'queue_wait', 'fence_update', 'fence_wait', 'pass_barrier', 'queue_barrier',
@@ -73,6 +73,12 @@ PRIMITIVES = ('submit', 'queue_signal', 'queue_wait', 'fence_update', 'fence_wai
               'producer_barrier', 'bridge_raise', 'initial', 'host_publish', 'kernel_fence', 'host_signal')
 NODES, PLAN_COUNT, PLAN_SUBMISSION = 64, 0x80000000, 0xC0000000
 STATES = ('image', 'stronger', 'false', 'unmatched', 'satisfied', 'transformed')
+
+
+# mesh-graph.h struct mesh_graph_access
+class Access(C.Structure):
+    _fields_ = [('key', C.c_uint64), ('start', C.c_uint64), ('end', C.c_uint64), ('vertex', C.c_uint32),
+                ('write', C.c_uint32)]
 
 
 # mesh-graph.h struct mesh_graph_processor, mesh_graph_task, mesh_graph_dependence, mesh_graph_operation,
@@ -145,6 +151,33 @@ def heap_order(priority, edges):
     return list(place[:count])
 
 
+# BSL §3; R. E. Tarjan, SIAM J. Comput. 1(2), 1972; mesh-graph.h mesh_graph_components: each vertex's strongly
+# connected component
+LIB.mesh_graph_components.restype = C.c_int
+LIB.mesh_graph_components.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
+                                      C.POINTER(C.c_uint32), C.POINTER(C.c_uint32)]
+
+
+def components(vertices, edges):
+    tails, heads = _array(C.c_uint32, [a for a, _ in edges]), _array(C.c_uint32, [b for _, b in edges])
+    component, count = (C.c_uint32 * max(vertices, 1))(), C.c_uint32()
+    _check(LIB.mesh_graph_components(vertices, len(edges), tails[0], heads[0], component, C.byref(count)))
+    return list(component[:vertices])
+
+
+# mesh-graph.h mesh_graph_rows: items bucketed by key, stable; first[keys + 1], order the items grouped by key
+ROW_KEY = C.CFUNCTYPE(C.c_uint32, C.c_void_p, C.c_size_t)
+LIB.mesh_graph_rows.restype = None
+LIB.mesh_graph_rows.argtypes = [C.c_uint32, C.c_size_t, ROW_KEY, C.c_void_p, C.POINTER(C.c_size_t),
+                                C.POINTER(C.c_size_t)]
+
+
+def rows(keys, key):
+    first, order = (C.c_size_t * (keys + 1))(), (C.c_size_t * max(len(key), 1))()
+    LIB.mesh_graph_rows(keys, len(key), ROW_KEY(lambda context, k: key[k]), None, first, order)
+    return list(first), list(order[:len(key)])
+
+
 def _text(printer, signature):
     made = C.c_size_t()
     status = printer(C.byref(signature), None, 0, C.byref(made))
@@ -188,8 +221,8 @@ def signature(processors, tasks, dependences, operations):
         free(made)
 
 
-# mesh-graph.h struct mesh_graph_record, mesh_graph_record, mesh_graph_record_read; mesh.h struct mesh_state and
-# struct mesh_algo `signature`
+# mesh-graph.h struct mesh_graph_record, mesh_graph_record, mesh_graph_record_read: the compiled program's signature
+# at its external boundary (the frontend's and E2B's record, the monitor's input)
 LIB.mesh_graph_record.restype = C.c_int
 LIB.mesh_graph_record.argtypes = [C.POINTER(Signature), C.c_void_p, C.c_size_t, C.POINTER(C.c_size_t)]
 LIB.mesh_graph_record_read.restype = C.c_int

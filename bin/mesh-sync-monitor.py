@@ -50,22 +50,21 @@ def observed_here(processors, o):
         PRIMITIVES[o.primitive] != 'initial' and not mesh_graph.PLAN_COUNT <= o.object < mesh_graph.PLAN_SUBMISSION
 
 
-def lanes(processors, operations):
+# mesh-graph.h struct mesh_graph_signature `first`/`order`: each processor's operations in its compiled order
+def lanes(processors, rows):
     lane, order = {}, {}
-    for o in operations:
-        if not observed_here(processors, o):
-            continue
-        key = 'queue' if KINDS[processors[o.processor].kind] == 'queue' else o.processor
-        order.setdefault(key, []).append(o)
-    index = {key: i for i, key in enumerate(sorted(order, key=str))}
-    for key, ops in order.items():
+    for p, ops in sorted(rows.items()):
+        mine = [o for o in ops if observed_here(processors, o)]
+        if mine:
+            order[len(order)] = mine
+    for p, ops in order.items():
         for o in ops:
-            lane.setdefault(PRIMITIVES[o.primitive], set()).add(index[key])
-    return {index[key]: ops for key, ops in order.items()}, lane
+            lane.setdefault(PRIMITIVES[o.primitive], set()).add(p)
+    return order, lane
 
 
-def generate(processors, operations, window, runs, observe):
-    order, home = lanes(processors, operations)
+def generate(processors, rows, window, runs, observe):
+    order, home = lanes(processors, rows)
     notes = ['%s is on lanes %s: the monitor orders it on %d only' % (name, sorted(places), min(places))
              for name, places in sorted(home.items()) if len(places) > 1]
     lines = ['#pragma D option quiet', '#pragma D option strsize=256'] + ([] if observe else ['#pragma D option destructive'])
@@ -138,13 +137,15 @@ def main(argv):
     compiled = rebuilt['digest']
     processors = [mesh_graph.Processor.from_buffer_copy(p) for p in signature.processor[:signature.processors]]
     operations = [mesh_graph.Operation.from_buffer_copy(o) for o in signature.operation[:signature.operations]]
+    rows = {p: [operations[signature.order[k]] for k in range(signature.first[p], signature.first[p + 1])]
+            for p in range(signature.processors)}
     mesh_graph.free(signature)
     if rebuilt.get('unknown'):
         sys.stderr.write('mesh-sync-monitor: unknown kernel synchronization %s (no recorded source or entry)\n'
                          % (rebuilt['unknown'],))
     executions = 1 + max((o.execution for o in operations), default=0)
     runs = runs or 1
-    program, notes = generate(processors, operations, window, runs, observe)
+    program, notes = generate(processors, rows, window, runs, observe)
     for note in notes:
         sys.stderr.write('mesh-sync-monitor: %s\n' % note)
     kernel = [o for o in operations if KINDS[processors[o.processor].kind] == 'kernel']

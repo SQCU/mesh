@@ -85,7 +85,7 @@ _Static_assert(sizeof(struct mesh_hop)==56 && offsetof(struct mesh_hop,word)==16
 #define MESH_LANE_BYTES 16u
 static inline uint32_t mesh_phase(uint64_t k){ k&=3; return (uint32_t)(k^(k>>1)); }
 static inline uint64_t mesh_group_bytes(uint32_t pages){ return ((uint64_t)pages+63)/64*MESH_LANE_BYTES; }
-struct mesh_status { _Atomic uint32_t behind,ahead,first,padding; };
+struct mesh_status { _Atomic uint32_t behind,ahead; _Atomic uint64_t first; };
 _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahead)==4 &&
   offsetof(struct mesh_status,first)==8,"mesh_status");
 /* JGroups (https://raw.githubusercontent.com/belaban/JGroups/master/src/org/jgroups/ViewId.java);
@@ -109,7 +109,7 @@ struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,relea
   uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
   _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced;
   uint32_t waits,tells; uint64_t syncs; uint32_t calls; _Atomic uint32_t closed; uint64_t rows,submit_room,transfers;
-  uint32_t sequencer; _Atomic uint32_t removed; uint64_t boot,times,signature,signature_bytes; };
+  uint32_t sequencer; _Atomic uint32_t removed; uint64_t boot,times; };
 _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
@@ -128,8 +128,7 @@ _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,closed)==252 && offsetof(struct mesh_state,rows)==256 &&
   offsetof(struct mesh_state,submit_room)==264 && offsetof(struct mesh_state,transfers)==272 &&
   offsetof(struct mesh_state,sequencer)==280 && offsetof(struct mesh_state,removed)==284 &&
-  offsetof(struct mesh_state,boot)==288 && offsetof(struct mesh_state,times)==296 &&
-  offsetof(struct mesh_state,signature)==304 && offsetof(struct mesh_state,signature_bytes)==312,"mesh_state");
+  offsetof(struct mesh_state,boot)==288 && offsetof(struct mesh_state,times)==296,"mesh_state");
 /* JGroups ViewId.java */
 static inline struct mesh_view_id mesh_plan_view(const struct mesh_state *s){
   return (struct mesh_view_id){.id=s->serial,.sequencer=s->sequencer,.boot=s->boot};
@@ -144,11 +143,11 @@ _Static_assert(sizeof(struct mesh_sync)==32 && offsetof(struct mesh_sync,entry)=
    L. Lamport, On interprocess communication, Distributed Computing 1(2), 1986;
    P. E. McKenney and J. D. Slingwine, Read-copy update, PDCS 1998 */
 struct mesh_algo { _Alignas(64) _Atomic uint64_t published; _Atomic uint64_t retired,released; uint32_t plans,nodes;
-  uint64_t group,table,adjacent,signature; };
+  uint64_t group,table,adjacent; };
 _Static_assert(sizeof(struct mesh_algo)==64 && offsetof(struct mesh_algo,retired)==8 &&
   offsetof(struct mesh_algo,released)==16 && offsetof(struct mesh_algo,plans)==24 && offsetof(struct mesh_algo,nodes)==28 &&
   offsetof(struct mesh_algo,group)==32 && offsetof(struct mesh_algo,table)==40 &&
-  offsetof(struct mesh_algo,adjacent)==48 && offsetof(struct mesh_algo,signature)==56,"mesh_algo");
+  offsetof(struct mesh_algo,adjacent)==48,"mesh_algo");
 
 /* design/aot-compilation-change-request.md, appendix item 2;
    E. A. Lee and D. G. Messerschmitt, IEEE Trans. Computers C-36(1), 1987 */

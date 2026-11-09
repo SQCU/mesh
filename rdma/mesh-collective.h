@@ -74,20 +74,22 @@ _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function
    results for the program's native preparation, the caller's to free by mesh_planned_free. `call[j]` for call j of
    `calls`: `plan` its function's state (struct mesh_function `plan`), `lead` that plan's copies - 1, `function`
    calls[j], `ordinal` its place among its function's `every` calls a block, so that block execution b runs the plan's
-   execution b every + ordinal; `function` is also the signature's MESH_GRAPH_PLAN_SUBMISSION + function. `task[x]`,
-   x < tasks, the calls' graph's vertices, the same tasks the plan's signature records (mesh-graph.h struct
-   mesh_graph_task: `label` the call; `processor` 2v node v's host, 2v + 1 its bridge). `order[0, orders)` that
+   execution b every + ordinal; `function` is also the signature's MESH_GRAPH_PLAN_SUBMISSION + function.
+   `signature` the plan's synchronization signature as plan_signature made it (mesh-graph.h struct mesh_graph_signature,
+   owned here, freed by mesh_planned_free; the region's record at struct mesh_state `signature` is its serialized form
+   for readers outside the compilation): its `task[x]`, x < tasks, are the calls' graph's vertices (`label` the call;
+   `processor` 2v node v's host, 2v + 1 its bridge), in the graph's numbering. `order[0, orders)` that
    graph's edges (its added synchronization excluded) whose ends are both this node's, each a call's submission (a
    host task: its mesh_transfers_start, the row's start) or its part (a bridge task: the call's work here), `from` and
    `to` those vertices, `delay` in block executions: the head at block t follows the tail at t - delay. They are the
    submission order, each submission before its part, each function's outstanding lag from a part to a later call's
    submission, and A10's orders and commuting chains from part to part. The graph's edges between nodes and its added
    synchronization are the transport's (mesh_transfers_start waits, the bridge's tells) */
-struct mesh_graph_task;
+struct mesh_graph_signature;
 struct mesh_graph_dependence;
 struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,padding; };
-struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_task *task; struct mesh_graph_dependence *order;
-                      uint32_t calls,tasks; size_t orders; };
+struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signature *signature;
+                      struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders; };
 _Static_assert(sizeof(struct mesh_planned_call)==32 && offsetof(struct mesh_planned_call,function)==16 &&
                sizeof(struct mesh_planned)==40 && offsetof(struct mesh_planned,calls)==24 &&
                offsetof(struct mesh_planned,orders)==32,"mesh_planned: rdma/mesh.py Planned");

@@ -1191,11 +1191,6 @@ def _deliver(irs, wanted):
         output = next(item for item in ir.program if item[0] == 'output')[3]
         key, source = output[1][pytree.tree_leaves(output[0].args)[o]], min(ir.coords)
         place = ir.places[source][key]
-        if place is None:
-            raise NotImplementedError('function %d\'s result leaf %d is its own input %s, which f holds in no value of its '
-                                      'own: its readers at map nodes %s take it from that input\'s source (the call '
-                                      'graph\'s sources resolved through the passthrough), not from a delivery by f'
-                                      % (f, o, key[0].name, nodes))
         dtype, shape = _layout(ir, place.owner)
         if place.owner in ir.loads:
             if ir.index in nodes:
@@ -1452,12 +1447,9 @@ class Task(C.Structure):
                 ('count', mesh.Q)]
 
 
-class Access(C.Structure):
-    _fields_ = [('key', mesh.Q), ('start', mesh.Q), ('end', mesh.Q), ('vertex', mesh.U), ('write', mesh.U)]
-
-
 class Native(C.Structure):
-    _fields_ = [('task', C.POINTER(Task)), ('access', C.POINTER(Access)), ('tasks', mesh.Q), ('accesses', mesh.Q)]
+    _fields_ = [('task', C.POINTER(Task)), ('access', C.POINTER(mesh_graph.Access)), ('tasks', mesh.Q),
+                ('accesses', mesh.Q)]
 
 
 TASK, ARRIVED, PUBLISH, SENT_TASK = 0, 1, 2, 3
@@ -1529,7 +1521,7 @@ def _transport():
                 ('mesh_metal_receive_fields', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, C.POINTER(Remote),
                                                         mesh.Section, C.POINTER(mesh.U)]),
                 ('mesh_metal_sent_extents', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, mesh.U, mesh.Section,
-                                                      C.POINTER(Access), C.c_size_t, C.POINTER(C.c_size_t)]),
+                                                      C.POINTER(mesh_graph.Access), C.c_size_t, C.POINTER(C.c_size_t)]),
                 ('mesh_metal_status_prepare', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q,
                                                         C.POINTER(mesh.Q)])):
             function = getattr(lib, name)
@@ -1576,7 +1568,8 @@ def _recorder():
         lib.MetalProgramEnd.restype = C.c_int
         lib.MetalProgramEnd.argtypes = [C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalReplayDestroy.restype, lib.MetalReplayDestroy.argtypes = None, [C.POINTER(Replay)]
-        lib.MetalRecorderEffects.restype, lib.MetalRecorderEffects.argtypes = None, [C.POINTER(Access), C.c_size_t]
+        lib.MetalRecorderEffects.restype = None
+        lib.MetalRecorderEffects.argtypes = [C.POINTER(mesh_graph.Access), C.c_size_t]
         lib.MetalProgramSignature.restype = C.c_int
         lib.MetalProgramSignature.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, C.POINTER(mesh_graph.Signature),
                                               C.c_char_p, C.c_size_t]
@@ -1701,10 +1694,9 @@ def _dispatch(name, count, *arguments):
 # binds buffer j at its storage offset x element size; each tensor operand's typed view gives its kernel's bytes there,
 # its maximal contiguous ranges (_access, mesh-collective.h mesh_strided_extents) from its storage's start
 def _launch(kernel, arguments, **dispatched):
-    named = [Access(j, extent.start - base, extent.end - base, 0, 0)
-             for j, value in enumerate(arguments) if isinstance(value, torch.Tensor) and value.numel()
-             for base in (value.untyped_storage().data_ptr(),) for extent in _access(value, 0)]
-    _recorder()[0].MetalRecorderEffects((Access * max(len(named), 1))(*named), len(named))
+    named = [extent for j, value in enumerate(arguments) if isinstance(value, torch.Tensor) and value.numel()
+             for extent in _access(value, 0, j, value.untyped_storage().data_ptr())]
+    _recorder()[0].MetalRecorderEffects((mesh_graph.Access * max(len(named), 1))(*named), len(named))
     kernel(*arguments, **dispatched)
 
 
@@ -3096,11 +3088,10 @@ def _captured(context, irs, compiled, gm, of, constants, holders, owned):
             # design/compilation-composition-change-request.md items 1 and 6 (unit 6E): at a node with no section of
             # the function, its call's result is its delivered leaves (_deliver `ir.landed`), each over its landing
             # value's standin, so the consumers here bind them as any cross-function operand (owners, _expanded), and
-            # its passed-through leaves (an output that is its placeholder q) the call's own input q here
+            # its passed-through leaves (Compiled `passed`) the call's own inputs here
             output, keys = next(item[3] for item in ir.program if item[0] == 'output')
-            given = {n: q for q, n in enumerate(n for n in ir.gm.graph.nodes if n.op == 'placeholder')}
-            places = instance(k, j)[0] if ir.landed else {}
-            leaves = [places[keys[leaf]][0] if o in ir.landed else inputs[given[leaf]] if leaf in given else None
+            places, passed = instance(k, j)[0] if ir.landed else {}, compiled[k].passed
+            leaves = [places[keys[leaf]][0] if o in ir.landed else inputs[passed[o]] if o in passed else None
                       for o, leaf in enumerate(pytree.tree_leaves(output.args))]
             result = pytree.tree_unflatten(leaves, compiled[k].spec) \
                 if any(leaf is not None for leaf in leaves) else None
@@ -3247,7 +3238,7 @@ def _transfers(captured, context, transports, owned, plan, handle, ir, k, j, val
                 status = metal.mesh_metal_sent_extents(C.byref(context), C.byref(transport), plan, i, section, None, 0,
                                                        C.byref(count))
                 mesh.check(0 if status == errno.ERANGE else status)
-                read, member = (Access * max(count.value, 1))(), {q: n for n, q in enumerate(touched or ())}
+                read, member = (mesh_graph.Access * max(count.value, 1))(), {q: n for n, q in enumerate(touched or ())}
                 mesh.check(metal.mesh_metal_sent_extents(C.byref(context), C.byref(transport), plan, i, section, read,
                                                          count.value, C.byref(count)))
                 for extent in read[:count.value]:
@@ -3255,7 +3246,7 @@ def _transfers(captured, context, transports, owned, plan, handle, ir, k, j, val
                     extent.key, extent.start, extent.end = (member[extent.key] if touched is not None else 0,
                                                             extent.start + at, extent.end + at)
                 extents = DATA(OBJECT(OBJC.objc_getClass(b'NSData'), _SEL(b'alloc')), _SEL(b'initWithBytes:length:'),
-                               C.addressof(read), C.sizeof(Access) * count.value)
+                               C.addressof(read), C.sizeof(mesh_graph.Access) * count.value)
                 SENT(recorder, _SEL(b'sent:operand:counter:extents:'), handle, captured['groups'][k, j, i], counter,
                      extents)
                 PUT(extents, SELECTOR[b'release'])
@@ -3349,13 +3340,20 @@ def _period(copies, horizon):
 # metal_recording.h struct MetalNative: key 1, the absolute CPU address ranges of the operand's bytes,
 # MetalRowAccesses's form; mesh-collective.h mesh_strided_extents (design/compilation-composition-change-request.md
 # item 6.4): the view's maximal contiguous ranges, its dimensions by decreasing stride (the same addresses), those of
-# one index or stride 0 adding none
-def _access(value, write):
+# one index or stride 0 adding none. `_strided_of`: a tensor operand's bytes as an absolute mesh.Strided (the
+# representation of every access set here: a declared transfer's view rebased, _ranges); `_access`: a view's ranges
+# under `key` (1, absolute CPU addresses, by default; a binding's index with `base` its storage's start, for a recorded
+# dispatch)
+def _strided_of(value):
     size = value.element_size()
     dims = sorted(((n, s * size) for n, s in zip(value.shape, value.stride()) if n > 1 and s), key=lambda d: -d[1])
-    view = mesh.Strided(offset=value.data_ptr(), element=size, dims=len(dims),
+    return mesh.Strided(offset=value.data_ptr(), element=size, dims=len(dims),
                         pairs=(mesh.Q * max(2 * len(dims), 1))(*[x for d in dims for x in d]))
-    return [Access(1, offset, offset + length, 0, write) for offset, length in mesh.extents(view)]
+
+
+def _access(view, write, key=1, base=0):
+    return [mesh_graph.Access(key, offset - base, offset + length - base, 0, write)
+            for offset, length in mesh.extents(view)]
 
 
 # design/compilation-composition-change-request.md item 6 (unit 6E), the delivered-result correspondence;
@@ -3377,17 +3375,16 @@ def _native(steps):
                 tasks.append(Task(TASK, 0, thunk.address, C.addressof(thunk.pointers), thunk.count))
                 for j, value in enumerate(thunk.held):
                     if isinstance(value, torch.Tensor) and value.numel():
-                        accesses += _access(value, thunk.written >> j & 1)
+                        accesses += _access(_strided_of(value), thunk.written >> j & 1)
         elif isinstance(step, _Bridge):
             owner = step.owner if isinstance(step, _Arrival) else 0
             tasks.append(Task(step.kind, step.transfer, None, C.addressof(step.word) if step.word is not None else None,
                               owner))
-            accesses += [a for value in step.ranges if value.numel()
-                         for a in _access(value, int(step.kind == ARRIVED and not owner))]
+            accesses += [a for view in step.ranges for a in _access(view, int(step.kind == ARRIVED and not owner))]
         else:
             raise NotImplementedError('%r in a CPU call: a step specialized to no native operand' % (step,))
         held.append(step)
-    made = (Task * max(len(tasks), 1))(*tasks), (Access * max(len(accesses), 1))(*accesses)
+    made = (Task * max(len(tasks), 1))(*tasks), (mesh_graph.Access * max(len(accesses), 1))(*accesses)
     return Native(made[0], made[1], len(tasks), len(accesses)), (made, held)
 
 
@@ -3433,7 +3430,7 @@ def _specialize(captured, context, irs, planned, horizon, compiled, bound, gm, c
             for _, r, f, _, v, i, (_, producer, ordinal) in ir.delivered.get(identity.ordinal, ()):
                 e, state = p * producer + ordinal, mesh.State.from_address(context.M + planned.call[r].plan)
                 arrivals.append(_Arrival(i, _count(context, state, _entry(context, state, i).count, e),
-                                         [copies[f][v][e % len(copies[f][v])]], r + 1))
+                                         [_strided_of(copies[f][v][e % len(copies[f][v])])], r + 1))
             made, held = _native(arrivals + steps)
             natives.setdefault(row, []).append(made)
             kept.append(held)
@@ -3532,9 +3529,9 @@ def _commutes(module, k):
 
 # design/aot-compilation-change-request.md A10, "Its bound", and appendix item 6; A. J. Bernstein, Analysis of programs
 # for parallel processing, IEEE Trans. Electronic Computers EC-15(5), 1966; Rinard and Diniz, section 2;
-# `sources[j]` call j's flat input leaves' producers
+# `sources[j]` call j's flat input leaves' producers, `every[f]` the block's calls of function f
 # (_Export), `horizon` the block executions the program issues ahead
-def _analyse(gm, of, compiled, sources, horizon):
+def _analyse(gm, of, compiled, sources, every, horizon):
     modules = [record.function.module for record in compiled]
     nodes = list(gm.graph.nodes)
     callee = {node: of.get(node) for node in nodes}
@@ -3573,23 +3570,18 @@ def _analyse(gm, of, compiled, sources, horizon):
     pairs = sorted(pairs)
     # the effects that persist between executions (Compiled `written`, `read`): every call of the functions sharing a
     # storage one of them writes is one chain in program order, which mesh_plan keeps and closes from one block's last
-    # call to the next block's first (delay 1, mesh-collective.h `chains`), with the commuting chains merged into it
-    head = list(range(len(calls)))
-
-    def find(x):
-        while head[x] != x:
-            head[x] = head[head[x]]
-            x = head[x]
-        return x
-
-    def join(group):
-        for a, b in zip(group, group[1:]):
-            head[max(find(a), find(b))] = min(find(a), find(b))
-    for chain in chains:
-        join([place[node] for node in chain])
-    for storage in {s for record in compiled for s in record.written}:
-        join([j for j, node in enumerate(calls)
-              if storage in compiled[callee[node]].written | compiled[callee[node]].read])
+    # call to the next block's first (delay 1, mesh-collective.h `chains`), with the commuting chains merged into it:
+    # one labelling (mesh_graph.components) over the links between successive calls of each commuting chain and of
+    # each written storage's calls, both directions; each call's head the least call of its label
+    groups = [[place[node] for node in chain] for chain in chains] + \
+        [[j for j, node in enumerate(calls) if storage in compiled[callee[node]].written | compiled[callee[node]].read]
+         for storage in {s for record in compiled for s in record.written}]
+    label = mesh_graph.components(len(calls), [link for group in groups for a, b in zip(group, group[1:])
+                                               for link in ((a, b), (b, a))])
+    least = {}
+    for j, c in enumerate(label):
+        least.setdefault(c, j)
+    head = [least[c] for c in label]
     # A10, "Its output": the calls of a function the program issues ahead: `horizon` block executions, each all
     # `every` calls of the function, so horizon x every. It is an issue capacity and also the lifetime bound of a
     # result read outside its function's plan (another function's call, a delivery, the block's outputs): such a read
@@ -3600,9 +3592,9 @@ def _analyse(gm, of, compiled, sources, horizon):
     # bound (the block order's width, or 1 for a chain) would put e and e - copies in one block, its landing waiting
     # for its own block's end. The orders the calls' effects impose (A10's pairs, the chains above, persistent
     # storage's placed effects across executions in the native program) are edges, not this bound
-    outstanding = {f: horizon * sum(callee[node] == f for node in calls) for f in dict.fromkeys(map(callee.get, calls))}
+    outstanding = {f: horizon * count for f, count in every.items()}
     return Calls(outstanding, (mesh.U * max(2 * len(pairs), 1))(*[j for pair in pairs for j in pair]), len(pairs),
-                 (mesh.U * max(len(calls), 1))(*[find(j) for j in range(len(calls))]))
+                 (mesh.U * max(len(calls), 1))(*head))
 
 
 # design/aot-compilation-change-request.md A10; P. Barham et al., MLSys 2022, section 4.2; torch v2.14.0
@@ -3623,8 +3615,11 @@ class _Program(torch.fx.Interpreter):
 
 # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature buffers_to_mutate, parameters_to_mutate,
 # user_inputs_to_mutate: `written` and `read` the storages of the module state the function writes and reads (its
-# effects that persist from one execution to the next), `mutated` the flat input leaves it writes
-Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec moves written read mutated')
+# effects that persist from one execution to the next), `mutated` the flat input leaves it writes; `passed` its result
+# leaves that are its own inputs, {flat output leaf: flat input leaf} (an output that is placeholder q, the
+# placeholders being the flat input leaves in order)
+Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec moves written read mutated '
+                                              'passed')
 
 
 # a flat leaf of a value of the traced program: leaf `leaf` of call `call`'s result, or of block input leaf `leaf`
@@ -3743,7 +3738,7 @@ class _Export(torch.fx.Interpreter):
                                           % (n.name,))
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
             result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
-            given = exported.graph_signature
+            given, inputs = exported.graph_signature, [node for node in gm.graph.nodes if node.op == 'placeholder']
             mutated = set(given.user_inputs_to_mutate.values())
             self.compiled.append(Compiled(function, signature, gm, pytree.tree_flatten((args, kwargs))[0], result,
                                           exported.call_spec.out_spec, moves,
@@ -3751,23 +3746,22 @@ class _Export(torch.fx.Interpreter):
                                                                       *given.parameters_to_mutate.values()]),
                                           _storages(function.module, [*given.inputs_to_buffers.values(),
                                                                       *given.inputs_to_parameters.values()]),
-                                          frozenset(q for q, name in enumerate(given.user_inputs) if name in mutated)))
+                                          frozenset(q for q, name in enumerate(given.user_inputs) if name in mutated),
+                                          {o: inputs.index(a) for o, a in enumerate(gm.graph.output_node().args[0])
+                                           if isinstance(a, Node) and a in inputs}))
             found = [len(self.compiled) - 1]
         self.of[n], self.origin[n] = found[0], len(self.calls)
         # design/compilation-composition-change-request.md item 6, unit 6E: each flat input leaf's producer
         self.sources.append([leaf if isinstance(leaf, _Produced) else None
                              for leaf in pytree.tree_leaves(map_arg((n.args, n.kwargs), lambda a: self.marks[a]))])
-        origin, result, body = len(self.calls), self.compiled[found[0]].result, self.compiled[found[0]].gm.graph
-        leaves, spec = pytree.tree_flatten(result)
-        # a result leaf that is the function's own input (an output that is its placeholder q, placeholders being the
-        # flat input leaves in order) is that input's value: its producer is the input's
-        given = {node: q for q, node in enumerate(node for node in body.nodes if node.op == 'placeholder')}
-        read = self.sources[-1]
+        origin, record, read = len(self.calls), self.compiled[found[0]], self.sources[-1]
+        leaves, spec = pytree.tree_flatten(record.result)
+        # a passed-through result leaf (Compiled `passed`) is its input's value: its producer is the input's
         self.marks[n] = pytree.tree_unflatten(
-            [read[given[out]] if out in given and read[given[out]] is not None else _Produced(origin, o)
-             for o, out in enumerate(pytree.tree_leaves(body.output_node().args))], spec)
+            [read[record.passed[o]] if o in record.passed and read[record.passed[o]] is not None
+             else _Produced(origin, o) for o in range(len(leaves))], spec)
         self.calls.append(found[0])
-        return result
+        return record.result
 
 
 # design/aot-compilation-change-request.md A1 to A3, A8 to A10 and appendix item 7;
@@ -3786,16 +3780,20 @@ def program(block, *example_inputs, horizon=HOST_LAG):
         exporter = _Export(gm, FakeTensorMode())
         exporter.run(*[exporter.fake(x) for x in example_inputs])
     compiled, of, calls, sources = exporter.compiled, exporter.of, exporter.calls, exporter.sources
-    analysed = _analyse(gm, of, compiled, sources, horizon)
     # the traced block's calls of each function (`every`) and each call's ordinal among them (`place`): the static
-    # call identities the capture's generations and step words take (mesh_plan publishes the same, planned.call)
-    every = collections.Counter(calls)
-    place = [sum(calls[s] == calls[r] for s in range(r)) for r in range(len(calls))]
+    # call identities the analysis's bound, the capture's generations, step words and block-copy selection take
+    # (mesh_plan receives `calls` and publishes the same, planned.call)
+    first, grouped = mesh_graph.rows(len(compiled), calls)
+    every, place = {f: first[f + 1] - first[f] for f in range(len(compiled))}, [0] * len(calls)
+    for q, r in enumerate(grouped):
+        place[r] = q - first[calls[r]]
+    analysed = _analyse(gm, of, compiled, sources, every, horizon)
     operands = [record.function.placement(record.gm, record.examples) for record in compiled]
     placeholders = [n for n in gm.graph.nodes if n.op == 'placeholder']
-    # each block input's reading functions, through passed-through results too (_Export `sources`)
-    readers = [[calls[j] for j, read in enumerate(sources)
-                if any(leaf is not None and leaf.call is None and leaf.leaf == i for leaf in read)]
+    # the block's reads, (consumer call j, its flat input leaf q, the producing leaf), one relation from _Export
+    # `sources` (passed-through results resolved): block inputs' readers, deliveries and delivered operands take it
+    reads = [(j, q, leaf) for j, read in enumerate(sources) for q, leaf in enumerate(read) if leaf is not None]
+    readers = [[calls[j] for j, _, leaf in reads if leaf.call is None and leaf.leaf == i]
                for i in range(len(placeholders))]
     given = [(x.dtype, x.numel(), x.device.type, tuple(x.shape)) if isinstance(x, torch.Tensor) else None
              for x in example_inputs]
@@ -3816,10 +3814,9 @@ def program(block, *example_inputs, horizon=HOST_LAG):
         # outside its producer's map reads the producer's delivery there (_deliver). wanted[f, o]: the functions of the
         # calls reading function f's flat result leaf o (_Export `sources`), the same at every node
         wanted = {}
-        for j, read in enumerate(sources):
-            for leaf in read:
-                if leaf is not None and leaf.call is not None:
-                    wanted.setdefault((calls[leaf.call], leaf.leaf), set()).add(calls[j])
+        for j, _, leaf in reads:
+            if leaf.call is not None:
+                wanted.setdefault((calls[leaf.call], leaf.leaf), set()).add(calls[j])
         _deliver(irs, wanted)
         for ir, record in zip(irs, compiled):
             lower(ir)
@@ -3831,13 +3828,14 @@ def program(block, *example_inputs, horizon=HOST_LAG):
         # (metal_recording.h struct MetalGeneration) {every, producer, ordinal} = {the consumer's calls of its
         # function a block, the producer's, call r's ordinal}: the consumer's execution t reads r's execution
         # (t div every) producer + ordinal (`every`, `place`)
-        for j, (k, read) in enumerate(zip(calls, sources)):
-            irs[k].delivered[place[j]] = [
-                (q, leaf.call, calls[leaf.call], leaf.leaf, *irs[calls[leaf.call]].landed[leaf.leaf],
-                 (every[k], every[calls[leaf.call]], place[leaf.call]))
-                for q, leaf in enumerate(read)
-                if leaf is not None and leaf.call is not None and leaf.leaf in irs[calls[leaf.call]].landed
-                and irs[calls[leaf.call]].landed[leaf.leaf][1] is not None]
+        for j, q, leaf in reads:
+            landed = irs[calls[leaf.call]].landed.get(leaf.leaf, (None, None)) if leaf.call is not None \
+                else (None, None)
+            irs[calls[j]].delivered.setdefault(place[j], [])
+            if landed[1] is not None:
+                irs[calls[j]].delivered[place[j]].append(
+                    (q, leaf.call, calls[leaf.call], leaf.leaf, *landed,
+                     (every[calls[j]], every[calls[leaf.call]], place[leaf.call])))
         holders = []
         for i, (x, functions) in enumerate(zip(given, readers)):
             k = next((k for k in functions if irs[k].device is not None), None)
@@ -3898,7 +3896,7 @@ def program(block, *example_inputs, horizon=HOST_LAG):
                                           (mesh.U * len(calls))(*calls), len(calls), analysed.orders,
                                           analysed.norders, analysed.chains, deadline, C.byref(planned)))
             state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
-            captured['every'] = {planned.call[j].function: planned.call[j].every for j in range(planned.calls)}
+            captured['every'] = every
             captured['planned'] = planned
             state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
             # JGroups ViewId.java

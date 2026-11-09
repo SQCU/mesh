@@ -50,7 +50,7 @@ _Static_assert(sizeof(struct mesh_metal_transport)==24,"mesh_metal_transport: rd
 _Static_assert(sizeof(struct mesh_metal_input)==40 && offsetof(struct mesh_metal_input,group)==8 &&
   offsetof(struct mesh_metal_input,count)==16 && offsetof(struct mesh_metal_input,pages)==24 &&
   offsetof(struct mesh_metal_input,copies)==28 && offsetof(struct mesh_metal_input,time)==32,
-  "mesh_metal_input: metal_recording.h struct MetalRemote");
+  "mesh_metal_input: rdma/mesh_compile.py Remote");
 _Static_assert(sizeof(struct mesh_metal_publication)==8,"mesh_metal_publication");
-_Static_assert(sizeof(struct mesh_metal_sent)==24,"mesh_metal_sent: metal_recording.h struct MetalSent");
+_Static_assert(sizeof(struct mesh_metal_sent)==24,"mesh_metal_sent: rdma/mesh_compile.py MetalSent");
 #endif

@@ -53,14 +53,11 @@ int mesh_metal_transport_create(struct mesh_ctx *context,const struct mesh_plann
   *transport=(struct mesh_metal_transport){.state=state,.offset=low,.bytes=bytes};
   return 0;
 }
-static const struct mesh_state *plan_words(const struct mesh_ctx *context,uint64_t plan){
-  return (const struct mesh_state *)((const char *)context->M+plan);
-}
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.7 */
 int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
   uint32_t transfer,struct mesh_metal_input *input){
-  const struct mesh_state *words=plan_words(context,plan);
+  const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
   const uint64_t at=transport->offset;
   *input=(struct mesh_metal_input){.phases=entry->phases-at,.group=mesh_group_bytes(entry->pages),.count=entry->count-at,
@@ -93,7 +90,7 @@ static const uint64_t *row_of(const struct hdr *m,const uint64_t *rows,uint32_t 
 int mesh_metal_receive_fields(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
   const struct mesh_metal_input *input,struct mesh_section section,uint32_t *fields){
   struct hdr *m=context->M;
-  const struct mesh_state *words=plan_words(context,plan);
+  const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_hop *hops=mesh_hops(m,words);
   const uint64_t group=transport->offset+input->phases,count=transport->offset+input->count;
   uint64_t *rows=rows_sorted(context,section),at;
@@ -116,7 +113,7 @@ int mesh_metal_sent_extents(struct mesh_ctx *context,struct mesh_metal_transport
   uint32_t transfer,struct mesh_section section,struct mesh_graph_access *extents,size_t room,size_t *count){
   (void)transport;
   struct hdr *m=context->M;
-  const struct mesh_state *words=plan_words(context,plan);
+  const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_hop *hops=mesh_hops(m,words);
   const uint64_t completion=mesh_transfer_at(m,words,transfer)->completion;
   uint64_t *rows=rows_sorted(context,section),at;
@@ -138,7 +135,7 @@ int mesh_metal_sent_extents(struct mesh_ctx *context,struct mesh_metal_transport
 /* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
 int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
   uint32_t transfer,struct mesh_metal_publication *publication){
-  publication->supplied=mesh_transfer_at(context->M,plan_words(context,plan),transfer)->targets[0].word-transport->offset;
+  publication->supplied=mesh_transfer_at(context->M,mesh_state_at(context->M,plan),transfer)->targets[0].word-transport->offset;
   return 0;
 }
 
@@ -146,7 +143,7 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
 int mesh_metal_sent_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
   uint32_t transfer,struct mesh_metal_sent *sent){
   (void)transport;
-  const struct mesh_state *words=plan_words(context,plan);
+  const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
   *sent=(struct mesh_metal_sent){.counter=(char *)context->M+entry->completion,.sends=entry->sends,.copies=words->copies};
   return 0;
@@ -155,13 +152,13 @@ int mesh_metal_sent_prepare(struct mesh_ctx *context,struct mesh_metal_transport
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1; metal_recording.h state:buffer:status: */
 int mesh_metal_status_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
   uint64_t *status){
-  *status=plan_words(context,plan)->status-transport->offset;
+  *status=mesh_state_at(context->M,plan)->status-transport->offset;
   return 0;
 }
 int mesh_metal_status(struct mesh_ctx *context,uint64_t plan,int cause,uint64_t *first){
   if(first)*first=UINT64_MAX;
   if(!plan)return EINVAL;
-  struct mesh_status *status=(struct mesh_status *)((char *)context->M+plan_words(context,plan)->status);
+  struct mesh_status *status=(struct mesh_status *)((char *)context->M+mesh_state_at(context->M,plan)->status);
   const uint32_t ahead=atomic_load_explicit(&status->ahead,memory_order_acquire);
   const uint32_t behind=atomic_load_explicit(&status->behind,memory_order_acquire);
   const uint64_t failed=atomic_load_explicit(&status->first,memory_order_acquire);

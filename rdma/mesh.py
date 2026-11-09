@@ -95,16 +95,16 @@ class View(C.Structure):
 
 # design/compilation-composition-change-request.md item 6, unit 6D: mesh-collective.h struct mesh_planned_call and struct
 # mesh_planned, mesh_plan's results for the program's native preparation (each call's plan, lead, function, ordinal
-# and every; the calls' graph's vertices as mesh-graph.h struct mesh_graph_task, the plan signature's tasks; its edges
-# between this node's submissions and parts as struct mesh_graph_dependence over those vertices), freed by
-# mesh_planned_free.  What must stay: the fields in the header's order and of its types
+# and every; the plan's signature as mesh-graph.h struct mesh_graph_signature, whose tasks are the calls' graph's
+# vertices; its edges between this node's submissions and parts as struct mesh_graph_dependence over those vertices),
+# freed by mesh_planned_free.  What must stay: the fields in the header's order and of its types
 class PlannedCall(C.Structure):
     _fields_ = [('plan', Q), ('lead', Q), ('function', U), ('ordinal', U), ('every', U), ('padding', U)]
 
 
 class Planned(C.Structure):
-    _fields_ = [('call', C.POINTER(PlannedCall)), ('task', C.POINTER(mesh_graph.Task)),
-                ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('tasks', U), ('orders', Z)]
+    _fields_ = [('call', C.POINTER(PlannedCall)), ('signature', C.POINTER(mesh_graph.Signature)),
+                ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('padding', U), ('orders', Z)]
 
 
 INVARIANT, EXECUTION = 0, 1
@@ -130,6 +130,10 @@ PLATFORM_NS = 5000000000
 # JGroups ViewId.java: "Lamport time of the view" (`serial`), "Address of the creator of this view" (`sequencer`,
 # `boot`), here and in Nodes; UUID.java: "Logical address which is unique over space and time."  libfabric
 # man/fi_cntr.3.md: "Counters record the number of requested operations that have completed." (`completions`)
+# 2026-11-09 (design/compilation-composition-change-request.md item 6, unit 6D): `signature` and `signature_bytes` go
+# with the plan record's region copy (the plan's signature is mesh_planned `signature` in the compilation; the exported
+# record is the composed program's), so the mirror ends at `times` (byte 304; the section stays 320 bytes by its
+# alignment).  What must stay: the words in the header's order and at its offsets
 class State(C.Structure):
     _fields_ = [('copies', U), ('receives', U), ('ranges', U), ('releases', U), ('phases', Q), ('counts', Q),
                 ('supplied', Q), ('status', Q), ('executions', Q), ('completions', Q), ('group', Q), ('epoch', Q),
@@ -138,7 +142,7 @@ class State(C.Structure):
                 ('broadcast', Q), ('arrived', Q), ('room', Q), ('deliveries', Q), ('submits', Q), ('announced', Q),
                 ('waits', U), ('tells', U), ('syncs', Q), ('calls', U), ('closed', U), ('rows', Q),
                 ('submit_room', Q), ('transfers', Q), ('sequencer', U), ('padding4', U), ('boot', Q),
-                ('times', Q), ('signature', Q), ('signature_bytes', Q)]
+                ('times', Q)]
 
 
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7: "Every

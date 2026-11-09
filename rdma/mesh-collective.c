@@ -131,9 +131,6 @@ struct plan {
   uint32_t *between;
   uint32_t *farthest;
   uint64_t phases,counts,completions,supplied,publications,status,hops,times,words;
-  /* design/synchronization-signature-change-request.md item 1 */
-  char *record;
-  uint64_t record_bytes,signature;
   /* L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2 */
   double *completed;
   /* design/aot-compilation-change-request.md A10 */
@@ -345,9 +342,18 @@ static void plan_name(const struct plan *p,uint32_t v,const char *what,uint64_t 
 
 /* design/disjoint-pages-change-request.md C3.3; M. Lam, PLDI 1988; B. R. Rau, MICRO 1994;
    design/aot-compilation-change-request.md, appendix item 1 */
+/* design/aot-compilation-change-request.md A10, "Its output" (`outstanding`, the most executions of the function the
+   program issues ahead, "which bounds how many the program issues ahead"): an EXECUTION value of execution e is live
+   from its writer to its last reader, all in e's block (other functions' calls read it there, outside this plan's
+   graph), so `outstanding` executions are live at once and each takes its own copy (Lam's modulo variable expansion);
+   e + copies is then at least `outstanding` executions on, past the block the program's `ended` wait has closed.
+   The graph's lags raise it where a read reaches a later write farther on; a read reaching none (a delivery to a node
+   where its function has no section, BSL's feedforward edge) adds nothing, its reuse held at run time: the bridge
+   serves execution t only below `executions`, which mesh_host_started raises after the block that read copy
+   t - copies ended (mesh-flow.c, mesh-dataflow.c mesh_host_started) */
 static int plan_unroll(struct plan *p){
   const uint32_t values=p->values;
-  p->copies=1;
+  p->copies=(uint32_t)p->outstanding;
   if(!values)return 0;
   const struct plan_value *last=p->value+values-1;
   const uint32_t sources=last->source+1+last->reads;
@@ -373,12 +379,7 @@ static int plan_unroll(struct plan *p){
       const uint64_t lag=lags[((size_t)x->source+1+j)*values+v];
       if(lag>most)most=lag;
     }
-    /* design/compilation-composition-change-request.md item 6, unit 6D (a delivery to a node where its function has no
-       section, BSL's feedforward edge): no later write follows the read in the plan's graph, so its copies are A10's
-       bound on the executions issued ahead (`outstanding`), an issue capacity; the reuse itself is the run's: a node's
-       bridge serves execution t only below the plan's `executions`, which mesh_host_started raises after the block
-       that read copy t - copies ended (mesh-flow.c, mesh-dataflow.c mesh_host_started) */
-    if(most==UINT64_MAX)most=p->outstanding;
+    if(most==UINT64_MAX)most=0;
     if(most>=UINT32_MAX){plan_name(p,v,"its copies exceed the 32-bit count of a plan's copies",most);status=ENOMEM;break;}
     if(most>p->copies)p->copies=(uint32_t)most;
   }
@@ -427,8 +428,6 @@ static void plan_layout(struct plan *p){
   p->hops=plan_align(p->rows+((uint64_t)p->calls+1)*sizeof(uint32_t));
   p->times=plan_align(p->hops+p->entries*p->copies*sizeof(struct mesh_hop));
   p->words=p->times+(uint64_t)p->transfers*sizeof(double);
-  p->signature=plan_align(p->words);
-  p->words=p->signature+p->record_bytes;
 }
 static uint64_t plan_supplied(const struct plan *p,const struct plan_demand *d){
   return p->base+p->supplied+(uint64_t)d->release*sizeof(uint64_t);
@@ -1010,7 +1009,7 @@ static int plan_signature(struct plan *plans,uint32_t count,const uint32_t *call
                           const uint32_t *call,const uint32_t *lead,const uint32_t *actor,const uint32_t *place,
                           const size_t *row,size_t built,uint32_t added,const uint32_t *from,const uint32_t *to,
                           const uint64_t *delay,const uint64_t *added_delay,double lambda,const size_t *wait_first,
-                          const size_t *wait_order){
+                          const size_t *wait_order,struct mesh_graph_signature **kept){
   struct mesh_graph_processor processor[2*MESH_NODES_MOST];
   for(uint32_t v=0;v<n;v++){processor[2*v]=(struct mesh_graph_processor){MESH_GRAPH_HOST,v};
                             processor[2*v+1]=(struct mesh_graph_processor){MESH_GRAPH_BRIDGE,v};}
@@ -1020,8 +1019,7 @@ static int plan_signature(struct plan *plans,uint32_t count,const uint32_t *call
   size_t *first=malloc(((size_t)n*count+2)*sizeof *first),*tell=malloc(((size_t)added+1)*sizeof *tell);
   struct plan_signed o={NULL,0,0};
   struct mesh_graph_signature signature;
-  char *record=NULL;
-  int status=dependence && offset && key && first && tell?0:ENOMEM;
+  int status=dependence && offset && key && first && tell && (*kept=calloc(1,sizeof **kept))?0:ENOMEM;
   uint64_t executions=1;
   /* the program graph without its emitted synchronization (BSL §4.1's IPC graph and A10's orders) is the relation the
      waits answer to; the added edges are checked against it by mesh_graph_resynchronized, never taken as their own
@@ -1071,14 +1069,8 @@ static int plan_signature(struct plan *plans,uint32_t count,const uint32_t *call
   if(!status && (status=mesh_graph_resynchronized(&signature,time,built,from,to,delay,added,from+built,to+built,
                                                   added_delay,lambda,offset)))
     mesh_graph_signature_free(&signature);
-  if(!status){
-    size_t made=0;
-    if((status=mesh_graph_record(&signature,NULL,0,&made))==ERANGE)
-      status=(record=malloc(made))?mesh_graph_record(&signature,record,made,&made):ENOMEM;
-    if(!status){plans[0].record=record;plans[0].record_bytes=made;record=NULL;}
-    mesh_graph_signature_free(&signature);
-  }
-  free(dependence);free(offset);free(key);free(first);free(tell);free(o.operation);free(record);
+  if(!status)**kept=signature;
+  free(dependence);free(offset);free(key);free(first);free(tell);free(o.operation);
   return status;
 }
 /* design/aot-compilation-change-request.md A10; A. J. Bernstein, 1966; M. C. Rinard and P. C. Diniz, 1997, §2 */
@@ -1229,11 +1221,9 @@ static int plan_graph(struct plan *plans,uint32_t count,const uint32_t *calls,ui
   const size_t built=graph.edges;
   /* design/compilation-composition-change-request.md item 6, unit 6D */
   planned->call=malloc(((size_t)J+1)*sizeof *planned->call);
-  planned->task=malloc(((size_t)V+1)*sizeof *planned->task);
   planned->order=malloc((built+1)*sizeof *planned->order);
-  if(!planned->call || !planned->task || !planned->order){status=ENOMEM;goto done;}
-  memcpy(planned->task,task,(size_t)V*sizeof *task);
-  planned->calls=J;planned->tasks=V;
+  if(!planned->call || !planned->order){status=ENOMEM;goto done;}
+  planned->calls=J;
   for(uint32_t j=0;j<J;j++){
     const struct plan *p=plans+calls[j];
     planned->call[j]=(struct mesh_planned_call){.lead=p->start_lead,.function=calls[j],.ordinal=place[j],
@@ -1291,7 +1281,7 @@ static int plan_graph(struct plan *plans,uint32_t count,const uint32_t *calls,ui
     }
   }
   if((status=plan_signature(plans,count,calls,J,program,s,n,V,t,task,node,call,lead,actor,place,row,built,added,from,to,
-                             delay,added_delay,lambda,wait_first,wait_order)))goto done;
+                             delay,added_delay,lambda,wait_first,wait_order,&planned->signature)))goto done;
   /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (5) */
   mesh_graph_rows(V,built+added,plan_at,from,first,rows);
   const struct plan_room_rows rooms={rows,to,delay};
@@ -1755,7 +1745,7 @@ static void plan_free(struct plan *p){
   free(p->wait_row);free(p->demand);free(p->of);free(p->parent);
   free(p->tree);free(p->run);free(p->members);free(p->lead);free(p->comm);free(p->child);free(p->value);free(p->read);
   free(p->here);free(p->first);free(p->head);free(p->lag);free(p->between);free(p->farthest);free(p->entry);
-  free(p->completed);free(p->record);
+  free(p->completed);
 }
 
 /* os/os_sync_wait_on_address.h, os_sync_wait_on_address_with_timeout; L. Lamport, Distributed Computing 1(2), 1986 */
@@ -1771,7 +1761,8 @@ static int plan_released(struct hdr *m,uint64_t deadline){
 }
 
 void mesh_planned_free(struct mesh_planned *planned){
-  free(planned->call);free(planned->task);free(planned->order);
+  if(planned->signature)mesh_graph_signature_free(planned->signature);
+  free(planned->call);free(planned->order);free(planned->signature);
   *planned=(struct mesh_planned){0};
 }
 
@@ -1879,9 +1870,6 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     state->calls=p->calls;
     state->rows=base+p->rows;
     state->times=base+p->times;
-    state->signature=plans[0].base+plans[0].signature;
-    state->signature_bytes=plans[0].record_bytes;
-    if(p->record)memcpy(mesh_at(m,at)+p->signature,p->record,(size_t)p->record_bytes);
     if(p->completed)memcpy(mesh_at(m,at)+p->times,p->completed,(size_t)p->transfers*sizeof *p->completed);
     struct mesh_sync *sync=mesh_syncs(m,state);
     for(uint32_t k=0;k<p->waits+p->tells;k++){
@@ -1970,7 +1958,6 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
   algo->group=group;
   algo->table=m->data_off+(uint64_t)table*m->pgsz;
   algo->adjacent=algo->table+(uint64_t)count*sizeof(uint64_t);
-  algo->signature=plans[0].base+plans[0].signature;
   atomic_store_explicit(&m->client,context->client,memory_order_relaxed);
   atomic_store_explicit(&m->client_start,context->start,memory_order_relaxed);
   atomic_store_explicit(&algo->published,atomic_fetch_add(&m->serial,1)+1,memory_order_release);
