@@ -13,67 +13,44 @@ outstanding, and what of it is outstanding. The standard every change request fo
   module ownership. Their individual implementation records do not establish that this composition is complete.
   Item 5 records the operator's native Apple Silicon execution and implementation deduplication correction and
   assigns replacement of duplicated specialization, command orchestration and representation bodies.
-  Item 6 requires completing IR handoffs before helper extraction and divides that connected refactoring into
-  eight implementation units. The earlier implementation carried plan identities and edges into native preparation,
-  capture dependencies into replay, and typed effects through transformations. Native rows reference published
-  plan calls; signature composition consumes the retained plan signature. Graph contraction, projection,
-  component analysis and shader-call traversal used the existing graph module, and both shader consumers used
-  the parser's retained call graph. A10's concurrency bound is separate from the horizon used to size retained
-  storage. The connected source changes,
-  revisions, direct builds and remaining work are recorded in that run's `integration.md` and review records;
-  these do not establish completion of the full assigned domain or runtime and performance requirements.
-  The subsequent structural review found active semantic transformations over emitted shader strings throughout
-  the recorder, beyond the three previously listed parsers. Generated target source must become the final mesh
-  emission; the producers' annotations must reach those lowerings. E2B then selected the recorder's non-self-timed
-  mode, which omits replay footprints and bypasses native dependency/fence preparation. Sharing the emitter has
-  not completed that synchronization-policy handoff. The performance follow-up also identifies static operation,
-  dtype and layout facts interpreted by the Torch path's generic shaders, serial reduction bodies, and native
-  projection facts emitted as defines then read back despite their presence in `MetalNativePlan`. Completing
-  source coverage alone has not completed specialization, fusion or the required execution mapping.
-  The [complete replacement workgroup](compilation-composition-change-request.md#complete-replacement-workgroup)
-  specifies the connected source-built provider, typed numerical/shader interfaces, eight implementation
-  responsibilities and deletion of the downstream source-rewrite path in one coordinated landing. It supersedes
-  the initial 6A–6H work division, not the requirements or completed reusable work.
-  Working commits metal-microbench f08d3c7b/e4d2adc5 and mesh dd2062d2/4abf824c now connect a source-built
-  LiteRT/ML Drift provider to typed numerical operations and Tint IR, shared region cloning, transformations,
-  CPU/GPU target emission and the native executor. The recorder's generated-source interception, parsing and
-  rewrite bodies and its non-self-timed bypass are removed. All five E2B stage graphs publish through this provider;
-  the actual provider, compiler, recorder and E2B caller link. The existing native diagnostic executes split-K
-  projection, subgroup-matrix projection and parallel argmax; its numerical records are under the new run's
-  `8_runs`. This is development evidence, not the complete replacement landing.
-  Subsequent working checkpoints metal-microbench caf49366 and mesh f30bf845 carry compact access views,
-  separate read/write page tables and compiled E2B input operations. The continuing work replaces compact-view
-  intersection with ISL's exact integer feasibility calculation and gives kernel insertion/merging one identity
-  remapping owner. These source changes still need their complete consumer and operational evidence.
-  Working checkpoints metal-microbench f784364a and mesh 83c1e78e record the next connected revision. All five E2B
-  stages now complete lowering and target emission in the workgroup's compile-only runs after repairs to symbol,
-  epilogue-operand and value-scope handoffs. The full production dependency chain builds, including ISL.
-  The existing numerical diagnostic now uses the shared native program: CPU projection, GPU split-K/matrix
-  projection and argmax execute. Normalization-to-projection also executes (relative RMS error 0.000216), with the
-  normalization map fused into projection. The native path exposed stale runtime effects for embedded constants;
-  the uniform zero-point handoff is repaired, and the neural target's embedded weights remain under revision.
-  Outstanding work includes complete frontend/target coverage, control-flow and native-program execution,
-  paged native CPU/write-ahead behavior, preservation of the supplied execution index through compiled inputs,
-  and displacement of unjustified per-execution host waits/submissions. Grouping must retain the selected tuned
-  algorithm: a temporary no-join guard prevents its loss to generic member construction while that handoff is
-  completed. Sourced actor costs, whole-group fusion choices, persisted executable/preparation results and the
-  observation handoffs are still being revised.
-  Working checkpoints metal-microbench 73b78edf and mesh 0932fdba preserve typed algorithm selection, control-flow
-  transport releases and the initial saved-artifact consumers. Persistence is still incomplete: target binary reload,
-  a shared structural identity, prepared native results and collective-plan relocation are being connected. The
-  interrupted checkpoint does not link until the target save/load definitions are finished. The later continuation
-  and actual build results are recorded in the same workgroup directory.
-  Subsequent checkpoints metal-microbench 94b43623 through ba83b97a and mesh fdae772b through 53bc3b17 restore
-  the production build and connect compiler, prepared/native and collective-plan persistence. Saved CPU and CoreML
-  projection artifacts execute against fresh storage in the existing diagnostic (relative RMS 0.000276 and
-  0.000204). CoreML's plan reports ANE0/CPU13/GPU0; no ANE execution is established. GPU binary restoration now
-  executes at metal-microbench 27beb387 with libraries343e12d5 (relative RMS0.000204, all outputs written). The
-  caller had moved a replay structure after native rows retained its address; that ownership defect is repaired.
-  Shared CPU/GPU scheduling, constant initialization and exact predicate access are connected; preserving CPU
-  replay handles through frontend/native row expansion remains under revision. Fresh provider-once compilation
-  finalizes four E2B stages; decode lowers1118 dispatches then crashes in AGX final target compilation. These working
-  records do not close tuned group construction, full-domain lowering or the outstanding execution requirements.
-  No E2B or Torch/collective operational run or corresponding performance closure on this replacement is recorded.
+  Item 6 requires completing IR handoffs before helper extraction. The
+  [complete replacement workgroup](compilation-composition-change-request.md#complete-replacement-workgroup)
+  assigns eight connected responsibilities and one coordinated replacement landing across both repositories.
+  Working commits record development; they do not constitute that landing or narrow the assigned program domain.
+
+  Current connected path: source-built LiteRT/ML Drift and Torch numerical producers → owned typed numerical
+  operations and Tint regions → specialization, fusion and target lowering → retained effects, dependence causes,
+  placement and native execution. Generated-source interception, parsing/rewrite bodies, native source recognizers
+  and the non-self-timed preparation bypass are deleted. Graph algorithms remain in `mesh-graph`/`mesh_graph`.
+  Selected tuned constructions feed one member emitter in normal and later kernels; the temporary blanket
+  no-fusion gate and repeated native selection are gone. CPU/GPU preparation shares scheduling and initialization;
+  replay ownership survives native row expansion. A10's call concurrency is separate from retained-storage horizon.
+
+  Compiler, prepared/native and collective-plan artifacts retain solved results and relocate current storage on
+  load. Existing restored numerical cases pass at metal-microbench a136b464 / mesh435bc6ae: normalization/projection
+  relative RMS0.000216, matrix projection0.000207, CPU projection0.000276, argmax zero mismatches, all outputs written
+  and finite. CoreML restoration also has numerical evidence, but its measured plan was ANE0/CPU13/GPU0; this does
+  not establish Neural Engine execution. The composed Torch save/load consumer still needs operational evidence.
+
+  The production dependency chain builds. All five E2B stage graphs publish/lower/finalize in the latest compile-only
+  record: 3/7/20/618/1068 dispatches. An earlier decode finalization crash in AGX does not reproduce after the changed
+  member emission; its cause is unproven. These are compilation records, not full-model numerical or throughput
+  evidence. Commands, revisions, binary hashes, observations and superseded development findings are retained in
+  metal-microbench `output_data/claude-typed-replacement-20261109T085408Z`.
+
+  Mesh cf7a94a4 adds shared typed LU/triangular/Cholesky, Householder QR, Padé matrix exponential, Hermitian
+  eigendecomposition and one-sided SVD producers. Exported real and complex programs reach C IR; numerical accuracy,
+  convergence/extreme scales and performance remain unmeasured. Metal-microbench a8b5ac31 extends the existing native
+  diagnostic to execute saved artifacts with explicit input/output storage; source and syntax checks alone do not
+  establish these numerical families. Checked factorization error effects are an open frontend/compiler/executor
+  handoff; returning `info` alone does not implement a checked operator.
+
+  Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
+  and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
+  actor costs and whole-group decisions; typed dynamic synchronization observation; actual Torch/collective and
+  five-node E2B execution with the required transport overhead/bandwidth and decode throughput after prefill.
+  Missing machine operands remain explicit in cost estimates. No corresponding operational/performance closure is
+  recorded. Claude quota exhausted during this workgroup; the operator-authorized Codex continuation remains active.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
   in the composition implementation. The review records distinguish remaining representation and observation gaps
