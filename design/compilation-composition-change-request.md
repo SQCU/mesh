@@ -511,6 +511,27 @@ execution dependency. Git history can of course be reverted, but restoring the o
 architectural reversal: they would have no unique supported operation or demonstrated performance advantage left
 to justify their restoration. This is the operator's removal by a complete replacement, not deletion of capability.
 
+### Source bindings for compact effects and scalar lowering
+
+These bind implementation methods to the existing complete-conversion and representation requirements; they do not
+replace the assigned domain with the operations exercised by a diagnostic.
+
+- **Compact effects — source:** William Pugh, [The Omega Test](https://www.cs.umd.edu/~pugh/papers/omega.pdf), the
+  author's expanded 1992 version, §§2.1–2.3: normalization, equality elimination, and integer inequality elimination
+  using real/dark shadows and splintering. **Role:** decide whether two bounded affine byte-access sets intersect.
+  The compiler supplies the access relations; `mesh-graph` owns their exact integer feasibility calculation and
+  returns dependence causes. Scheduling, fusion and lifetime consumers use that relation. Enumerating tensor
+  elements or replacing a strided set by its bounding interval is not this method. Exact arithmetic must survive
+  elimination. The paper states exponential worst-case complexity; its practical results do not establish a general
+  polynomial bound for these queries.
+- **Software binary64 — source:** John R. Hauser, [Berkeley SoftFloat 3e, Library Interface](https://www.jhauser.us/arithmetic/SoftFloat-3/doc/SoftFloat.html),
+  §§4, 6–8; [FDLIBM](https://netlib.org/fdlibm/), the relevant function's implementation and dependencies for
+  transcendental functions. **Role:** implement the scalar operations of a typed binary64 kernel when the selected
+  target lacks native binary64 instructions. The compiler transforms typed instructions and preserves storage,
+  conversions, special values and the required rounding semantics. SoftFloat supplies basic arithmetic, comparison
+  and conversion algorithms; it is not a source for every transcendental function. Retain the upstream notices for
+  derived source. Authored library source is a compiler input; generated target source remains terminal output.
+
 ## Reusable form
 
 The same change-request form can name several existing requests in one requirement:
