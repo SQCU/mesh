@@ -105,6 +105,17 @@ int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t ed
                                 const uint32_t *added_to, double lambda, uint64_t *added_delay);
 /* design/torch-source-lowering-change-request.md item 3 */
 struct mesh_graph_access { uint64_t key, start, end; uint32_t vertex, write; };
+/* MLIR affine_map with floordiv and mod: coefficient ((x[dim] floordiv divisor) mod modulus), modulus 0 none, divisor 1
+   none (metal_ir.h metal_ir_term, the same record) */
+struct mesh_graph_term { uint32_t dim, padding; int64_t coefficient; uint64_t divisor, modulus; };
+/* design/compilation-composition-change-request.md, "Complete replacement workgroup", values and effects; J. Lee,
+   Ph.D. dissertation, University of Michigan, 2015, Chapter III, §3.2.2: the bytes threadgroup g = (g_0, g_1, g_2) of
+   dispatch `dispatch` touches through its binding `binding`, [start + t(g), + extent) of the bound value's storage, t the
+   sum of terms [first, first + terms) of the caller's term array over g (metal_ir.h metal_ir_footprints), `exact` 0
+   where that is a bound */
+struct mesh_graph_footprint { uint32_t dispatch, binding, exact, first, terms, padding; int64_t start; uint64_t extent; };
+_Static_assert(sizeof(struct mesh_graph_term) == 32 && sizeof(struct mesh_graph_footprint) == 40,
+               "metal_ir.h metal_ir_term, metal_ir_footprint");
 /* design/compilation-composition-change-request.md item 6.2: the relation is the supplied edges (supplied_from[e] ->
    supplied_to[e]) united with the accesses' conflicts (lower vertex first), each pair once, sorted by (from, to); every
    edge runs forward in the caller's issue numbering (EINVAL for a supplied edge with from >= to: it would wait on work

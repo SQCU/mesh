@@ -87,36 +87,16 @@ static const uint64_t *row_of(const struct hdr *m,const uint64_t *rows,uint32_t 
   *at=landed-key;
   return bsearch(&key,rows,count,2*sizeof *rows,row_order);
 }
-int mesh_metal_receive_fields(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
-  const struct mesh_metal_input *input,struct mesh_section section,uint32_t *fields){
+/* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3: the plan's hops of `direction` whose
+   count word is `word`, each one struct mesh_graph_access of its bytes in the copy-0 rows of `section` (mesh-metal.h
+   mesh_metal_sent_extents), `vertex` its transport field where `phases` is the range's phase fields (else 0) */
+static int hop_extents(struct mesh_ctx *context,uint64_t plan,uint32_t direction,uint64_t word,uint64_t phases,
+  struct mesh_section section,const uint32_t *members,uint32_t count,struct mesh_graph_access *extents,size_t room,
+  size_t *made){
   struct hdr *m=context->M;
   const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_hop *hops=mesh_hops(m,words);
-  const uint64_t group=transport->offset+input->phases,count=transport->offset+input->count;
-  uint64_t *rows=rows_sorted(context,section),at;
-  if(!rows)return ENOMEM;
-  memset(fields,0,(size_t)input->pages*sizeof *fields);
-  for(uint64_t e=0;e<words->entries;e++){
-    const struct mesh_hop *hop=hops+e;
-    if(hop->direction!=MESH_RECEIVE || hop->count!=count)continue;
-    const uint64_t *found=row_of(m,rows,section.stride,hop,&at);
-    if(!found){free(rows);return EINVAL;}
-    fields[(hop->word-group)/sizeof(uint64_t)*32+hop->field/2]=(uint32_t)found[1];
-  }
-  free(rows);
-  return 0;
-}
-
-/* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3; rdma/mesh-collective.c mesh_plan's
-   SEND hops (count the transfer's completion word of the hop's copy) */
-int mesh_metal_sent_extents(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
-  uint32_t transfer,struct mesh_section section,const uint32_t *members,uint32_t count,struct mesh_graph_access *extents,
-  size_t room,size_t *made){
-  (void)transport;
-  struct hdr *m=context->M;
-  const struct mesh_state *words=mesh_state_at(context->M,plan);
-  const struct mesh_hop *hops=mesh_hops(m,words);
-  const uint64_t completion=mesh_transfer_at(m,words,transfer)->completion,block=(uint64_t)m->block*m->pgsz;
+  const uint64_t block=(uint64_t)m->block*m->pgsz;
   uint64_t *rows=rows_sorted(context,section),at;
   uint32_t *member=count?malloc((section.stride?section.stride:1)*sizeof *member):NULL;
   if(!rows || (count && !member)){free(rows);free(member);return ENOMEM;}
@@ -126,17 +106,134 @@ int mesh_metal_sent_extents(struct mesh_ctx *context,struct mesh_metal_transport
   int status=0;
   for(uint64_t e=0;e<words->entries && !status;e++){
     const struct mesh_hop *hop=hops+e;
-    if(hop->direction!=MESH_SEND || hop->count!=completion)continue;
+    if(hop->direction!=direction || hop->count!=word)continue;
     const uint64_t *row=row_of(m,rows,section.stride,hop,&at);
     const uint32_t key=row && member?member[row[1]]:0;
     if(!row || key==UINT32_MAX){status=EINVAL;break;}
     const uint64_t base=member?0:row[1]*block;
-    if(found<room)extents[found]=(struct mesh_graph_access){.key=key,.start=base+at,.end=base+at+hop->bytes};
+    const uint32_t field=phases?(uint32_t)((hop->word-phases)/sizeof(uint64_t)*32+hop->field/2):0;
+    if(found<room)extents[found]=(struct mesh_graph_access){.key=key,.start=base+at,.end=base+at+hop->bytes,.vertex=field};
     found++;
   }
   free(rows);free(member);
   *made=found;
   return status?status:found>room?ERANGE:0;
+}
+/* design/torch-capture-change-request.md item 3; MPI 4.1 §4.2.2 MPI_PARRIVED: each RECEIVE hop's field names its row */
+int mesh_metal_receive_fields(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+  const struct mesh_metal_input *input,struct mesh_section section,uint32_t *fields){
+  const uint64_t block=(uint64_t)((struct hdr *)context->M)->block*((struct hdr *)context->M)->pgsz;
+  size_t made=input->pages,room=0;
+  struct mesh_graph_access *extents=NULL;
+  int status=ERANGE;
+  while(status==ERANGE){
+    free(extents);
+    room=made;
+    if(!(extents=malloc((room+1)*sizeof *extents)))return ENOMEM;
+    status=hop_extents(context,plan,MESH_RECEIVE,transport->offset+input->count,transport->offset+input->phases,section,
+                       NULL,0,extents,room,&made);
+  }
+  memset(fields,0,(size_t)input->pages*sizeof *fields);
+  for(size_t k=0;!status && k<made;k++)
+    if(extents[k].vertex<input->pages)fields[extents[k].vertex]=(uint32_t)(extents[k].start/block);
+    else status=EINVAL;
+  free(extents);
+  return status;
+}
+/* design/problems-of-14b9a757-change-request.md, third stops 7; rdma/mesh-collective.c mesh_plan's SEND hops (count
+   the transfer's completion word of the hop's copy) */
+int mesh_metal_sent_extents(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+  uint32_t transfer,struct mesh_section section,const uint32_t *members,uint32_t count,struct mesh_graph_access *extents,
+  size_t room,size_t *made){
+  (void)transport;
+  return hop_extents(context,plan,MESH_SEND,mesh_transfer_at(context->M,mesh_state_at(context->M,plan),transfer)->completion,
+                     0,section,members,count,extents,room,made);
+}
+
+/* J. Lee, Ph.D. dissertation, University of Michigan, 2015, §3.2.2: a footprint's hull over threadgroups x = w and
+   every (y, z) of the grid, each term of dimension x at w and of y or z over [0, ((groups - 1) floordiv divisor)]
+   (below its modulus); its partitions [*lo, *hi] of the range, none where *lo > *hi */
+static void mask_bounds(const uint32_t groups[3],const struct mesh_graph_footprint *a,const struct mesh_graph_term *term,
+  const struct mesh_metal_range *r,uint32_t w,uint32_t *lo,uint32_t *hi){
+  __int128 low=a->start-(__int128)r->at,high=low;
+  for(uint32_t k=0;k<a->terms;k++){
+    const struct mesh_graph_term *t=term+a->first+k;
+    const uint64_t divisor=t->divisor?t->divisor:1;
+    uint64_t least=0,most=(t->dim?(uint64_t)groups[t->dim]-1:w)/divisor;
+    if(!t->dim)least=most;
+    if(t->modulus && most-least>=t->modulus){least=0;most=t->modulus-1;}
+    else if(t->modulus){least%=t->modulus;most%=t->modulus;}
+    const __int128 x=(__int128)t->coefficient*least,y=(__int128)t->coefficient*most;
+    low+=x<y?x:y;high+=x<y?y:x;
+  }
+  high+=a->extent;
+  const __int128 end=(__int128)r->partitions*r->page;
+  if(low<0)low=0;
+  if(high>end)high=end;
+  if(high<=low || !r->page){*lo=1;*hi=0;return;}
+  *lo=(uint32_t)(low/r->page);*hi=(uint32_t)((high-1)/r->page);
+}
+struct mask_rows { const uint32_t *bound; uint32_t width; const uint32_t *probe; };
+static int mask_same(const void *context,uint32_t k){
+  const struct mask_rows *x=context;
+  return !memcmp(x->bound+(size_t)k*x->width,x->probe,x->width*sizeof *x->probe);
+}
+/* design/torch-capture-change-request.md item 3; mesh-graph.h mesh_graph_keyed_find and mesh_graph_keyed_add over
+   the rows' hash */
+int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh_graph_footprint *footprint,
+  const struct mesh_graph_term *term,const uint32_t *range,struct mesh_metal_readiness *readiness){
+  const uint32_t G=groups[0],R=readiness->ranges,width=2*R;
+  if(readiness->groups!=G || !G || !groups[1] || !groups[2])return EINVAL;
+  for(size_t a=0;a<footprints;a++){
+    if(range[a]!=UINT32_MAX && range[a]>=R)return EINVAL;
+    for(uint32_t k=0;k<footprint[a].terms;k++)if(term[footprint[a].first+k].dim>2)return EINVAL;
+  }
+  uint32_t *bound=malloc(((size_t)G*width+1)*sizeof *bound),*head=malloc(((size_t)G+1)*sizeof *head),
+           *next=malloc(((size_t)G+1)*sizeof *next),*first=malloc(((size_t)(G>R?G:R)+1)*sizeof *first);
+  if(!bound || !head || !next || !first){free(bound);free(head);free(next);free(first);return ENOMEM;}
+  for(uint32_t d=0;d<R;d++)first[d]=0;
+  for(size_t a=0;a<footprints;a++)if(range[a]!=UINT32_MAX)first[range[a]]=1;
+  for(uint32_t w=0;w<G;w++){
+    uint32_t *row=bound+(size_t)w*width;
+    for(uint32_t d=0;d<R;d++){row[2*d]=1;row[2*d+1]=0;}
+    for(uint32_t d=0;d<R;d++)
+      if(!first[d] && readiness->range[d].partitions){row[2*d]=0;row[2*d+1]=readiness->range[d].partitions-1;}
+    for(size_t a=0;a<footprints;a++){
+      if(range[a]==UINT32_MAX)continue;
+      uint32_t lo,hi,*at=row+2*range[a];
+      mask_bounds(groups,footprint+a,term,readiness->range+range[a],w,&lo,&hi);
+      if(lo>hi)continue;
+      if(at[0]>at[1]){at[0]=lo;at[1]=hi;}
+      else{if(lo<at[0])at[0]=lo;if(hi>at[1])at[1]=hi;}
+    }
+    head[w]=UINT32_MAX;
+  }
+  uint32_t classes=0;
+  for(uint32_t w=0;w<G;w++){
+    const uint32_t *row=bound+(size_t)w*width;
+    uint64_t hash=1469598103934665603u;
+    for(uint32_t x=0;x<width;x++)hash=(hash^row[x])*1099511628211u;
+    const struct mask_rows same={bound,width,row};
+    const uint32_t key=(uint32_t)(hash%G),k=mesh_graph_keyed_find(head,next,key,mask_same,&same);
+    if(k!=UINT32_MAX){readiness->class_of[w]=readiness->class_of[k];continue;}
+    mesh_graph_keyed_add(head,next,key,w);
+    readiness->class_of[w]=classes;
+    first[classes++]=w;
+  }
+  for(uint32_t c=0;c<classes;c++){
+    const uint32_t *row=bound+(size_t)first[c]*width;
+    for(uint32_t d=0;d<R;d++){
+      const struct mesh_metal_range *r=readiness->range+d;
+      uint32_t a=UINT32_MAX,b=0;
+      for(uint32_t f=0;row[2*d]<=row[2*d+1] && f<r->input.pages;f++)
+        if(r->field[f]!=UINT32_MAX && r->field[f]>=row[2*d] && r->field[f]<=row[2*d+1]){if(f<a)a=f;b=f+1;}
+      if(a>=b)a=b=0;
+      readiness->span[2*((size_t)c*R+d)]=a;readiness->span[2*((size_t)c*R+d)+1]=b;
+    }
+  }
+  readiness->classes=classes;
+  free(bound);free(head);free(next);free(first);
+  return 0;
 }
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
@@ -161,6 +258,42 @@ int mesh_metal_status_prepare(struct mesh_ctx *context,struct mesh_metal_transpo
   uint64_t *status){
   *status=mesh_state_at(context->M,plan)->status-transport->offset;
   return 0;
+}
+
+/* design/compilation-composition-change-request.md, "Complete replacement workgroup", values and effects: the records
+   of mesh-metal.h from the plan, one calling sequence for every producer of the compiler's transport operands */
+int mesh_metal_range_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  const struct mesh_planned *planned,uint32_t call,uint32_t owner,uint32_t transfer,struct mesh_section section,
+  uint64_t at,uint32_t *field,uint32_t room,struct mesh_metal_range *range){
+  if(call>=planned->calls || owner>=planned->calls)return EINVAL;
+  const struct mesh_planned_call *mine=planned->call+call,*theirs=planned->call+owner;
+  const struct hdr *m=context->M;
+  *range=(struct mesh_metal_range){.generation=owner==call?(struct mesh_graph_generation){1,1,0}:
+    (struct mesh_graph_generation){mine->every?mine->every:1,theirs->every?theirs->every:1,theirs->ordinal},
+    .partitions=section.stride,.page=(uint64_t)m->block*m->pgsz,.field=field,.at=at,.transfer=transfer,.owner=owner};
+  int status=mesh_metal_receive_prepare(context,transport,theirs->plan,transfer,&range->input);
+  if(!status && range->input.pages>room)status=ERANGE;
+  return status?status:mesh_metal_receive_fields(context,transport,theirs->plan,&range->input,section,field);
+}
+int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  const struct mesh_planned *planned,uint32_t call,uint32_t transfer,uint64_t total,struct mesh_metal_release *release){
+  if(call>=planned->calls)return EINVAL;
+  struct mesh_metal_publication publication;
+  *release=(struct mesh_metal_release){.total=total,.transfer=transfer};
+  int status=mesh_metal_publication_prepare(context,transport,planned->call[call].plan,transfer,&publication);
+  if(!status)status=mesh_metal_status_prepare(context,transport,planned->call[call].plan,&release->status);
+  release->supplied=publication.supplied;
+  return status;
+}
+int mesh_metal_sending_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  const struct mesh_planned *planned,uint32_t call,uint32_t transfer,struct mesh_section section,
+  struct mesh_graph_access *extent,size_t room,struct mesh_metal_sending *sending){
+  if(call>=planned->calls)return EINVAL;
+  *sending=(struct mesh_metal_sending){.extent=extent,.transfer=transfer};
+  int status=mesh_metal_sent_prepare(context,transport,planned->call[call].plan,transfer,&sending->sent);
+  if(status || !sending->sent.sends)return status;
+  return mesh_metal_sent_extents(context,transport,planned->call[call].plan,transfer,section,NULL,0,extent,room,
+                                 &sending->extents);
 }
 int mesh_metal_status(struct mesh_ctx *context,uint64_t plan,int cause,uint64_t *first){
   if(first)*first=UINT64_MAX;

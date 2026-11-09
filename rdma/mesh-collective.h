@@ -90,15 +90,28 @@ _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function
    synchronization are the transport's (mesh_transfers_start waits, the bridge's tells) */
 struct mesh_graph_signature;
 struct mesh_graph_dependence;
+/* design/compilation-composition-change-request.md, "Complete replacement workgroup", program relations ("Retain the
+   value/effect/transfer cause of an edge"); A. J. Bernstein, IEEE Trans. Electronic Computers EC-15(5), 1966: `causes[q]`
+   the condition of order pair q, FLOW where call b reads a result of call a, CONFLICT where one writes storage the
+   other reads or writes. `cause[e]` of order[e]: FLOW or CONFLICT with `pair` q, the edge implementing pair q at a node
+   both calls' parts share; PROGRAM a node's submission order or its parts' call order; SUBMIT a submission before its
+   part; OUTSTANDING A10's bound, a part before a later call's submission; CHAIN a commuting chain's or a persistent
+   storage's order; TRANSFER a demand's tree edge between nodes (`pair` the demand); `pair` UINT32_MAX but for FLOW,
+   CONFLICT and TRANSFER */
+enum { MESH_ORDER_FLOW, MESH_ORDER_CONFLICT, MESH_PLANNED_PROGRAM, MESH_PLANNED_SUBMIT, MESH_PLANNED_OUTSTANDING,
+       MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER };
+struct mesh_planned_cause { uint32_t kind,pair; };
 struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,padding; };
 struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signature *signature;
-                      struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders; };
+                      struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
+                      struct mesh_planned_cause *cause; };
 _Static_assert(sizeof(struct mesh_planned_call)==32 && offsetof(struct mesh_planned_call,function)==16 &&
-               sizeof(struct mesh_planned)==40 && offsetof(struct mesh_planned,calls)==24 &&
-               offsetof(struct mesh_planned,orders)==32,"mesh_planned: rdma/mesh.py Planned");
+               sizeof(struct mesh_planned)==48 && offsetof(struct mesh_planned,calls)==24 &&
+               offsetof(struct mesh_planned,orders)==32 && offsetof(struct mesh_planned,cause)==40 &&
+               sizeof(struct mesh_planned_cause)==8,"mesh_planned: rdma/mesh.py Planned");
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
-              const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,uint32_t norders,const uint32_t *chains,
-              uint32_t horizon,uint64_t deadline,struct mesh_planned *planned);
+              const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
+              const uint32_t *chains,uint32_t horizon,uint64_t deadline,struct mesh_planned *planned);
 void mesh_planned_free(struct mesh_planned *);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
