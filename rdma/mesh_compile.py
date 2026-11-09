@@ -16,8 +16,10 @@ import weakref
 import torch
 import torch.utils._pytree as pytree
 from torch._library._out_variant import _is_functional, get_out_arg_names, to_out_variant
-from torch._subclasses.fake_tensor import FakeTensorMode
+from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
+from torch._subclasses.meta_utils import MetaConverter
 from torch.fx.node import Node, map_arg
+from torch.utils._mode_utils import no_dispatch
 
 import mesh
 import mesh_disk
@@ -387,6 +389,25 @@ def _operator(node, local):
         rule = _matmul(operands, shapes, out)
     elif packet is A.einsum:
         rule = _einsum(local, operands, shapes, out)
+    elif packet is A.sum and len(operands) == 1:
+        given, rank = _given(local, _names(local)), len(shapes[0])
+        dimensions = given.get('dim')
+        dimensions = tuple(range(rank)) if not rank or dimensions is None or dimensions == [] \
+            else tuple(d % rank for d in _ints(dimensions, 1))
+        labels = tuple(('reduced', d) if d in dimensions else d for d in range(rank)) \
+            if given.get('keepdim', False) else tuple(d for d in range(rank) if d not in dimensions)
+        rule = Rule('reduction', 1, operands, [tuple(range(rank))], labels, (0,), dimensions, (), False, None,
+                    general.configure)
+    elif packet in (A.permute, A.transpose, A.t) and len(operands) == 1:
+        given, rank = _given(local, _names(local)), len(shapes[0])
+        dimensions = list(range(rank))
+        if packet is A.permute:
+            dimensions = [d % rank for d in given['dims']]
+        elif rank > 1:
+            a, b = (0, 1) if packet is A.t else (given['dim0'] % rank, given['dim1'] % rank)
+            dimensions[a], dimensions[b] = dimensions[b], dimensions[a]
+        rule = Rule('format', 0, operands, [tuple(range(rank))], tuple(dimensions), (0,), (), (), False, None,
+                    general.configure)
     elif packet in CONVOLUTION or packet in TRANSPOSED:
         rule = _convolution(node, local, operands, shapes)
     elif packet in MAXIMUM or packet in AVERAGE:
@@ -675,20 +696,22 @@ def partition(gm, placement, nodes, page):
         pad = rule.operands[0] if rule is not None and rule.kind == 'slice' else None
         if pad is not None and operators.get(pad) is not None and operators[pad].kind == 'pad' and len(pad.users) == 1:
             operators[node], operators[pad] = _merged(pad, operators[pad], rule), None
-    names = {node.name: node for node in ir.order if node.op == 'placeholder'}
+    names = {node.name if node.op == 'placeholder' else node.target: node for node in ir.order
+             if node.op in ('placeholder', 'get_attr')}
     for name, mapping in placement.splits.items():
         node, mapping = names.get(name), tuple(mapping)
         if node is None or ir.sharding[node] is None or len(mapping) != len(ir.sharding[node]) \
                 or not all(isinstance(m, int) and -1 <= m < len(ir.shape) for m in mapping) \
                 or len([m for m in mapping if m >= 0]) != len({m for m in mapping if m >= 0}):
-            raise ValueError('splits[%r] = %s: no placeholder\'s dims_mapping over a mesh of %d dimensions, each at '
+            raise ValueError('splits[%r] = %s: no input or module tensor\'s dims_mapping over a mesh of %d dimensions, each at '
                              'most once (GSPMD section 3.1)' % (name, mapping, len(ir.shape)))
         ir.sharding[node] = tuple(m if m >= 0 and ir.shape[m] > 1 else -1 for m in mapping)
         annotated.add(node)
     # GSPMD sections 3.1, 3.5 and 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram;
     # design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 8
     replicated = mesh_graph.forward(ir.order, lambda node: node.all_input_nodes,
-                                    lambda node, operands: node.op == 'get_attr' or node.op == 'call_function'
+                                    lambda node, operands: node.op == 'get_attr'
+                                    and not any(m >= 0 for m in ir.sharding[node] or ()) or node.op == 'call_function'
                                     and bool(operands) and all(operands) and _aliases(ir.locals[node]))
     annotated |= {node for node, whole in replicated.items() if whole and ir.sharding[node] is not None}
     _complete(ir, operators, annotated)
@@ -7399,9 +7422,15 @@ def _ended(replay):
 # 3; J. Reed, Z. DeVito, H. He, A. Ussery and J. Ansel, MLSys 2022; torch v2.14.0 torch/fx/_symbolic_trace.py,
 # Tracer.is_leaf_module; torch/nn/modules/module.py, _forward_unimplemented
 class Function(torch.nn.Module):
-    def __init__(self, module, placement, weights, device=None):
+    def __init__(self, module, placement, weights, device=None, loss=None):
         super().__init__()
         self.module, self.placement, self.weights, self.device = module, placement, weights, device
+        self.loss = loss
+
+
+# torch 2.14.0 torch/export/experimental/__init__.py _export_forward_backward;
+# torch/export/graph_signature.py ExportBackwardSignature; torch/_functorch/aot_autograd.py aot_export_module
+TrainingResult = collections.namedtuple('TrainingResult', 'outputs parameters inputs')
 
 
 class Tracer(torch.fx.Tracer):
@@ -7666,8 +7695,27 @@ def _decomposed(exported):
         exported = exported.run_decompositions({op: known[op] for op in wanted})
 
 def _metadata(value):
-    return (tuple(value.shape), tuple(value.stride()), value.dtype, value.device) \
+    return (tuple(value.shape), tuple(value.stride()), value.storage_offset(), value.dtype, value.device,
+            value.requires_grad) \
         if isinstance(value, torch.Tensor) else value
+
+
+# torch 2.14.0 torch/export/experimental/__init__.py _export_forward_backward;
+# torch/export/exported_program.py _decompose_and_get_gm_with_new_signature_constants, ModuleCallSignature
+def _exported(function, args, kwargs):
+    exported = torch.export.export(function.module, tuple(args), dict(kwargs), strict=False)
+    forward = exported.call_spec.out_spec
+    if function.loss is not None:
+        from torch.export.experimental import _export_forward_backward
+        exported = _export_forward_backward(exported, joint_loss_index=function.loss)
+    exported = _decomposed(exported)
+    if function.loss is not None:
+        backward = exported.graph_signature.backward_signature
+        outputs = pytree.tree_unflatten([None] * forward.num_leaves, forward)
+        result = TrainingResult(outputs, dict.fromkeys(backward.gradients_to_parameters.values()),
+                                (None,) * len(backward.gradients_to_user_inputs))
+        exported.module_call_graph[0].signature.out_spec = pytree.tree_structure(result)
+    return exported
 
 
 # design/aot-compilation-change-request.md A1, A10 and appendix item 6; torch 2.14.0 torch/export/__init__.py;
@@ -7681,6 +7729,7 @@ class _Export(torch.fx.Interpreter):
         super().__init__(gm)
         self.mode, self.compiled, self.of, self.origin, self.calls = mode, [], {}, {}, []
         self.marks, self.sources, self.inputs = {}, [], 0
+        self.converters = {}
 
     # each node's value with every flat leaf replaced by the _Produced naming it
     def marked(self, n, produced):
@@ -7690,9 +7739,12 @@ class _Export(torch.fx.Interpreter):
     def fake(self, value, device=None):
         if not isinstance(value, torch.Tensor):
             return value
-        with self.mode:
-            return torch.empty_strided(tuple(value.shape), tuple(value.stride()), dtype=value.dtype,
-                                       device=device or value.device)
+        device = torch.device(device or value.device)
+        converter = self.converters.setdefault(device, MetaConverter())
+        def make(meta, original_device):
+            with no_dispatch():
+                return FakeTensor(self.mode, meta(), device)
+        return converter(value, callback=make)
 
     def run_node(self, n):
         function = self.module.get_submodule(n.target) if n.op == 'call_module' else None
@@ -7719,13 +7771,16 @@ class _Export(torch.fx.Interpreter):
 
     def export(self, n, function, args, kwargs):
         flat, spec = pytree.tree_flatten((args, kwargs))
-        signature = (spec, tuple(_metadata(v) for v in flat))
+        storages = {}
+        aliases = tuple(storages.setdefault(v.untyped_storage()._cdata, len(storages))
+                        if isinstance(v, torch.Tensor) else None for v in flat)
+        signature = (spec, tuple(_metadata(v) for v in flat), aliases)
         found = [k for k, c in enumerate(self.compiled) if c.function is function and c.signature == signature]
         if not found:
             if function.device is not None:
                 held = 'cpu' if function.device == 'ane' else function.device
                 args, kwargs = pytree.tree_map(lambda v: self.fake(v, held), (args, kwargs))
-            exported = _decomposed(torch.export.export(function.module, tuple(args), dict(kwargs), strict=False))
+            exported = _exported(function, args, kwargs)
             gm = exported.module(check_guards=False)
             _static(gm)
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
@@ -8047,13 +8102,17 @@ def _constant_storage(info):
         if info.buffer else (('data', info.data, info.data_bytes), info.data, info.data_bytes)
 
 
-def _save_program(context, state, path):
-    retained, replay = state['built'], state['replay']
-    programs, analysed, calls = retained['programs'], retained['analysed'], retained['calls']
+def _finish(replay):
     error = C.create_string_buffer(4096)
     status = replay['lib'].MetalProgramEnd(replay['program'], replay['ended'], error, len(error))
     if status:
         raise _execution_error(replay, status, error.value.decode())
+
+
+def _save_program(context, state, path):
+    retained, replay = state['built'], state['replay']
+    programs, analysed, calls = retained['programs'], retained['analysed'], retained['calls']
+    _finish(replay)
     plan = _saved_bytes(mesh.LIB.mesh_plan_save, C.byref(context), _program(), retained['functions'],
                        len(retained['functions']), _array(mesh.U, calls), len(calls), analysed.orders, analysed.causes,
                        analysed.norders, analysed.chains, C.byref(retained['planned']), diagnostic=False)
@@ -8249,6 +8308,7 @@ def _runner(context, state, make):
             timed(make)
         return timed(lambda: _save_program(context, state, path))
     run.save = save
+    run.synchronize = lambda: timed(lambda: _finish(state['replay']))
     run.signature = lambda: state['replay']['signature'] if state['replay'] is not None else None
     weakref.finalize(run, _dropped, context, state)
     return run
