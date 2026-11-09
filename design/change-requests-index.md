@@ -8,7 +8,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
 
 ## Outstanding
 
-- [compilation-composition-change-request.md](compilation-composition-change-request.md): outstanding, items 1–6.
+- [compilation-composition-change-request.md](compilation-composition-change-request.md): outstanding, items 1–7.
   Composes the nine requests below through cited compiler roles, complete lowering, shared representations and
   module ownership. Their individual implementation records do not establish that this composition is complete.
   Item 5 records the operator's native Apple Silicon execution and implementation deduplication correction and
@@ -17,6 +17,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   [complete replacement workgroup](compilation-composition-change-request.md#complete-replacement-workgroup)
   assigns eight connected responsibilities and one coordinated replacement landing across both repositories.
   Working commits record development; they do not constitute that landing or narrow the assigned program domain.
+  [Item 7](compilation-composition-change-request.md#7-preserve-the-properties-while-compiling-away-the-abstract-machinery)
+  cites MLIR analysis/control lowering, Halide scheduled program synthesis and CompCert behavioral preservation.
+  Lowerable IR carries solved properties into optimizing compilation; the runtime need not retain their original
+  types/graphs/metadata. Direct compiled control and fixed target operations must displace the remaining task/loop
+  and command interpreters. This documentation records the obligation, not completion or a performance result.
 
   Current connected path: source-built LiteRT/ML Drift and Torch numerical producers → owned typed numerical
   operations and Tint regions → specialization, fusion and target lowering → retained effects, dependence causes,

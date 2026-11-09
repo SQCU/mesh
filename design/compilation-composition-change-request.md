@@ -88,10 +88,47 @@ Ha's self-timed strategy:
 Actor firing depends on actual input availability. The data structures are the dataflow graph, processor assignments,
 per-processor actor orders and the communication/synchronization graphs.
 
+### S8. Analysis results become lower IR; abstract operations disappear
+
+MLIR, [One-Shot Bufferization](https://mlir.llvm.org/docs/Bufferization/#what-is-one-shot-bufferize):
+whole-function SSA use-def analysis builds alias/equivalence sets and decides in-place storage before rewriting
+tensor operations to buffer operations. Rewriting consumes those decisions. The role here is a completed
+analysis-to-lowering handoff; recovering aliases from already allocated memory would discard the analysis.
+
+MLIR's [affine lowering](https://mlir.llvm.org/docs/Passes/#-lower-affine) replaces affine operations with
+structured control and arithmetic and removes unused maps/sets. Its
+[SCF-to-CF conversion](https://mlir.llvm.org/docs/Passes/#-convert-scf-to-cf) and
+[CF-to-LLVM conversion](https://mlir.llvm.org/docs/Passes/#-convert-cf-to-llvm) continue to ordinary control flow.
+The concrete [`WhileLowering::matchAndRewrite` implementation](https://mlir.llvm.org/doxygen/SCFToControlFlow_8cpp_source.html)
+inlines test/body regions and replaces their terminators with conditional branches and backedges. Loop-carried
+values become block arguments. These methods preserve control and data flow while eliminating the structured
+loop operation; they do not require an executor to interpret a loop object.
+
+### S9. Algorithm and schedule compile into loops, storage and target code
+
+J. Ragan-Kelley et al., *Decoupling Algorithms from Schedules for Easy Optimization of Image Processing Pipelines*,
+SIGGRAPH 2012, [§§5.1–5.2 and Figure 5](https://commit.csail.mit.edu/papers/2012/ragan-kelley-siggraph12-halide.pdf).
+Halide lowers the algorithm and schedule into imperative loops and storage, infers bounds, and lowers through
+LLVM to target code. Bounds that depend on input sizes become generated expressions. Scheduling decisions are
+realized in the program; the original functional pipeline need not be reconstructed at each invocation. The
+paper also uses runtime services for parallel work: compilation removes the abstract scheduling problem, not
+the actual resource operations. Its role here is scheduled program synthesis followed by ordinary optimization.
+
+### S10. Preservation relates behaviors across representations
+
+CompCert, [whole-program preservation and refinement theorems](https://compcert.org/doc/html/compcert.driver.Complements.html),
+`transf_c_program_preservation` and `transf_c_program_is_refinement`. For source C without undefined behavior,
+each generated assembly behavior is an allowed source behavior. The theorem relates source and target semantics;
+it does not require assembly to retain C's syntax or data structures. Its role here is the correctness criterion
+for representation-changing compilation. Citing it does not prove Mesh's transformations or transfer CompCert's
+C/assembly theorem to distributed execution. Required numerical, control and communication properties must be
+established for Mesh's own lowerings. Behavior preservation alone also does not establish performance preservation.
+
 S1, S2, S4 and S5 were read on their linked pages on 2026-11-08; S3 and S7 from the linked PDFs. S6 was reread in the
 previously downloaded author's book, §4.2.2; its extraction is also recorded in
 [specialization-sources-2026-11-07.md](specialization-sources-2026-11-07.md). MLIR supplies the cited compiler methods;
-the implementation sites are the existing mesh and metal-microbench modules below.
+the implementation sites are the existing mesh and metal-microbench modules below. S8–S10 were checked against
+the linked primary documentation, implementation and paper on 2026-11-09.
 
 ## The nine requests and their roles
 
@@ -619,6 +656,7 @@ compiler and native/signature consumers use these retained boundaries and their 
 without a second traversal of source FX or duplicated test lowering. This is a structured-control contract, not a
 requirement for a runtime control stack or general CALL/RET interpreter: final lowering may emit direct branches
 and backedges and fuse compatible work, retaining only waits demanded by actual dependencies and semantics.
+Requirement 7 below makes completing that final lowering explicit.
 
 **Connected edit boundary.** Frontend owns recursive region partition/instantiation and the original port links;
 compiler owns shared typed region/generation operands and their transformed effects; executor owns scoped
@@ -630,6 +668,68 @@ producer facts and their existing consumers. Existing operational callers will e
 zero/repeated nested activations, borrowed inputs, carried outputs and communication as the connected code becomes
 runnable; no separate evaluator is introduced.
 
+### 7. Preserve the properties while compiling away the abstract machinery
+
+The operator, 2026-11-09:
+
+> " Execution will reuse the loop stack." does this mean that a runtime has a loop stack? is a runtime using the most compact most optimized program which has the same data flow dependency ordering and so on as the IR implies or is there an extra virtualization, sync, wait, guard, or runtime check implied by this representation? the performance ceiling of our final lowering is paramount in this scope of work...
+
+> lets make sure that our documentation of change requests and so on correctly cites reference systems where abstract problems are solved, producing lowerable-IRs, which are themselves then optimizing-compiled into abstraction-agnostic-forms which have the same properties (by compilation) with or without an explicit representation of the types, metadata, graphs, etc that we know will still be true about the runtimes.
+
+- **Source:** S8 supplies analysis-to-storage and structured-control-to-CFG lowerings; S9 supplies scheduled
+  imperative program synthesis and target compilation; S6 specializes static operands into executable code;
+  S10 supplies the cross-representation preservation criterion. S3/S4 permit joint compute/communication
+  transformations and S7 supplies the remaining data-availability semantics.
+- **Applies to:** requirements 1–6, all nine composed requests, the complete replacement workgroup and nested
+  region handoff above. This clarifies their final lowering; it adds no separate execution regime.
+- **Roles and representations:** analysis solves the abstract problem once and supplies a lowerable program to
+  its optimizing consumers. Typed numerical IR, dependencies, placement, storage, control and communication
+  annotations stay available until their last compiler consumer. Each may then be realized in instructions,
+  addresses, branches, target commands and synchronization without preserving its original runtime encoding.
+  A property is preserved through the meaning of the generated program, whether its descriptive metadata is
+  erased or retained separately for loading, inspection or the required signature.
+- **Replaces:** the residual position/task/guard/loop-stack interpreter in `MetalProgramExecute`/`MetalNativeStep`,
+  whole-prefix predicate drains without a reaching-writer justification in `MetalLoopTest`, and repeated static
+  command-kind, cut, pass and binding discovery inside `MetalRowEncode`/`MetalReplayRun`. Compiling an outer caller
+  which still invokes those generic decoders does not complete their replacement. These are implementation sites
+  to revise; the external references above define the methods.
+- **Write:** pass the solved schedule and structured control/effects into the existing compiler's native target
+  lowering and persistence owner. Emit direct control flow and fixed target/API operations with bound operands;
+  compose and optimize CPU bodies with that control, and fuse target-local work where legal. Preserve lowerable
+  CPU bodies until composition rather than reducing them prematurely to opaque function pointers. Reuse the
+  existing native compilation/load owner; remove the displaced executor bodies when the complete consumer lands.
+
+The preservation and elimination obligations apply at every scope: numerical functions, their call/control graph,
+and the placed collective/transport program. These are applications of the cited methods to Mesh's existing
+contracts, not claims that the reference systems implement Mesh's interfaces.
+
+| Compiler operand or solved result | Property preserved in the emitted program | Representation that execution need not interpret |
+|---|---|---|
+| Typed numerical operations, shapes, views and alias/effect relations | Specified numerical semantics, permitted floating-point transformations, mutations, addressing and required lifetimes | Type objects, shape inference, operation names, alias-analysis graphs |
+| Partitioned computation, transfer dependencies and compiled order | Required producer/consumer ordering, publication and readiness; legal overlap and fused work | Original vertices, edges, partitions and an independent scheduling solve |
+| Structured test/body regions, carried values and exit links | Taken-arm effects, N+1 tests for N WHILE bodies, final false-test effects and correct exit values | Source region objects, position dispatch, a general loop-stack interpreter |
+| Realized storage, copies and completion dependencies | Correct value instance, non-overlapping live storage where required, reuse only after completion | Repeated lifetime analysis or parsing allocation metadata on each task |
+| Selected ICB runs, bindings, copies/fills, barriers and API boundaries | The selected target commands with their required ordering and operands | Static command-kind switches, pass scans, cut discovery and generic callback tables |
+| Lowered synchronization and its retained provenance | The required externally observable synchronization property of this executable | Runtime reconstruction of the compiler graph; the signature remains an associated observation artifact |
+
+Graph transformations may fuse vertices, remove edges made internal to fused work, and replace storage or control
+representations. The contract preserves the required observations and ordering, not a literal source graph or
+one runtime action per vertex. Dropping an annotation before its consumer, reparsing emitted source to recover it,
+or silently forgetting its property is an incomplete lowering.
+
+Residual runtime operands are actual changing data: inputs, predicates, supported dynamic indexes, addresses bound
+at preparation/load, arrival/completion and resource state. Their arithmetic, branches and necessary API work
+remain compiled operations. A remaining wait must follow from actual producer/consumer effects and the selected
+target mechanism. A host predicate's reaching writers determine its synchronization; unrelated queued work alone
+does not justify a whole-queue drain. Readiness is not permission to repeat placement or dependency analysis.
+
+Performance is an independent requirement of this replacement. Semantic equivalence does not excuse an extra
+interpreter, launch, transfer, guard or wait introduced only to maintain an erased abstraction. Review the generated
+control flow and target operations as well as the retained IR; removing a top-level interpreter while hiding the
+same dispatch underneath it does not satisfy the requirement. Existing numerical clients, emitted-signature
+observation and the measurements required by `docs/measurement.md` establish the corresponding implementation
+evidence. Citations and successful compilation alone establish neither full coverage nor the required performance.
+
 ## Reusable form
 
 The same change-request form can name several existing requests in one requirement:
@@ -638,6 +738,10 @@ The same change-request form can name several existing requests in one requireme
 - **Source:** `<external author/source, section and exact method defining the roles>`.
 - **Roles and representations:** `<which clauses define inputs, transformations, analyses, outputs or execution;
   the named graphs, types, tables and schedules they share>`.
+- **Preservation and elimination:** `<properties maintained across each lowering, the last compiler consumer of
+  each annotation, and how the target realizes those properties after the original representation is eliminated>`.
+- **Residual execution:** `<actual varying operands and necessary target operations; static decisions compiled
+  away; performance obligations and their existing measurement path>`.
 - **Replaces:** `<existing split, duplicated decision or incomplete producer/consumer connection>`.
 - **Write:** implement those clauses as `<the cited composition>`, with `<producer>` supplying `<representation>`
   to `<consumer>` through `<responsible existing module>`; revise the callers and remove the displaced implementation
