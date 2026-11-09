@@ -94,6 +94,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
   actor costs and whole-group decisions; typed dynamic synchronization observation; actual Torch/collective and
   five-node E2B execution with the required transport overhead/bandwidth and decode throughput after prefill.
+  Source review also identifies specific performance mechanisms still to preserve: typed native CPU SGEMM/BNNS
+  contractions replacing the old Accelerate path; submission of independent GPU work before synchronous CPU/ANE
+  computation where the compiled schedule requires overlap; and efficient typed indexed updates replacing Torch's
+  current output-by-update scan. Restored CP/EP/mixed-engine callers do not by themselves close those obligations.
+  The historical optional fragment-1 coded-weight input still needs its typed codec handoff. Online KV attention,
+  local result layouts and global dropout coordinates now have source checkpoints but await their numerical run.
   Missing machine operands remain explicit in cost estimates. No corresponding operational/performance closure is
   recorded. Claude quota exhausted during this workgroup; the operator-authorized Codex continuation remains active.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
