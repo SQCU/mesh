@@ -1,7 +1,4 @@
-"""C9's review of each commit to mesh or metal-microbench (design/rubrics.md:422, the 10-30 pair): the commit, its
-changed functions whole, read by Claude Haiku with no tools. A Claude Code PostToolUse payload on stdin (each
-repository's .claude/settings.json); what the reader finds goes to stderr with exit 2, which Claude Code hands back to
-the committing session."""
+"""design/rubrics.md:422; design/commentary-review.md#post-commit-findings"""
 import json
 import os
 import re
@@ -69,24 +66,37 @@ def made(payload):
     return [(d, sha) for d, sha in found if git(d, 'rev-parse', '--path-format=absolute', '--git-common-dir') in REPOSITORIES]
 
 
+def feedback(messages):
+    if messages:
+        message = '\n\n'.join(messages)
+        print(json.dumps({'systemMessage': message,
+                          'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': message}}))
+    return 0
+
+
 def main():
     findings = []
     for repo, sha in made(json.load(sys.stdin)):
         commit = git(repo, 'show', '-W', '--no-color', '--format=commit %H%n%s%n', sha, '--', '.', *SKIPPED)
         if '\ndiff --git' not in '\n' + commit:
             continue
-        read = subprocess.run([*READER, '--system-prompt', PROMPT, 'Review this commit.'], input=commit[:400000],
-                              capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=170)
+        try:
+            read = subprocess.run([*READER, '--system-prompt', PROMPT, 'Review this commit.'], input=commit[:400000],
+                                  capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=170)
+        except (subprocess.TimeoutExpired, OSError) as error:
+            findings.append(f'C9 review of {sha[:10]} in {repo}: the reader failed: {error}')
+            continue
         said = read.stdout.strip()
         if read.returncode:
-            print(f'C9 review of {sha[:10]} in {repo}: the reader failed: {read.stderr.strip()[:500]}', file=sys.stderr)
-            return 1
+            findings.append(f'C9 review of {sha[:10]} in {repo}: the reader exited {read.returncode}: '
+                            f'{read.stderr.strip()[:500]}')
+            continue
+        if not said:
+            findings.append(f'C9 review of {sha[:10]} in {repo}: the reader gave no result')
+            continue
         if said != 'PASS':
             findings.append(f'C9 (design/rubrics.md:422) in {sha[:10]} of {repo}, read by Claude Haiku:\n{said}')
-    if findings:
-        print('\n\n'.join(findings), file=sys.stderr)
-        return 2
-    return 0
+    return feedback(findings)
 
 
 if __name__ == '__main__':

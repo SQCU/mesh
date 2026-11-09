@@ -116,9 +116,13 @@ def review(repo, sha, entries):
         try:
             read = subprocess.run([*READER, '--system-prompt', PROMPT, 'Review this commit.'], input=given,
                                   capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=880)
-            said, failed = read.stdout.strip(), read.returncode and read.stderr.strip()[:500]
+            said = read.stdout.strip()
+            failed = (f'exit {read.returncode}: {read.stderr.strip()[:500]}' if read.returncode else
+                      'no result' if not said else '')
         except subprocess.TimeoutExpired:
             said, failed = '', 'the reader did not answer in 880 s'
+        except OSError as error:
+            said, failed = '', str(error)
         if failed:
             record.update(outstanding=None, findings=[f'the reader failed: {failed}'])
         else:
@@ -132,9 +136,11 @@ def outstanding():
     with open(REVIEWS) as f:
         for line in f:
             record = json.loads(line)
-            latest[record['commit']] = record
+            latest[record['repository'], record['commit'], record.get('file')] = record
     for record in latest.values():
-        if record['outstanding'] is not False:
+        if 'style' in record:
+            print(f"{record['commit'][:10]} of {record['repository']}, {record['file']}: {record['style']}\n")
+        elif record['outstanding'] is not False:
             named = ', '.join(f"{e['document']} at {e['revision'][:10]}" for e in record['registered']) or 'none'
             print(f"{record['commit'][:10]} of {record['repository']}, against {named}: {record['subject'][:160]}\n"
                   + '\n'.join(record['findings']) + '\n')
@@ -169,12 +175,10 @@ def main():
         if not record or record['outstanding'] is False:
             continue
         named = ', '.join(f"{e['document']} at {e['revision'][:10]}" for e in entries) or 'no registered change request'
-        findings.append(f'Change request review of {sha[:10]} in {repo}, against {named}, recorded as outstanding in '
+        state = 'outstanding' if record['outstanding'] else 'incomplete (reader failure)'
+        findings.append(f'Change request review of {sha[:10]} in {repo}, against {named}, recorded as {state} in '
                         f'{REVIEWS}:\n' + '\n'.join(record['findings']))
-    if findings:
-        print('\n\n'.join(findings), file=sys.stderr)
-        return 2
-    return 0
+    return c9.feedback(findings)
 
 
 if __name__ == '__main__':

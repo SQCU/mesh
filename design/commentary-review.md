@@ -7,7 +7,8 @@ vetoes or redirects the work that made the commit, and nothing reads what it wri
 ## Why
 
 The change-request review it follows (bin/mesh-cr-review.py, deleted by mesh 2d2eefef) exited with status 2. Claude Code
-hands that status back to the committing session as a blocking error, so the review's findings acted as vetoes. The
+hands that status back to the committing session as error feedback. The commit has already happened; the hook cannot
+undo it. The review's findings were nevertheless treated as vetoes by the committing agents. The
 operator, 2026-11-07 22:07: "throw out the reviewer if they've been somehow implemented in a manner where they
 rejection-filter requirements that have been literally passed from the user to an implementer". And at 22:10: "have a
 subagent write a post-commit reviewer which isn't given any ability to interrupt integratino work or otherwise act
@@ -16,6 +17,22 @@ the reviewer as a check (rather than you know a line item veto) upon out of orde
 
 The deleted review's string checks are kept here as observations: quoted turns looked for in the session transcripts,
 and quoted words looked for in the retrieval records. Its authority is not kept.
+
+## Post-commit findings
+
+The C9, comment and change-request hooks return their findings with status 0 in
+`hookSpecificOutput.additionalContext`, with `hookEventName` `PostToolUse`, and in `systemMessage` for the user.
+This is the context form of the [Claude Code hook interface](https://code.claude.com/docs/en/hooks#posttooluse-decision-control).
+Findings are work to reconcile with the operator's requirements and cited sources. They do not authorize a rollback,
+deletion of required behavior, or a replacement specification. A failed reader is reported as an incomplete review.
+The comment review's explicit command-line checks retain their diagnostic exit statuses.
+
+The change-request reviewer keeps appending every result to
+`metal-microbench/output_data/change-request-reviews.jsonl`: `outstanding` is true for findings, false for a pass,
+and null when the reader failed. Its `outstanding` command lists the latest review for each repository and commit,
+and each file's style finding separately. A style finding cannot replace a change-request review of the same commit.
+The historical records remain intact. The hook's successful exit means its feedback was delivered, not that the
+implementation passed review.
 
 ## The hook
 

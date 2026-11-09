@@ -762,6 +762,8 @@ def main():
         groups = [(f'{sha[:10]} in {repo}', commit(repo, sha)) for repo, sha in c9.made(json.load(sys.stdin))]
     reports, failures = report(groups)
     said = reports + (['Comment review: ' + '; '.join(dict.fromkeys(failures))] if failures else [])
+    if not args:
+        return c9.feedback(said)
     if said:
         print('\n\n'.join(said), file=sys.stderr)
     return 2 if reports else 1 if failures else 0
