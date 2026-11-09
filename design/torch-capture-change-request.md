@@ -476,7 +476,7 @@ Each requirement names the code it replaces, the quoted source, and what is writ
     p. 9). The value's number of locations is Bff(e): the smallest m for which adding d_m(snk(e), src(e)) leaves λ_max
     unchanged, found by the binary search from (6)'s value, with t(v) the execution time estimates. This is Lam's
     ⌈l/s⌉, l being the execution time along the cycle the reverse edge closes and s being λ_max.
-  - **Stop:** the execution time estimates t(v) of the host's write and of the GPU's passes. Bhattacharyya, Sriram
+  - **Stop, source supplied by the 2026-11-09 appendix below:** the execution time estimates t(v) of the host's write and of the GPU's passes. Bhattacharyya, Sriram
     and Lee "assume that "good" estimates are available for the execution times of actors" (§1; SS §1) and say
     nothing of their source; no quoted source says how they are obtained here. Until one is quoted, Bff(e) is
     not computed and `HOST_LAG` stands.
@@ -789,3 +789,29 @@ RenderDoc, GFXReconstruct, CUDA); item 2's form (Bff(e) of a feedforward edge); 
 partition-ready kernels and index-space analysis, with MPI 4.1's partitions); item 4 (Linux `complete_all` with Reed and
 Kanodia's eventcount, on Metal's 64-bit event); item 6 (TensorFlow Lite's separate arenas; Memo 33 §2.2, Mukerji §3.1
 and Dagor's `do_arcs_overlap` for the u records).
+
+## Source for item 2's execution-time estimates (2026-11-09)
+
+- **Applies to:** item 2's remaining estimate-source stop, AOT A3's weighting operand, and
+  compilation-composition's retained numerical, dependency and target representations.
+- **Replaces:** the absence of a producer for t(v), and the consequent constant `HOST_LAG`.
+- **Source:**
+  - OpenXLA authors, [Cost Models in XLA GPU — Present and Future](https://github.com/openxla/xla/discussions/10065),
+    “Status-quo”: “Device time = max(compute time, memory read+write time) + kernel launch overhead”.
+    Its compute estimate uses operation costs and attainable parallelism; memory estimates use the accessed bytes
+    and the target's bandwidth. The corresponding
+    [GpuPerformanceModelBase](https://github.com/openxla/xla/blob/main/xla/service/gpu/model/gpu_performance_model_base.cc)
+    methods are `ComputeTime`, `ReadTimeWithDRAMHeuristic`, `WriteTime`, and
+    `CombineComputeAndMemoryAccessTime` (read 2026-11-09).
+  - S. Williams, A. Waterman and D. Patterson, [Roofline](https://escholarship.org/content/qt78h8v7mr/qt78h8v7mr.pdf),
+    §3–4: “these limits are created once per multicore computer, not once per kernel.” The model uses processor and
+    memory rates, with ceilings for the parallelism and instruction mix attained by the implementation; §3 and
+    Appendix A obtain those machine operands from hardware specifications or measurements.
+  - Bhattacharyya, Sriram and Lee §4.2–4.3 and Lam, as quoted in item 2, supply the consumer of these estimates.
+- **Write:** the target lowering supplies the operations, memory traffic and execution mapping of each compiled
+  actor to the analytical cost model, with the machine's rates and primitive costs as operands. Native CPU work,
+  including the host's write, uses its CPU rates and traffic; a GPU pass uses its GPU mapping and rates. Preserve
+  the estimates with the compiled actors and pass them as t(v) to item 2's existing cycle-mean and buffer-bound
+  calculation. The resulting Bff(e) supplies the value's locations and the native program's corresponding reuse
+  edges. Transformations update the costs of their resulting actors along with their effects. This supplies the
+  source of the estimates; it does not change item 2's buffer-bound algorithm or make estimates exact runtimes.

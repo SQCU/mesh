@@ -45,8 +45,9 @@ outstanding, and what of it is outstanding. The standard every change request fo
     by the heap order over the commands' dependence levels and their ranges' published completion times. Checked on
     this Mac by the scratch mask harness, and by the five-rank E2B decode on the five machines, 71 later passes a step
     (integration-finishing item 1).
-  - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
-    then.
+  - Open implementation: item 2's execution-time estimates t(v), on which its buffer bound depends. The
+    2026-11-09 appendix supplies the analytical cost-model source and its connection to the existing buffer-bound
+    method. `HOST_LAG` remains in the implementation until that producer/consumer connection is completed.
   - In the torch scope, item 9 remains outstanding across the full assigned domain. The composition implementation
     removes `program()`'s MPS-only/no-transfer selection and connects CPU tasks, MPS replay and declared transfers
     through the native program. Its cross-placement results carry source-call readiness to their consumers.
