@@ -28,8 +28,6 @@ import mesh_graph
 
 # torch 2.14.0 torch/export/__init__.py, export; torch/_ops.py, OpOverload
 A = torch.ops.aten
-# Y. Xu et al., GSPMD, arXiv 2105.04663, 2021, section 3.5
-ELEMENTWISE = {A.add, A.sub, A.mul, A.div, A.neg, A.relu, A.tanh, A.sigmoid, A.exp, A.gelu, A.silu, A.copy_}
 # GSPMD sections 3.2 and 3.5
 DOT = {A.matmul, A.mm, A.bmm}
 # GSPMD section 4.3
@@ -120,9 +118,15 @@ class IR:
 # J. Ansel et al., PyTorch 2, ASPLOS 2024, sections 3.5 and 5.1; design/aot-compilation-change-request.md A1 and
 # appendix item 7; torch 2.14.0 torch/fx/experimental/proxy_tensor.py set_meta; torch/_subclasses/fake_tensor.py
 # FakeTensor
+def _prototype(node):
+    values = pytree.tree_leaves(node.meta.get('val'))
+    return values[0] if values and all(isinstance(v, torch.Tensor) and v.shape == values[0].shape
+                                     for v in values) else None
+
+
 def _value(node):
-    value = node.meta.get('val')
-    if not isinstance(value, torch.Tensor):
+    value = _prototype(node)
+    if value is None:
         raise NotImplementedError('%s (%s): no tensor value (torch.export: its meta[\'val\'])'
                                   % (node.name, node.target))
     if not all(isinstance(size, int) for size in value.shape):
@@ -354,6 +358,10 @@ def _pad(node, local, operands, shapes):
 def _slice(node, local, operands, shapes):
     packet, names, x = local.target.overloadpacket, _names(local), shapes[0]
     given, r = _given(local, names), len(x)
+    if packet is A.squeeze and _named(local, names) == ['self']:
+        dimensions = _dims(given, _value(operands[0]))
+        kept = tuple(d for d in range(r) if d not in dimensions or x[d] != 1)
+        return Rule('slice', 1, operands, [tuple(range(r))], kept, (0,), (), (), False, None, lambda sharded: ())
     dim = given.get('dim', 0)
     if _named(local, names) != ['self'] or type(dim) is not int:
         return None
@@ -420,16 +428,21 @@ def _operator(node, local):
     operands = []
     map_arg((local.args, local.kwargs), operands.append)
     general = Rule('general', None, operands, None, None, (), (), (), False, None, lambda sharded: ())
-    if not isinstance(local.target, torch._ops.OpOverload) or not isinstance(node.meta.get('val'), torch.Tensor) \
-            or not all(isinstance(o.meta.get('val'), torch.Tensor) for o in operands):
+    if local.target is operator.getitem and len(operands) == 1 and _prototype(operands[0]) is not None \
+            and not isinstance(operands[0].meta.get('val'), torch.Tensor):
+        rank = _value(node).dim()
+        return Rule('format', 0, operands, [tuple(range(rank))], tuple(range(rank)), (0,), (), (), False, None,
+                    general.configure)
+    if not isinstance(local.target, torch._ops.OpOverload) or _prototype(node) is None \
+            or not all(_prototype(o) is not None for o in operands):
         return general
     out, shapes = tuple(_value(node).shape), [tuple(_value(o).shape) for o in operands]
     packet, rule = local.target.overloadpacket, None
-    if packet in ELEMENTWISE and all(len(s) <= len(out) for s in shapes):
+    if (packet in POINTWISE or packet is A.copy_) and all(len(s) <= len(out) for s in shapes):
         rule = Rule('elementwise', 0, operands,
                     [tuple(len(out) - len(s) + i if size == out[len(out) - len(s) + i] else ('broadcast', k, i)
                            for i, size in enumerate(s)) for k, s in enumerate(shapes)],
-                    tuple(range(len(out))), tuple(k for k, s in enumerate(shapes) if s == out), (), (), False, None,
+                    tuple(range(len(out))), tuple(range(len(operands))), (), (), False, None,
                     general.configure)
     elif packet is A.linear and len(operands) in (2, 3) and shapes[0] and len(shapes[1]) == 2 \
             and _named(local, _names(local)) == ['input', 'weight', 'bias'][:len(operands)]:
@@ -448,6 +461,24 @@ def _operator(node, local):
             if given.get('keepdim', False) else tuple(d for d in range(rank) if d not in dimensions)
         rule = Rule('reduction', 1, operands, [tuple(range(rank))], labels, (0,), dimensions, (), False, None,
                     general.configure)
+    elif packet in (A.sort, A.topk, A.cumsum, A.cumprod, *SOFTMAX) and len(operands) == 1:
+        given, rank = _given(local, _names(local)), len(shapes[0])
+        dim = given.get('dim', -1) % max(rank, 1)
+        labels = tuple(('whole', d) if d == dim else d for d in range(rank))
+        rule = Rule('format', 0, operands, [labels], tuple(range(rank)), (0,), (), (), False, None,
+                    general.configure)
+    elif packet in (A.gather, A.scatter, A.scatter_add, A.scatter_reduce):
+        given, rank = _given(local, _names(local)), len(out)
+        dim = given['dim'] % max(rank, 1)
+        labels = [tuple(d if d != dim and shape[d] == out[d] else ('indexed', k, d) for d in range(rank))
+                  for k, shape in enumerate(shapes)]
+        rule = Rule('format', 0, operands, labels, tuple(range(rank)), tuple(range(len(operands))), (), (), False,
+                    None, general.configure)
+    elif packet is A.cat:
+        dim, rank = _given(local, _names(local)).get('dim', 0) % max(len(out), 1), len(out)
+        labels = [tuple(('part', k, d) if d == dim else d for d in range(rank)) for k in range(len(operands))]
+        rule = Rule('format', 0, operands, labels, tuple(range(rank)), tuple(range(len(operands))), (), (), False,
+                    None, general.configure)
     elif packet in (A.permute, A.transpose, A.t) and len(operands) == 1:
         given, rank = _given(local, _names(local)), len(shapes[0])
         dimensions = list(range(rank))
@@ -471,7 +502,7 @@ def _operator(node, local):
         rule = _pooling(node, local, operands, shapes)
     elif packet in PAD:
         rule = _pad(node, local, operands, shapes)
-    elif packet in (A.slice, A.select, A.unsqueeze):
+    elif packet in (A.slice, A.select, A.unsqueeze, A.squeeze):
         rule = _slice(node, local, operands, shapes)
     return rule or general
 
@@ -766,19 +797,19 @@ def partition(gm, placement, nodes, page):
                                     if getattr(node.target, 'overloadpacket', None) is A._to_copy else node.kwargs)
             operators[node] = _operator(node, ir.locals[node])
         if node.op != 'output':
-            ir.sharding[node] = (-1,) * _value(node).dim() if isinstance(node.meta.get('val'), torch.Tensor) else None
+            ir.sharding[node] = (-1,) * _value(node).dim() if _prototype(node) is not None else None
     for node, rule in list(operators.items()):
         pad = rule.operands[0] if rule is not None and rule.kind == 'slice' else None
         if pad is not None and operators.get(pad) is not None and operators[pad].kind == 'pad' and len(pad.users) == 1:
             operators[node], operators[pad] = _merged(pad, operators[pad], rule), None
-    names = {node.name if node.op == 'placeholder' else node.target: node for node in ir.order
-             if node.op in ('placeholder', 'get_attr')}
+    names = {node.name: node for node in ir.order if node.op != 'output' and ir.sharding[node] is not None}
+    names.update({node.target: node for node in ir.order if node.op == 'get_attr'})
     for name, mapping in placement.splits.items():
         node, mapping = names.get(name), tuple(mapping)
         if node is None or ir.sharding[node] is None or len(mapping) != len(ir.sharding[node]) \
                 or not all(isinstance(m, int) and -1 <= m < len(ir.shape) for m in mapping) \
                 or len([m for m in mapping if m >= 0]) != len({m for m in mapping if m >= 0}):
-            raise ValueError('splits[%r] = %s: no input or module tensor\'s dims_mapping over a mesh of %d dimensions, each at '
+            raise ValueError('splits[%r] = %s: no tensor result\'s dims_mapping over a mesh of %d dimensions, each at '
                              'most once (GSPMD section 3.1)' % (name, mapping, len(ir.shape)))
         ir.sharding[node] = tuple(m if m >= 0 and ir.shape[m] > 1 else -1 for m in mapping)
         annotated.add(node)
@@ -828,7 +859,8 @@ def _forms(ir):
 
 def _meta(ir, key):
     if key in ir.shapes or isinstance(key[1], tuple):
-        return torch.empty(_shape(ir, key), dtype=_value(key[0]).dtype, device='meta')
+        return pytree.tree_map(lambda value: torch.empty(_shape(ir, key), dtype=value.dtype, device='meta'),
+                               key[0].meta['val'])
     if len(key) == 2 and key[1] is None:
         return pytree.tree_map(lambda v: torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device='meta')
                                if isinstance(v, torch.Tensor) else v, key[0].meta.get('val'))
