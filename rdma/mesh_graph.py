@@ -103,10 +103,11 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
                 decision = node('decide', c)
                 requirements[decision] = loop_conditions.get(c, ())
                 retest = sequence(r, z, decision, c, [])
-                after = node('bound', c, (tail, retest))
+                exited = node('exit', c, (tail,))
+                after = node('bound', c, (exited, retest))
                 body = sequence(b, r, after, c)
                 entered = node('trip', c, (body,))
-                nodes[decision] = ('decide', c, (tail, entered))
+                nodes[decision] = ('decide', c, (exited, entered))
                 initial = sequence(a, b, decision, c, [])
                 tail = node('init', c, (initial,))
             elif controls[c].kind == 2:
@@ -188,7 +189,7 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
                 result.append(move(state, expansion(cursor, native) if kind == 'action' else targets[0],
                                    selected=made, seen=completed if kind == 'task' else seen))
             return result
-        if kind == 'mark':
+        if kind in ('mark', 'exit'):
             return [move(state, targets[0])]
         if kind == 'install':
             return [move(state, targets[0], native=value[0], seen=seen | value[1])]
@@ -278,20 +279,22 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
         def summary(ends):
             relevant = reach(ends, previous.__getitem__)
             required = set.intersection(*(dom[v] for v in ends))
-            markers = {v for v in relevant if nodes[v[0]][0] == 'mark'}
+            markers = {v for v in relevant if nodes[v[0]][0] in ('mark', 'init', 'trip', 'exit')}
             exact = sorted((markers & required) - repeated, key=lambda v: len(dom[v]))
             segments = [set() for _ in range(len(exact) + 1)]
             for v in markers - set(exact):
                 before = sum(x in dom[v] for x in exact)
-                segments[before].add(nodes[v[0]][1])
-            return tuple((frozenset(segments[k]), nodes[v[0]][1]) for k, v in enumerate(exact)) +                    ((frozenset(segments[-1]), None),)
+                segments[before].add(nodes[v[0]][:2])
+            return tuple((frozenset(segments[k]), nodes[v[0]][:2]) for k, v in enumerate(exact)) + \
+                   ((frozenset(segments[-1]), None),)
         for key, ends in by_source[source]:
             activations[key] = summary(ends)
         if finals[source]:
             final_tasks[source] = summary(finals[source])
     return {'states': states, 'transitions': sorted(set(transitions)), 'accepting': sorted(set(accepting)),
             'objects': object_ids, 'spans': spans, 'activations': activations, 'final_tasks': final_tasks,
-            'epsilon_graphs': epsilon_graphs, 'endpoints': endpoints,
+            'epsilon_graphs': epsilon_graphs, 'endpoints': endpoints, 'descendants': descendants,
+            'feedbacks': metadata.get('feedbacks', ()), 'controls': controls,
             'marked_tasks': {x.index for x in instructions if x.kind == 8}}
 
 
@@ -331,9 +334,38 @@ def trace_occurrences(tasks, dependences, operations, program, machine, witness)
         return tasks, dependences, [operations[program[row[3]]].vertex if row[3] >= 0 else NONE for row in witness], set(), dict(enumerate(range(len(tasks))))
     made, edges, latest, vertices, symbolic, uncertain = [], [], {}, [], set(), set()
     activations = collections.Counter()
+    frames, contexts, serial = {}, {}, 0
     incoming = collections.defaultdict(list)
+    feedback, sources, distances, carry = collections.defaultdict(list), collections.defaultdict(set), {}, {}
+    for edge in machine.get('feedbacks', ()):
+        feedback[edge.sink].append(edge)
+        sources[edge.control].add(edge.source)
+        distances[edge.control] = max(distances.get(edge.control, 0), edge.distance)
+    def boundary(control):
+        frame = frames.get(control)
+        snapshot = {}
+        for template in sources[control]:
+            source = latest.get(template)
+            context = contexts.get(source, {})
+            previous = context.get(control)
+            if template in symbolic or (frame and frame[2]) or (previous and previous[2]):
+                snapshot[template] = None
+            elif frame and previous and previous[0] == frame[0]:
+                parents = set(context) - machine['descendants'][control]
+                if all(context[p] == frames.get(p) for p in parents):
+                    snapshot[template] = source
+        carry.setdefault(control, collections.deque(maxlen=distances.get(control, 1))).append(snapshot)
     for edge in dependences:
         incoming[edge.sink].append(edge)
+    def compatible(vertex):
+        for control, source in contexts.get(vertex, {}).items():
+            current = frames.get(control)
+            if current is None or source == current:
+                continue
+            if source[2] or current[2]:
+                return None
+            return False
+        return True
     def activate(template, family=False):
         vertex = len(made)
         task = Task.from_buffer_copy(tasks[template])
@@ -345,15 +377,64 @@ def trace_occurrences(tasks, dependences, operations, program, machine, witness)
             if edge.source in symbolic:
                 uncertain.add(vertex)
             elif edge.source in latest:
-                edges.append(Dependence(latest[edge.source], vertex, edge.delay))
+                source = latest[edge.source]
+                matching = compatible(source)
+                if matching is None:
+                    uncertain.add(vertex)
+                elif matching:
+                    edges.append(Dependence(source, vertex, edge.delay))
+        for edge in feedback[template]:
+            history = carry.get(edge.control, ())
+            if edge.control not in frames or frames[edge.control][2]:
+                uncertain.add(vertex)
+            elif len(history) >= edge.distance and edge.source in history[-edge.distance]:
+                source = history[-edge.distance][edge.source]
+                if source is None:
+                    uncertain.add(vertex)
+                else:
+                    edges.append(Dependence(source, vertex, 0))
         latest[template] = vertex
+        contexts[vertex] = dict(frames)
         activations[template] += 1
         symbolic.discard(template)
+    def event(kind, value, possible=False):
+        nonlocal serial
+        if kind == 'mark':
+            if possible:
+                symbolic.add(value)
+            else:
+                activate(value)
+            return
+        serial += 1
+        if possible:
+            frames[value] = (serial, serial, True)
+            for child in machine['descendants'][value] - {value}:
+                if child in frames:
+                    frames[child] = (serial, serial, True)
+        elif kind == 'init':
+            for child in machine['descendants'][value]:
+                frames.pop(child, None)
+                carry.pop(child, None)
+            frames[value] = (serial, 0, False)
+        elif kind == 'trip':
+            entry = frames.get(value)
+            if entry is None:
+                raise ValueError('trip has no retained control entry %d' % value)
+            boundary(value)
+            frames[value] = (entry[0], serial, entry[2])
+            for child in machine['descendants'][value] - {value}:
+                frames.pop(child, None)
+                carry.pop(child, None)
+        elif kind == 'exit':
+            for child in machine['descendants'][value]:
+                frames.pop(child, None)
+                carry.pop(child, None)
     def apply(summary):
         for possible, exact in summary:
-            symbolic.update(possible)
+            for kind, value in possible:
+                event(kind, value, possible=True)
             if exact is not None:
-                activate(exact)
+                event(*exact)
     for template in range(len(tasks)):
         if template not in marked:
             task = Task.from_buffer_copy(tasks[template])
@@ -602,8 +683,12 @@ class Submission(C.Structure):
 
 
 class Action(C.Structure):
-    _fields_ = [(n, C.c_uint32) for n in ('kind', 'submission', 'object', 'primitive', 'vertex', 'padding')] + \
+    _fields_ = [(n, C.c_uint32) for n in ('kind', 'submission', 'object', 'primitive', 'vertex', 'provenance')] + \
                [(n, C.c_uint64) for n in ('execution', 'value', 'begin', 'end')]
+
+
+LIB.mesh_graph_action_owner.argtypes = [C.POINTER(Action), C.POINTER(C.c_uint32), C.POINTER(C.c_uint64), C.POINTER(Action)]
+LIB.mesh_graph_action_owner.restype = None
 
 
 class Instruction(C.Structure):
@@ -613,6 +698,10 @@ class Instruction(C.Structure):
 
 class Condition(C.Structure):
     _fields_ = [('choice', C.c_uint32), ('taken', C.c_uint32)]
+
+
+class Feedback(C.Structure):
+    _fields_ = [(n, C.c_uint32) for n in ('control', 'source', 'sink', 'distance')]
 
 
 class Signature(C.Structure):
@@ -630,7 +719,8 @@ class Signature(C.Structure):
                 ('selection', C.POINTER(Selection)), ('guard', C.POINTER(Guard)), ('choices', C.c_size_t),
                 ('choice', C.POINTER(Choice)), ('submissions', C.c_size_t), ('actions', C.c_size_t),
                 ('instructions', C.c_size_t), ('conditions', C.c_size_t), ('submission', C.POINTER(Submission)),
-                ('action', C.POINTER(Action)), ('instruction', C.POINTER(Instruction)), ('condition', C.POINTER(Condition))]
+                ('action', C.POINTER(Action)), ('instruction', C.POINTER(Instruction)), ('condition', C.POINTER(Condition)),
+                ('feedbacks', C.c_size_t), ('feedback', C.POINTER(Feedback))]
 
 
 PRINTERS = ('mesh_graph_matrix_market', 'mesh_graph_dot', 'mesh_graph_space_time')

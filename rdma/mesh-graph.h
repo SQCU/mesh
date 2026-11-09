@@ -248,8 +248,12 @@ struct mesh_graph_choice { uint32_t parent, control; uint64_t execution, call; u
 enum mesh_graph_instruction_kind { MESH_GRAPH_OPERATION, MESH_GRAPH_ACTION, MESH_GRAPH_LOOP_ENTRY, MESH_GRAPH_LOOP_BODY,
   MESH_GRAPH_LOOP_RETEST, MESH_GRAPH_LOOP_END, MESH_GRAPH_SPAN_ENTRY, MESH_GRAPH_SPAN_END, MESH_GRAPH_TASK };
 struct mesh_graph_submission { uint32_t lag, positions, window, flags, queue, host, drained, ended, progress, padding; unsigned char policy[16]; };
-struct mesh_graph_action { uint32_t kind, submission, object, primitive, vertex, padding; uint64_t execution, value, begin, end; };
+enum { MESH_GRAPH_ACTION_ISSUE = 1, MESH_GRAPH_ACTION_QUEUE = 2 };
+struct mesh_graph_action { uint32_t kind, submission, object, primitive, vertex, provenance; uint64_t execution, value, begin, end; };
+void mesh_graph_action_owner(const struct mesh_graph_action *, uint32_t *vertex, uint64_t *execution, struct mesh_graph_action *);
 struct mesh_graph_instruction { uint32_t kind, index, once, condition, conditions, padding; uint64_t execution, position; };
+/* design/compilation-composition-change-request.md 6.2; named control entry, logical trip-boundary carry. */
+struct mesh_graph_feedback { uint32_t control, from, to, distance; };
 struct mesh_graph_condition { uint32_t choice, taken; };
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
@@ -264,7 +268,8 @@ struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dep
                               struct mesh_graph_guard *guard; size_t choices; struct mesh_graph_choice *choice;
                               size_t submissions, actions, instructions, conditions;
                               struct mesh_graph_submission *submission; struct mesh_graph_action *action;
-                              struct mesh_graph_instruction *instruction; struct mesh_graph_condition *condition; };
+                              struct mesh_graph_instruction *instruction; struct mesh_graph_condition *condition;
+                              size_t feedbacks; struct mesh_graph_feedback *feedback; };
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
@@ -278,6 +283,7 @@ int mesh_graph_signature_conditions(struct mesh_graph_signature *, size_t select
 int mesh_graph_signature_choices(struct mesh_graph_signature *, size_t choices, const struct mesh_graph_choice *,
                                  size_t guards, const struct mesh_graph_guard *);
 
+int mesh_graph_signature_feedback(struct mesh_graph_signature *, size_t, const struct mesh_graph_feedback *);
 int mesh_graph_signature_execution(struct mesh_graph_signature *, size_t submissions, const struct mesh_graph_submission *,
                                    size_t actions, const struct mesh_graph_action *, size_t instructions,
                                    const struct mesh_graph_instruction *, size_t conditions, const struct mesh_graph_condition *);

@@ -115,6 +115,7 @@ def load(path):
                     'actions': [mesh_graph.Action.from_buffer_copy(x) for x in made.action[:made.actions]],
                     'instructions': [mesh_graph.Instruction.from_buffer_copy(x) for x in made.instruction[:made.instructions]],
                     'conditions': [mesh_graph.Condition.from_buffer_copy(x) for x in made.condition[:made.conditions]],
+                    'feedbacks': [mesh_graph.Feedback.from_buffer_copy(x) for x in made.feedback[:made.feedbacks]],
                     'selections': [mesh_graph.Selection.from_buffer_copy(x) for x in made.selection[:made.selections]],
                     'guards': [mesh_graph.Guard.from_buffer_copy(x) for x in made.guard[:made.guards]],
                     'scopes': [mesh_graph.Scope.from_buffer_copy(x) for x in made.scope[:made.operations]] if made.scope else []}
@@ -203,7 +204,7 @@ class SubmissionOwner:
         self.lanes = {x.queue for x in metadata['submissions']}
         self.object_map, self.lane_map = objects, lanes
         self.object_primitives, self.lane_primitives, self.completion = object_primitives, lane_primitives, completion
-        self.initial = tuple((0,) * (8 + x.lag + x.positions * x.window) for x in metadata['submissions'])
+        self.initial = tuple((0,) * (8 + x.lag + x.positions * x.window) + (NONE, 0) for x in metadata['submissions'])
         self.cache, self.catalog = {}, {}
 
     def step(self, index, values):
@@ -211,11 +212,13 @@ class SubmissionOwner:
         if key in self.cache:
             return self.cache[key]
         C = mesh_graph.C
-        action = self.metadata['actions'][index]
+        action = mesh_graph.Action.from_buffer_copy(self.metadata['actions'][index])
+        vertex, execution = C.c_uint32(values[-2]), C.c_uint64(values[-1])
+        mesh_graph.LIB.mesh_graph_action_owner(C.byref(action), C.byref(vertex), C.byref(execution), C.byref(action))
         source = self.metadata['submissions'][action.submission]
         config = self.Config(source.lag, source.positions, source.window, source.flags)
         commits = (C.c_uint64 * source.lag)(*values[8:8 + source.lag])
-        progress = (C.c_uint64 * (source.positions * source.window))(*values[8 + source.lag:])
+        progress = (C.c_uint64 * (source.positions * source.window))(*values[8 + source.lag:-2])
         state, effect = self.State(*values[:8], commits, progress), self.Effect()
         status = self.library.MetalSubmissionAdvance(C.byref(config), C.byref(state), action.kind, action.value, C.byref(effect))
         if status:
@@ -243,7 +246,7 @@ class SubmissionOwner:
             outputs.append(self.catalog[signature])
         self.library.MetalSubmissionApply(C.byref(state), C.byref(effect))
         self.library.MetalSubmissionNormalize(C.byref(config), C.byref(state))
-        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:8]) + tuple(commits) + tuple(progress)
+        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:8]) + tuple(commits) + tuple(progress) + (vertex.value, execution.value)
         self.cache[key] = changed, tuple(outputs)
         return self.cache[key]
 
