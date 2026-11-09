@@ -6554,8 +6554,9 @@ IF, WHILE = 0, 1
 
 
 class _Control:
-    def __init__(self, kind, arms, predicate, bound=0):
+    def __init__(self, kind, arms, predicate, bound=0, test=None):
         self.kind, self.arms, self.predicate, self.bound = kind, arms, predicate, bound
+        self.test = test
         self.place, self.node = GPU, 0
 
 
@@ -6563,7 +6564,7 @@ def _placed(ops, place, node):
     for g in ops:
         g.place, g.node = place, node
         if isinstance(g, _Control):
-            for arm in g.arms:
+            for arm in ([g.test] if g.test is not None else []) + g.arms:
                 _placed(arm, place, node)
 
 
@@ -7306,16 +7307,20 @@ class _Builder:
         if isinstance(g, _Control):
             bounds = [self.lib.metal_ir_operations(self.p)]
             children = []
-            for arm in g.arms:
+            for arm in ([g.test] if g.test is not None else []) + g.arms:
                 for inner in arm:
                     handle = self.generic(inner)
                     if isinstance(inner, _Control):
                         children.append(handle)
                 bounds.append(self.lib.metal_ir_operations(self.p))
-            first, middle, last = bounds if g.kind == IF else (bounds[0], bounds[1], bounds[1])
+            first, middle, last = bounds if g.kind == IF else (bounds[-2], bounds[-1], bounds[-1])
             control = self.lib.metal_ir_control
             control.restype, control.argtypes = mesh.U, [C.c_void_p, mesh.U, mesh.U, mesh.U, mesh.U, mesh.U, mesh.Q]
             handle = control(self.p, g.kind, first, middle, last, self.value(g.predicate), g.bound)
+            if g.test is not None:
+                tested = self.lib.metal_ir_control_test
+                tested.restype, tested.argtypes = C.c_int, [C.c_void_p, mesh.U, mesh.U, mesh.U]
+                mesh.check(tested(self.p, handle, bounds[0], bounds[1]))
             parent = self.lib.metal_ir_control_parent
             parent.restype, parent.argtypes = None, [C.c_void_p, mesh.U, mesh.U]
             for child in children:
