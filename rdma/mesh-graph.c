@@ -1729,8 +1729,18 @@ static void redundant_offer(struct redundant_search *s, uint32_t y, uint64_t at,
     redundant_push(s, at, y, first);
   }
 }
-int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
-                         const unsigned char *synchronization, unsigned char *redundant) {
+static int redundant_implies(uint32_t scope, uint32_t required, const uint32_t *parent) {
+  while (scope != UINT32_MAX && scope != required) scope = parent[scope];
+  return required == UINT32_MAX || scope == required;
+}
+static int graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
+    const unsigned char *synchronization, const uint32_t *scope, const uint32_t *parent, uint32_t scopes,
+    unsigned char *redundant) {
+  if (scope) {
+    if (scopes && !parent) return EINVAL;
+    for (uint32_t v = 0; v < vertices; v++) if (scope[v] != UINT32_MAX && scope[v] >= scopes) return EINVAL;
+    for (uint32_t c = 0; c < scopes; c++) if (parent[c] != UINT32_MAX && parent[c] >= c) return EINVAL;
+  }
   for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices || from[e] == to[e]) return EINVAL;
   if (vertices == UINT32_MAX || edges >= SIZE_MAX / (4 * sizeof(struct redundant_entry))) return ENOMEM;
   const size_t n = (size_t)vertices + 1;
@@ -1739,7 +1749,8 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
   struct redundant_search s = {malloc(2 * n * sizeof *s.best), malloc(2 * n * sizeof *s.first),
                                malloc((3 * edges + 1) * sizeof *s.heap), 0};
   unsigned char *done = malloc(2 * n);
-  int result = first && order && pair && s.best && s.first && s.heap && done ? 0 : ENOMEM;
+  uint32_t *searched = scope ? calloc((size_t)scopes + 1, sizeof *searched) : NULL;
+  int result = first && order && pair && s.best && s.first && s.heap && done && (!scope || searched) ? 0 : ENOMEM;
   size_t synchronizations = 0;
   for (size_t e = 0; !result && e < edges; e++) if (synchronization[e]) pair[synchronizations++] = (uint64_t)from[e] << 32 | to[e];
   if (!result && synchronizations) qsort(pair, synchronizations, sizeof *pair, completion_edge_before);
@@ -1752,39 +1763,56 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
     int any = 0;
     for (size_t k = first[u]; k < first[u + 1]; k++) any |= synchronization[order[k]] != 0;
     if (!any) continue;
-    for (size_t v = 0; v < 2 * (size_t)vertices; v++) { s.best[v] = UINT64_MAX; s.first[v] = SIZE_MAX; done[v] = 0; }
-    s.count = 0;
-    for (size_t k = first[u]; k < first[u + 1]; k++) redundant_offer(&s, to[order[k]], delay[order[k]], order[k]);
-    while (s.count) {
-      const struct redundant_entry x = redundant_pop(&s);
-      const size_t at = 2 * (size_t)x.vertex;
-      const int label = s.best[at] == x.at && s.first[at] == x.first && !done[at] ? 0
-                      : s.best[at + 1] == x.at && s.first[at + 1] == x.first && !done[at + 1] ? 1 : -1;
-      if (label < 0) continue;
-      done[at + (size_t)label] = 1;
-      for (size_t k = first[x.vertex]; k < first[x.vertex + 1]; k++)
-        if (delay[order[k]] <= UINT64_MAX - x.at) redundant_offer(&s, to[order[k]], x.at + delay[order[k]], x.first);
-    }
-    for (size_t k = first[u]; k < first[u + 1]; k++) {
-      const size_t e = order[k], at = 2 * (size_t)to[e];
-      if (synchronization[e]) redundant[e] = (s.first[at] == e ? s.best[at + 1] : s.best[at]) <= delay[e];
+    const size_t targets = scope ? first[u + 1] - first[u] : 1;
+    for (size_t target = 0; target < targets; target++) {
+      const size_t wanted = scope ? order[first[u] + target] : SIZE_MAX;
+      if (scope) {
+        if (!synchronization[wanted]) continue;
+        const uint32_t group = scope[to[wanted]] == UINT32_MAX ? scopes : scope[to[wanted]];
+        if (searched[group] == u + 1) continue;
+        searched[group] = u + 1;
+      }
+      for (size_t v = 0; v < 2 * (size_t)vertices; v++) { s.best[v] = UINT64_MAX; s.first[v] = SIZE_MAX; done[v] = 0; }
+      s.count = 0;
+      for (size_t k = first[u]; k < first[u + 1]; k++) redundant_offer(&s, to[order[k]], delay[order[k]], order[k]);
+      while (s.count) {
+        const struct redundant_entry x = redundant_pop(&s);
+        const size_t at = 2 * (size_t)x.vertex;
+        const int label = s.best[at] == x.at && s.first[at] == x.first && !done[at] ? 0
+                        : s.best[at + 1] == x.at && s.first[at + 1] == x.first && !done[at + 1] ? 1 : -1;
+        if (label < 0) continue;
+        done[at + (size_t)label] = 1;
+        if (scope && !redundant_implies(scope[u], scope[x.vertex], parent) &&
+            !redundant_implies(scope[to[wanted]], scope[x.vertex], parent)) continue;
+        for (size_t k = first[x.vertex]; k < first[x.vertex + 1]; k++)
+          if (delay[order[k]] <= UINT64_MAX - x.at) redundant_offer(&s, to[order[k]], x.at + delay[order[k]], x.first);
+      }
+      for (size_t k = first[u]; k < first[u + 1]; k++) {
+        const size_t e = order[k], at = 2 * (size_t)to[e];
+        if (synchronization[e] && (!scope || scope[to[e]] == scope[to[wanted]]))
+          redundant[e] = (s.first[at] == e ? s.best[at + 1] : s.best[at]) <= delay[e];
+      }
     }
   }
-  free(first); free(order); free(pair); free(s.best); free(s.first); free(s.heap); free(done);
+  free(first); free(order); free(pair); free(s.best); free(s.first); free(s.heap); free(done); free(searched);
   return result;
 }
 
+int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
+    const unsigned char *synchronization, unsigned char *redundant) {
+  return graph_redundant(vertices, edges, from, to, delay, synchronization, NULL, NULL, 0, redundant);
+}
 /* design/torch-source-lowering-change-request.md item 3; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans.
    Signal Processing 45(6), 1997, §7, Fig. 4 */
-int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
-                               unsigned char *redundant, size_t *kept) {
+int mesh_graph_synchronization_scoped(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+    const uint32_t *scope, const uint32_t *parent, uint32_t scopes, unsigned char *redundant, size_t *kept) {
   if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
   uint64_t *delay = calloc(edges + 1, sizeof *delay);
   unsigned char *synchronization = malloc(edges + 1);
   int result = delay && synchronization ? 0 : ENOMEM;
   if (!result) {
     memset(synchronization, 1, edges + 1);
-    result = mesh_graph_redundant(vertices, edges, from, to, delay, synchronization, redundant);
+    result = graph_redundant(vertices, edges, from, to, delay, synchronization, scope, parent, scopes, redundant);
   }
   size_t made = 0;
   for (size_t e = 0; !result && e < edges; e++) made += !redundant[e];
@@ -1793,6 +1821,10 @@ int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *
   return result;
 }
 
+int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+    unsigned char *redundant, size_t *kept) {
+  return mesh_graph_synchronization_scoped(vertices, edges, from, to, NULL, NULL, 0, redundant, kept);
+}
 /* design/torch-source-lowering-change-request.md item 3; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
 int mesh_graph_levels(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, uint32_t *level) {
   for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
@@ -2544,6 +2576,8 @@ struct compose_instruction { struct mesh_graph_instruction instruction; size_t o
 static int compose_instruction_before(const void *a,const void *b){
   const struct compose_instruction *x=a,*y=b;
   if(x->instruction.position!=y->instruction.position)return x->instruction.position<y->instruction.position?-1:1;
+  const int xo=x->instruction.kind==MESH_GRAPH_OPERATION,yo=y->instruction.kind==MESH_GRAPH_OPERATION;
+  if(xo!=yo)return xo-yo;
   return (x->ordinal>y->ordinal)-(x->ordinal<y->ordinal);
 }
 int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_graph_signature *b,
@@ -2708,14 +2742,14 @@ int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_g
       }
       for(size_t k=0;k<g->actions;k++){
         struct mesh_graph_action x=g->action[k];x.submission+=(uint32_t)machines;if(x.vertex!=MESH_GRAPH_NONE)x.vertex+=side?a->tasks:0;
-        x.begin=x.begin<g->operations?map[x.begin]:g->operations?map[g->operations-1]+1:0;
-        x.end=x.end?map[x.end-1]+1:x.begin;s->action[actions+k]=x;
+        x.begin=x.begin?map[x.begin-1]+1:0;
+        x.end=x.end?map[x.end-1]+1:0;s->action[actions+k]=x;
       }
       for(size_t k=0;k<g->conditions;k++){
         struct mesh_graph_condition x=g->condition[k];x.choice+=side?(uint32_t)a->choices:0;s->condition[conditions+k]=x;
       }
 #define COMPOSE_INSTRUCTION(X) do { struct mesh_graph_instruction x_=(X); \
-        x_.position=x_.position<g->operations?map[x_.position]:g->operations?map[g->operations-1]+1:0; \
+        x_.position=x_.kind==MESH_GRAPH_OPERATION?map[x_.index]:x_.position?map[x_.position-1]+1:0; \
         if(x_.kind==MESH_GRAPH_OPERATION)x_.index=(uint32_t)map[x_.index]; \
         else if(x_.kind==MESH_GRAPH_ACTION)x_.index+=(uint32_t)actions; \
         else if(x_.kind>=MESH_GRAPH_LOOP_ENTRY && x_.kind<=MESH_GRAPH_LOOP_END)x_.index+=side?(uint32_t)a->controls:0; \

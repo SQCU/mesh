@@ -199,6 +199,11 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
    edge another path covers (mesh_graph_redundant at zero delays, every edge a candidate); kept counts the others */
 int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
                                unsigned char *redundant, size_t *kept);
+/* design/compilation-composition-change-request.md item 6.1; scope[v] == UINT32_MAX or scope[v] < scopes;
+   parent[c] == UINT32_MAX or parent[c] < c;
+   alternate(u,v) => every internal w has scope[w] in ancestors(scope[u]) union ancestors(scope[v]) */
+int mesh_graph_synchronization_scoped(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+    const uint32_t *scope, const uint32_t *parent, uint32_t scopes, unsigned char *redundant, size_t *kept);
 /* design/torch-source-lowering-change-request.md item 3; design/compilation-composition-change-request.md item 6.3:
    levels and places over the caller's dependence relation (from[e] < to[e]); level the longest path to v, place the
    heap order by -level (mesh_graph_heap_order) */

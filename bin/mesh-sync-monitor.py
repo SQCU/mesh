@@ -167,12 +167,12 @@ class SubmissionOwner:
             _fields_ = [(name, C.c_uint32) for name in ('lag', 'positions', 'window', 'flags')]
         class State(C.Structure):
             _fields_ = [(name, C.c_uint64) for name in
-                        ('commits', 'encoded', 'signalled', 'tests', 'completed', 'completedCommits', 'pending')] + \
+                        ('commits', 'encoded', 'signalled', 'tests', 'completed', 'completedCommits', 'pending', 'issued')] + \
                        [('commitEnds', C.POINTER(C.c_uint64)), ('progressCommits', C.POINTER(C.c_uint64))]
         class Effect(C.Structure):
             _fields_ = [(name, C.c_uint64) for name in
                         ('wait', 'signal', 'ended', 'slot', 'stored', 'completed', 'completedCommits', 'encoded')] + \
-                       [(name, C.c_uint32) for name in ('action', 'opened', 'submitted', 'array')]
+                       [(name, C.c_uint32) for name in ('action', 'active', 'submitted', 'array')]
         library = os.path.abspath(os.path.join(HERE, '..', '..', '..', 'metal-microbench', '.build', 'libmetal_recording.dylib'))
         self.library = C.CDLL(library)
         self.library.MetalSubmissionIdentity.argtypes = [C.POINTER(C.c_ubyte)]
@@ -203,7 +203,7 @@ class SubmissionOwner:
         self.lanes = {x.queue for x in metadata['submissions']}
         self.object_map, self.lane_map = objects, lanes
         self.object_primitives, self.lane_primitives, self.completion = object_primitives, lane_primitives, completion
-        self.initial = tuple((0,) * (7 + x.lag + x.positions * x.window) for x in metadata['submissions'])
+        self.initial = tuple((0,) * (8 + x.lag + x.positions * x.window) for x in metadata['submissions'])
         self.cache, self.catalog = {}, {}
 
     def step(self, index, values):
@@ -214,9 +214,9 @@ class SubmissionOwner:
         action = self.metadata['actions'][index]
         source = self.metadata['submissions'][action.submission]
         config = self.Config(source.lag, source.positions, source.window, source.flags)
-        commits = (C.c_uint64 * source.lag)(*values[7:7 + source.lag])
-        progress = (C.c_uint64 * (source.positions * source.window))(*values[7 + source.lag:])
-        state, effect = self.State(*values[:7], commits, progress), self.Effect()
+        commits = (C.c_uint64 * source.lag)(*values[8:8 + source.lag])
+        progress = (C.c_uint64 * (source.positions * source.window))(*values[8 + source.lag:])
+        state, effect = self.State(*values[:8], commits, progress), self.Effect()
         status = self.library.MetalSubmissionAdvance(C.byref(config), C.byref(state), action.kind, action.value, C.byref(effect))
         if status:
             raise ValueError('compiled submission action %d: %s' % (index, os.strerror(status)))
@@ -243,7 +243,7 @@ class SubmissionOwner:
             outputs.append(self.catalog[signature])
         self.library.MetalSubmissionApply(C.byref(state), C.byref(effect))
         self.library.MetalSubmissionNormalize(C.byref(config), C.byref(state))
-        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:7]) + tuple(commits) + tuple(progress)
+        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:8]) + tuple(commits) + tuple(progress)
         self.cache[key] = changed, tuple(outputs)
         return self.cache[key]
 
