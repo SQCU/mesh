@@ -1,7 +1,8 @@
 # Change requests: which are outstanding
 
 As of 2026-11-09, including the composition implementation and review recorded in metal-microbench
-`output_data/claude-ir-handoffs-20261109T051956Z`. Each entry names a change request, whether it is
+`output_data/claude-ir-handoffs-20261109T051956Z` and the continuing replacement workgroup in
+`output_data/claude-typed-replacement-20261109T085408Z`. Each entry names a change request, whether it is
 outstanding, and what of it is outstanding. The standard every change request follows is
 [change-requests.md](change-requests.md).
 
@@ -13,17 +14,17 @@ outstanding, and what of it is outstanding. The standard every change request fo
   Item 5 records the operator's native Apple Silicon execution and implementation deduplication correction and
   assigns replacement of duplicated specialization, command orchestration and representation bodies.
   Item 6 requires completing IR handoffs before helper extraction and divides that connected refactoring into
-  eight implementation units. The implementation now carries plan identities and edges into native preparation,
+  eight implementation units. The earlier implementation carried plan identities and edges into native preparation,
   capture dependencies into replay, and typed effects through transformations. Native rows reference published
   plan calls; signature composition consumes the retained plan signature. Graph contraction, projection,
-  component analysis and shader-call traversal use the existing graph module, and both shader consumers use
+  component analysis and shader-call traversal used the existing graph module, and both shader consumers used
   the parser's retained call graph. A10's concurrency bound is separate from the horizon used to size retained
   storage. The connected source changes,
   revisions, direct builds and remaining work are recorded in that run's `integration.md` and review records;
   these do not establish completion of the full assigned domain or runtime and performance requirements.
   The subsequent structural review found active semantic transformations over emitted shader strings throughout
   the recorder, beyond the three previously listed parsers. Generated target source must become the final mesh
-  emission; the producers' annotations must reach those lowerings. E2B still selects the recorder's non-self-timed
+  emission; the producers' annotations must reach those lowerings. E2B then selected the recorder's non-self-timed
   mode, which omits replay footprints and bypasses native dependency/fence preparation. Sharing the emitter has
   not completed that synchronization-policy handoff. The performance follow-up also identifies static operation,
   dtype and layout facts interpreted by the Torch path's generic shaders, serial reduction bodies, and native
@@ -32,8 +33,18 @@ outstanding, and what of it is outstanding. The standard every change request fo
   The [complete replacement workgroup](compilation-composition-change-request.md#complete-replacement-workgroup)
   specifies the connected source-built provider, typed numerical/shader interfaces, eight implementation
   responsibilities and deletion of the downstream source-rewrite path in one coordinated landing. It supersedes
-  the initial 6A–6H work division, not the requirements or completed reusable work. This is an outstanding
-  implementation assignment; the interface, replacement and performance closure have not been demonstrated.
+  the initial 6A–6H work division, not the requirements or completed reusable work.
+  Working commits metal-microbench f08d3c7b/e4d2adc5 and mesh dd2062d2/4abf824c now connect a source-built
+  LiteRT/ML Drift provider to typed numerical operations and Tint IR, shared region cloning, transformations,
+  CPU/GPU target emission and the native executor. The recorder's generated-source interception, parsing and
+  rewrite bodies and its non-self-timed bypass are removed. All five E2B stage graphs publish through this provider;
+  the actual provider, compiler, recorder and E2B caller link. The existing native diagnostic executes split-K
+  projection, subgroup-matrix projection and parallel argmax; its numerical records are under the new run's
+  `8_runs`. This is development evidence, not the complete replacement landing.
+  Outstanding work includes complete frontend/target coverage, exact compact access relations, paged native CPU
+  and write-ahead bindings, compiled per-execution inputs/publication, and displacement of unjustified
+  per-execution host waits/submissions. Sourced actor costs and the observation handoffs are still being revised.
+  No E2B or Torch/collective operational run or corresponding performance closure on this replacement is recorded.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
   in the composition implementation. The review records distinguish remaining representation and observation gaps
@@ -47,7 +58,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
     (integration-finishing item 1).
   - Open implementation: item 2's execution-time estimates t(v), on which its buffer bound depends. The
     2026-11-09 appendix supplies the analytical cost-model source and its connection to the existing buffer-bound
-    method. `HOST_LAG` remains in the implementation until that producer/consumer connection is completed.
+    method. The replacement connects dispatch actor records to `mesh_graph_actor_time`, `mesh_plan`'s existing
+    buffer-bound calculation and the native program's horizon; `HOST_LAG` is removed. Target execution
+    multiplicities, machine operand meanings/coverage and mixed CPU/GPU actor topology still require revision;
+    zero estimates from absent records do not establish the required storage or performance behavior.
   - In the torch scope, item 9 remains outstanding across the full assigned domain. The composition implementation
     removes `program()`'s MPS-only/no-transfer selection and connects CPU tasks, MPS replay and declared transfers
     through the native program. Its cross-placement results carry source-call readiness to their consumers.
