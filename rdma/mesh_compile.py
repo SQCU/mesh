@@ -2814,13 +2814,29 @@ def _linalg_swap(x, pivot, row, ops):
     axis, t = x.dim() - 2, _class(source)
     index = pivot.reshape(*pivot.shape, *([1] * (source.dim() - pivot.dim())))
     selected = r('sub', I32, _load(r, 1, index, I32), r.const(1, I32))
+    inputs = [(source, None), (index, _aligned(index, target.shape))]
+    if isinstance(row, torch.Tensor):
+        row = row.reshape(*row.shape, *([1] * (source.dim() - row.dim())))
+        inputs.append((row, _aligned(row, target.shape)))
+        origin = _load(r, 2, row, I32)
+    else:
+        origin = r.const(row, I32)
     at, own = [r.index(d) for d in range(source.dim())], r.index(axis)
-    at[axis] = r('select', I32, r('eq', BOOL, own, r.const(row, I32)), selected,
-                 r('select', I32, r('eq', BOOL, own, selected), r.const(row, I32), own))
+    at[axis] = r('select', I32, r('eq', BOOL, own, origin), selected,
+                 r('select', I32, r('eq', BOOL, own, selected), origin, own))
     r.done(r('extract', t, *at, integer=0))
-    ops.append(_Generic(target.shape, [(source, None), (index, _aligned(index, target.shape))],
-                        [(target, _same(target.dim()))], r))
+    ops.append(_Generic(target.shape, inputs, [(target, _same(target.dim()))], r))
     return made
+
+
+def _linalg_pivot_magnitude(x, ops):
+    scores = _temporary(x.shape, x.real.dtype)
+    ops += _elementwise('abs', scores, x.real)
+    if x.is_complex():
+        imaginary = _temporary(x.shape, x.real.dtype)
+        ops += _elementwise('abs', imaginary, x.imag)
+        ops += _elementwise('add', scores, scores, imaginary)
+    return scores
 
 
 def _linalg_lu(a, lu, pivots, info, pivot=True):
@@ -2830,14 +2846,7 @@ def _linalg_lu(a, lu, pivots, info, pivot=True):
     for j in range(min(m, n)):
         column, p = current[..., j:, j], pivots[..., j]
         if pivot:
-            scores = _temporary(column.shape, column.real.dtype)
-            if column.is_complex():
-                imaginary = _temporary(column.shape, column.real.dtype)
-                ops += _elementwise('abs', scores, column.real)
-                ops += _elementwise('abs', imaginary, column.imag)
-                ops += _elementwise('add', scores, scores, imaginary)
-            else:
-                ops += _elementwise('abs', scores, column)
+            scores = _linalg_pivot_magnitude(column, ops)
             ops += _extreme(A.argmax.default, {'self': scores, 'dim': -1, 'keepdim': False}, [p])
             ops += _elementwise('add', p, p, j + 1)
             current = _linalg_swap(current, p, j, ops)
@@ -2933,9 +2942,207 @@ def _linalg_cholesky(a, out, info, upper=False):
     return ops + _copy(out, _linalg_transpose(factor, ops, upper, upper))
 
 
+def _linalg_symmetric(a, ops, hermitian=True, upper=False):
+    matrix, other = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
+    opposite = _linalg_transpose(a, ops, True, hermitian)
+    ops += _triangular_part(A.triu.default if upper else A.tril.default, {'self': a}, [matrix])
+    ops += _triangular_part(A.tril.default if upper else A.triu.default,
+                            {'self': opposite, 'diagonal': -1 if upper else 1}, [other])
+    ops += _elementwise('add', matrix, matrix, other)
+    if hermitian and a.is_complex():
+        ops += _fill(matrix.diagonal(dim1=-2, dim2=-1).imag, 0)
+    return matrix
+
+
+# Reference-LAPACK SRC/dsytf2.f, zsytf2.f, zhetf2.f, dsytrs.f and zhetrs.f
+def _linalg_diagonal_block(a, j, pair, hermitian, ops, active=None):
+    width = min(2, a.shape[-1] - j)
+    block = _temporary((*a.shape[:-2], width, width), a.dtype)
+    ops += _fill(block, 0)
+    if active is None:
+        ops += _copy(block[..., 0, 0], a[..., j, j])
+    else:
+        ops += _elementwise('where', block[..., 0, 0], active, a[..., j, j], 1)
+    if width == 2:
+        ops += _elementwise('where', block[..., 1, 1], pair, a[..., j + 1, j + 1], 1)
+        ops += _elementwise('where', block[..., 1, 0], pair, a[..., j + 1, j], 0)
+        opposite = _linalg_transpose(block[..., 1:2, :1], ops, True, hermitian)
+        ops += _copy(block[..., :1, 1:2], opposite)
+    return block
+
+
+def _linalg_block_solve(a, b, out, ops, left=True):
+    lu, pivots = _temporary(a.shape, a.dtype), _temporary(a.shape[:-1], torch.int32)
+    info = _temporary(a.shape[:-2], torch.int32)
+    ops += _linalg_lu(a, lu, pivots, info)
+    ops += _linalg_lu_solve(lu, pivots, b, out, left)
+
+
+def _linalg_block_columns(a, j, pair, ops):
+    columns = _temporary((*a.shape[:-2], a.shape[-1] - j - 1, 2), a.dtype)
+    ops += _copy(columns[..., 0], a[..., j + 1:, j])
+    ops += _elementwise('where', columns[..., 1], pair.unsqueeze(-1), a[..., j + 1:, j + 1], 0)
+    ops += _elementwise('where', columns[..., 0, 0], pair, 0, columns[..., 0, 0])
+    ops += _fill(columns[..., 0, 1], 0)
+    return columns
+
+
+def _linalg_ldl(a, ld, pivots, info, hermitian):
+    ops, batch, n = [], a.shape[:-2], a.shape[-1]
+    work = _linalg_symmetric(a, ops, hermitian)
+    skip = _temporary(batch, torch.bool)
+    ops += _fill(info, 0) + _fill(pivots, 0) + _fill(skip, False)
+    alpha = (1 + math.sqrt(17)) / 8
+    for j in range(n):
+        active, bad, pair = (_temporary(batch, torch.bool) for _ in range(3))
+        pivot = _temporary(batch, torch.int32)
+        diagonal = _linalg_pivot_magnitude(work[..., j, j], ops)
+        ops += _elementwise('logical_not', active, skip) + _fill(pair, False) + _fill(pivot, j + 1)
+        if j + 1 < n:
+            scores = _linalg_pivot_magnitude(work[..., j + 1:, j], ops)
+            colmax, rowmax = (_temporary(batch, a.real.dtype) for _ in range(2))
+            imax = _temporary(batch, torch.int32)
+            ops += _extreme(A.max.dim, {'self': scores, 'dim': -1}, [colmax, imax])
+            ops += _elementwise('add', imax, imax, 1)
+            row = _temporary((*batch, n - j, 1), a.dtype)
+            ops += _linalg_columns(work[..., j:, j:].transpose(-2, -1), imax.unsqueeze(-1), row)
+            row = row[..., 0]
+            row_scores = _linalg_pivot_magnitude(row, ops)
+            selected = imax.unsqueeze(-1)
+            r, t = _Region(), _class(row_scores)
+            r.done(r('select', t, r('eq', BOOL, r.index(row_scores.dim() - 1),
+                                   _load(r, 1, selected, I32)), r.const(0, t), _load(r, 0, row_scores, t)))
+            ops.append(_Generic(row_scores.shape, [(row_scores, _same(row_scores.dim())),
+                                (selected, _aligned(selected, row_scores.shape))],
+                                [(row_scores, _same(row_scores.dim()))], r))
+            ops += _reduced(A.amax.default, {'self': row_scores, 'dim': [-1], 'keepdim': False}, [rowmax])
+            at = _temporary((*batch, 1, 1), a.dtype)
+            ops += _linalg_columns(row.unsqueeze(-2), imax.unsqueeze(-1), at)
+            alternate = _linalg_pivot_magnitude(at[..., 0, 0], ops)
+            threshold, safe = (_temporary(batch, a.real.dtype) for _ in range(2))
+            stay, again, other, zero = (_temporary(batch, torch.bool) for _ in range(4))
+            ops += _elementwise('mul', threshold, colmax, alpha)
+            ops += _elementwise('ge', stay, diagonal, threshold)
+            ops += _elementwise('eq', zero, rowmax, 0)
+            ops += _elementwise('where', safe, zero, 1, rowmax)
+            ops += _elementwise('div', safe, colmax, safe)
+            ops += _elementwise('mul', threshold, threshold, safe)
+            ops += _elementwise('ge', again, diagonal, threshold)
+            ops += _elementwise('logical_or', stay, stay, again)
+            ops += _elementwise('mul', threshold, rowmax, alpha)
+            ops += _elementwise('ge', other, alternate, threshold)
+            ops += _elementwise('logical_or', pair, stay, other)
+            ops += _elementwise('logical_not', pair, pair)
+            ops += _elementwise('add', imax, imax, j + 1)
+            ops += _elementwise('where', pivot, stay, j + 1, imax)
+            ops += _elementwise('maximum', threshold, diagonal, colmax)
+            ops += _elementwise('eq', bad, threshold, 0)
+        else:
+            ops += _elementwise('eq', bad, diagonal, 0)
+        nan, usable, first = (_temporary(batch, torch.bool) for _ in range(3))
+        ops += _elementwise('isnan', nan, diagonal)
+        ops += _elementwise('logical_or', bad, bad, nan)
+        ops += _elementwise('logical_and', bad, bad, active)
+        ops += _elementwise('eq', first, info, 0)
+        ops += _elementwise('logical_and', first, first, bad)
+        ops += _elementwise('where', info, first, j + 1, info)
+        ops += _elementwise('logical_not', usable, bad)
+        ops += _elementwise('logical_and', usable, usable, active)
+        ops += _elementwise('logical_and', pair, pair, usable)
+        ops += _elementwise('where', pivot, usable, pivot, j + 1)
+        signed = _temporary(batch, torch.int32)
+        ops += _elementwise('neg', signed, pivot)
+        ops += _elementwise('where', signed, pair, signed, pivot)
+        ops += _elementwise('where', pivots[..., j], active, signed, pivots[..., j])
+        if j + 1 < n:
+            ops += _elementwise('where', pivots[..., j + 1], pair, signed, pivots[..., j + 1])
+            local, target = _temporary(batch, torch.int32), _temporary(batch, torch.int32)
+            ops += _elementwise('sub', local, pivot, j) + _copy(target, pair)
+            trailing = _linalg_swap(work[..., j:, j:], local, target, ops)
+            trailing = _linalg_swap(trailing.transpose(-2, -1), local, target, ops).transpose(-2, -1)
+            block = _linalg_diagonal_block(trailing, 0, pair, hermitian, ops, usable)
+            columns = _linalg_block_columns(trailing, 0, pair, ops)
+            lower = _temporary(columns.shape, columns.dtype)
+            _linalg_block_solve(block, columns, lower, ops, False)
+            change = _temporary(trailing[..., 1:, 1:].shape, a.dtype)
+            opposite = _linalg_transpose(columns, ops, True, hermitian)
+            ops += _product(A.matmul.default, {'self': lower, 'other': opposite}, [change])
+            ops += _elementwise('sub', trailing[..., 1:, 1:], trailing[..., 1:, 1:], change)
+            ops += _elementwise('where', lower[..., 0, 0], pair, trailing[..., 1, 0], lower[..., 0, 0])
+            ops += _copy(trailing[..., 1:, 0], lower[..., 0])
+            if j + 2 < n:
+                ops += _elementwise('where', trailing[..., 2:, 1], pair.unsqueeze(-1),
+                                     lower[..., 1:, 1], trailing[..., 2:, 1])
+            if hermitian and a.is_complex():
+                ops += _fill(trailing.diagonal(dim1=-2, dim2=-1).imag, 0)
+            ops += _elementwise('where', work[..., j:, j:], usable[..., None, None], trailing, work[..., j:, j:])
+        ops += _copy(skip, pair)
+    return ops + _triangular_part(A.tril.default, {'self': work}, [ld])
+
+
+def _linalg_ldl_solve(ld, pivots, b, out, hermitian):
+    batch, n, ops = out.shape[:-2], out.shape[-2], []
+    factor = ld.expand(*batch, n, n)
+    pivots = pivots.expand(*batch, n)
+    work = _temporary(out.shape, out.dtype)
+    skip = _temporary(batch, torch.bool)
+    ops += _assign(work, b) + _fill(skip, False)
+    for j in range(n):
+        active, pair = _temporary(batch, torch.bool), _temporary(batch, torch.bool)
+        pivot, target = _temporary(batch, torch.int32), _temporary(batch, torch.int32)
+        ops += _elementwise('logical_not', active, skip)
+        ops += _elementwise('lt', pair, pivots[..., j], 0)
+        ops += _elementwise('logical_and', pair, pair, active)
+        ops += _elementwise('abs', pivot, pivots[..., j])
+        ops += _copy(target, pair) + _elementwise('add', target, target, j)
+        moved = _linalg_swap(work, pivot, target, ops)
+        block = _linalg_diagonal_block(factor, j, pair, hermitian, ops, active)
+        width = block.shape[-1]
+        rhs = _temporary((*batch, width, out.shape[-1]), out.dtype)
+        ops += _copy(rhs, moved[..., j:j + width, :])
+        if j + 1 < n:
+            columns = _linalg_block_columns(factor, j, pair, ops)
+            change = _temporary(moved[..., j + 1:, :].shape, out.dtype)
+            ops += _product(A.matmul.default, {'self': columns, 'other': rhs}, [change])
+            ops += _elementwise('sub', moved[..., j + 1:, :], moved[..., j + 1:, :], change)
+        solution = _temporary(rhs.shape, rhs.dtype)
+        _linalg_block_solve(block, rhs, solution, ops)
+        ops += _copy(moved[..., j, :], solution[..., 0, :])
+        if width == 2:
+            ops += _elementwise('where', moved[..., j + 1, :], pair.unsqueeze(-1),
+                                 solution[..., 1, :], moved[..., j + 1, :])
+        ops += _elementwise('where', work, active[..., None, None], moved, work)
+        ops += _copy(skip, pair)
+    ops += _fill(skip, False)
+    for j in reversed(range(n)):
+        active, pair = _temporary(batch, torch.bool), _temporary(batch, torch.bool)
+        pivot = _temporary(batch, torch.int32)
+        ops += _elementwise('logical_not', active, skip)
+        ops += _elementwise('lt', pair, pivots[..., j], 0)
+        ops += _elementwise('logical_and', pair, pair, active)
+        ops += _elementwise('abs', pivot, pivots[..., j])
+        start = max(j - 1, 0)
+        width = j - start + 1
+        made = _temporary(work.shape, work.dtype)
+        ops += _copy(made, work)
+        if j + 1 < n:
+            lower = factor[..., j + 1:, start:j + 1]
+            transposed = _linalg_transpose(lower, ops, True, hermitian)
+            change = _temporary((*batch, width, out.shape[-1]), out.dtype)
+            ops += _product(A.matmul.default, {'self': transposed, 'other': work[..., j + 1:, :]}, [change])
+            ops += _elementwise('sub', made[..., j, :], work[..., j, :], change[..., -1, :])
+            if j:
+                ops += _elementwise('where', change[..., 0, :], pair.unsqueeze(-1), change[..., 0, :], 0)
+                ops += _elementwise('sub', made[..., j - 1, :], work[..., j - 1, :], change[..., 0, :])
+        made = _linalg_swap(made, pivot, j, ops)
+        ops += _elementwise('where', work, active[..., None, None], made, work)
+        ops += _copy(skip, pair)
+    return ops + _copy(out, work)
+
+
 FACTORIZATIONS = (A.linalg_lu_factor_ex, A._linalg_solve_ex, A.linalg_solve_ex, A.linalg_inv_ex,
                   A.linalg_cholesky_ex, A.linalg_solve_triangular, A.triangular_solve, A.linalg_lu_solve,
-                  A.cholesky_solve, A.cholesky_inverse)
+                  A.cholesky_solve, A.cholesky_inverse, A.linalg_ldl_factor_ex, A.linalg_ldl_solve)
 
 
 def _factorization(target, given, outs):
@@ -2945,6 +3152,10 @@ def _factorization(target, given, outs):
         return _linalg_lu(a, *outs, given['pivot'])
     if packet is A.linalg_cholesky_ex:
         return _linalg_cholesky(a, *outs, given['upper'])
+    if packet is A.linalg_ldl_factor_ex:
+        return _linalg_ldl(a, *outs, given['hermitian'])
+    if packet is A.linalg_ldl_solve:
+        return _linalg_ldl_solve(given['LD'], given['pivots'], given['B'], outs[0], given['hermitian'])
     if packet is A.linalg_lu_solve:
         return _linalg_lu_solve(given['LU'], given['pivots'], given['B'], outs[0], given['left'], given['adjoint'])
     if packet in (A.linalg_solve_triangular, A.triangular_solve):
@@ -3363,16 +3574,8 @@ def _linalg_converged(active, ops, message):
 def _eigen_hermitian(target, given, outs):
     a, (values, vectors), ops = given['A'], outs, []
     batch, n = a.shape[:-2], a.shape[-1]
-    matrix = _temporary(a.shape, a.dtype)
     upper = given.get('UPLO', 'L').upper() == 'U'
-    opposite = _linalg_transpose(a, ops, True, True)
-    other = _temporary(a.shape, a.dtype)
-    ops += _triangular_part(A.triu.default if upper else A.tril.default, {'self': a}, [matrix])
-    ops += _triangular_part(A.tril.default if upper else A.triu.default,
-                            {'self': opposite, 'diagonal': -1 if upper else 1}, [other])
-    ops += _elementwise('add', matrix, matrix, other)
-    if a.is_complex():
-        ops += _fill(matrix.diagonal(dim1=-2, dim2=-1).imag, 0)
+    matrix = _linalg_symmetric(a, ops, True, upper)
     rotations = _temporary(a.shape, a.dtype) if vectors.numel() else None
     if rotations is not None:
         ops += _linalg_identity(rotations)

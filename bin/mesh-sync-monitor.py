@@ -224,7 +224,8 @@ def generate(operations, program, observe, point=None, metadata=None):
         return ' '.join(actions)
     completion = next((e for e in metadata.get('events', ()) if e.role == 1), None)
     spans = metadata.get('spans', ())
-    act = 'ustack(); exit(1);' if observe else 'ustack(); stop(); exit(1);'
+    act = 'printf("mesh-sync-monitor: failure target pid %d\\n", pid); ustack(); ' + (
+        'exit(1);' if observe else 'stop(); exit(1);')
     slots = max(1, completion.lookback) if completion else 1
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
              '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])

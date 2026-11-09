@@ -252,6 +252,7 @@ struct mesh_graph_scope { uint32_t once, counter; int64_t delta; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };
 struct mesh_graph_selection { uint32_t argument, bytes; uint64_t table, index; };
 struct mesh_graph_guard { uint64_t operation; uint32_t selection, taken; };
+struct mesh_graph_choice { uint32_t parent, control; uint64_t execution, call; };
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
                               struct mesh_graph_processor *processor; struct mesh_graph_task *task;
@@ -262,7 +263,7 @@ struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dep
                               struct mesh_graph_control *control; struct mesh_graph_event *event;
                               struct mesh_graph_scope *scope; size_t spans; struct mesh_graph_span *span;
                               size_t selections, guards; struct mesh_graph_selection *selection;
-                              struct mesh_graph_guard *guard; };
+                              struct mesh_graph_guard *guard; size_t choices; struct mesh_graph_choice *choice; };
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
@@ -273,6 +274,8 @@ int mesh_graph_signature_program(struct mesh_graph_signature *, size_t controls,
 int mesh_graph_signature_spans(struct mesh_graph_signature *, size_t spans, const struct mesh_graph_span *);
 int mesh_graph_signature_conditions(struct mesh_graph_signature *, size_t selections, const struct mesh_graph_selection *,
                                     size_t guards, const struct mesh_graph_guard *);
+int mesh_graph_signature_choices(struct mesh_graph_signature *, size_t choices, const struct mesh_graph_choice *,
+                                 size_t guards, const struct mesh_graph_guard *);
 
 /* design/synchronization-signature-change-request.md item 1, "its SHA-256 is part of the compiled artifact": the
    signature's one serialized form, its header then processor, task, dependence, operation, edge, least and alias in

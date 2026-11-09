@@ -197,6 +197,10 @@ class Guard(C.Structure):
     _fields_ = [('operation', C.c_uint64), ('selection', C.c_uint32), ('taken', C.c_uint32)]
 
 
+class Choice(C.Structure):
+    _fields_ = [('parent', C.c_uint32), ('control', C.c_uint32), ('execution', C.c_uint64), ('call', C.c_uint64)]
+
+
 class Signature(C.Structure):
     _fields_ = [('processors', C.c_uint32), ('tasks', C.c_uint32), ('operations', C.c_size_t),
                 ('dependences', C.c_size_t), ('synchronized', C.c_size_t), ('uncovered', C.c_size_t),
@@ -209,7 +213,8 @@ class Signature(C.Structure):
                 ('unknown', C.POINTER(C.c_uint64)), ('alias', C.POINTER(C.c_uint32)), ('digest', C.c_ubyte * 32), ('controls', C.c_size_t), ('events', C.c_size_t),
                 ('control', C.POINTER(Control)), ('event', C.POINTER(Event)), ('scope', C.POINTER(Scope)),
                 ('spans', C.c_size_t), ('span', C.POINTER(Span)), ('selections', C.c_size_t), ('guards', C.c_size_t),
-                ('selection', C.POINTER(Selection)), ('guard', C.POINTER(Guard))]
+                ('selection', C.POINTER(Selection)), ('guard', C.POINTER(Guard)), ('choices', C.c_size_t),
+                ('choice', C.POINTER(Choice))]
 
 
 PRINTERS = ('mesh_graph_matrix_market', 'mesh_graph_dot', 'mesh_graph_space_time')
