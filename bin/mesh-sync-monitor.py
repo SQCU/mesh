@@ -110,6 +110,7 @@ def load(path):
         metadata = {'controls': [mesh_graph.Control.from_buffer_copy(c) for c in made.control[:made.controls]],
                     'events': [mesh_graph.Event.from_buffer_copy(e) for e in made.event[:made.events]],
                     'spans': [mesh_graph.Span.from_buffer_copy(x) for x in made.span[:made.spans]],
+                    'choices': [mesh_graph.Choice.from_buffer_copy(x) for x in made.choice[:made.choices]],
                     'selections': [mesh_graph.Selection.from_buffer_copy(x) for x in made.selection[:made.selections]],
                     'guards': [mesh_graph.Guard.from_buffer_copy(x) for x in made.guard[:made.guards]],
                     'scopes': [mesh_graph.Scope.from_buffer_copy(x) for x in made.scope[:made.operations]] if made.scope else []}
@@ -155,203 +156,124 @@ def counter_rules(operations, program, scopes=()):
     return [(scopes[i].counter, scopes[i].delta) if scopes else (0, 0) for i in program]
 
 
-def control_walk(operations, program, metadata):
-    scopes, links = metadata.get('scopes', ()), collections.defaultdict(list)
-    for c, control in enumerate(metadata.get('controls', ())):
-        body, end = (bisect.bisect_left(program, getattr(control, name)) for name in ('body', 'end'))
-        if control.kind == 1:
-            if body != end:
-                links[body].append((end, None))
-                links[end].append((body, ('repeat', c, control.bound)))
-        elif control.kind == 2:
-            entry = bisect.bisect_left(program, control.entry)
-            links[entry].append((end, None))
-    groups, once, last = {}, [], {}
-    for k, i in enumerate(program):
-        owner = scopes[i].once if scopes else 0
-        key = (operations[i].execution, owner)
-        group = groups.setdefault(key, len(groups) + 1) if owner else 0
-        once.append(group)
-        if group:
-            links[k].append((k + 1, ('once', group)))
-            last[group] = k
-    for guard in metadata.get('guards', ()):
-        k = bisect.bisect_left(program, guard.operation)
-        if k < len(program) and program[k] == guard.operation:
-            links[k].append((k + 1, ('selection', guard.selection, not guard.taken)))
-    alternatives = {}
-    for start in list(links):
-        paths = mesh_graph.walk([(start, frozenset())],
-            lambda state: [(target, state[1] | ({owner} if owner else set())) for target, owner in links[state[0]]])
-        alternatives[start] = [(target, needed) for target, needed in paths if target != start]
-    return alternatives, once, set(last.values())
-
-
 def generate(operations, program, observe, point=None, metadata=None):
-    total, executions = len(program), 1 + max((operations[i].execution for i in program), default=0)
     metadata = metadata or {}
-    rules = counter_rules(operations, program, metadata.get('scopes', ()))
-    alternatives, once, once_last = control_walk(operations, program, metadata)
-    guards = collections.defaultdict(list)
-    for guard in metadata.get('guards', ()):
-        guards[bisect.bisect_left(program, guard.operation)].append(guard)
-    def selected(index):
-        choice = metadata['selections'][index]
-        if choice.bytes not in (1, 2, 4, 8):
-            raise ValueError('selection %d has unsupported scalar width %d' % (index, choice.bytes))
-        table = '*(uint64_t *)copyin(self->argument%d + %d, 8)' % (choice.argument, choice.table)
-        word = '*(uint64_t *)copyin((%s) + %d, 8)' % (table, choice.index * 8)
-        return '(*(uint%d_t *)copyin(%s, %d) != 0)' % (choice.bytes * 8, word, choice.bytes)
-    def condition(needed):
-        clauses = []
-        for requirement in sorted(needed):
-            kind, number, *rest = requirement
-            if kind == 'once': clauses.append('seenOnce[%d]' % number)
-            elif kind == 'selection': clauses.append('%s == %d' % (selected(number), rest[0]))
-            elif rest[0]: clauses.append('loopTrips[%d] < %d' % (number, rest[0]))
-        return ' && '.join(clauses) or '1'
-    def repeat_actions(needed):
-        actions = []
-        for requirement in sorted(needed):
-            if requirement[0] != 'repeat': continue
-            c = requirement[1]
-            actions.append('loopTrips[%d]++;' % c)
-            for k, control in enumerate(metadata.get('controls', ())):
-                parent = control.parent
-                while parent != NONE and parent != c:
-                    parent = metadata['controls'][parent].parent
-                if parent == c: actions.append('loopTrips[%d] = 1;' % k)
-        return ' '.join(actions)
     completion = next((e for e in metadata.get('events', ()) if e.role == 1), None)
-    spans = metadata.get('spans', ())
+    slots = max(1, completion.lookback) if completion else 1
+    object_primitives = {PRIMITIVES.index(name) for name, _, obj, _, _ in PROBES if obj is not None}
+    lane_primitives = {PRIMITIVES.index(name) for name, _, _, _, lane in PROBES if lane is not None}
+    object_primitives.update((PRIMITIVES.index('trip_test'), PRIMITIVES.index('bridge_start')))
+    objects = {k: operations[i].object for k, i in enumerate(program)
+               if operations[i].primitive in object_primitives and (not completion or operations[i].object != completion.object)}
+    lanes = {k: operations[i].processor for k, i in enumerate(program) if operations[i].primitive in lane_primitives}
+    machine = mesh_graph.trace_machine(operations, program, metadata, objects, lanes)
+    rules = counter_rules(operations, program, metadata.get('scopes', ()))
+    family_objects = collections.defaultdict(set)
+    for event in metadata.get('events', ()):
+        if event.counter:
+            family_objects[event.counter].add(event.object)
+    spans, transitions = machine['spans'], machine['transitions']
     act = 'printf("mesh-sync-monitor: failure target pid %d\\n", pid); ustack(); ' + (
         'exit(1);' if observe else 'stop(); exit(1);')
-    slots = max(1, completion.lookback) if completion else 1
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
              '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])
-    lines += ['self int inrun, inapi, bs;', 'self uint64_t exec, ended, bsob, bsva, spanfirst, spanend;', 'int64_t cur;',
-              'int64_t e[int64_t], o[int64_t], v[int64_t], x[int64_t], q[int64_t];',
-              'int64_t om[uint64_t], ko[int64_t], lm[uint64_t], kl[int64_t];',
-              'int64_t family[int64_t], delta[int64_t], eventcount[int64_t];',
-              'int64_t once[int64_t], onceLast[int64_t], seenOnce[int64_t];',
-              'uint64_t loopTrips[int64_t];',
-              'uint64_t spanEvent[uint64_t], spanFirst[uint64_t], spanEnd[uint64_t];', 'BEGIN { cur = 0; }']
-    for start in range(0, total, 64):
-        lines.append('BEGIN { %s }' % ' '.join(
-            'e[%d] = %d; o[%d] = %d; v[%d] = %d; x[%d] = %d; q[%d] = %d;' % (
-                k, operations[i].primitive, k, operations[i].object, k, operations[i].value, k, operations[i].execution, k,
-                operations[i].processor) for k, i in enumerate(program[start:start + 64], start)))
-    for start in range(0, total, 64):
-        lines.append('BEGIN { %s }' % ' '.join('family[%d] = %d; delta[%d] = %d;' % (k, rules[k][0], k, rules[k][1])
-                                             for k in range(start, min(start + 64, total))))
-    for k, group in enumerate(once):
-        if group:
-            lines.append('BEGIN { once[%d] = %d; onceLast[%d] = %d; }' % (k, group, k, k in once_last))
+    lines += ['self int inrun, inapi, bs;', 'self uint64_t exec, ended, bsob, bsva, spanfirst, spanend;',
+              'uint64_t epoch, invocation, objectcount, lanecount;',
+              'uint64_t active[uint64_t, uint64_t], om[uint64_t], lm[uint64_t], signals[uint64_t];',
+              'uint64_t spanEvent[uint64_t], spanFirst[uint64_t], spanEnd[uint64_t];',
+              'BEGIN { epoch = 1; active[1, 0] = 1; }']
+    trip, wait, signal = (PRIMITIVES.index(name) for name in ('trip_test', 'host_wait', 'queue_signal'))
+
+    def check(probe, point, predicate, kind, name=None, obj=None, val=None, lane=None):
+        at = probe + point
+        primitive = PRIMITIVES.index(name) if name else -1
+        lines.append('%s { this->checked = 0; }' % at)
+        lines.append('%s %s { this->checked = 1; this->ok = 0; this->ordinary = 0; '
+                     'this->ob = %s; this->va = %s; this->ln = %s; this->completion = 0; }' %
+                     (at, predicate, obj or '0', val or '0', lane or '0'))
+        if obj is not None:
+            lines.append('%s /this->checked/ { this->obid = om[this->ob] ? om[this->ob] : objectcount + 1; }' % at)
+            if completion:
+                lines.append('%s /this->checked/ { this->completion = this->ob == self->ended; }' % at)
+                for slot in range(slots):
+                    lines.append('%s /this->checked && spanEvent[%d] == this->ob/ { this->completion = 1; }' % (at, slot))
+        if lane is not None:
+            lines.append('%s /this->checked/ { this->lnid = lm[this->ln] ? lm[this->ln] : lanecount + 1; }' % at)
+        for source, target, token, index, ob, ln in transitions:
+            if token != kind:
+                continue
+            clause = ['active[epoch %% 2, %d] == epoch' % source]
+            if kind == 'op':
+                operation = operations[program[index]]
+                if operation.primitive != primitive and not (operation.primitive == trip and primitive == wait):
+                    continue
+                if name == 'bridge_start':
+                    clause.append('arg1 == 0')
+                if obj is not None:
+                    if completion and operation.object == completion.object:
+                        slot = '(this->va - 1) %% %d' % slots
+                        expected = ('(this->va && this->va <= self->spanfirst ? '
+                            '(this->va > spanFirst[%s] && this->va <= spanEnd[%s] ? spanEvent[%s] : 0) : self->ended)' %
+                            (slot, slot, slot))
+                        clause.append('this->ob == %s' % expected)
+                    else:
+                        clause.append('!this->completion && this->obid == %d' % ob)
+                if lane is not None:
+                    clause.append('this->lnid == %d' % ln)
+                family, delta = rules[index]
+                value = 'this->tally + (%d)' % delta if family else str(operation.value)
+                if val is not None:
+                    value_clause = 'this->va == (%s)' % value
+                else:
+                    value_clause = '1'
+                printed = (index, operation.primitive, operation.object if obj is not None else -1, operation.execution)
+            else:
+                span, family = spans[index], 0
+                clause.append('invocation == %d' % index)
+                if kind == 'enter':
+                    clause.extend(('arg2 == %d' % span.first, 'arg3 == %d' % span.count))
+                else:
+                    clause.append('arg1 == 0')
+                value_clause, printed = '1', (-1 - index * 2 - (kind == 'leave'), -1, -1, span.first)
+            lines.append('%s /this->checked/ { this->matching = %s; this->tally = 0; }' % (at, ' && '.join(clause)))
+            if family:
+                bindings = machine['states'][source][4]
+                for logical, ordinal in zip(machine['objects'], bindings):
+                    if logical in family_objects[family] and ordinal:
+                        lines.append('%s /this->checked && this->matching && signals[%d] > this->tally/ '
+                                     '{ this->tally = signals[%d]; }' % (at, ordinal, ordinal))
+            lines.append('%s /this->checked && this->matching && (%s)/ { this->ok = 1; '
+                'active[(epoch + 1) %% 2, %d] = epoch + 1; this->ordinary = this->ordinary || %d; '
+                'printf("mesh-sync-monitor: transition %%d %d %d %d %d %d %%d %d %%d\\n", epoch - 1, %s, tid); }' %
+                (at, value_clause, target, bool(ob), source, target, *printed[:3], printed[3],
+                 'this->va' if val is not None else '-1'))
+        if obj is not None:
+            lines.append('%s /this->checked && this->ok && this->ordinary/ '
+                '{ om[this->ob] = this->obid; objectcount = this->obid > objectcount ? this->obid : objectcount; }' % at)
+            if primitive == signal:
+                lines.append('%s /this->checked && this->ok && this->ordinary/ { signals[this->obid] = this->va; }' % at)
+        if lane is not None:
+            lines.append('%s /this->checked && this->ok/ '
+                '{ lm[this->ln] = this->lnid; lanecount = this->lnid > lanecount ? this->lnid : lanecount; }' % at)
+        lines.append('%s /this->checked && !this->ok/ '
+            '{ printf("mesh-sync-monitor: unexpected %s at trace step %%d invocation %%d value %%d thread %%d\\n", '
+            'epoch - 1, invocation, this->va, tid); %s }' % (at, name or kind, act))
+        lines.append('%s /this->checked && this->ok/ { epoch++; }' % at)
+
+    check('pid$target::MetalProgramRun:', 'entry', '/1/', 'enter')
     argument = completion.argument if completion else 4
-    for number in sorted({x.argument for x in metadata.get('selections', ())}):
-        lines.append('self uint64_t argument%d;' % number)
-        lines.append('pid$target::MetalProgramRun:entry { self->argument%d = arg%d; }' % (number, number))
-    for c, control in enumerate(metadata.get('controls', ())):
-        lines.append('BEGIN { loopTrips[%d] = 1; }' % c)
-    if spans:
-        lines += ['uint64_t invocation, runFirst[uint64_t], runCount[uint64_t], runBegin[uint64_t], runEnd[uint64_t];']
-        for k, span in enumerate(spans):
-            begin, end = (bisect.bisect_left(program, getattr(span, name)) for name in ('begin', 'end'))
-            lines.append('BEGIN { runFirst[%d] = %d; runCount[%d] = %d; runBegin[%d] = %d; runEnd[%d] = %d; }' %
-                         (k, span.first, k, span.count, k, begin, k, end))
-        lines.append('pid$target::MetalProgramRun:entry /invocation >= %d || arg2 != runFirst[invocation] || '
-                     'arg3 != runCount[invocation] || cur != runBegin[invocation]/ '
-                     '{ printf("mesh-sync-monitor: unexpected invocation %%d first %%d count %%d at operation %%d\\n", '
-                     'invocation, arg2, arg3, cur); %s }' % (len(spans), act))
     lines.append('pid$target::MetalProgramRun:entry { self->inrun = 1; self->exec = arg2; self->ended = arg%d; '
                  'self->spanfirst = arg2; self->spanend = arg2 + arg3; }' % argument)
-    if spans:
-        lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0/ '
-                     '{ this->spanok = cur == runEnd[invocation]; }')
-        for origin, choices in alternatives.items():
-            for target, needed in choices:
-                lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && !this->spanok && '
-                             'cur == %d && runEnd[invocation] == %d && (%s)/ { this->spanok = 1; }' %
-                             (origin, target, condition(needed)))
-        lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && !this->spanok/ '
-                     '{ printf("mesh-sync-monitor: unexpected invocation end %%d at operation %%d expected %%d\\n", '
-                     'invocation, cur, runEnd[invocation]); %s }' % act)
-        lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && this->spanok/ '
-                     '{ cur = runEnd[invocation]; invocation++; }')
+    check('pid$target::MetalProgramRun:', 'return', '/self->inrun/', 'leave')
     if completion:
         for back in range(slots):
             lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && self->spanend - self->spanfirst > %d/ '
                 '{ this->slot = (self->spanend - 1 - %d) %% %d; spanEvent[this->slot] = self->ended; '
                 'spanFirst[this->slot] = self->spanfirst; spanEnd[this->slot] = self->spanend; }' % (back, back, slots))
-    lines.append('pid$target::MetalProgramRun:return /self->inrun/ { self->inrun = 0; '
+    lines.append('pid$target::MetalProgramRun:return /self->inrun/ { self->inrun = 0; invocation++; '
                  'printf("mesh-sync-monitor: run %d\\n", (int)arg1); }')
-    ended = (PRIMITIVES.index('queue_signal'), PRIMITIVES.index('host_signal'))
-
-    trip, wait = PRIMITIVES.index('trip_test'), PRIMITIVES.index('host_wait')
-    lines.append('int shifted;')
-
-    def match(index):
-        ordinary = (f'(om[this->ob] == 0 || om[this->ob] == o[{index}] + 1) && '
-                    f'(ko[o[{index}]] == 0 || ko[o[{index}]] == this->ob + 1)')
-        if completion:
-            slot = '(this->va - 1) %% %d' % slots
-            expected = (f'(this->va && this->va <= self->spanfirst ? '
-                f'(this->va > spanFirst[{slot}] && this->va <= spanEnd[{slot}] ? spanEvent[{slot}] : 0) : self->ended)')
-            ordinary = f'(o[{index}] == {completion.object} ? this->ob == {expected} : ({ordinary}))'
-        bound = f'{index} < runEnd[invocation] && ' if spans else ''
-        conditional = ' && '.join('(%s != %d || (%s))' % (index, k,
-            ' && '.join('%s == %d' % (selected(g.selection), g.taken) for g in choices)) for k, choices in guards.items())
-        conditional = f' && ({conditional})' if conditional else ''
-        return (f'{index} < {total} && {bound}(!once[{index}] || !seenOnce[once[{index}]]) && '
-                f'(e[{index}] == this->c || (this->c == {wait} && e[{index}] == {trip})) && '
-                f'x[{index}] >= self->exec && (!this->hasva || '
-                f'(family[{index}] ? eventcount[family[{index}]] + delta[{index}] : v[{index}]) == this->va) && '
-                f'(!this->hasob || ({ordinary})) && (!this->hasln || '
-                f'((lm[this->ln] == 0 || lm[this->ln] == q[{index}] + 1) && '
-                f'(kl[q[{index}]] == 0 || kl[q[{index}]] == this->ln + 1))){conditional}')
-
-    def check(probe, name, obj, val, lane, point, predicate):
-        guard = '/this->checked && %s/'
-        lines.append('%s%s { this->checked = 0; }' % (probe, point))
-        lines.append('%s%s %s { this->checked = 1; this->c = %d; this->ob = %s; this->hasob = %d; this->va = %s; '
-                     'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->picked = -1; this->ok = %s%s; }' % (
-                         probe, point, predicate, PRIMITIVES.index(name), obj or '0', obj is not None, val or '0', val is not None,
-                         lane or '0', lane is not None, match('this->i'),
-                         ' && arg1 == 0' if name == 'bridge_start' else ''))
-        route = 0
-        for origin, choices in alternatives.items():
-            for target, needed in choices:
-                if target >= total:
-                    continue
-                lines.append('%s /this->checked && !this->ok && cur == %d && (%s)/ '
-                    '{ this->i = %d; this->ok = %s%s; this->picked = this->ok ? %d : -1; shifted = this->ok ? 1 : shifted; }' %
-                    (probe + point, origin, condition(needed), target, match('this->i'),
-                     ' && arg1 == 0' if name == 'bridge_start' else '', route))
-                if repeat_actions(needed):
-                    lines.append('%s /this->checked && this->ok && this->picked == %d/ { %s }' %
-                                 (probe + point, route, repeat_actions(needed)))
-                route += 1
-        mapped = 'this->hasob' if completion is None else 'this->hasob && o[this->i] != %d' % completion.object
-        lines.append('%s %s { this->mapped = %s; }' % (probe + point, guard % 'this->ok', mapped))
-        lines.append('%s %s { om[this->mapped ? this->ob : 0] = this->mapped ? o[this->i] + 1 : om[0]; '
-                     'ko[this->mapped ? o[this->i] : -1] = this->mapped ? this->ob + 1 : ko[-1]; '
-                     'eventcount[family[this->i]] = family[this->i] && this->c == 1 ? this->va : eventcount[family[this->i]]; '
-                     'lm[this->hasln ? this->ln : 0] = this->hasln ? q[this->i] + 1 : lm[0]; '
-                     'kl[this->hasln ? q[this->i] : -1] = this->hasln ? this->ln + 1 : kl[-1]; '
-                     'seenOnce[once[this->i]] = onceLast[this->i] ? 1 : seenOnce[once[this->i]]; cur = this->i + 1; '
-                     'printf("mesh-sync-monitor: observed %%d %%d %%d %%d %%d %%d\\n", this->i, this->c, this->hasob ? '
-                     'o[this->i] : -1, this->hasva ? (int64_t)this->va : -1, self->exec, tid); '
-                     'self->exec = x[this->i]; self->exec = this->hasob && this->ob == self->ended && (this->c == %d || '
-                     'this->c == %d) && this->va > self->exec ? this->va : self->exec; }'
-                     % (probe + point, guard % 'this->ok', ended[0], ended[1]))
-        lines.append('%s %s { printf("mesh-sync-monitor: unexpected %s at operation %%d of %d, execution %%d (compiled '
-                     'primitive %%d value %%d execution %%d; called value %%d) thread %%d\\n", this->i, self->exec, '
-                     'this->i < %d ? e[this->i] : -1, this->i < %d ? v[this->i] : -1, this->i < %d ? x[this->i] : -1, '
-                     'this->hasva ? (int64_t)this->va : -1, tid); %s }' % (probe + point, guard % '!this->ok', name, total,
-                                                                          total, total, total, act))
-
     for name, probe, obj, val, lane in PROBES:
-        check(probe, name, obj, val, lane, 'entry', '/self->inrun && self->inapi == 0/')
+        check(probe, 'entry', '/self->inrun && self->inapi == 0/', 'op', name, obj, val, lane)
         lines.append('%sentry /self->inrun/ { self->inapi++; }' % probe)
         lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
     name, probe, obj, val = START
@@ -361,20 +283,20 @@ def generate(operations, program, observe, point=None, metadata=None):
     lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
     if point:
         need = 'uregs[R_X%d]' % point['need']
-        check('pid$target:libmesh.dylib:mesh_transfers_start:', 'host_wait', '(self->bsob << 20) + uregs[R_X%d]' %
-              point['edge'], '((int64_t)uregs[R_X%d] < 0 ? 0 : uregs[R_X%d] ? -1 : %s)' % (point['high'], point['high'], need),
-              None, '%x' % point['offset'], '/self->bs/')
-    check(probe, name, 'self->bsob', 'self->bsva', None, 'return', '/self->bs/')
+        check('pid$target:libmesh.dylib:mesh_transfers_start:', '%x' % point['offset'], '/self->bs/', 'op', 'host_wait',
+              '(self->bsob << 20) + uregs[R_X%d]' % point['edge'],
+              '((int64_t)uregs[R_X%d] < 0 ? 0 : uregs[R_X%d] ? -1 : %s)' % (point['high'], point['high'], need))
+    check(probe, 'return', '/self->bs/', 'op', name, 'self->bsob', 'self->bsva')
     lines.append('%sreturn /self->bs/ { self->bs = 0; }' % probe)
     lines.append('%s /self->inrun && self->inapi == 0/ { printf("mesh-sync-monitor: unexpected %%s %%s '
-                 'execution %%d thread %%d\\n", probeprov, probefunc, self->exec, tid); %s }' % (
-                     ',\n'.join(UNLISTED), act))
-    lines.append('END { printf("mesh-sync-monitor: program %%d of %d\\n", cur); printf("mesh-sync-monitor: shifted %%d\\n", '
-                 'shifted); }' % total)
-    if spans:
-        lines.append('END /invocation != %d/ { printf("mesh-sync-monitor: unexpected invocation count %%d of %d\\n", '
-                     'invocation); exit(1); }' % (len(spans), len(spans)))
-    return '\n'.join(lines) + '\n', executions
+                 'execution %%d thread %%d\\n", probeprov, probefunc, self->exec, tid); %s }' %
+                 (',\n'.join(UNLISTED), act))
+    lines.append('END { this->accepted = 0; }')
+    for state in machine['accepting']:
+        lines.append('END /active[epoch %% 2, %d] == epoch/ { this->accepted = 1; '
+                     'printf("mesh-sync-monitor: accepting %%d %d\\n", epoch - 1); }' % (state, state))
+    lines.append('END /!this->accepted/ { printf("mesh-sync-monitor: unexpected incomplete trace at %d\\n", epoch - 1); exit(1); }')
+    return '\n'.join(lines) + '\n', sum(span.count for span in spans)
 
 
 def bridge_program(group):
@@ -541,36 +463,34 @@ def main(argv):
                    for line in bridge_text.splitlines()) if m]
     sys.stdout.write(done.stdout)
     sys.stderr.write(done.stderr)
-    # the walk: the compiled operation each observed one matched, in order (a WHILE's trips repeat or skip a span of
-    # it). A trip test is observed as the host wait it is; eventcount operands stay observed values.
-    observed, failures, walk, shifted = [], [], [], 0
-    trip = PRIMITIVES.index('trip_test')
+    observed, failures, walk, records, accepting = [], [], [], [], []
     for line in done.stdout.splitlines():
-        m = re.match(r'mesh-sync-monitor: shifted (\d+)$', line)
-        if m:
-            shifted = int(m.group(1))
-        m = re.match(r'mesh-sync-monitor: observed (\d+) (\d+) (-?\d+) (-?\d+) (\d+) \d+$', line)
-        if m:
-            k, c, obj, value, execution = map(int, m.groups())
-            compiled_op = operations[program[k]]
-            walk.append(k)
-            c = trip if compiled_op.primitive == trip else c
-            observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[c]), c, compiled_op.vertex,
-                                                 NONE if obj < 0 else obj, execution,
-                                                 compiled_op.value if value < 0 else value))
+        match = re.fullmatch(r'mesh-sync-monitor: transition ' + r'(-?\d+) ' * 8 + r'(-?\d+)', line)
+        if match:
+            records.append(tuple(map(int, match.groups())))
+        match = re.fullmatch(r'mesh-sync-monitor: accepting (\d+) (\d+)', line)
+        if match:
+            accepting.append(tuple(map(int, match.groups())))
         if 'mesh-sync-monitor: unexpected' in line:
             failures.append(line)
-        m = re.match(r'mesh-sync-monitor: run (-?\d+)$', line)
-        if m and int(m.group(1)):
-            failures.append('MetalProgramRun returned %s' % m.group(1))
+        match = re.fullmatch(r'mesh-sync-monitor: run (-?\d+)', line)
+        if match and int(match.group(1)):
+            failures.append('MetalProgramRun returned %s' % match.group(1))
     if done.returncode:
         failures.append('dtrace exited %d' % done.returncode)
-    looped = bool(metadata['controls'] or metadata.get('guards'))
-    if not looped and len(observed) != len(program):
-        failures.append('%d of %d compiled program operations observed' % (len(observed), len(program)))
-    if looped and program and (not walk or walk[-1] != len(program) - 1):
-        failures.append('the walk of %d observed operations ended at compiled operation %s of %d'
-                        % (len(walk), walk[-1] if walk else None, len(program)))
+    try:
+        witness = mesh_graph.trace_witness(records, accepting)
+    except ValueError as failure:
+        failures.append(str(failure))
+        witness = []
+    for _, _, _, k, primitive, obj, value, execution, _ in witness:
+        if k < 0:
+            continue
+        compiled_op = operations[program[k]]
+        walk.append(k)
+        observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[primitive]), primitive, compiled_op.vertex,
+                                             NONE if obj < 0 else obj, execution,
+                                             compiled_op.value if value < 0 else value))
     blind = {c: n for c, n in coverage.items() if c not in ('program', 'static')}
     if bridge:
         made, missing = bridge_match([i for i, c in enumerate(which) if c == 'bridge'], operations, raised)
@@ -581,7 +501,7 @@ def main(argv):
                                           operations[i].object, operations[i].execution, count) for i, count in made]
     expected_ops, counters = [], [0, 0, 0]
     rules = counter_rules(operations, program, metadata['scopes'])
-    for k in (walk if looped else range(len(program))):
+    for k in walk:
         source = operations[program[k]]
         family, delta = rules[k]
         value = counters[family] + delta if family else source.value

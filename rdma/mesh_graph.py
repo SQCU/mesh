@@ -1,4 +1,5 @@
 # design/rubrics.md C9
+import bisect
 import collections
 import ctypes as C
 import errno
@@ -15,6 +16,196 @@ def walk(starts, neighbours):
             order.append(v)
             queue.extend(neighbours(v))
     return order
+
+
+# Rabin and Scott, IBM JRD 3(2), 1959, Definition 11 and Theorem 11; design/synchronization-signature-change-request.md 3–4.
+def trace_machine(operations, program, metadata, objects, lanes):
+    controls, choices = metadata.get('controls', ()), metadata.get('choices', ())
+    scopes, guards = metadata.get('scopes', ()), collections.defaultdict(list)
+    if metadata.get('selections') and not choices:
+        raise ValueError('signature has obsolete address-based choices; regenerate it from the retained compiled program')
+    for guard in metadata.get('guards', ()):
+        at = bisect.bisect_left(program, guard.operation)
+        if at < len(program) and program[at] == guard.operation:
+            guards[at].append((guard.selection, int(bool(guard.taken))))
+    children, bounds = collections.defaultdict(list), {}
+    for c, control in enumerate(controls):
+        children[control.parent].append(c)
+        bounds[c] = tuple(bisect.bisect_left(program, getattr(control, name))
+                          for name in ('entry', 'body', 'retest', 'end'))
+    for rows in children.values():
+        rows.sort(key=lambda c: bounds[c][0])
+    groups, once, last = {}, {}, {}
+    for k, i in enumerate(program):
+        owner = scopes[i].once if scopes else 0
+        if owner:
+            group = groups.setdefault((operations[i].execution, owner), len(groups))
+            once[k], last[group] = group, k
+    descendants = {}
+    for c in range(len(controls)):
+        descendants[c] = reach([c], children.__getitem__)
+    reset = {c: tuple(i for i, choice in enumerate(choices) if choice.parent in descendants[c]) for c in descendants}
+    nodes = []
+
+    def node(kind, value=None, targets=()):
+        made = len(nodes)
+        nodes.append((kind, value, tuple(targets)))
+        return made
+
+    def sequence(first, end, tail, parent, selected=None):
+        cursor = end
+        for c in reversed(children[parent] if selected is None else selected):
+            a, b, r, z = bounds[c]
+            if a < first or z > cursor:
+                raise ValueError('control %d is outside its retained parent interval' % c)
+            for k in reversed(range(z, cursor)):
+                tail = node('op', k, (tail,))
+            if controls[c].kind == 1 and b != z:
+                decision = node('decide', c)
+                retest = sequence(r, z, decision, c, [])
+                after = node('bound', c, (tail, retest))
+                body = sequence(b, r, after, c)
+                entered = node('trip', c, (body,))
+                nodes[decision] = ('decide', c, (tail, entered))
+                initial = sequence(a, b, decision, c, [])
+                tail = node('init', c, (initial,))
+            elif controls[c].kind == 2:
+                tail = node('optional', c, (tail, sequence(a, z, tail, c)))
+            cursor = a
+        for k in reversed(range(first, cursor)):
+            tail = node('op', k, (tail,))
+        return tail
+
+    spans = metadata.get('spans') or [Span(0, 1 + max((operations[i].execution for i in program), default=0),
+                                          0, len(operations))]
+    final = node('final')
+    start = final
+    for span in reversed(range(len(spans))):
+        first, end = (bisect.bisect_left(program, getattr(spans[span], name)) for name in ('begin', 'end'))
+        root = [c for c in children[NONE] if first <= bounds[c][0] and bounds[c][3] <= end]
+        leave = node('leave', span, (start,))
+        start = node('enter', span, (sequence(first, end, leave, NONE, root),))
+    uses = [set(g[0] for g in guards.get(value, ())) if kind == 'op' else set() for kind, value, _ in nodes]
+    live = [set(use) for use in uses]
+    predecessors = collections.defaultdict(set)
+    for n, (_, _, targets) in enumerate(nodes):
+        for target in targets:
+            predecessors[target].add(n)
+    queue, queued = collections.deque(range(len(nodes))), set(range(len(nodes)))
+    while queue:
+        n = queue.popleft()
+        queued.remove(n)
+        kind, value, targets = nodes[n]
+        future = set().union(*(live[t] for t in targets)) if targets else set()
+        if kind == 'trip':
+            future.difference_update(reset[value])
+        made = uses[n] | future
+        if made != live[n]:
+            live[n] = made
+            for before in predecessors[n] - queued:
+                queue.append(before)
+                queued.add(before)
+
+    def normalized(state):
+        cursor, seen, selected, trips, bound, queues = state
+        return cursor, seen, tuple(v if i in live[cursor] else -1 for i, v in enumerate(selected)), trips, bound, queues
+
+    def move(state, target, selected=None, seen=None, trips=None):
+        return normalized((target, state[1] if seen is None else seen, state[2] if selected is None else tuple(selected),
+                           state[3] if trips is None else tuple(trips), state[4], state[5]))
+
+    def assign(state, requirements):
+        selected = list(state[2])
+        for choice, taken in requirements:
+            if selected[choice] not in (-1, taken):
+                return None
+            selected[choice] = taken
+        return selected
+
+    def epsilon(state):
+        cursor, seen, selected, trips, _, _ = state
+        kind, value, targets = nodes[cursor]
+        if kind == 'op':
+            if value in once and seen & (1 << once[value]):
+                return [move(state, targets[0])]
+            return [move(state, targets[0], selected=made) for choice, taken in guards.get(value, ())
+                    if (made := assign(state, [(choice, 1 - taken)])) is not None]
+        if kind in ('optional', 'decide'):
+            return [move(state, target) for target in targets]
+        if kind == 'init':
+            changed = list(trips)
+            changed[value] = 0
+            return [move(state, targets[0], trips=changed)]
+        if kind == 'bound':
+            reached = controls[value].bound and trips[value] >= controls[value].bound
+            return [move(state, targets[0 if reached else 1])]
+        if kind == 'trip':
+            changed, selected = list(trips), list(selected)
+            if controls[value].bound:
+                changed[value] += 1
+            for choice in reset[value]:
+                selected[choice] = -1
+            return [move(state, targets[0], selected=selected, trips=changed)]
+        return []
+
+    object_ids, lane_ids = sorted(set(objects.values())), sorted(set(lanes.values()))
+    object_at, lane_at = {v: k for k, v in enumerate(object_ids)}, {v: k for k, v in enumerate(lane_ids)}
+    initial = normalized((start, 0, (-1,) * len(choices), (0,) * len(controls), (0,) * len(object_ids), (0,) * len(lane_ids)))
+    states, indexed, transitions, accepting = [initial], {initial: 0}, [], []
+    for source, state in enumerate(states):
+        for current in walk([state], epsilon):
+            cursor, seen, selected, trips, bound, queues = current
+            kind, value, targets = nodes[cursor]
+            if kind == 'final':
+                accepting.append(source)
+                continue
+            if kind not in ('op', 'enter', 'leave'):
+                continue
+            if kind == 'op':
+                if value in once and seen & (1 << once[value]):
+                    continue
+                selected = assign(current, guards.get(value, ()))
+                if selected is None:
+                    continue
+                if value in once and last[once[value]] == value:
+                    seen |= 1 << once[value]
+            ob, ln = 0, 0
+            bound, queues = list(bound), list(queues)
+            if kind == 'op' and value in objects:
+                slot = object_at[objects[value]]
+                bound[slot] = bound[slot] or max(bound, default=0) + 1
+                ob = bound[slot]
+            if kind == 'op' and value in lanes:
+                slot = lane_at[lanes[value]]
+                queues[slot] = queues[slot] or max(queues, default=0) + 1
+                ln = queues[slot]
+            following = normalized((targets[0], seen, tuple(selected), trips, tuple(bound), tuple(queues)))
+            if following not in indexed:
+                indexed[following] = len(states)
+                states.append(following)
+            transitions.append((source, indexed[following], kind, value, ob, ln))
+    return {'states': states, 'transitions': sorted(set(transitions)), 'accepting': sorted(set(accepting)),
+            'objects': object_ids, 'spans': spans}
+
+
+def trace_witness(records, accepting):
+    at = collections.defaultdict(list)
+    for record in records:
+        at[record[0]].append(record)
+    steps = max(at, default=-1) + 1
+    target = next((state for count, state in accepting if count == steps), None)
+    if target is None:
+        raise ValueError('no accepting compiled control state at observation end')
+    result = []
+    for step in reversed(range(steps)):
+        predecessor = next((row for row in at[step] if row[2] == target), None)
+        if predecessor is None:
+            raise ValueError('missing trace predecessor at step %d state %d' % (step, target))
+        result.append(predecessor)
+        target = predecessor[1]
+    if target != 0:
+        raise ValueError('trace does not start in the compiled initial state')
+    return list(reversed(result))
 
 
 def reach(starts, neighbours):
