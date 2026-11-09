@@ -649,6 +649,28 @@ leaf is retained in the same `forms`/`added`/`results` representation as other m
 instantiation. The produced leaf and each consumer's sliced or resharded view remain distinct keys. Logical value
 links do not authorize physical aliasing; actual source alias identity, copies and completion remain operands.
 
+`AllocationProjection` connects those scoped values to storage through `numerical[(scope,value)]` and
+`wires[(segment,value)]`. Both name an `Allocation {root, domain, function, index, activation, context}`;
+`root` is `(scope,value,segment-or-none)`. The numerical domain is its owning scope, while an independently
+activated wire domain is its communication segment. `function,index` retain the actual solved allocation,
+`activation` its typed producing-generation operand, and `context` the prepared parent-frame selector. A
+compiler-owned numerical temporary may acquire its allocation from the existing lifetime owner. An unassigned
+wire plan is unfinished construction, not permission to substitute its parent's invocation generation.
+
+The projection's `standins` bind these roots; `realize` derives both `homes_by_scope` and `homes_by_segment`
+through the existing `_homes` view owner. Only a segment's actual wire roots override its numerical views.
+Borrowed formals retain the linked source when they have no local home. A wire live-in is materialized through
+the existing typed copy owner when its fixed transport address differs; newly produced outputs write their
+wire view directly. A yielded wire result is copied directly into its parent result, without an intermediate
+child numerical copy. Source correspondence, physical alias proof and producing generation remain distinct.
+
+Recursive instantiation consumes each retained `Region.ir`, replacing the old numerical-only FX branch walk.
+Its `_Segment` records are compilation boundaries over maximal operation blocks, including empty blocks;
+the builder retains their exact operation ranges for the scoped activation/effect consumer. Keeping these
+ranges alone does not implement that consumer. The same projection is used by the public program builder and
+the existing single-node artifact diagnostic. Neither source lowering nor the diagnostic has a second child
+layout allocator or a second execution regime.
+
 A WHILE retains its test once in `[first,middle)` and its body once in `[middle,last)`. After each body, execution
 returns to that same test; N body executions therefore entail N+1 tests, including the final false test's effects.
 The loop's initial and repeated tests share its lexical test region and communication activation stream. The

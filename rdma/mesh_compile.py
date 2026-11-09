@@ -59,6 +59,41 @@ Window = collections.namedtuple('Window', 'label operand dim extent stride low t
 Port = collections.namedtuple('Port', 'scope node index value storage')
 Link = collections.namedtuple('Link', 'source target kind')
 TransferSite = collections.namedtuple('TransferSite', 'position port', defaults=(None,))
+Allocation = collections.namedtuple('Allocation', 'root domain function index activation context',
+                                    defaults=(None, None, None, None))
+
+
+# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
+class AllocationProjection:
+    def __init__(self, root):
+        self.root, self.segmented = root, _segments(root)
+        self.numerical, self.wires, self.allocations = {}, {}, {}
+        self.standins, self.homes_by_scope, self.homes_by_segment = {}, {}, {}
+        for region in root.region.regions:
+            for value in range(len(region.ir.values)):
+                key = region.id, value, None
+                self.numerical[region.id, value] = key
+                self.allocations[key] = Allocation(key, region.id)
+        for segment in self.segmented.segments:
+            ir = root.region.regions[segment.scope].ir
+            for transfer in segment.transfers:
+                value = ir.declared[transfer].value
+                if value != mesh.ABSENT:
+                    key = segment.scope, value, segment.id
+                    self.wires[segment.id, value] = key
+                    self.allocations[key] = Allocation(key, segment.id)
+
+    def realize(self, standins, allocations):
+        self.standins, self.allocations = standins, allocations
+        for region in self.root.region.regions:
+            copies = [standins[self.numerical[region.id, value]] for value in range(len(region.ir.values))]
+            self.homes_by_scope[region.id] = _homes(region.ir, copies)
+        for segment in self.segmented.segments:
+            region = self.root.region.regions[segment.scope]
+            copies = [standins[self.wires.get((segment.id, value), self.numerical[region.id, value])]
+                      for value in range(len(region.ir.values))]
+            self.homes_by_segment[segment.id] = _homes(region.ir, copies)
+        return self
 
 
 # design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
@@ -6520,32 +6555,6 @@ def _concatenated(target, given, outs):
     return ops
 
 
-# a branch graph module's structured operations over the given operands (its placeholders), each call's result a
-# temporary of its meta value, an alias the view itself; its results
-def _interpreted(module, given, page):
-    env, ops, inputs = {}, [], iter(given)
-    for node in module.graph.nodes:
-        if node.op == 'placeholder':
-            env[node] = next(inputs)
-        elif node.op == 'get_attr':
-            env[node] = operator.attrgetter(node.target)(module)
-        elif node.op == 'call_function':
-            args, kwargs = map_arg((node.args, node.kwargs), env.__getitem__)
-            local = Local(node.op, node.target, node.args, node.kwargs)
-            if node.target in SYMBOLIC and not any(isinstance(a, torch.Tensor) for a in args):
-                env[node] = node.target(*args)
-                continue
-            if _aliases(local):
-                env[node] = _call(local, args, kwargs)
-                continue
-            made, spec = pytree.tree_flatten(node.meta['val'])
-            outs = [_held(m) for m in made]
-            ops += _lowering(local, page)(args, kwargs, outs)
-            env[node] = pytree.tree_unflatten(outs, spec)
-        elif node.op == 'output':
-            return ops, pytree.tree_leaves(map_arg(node.args[0], env.__getitem__))
-
-
 # metal_ir.h metal_ir_control (the role of CUDA 12.4 graph conditional IF and WHILE nodes): an IF's two arms, the first
 # run where the one-element predicate is nonzero and the second where it is zero, only the taken arm's effects
 # executing; a WHILE's one range run again while the predicate is nonzero, tested before every trip (`bound` a known
@@ -6560,52 +6569,22 @@ class _Control:
         self.place, self.node = GPU, 0
 
 
+class _Segment:
+    def __init__(self, segment, ops):
+        self.segment, self.ops = segment, ops
+        self.place, self.node = GPU, 0
+
+
 def _placed(ops, place, node):
     for g in ops:
-        g.place, g.node = place, node
+        g.place = place
+        if not hasattr(g, 'scope'):
+            g.node = node
+        if isinstance(g, _Segment):
+            _placed(g.ops, place, node)
         if isinstance(g, _Control):
             for arm in ([g.test] if g.test is not None else []) + g.arms:
                 _placed(arm, place, node)
-
-
-def _flagged(value, flag):
-    r = _Region()
-    r.done(_convert(r, _convert(r, r.arg(0, value), _class(value), BOOL), BOOL, I32))
-    return _Generic((), [(value, _rows(0, [None] * value.dim()))], [(flag, ())], r)
-
-
-# torch 2.14.0 torch/_higher_order_ops/cond.py: one IF over the predicate, each arm its branch's operations and the
-# copies of its results into the cond's
-def _conditional(target, args, kwargs, outs, page):
-    predicate, first, second, operands = args
-    if not isinstance(predicate, torch.Tensor):
-        ops, results = _interpreted(first if predicate else second, list(operands), page)
-        return ops + [op for out, value in zip(outs, results) for op in _copy(out, value)]
-    arms = []
-    for module in (first, second):
-        body, results = _interpreted(module, list(operands), page)
-        for out, value in zip(outs, results):
-            body += _copy(out, value)
-        arms.append(body)
-    return [_Control(IF, arms, predicate)]
-
-
-# torch 2.14.0 torch/_higher_order_ops/while_loop.py: the carried values in the loop's results, the test's verdict a
-# flag computed before the range and again at its end, the body's results copied into the carried state each trip
-def _iterated(target, args, kwargs, outs, page):
-    test, body, carried, additional = args
-    flag, ops = _temporary([], torch.int32), []
-    for out, value in zip(outs, carried):
-        ops += _copy(out, value) if isinstance(value, torch.Tensor) else _fill(out, value)
-
-    def tested():
-        made, (verdict,) = _interpreted(test, [*outs, *additional], page)
-        return made + [_flagged(verdict, flag)]
-    ops += tested()
-    made, results = _interpreted(body, [*outs, *additional], page)
-    for out, value in zip(outs, results):
-        made += _copy(out, value) if isinstance(value, torch.Tensor) else _fill(out, value)
-    return ops + [_Control(WHILE, [made + tested()], flag, _trips(test, body, carried, additional))]
 
 
 # N. D. Jones, C. K. Gomard and P. Sestoft, Partial Evaluation and Automatic Program Generation, 1993, Definition 4.1:
@@ -6736,10 +6715,6 @@ def _lowering(local, page):
             return (_lifted(local.target, lower, given, outs) if _complexes(given, outs)
                     else lower(local.target, given, outs))
         return lifted
-    if packet is torch.ops.higher_order.cond:
-        return lambda args, kwargs, outs: _conditional(local.target, args, kwargs, outs, page)
-    if packet is torch.ops.higher_order.while_loop:
-        return lambda args, kwargs, outs: _iterated(local.target, args, kwargs, outs, page)
     if packet in SOURCES:
         return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, args, kwargs), outs)
     if packet in VIEWS:
@@ -6902,8 +6877,9 @@ def _key(value):
 # torch 2.14.0 torch/_tensor_docs.py, view and copy_; design/torch-source-lowering-change-request.md item 1: a call's
 # structured operations over its operands' placed views, its result its own place, a placed view of an operand it
 # writes in place, an alias, or a temporary the compilation realizes
-def _called(ir, key, operands, local, form, placed):
-    lower = _lowering(local, ir.page)
+def _called(ir, key, operands, local, form, placed, control):
+    lower = (lambda args, kwargs, outs: control(key, args, kwargs, outs)) if local.target in CONTROL \
+        else _lowering(local, ir.page)
     given = iter(operands)
     args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
     mine = placed(key)
@@ -7060,7 +7036,7 @@ def _copied(ir, read, key, cut, source, target):
 
 # N. D. Jones, C. K. Gomard and P. Sestoft, 1993, Definition 4.1: one item of the function's program over its placed
 # stand-ins (`placed`) and the call's input leaves (`given`): its value and its structured operations
-def _specialized(ir, placed, item, operands, ops, given):
+def _specialized(ir, placed, item, operands, ops, given, control):
     kind, reads, key, operand = item
     value = placed(key)
     if key in ir.attributes:
@@ -7090,33 +7066,180 @@ def _specialized(ir, placed, item, operands, ops, given):
             extent = -(-size // ir.shape[m])
             valid = max(0, min(extent, size - ir.coords[ir.device][m] * extent))
             operands[at] = operands[at].narrow(dim, 0, valid)
-        value, made = _called(ir, key, operands, ir.locals[operand], ir.forms.get(key), placed)
+        value, made = _called(ir, key, operands, ir.locals[operand], ir.forms.get(key), placed, control)
         ops += made
     elif kind == 'collective':
         ops += _collected(ir, placed, item, operands)
     return value
 
 
-# a call's structured operations in the function's program order and its result over the placed stand-ins `tensors`
-def _instantiate(ir, tensors, given, spec, stream=0):
-    ops = []
+# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
+class _Instantiated:
+    def __init__(self, projection):
+        self.projection, self.root = projection, projection.root
+        self.values, self.storage, self.blocks = {}, {}, {}
+        self.nodes = {(region.id, node): index for index, (region, node) in enumerate(
+            (region, node) for region in self.root.region.regions for node in region.ir.order)}
+
+    def home(self, scope, key, segment=None):
+        ir = self.root.region.regions[scope].ir
+        if key not in ir.homes:
+            return None
+        value = ir.homes[key][0]
+        selected = segment if (segment, value) in self.projection.wires \
+            else self.storage.get((scope, value))
+        homes = self.projection.homes_by_scope[scope] if selected is None \
+            else self.projection.homes_by_segment[selected]
+        return homes[0][key][0]
+
+    def read(self, scope, key):
+        ir = self.root.region.regions[scope].ir
+        if key in ir.homes and (scope, ir.homes[key][0]) in self.storage:
+            return self.home(scope, key)
+        return self.values[scope][key] if key in self.values[scope] else self.home(scope, key)
+
+    def remember(self, ir, key, value, segment):
+        self.values[ir.region.id][key] = value
+        if key in ir.homes and isinstance(value, torch.Tensor):
+            v = ir.homes[key][0]
+            home = self.home(ir.region.id, key, segment)
+            if home is not None and _key(home) == _key(value):
+                self.storage[ir.region.id, v] = segment if (segment, v) in self.projection.wires \
+                    else self.storage.get((ir.region.id, v))
+        form = ir.forms.get(key)
+        if isinstance(form, tuple):
+            for (_, leaf), made in zip(form[1], pytree.tree_leaves(value)):
+                if leaf != key:
+                    self.remember(ir, leaf, made, segment)
+
+    def locate(self, ops, ir, node, segment):
+        for op in ops:
+            if hasattr(op, 'scope'):
+                continue
+            op.scope, op.segment = ir.region.id, segment
+            op.node = self.nodes.get((ir.region.id, node), len(self.nodes))
+            op.place = CPU if _device(ir, (node, ir.sharding.get(node))) == 'cpu' else GPU
+            if isinstance(op, _Control):
+                for arm in ([op.test] if op.test is not None else []) + op.arms:
+                    self.locate(arm, ir, node, segment)
+
+    def linked(self, link):
+        (scope, key), target = _link_values(self.root, link)
+        return link.source.value if key is None else self.read(scope, key), target
+
+    def copies(self, links, ir, node, segment):
+        ops = []
+        for link in links:
+            source, (scope, key) = self.linked(link)
+            target = self.projection.homes_by_scope[scope][0][key][0]
+            if isinstance(source, torch.Tensor) and _key(source) == _key(target) \
+                    and source.storage_offset() == target.storage_offset() \
+                    and source.shape == target.shape and source.stride() == target.stride():
+                continue
+            ops += _assign(target, source)
+            self.remember(self.root.region.regions[scope].ir, key, target, None)
+        self.locate(ops, ir, node, segment)
+        return ops
+
+    def control(self, ir, key, args, kwargs, outs):
+        node = key[0]
+        children = [child for child in ir.region.children if child.control is node]
+        conditional = node.target is torch.ops.higher_order.cond
+        links = [link for link in ir.region.links if link.target.node is node
+                 or any(link.target.scope == child.id for child in children)]
+        position = next(g for g, item in enumerate(ir.program) if item[0] == 'call' and item[2] == key)
+        boundary = self.projection.segmented.boundaries.get((ir.region.id, position))
+        segment = self.projection.segmented.items[ir.region.id][position]
+        before = boundary.before if boundary else segment
+        for port, out in zip(ir.region.ports[node], outs):
+            self.remember(ir, ir.ports[port], out, None)
+        zero = [link for link in links if link.kind == 'zero-exit']
+        initial = self.copies(zero, ir, node, before)
+        if boundary:
+            self.blocks[before].ops += initial
+            initial = []
+        yielded = {link.source: _link_values(self.root, link)[1] for link in links if link.kind == 'yield'}
+        carried = {link.target: yielded[link.source] for link in links if link.kind == 'carried'}
+        arms, verdict = [], None
+        selected = children if not conditional or isinstance(args[0], torch.Tensor) else [children[0 if args[0] else 1]]
+        for child in selected:
+            incoming = {}
+            for link in links:
+                if link.target.scope != child.id or link.kind not in ('initial', 'borrowed'):
+                    continue
+                incoming[link.target] = self.read(*carried[link.target]) if link.target in carried \
+                    else self.linked(link)[0]
+            body, result = self.region(child, [incoming[port] for port in child.inputs])
+            exits = [link for link in links if link.kind == 'yield' and link.source.scope == child.id]
+            last = self.projection.segmented.items[child.id][-1]
+            copies = self.copies(exits, child.ir, next(n for n in child.ir.order if n.op == 'output'), last)
+            if last in self.blocks and self.projection.segmented.segments[last].scope == child.id:
+                self.blocks[last].ops += copies
+            else:
+                body += copies
+            if child.role == 'test':
+                verdict, = pytree.tree_leaves(result)
+            arms.append(body)
+        if conditional:
+            return initial + ([_Control(IF, arms, args[0])] if isinstance(args[0], torch.Tensor) else arms[0])
+        return initial + [_Control(WHILE, [arms[1]], verdict, _trips(*args), test=arms[0])]
+
+    def enter(self, segment, given):
+        ir = self.root.region.regions[segment.scope].ir
+        inputs = {item[2]: given[item[3]] for item in ir.program if item[0] == 'input'}
+        ops = []
+        for key in segment.inputs:
+            if key not in ir.homes or (segment.id, ir.homes[key][0]) not in self.projection.wires:
+                continue
+            source = inputs[key] if key in inputs else self.read(segment.scope, key)
+            target = self.home(segment.scope, key, segment.id)
+            if _key(source) != _key(target):
+                ops += _assign(target, source)
+            self.remember(ir, key, target, segment.id)
+        if ops:
+            self.locate(ops, ir, ir.program[segment.first][2][0], segment.id)
+        return ops
+
+    def region(self, region, given):
+        ir, ops, current = region.ir, [], None
+        self.values[region.id] = {}
+        for position, item in enumerate(ir.program):
+            kind, reads, key, operand = item
+            segment = self.projection.segmented.items[region.id][position]
+            own = segment is not None and self.projection.segmented.segments[segment].scope == region.id
+            if segment is None:
+                before = self.projection.segmented.boundaries[region.id, position].before
+                if before not in self.blocks:
+                    block = _Segment(before, self.enter(self.projection.segmented.segments[before], given))
+                    block.scope = region.id
+                    self.blocks[before] = block
+                    ops.append(block)
+            if own and segment != current:
+                block = _Segment(segment, self.enter(self.projection.segmented.segments[segment], given))
+                block.scope = region.id
+                self.blocks[segment] = block
+                ops.append(block)
+            current = segment
+            emitted = self.blocks[segment].ops if own else ops
+            if kind == 'output':
+                node, keys = operand
+                return ops, map_arg(node.args[0], lambda n: self.read(region.id, keys[n]))
+            first = len(emitted)
+            placed = lambda k: self.home(region.id, k, segment)
+            value = _specialized(ir, placed, item, [self.read(region.id, read) for read in reads], emitted, given,
+                                 lambda k, args, kwargs, outs: self.control(ir, k, args, kwargs, outs))
+            if kind == 'input' and key in ir.homes and (segment, ir.homes[key][0]) in self.projection.wires:
+                value = placed(key)
+            self.remember(ir, key, value, segment)
+            self.locate(emitted[first:], ir, key[0], segment)
+
+
+def _instantiate(ir, projection, given, spec, stream=0):
     RANDOM.update(state=None, sites=0, stream=stream)
-    items = {item[2]: item for item in ir.program if item[0] != 'output'}
-
-    def placed(key):
-        return tensors[key][0] if key in tensors else None
-
-    def specialized(key, operands):
-        first = len(ops)
-        value = _specialized(ir, placed, items[key], operands, ops, given)
-        node = ir.order.index(key[0]) if key[0] in ir.order else len(ir.order)
-        _placed(ops[first:], CPU if _device(ir, key) == 'cpu' else GPU, node)
-        return value
-    values = mesh_graph.forward(list(items), lambda key: items[key][1], specialized)
+    ops, result = _Instantiated(projection).region(ir.region, given)
     if RANDOM['state'] is not None:
         ops.append(_stepped(RANDOM['state']))
-    node, keys = next(item[3] for item in ir.program if item[0] == 'output')
-    return ops, pytree.tree_unflatten(list(map_arg(node.args[0], lambda n: values[keys[n]])), spec)
+    return ops, pytree.tree_unflatten(pytree.tree_leaves(result), spec)
 
 
 # design/plan-to-bridge-change-request.md R4
@@ -7291,6 +7414,18 @@ class _Builder:
     # metal_ir.h `identity`: the producer's identity of an operation and of the values it first names, (function,
     # call ordinal, FX node position) of the call's graph, kept through every transformation (metal_ir_operation_info)
     def generic(self, g):
+        if isinstance(g, _Segment):
+            first, children = self.lib.metal_ir_operations(self.p), []
+            for inner in g.ops:
+                handle = self.generic(inner)
+                if isinstance(inner, _Control):
+                    children.append(handle)
+                elif isinstance(inner, _Segment):
+                    children += handle
+            if not hasattr(self, 'segments'):
+                self.segments = {}
+            self.segments[g.segment] = first, self.lib.metal_ir_operations(self.p)
+            return children
         if isinstance(g, _Check):
             self.identity = self.base | g.node
             operation = self.lib.metal_ir_check(self.p, self.value(g.info), g.code, self.identity)
@@ -7312,6 +7447,8 @@ class _Builder:
                     handle = self.generic(inner)
                     if isinstance(inner, _Control):
                         children.append(handle)
+                    elif isinstance(inner, _Segment):
+                        children += handle
                 bounds.append(self.lib.metal_ir_operations(self.p))
             first, middle, last = bounds if g.kind == IF else (bounds[-2], bounds[-1], bounds[-1])
             control = self.lib.metal_ir_control
@@ -7501,11 +7638,24 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
     # its pages of `ir.page` bytes (metal_ir_value_paged)
     def instance(k, j):
         if (k, j) not in standins:
-            ir, copies = irs[k], []
-            for v, (dtype, numel, _) in enumerate(ir.layouts):
-                pages = 0 if ir.values[v].run else -(-numel * dtype.itemsize // ir.page)
-                copies.append(raw[k, 0][v] if j and v in rated[k] else [standin((k, v, j, pages, ir.page), dtype, numel)])
-            raw[k, j], standins[k, j] = copies, _homes(ir, copies)
+            ir, projection = irs[k], AllocationProjection(irs[k])
+            copies, allocated = {}, dict(projection.allocations)
+            for root, allocation in allocated.items():
+                scope, v, segment = root
+                own = ir.region.regions[scope].ir
+                dtype, numel, _ = own.layouts[v]
+                if scope == 0 and segment is None:
+                    pages = 0 if own.values[v].run else -(-numel * dtype.itemsize // own.page)
+                    copies[root] = raw[k, 0][v] if j and v in rated[k] else [standin((k, v, j, pages, own.page), dtype, numel)]
+                    allocated[root] = allocation._replace(function=k, index=v)
+                elif segment is not None and len(projection.segmented.segments) == 1:
+                    numerical = projection.numerical[scope, v]
+                    copies[root] = copies[numerical]
+                    allocated[root] = allocated[numerical]._replace(root=root, domain=allocation.domain)
+                else:
+                    copies[root] = [torch.empty(numel, dtype=dtype, device='meta')]
+            raw[k, j] = [copies[projection.numerical[0, v]] for v in range(len(ir.values))]
+            standins[k, j] = projection.realize(copies, allocated)
         return standins[k, j]
 
     def storage(k, v, j):
@@ -7521,19 +7671,22 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             # the function, its call's result is its delivered leaves (_deliver `ir.landed`), each over its landing
             # value's stand-in, and its passed-through leaves (Compiled `passed`) the call's own inputs here
             output, keys = next(item[3] for item in ir.program if item[0] == 'output')
-            places, passed = instance(k, j)[0] if ir.landed else {}, compiled[k].passed
+            places, passed = instance(k, j).homes_by_scope[0][0] if ir.landed else {}, compiled[k].passed
             leaves = [places[keys[leaf]][0] if o in ir.landed else inputs[passed[o]] if o in passed else None
                       for o, leaf in enumerate(pytree.tree_leaves(output.args))]
             result = pytree.tree_unflatten(leaves, compiled[k].spec) if any(x is not None for x in leaves) else None
             rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': None})
             return result
-        ops, result = _instantiate(ir, instance(k, j)[0], inputs, compiled[k].spec, row)
+        ops, result = _instantiate(ir, instance(k, j), inputs, compiled[k].spec, row)
         # docs/provider.md#fragment-coded-weights
         if compiled[k].target is not None:
             for g in ops:
                 _placed([g], compiled[k].target, g.node)
-        fixed = {_key(storage(k, v, j)): ir.initial[v] for v in ir.constant_values}
+        projection = instance(k, j)
+        fixed = {_key(projection.standins[projection.numerical[region.id, v]][0]): region.ir.initial[v]
+                 for region in ir.region.regions for v in region.ir.constant_values}
         builder = _Builder(compiler, owners, role, row, (k << 48) | (j << 32), fixed)
+        builder.allocation = projection
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[GPU]), C.byref(machines[CPU]))
         owned[id(builder)] = lambda p=builder.p: compiler.metal_ir_program_free(p)
@@ -7569,9 +7722,10 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its preparation: %s'
                           % (node.name, k, error.value.decode()))
         rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': builder, 'prepared': prepared,
+                     'allocation': instance(k, j),
                      'marks': marks, 'receives': receives, 'sends': sends})
         return result
-    _Program(gm, call).run(*[instance(k, 0)[1][i][0] if k is not None else constant
+    _Program(gm, call).run(*[instance(k, 0).homes_by_scope[0][1][i][0] if k is not None else constant
                              for i, (constant, k) in enumerate(zip(constants, holders))])
     return {'lib': lib, 'recorder': recorder, 'owners': owners, 'rated': rated, 'rows': rows, 'compiler': compiler,
             'device': device, 'inputs': [ir.inputs for ir in irs]}
@@ -7638,6 +7792,14 @@ def _lifetimes(programs, irs):
                 row['own'][vi] = len(irs[k].values) + len(own[k])
                 own[k].append(mesh.Value(section=mesh.Section(bytes=value.bytes), kind=value.kind, state=value.state,
                                          begin=value.begin, end=value.end, run=1))
+        projection = row.get('allocation')
+        if projection is not None:
+            for root, copies in projection.standins.items():
+                if root[2] is not None:
+                    continue
+                vi = row['builder'].roots.get(_key(copies[0]))
+                if vi in row['own']:
+                    projection.allocations[root] = projection.allocations[root]._replace(function=k, index=row['own'][vi])
         row['levels'] = levels
     return own
 
