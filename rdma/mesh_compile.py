@@ -16,6 +16,7 @@ import weakref
 import torch
 import torch.utils._pytree as pytree
 from torch._library._out_variant import _is_functional, get_out_arg_names, to_out_variant
+from torch._prims_common import is_non_overlapping_and_dense_or_false
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 from torch._subclasses.meta_utils import MetaConverter
 from torch.fx.node import Node, map_arg
@@ -48,7 +49,8 @@ Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 # of call j's commuting chain
 Calls = collections.namedtuple('Calls', 'outstanding orders causes norders chains')
 # GSPMD section 4.1, "Static operator configurations"
-Local = collections.namedtuple('Local', 'op target args kwargs')
+Local = collections.namedtuple('Local', 'op target args kwargs annotation', defaults=(None,))
+AttentionOrigin = collections.namedtuple('AttentionOrigin', 'query')
 # GSPMD sections 3.2, 3.5, 4 and 4.6
 Rule = collections.namedtuple('Rule', 'kind level operands labels out propagate contracting windows fused merged '
                                       'configure')
@@ -70,6 +72,7 @@ class IR:
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
         self.made, self.locals, self.shapes = set(), {}, {}
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
+        self.prototypes = {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
         self.publishes, self.inputs, self.declares, self.waits = {}, {}, {}, {}
         self.attributes, self.loads, self.kinds, self.page, self.hull = {}, set(), {}, None, None
@@ -81,6 +84,12 @@ class IR:
         self.program.append(item)
         if item[2] is not None:
             self.made.add(item[2])
+
+    def describe(self, key, result):
+        self.prototypes[key] = result
+        if isinstance(result, torch.Tensor):
+            self.metas[key] = result
+        return result
 
     # GSPMD section 3.1
     def local(self, node, sharding):
@@ -367,6 +376,43 @@ def _slice(node, local, operands, shapes):
     return Rule('slice', 1, operands, [tuple(range(r))], tuple(range(r)), (0,), (), windows, False, None, configure)
 
 
+# GSPMD sections 3.5 and 4.1: a reshape's unchanged dimension boundaries preserve their partition;
+# PyTorch Tensor Views, aten::view, aten::_unsafe_view and aten::expand
+def _view_rule(node, local, operands, shapes, out):
+    shape, packet, names = shapes[0], local.target.overloadpacket, _names(local)
+    if packet is A.expand:
+        lead = len(out) - len(shape)
+        labels = tuple(d - lead if d >= lead and shape[d - lead] == size else ('expanded', d)
+                       for d, size in enumerate(out))
+    else:
+        boundaries = {(math.prod(shape[:d]), size): d for d, size in enumerate(shape) if size > 1}
+        labels = tuple(boundaries.get((math.prod(out[:d]), size), ('reshaped', d)) for d, size in enumerate(out))
+    def configure(sharded):
+        return ((node, _with(local, names, {names[1]: [sharded.get(label, size)
+                                                      for label, size in zip(labels, out)]})),)
+    return Rule('format', 0, operands, [tuple(range(len(shape)))], labels, (0,), (), (), False, None, configure)
+
+
+# GSPMD section 3.5; T. Dao et al., FlashAttention, NeurIPS 2022, Algorithm 1: independent query rows;
+# PyTorch 2.14 torch.nn.functional.scaled_dot_product_attention
+def _attention_rule(node, local, operands, shapes, out):
+    rank, labels, given = len(out), [], _given(local, _names(local))
+    named = _named(local, _names(local))
+    for k, (name, shape) in enumerate(zip(named, shapes)):
+        if name not in ('query', 'key', 'value', 'attn_mask') or not shape or len(shape) > rank:
+            return None
+        dimensions = list(range(rank - len(shape), rank))
+        dimensions[-1] = ('feature',) if name in ('query', 'key') else ('keys',) if name == 'attn_mask' else rank - 1
+        if name in ('key', 'value'):
+            dimensions[-2] = ('keys',)
+        for d, size in enumerate(shape[:-2]):
+            if size != out[rank - len(shape) + d] or given.get('enable_gqa') and d == len(shape) - 3:
+                dimensions[d] = ('broadcast', k, d)
+        labels.append(tuple(dimensions))
+    return Rule('attention', 1, operands, labels, tuple(range(rank)), tuple(range(len(operands))), (), (), False,
+                None, lambda sharded: ())
+
+
 # design/aot-compilation-change-request.md A2 and A4; GSPMD sections 3.1, 3.2, 3.5, 4.3 to 4.6 and Appendix A.2; torch
 # 2.14.0 torch/_export/verifier.py
 def _operator(node, local):
@@ -411,6 +457,13 @@ def _operator(node, local):
             dimensions[a], dimensions[b] = dimensions[b], dimensions[a]
         rule = Rule('format', 0, operands, [tuple(range(rank))], tuple(dimensions), (0,), (), (), False, None,
                     general.configure)
+    elif packet in (A.view, A._unsafe_view, A.expand) and len(operands) == 1:
+        rule = _view_rule(node, local, operands, shapes, out)
+    elif packet in (A.alias, A.detach, A.clone, A._to_copy) and len(operands) == 1 and shapes[0] == out:
+        rule = Rule('format', 0, operands, [tuple(range(len(out)))], tuple(range(len(out))), (0,), (), (), False,
+                    None, general.configure)
+    elif packet is A.scaled_dot_product_attention:
+        rule = _attention_rule(node, local, operands, shapes, out)
     elif packet in CONVOLUTION or packet in TRANSPOSED:
         rule = _convolution(node, local, operands, shapes)
     elif packet in MAXIMUM or packet in AVERAGE:
@@ -647,7 +700,8 @@ def _partition(ir, operators):
                 if window.label in whole:
                     wants[window.operand][window.dim] = -1
             keys = [_reshard(ir, o, ir.sharding[o], tuple(w)) for o, w in zip(rule.operands, wants)]
-            sharded, cuts, dims = {}, [], {w.dim: w for w in rule.windows}
+            sharded = {label: ir.local(node, local)[d] for d, label in enumerate(out) if local[d] >= 0}
+            cuts, dims = [], {w.dim: w for w in rule.windows}
             for dim in range(len(_value(rule.operands[rule.windows[0].operand]).shape) if dims else 0):
                 window = dims.get(dim)
                 at = None if window is None else out.index(window.label)
@@ -659,6 +713,10 @@ def _partition(ir, operators):
                         cuts.append((at, local[at], tuple(after), sharded[window.label]))
             for n, configured in rule.configure(sharded):
                 ir.locals[n] = configured
+            if rule.kind == 'attention':
+                q, m = len(local) - 2, local[-2]
+                start = ir.coords[ir.device][m] * ir.local(node, local)[q] if m >= 0 and ir.device is not None else 0
+                ir.locals[node] = ir.locals[node]._replace(annotation=AttentionOrigin(start))
             reads = tuple(keys)
             if rule.merged is not None:
                 ir.emit(('call', reads, (rule.merged, 'merged', node), rule.merged))
@@ -758,7 +816,7 @@ def _forms(ir):
 
 
 def _meta(ir, key):
-    if key in ir.shapes or len(key) == 2 and isinstance(key[1], tuple):
+    if key in ir.shapes or isinstance(key[1], tuple):
         return torch.empty(_shape(ir, key), dtype=_value(key[0]).dtype, device='meta')
     if len(key) == 2 and key[1] is None:
         return pytree.tree_map(lambda v: torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device='meta')
@@ -775,15 +833,18 @@ def _formed(ir, item, operands):
             and len(ir.forms[reads[0]][1]) > 1:
         ir.taken[key] = ir.forms[reads[0]][1][local.args[1]][1]
     if any(o is UNKNOWN for o in operands):
-        return _meta(ir, key)
+        return ir.describe(key, _meta(ir, key))
     given = iter(operands)
     args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
     try:
         result = _call(local, args, kwargs)
     except (NotImplementedError, RuntimeError):
-        return _meta(ir, key)
-    if isinstance(result, torch.Tensor):
-        ir.metas[key] = result
+        return ir.describe(key, _meta(ir, key))
+    if getattr(local.target, 'overloadpacket', None) is A.scaled_dot_product_attention:
+        source = operand.meta['val']
+        order = sorted(range(source.dim()), key=lambda d: (-source.stride(d), d))
+        result = torch.empty_permuted(result.shape, order, dtype=result.dtype, device='meta')
+    ir.describe(key, result)
     schema = local.target._schema if isinstance(local.target, torch._ops.OpOverload) else None
     if schema is None or not _is_functional(schema) or any(r.alias_info is not None for r in schema.returns):
         return result
@@ -818,7 +879,7 @@ def _bases(ir, item, reads):
         return frozenset((key,)) if isinstance(key[0].meta.get('val'), torch.Tensor) else None
     if reads and None not in reads and (_sliced(item) or kind == 'call' and key in ir.metas
                                         and _aliases(ir.locals[operand])):
-        return frozenset().union(*reads)
+        return frozenset((key,)) if kind == 'pad' else frozenset().union(*reads)
     return None
 
 
@@ -932,7 +993,11 @@ def _contiguous(shape):
 
 def _own(ir, key):
     shape = _layout(ir, key)[1]
-    return Place(key, 0, shape, _contiguous(shape), ir.results.get(key, key))
+    metadata = ir.metas.get(key)
+    strides = tuple(metadata.stride()) if key not in ir.contiguous and metadata is not None \
+        and is_non_overlapping_and_dense_or_false(metadata) \
+        else _contiguous(shape)
+    return Place(key, 0, shape, strides, ir.results.get(key, key))
 
 
 def _narrowed(place, dim, start, length):
@@ -5753,7 +5818,7 @@ def _heads(x, group, kv):
     return x.as_strided(shape, stride, x.storage_offset())
 
 
-def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0):
+def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, query_origin=0):
     length, size, other, value = q.shape[-2], q.shape[-1], k.shape[-2], v.shape[-1]
     t = _compute(q.dtype, k.dtype, v.dtype, torch.float32)
     qs, ks, vs = _heads(q, group, False), _heads(k, group, True), _heads(v, group, True)
@@ -5776,7 +5841,8 @@ def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0):
         score = r('select', t, given, score, r.const(-math.inf, t)) if mask.dtype is torch.bool else \
             r('add', t, score, _convert(r, given, _class(mask), t))
     if causal:
-        score = r('select', t, r('gt', BOOL, r.index(b + 2), r.index(b)), r.const(-math.inf, t), score)
+        query = r('add', I32, r.index(b), r.const(query_origin, I32))
+        score = r('select', t, r('gt', BOOL, r.index(b + 2), query), r.const(-math.inf, t), score)
     value = _load(r, 1, vs, t)
     if dropout:
         at = r.const(0, I32)
@@ -5815,10 +5881,10 @@ def _attending(given):
             mask.expand(*lead, q.shape[-2], k.shape[-2]) if mask is not None else None), given['is_causal'], scale, group
 
 
-def _attended(target, given, outs):
+def _attended(target, given, outs, query_origin=0):
     _typed(target, [given['query'], given['key'], given['value'], given['attn_mask']], outs)
     operands, causal, scale, group = _attending(given)
-    return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']))
+    return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']), query_origin)
 
 
 # J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw, Parallel random numbers: as easy as 1, 2, 3, SC 2011, §3.1 and
@@ -6315,6 +6381,9 @@ SYMBOLIC = {operator.add: 'add', operator.sub: 'sub', operator.mul: 'mul', opera
 
 def _lowering(local):
     packet = getattr(local.target, 'overloadpacket', local.target)
+    if packet is A.scaled_dot_product_attention:
+        origin = local.annotation.query if isinstance(local.annotation, AttentionOrigin) else 0
+        return lambda args, kwargs, outs: _attended(local.target, _operands(local.target, args, kwargs), outs, origin)
     if packet in (A._linalg_det, A._linalg_slogdet):
         metadata = _given(local, _names(local))['A'].meta['val']
         transpose = metadata.is_contiguous() and not metadata.is_complex()
@@ -6519,15 +6588,14 @@ def _called(ir, key, operands, local, form, placed):
         return mine, []
     if _aliases(local):
         return _call(local, args, kwargs), []
-    outs, spec = _made(ir, key, local, args, kwargs)
+    outs, spec = _made(ir, key, local)
     return pytree.tree_unflatten(outs, spec), lower(args, kwargs, outs)
 
 
-def _made(ir, key, local, args, kwargs):
+def _made(ir, key, local):
     if isinstance(local.target, torch._ops.OpOverload) and not local.target._schema.returns:
         return [None], pytree.tree_structure(None)
-    made, spec = pytree.tree_flatten(_call(local, args, kwargs) if isinstance(local.target, torch._ops.OpOverload)
-                                     else key[0].meta['val'])
+    made, spec = pytree.tree_flatten(ir.prototypes[key])
     return [_held(m) if m is not None else None for m in made], spec
 
 
