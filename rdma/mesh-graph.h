@@ -16,6 +16,12 @@ int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(co
 int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                           const void *context, uint32_t root,
                           int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer);
+/* the same depth-first search over rows (first, head) from `root`, each reachable vertex visited once in preorder with
+   its tree parent (root's UINT32_MAX) after the search; cross and forward edges allowed (a callee of two callers is
+   visited once), EDEADLK on a back edge (a cycle); mesh_graph_tree_visit is this with EINVAL on a cross edge */
+int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                        const void *context, uint32_t root,
+                        int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer);
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Y. J. Chu and T. H. Liu, Scientia Sinica 14, 1965; J. Edmonds, J. Res. Nat. Bur. Standards 71B, 1967 */
 int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
@@ -68,6 +74,12 @@ int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edge
    Res. 22(3), 1997, §2; design/integration-finishing-change-request.md item 2 */
 int mesh_graph_heap_cuts(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from, const uint32_t *to,
                          const unsigned char *counted, uint32_t *listed, uint32_t *before, uint32_t *count);
+/* design/compilation-composition-change-request.md item 6.3: a placement (place[v] the position of vertex v, a
+   permutation of 0 .. vertices - 1, e.g. mesh_graph_heap_order's or mesh_graph_schedule's) restricted to the `kept`
+   vertices: at[r] the r-th kept vertex in place order (at has room for `vertices`; its first *count entries are
+   these), rank[v] for every v the number of kept vertices placed before it */
+void mesh_graph_project(uint32_t vertices, const uint32_t *place, const unsigned char *kept, uint32_t *rank, uint32_t *at,
+                        uint32_t *count);
 /* design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the self-timed
    buffer bound"; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997 (BSL) */
 /* BSL §3; R. E. Tarjan, SIAM J. Comput. 1(2), 1972 */

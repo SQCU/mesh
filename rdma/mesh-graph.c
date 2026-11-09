@@ -42,8 +42,8 @@ int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(co
   return 0;
 }
 
-int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                          const void *context, uint32_t root,
+static int graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                          const void *context, uint32_t root, int tree,
                           int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
   if (root >= vertices) return EINVAL;
   uint32_t *parent = malloc(((size_t)vertices + 1) * sizeof *parent);
@@ -61,10 +61,20 @@ int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*hea
     else if (color[w] == 2) crossed = 1;
     else { parent[w] = v; v = w; }
   }
-  if (!status && crossed) status = EINVAL;
+  if (!status && tree && crossed) status = EINVAL;
   for (uint32_t k = 0; !status && k < count; k++) status = visit(consumer, order[k], parent[order[k]]);
   free(parent); free(order); free(next); free(color);
   return status;
+}
+int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                          const void *context, uint32_t root,
+                          int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
+  return graph_preorder(vertices, first, head, context, root, 1, visit, consumer);
+}
+int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                        const void *context, uint32_t root,
+                        int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
+  return graph_preorder(vertices, first, head, context, root, 0, visit, consumer);
 }
 
 struct within { uint32_t N,root,depth; const uint32_t *from,*order,*into; const uint32_t *in; const double *weight,*rest;
@@ -1149,18 +1159,30 @@ int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edge
 int mesh_graph_heap_cuts(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from, const uint32_t *to,
                          const unsigned char *counted, uint32_t *listed, uint32_t *before, uint32_t *count) {
   uint32_t *place = malloc(((size_t)vertices + 1) * sizeof *place), *at = malloc(((size_t)vertices + 1) * sizeof *at);
-  int result = place && at ? mesh_graph_heap_order(vertices, priority, edges, from, to, place) : ENOMEM;
+  uint32_t *rank = malloc(((size_t)vertices + 1) * sizeof *rank);
+  unsigned char *uncounted = malloc((size_t)vertices + 1);
+  int result = place && at && rank && uncounted ? mesh_graph_heap_order(vertices, priority, edges, from, to, place) : ENOMEM;
   if (!result) {
-    for (uint32_t v = 0; v < vertices; v++) at[place[v]] = v;
-    uint32_t made = 0, seen = 0;
-    for (uint32_t k = 0; k < vertices; k++) {
-      if (counted[at[k]]) { seen++; continue; }
-      listed[made] = at[k]; before[made++] = seen;
-    }
-    *count = made;
+    for (uint32_t v = 0; v < vertices; v++) uncounted[v] = !counted[v];
+    mesh_graph_project(vertices, place, uncounted, rank, at, count);
+    for (uint32_t k = 0; k < *count; k++) { listed[k] = at[k]; before[k] = place[at[k]] - k; }
   }
-  free(place); free(at);
+  free(place); free(at); free(rank); free(uncounted);
   return result;
+}
+
+/* design/compilation-composition-change-request.md item 6.3: a placement (place[v] the position of v, a permutation)
+   restricted to the `kept` vertices */
+void mesh_graph_project(uint32_t vertices, const uint32_t *place, const unsigned char *kept, uint32_t *rank, uint32_t *at,
+                        uint32_t *count) {
+  for (uint32_t v = 0; v < vertices; v++) at[place[v]] = v;
+  uint32_t made = 0;
+  for (uint32_t p = 0; p < vertices; p++) {
+    const uint32_t v = at[p];
+    rank[v] = made;
+    if (kept[v]) at[made++] = v;
+  }
+  *count = made;
 }
 
 /* design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the self-timed
