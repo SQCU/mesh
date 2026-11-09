@@ -47,7 +47,7 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
             elif kind in (6, 7):
                 token('enter' if kind == 6 else 'leave', instruction.index)
             elif kind == 8:
-                token('task', instruction.index, conditions, instruction.once, instruction.execution)
+                token('task', (instruction.index, instruction.submission, instruction.execution), conditions, instruction.once, instruction.execution)
             else:
                 points[instruction.index][kind] = index
                 if kind == 3:
@@ -189,6 +189,11 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
                 result.append(move(state, expansion(cursor, native) if kind == 'action' else targets[0],
                                    selected=made, seen=completed if kind == 'task' else seen))
             return result
+        if kind == 'mark' and value[1]:
+            task, owner, execution = value
+            changed = list(native)
+            changed[owner - 1] = action_owner.task(task, execution, native[owner - 1])
+            return [move(state, targets[0], native=tuple(changed))]
         if kind in ('mark', 'exit'):
             return [move(state, targets[0])]
         if kind == 'install':
@@ -450,6 +455,7 @@ def trace_occurrences(tasks, dependences, operations, program, machine, witness,
     def event(kind, value, possible=False):
         nonlocal serial
         if kind == 'mark':
+            value = value[0]
             if possible:
                 symbolic.add(value)
             else:
@@ -744,12 +750,17 @@ class Action(C.Structure):
                [(n, C.c_uint64) for n in ('execution', 'value', 'begin', 'end')]
 
 
-LIB.mesh_graph_action_owner.argtypes = [C.POINTER(Action), C.POINTER(C.c_uint32), C.POINTER(C.c_uint64), C.POINTER(Action)]
+class Ownership(C.Structure):
+    _fields_ = [(n, C.c_uint32) for n in ('current', 'issued', 'completed', 'padding')] + \
+               [(n, C.c_uint64) for n in ('execution', 'issued_execution', 'completed_execution')]
+
+
+LIB.mesh_graph_action_owner.argtypes = [C.POINTER(Action), C.POINTER(Ownership), C.POINTER(Action), C.POINTER(Action)]
 LIB.mesh_graph_action_owner.restype = None
 
 
 class Instruction(C.Structure):
-    _fields_ = [(n, C.c_uint32) for n in ('kind', 'index', 'once', 'condition', 'conditions', 'padding')] + \
+    _fields_ = [(n, C.c_uint32) for n in ('kind', 'index', 'once', 'condition', 'conditions', 'submission')] + \
                [(n, C.c_uint64) for n in ('execution', 'position')]
 
 

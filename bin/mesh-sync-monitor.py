@@ -193,7 +193,7 @@ class SubmissionOwner:
         self.library.MetalSubmissionNormalize.argtypes = [C.POINTER(Config), C.POINTER(State)]
         self.library.MetalSubmissionNormalize.restype = None
         self.library.MetalSubmissionEvents.argtypes = [C.POINTER(mesh_graph.Submission), C.POINTER(mesh_graph.Action),
-            C.POINTER(mesh_graph.Action), C.POINTER(State), C.POINTER(Effect), C.POINTER(mesh_graph.Operation), C.POINTER(mesh_graph.Scope)]
+            C.POINTER(mesh_graph.Action), C.POINTER(mesh_graph.Action), C.POINTER(State), C.POINTER(Effect), C.POINTER(mesh_graph.Operation), C.POINTER(mesh_graph.Scope)]
         self.library.MetalSubmissionEvents.restype = C.c_size_t
         self.Config, self.State, self.Effect = Config, State, Effect
         self.metadata, self.operations, self.program = metadata, operations, program
@@ -204,8 +204,11 @@ class SubmissionOwner:
         self.lanes = {x.queue for x in metadata['submissions']}
         self.object_map, self.lane_map = objects, lanes
         self.object_primitives, self.lane_primitives, self.completion = object_primitives, lane_primitives, completion
-        self.initial = tuple((0,) * (8 + x.lag + x.positions * x.window) + (NONE, 0) for x in metadata['submissions'])
+        self.initial = tuple((0,) * (8 + x.lag + x.positions * x.window) + (NONE, 0, NONE, 0, NONE, 0) for x in metadata['submissions'])
         self.cache, self.catalog = {}, {}
+
+    def task(self, vertex, execution, values):
+        return values[:-6] + (vertex, execution) + values[-4:]
 
     def step(self, index, values):
         key = index, values
@@ -213,19 +216,19 @@ class SubmissionOwner:
             return self.cache[key]
         C = mesh_graph.C
         action = mesh_graph.Action.from_buffer_copy(self.metadata['actions'][index])
-        vertex, execution = C.c_uint32(values[-2]), C.c_uint64(values[-1])
-        prefix = mesh_graph.Action()
-        mesh_graph.LIB.mesh_graph_action_owner(C.byref(action), C.byref(vertex), C.byref(execution), C.byref(prefix))
+        owner = mesh_graph.Ownership(values[-6], values[-4], values[-2], 0, values[-5], values[-3], values[-1])
+        prefix, completed = mesh_graph.Action(), mesh_graph.Action()
+        mesh_graph.LIB.mesh_graph_action_owner(C.byref(action), C.byref(owner), C.byref(prefix), C.byref(completed))
         source = self.metadata['submissions'][action.submission]
         config = self.Config(source.lag, source.positions, source.window, source.flags)
         commits = (C.c_uint64 * source.lag)(*values[8:8 + source.lag])
-        progress = (C.c_uint64 * (source.positions * source.window))(*values[8 + source.lag:-2])
+        progress = (C.c_uint64 * (source.positions * source.window))(*values[8 + source.lag:-6])
         state, effect = self.State(*values[:8], commits, progress), self.Effect()
         status = self.library.MetalSubmissionAdvance(C.byref(config), C.byref(state), action.kind, action.value, C.byref(effect))
         if status:
             raise ValueError('compiled submission action %d: %s' % (index, os.strerror(status)))
         emitted, scopes = (mesh_graph.Operation * 3)(), (mesh_graph.Scope * 3)()
-        count = self.library.MetalSubmissionEvents(C.byref(source), C.byref(action), C.byref(prefix), C.byref(state), C.byref(effect), emitted, scopes)
+        count = self.library.MetalSubmissionEvents(C.byref(source), C.byref(action), C.byref(prefix), C.byref(completed), C.byref(state), C.byref(effect), emitted, scopes)
         if count > 3:
             raise ValueError('submission owner exceeded its event record')
         outputs = []
@@ -247,7 +250,7 @@ class SubmissionOwner:
             outputs.append(self.catalog[signature])
         self.library.MetalSubmissionApply(C.byref(state), C.byref(effect))
         self.library.MetalSubmissionNormalize(C.byref(config), C.byref(state))
-        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:8]) + tuple(commits) + tuple(progress) + (vertex.value, execution.value)
+        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:8]) + tuple(commits) + tuple(progress) + (owner.current, owner.execution, owner.issued, owner.issued_execution, owner.completed, owner.completed_execution)
         self.cache[key] = changed, tuple(outputs)
         return self.cache[key]
 

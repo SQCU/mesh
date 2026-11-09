@@ -254,10 +254,12 @@ struct mesh_graph_choice { uint32_t parent, control; uint64_t execution, call; u
 enum mesh_graph_instruction_kind { MESH_GRAPH_OPERATION, MESH_GRAPH_ACTION, MESH_GRAPH_LOOP_ENTRY, MESH_GRAPH_LOOP_BODY,
   MESH_GRAPH_LOOP_RETEST, MESH_GRAPH_LOOP_END, MESH_GRAPH_SPAN_ENTRY, MESH_GRAPH_SPAN_END, MESH_GRAPH_TASK };
 struct mesh_graph_submission { uint32_t lag, positions, window, flags, queue, host, drained, ended, progress, padding; unsigned char policy[16]; };
-enum { MESH_GRAPH_ACTION_ISSUE = 1, MESH_GRAPH_ACTION_QUEUE = 2 };
+enum { MESH_GRAPH_ACTION_ISSUE = 1, MESH_GRAPH_ACTION_QUEUE = 2, MESH_GRAPH_ACTION_CURRENT = 4, MESH_GRAPH_ACTION_COMPLETE = 8 };
 struct mesh_graph_action { uint32_t kind, submission, object, primitive, vertex, provenance; uint64_t execution, value, begin, end; };
-void mesh_graph_action_owner(const struct mesh_graph_action *, uint32_t *vertex, uint64_t *execution, struct mesh_graph_action *);
-struct mesh_graph_instruction { uint32_t kind, index, once, condition, conditions, padding; uint64_t execution, position; };
+struct mesh_graph_ownership { uint32_t current, issued, completed, padding; uint64_t execution, issued_execution, completed_execution; };
+void mesh_graph_action_owner(struct mesh_graph_action *, struct mesh_graph_ownership *,
+                             struct mesh_graph_action *prefix, struct mesh_graph_action *completed);
+struct mesh_graph_instruction { uint32_t kind, index, once, condition, conditions, submission; uint64_t execution, position; };
 /* design/compilation-composition-change-request.md 6.2; named control entry, logical trip-boundary carry. */
 struct mesh_graph_feedback { uint32_t control, from, to, distance; };
 struct mesh_graph_condition { uint32_t choice, taken; };
