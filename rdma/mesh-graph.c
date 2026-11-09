@@ -2102,7 +2102,7 @@ void mesh_graph_action_owner(struct mesh_graph_action *action,struct mesh_graph_
   if(action->provenance&MESH_GRAPH_ACTION_COMPLETE){owner->completed=action->vertex;owner->completed_execution=action->execution;}
   *prefix=*completed=*action;
   if(action->provenance&MESH_GRAPH_ACTION_QUEUE){prefix->vertex=owner->issued;prefix->execution=owner->issued_execution;}
-  completed->vertex=owner->completed;completed->execution=owner->completed_execution;
+  if(action->provenance&MESH_GRAPH_ACTION_CURRENT){completed->vertex=owner->completed;completed->execution=owner->completed_execution;}
 }
 int mesh_graph_signature_execution(struct mesh_graph_signature *s,size_t submissions,const struct mesh_graph_submission *submission,
                                     size_t actions,const struct mesh_graph_action *action,size_t instructions,
