@@ -58,6 +58,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   algorithm: a temporary no-join guard prevents its loss to generic member construction while that handoff is
   completed. Sourced actor costs, whole-group fusion choices, persisted executable/preparation results and the
   observation handoffs are still being revised.
+  Working checkpoints metal-microbench 73b78edf and mesh 0932fdba preserve typed algorithm selection, control-flow
+  transport releases and the initial saved-artifact consumers. Persistence is still incomplete: target binary reload,
+  a shared structural identity, prepared native results and collective-plan relocation are being connected. The
+  interrupted checkpoint does not link until the target save/load definitions are finished. The later continuation
+  and actual build results are recorded in the same workgroup directory.
   No E2B or Torch/collective operational run or corresponding performance closure on this replacement is recorded.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present

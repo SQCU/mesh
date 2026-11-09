@@ -119,6 +119,12 @@ _Static_assert(sizeof(struct mesh_planned_call)==32 && offsetof(struct mesh_plan
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
               const uint32_t *chains,uint64_t deadline,struct mesh_planned *planned);
+int mesh_plan_save(struct mesh_ctx *,uint64_t program,const struct mesh_function *,uint32_t count,
+  const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
+  const uint32_t *chains,const struct mesh_planned *,void **bytes,size_t *length);
+int mesh_plan_load(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *,uint32_t count,
+  const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
+  const uint32_t *chains,uint64_t deadline,const void *bytes,size_t length,struct mesh_planned *);
 void mesh_planned_free(struct mesh_planned *);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
