@@ -45,14 +45,19 @@ outstanding, and what of it is outstanding. The standard every change request fo
   separate read/write page tables and compiled E2B input operations. The continuing work replaces compact-view
   intersection with ISL's exact integer feasibility calculation and gives kernel insertion/merging one identity
   remapping owner. These source changes still need their complete consumer and operational evidence.
-  CPU projection and normalization-to-projection now execute in the existing numerical diagnostic; the latter
-  fuses the normalization map into projection (relative RMS error 0.000216). Three E2B stages complete lowering
-  and emission. Full prefill/decode exposed symbol, epilogue-operand and value-scope defects being repaired; graph
-  publication alone did not establish successful compilation.
+  Working checkpoints metal-microbench f784364a and mesh 83c1e78e record the next connected revision. All five E2B
+  stages now complete lowering and target emission in the workgroup's compile-only runs after repairs to symbol,
+  epilogue-operand and value-scope handoffs. The full production dependency chain builds, including ISL.
+  The existing numerical diagnostic now uses the shared native program: CPU projection, GPU split-K/matrix
+  projection and argmax execute. Normalization-to-projection also executes (relative RMS error 0.000216), with the
+  normalization map fused into projection. The native path exposed stale runtime effects for embedded constants;
+  the uniform zero-point handoff is repaired, and the neural target's embedded weights remain under revision.
   Outstanding work includes complete frontend/target coverage, control-flow and native-program execution,
   paged native CPU/write-ahead behavior, preservation of the supplied execution index through compiled inputs,
-  and displacement of unjustified per-execution host waits/submissions. Sourced actor costs, whole-group fusion
-  choices, persisted executable artifacts and the observation handoffs are still being revised.
+  and displacement of unjustified per-execution host waits/submissions. Grouping must retain the selected tuned
+  algorithm: a temporary no-join guard prevents its loss to generic member construction while that handoff is
+  completed. Sourced actor costs, whole-group fusion choices, persisted executable/preparation results and the
+  observation handoffs are still being revised.
   No E2B or Torch/collective operational run or corresponding performance closure on this replacement is recorded.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
