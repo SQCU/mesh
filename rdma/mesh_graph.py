@@ -128,7 +128,8 @@ class Access(C.Structure):
 # capture-change-request.md, "Source for item 2's execution-time estimates")
 class Machine(C.Structure):
     _fields_ = [(name, C.c_double) for name in ('peak', 'bandwidth', 'block_bandwidth', 'l2', 'l1', 'launch', 'l2_speedup',
-                                                'l1_speedup', 'overlap')] + [('cores', C.c_uint32), ('fpus', C.c_uint32)]
+                                                'l1_speedup', 'overlap')] + [('cores', C.c_uint32), ('fpus', C.c_uint32),
+                                                                             ('direct', C.c_double), ('blit', C.c_double)]
 
 
 class Read(C.Structure):
@@ -137,11 +138,12 @@ class Read(C.Structure):
 
 class Actor(C.Structure):
     _fields_ = [('flops', C.c_double), ('blocks', C.c_uint64), ('threads', C.c_uint64), ('written', C.c_uint64),
-                ('launches', C.c_uint64), ('reads', C.c_size_t), ('read', C.POINTER(Read))]
+                ('launches', C.c_uint64), ('reads', C.c_size_t), ('read', C.POINTER(Read)), ('direct', C.c_uint64),
+                ('blits', C.c_uint64)]
 
 
-LIB.mesh_graph_actor_time.restype = C.c_double
-LIB.mesh_graph_actor_time.argtypes = [C.POINTER(Machine), C.POINTER(Actor)]
+LIB.mesh_graph_actor_time.restype = C.c_int
+LIB.mesh_graph_actor_time.argtypes = [C.POINTER(Machine), C.POINTER(Actor), C.POINTER(C.c_double)]
 LIB.mesh_graph_buffer_bound.restype = C.c_int
 LIB.mesh_graph_buffer_bound.argtypes = [C.c_uint32, C.POINTER(C.c_double), C.POINTER(C.c_double), C.c_size_t,
                                         C.c_void_p, C.POINTER(C.c_uint64)]
@@ -215,6 +217,15 @@ def heap_order(priority, edges):
     _check(LIB.mesh_graph_heap_order(count, (C.c_double * max(count, 1))(*priority), len(edges), tails[0], heads[0],
                                      place))
     return list(place[:count])
+
+
+# mesh-graph.h mesh_graph_actor_time: (t(v) in ns over the recorded operands, whether every operand it needs is recorded)
+def actor_time(machine, actor):
+    time = C.c_double()
+    status = LIB.mesh_graph_actor_time(C.byref(machine), C.byref(actor), C.byref(time))
+    if status not in (0, errno.ENODATA):
+        _check(status)
+    return time.value, status == 0
 
 
 # BSL §4.2-4.3, (6); mesh-graph.h mesh_graph_buffer_bound: Bff of each actor's host -> device edge from its t(v),

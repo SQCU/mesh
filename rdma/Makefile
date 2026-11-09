@@ -48,7 +48,17 @@ HIGHS_FLAGS = -O2 -DNDEBUG $(CFLAGS_EXACT) -fexceptions -Wno-unused-variable -Wn
 HIGHS_JOBS := $(shell sysctl -n hw.logicalcpu)
 HIGHS_CFLAGS = -isystem $(HIGHS)/highs -isystem $(HIGHS)
 HIGHS_LIBS = .build/highs/obj/*.o -lc++ -lpthread
-HEADERS = mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h \
+# 2026-11-09 (design/compilation-composition-change-request.md, "Complete replacement workgroup"; root's exact
+# intersection review): isl (S. Verdoolaege, ICMS 2010), the established exact integer set library, for mesh-graph.c's
+# view conflicts (mesh_graph_dependences_views), static with the arbitrary-precision imath its release includes, so no
+# node-local GMP.  Its release tarball checked as HiGHS's is, unmodified, in its own directory
+ISL_VERSION = 0.27
+ISL_SHA256 = 6d8babb59e7b672e8cb7870e874f3f7b813b6e00e6af3f8b04f7579965643d5c
+ISL_TARBALL = .build/isl/isl-$(ISL_VERSION).tar.xz
+ISL = .build/isl/isl-$(ISL_VERSION)
+ISL_ARCHIVE = $(ISL)/.libs/libisl.a
+ISL_CFLAGS = -isystem $(ISL)/include
+HEADERS =mesh.h mesh-map.h mesh-verbs.h mesh-bridge.h mesh-holders.h mesh-graph.h mesh-dataflow.h mesh-call.h mesh-collective.h \
   mesh-section.h
 # the resident bridge (design/page-queue-change-request.md): its main and event loop (mesh-link.c), its ports' children
 # from the parent's side (mesh-children.c) and their own (mesh-child.c), discovery and pairing (mesh-ports.c), the
@@ -82,13 +92,23 @@ $(HIGHS_INPUTS): FORCE
 	if test ! -f $@ && test -f $(HIGHS_BUILT); then echo '$(HIGHS_INPUT_TEXT)' > $@ && touch -r $(HIGHS_BUILT) $@; \
 	else echo '$(HIGHS_INPUT_TEXT)' | cmp -s - $@ || echo '$(HIGHS_INPUT_TEXT)' > $@; fi
 FORCE:
+$(ISL_TARBALL):
+	mkdir -p .build/isl
+	curl --fail --location --output $@.part https://libisl.sourceforge.io/isl-$(ISL_VERSION).tar.xz
+	echo '$(ISL_SHA256)  $@.part' | shasum -a 256 --check
+	mv $@.part $@
+$(ISL_ARCHIVE): $(ISL_TARBALL)
+	tar -xf $(ISL_TARBALL) -C .build/isl
+	cd $(ISL) && ./configure --with-int=imath-32 --disable-shared --enable-static --disable-dependency-tracking CFLAGS='-O2 -fPIC'
+	$(MAKE) -C $(ISL) gitversion.h
+	$(MAKE) -C $(ISL) libisl.la
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c $(HEADERS) Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
-mesh-flow: $(BRIDGE) $(HEADERS) $(HIGHS_BUILT) Makefile
+mesh-flow: $(BRIDGE) $(HEADERS) $(HIGHS_BUILT) $(ISL_ARCHIVE) Makefile
 	mkdir -p .build
-	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -Wall -Wextra -Werror -o .build/$@ $(BRIDGE) -lrdma $(HIGHS_LIBS) -framework CoreFoundation -framework IOKit
+	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) $(ISL_CFLAGS) -fblocks -O2 -Wall -Wextra -Werror -o .build/$@ $(BRIDGE) -lrdma $(HIGHS_LIBS) $(ISL_ARCHIVE) -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
 # the bridge's heartbeat (tag pre-return-20261103 rdma/Makefile): no device, no verbs, its own translation unit
@@ -101,8 +121,8 @@ mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-map.h mesh-holders.h Makefile
 # it includes alone, where it linked mesh-dataflow.c.  What must stay: its inputs are what it includes
 mesh-stat: mesh-stat.c mesh.h mesh-map.h mesh-holders.h
 	cc -O2 -o $@ mesh-stat.c
-libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) $(HIGHS_BUILT) Makefile
-	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS)
+libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) $(HIGHS_BUILT) $(ISL_ARCHIVE) Makefile
+	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) $(ISL_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS) $(ISL_ARCHIVE)
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit FORCE

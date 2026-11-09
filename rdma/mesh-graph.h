@@ -67,20 +67,27 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
    name: `peak` the resource's FP throughput in GFLOP/s (XLA's clock_rate_ghz 2 core_count fpus_per_core) spread over
    `cores` cores of `fpus` concurrent lanes each (an actor of b blocks of t threads attains peak min(b, cores) / cores
    min(t, fpus) / fpus), DRAM `bandwidth` in bytes/s, `block_bandwidth` the bytes/s one block attains (XLA's
-   clock_rate_ghz 1e9 memory_transactions_per_clock), L2 bytes, L1 bytes a core, `launch` ns a kernel launch, and the
-   rate ratios XLA's model holds as constants (kL2CacheSpeedup, kL1CacheSpeedup: L2 and L1 bandwidth over DRAM's;
-   kMemoryComputeParallelism: the overlapped fraction of the lesser of compute and memory time), whose XLA values are
-   that GPU's, not this fleet's. Unrecorded refinements are 0: no cache level (l2, l1: every read at DRAM bandwidth
-   times its utilization), no per-block bandwidth limit (block_bandwidth), no launch overhead; overlap 1 is Roofline's
-   t = max(compute, memory). An actor's estimate t(v) in ns: its flops over `blocks` blocks of `threads` threads,
-   each operand read `net` distinct and `total` accessed bytes at its coalescing `utilization`, `written` bytes,
-   `launches` kernel launches */
+   clock_rate_ghz 1e9 memory_transactions_per_clock), L2 bytes, L1 bytes a core, the ns of one kernel launch in each
+   form the program issues it (`launch` a command of an indirect command buffer executed by a compute encoder,
+   `direct` a dispatch encoded directly, `blit` a copy or fill encoded directly; XLA's one kKernelLaunchOverhead),
+   and the rate ratios XLA's model holds as
+   constants (kL2CacheSpeedup, kL1CacheSpeedup: L2 and L1 bandwidth over DRAM's; kMemoryComputeParallelism: the
+   overlapped fraction of the lesser of compute and memory time), whose XLA values are that GPU's, not this fleet's;
+   overlap 1 is Roofline's t = max(compute, memory). An operand not measured is 0 (its record null). An actor's
+   estimate t(v) in ns: its flops over `blocks` concurrent blocks of `threads` lanes each, each operand read `net`
+   distinct and `total` accessed bytes at its coalescing `utilization`, `written` bytes, `launches` indirect commands
+   `direct` direct dispatches and `blits` copies or fills. *time is the estimate over the recorded operands; 0, or ENODATA where the actor
+   needs one that is absent (then *time is a lower bound): peak, cores and fpus for flops; bandwidth for bytes, and
+   block_bandwidth for bytes moved by fewer blocks than the machine's cores (XLA's AdjustBandwidth: few blocks do not
+   attain the DRAM bandwidth; here writes too, where XLA's WriteTime takes the whole bandwidth); launch for launches,
+   direct for direct, blit for blits. Absent cache levels (l2, l1) and their ratios leave reads at DRAM bandwidth times their
+   utilization, XLA's model without its cache heuristic */
 struct mesh_graph_machine { double peak, bandwidth, block_bandwidth, l2, l1, launch, l2_speedup, l1_speedup, overlap;
-                            uint32_t cores, fpus; };
+                            uint32_t cores, fpus; double direct, blit; };
 struct mesh_graph_read { uint64_t net, total; double utilization; };
 struct mesh_graph_actor { double flops; uint64_t blocks, threads, written, launches; size_t reads;
-                          const struct mesh_graph_read *read; };
-double mesh_graph_actor_time(const struct mesh_graph_machine *machine, const struct mesh_graph_actor *actor);
+                          const struct mesh_graph_read *read; uint64_t direct, blits; };
+int mesh_graph_actor_time(const struct mesh_graph_machine *machine, const struct mesh_graph_actor *actor, double *time);
 /* design/joint-compilation.md §3, row 5 */
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
                     uint64_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
@@ -165,11 +172,12 @@ struct mesh_strided { uint64_t offset,element; uint32_t dims,padding; const uint
 _Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,dims)==16 &&
                offsetof(struct mesh_strided,pairs)==24,"mesh_strided: rdma/mesh.py Strided");
 /* design/compilation-composition-change-request.md, "Complete replacement workgroup" (exact effects without
-   enumeration); W. Pugh, The Omega Test, CACM 35(8), 1992 (integer feasibility of the meeting of two views): an access
-   of vertex `vertex` to the view's bytes of storage `key`, `write` as struct mesh_graph_access's. Two views of one key,
-   of different vertices, at least one written (both 2 do not conflict), conflict exactly where some byte is in both:
-   decided over their dimensions without enumerating their bytes (a dimension of one stride at a time; two outermost
-   dimensions of equal stride by the few relative offsets their slices can meet at). The relation keeps each edge's
+   enumeration); S. Verdoolaege, isl: An Integer Set Library for the Polyhedral Model, ICMS 2010, LNCS 6327 (isl 0.27):
+   an access of vertex `vertex` to the view's bytes of storage `key`, `write` as struct mesh_graph_access's. Two views
+   of one key, of different vertices, at least one written (both 2 do not conflict), conflict exactly where some byte
+   is in both: the integer points of offset_a + sum_k i_k stride_k + u = offset_b + sum_l j_l stride_l + v over their
+   bounded indices and element bytes u, v, isl_basic_set_is_empty (exact, arbitrary precision), no index or byte
+   enumerated and no hull taken for a conflict. The relation keeps each edge's
    causes (design/compilation-composition-change-request.md, "Retain the value/effect/transfer cause of an edge"):
    one record {from, to} a distinct (from, to, cause), sorted by from, to, kind, key, given, `from` < `to`; a
    conflict's cause its key and hazard (the lower vertex's access before the higher's: READ_AFTER_WRITE,

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/sysctl.h>
+#include <dlfcn.h>
 #include "mesh-metal.h"
 #include "mesh-collective.h"
 
@@ -288,11 +289,12 @@ void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
 static int machine_read(id given,struct mesh_graph_machine *x){
   if(![given isKindOfClass:[NSDictionary class]])return EINVAL;
   double *field[]={&x->peak,&x->bandwidth,&x->block_bandwidth,&x->l2,&x->l1,&x->launch,&x->l2_speedup,&x->l1_speedup,
-                   &x->overlap};
+                   &x->overlap,&x->direct,&x->blit};
   NSString *name[]={@"peak",@"bandwidth",@"block_bandwidth",@"l2",@"l1",@"launch",@"l2_speedup",@"l1_speedup",
-                    @"overlap"};
-  for(int k=0;k<9;k++){
+                    @"overlap",@"direct",@"blit"};
+  for(int k=0;k<11;k++){
     id number=((NSDictionary *)given)[name[k]];
+    if(number==[NSNull null]){*field[k]=0;continue;}
     if(![number isKindOfClass:[NSNumber class]])return EINVAL;
     *field[k]=[number doubleValue];
   }
@@ -300,8 +302,9 @@ static int machine_read(id given,struct mesh_graph_machine *x){
   uint32_t physical=0;
   size_t size=sizeof physical;
   if(!cores && sysctlbyname("hw.physicalcpu",&physical,&size,NULL,0))return errno;
-  if((cores && ![cores isKindOfClass:[NSNumber class]]) || ![fpus isKindOfClass:[NSNumber class]])return EINVAL;
-  x->cores=cores?[cores unsignedIntValue]:physical;x->fpus=[fpus unsignedIntValue];
+  if((cores && ![cores isKindOfClass:[NSNumber class]]) || (fpus!=[NSNull null] && ![fpus isKindOfClass:[NSNumber class]]))
+    return EINVAL;
+  x->cores=cores?[cores unsignedIntValue]:physical;x->fpus=fpus==[NSNull null]?0:[fpus unsignedIntValue];
   return 0;
 }
 /* design/torch-capture-change-request.md, 2026-11-09 appendix: this node's model's GPU and CPU records */
@@ -311,7 +314,12 @@ int mesh_metal_machines(const char *path,struct mesh_graph_machine *gpu,struct m
   if(sysctlbyname("hw.model",model,&size,NULL,0))return errno;
   int status=ENOENT;
   @autoreleasepool{
-    NSData *data=[NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
+    Dl_info loaded;
+    NSString *file=path?[NSString stringWithUTF8String:path]:
+      dladdr((const void *)mesh_graph_actor_time,&loaded) && loaded.dli_fname?
+      [[[[NSString stringWithUTF8String:loaded.dli_fname] stringByDeletingLastPathComponent]
+        stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"etc/mesh-capacity.json"]:nil;
+    NSData *data=file?[NSData dataWithContentsOfFile:file]:nil;
     id records=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL]:nil;
     id models=[records isKindOfClass:[NSDictionary class]]?((NSDictionary *)records)[@"models"]:nil;
     id entry=[models isKindOfClass:[NSDictionary class]]?((NSDictionary *)models)[[NSString stringWithUTF8String:model]]:nil;

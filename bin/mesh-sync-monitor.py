@@ -165,7 +165,7 @@ def generate(operations, program, observe, point=None):
         guard = '/this->checked && %s/'
         lines.append('%s%s %s { this->checked = 1; this->c = %d; this->ob = %s; this->hasob = %d; this->va = %s; '
                      'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->ok = this->i < %d && '
-                     'e[this->i] == this->c && x[this->i] == self->exec && (!this->hasva || v[this->i] == this->va) && '
+                     'e[this->i] == this->c && x[this->i] >= self->exec && (!this->hasva || v[this->i] == this->va) && '
                      '(!this->hasob || ((om[this->ob] == 0 || om[this->ob] == o[this->i] + 1) && (ko[o[this->i]] == 0 || '
                      'ko[o[this->i]] == this->ob + 1))) && (!this->hasln || ((lm[this->ln] == 0 || lm[this->ln] == '
                      'q[this->i] + 1) && (kl[q[this->i]] == 0 || kl[q[this->i]] == this->ln + 1)))%s; }' % (
@@ -177,7 +177,8 @@ def generate(operations, program, observe, point=None):
                      'kl[this->hasln ? q[this->i] : -1] = this->hasln ? this->ln + 1 : kl[-1]; cur++; '
                      'printf("mesh-sync-monitor: observed %%d %%d %%d %%d %%d %%d\\n", this->i, this->c, this->hasob ? '
                      'o[this->i] : -1, this->hasva ? (int64_t)this->va : -1, self->exec, tid); '
-                     'self->exec += this->hasob && this->ob == self->ended && (this->c == %d || this->c == %d) ? 1 : 0; }'
+                     'self->exec = x[this->i]; self->exec = this->hasob && this->ob == self->ended && (this->c == %d || '
+                     'this->c == %d) && this->va > self->exec ? this->va : self->exec; }'
                      % (probe + point, guard % 'this->ok', ended[0], ended[1]))
         lines.append('%s %s { printf("mesh-sync-monitor: unexpected %s at operation %%d of %d, execution %%d (compiled '
                      'primitive %%d value %%d execution %%d; called value %%d) thread %%d\\n", this->i, self->exec, '
