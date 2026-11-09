@@ -536,6 +536,85 @@ replace the assigned domain with the operations exercised by a diagnostic.
   and conversion algorithms; it is not a source for every transcendental function. Retain the upstream notices for
   derived source. Authored library source is a compiler input; generated target source remains terminal output.
 
+### Nested communication regions: producer and consumer handoff
+
+This is the next open implementation connection of items 1, 5 and 6, units 6D–6F, and workgroup
+responsibilities 2, 5–7. It applies AOT A7/A10 and appendix item 6, disjoint-pages C3.3, and the complete
+replacement's typed transfer/generation requirement. It does not change the bridge protocol or introduce a
+second executor. The build27 numerical/control observations recorded in the workgroup's `output_data` do not
+establish distributed communication inside a dynamic body.
+
+**Code fact and displaced boundary.** `mesh_compile.partition` currently partitions the outer FX graph. A generic
+control call gathers operands before `_interpreted` recursively lowers its body numerically. The body does not
+pass through the existing partition, collective construction and plan consumers. `_Export` and `mesh_plan` carry
+a flat repeated call block. Its range generation `{every, producer, ordinal}` maps a consumer invocation to a
+producer invocation; native step words and `MetalCallExecution` carry that invocation through all its trips.
+`Joins` publishes the call's sent result after its outermost control. These facts correctly describe a fixed
+received operand reused by the body. They do not describe a fresh collective created in that body. Each bridge
+plan execution visits its compiled hops once: putting optional or repeated transfers into that unchanged parent
+plan can leave an untaken hop waiting or reuse an earlier phase.
+A source region is not necessarily one communication plan: `mesh-flow.c`'s `lane_take` selects the earliest
+delivered execution, and `link_send_drain` retains that execution's cursor when its next supplied/phase word is
+not ready. If a parent's later hop requires a nested child's result, retaining the parent execution on that lane
+can prevent the child's later delivery from running. The compiler therefore projects a region into maximal
+straight-line communication segments at the required nested call/control boundaries, retaining each segment's
+original region and ports. Existing graph ordering/scheduling owners determine those cuts and dependencies;
+there is no default plan per numerical operation. The segment port relations carry pre-call values into the
+child and its actual yielded values into the continuation, with the corresponding producing activation intact.
+
+**Source roles.** MLIR's [SCF while, condition and yield](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfwhile-scfwhileop)
+provide explicit region arguments, carried values and result correspondence, including zero trips. Their role
+here is preserving structured value/control links, not selecting a communication schedule. MPI 4.1
+[Persistent Communication Requests](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node83.htm), §4.9,
+separates binding persistent operands from starting and completing repeated operations. Its role here is the
+already compiled plan's activation and buffer lifetime, not an MPI wire protocol. The existing Lam/BSL and exact
+dependence owners remain responsible for storage reuse, scheduling and synchronization; a dynamic trip count
+must not be silently supplied as a static repetition count to their existing flat-call inputs.
+
+OpenXLA's [`SpmdPartitioner::PreprocessCallSites`, `HandleWhile` and `HandleConditional`](https://github.com/openxla/xla/blob/main/xla/service/spmd/spmd_partitioner.cc)
+align caller/callee shardings and retain partitioned control operands and results; the conditional predicate is
+replicated across participating partitions. Their role is recursive partitioning with explicit boundary layouts,
+using the same sharding and collective owners inside and outside control regions. This does not adopt another
+transport scheduler.
+
+**Retained operands and responsibility.**
+
+| Producer and representation | Consumer and required preservation |
+|---|---|
+| Frontend: nested region identity from the owning function, original control node and arm/test/body role; its parent and actual control activation. | Shared compiler keeps the same region/call identity through partitioning and lowering. An untaken arm has no activation; a zero-trip loop has its initial test and selected exit values, but no body activation. |
+| Frontend: each flattened argument/result's source value, formal/result ordinal, storage/alias identity and sharding/layout; initial, carried, additional/captured and yielded correspondence. | Partitioning uses the existing propagation, resharding and collective owners in every region. Lowering retains borrowed parent values in their producer's domain and preserves the actual child producer of a yielded or aliased result. |
+| Compiler/plan: the persistent communicating region's actual activation and each range's producing activation, alongside its transfer, view and effects. | Native call entry supplies the monotonically increasing plan execution only when that region executes. Acquisition, publication and copy selection consume that exact identity. A loop trip number or observer feedback distance is not a substitute. Fixed invocation correspondence remains the existing static case. |
+| Shared effect/lifetime owner: the complete uses of borrowed inputs, child outputs and aliases, including enclosing consumers and transport completion. | Preparation binds the resulting finite copies and last-use/completion relations. A child return alone does not free an escaping output. Later reentry reuses storage only after the retained last use, without a guessed trip bound or an unconditional added wait. |
+| Plan owner: scoped call/control relations and solved allocations/schedules. | Native caller and signature consume the same results. The old global cyclic call order, affine cross-call thresholds and `horizon × calls-per-block` coordinate apply only where their premises hold; optional children must not be appended to that flat cycle. Save/load retains the resolved results and relocates live bindings without solving them again. |
+
+A dynamic child's activation count need not be affine in its parent's invocation count. The existing wire
+program fixes a child's buffer addresses by its own execution copy. A borrowed parent's numerical view still
+selects its parent's copy. Direct transport aliasing therefore requires the retained address correspondence;
+where it does not hold, the existing typed copy/reshard lowering supplies the required child-domain transfer
+value and may fuse its producer's store when legal. This preserves source alias semantics while meeting the
+compiled transport's actual storage constraint. A generation word alone cannot repair an incorrectly bound
+buffer, and no runtime bridge descriptor remapping is introduced.
+
+The frontend's concrete source records are `Region {id, parent, control, role, path, gm, ports, inputs, outputs,
+links, children, ir}`, `Port {scope, node, index, value, storage}`, and `Link {source, target, kind}`. A region ID
+names a lexical control site; reusing a GraphModule does not reuse that activation identity. `control` is the
+original owning FX node; ordered children retain then/else or test/body roles. `index` is a flattened result
+ordinal; `value` retains the original typed metadata, and `storage` its scoped alias identity. Links distinguish
+borrowed, initial, carried, yielded and zero-trip exit values. The region's existing partition IR owns sharding
+and layout; no second layout schema is inferred from names. Paths serve source provenance and annotations only.
+One compiler Program retains the regions of an outer call. The plan owner projects its communication segments
+from that ordered IR and these ports; it does not reparse FX or create separate recorder captures for each body.
+
+**Connected edit boundary.** Frontend owns recursive region partition/instantiation and the original port links;
+compiler owns shared typed region/generation operands and their transformed effects; executor owns scoped
+`mesh_plan` consumption, native activation/copy/completion and the saved signature connection. A communicating
+region uses persistent child plans through the existing protocol. Their preparation, activation and lifetime
+consumers must land together; no unused region metadata, parent-generation replay of a child collective, or
+numerical-only branch fallback constitutes this handoff. The concrete C interface follows agreement on these
+producer facts and their existing consumers. Existing operational callers will exercise taken/untaken and
+zero/repeated nested activations, borrowed inputs, carried outputs and communication as the connected code becomes
+runnable; no separate evaluator is introduced.
+
 ## Reusable form
 
 The same change-request form can name several existing requests in one requirement:
