@@ -774,8 +774,6 @@ Each requirement names the code it replaces, the quoted source, and what is writ
   operations can be captured by CUDA Graphs."
 - **Write:** every node runs its captured program by replay, its collectives included. fcf5d18a's calls of torch from
   Python at every execution are deleted.
-- **Written,** in the torch scope, with design/torch-source-lowering-change-request.md item 4, which writes what item 3
-  stops on.
 
 ## Stops
 

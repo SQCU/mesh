@@ -16,7 +16,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
     (integration-finishing item 1).
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
-  - In the torch scope, item 9 waits on the lowering request's item 4, which is withdrawn.
+  - In the torch scope, item 9 remains outstanding: rdma/mesh_compile.py `program()` selects replay only for an
+    MPS-only node with no declared transfer naming a value (`replayed`). The requirement is that every node replays,
+    its collectives included. The lowering request's withdrawn item 4 points to item 1 for the consumer's lowering;
+    its withdrawal does not complete or withdraw item 9.
   - Implemented: items 1 (metal-microbench a3792f13), 4 (mesh 992f6389), 5, 6 (mesh a2c1532c and b880b808,
     metal-microbench 6b3c29e5, completed in mesh 356bed56) and 7, and item 2's first write. Item 8 is written by the lowering
     request's items 1–3.
