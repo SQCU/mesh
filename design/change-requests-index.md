@@ -99,19 +99,24 @@ outstanding, and what of it is outstanding. The standard every change request fo
   computation where the compiled schedule requires overlap; and efficient typed indexed updates. Build22 connects
   typed BLAS/BNNS calls inside the existing native member body, with retained layout/workspace and shared contraction
   facts consumed by CPU, GPU and Core ML. Restored F64 transposed and F32 single-row BLAS cases agree exactly with
-  Torch. BNNS descriptor emission, staged-storage binding and CPU struct-constant emission still expose concrete
-  integration failures; corrective checkpoint metalaa0dc393 awaits linked verification.
+  Torch. Build23 verifies corrective checkpoint metalaa0dc393: strided BNNS, fixed-half staging and
+  rounded-input contractions restore with exact agreement. The canonical joint transformer also executes through
+  native CPU after tuned contraction lowering: forward relative error 7.737e-8, parameter gradients at most
+  2.878e-7, input gradient 1.403e-7, all finite; the 119-operation artifact is 413,734 bytes. These results resolve
+  the build22 printer/binding failures and preserve those numerical cases; throughput remains unmeasured.
   The output-by-update scan is replaced by stable key sorting, shared segmented scans and canonical typed scatter.
   The shared lowerer now suppresses ordinary mapped writes for explicitly scattered outputs. Build22 GPU execution
   covers all eleven update variants, duplicate keys, include-self/alpha, I64/complex128/Bool values, noncontiguous
   advanced indices, scalar/empty cases and histogram. The largest relative difference is 2.558e-8; the other checked
   results are exact. Alpha is applied before reduction, preserving the finite 1.5e38 overflow-sensitive case.
   Invalid negative scatter indices and an index-add coordinate of 2**32 report the intended typed check. CPU update
-  execution remains blocked by the struct-constant emitter defect above. This does not establish performance or
+  execution passes in build23 after the shared printer correction: ten of eleven update results are exact,
+  scatter_add differs by 2.558e-8, and complex128 and alpha-overflow cases are exact. This does not establish performance or
   distributed EP execution. Restored CP/EP/mixed-engine callers do not by themselves close those obligations.
-  Core ML invocation also rebuilds fixed feature providers, array views, options and output bindings on every call;
-  the existing `CoreMLFunction` prepared these once. That preparation must survive in the native artifact and its
-  relocated replay bindings. A Core ML preferred-device plan reports intended placement, not observed device use.
+  Compiler checkpoint metal2abd0b2f moves fixed Core ML feature providers, array views, options and output bindings
+  to prepared invocation objects, preserving the existing `CoreMLFunction` preparation boundary. The adjacent
+  executor binds relocated storage once per residue. This handoff awaits linked restoration evidence. A Core ML
+  preferred-device plan reports intended placement, not observed device use.
   The historical optional fragment-1 coded-weight input still needs its typed codec handoff. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
