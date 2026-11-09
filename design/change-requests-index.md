@@ -33,7 +33,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
   not establish Neural Engine execution. The composed Torch save/load consumer still needs operational evidence.
 
   The production dependency chain builds. All five E2B stage graphs publish/lower/finalize in the latest compile-only
-  record (build22): 3/7/20/602/1068 dispatches. An earlier decode finalization crash in AGX does not reproduce after the changed
+  record (build26): 3/7/20/602/1068 dispatches. An earlier decode finalization crash in AGX does not reproduce after the changed
   member emission; its cause is unproven. These are compilation records, not full-model numerical or throughput
   evidence. Commands, revisions, binary hashes, observations and superseded development findings are retained in
   metal-microbench `output_data/claude-typed-replacement-20261109T085408Z`.
@@ -134,8 +134,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   against the historical packer. Build25 passes unchanged-reference numerical checks: plain CPU/GPU, int8 rotation,
   Hadamard and ragged FFN all have relative error at most 1.828e-7; zero-width output is exact. A separate signed I4
   strided/offset view over constant root storage also restores exactly. Target-demanded compilation of invariant
-  coded definitions remains open. The F16 neural case reaches convolution but exposes a missing required pad
-  operand; that emitter correction awaits the next build. No ANE execution or throughput closure follows. Online KV attention,
+  coded definitions remains open. Build26 verifies selected packed projection (algorithm1) for a signed I4 view
+  with offset5 and strides[1033,2], with exact output. The repaired F16 neural convolution executes exactly at
+  8x128x64 and 1x2048x1024 for the supplied power-of-two inputs, but both preferred plans still select CPU.
+  No ANE execution or throughput closure follows. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
   relative error 2.217e-7, including an exactly zero fully masked row; causal attention has error 6.092e-8. The two
@@ -194,8 +196,17 @@ outstanding, and what of it is outstanding. The standard every change request fo
   result consumed by ordinary ordering, feedback and predicate reads.
   Mesh67792fda preserves the finite family of complete accepting state paths. The actual two-WHILE artifacts
   (31 operations, 282,897 bytes) have exact numerical results and four static image edges with no false edge.
-  External observation fails before execution because the generated DTrace program exceeds its DIF instruction
-  size limit. Emission-size reduction is assigned; no nested-loop runtime observation is claimed from that failure.
+  The initial external observation fails before execution with DTrace's program-size diagnostic. Individual
+  actions were small; the evidence points to aggregate observer load size. Mesh201f2a89 shares20 typed matching
+  rules across128 masked transition rows and retains all transition identities as data. The generated observer
+  falls from181,732 to63,338bytes and from43,109 to14,429 DIF instructions. This completes a representation handoff,
+  rather than merely packaging the same repeated checks into smaller clauses. Actual build26 observation now
+  enables: outer3/inner2,0,2 passes with85 observed program operations,11 image edges and no false/redundant edge.
+  The outer-zero case is numerically exact but fails materialization: a completion refers to task12 before any
+  retained activation, leaving one false edge. That provenance defect remains assigned; the checker is unchanged.
+  These runs use --observe and do not exercise destructive fail-stop interception.
+  Metalcc580af4 / mesh8ce87a05 also retain one exact conflict result, including self conflicts and predicate reads,
+  consumed by ordinary dependencies, control feedback and predicate phases. Artifact v18 retains it on save/load.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
   bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
   the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
