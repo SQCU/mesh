@@ -90,13 +90,17 @@ records. Background invocation errors go to that directory's log.
 
 ## Post-commit findings
 
-The C9, comment, change-request and style hooks deliver feedback with status 0 through
+The C9, comment, change-request and style hooks run in the background (`"async": true`,
+[Run hooks in the background](https://code.claude.com/docs/en/hooks#run-hooks-in-the-background)): the commit returns
+at once, and the session continues while they read. They deliver feedback with status 0 through
 `hookSpecificOutput.additionalContext` and `systemMessage`, using the
-[PostToolUse interface](https://code.claude.com/docs/en/hooks#posttooluse-decision-control). Findings are material for
+[PostToolUse interface](https://code.claude.com/docs/en/hooks#posttooluse-decision-control), which Claude Code hands
+to the session on its next turn. Findings are material for
 review and revision. A reviewer finding alone does not authorize rollback, deletion of required behavior or a
 replacement specification. An incomplete review stays visible. The hook's successful exit means feedback delivery,
 not implementation approval. Explicit comment-review commands retain their diagnostic exit statuses.
 
 Both repositories' existing .claude/settings.json entries continue to invoke these scripts. The document-commentary
-hook remains detached; the change-request and style hooks return feedback to the invoking session. C9 and source
+hook remains detached; the C9, comment, change-request and style hooks return feedback to the invoking session on its
+next turn. C9 and source
 comment review retain their focused implementations.

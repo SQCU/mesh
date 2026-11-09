@@ -1,9 +1,10 @@
 # Review warnings
 
-The reviewers' style guide. It governs the warnings that the reviewers bin/mesh_review.py runs hand back to the
-session that committed: how a reviewer writes a warning, and how that session reads it. Its form is its own: the turns,
-quoted verbatim from the transcript, then each rule with its source. A rule that is Claude's reading of the turns says
-so.
+The reviewers' style guide. It governs the warnings that the post-commit review hooks (both repositories'
+.claude/settings.json) and the reviews bin/mesh_review.py runs hand back, to the session that committed or to the host
+that ran the review: how a reviewer writes a warning, and how the session or host reads it. Its form is its own: the
+turns, quoted verbatim from the transcript, then each rule with its source. A rule that is Claude's reading of the
+turns says so.
 
 ## The turns
 
@@ -39,23 +40,38 @@ so.
     are diagnostic messages that report constructions that are not inherently erroneous but that are risky or suggest
     there may have been an error." Its `-Werror`, "Turn all warnings into errors.", is the mode these warnings do not
     take.
-- **Rule:** a reviewer's warning is handed back to the session that committed with status 0, and appended to the
-  review record (metal-microbench output_data/change-request-reviews.jsonl). Nothing is blocked, reverted or deleted
-  because of it, and the session's work continues.
+  - Claude Code, Hooks reference, "Run hooks in the background"
+    (https://code.claude.com/docs/en/hooks#run-hooks-in-the-background): "By default, hooks block Claude's execution
+    until they complete." "When an async hook fires, Claude Code starts the hook process and immediately continues
+    without waiting for it to finish." "After the background process exits, Claude Code delivers the
+    `additionalContext` and `systemMessage` fields from the hook's JSON response to Claude on the next conversation
+    turn".
+- **Rule:** each post-commit review hook sets `"async": true`. The commit returns at once, and the session's work
+  continues while the review runs. When the review ends, its warnings reach the session on its next turn, with status
+  0, and are appended to the review record (metal-microbench output_data/change-request-reviews.jsonl). Nothing is
+  blocked, reverted or deleted because of a warning.
 
-### 2. A warning is feedback that may require a change
+### 2. A warning quotes the sentence its place departs from
 
-- **Source:** turn 1: "do form feedback which may require changes in most situations where they appear".
-- **Rule:** each warning names its place (the path and line), the sentence of the governing document the place departs
-  from, and the change that would make the place adhere. This three-part form is Claude's reading of turn 1; no quoted
-  turn states it.
+- **Source:**
+  - turn 1: "do form feedback which may require changes in most situations where they appear".
+  - turn 3: change requests "are a bespoke documentary standard to catch attempts to add false new requirements or
+    false new constraints which are otherwise immeasurable".
+- **Rule:** each warning names its place (the path and line), quotes the sentence of the governing document the place
+  departs from, with that document's path, and names the change that would make the place adhere to that sentence.
+  What a reviewer finds that no governing sentence states, such as code it takes to be unused, is not a warning: it may
+  be written in the review's summary, and asks for no change. The three-part form is Claude's reading of turn 1, and
+  the exclusion is Claude's reading of turn 3; no quoted turn states either.
 
 ### 3. How the receiving session reads a warning
 
 - **Source:** turns 1 to 4.
 - **Rule:**
-  - The session continues its work. In most situations where a warning appears, it makes the change the warning names
-    (turn 1).
+  - The session continues its work. It reads each warning against its place and its quoted sentence. In most
+    situations where a warning appears, that sentence requires a change at the place, and the session makes it
+    (turn 1). Reading the warning against its place first is Claude's reading of turn 1's "may require".
+  - A warning asks for nothing beyond what its quoted sentence requires; the session makes no other change for it
+    (turn 3).
   - Text the operator directed stands, and the warning on it stays in the record (turn 2; turn 4: "rejection-filter
     requirements that have been literally passed from the user to an implementer").
   - A warning is not put to the operator as a choice between their instruction and the warning (turn 1: "i can't solve
