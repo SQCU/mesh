@@ -115,9 +115,19 @@ outstanding, and what of it is outstanding. The standard every change request fo
   distributed EP execution. Restored CP/EP/mixed-engine callers do not by themselves close those obligations.
   Compiler checkpoint metal2abd0b2f moves fixed Core ML feature providers, array views, options and output bindings
   to prepared invocation objects, preserving the existing `CoreMLFunction` preparation boundary. The adjacent
-  executor binds relocated storage once per residue. This handoff awaits linked restoration evidence. A Core ML
-  preferred-device plan reports intended placement, not observed device use.
-  The historical optional fragment-1 coded-weight input still needs its typed codec handoff. Online KV attention,
+  executor binds relocated storage once per residue. Build24 restores this handoff with correct numerical output.
+  Both the existing F32 arithmetic case and an explicit historical F16 contraction still receive CPU-preferred
+  plans. Review found target consumers bypassing constant bytes owned by the Value's storage root; that handoff
+  and the historical constant-weight convolution construction remain under repair. A Core ML preferred-device
+  plan reports intended placement, not observed device use.
+  Build24 also executes a mixed GPU/CPU/GPU artifact with relative error 4.298e-9, but its signature has one false
+  edge: the new prefix submission is attributed to its numeric consumer instead of the actual GPU producer.
+  The executor is repairing that retained provenance; numerical success does not close synchronization or overlap.
+  The historical fragment-1 input now has a typed codec producer (mesha743225e), retained selected/basis operands,
+  and explicit source-device versus compiled-target placement. Its first nonzero numerical cases fail on CPU and
+  GPU because the handoff equation included row parity twice. Mesh13d6d475 corrects that one inverse lane formula
+  against the historical packer; numerical reruns and target-demanded constant realization remain open. The
+  independent reference is unchanged. Zero-width output is exact. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
   relative error 2.217e-7, including an exactly zero fully masked row; causal attention has error 6.092e-8. The two
