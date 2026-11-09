@@ -246,7 +246,7 @@ struct mesh_graph_selection { uint32_t argument, bytes; uint64_t table, index; }
 struct mesh_graph_guard { uint64_t operation; uint32_t selection, taken; };
 struct mesh_graph_choice { uint32_t parent, control; uint64_t execution, call; uint32_t entry, trip; };
 enum mesh_graph_instruction_kind { MESH_GRAPH_OPERATION, MESH_GRAPH_ACTION, MESH_GRAPH_LOOP_ENTRY, MESH_GRAPH_LOOP_BODY,
-  MESH_GRAPH_LOOP_RETEST, MESH_GRAPH_LOOP_END, MESH_GRAPH_SPAN_ENTRY, MESH_GRAPH_SPAN_END };
+  MESH_GRAPH_LOOP_RETEST, MESH_GRAPH_LOOP_END, MESH_GRAPH_SPAN_ENTRY, MESH_GRAPH_SPAN_END, MESH_GRAPH_TASK };
 struct mesh_graph_submission { uint32_t lag, positions, window, flags, queue, host, drained, ended, progress, padding; unsigned char policy[16]; };
 struct mesh_graph_action { uint32_t kind, submission, object, primitive, vertex, padding; uint64_t execution, value, begin, end; };
 struct mesh_graph_instruction { uint32_t kind, index, once, condition, conditions, padding; uint64_t execution, position; };

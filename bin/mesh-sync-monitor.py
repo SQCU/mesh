@@ -261,6 +261,7 @@ def generate(operations, program, observe, point=None, metadata=None):
     owner = SubmissionOwner(metadata, operations, program, objects, lanes, object_primitives, lane_primitives, completion) \
         if metadata.get('instructions') else None
     machine = mesh_graph.trace_machine(operations, program, metadata, objects, lanes, owner)
+    metadata['_machine'] = machine
     rules = counter_rules(operations, program, metadata.get('scopes', ()))
     family_objects = collections.defaultdict(set)
     for event in metadata.get('events', ()):
@@ -610,12 +611,20 @@ def main(argv):
     except ValueError as failure:
         failures.append(str(failure))
         witness = []
-    for _, _, _, k, primitive, obj, value, execution, _ in witness:
+    try:
+        realized_tasks, realized_dependences, vertices, symbolic_tasks, task_map = mesh_graph.trace_occurrences(tasks, dependences, operations,
+            program, metadata['_machine'], witness)
+    except ValueError as failure:
+        failures.append(str(failure))
+        realized_tasks, realized_dependences, vertices, symbolic_tasks, task_map = tasks, dependences, [NONE] * len(witness), set(), dict(enumerate(range(len(tasks))))
+    realized_vertices = []
+    for occurrence, (_, _, _, k, primitive, obj, value, execution, _) in zip(vertices, witness):
         if k < 0:
             continue
         compiled_op = operations[program[k]]
         walk.append(k)
-        observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[primitive]), primitive, compiled_op.vertex,
+        realized_vertices.append(occurrence)
+        observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[primitive]), primitive, occurrence,
                                              NONE if obj < 0 else obj, execution,
                                              compiled_op.value if value < 0 else value))
     blind = {c: n for c, n in coverage.items() if c not in ('program', 'static')}
@@ -624,27 +633,35 @@ def main(argv):
         if missing:
             failures.append('%d compiled bridge raises not observed (%d observed)' % (len(missing), len(made)))
         blind.pop('bridge', None)
-        observed += [mesh_graph.Operation(operations[i].processor, operations[i].primitive, operations[i].vertex,
+        observed += [mesh_graph.Operation(operations[i].processor, operations[i].primitive, task_map[operations[i].vertex],
                                           operations[i].object, operations[i].execution, count) for i, count in made]
     expected_ops, counters = [], [0, 0, 0]
     rules = counter_rules(operations, program, metadata['scopes'])
-    for k in walk:
+    for k, occurrence in zip(walk, realized_vertices):
         source = operations[program[k]]
         family, delta = rules[k]
         value = counters[family] + delta if family else source.value
-        expected_ops.append(mesh_graph.Operation(source.processor, source.primitive, source.vertex, source.object,
+        expected_ops.append(mesh_graph.Operation(source.processor, source.primitive, occurrence, source.object,
                                                  source.execution, value))
         if family and source.primitive == PRIMITIVES.index('queue_signal'):
             counters[family] = value
     if bridge:
-        expected_ops += [operations[i] for i, c in enumerate(which) if c == 'bridge']
-    expected = mesh_graph.signature(processors, tasks, dependences, expected_ops)
-    watched = mesh_graph.signature(processors, tasks, dependences, observed)
-    if expected['states'].get('false'):
-        failures.append('realized compiled alternative has %d synchronization edges with no dependence under them' %
-                        expected['states']['false'])
-    if expected['redundant']:
-        failures.append('realized compiled alternative has %d redundant synchronization edges' % expected['redundant'])
+        expected_ops += [mesh_graph.Operation(o.processor, o.primitive, task_map[o.vertex], o.object, o.execution, o.value)
+                         for i, o in enumerate(operations) if i < len(which) and which[i] == 'bridge']
+    expected = mesh_graph.signature(processors, realized_tasks, realized_dependences, expected_ops)
+    watched = mesh_graph.signature(processors, realized_tasks, realized_dependences, observed)
+    unknown_edges = [(signal, wait) for signal, wait, *_ in expected['synchronized']
+                     if expected_ops[signal].vertex in symbolic_tasks or expected_ops[wait].vertex in symbolic_tasks]
+    known_edges = [edge for edge in expected['synchronized'] if edge[:2] not in unknown_edges]
+    false_edges = sum(edge[2] == 'false' for edge in known_edges)
+    redundant_edges = sum(edge[3] for edge in known_edges)
+    if false_edges:
+        failures.append('realized compiled alternative has %d synchronization edges with no dependence under them' % false_edges)
+    if redundant_edges:
+        failures.append('realized compiled alternative has %d redundant synchronization edges' % redundant_edges)
+    if unknown_edges:
+        failures.append('synchronization classification remains unproved for %d observed edges affected by hidden task activations: %s' %
+                        (len(unknown_edges), unknown_edges))
     if expected['digest'] != watched['digest']:
         failures.append('observed graph %s differs from the compiled graph %s over the observed scope'
                         % (watched['digest'], expected['digest']))
@@ -667,6 +684,7 @@ def main(argv):
     sys.stderr.write('mesh-sync-monitor: %s; runtime-observed operations %s; %d kernel records from compiled IR '
                      '(not runtime-observed); other unobserved classes %s\n' % (result, runtime, static, blind or 'none'))
     record.update(result=result, reasons=failures[:16], blind=blind, runtime_observed=runtime, compiled_kernel_records=static,
+                  unclassified_edges=unknown_edges,
                   observed_sha256=watched['digest'],
                   expected_sha256=expected['digest'], counts_differing=len(differing), dtrace_status=done.returncode,
                   bridge=bool(bridge), bridge_raises=len(raised))

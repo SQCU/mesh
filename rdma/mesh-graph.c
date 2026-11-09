@@ -2077,7 +2077,7 @@ int mesh_graph_signature_execution(struct mesh_graph_signature *s,size_t submiss
     if(x->position>s->operations || x->condition>conditions || x->conditions>conditions-x->condition)return EINVAL;
     const size_t count=x->kind==MESH_GRAPH_OPERATION?s->operations:x->kind==MESH_GRAPH_ACTION?actions:
       x->kind>=MESH_GRAPH_LOOP_ENTRY && x->kind<=MESH_GRAPH_LOOP_END?s->controls:
-      x->kind==MESH_GRAPH_SPAN_ENTRY || x->kind==MESH_GRAPH_SPAN_END?s->spans:0;
+      x->kind==MESH_GRAPH_SPAN_ENTRY || x->kind==MESH_GRAPH_SPAN_END?s->spans:x->kind==MESH_GRAPH_TASK?s->tasks:0;
     if(x->index>=count)return EINVAL;
   }
   struct mesh_graph_submission *p=malloc((submissions+1)*sizeof *p);
@@ -2787,6 +2787,7 @@ int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_g
         x_.position=x_.kind==MESH_GRAPH_OPERATION?map[x_.index]:x_.position?map[x_.position-1]+1:0; \
         if(x_.kind==MESH_GRAPH_OPERATION)x_.index=(uint32_t)map[x_.index]; \
         else if(x_.kind==MESH_GRAPH_ACTION)x_.index+=(uint32_t)actions; \
+        else if(x_.kind==MESH_GRAPH_TASK)x_.index+=side?a->tasks:0; \
         else if(x_.kind>=MESH_GRAPH_LOOP_ENTRY && x_.kind<=MESH_GRAPH_LOOP_END)x_.index+=side?(uint32_t)a->controls:0; \
         joined[s->instructions]=(struct compose_instruction){x_,s->instructions};s->instructions++; } while(0)
       for(size_t k=0;k<g->instructions;k++){

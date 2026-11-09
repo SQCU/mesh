@@ -46,6 +46,8 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
                 token('action', instruction.index, conditions, instruction.once, instruction.execution)
             elif kind in (6, 7):
                 token('enter' if kind == 6 else 'leave', instruction.index)
+            elif kind == 8:
+                token('task', instruction.index, conditions, instruction.once, instruction.execution)
             else:
                 points[instruction.index][kind] = index
                 if kind == 3:
@@ -80,6 +82,8 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
         kind, value, conditions, group = code[index]
         if kind == 'skip':
             return tail
+        if kind == 'task':
+            tail = node('mark', value, (tail,))
         made = node(kind, value, (tail,))
         requirements[made] = conditions
         if group is not None:
@@ -173,16 +177,19 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
     def epsilon(state):
         cursor, seen, selected, trips, _, _, native = state
         kind, value, targets = nodes[cursor]
-        if kind in ('op', 'action'):
+        if kind in ('op', 'action', 'task'):
             if cursor in once and seen & (1 << once[cursor]):
                 return [move(state, targets[0])]
             completed = seen | ((1 << once[cursor]) if cursor in once_last else 0)
             result = [move(state, targets[0], selected=made, seen=completed)
                       for choice, taken in requirements.get(cursor, ())
                       if (made := assign(state, [(choice, 1 - taken)])) is not None]
-            if kind == 'action' and (made := assign(state, requirements.get(cursor, ()))) is not None:
-                result.append(move(state, expansion(cursor, native), selected=made))
+            if kind in ('action', 'task') and (made := assign(state, requirements.get(cursor, ()))) is not None:
+                result.append(move(state, expansion(cursor, native) if kind == 'action' else targets[0],
+                                   selected=made, seen=completed if kind == 'task' else seen))
             return result
+        if kind == 'mark':
+            return [move(state, targets[0])]
         if kind == 'install':
             return [move(state, targets[0], native=value[0], seen=seen | value[1])]
         if kind == 'decide':
@@ -211,12 +218,19 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
     initial = normalized((start, 0, (-1,) * len(choices), (0,) * len(controls), (0,) * len(object_ids), (0,) * len(lane_ids),
                           action_owner.initial if action_owner else ()))
     states, indexed, transitions, accepting = [initial], {initial: 0}, [], []
+    epsilon_graphs, endpoints, finals = {}, collections.defaultdict(set), collections.defaultdict(set)
     for source, state in enumerate(states):
-        for current in walk([state], epsilon):
+        graph = {}
+        def successors(current):
+            if current not in graph:
+                graph[current] = tuple(epsilon(current))
+            return graph[current]
+        for current in walk([state], successors):
             cursor, seen, selected, trips, bound, queues, native = current
             kind, value, targets = nodes[cursor]
             if kind == 'final':
                 accepting.append(source)
+                finals[source].add(current)
                 continue
             if kind not in ('op', 'enter', 'leave'):
                 continue
@@ -242,9 +256,43 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
             if following not in indexed:
                 indexed[following] = len(states)
                 states.append(following)
-            transitions.append((source, indexed[following], kind, value, ob, ln))
+            transition = (source, indexed[following], kind, value, ob, ln)
+            transitions.append(transition)
+            endpoints[transition[:4]].add(current)
+        epsilon_graphs[source] = graph
+    activations, final_tasks = {}, {}
+    by_source = collections.defaultdict(list)
+    for key, ends in endpoints.items():
+        by_source[key[0]].append((key, ends))
+    for source, graph in epsilon_graphs.items():
+        order = list(graph)
+        at = {v: k for k, v in enumerate(order)}
+        component = components(len(order), [(at[v], at[w]) for v in order for w in graph[v]])
+        counts = collections.Counter(component)
+        repeated = {v for v in order if counts[component[at[v]]] > 1 or v in graph[v]}
+        dom = dominators(states[source], graph.__getitem__)
+        previous = collections.defaultdict(list)
+        for v in order:
+            for w in graph[v]:
+                previous[w].append(v)
+        def summary(ends):
+            relevant = reach(ends, previous.__getitem__)
+            required = set.intersection(*(dom[v] for v in ends))
+            markers = {v for v in relevant if nodes[v[0]][0] == 'mark'}
+            exact = sorted((markers & required) - repeated, key=lambda v: len(dom[v]))
+            segments = [set() for _ in range(len(exact) + 1)]
+            for v in markers - set(exact):
+                before = sum(x in dom[v] for x in exact)
+                segments[before].add(nodes[v[0]][1])
+            return tuple((frozenset(segments[k]), nodes[v[0]][1]) for k, v in enumerate(exact)) +                    ((frozenset(segments[-1]), None),)
+        for key, ends in by_source[source]:
+            activations[key] = summary(ends)
+        if finals[source]:
+            final_tasks[source] = summary(finals[source])
     return {'states': states, 'transitions': sorted(set(transitions)), 'accepting': sorted(set(accepting)),
-            'objects': object_ids, 'spans': spans}
+            'objects': object_ids, 'spans': spans, 'activations': activations, 'final_tasks': final_tasks,
+            'epsilon_graphs': epsilon_graphs, 'endpoints': endpoints,
+            'marked_tasks': {x.index for x in instructions if x.kind == 8}}
 
 
 def trace_groups(machine, labels):
@@ -277,6 +325,65 @@ def trace_witness(records, accepting):
     return list(reversed(result))
 
 
+def trace_occurrences(tasks, dependences, operations, program, machine, witness):
+    marked = machine.get('marked_tasks', set())
+    if not marked:
+        return tasks, dependences, [operations[program[row[3]]].vertex if row[3] >= 0 else NONE for row in witness], set(), dict(enumerate(range(len(tasks))))
+    made, edges, latest, vertices, symbolic, uncertain = [], [], {}, [], set(), set()
+    activations = collections.Counter()
+    incoming = collections.defaultdict(list)
+    for edge in dependences:
+        incoming[edge.sink].append(edge)
+    def activate(template, family=False):
+        vertex = len(made)
+        task = Task.from_buffer_copy(tasks[template])
+        task.place = vertex
+        made.append(task)
+        if family:
+            uncertain.add(vertex)
+        for edge in incoming[template]:
+            if edge.source in symbolic:
+                uncertain.add(vertex)
+            elif edge.source in latest:
+                edges.append(Dependence(latest[edge.source], vertex, edge.delay))
+        latest[template] = vertex
+        activations[template] += 1
+        symbolic.discard(template)
+    def apply(summary):
+        for possible, exact in summary:
+            symbolic.update(possible)
+            if exact is not None:
+                activate(exact)
+    for template in range(len(tasks)):
+        if template not in marked:
+            task = Task.from_buffer_copy(tasks[template])
+            task.place = len(made)
+            latest[template] = len(made)
+            made.append(task)
+    for row in witness:
+        _, source, target, index, *_ = row
+        kind, token = ('op', index) if index >= 0 else ('leave' if (-index - 1) % 2 else 'enter', (-index - 1) // 2)
+        apply(machine['activations'][(source, target, kind, token)])
+        template = operations[program[index]].vertex if index >= 0 else NONE
+        if template in symbolic:
+            activate(template, family=True)
+        if template != NONE and template not in latest:
+            raise ValueError('operation references task %d before any retained activation' % template)
+        vertices.append(latest.get(template, NONE))
+    if witness:
+        apply(machine['final_tasks'].get(witness[-1][2], ()))
+    for edge in dependences:
+        if edge.sink not in marked:
+            if edge.source in symbolic or activations[edge.source] > 1:
+                uncertain.add(latest[edge.sink])
+            elif edge.source in latest:
+                edges.append(Dependence(latest[edge.source], latest[edge.sink], edge.delay))
+    downstream = collections.defaultdict(list)
+    for edge in edges:
+        downstream[edge.source].append(edge.sink)
+    return made, edges, vertices, reach(uncertain, downstream.__getitem__), latest
+
+
 def reach(starts, neighbours):
     return set(walk(starts, neighbours))
 
@@ -301,6 +408,26 @@ def propagate(order, neighbours, forward, backward):
             for v in vertices:
                 for e in neighbours(v):
                     changed |= visit(v, e)
+
+
+# G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 1976
+def dominators(start, neighbours):
+    order = walk([start], neighbours)
+    previous = collections.defaultdict(list)
+    for v in order:
+        for w in neighbours(v):
+            previous[w].append(v)
+    result = {v: {start} if v == start else set(order) for v in order}
+    def update(_, v):
+        if v == start:
+            return False
+        value = {v} | set.intersection(*(result[u] for u in previous[v]))
+        if value == result[v]:
+            return False
+        result[v] = value
+        return True
+    propagate(order, neighbours, update, lambda _v, _w: False)
+    return result
 
 
 # G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 1976
