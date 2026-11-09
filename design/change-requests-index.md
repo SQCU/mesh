@@ -98,6 +98,9 @@ outstanding, and what of it is outstanding. The standard every change request fo
   contractions replacing the old Accelerate path; submission of independent GPU work before synchronous CPU/ANE
   computation where the compiled schedule requires overlap; and efficient typed indexed updates replacing Torch's
   current output-by-update scan. Restored CP/EP/mixed-engine callers do not by themselves close those obligations.
+  Core ML invocation also rebuilds fixed feature providers, array views, options and output bindings on every call;
+  the existing `CoreMLFunction` prepared these once. That preparation must survive in the native artifact and its
+  relocated replay bindings. A Core ML preferred-device plan reports intended placement, not observed device use.
   The historical optional fragment-1 coded-weight input still needs its typed codec handoff. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
