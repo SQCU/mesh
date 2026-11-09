@@ -188,6 +188,16 @@ def trace_machine(operations, program, metadata, objects, lanes):
             'objects': object_ids, 'spans': spans}
 
 
+def trace_groups(machine, labels):
+    groups = {}
+    for source, target, kind, index, ob, lane in machine['transitions']:
+        key = (kind, labels[(source, kind, index)], ob, lane, index - source, target - source, source // 64, target // 64)
+        if key not in groups:
+            groups[key] = [source, target, kind, index, ob, lane, 0]
+        groups[key][-1] |= 1 << (source % 64)
+    return list(groups.values())
+
+
 def trace_witness(records, accepting):
     at = collections.defaultdict(list)
     for record in records:
