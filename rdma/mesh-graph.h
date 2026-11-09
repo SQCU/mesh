@@ -204,6 +204,7 @@ int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *
    heap order by -level (mesh_graph_heap_order) */
 int mesh_graph_schedule(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, uint32_t *level,
                         uint32_t *place);
+int mesh_graph_levels(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, uint32_t *level);
 /* design/synchronization-signature-change-request.md items 1, 2, 4 and 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee,
    IEEE Trans. Signal Processing 45(6), 1997, §4.1, §5.1 and §7, Fig. 4; E. A. Lee and D. G. Messerschmitt, IEEE Trans.
    Computers C-36(1), 1987; M. Lam, PLDI 1988; L. Lamport, CACM 21(7), 1978 */
@@ -253,6 +254,12 @@ struct mesh_graph_span { uint64_t first, count, begin, end; };
 struct mesh_graph_selection { uint32_t argument, bytes; uint64_t table, index; };
 struct mesh_graph_guard { uint64_t operation; uint32_t selection, taken; };
 struct mesh_graph_choice { uint32_t parent, control; uint64_t execution, call; uint32_t entry, trip; };
+enum mesh_graph_instruction_kind { MESH_GRAPH_OPERATION, MESH_GRAPH_ACTION, MESH_GRAPH_LOOP_ENTRY, MESH_GRAPH_LOOP_BODY,
+  MESH_GRAPH_LOOP_RETEST, MESH_GRAPH_LOOP_END, MESH_GRAPH_SPAN_ENTRY, MESH_GRAPH_SPAN_END };
+struct mesh_graph_submission { uint32_t lag, positions, window, flags, queue, host, drained, ended, progress, padding; unsigned char policy[16]; };
+struct mesh_graph_action { uint32_t kind, submission, object, primitive, vertex, padding; uint64_t execution, value, begin, end; };
+struct mesh_graph_instruction { uint32_t kind, index, once, condition, conditions, padding; uint64_t execution, position; };
+struct mesh_graph_condition { uint32_t choice, taken; };
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
                               struct mesh_graph_processor *processor; struct mesh_graph_task *task;
@@ -263,7 +270,10 @@ struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dep
                               struct mesh_graph_control *control; struct mesh_graph_event *event;
                               struct mesh_graph_scope *scope; size_t spans; struct mesh_graph_span *span;
                               size_t selections, guards; struct mesh_graph_selection *selection;
-                              struct mesh_graph_guard *guard; size_t choices; struct mesh_graph_choice *choice; };
+                              struct mesh_graph_guard *guard; size_t choices; struct mesh_graph_choice *choice;
+                              size_t submissions, actions, instructions, conditions;
+                              struct mesh_graph_submission *submission; struct mesh_graph_action *action;
+                              struct mesh_graph_instruction *instruction; struct mesh_graph_condition *condition; };
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
@@ -276,6 +286,10 @@ int mesh_graph_signature_conditions(struct mesh_graph_signature *, size_t select
                                     size_t guards, const struct mesh_graph_guard *);
 int mesh_graph_signature_choices(struct mesh_graph_signature *, size_t choices, const struct mesh_graph_choice *,
                                  size_t guards, const struct mesh_graph_guard *);
+
+int mesh_graph_signature_execution(struct mesh_graph_signature *, size_t submissions, const struct mesh_graph_submission *,
+                                   size_t actions, const struct mesh_graph_action *, size_t instructions,
+                                   const struct mesh_graph_instruction *, size_t conditions, const struct mesh_graph_condition *);
 
 /* design/synchronization-signature-change-request.md item 1, "its SHA-256 is part of the compiled artifact": the
    signature's one serialized form, its header then processor, task, dependence, operation, edge, least and alias in

@@ -111,6 +111,10 @@ def load(path):
                     'events': [mesh_graph.Event.from_buffer_copy(e) for e in made.event[:made.events]],
                     'spans': [mesh_graph.Span.from_buffer_copy(x) for x in made.span[:made.spans]],
                     'choices': [mesh_graph.Choice.from_buffer_copy(x) for x in made.choice[:made.choices]],
+                    'submissions': [mesh_graph.Submission.from_buffer_copy(x) for x in made.submission[:made.submissions]],
+                    'actions': [mesh_graph.Action.from_buffer_copy(x) for x in made.action[:made.actions]],
+                    'instructions': [mesh_graph.Instruction.from_buffer_copy(x) for x in made.instruction[:made.instructions]],
+                    'conditions': [mesh_graph.Condition.from_buffer_copy(x) for x in made.condition[:made.conditions]],
                     'selections': [mesh_graph.Selection.from_buffer_copy(x) for x in made.selection[:made.selections]],
                     'guards': [mesh_graph.Guard.from_buffer_copy(x) for x in made.guard[:made.guards]],
                     'scopes': [mesh_graph.Scope.from_buffer_copy(x) for x in made.scope[:made.operations]] if made.scope else []}
@@ -156,6 +160,94 @@ def counter_rules(operations, program, scopes=()):
     return [(scopes[i].counter, scopes[i].delta) if scopes else (0, 0) for i in program]
 
 
+class SubmissionOwner:
+    def __init__(self, metadata, operations, program, objects, lanes, object_primitives, lane_primitives, completion):
+        C = mesh_graph.C
+        class Config(C.Structure):
+            _fields_ = [(name, C.c_uint32) for name in ('lag', 'positions', 'window', 'flags')]
+        class State(C.Structure):
+            _fields_ = [(name, C.c_uint64) for name in
+                        ('commits', 'encoded', 'signalled', 'tests', 'completed', 'completedCommits', 'pending')] + \
+                       [('commitEnds', C.POINTER(C.c_uint64)), ('progressCommits', C.POINTER(C.c_uint64))]
+        class Effect(C.Structure):
+            _fields_ = [(name, C.c_uint64) for name in
+                        ('wait', 'signal', 'ended', 'slot', 'stored', 'completed', 'completedCommits', 'encoded')] + \
+                       [(name, C.c_uint32) for name in ('action', 'opened', 'submitted', 'array')]
+        library = os.path.abspath(os.path.join(HERE, '..', '..', '..', 'metal-microbench', '.build', 'libmetal_recording.dylib'))
+        self.library = C.CDLL(library)
+        self.library.MetalSubmissionIdentity.argtypes = [C.POINTER(C.c_ubyte)]
+        self.library.MetalSubmissionIdentity.restype = C.c_int
+        identity = (C.c_ubyte * 16)()
+        status = self.library.MetalSubmissionIdentity(identity)
+        if status:
+            raise ValueError('cannot identify loaded submission owner: %s' % os.strerror(status))
+        for config in metadata['submissions']:
+            if bytes(config.policy) != bytes(identity):
+                raise ValueError('saved submission policy %s differs from loaded recorder %s; regenerate the compiled signature' %
+                                 (bytes(config.policy).hex(), bytes(identity).hex()))
+        self.library.MetalSubmissionAdvance.argtypes = [C.POINTER(Config), C.POINTER(State), C.c_uint32, C.c_uint64, C.POINTER(Effect)]
+        self.library.MetalSubmissionAdvance.restype = C.c_int
+        self.library.MetalSubmissionApply.argtypes = [C.POINTER(State), C.POINTER(Effect)]
+        self.library.MetalSubmissionApply.restype = None
+        self.library.MetalSubmissionNormalize.argtypes = [C.POINTER(Config), C.POINTER(State)]
+        self.library.MetalSubmissionNormalize.restype = None
+        self.library.MetalSubmissionEvents.argtypes = [C.POINTER(mesh_graph.Submission), C.POINTER(mesh_graph.Action),
+            C.POINTER(State), C.POINTER(Effect), C.POINTER(mesh_graph.Operation), C.POINTER(mesh_graph.Scope)]
+        self.library.MetalSubmissionEvents.restype = C.c_size_t
+        self.Config, self.State, self.Effect = Config, State, Effect
+        self.metadata, self.operations, self.program = metadata, operations, program
+        self.objects = {obj for x in metadata['submissions'] for obj in (x.drained, x.progress)} | \
+                       {x.object for x in metadata['actions'] if x.object != NONE}
+        if completion:
+            self.objects.discard(completion.object)
+        self.lanes = {x.queue for x in metadata['submissions']}
+        self.object_map, self.lane_map = objects, lanes
+        self.object_primitives, self.lane_primitives, self.completion = object_primitives, lane_primitives, completion
+        self.initial = tuple((0,) * (7 + x.lag + x.positions * x.window) for x in metadata['submissions'])
+        self.cache, self.catalog = {}, {}
+
+    def step(self, index, values):
+        key = index, values
+        if key in self.cache:
+            return self.cache[key]
+        C = mesh_graph.C
+        action = self.metadata['actions'][index]
+        source = self.metadata['submissions'][action.submission]
+        config = self.Config(source.lag, source.positions, source.window, source.flags)
+        commits = (C.c_uint64 * source.lag)(*values[7:7 + source.lag])
+        progress = (C.c_uint64 * (source.positions * source.window))(*values[7 + source.lag:])
+        state, effect = self.State(*values[:7], commits, progress), self.Effect()
+        status = self.library.MetalSubmissionAdvance(C.byref(config), C.byref(state), action.kind, action.value, C.byref(effect))
+        if status:
+            raise ValueError('compiled submission action %d: %s' % (index, os.strerror(status)))
+        emitted, scopes = (mesh_graph.Operation * 3)(), (mesh_graph.Scope * 3)()
+        count = self.library.MetalSubmissionEvents(C.byref(source), C.byref(action), C.byref(state), C.byref(effect), emitted, scopes)
+        if count > 3:
+            raise ValueError('submission owner exceeded its event record')
+        outputs = []
+        for i in range(count):
+            op, scope = mesh_graph.Operation.from_buffer_copy(emitted[i]), mesh_graph.Scope.from_buffer_copy(scopes[i])
+            if scope.counter:
+                op.value = 0
+            signature = bytes(op), bytes(scope)
+            if signature not in self.catalog:
+                k = len(self.program)
+                self.catalog[signature] = k
+                self.program.append(len(self.operations))
+                self.operations.append(op)
+                self.metadata['scopes'].append(scope)
+                if op.primitive in self.object_primitives and (not self.completion or op.object != self.completion.object):
+                    self.object_map[k] = op.object
+                if op.primitive in self.lane_primitives:
+                    self.lane_map[k] = op.processor
+            outputs.append(self.catalog[signature])
+        self.library.MetalSubmissionApply(C.byref(state), C.byref(effect))
+        self.library.MetalSubmissionNormalize(C.byref(config), C.byref(state))
+        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:7]) + tuple(commits) + tuple(progress)
+        self.cache[key] = changed, tuple(outputs)
+        return self.cache[key]
+
+
 def generate(operations, program, observe, point=None, metadata=None):
     metadata = metadata or {}
     completion = next((e for e in metadata.get('events', ()) if e.role == 1), None)
@@ -166,7 +258,9 @@ def generate(operations, program, observe, point=None, metadata=None):
     objects = {k: operations[i].object for k, i in enumerate(program)
                if operations[i].primitive in object_primitives and (not completion or operations[i].object != completion.object)}
     lanes = {k: operations[i].processor for k, i in enumerate(program) if operations[i].primitive in lane_primitives}
-    machine = mesh_graph.trace_machine(operations, program, metadata, objects, lanes)
+    owner = SubmissionOwner(metadata, operations, program, objects, lanes, object_primitives, lane_primitives, completion) \
+        if metadata.get('instructions') else None
+    machine = mesh_graph.trace_machine(operations, program, metadata, objects, lanes, owner)
     rules = counter_rules(operations, program, metadata.get('scopes', ()))
     family_objects = collections.defaultdict(set)
     for event in metadata.get('events', ()):
@@ -423,7 +517,11 @@ def main(argv):
     node, which = classify(processors, operations, point is not None)
     program = [i for i, c in enumerate(which) if c == 'program']
     coverage = {c: which.count(c) for c in CLASSES if c in which}
-    script, executions = generate(operations, program, observe, point, metadata)
+    try:
+        script, executions = generate(operations, program, observe, point, metadata)
+    except (ValueError, OSError) as failure:
+        sys.stderr.write('mesh-sync-monitor: cannot compile observation: %s\n' % failure)
+        return 2
     target_path = os.path.splitext(path)[0] + '.monitor.d'
     open(target_path, 'w').write(script)
     # item 4: every compiled edge the image of a dependence and none redundant, before anything runs; item 6: every

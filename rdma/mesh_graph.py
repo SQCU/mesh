@@ -19,39 +19,70 @@ def walk(starts, neighbours):
 
 
 # Rabin and Scott, IBM JRD 3(2), 1959, Definition 11 and Theorem 11; design/synchronization-signature-change-request.md 3–4.
-def trace_machine(operations, program, metadata, objects, lanes):
+def trace_machine(operations, program, metadata, objects, lanes, action_owner=None):
     controls, choices = metadata.get('controls', ()), metadata.get('choices', ())
-    scopes, guards = metadata.get('scopes', ()), collections.defaultdict(list)
+    instructions, scopes = metadata.get('instructions', ()), metadata.get('scopes', ())
     if metadata.get('selections') and not choices:
         raise ValueError('signature has obsolete address-based choices; regenerate it from the retained compiled program')
-    for guard in metadata.get('guards', ()):
-        at = bisect.bisect_left(program, guard.operation)
-        if at < len(program) and program[at] == guard.operation:
-            guards[at].append((guard.selection, int(bool(guard.taken))))
-    children, bounds = collections.defaultdict(list), {}
+    if instructions and action_owner is None:
+        raise ValueError('retained submission instructions require their compiled owner')
+    spans = metadata.get('spans') or [Span(0, 1 + max((operations[i].execution for i in program), default=0), 0, len(operations))]
+    groups, last, code, children, bounds = {}, {}, [], collections.defaultdict(list), {}
+    def token(kind, value, conditions=(), owner=0, execution=0):
+        group = groups.setdefault((execution, owner), len(groups)) if owner else None
+        if group is not None:
+            last[group] = len(code)
+        code.append((kind, value, tuple(conditions), group))
+    if instructions:
+        at = {i: k for k, i in enumerate(program)}
+        points = collections.defaultdict(dict)
+        for index, instruction in enumerate(instructions):
+            conditions = [(g.choice, g.taken) for g in metadata['conditions'][instruction.condition:instruction.condition + instruction.conditions]]
+            kind = instruction.kind
+            if kind == 0:
+                token('op' if instruction.index in at else 'skip', at.get(instruction.index), conditions,
+                      instruction.once, instruction.execution)
+            elif kind == 1:
+                token('action', instruction.index, conditions, instruction.once, instruction.execution)
+            elif kind in (6, 7):
+                token('enter' if kind == 6 else 'leave', instruction.index)
+            else:
+                points[instruction.index][kind] = index
+                token('skip', None)
+        for c, control in enumerate(controls):
+            bounds[c] = tuple(points[c][kind] for kind in (2, 3, 4, 5))
+    else:
+        guards = collections.defaultdict(list)
+        for guard in metadata.get('guards', ()):
+            k = bisect.bisect_left(program, guard.operation)
+            if k < len(program) and program[k] == guard.operation:
+                guards[k].append((guard.selection, guard.taken))
+        for k, i in enumerate(program):
+            token('op', k, guards[k], scopes[i].once if scopes else 0, operations[i].execution)
+        for c, control in enumerate(controls):
+            bounds[c] = tuple(bisect.bisect_left(program, getattr(control, name)) for name in ('entry', 'body', 'retest', 'end'))
     for c, control in enumerate(controls):
         children[control.parent].append(c)
-        bounds[c] = tuple(bisect.bisect_left(program, getattr(control, name))
-                          for name in ('entry', 'body', 'retest', 'end'))
     for rows in children.values():
         rows.sort(key=lambda c: bounds[c][0])
-    groups, once, last = {}, {}, {}
-    for k, i in enumerate(program):
-        owner = scopes[i].once if scopes else 0
-        if owner:
-            group = groups.setdefault((operations[i].execution, owner), len(groups))
-            once[k], last[group] = group, k
-    descendants = {}
-    for c in range(len(controls)):
-        descendants[c] = reach([c], children.__getitem__)
+    descendants = {c: reach([c], children.__getitem__) for c in range(len(controls))}
     reset = {c: tuple(i for i, choice in enumerate(choices) if choice.parent in descendants[c]) for c in descendants}
-    nodes = []
-
+    nodes, requirements, once, once_last = [], {}, {}, set()
     def node(kind, value=None, targets=()):
         made = len(nodes)
         nodes.append((kind, value, tuple(targets)))
         return made
-
+    def leaf(index, tail):
+        kind, value, conditions, group = code[index]
+        if kind == 'skip':
+            return tail
+        made = node(kind, value, (tail,))
+        requirements[made] = conditions
+        if group is not None:
+            once[made] = group
+            if last[group] == index:
+                once_last.add(made)
+        return made
     def sequence(first, end, tail, parent, selected=None):
         cursor = end
         for c in reversed(children[parent] if selected is None else selected):
@@ -59,7 +90,7 @@ def trace_machine(operations, program, metadata, objects, lanes):
             if a < first or z > cursor:
                 raise ValueError('control %d is outside its retained parent interval' % c)
             for k in reversed(range(z, cursor)):
-                tail = node('op', k, (tail,))
+                tail = leaf(k, tail)
             if controls[c].kind == 1 and b != z:
                 decision = node('decide', c)
                 retest = sequence(r, z, decision, c, [])
@@ -73,19 +104,18 @@ def trace_machine(operations, program, metadata, objects, lanes):
                 tail = node('optional', c, (tail, sequence(a, z, tail, c)))
             cursor = a
         for k in reversed(range(first, cursor)):
-            tail = node('op', k, (tail,))
+            tail = leaf(k, tail)
         return tail
-
-    spans = metadata.get('spans') or [Span(0, 1 + max((operations[i].execution for i in program), default=0),
-                                          0, len(operations))]
-    final = node('final')
-    start = final
-    for span in reversed(range(len(spans))):
-        first, end = (bisect.bisect_left(program, getattr(spans[span], name)) for name in ('begin', 'end'))
-        root = [c for c in children[NONE] if first <= bounds[c][0] and bounds[c][3] <= end]
-        leave = node('leave', span, (start,))
-        start = node('enter', span, (sequence(first, end, leave, NONE, root),))
-    uses = [set(g[0] for g in guards.get(value, ())) if kind == 'op' else set() for kind, value, _ in nodes]
+    start = node('final')
+    if instructions:
+        start = sequence(0, len(code), start, NONE)
+    else:
+        for span in reversed(range(len(spans))):
+            first, end = (bisect.bisect_left(program, getattr(spans[span], name)) for name in ('begin', 'end'))
+            root = [c for c in children[NONE] if first <= bounds[c][0] and bounds[c][3] <= end]
+            leave = node('leave', span, (start,))
+            start = node('enter', span, (sequence(first, end, leave, NONE, root),))
+    uses = [set(g[0] for g in requirements.get(k, ())) for k in range(len(nodes))]
     live = [set(use) for use in uses]
     predecessors = collections.defaultdict(set)
     for n, (_, _, targets) in enumerate(nodes):
@@ -105,31 +135,51 @@ def trace_machine(operations, program, metadata, objects, lanes):
             for before in predecessors[n] - queued:
                 queue.append(before)
                 queued.add(before)
-
     def normalized(state):
-        cursor, seen, selected, trips, bound, queues = state
-        return cursor, seen, tuple(v if i in live[cursor] else -1 for i, v in enumerate(selected)), trips, bound, queues
-
-    def move(state, target, selected=None, seen=None, trips=None):
+        cursor, seen, selected, trips, bound, queues, native = state
+        return cursor, seen, tuple(v if i in live[cursor] else -1 for i, v in enumerate(selected)), trips, bound, queues, native
+    def move(state, target, selected=None, seen=None, trips=None, native=None):
         return normalized((target, state[1] if seen is None else seen, state[2] if selected is None else tuple(selected),
-                           state[3] if trips is None else tuple(trips), state[4], state[5]))
-
-    def assign(state, requirements):
+                           state[3] if trips is None else tuple(trips), state[4], state[5], state[6] if native is None else native))
+    def assign(state, needed):
         selected = list(state[2])
-        for choice, taken in requirements:
+        for choice, taken in needed:
             if selected[choice] not in (-1, taken):
                 return None
             selected[choice] = taken
         return selected
-
+    expanded = {}
+    def expansion(cursor, native):
+        key = cursor, native
+        if key not in expanded:
+            _, action, targets = nodes[cursor]
+            machine = metadata['actions'][action].submission
+            changed, outputs = action_owner.step(action, native[machine])
+            updated = list(native)
+            updated[machine] = changed
+            mask = (1 << once[cursor]) if cursor in once_last else 0
+            tail = node('install', (tuple(updated), mask), targets)
+            live.append(set(live[targets[0]]))
+            for operation in reversed(outputs):
+                tail = node('op', operation, (tail,))
+                live.append(set(live[targets[0]]))
+            expanded[key] = tail
+        return expanded[key]
     def epsilon(state):
-        cursor, seen, selected, trips, _, _ = state
+        cursor, seen, selected, trips, _, _, native = state
         kind, value, targets = nodes[cursor]
-        if kind == 'op':
-            if value in once and seen & (1 << once[value]):
+        if kind in ('op', 'action'):
+            if cursor in once and seen & (1 << once[cursor]):
                 return [move(state, targets[0])]
-            return [move(state, targets[0], selected=made) for choice, taken in guards.get(value, ())
-                    if (made := assign(state, [(choice, 1 - taken)])) is not None]
+            completed = seen | ((1 << once[cursor]) if cursor in once_last else 0)
+            result = [move(state, targets[0], selected=made, seen=completed)
+                      for choice, taken in requirements.get(cursor, ())
+                      if (made := assign(state, [(choice, 1 - taken)])) is not None]
+            if kind == 'action' and (made := assign(state, requirements.get(cursor, ()))) is not None:
+                result.append(move(state, expansion(cursor, native), selected=made))
+            return result
+        if kind == 'install':
+            return [move(state, targets[0], native=value[0], seen=seen | value[1])]
         if kind in ('optional', 'decide'):
             return [move(state, target) for target in targets]
         if kind == 'init':
@@ -147,14 +197,15 @@ def trace_machine(operations, program, metadata, objects, lanes):
                 selected[choice] = -1
             return [move(state, targets[0], selected=selected, trips=changed)]
         return []
-
-    object_ids, lane_ids = sorted(set(objects.values())), sorted(set(lanes.values()))
+    object_ids = sorted(set(objects.values()) | (action_owner.objects if action_owner else set()))
+    lane_ids = sorted(set(lanes.values()) | (action_owner.lanes if action_owner else set()))
     object_at, lane_at = {v: k for k, v in enumerate(object_ids)}, {v: k for k, v in enumerate(lane_ids)}
-    initial = normalized((start, 0, (-1,) * len(choices), (0,) * len(controls), (0,) * len(object_ids), (0,) * len(lane_ids)))
+    initial = normalized((start, 0, (-1,) * len(choices), (0,) * len(controls), (0,) * len(object_ids), (0,) * len(lane_ids),
+                          action_owner.initial if action_owner else ()))
     states, indexed, transitions, accepting = [initial], {initial: 0}, [], []
     for source, state in enumerate(states):
         for current in walk([state], epsilon):
-            cursor, seen, selected, trips, bound, queues = current
+            cursor, seen, selected, trips, bound, queues, native = current
             kind, value, targets = nodes[cursor]
             if kind == 'final':
                 accepting.append(source)
@@ -162,13 +213,13 @@ def trace_machine(operations, program, metadata, objects, lanes):
             if kind not in ('op', 'enter', 'leave'):
                 continue
             if kind == 'op':
-                if value in once and seen & (1 << once[value]):
+                if cursor in once and seen & (1 << once[cursor]):
                     continue
-                selected = assign(current, guards.get(value, ()))
+                selected = assign(current, requirements.get(cursor, ()))
                 if selected is None:
                     continue
-                if value in once and last[once[value]] == value:
-                    seen |= 1 << once[value]
+                if cursor in once_last:
+                    seen |= 1 << once[cursor]
             ob, ln = 0, 0
             bound, queues = list(bound), list(queues)
             if kind == 'op' and value in objects:
@@ -179,7 +230,7 @@ def trace_machine(operations, program, metadata, objects, lanes):
                 slot = lane_at[lanes[value]]
                 queues[slot] = queues[slot] or max(queues, default=0) + 1
                 ln = queues[slot]
-            following = normalized((targets[0], seen, tuple(selected), trips, tuple(bound), tuple(queues)))
+            following = normalized((targets[0], seen, tuple(selected), trips, tuple(bound), tuple(queues), native))
             if following not in indexed:
                 indexed[following] = len(states)
                 states.append(following)
@@ -403,6 +454,24 @@ class Choice(C.Structure):
                 ('entry', C.c_uint32), ('trip', C.c_uint32)]
 
 
+class Submission(C.Structure):
+    _fields_ = [(n, C.c_uint32) for n in ('lag', 'positions', 'window', 'flags', 'queue', 'host', 'drained', 'ended', 'progress', 'padding')] + [('policy', C.c_ubyte * 16)]
+
+
+class Action(C.Structure):
+    _fields_ = [(n, C.c_uint32) for n in ('kind', 'submission', 'object', 'primitive', 'vertex', 'padding')] + \
+               [(n, C.c_uint64) for n in ('execution', 'value', 'begin', 'end')]
+
+
+class Instruction(C.Structure):
+    _fields_ = [(n, C.c_uint32) for n in ('kind', 'index', 'once', 'condition', 'conditions', 'padding')] + \
+               [(n, C.c_uint64) for n in ('execution', 'position')]
+
+
+class Condition(C.Structure):
+    _fields_ = [('choice', C.c_uint32), ('taken', C.c_uint32)]
+
+
 class Signature(C.Structure):
     _fields_ = [('processors', C.c_uint32), ('tasks', C.c_uint32), ('operations', C.c_size_t),
                 ('dependences', C.c_size_t), ('synchronized', C.c_size_t), ('uncovered', C.c_size_t),
@@ -416,7 +485,9 @@ class Signature(C.Structure):
                 ('control', C.POINTER(Control)), ('event', C.POINTER(Event)), ('scope', C.POINTER(Scope)),
                 ('spans', C.c_size_t), ('span', C.POINTER(Span)), ('selections', C.c_size_t), ('guards', C.c_size_t),
                 ('selection', C.POINTER(Selection)), ('guard', C.POINTER(Guard)), ('choices', C.c_size_t),
-                ('choice', C.POINTER(Choice))]
+                ('choice', C.POINTER(Choice)), ('submissions', C.c_size_t), ('actions', C.c_size_t),
+                ('instructions', C.c_size_t), ('conditions', C.c_size_t), ('submission', C.POINTER(Submission)),
+                ('action', C.POINTER(Action)), ('instruction', C.POINTER(Instruction)), ('condition', C.POINTER(Condition))]
 
 
 PRINTERS = ('mesh_graph_matrix_market', 'mesh_graph_dot', 'mesh_graph_space_time')
