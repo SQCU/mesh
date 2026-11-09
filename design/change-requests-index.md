@@ -58,13 +58,17 @@ outstanding, and what of it is outstanding. The standard every change request fo
   At metal012f52bd / meshc4fbcac8, native CPU LDL factor/solve executes a batch containing a2x2 pivot and nontrivial
   swap, with solve relative error3.274e-8 and residual3.377e-8. Mesh-produced factors work in Torch's solve, and the
   compiled solve consumes Torch-produced factors. These cases do not establish all shapes, convergence/extreme
-  scales or performance. The tiny GPU eig still expands to153 scheduled commands: internal storage consumption
-  alone has not completed target-owned control fusion. Its remaining fusion veto is under investigation.
+  scales or performance. At metalf91334a9 / meshcdf04321, completing canonical storage bindings, typed gather/local
+  handoffs and whole-control local storage reduces the tiny GPU eig from154 dispatch records to5 (4 GPU commands
+  and a typed CHECK). Its restored artifact falls from12,340,083 to420,912 bytes; eigen residual2.504e-8 remains
+  correct. One Program-owned effect/carriedness cache now supplies transformation and retention. This is structural
+  and numerical evidence, not measured throughput. CPU composition still requires compatible-grid local fusion.
   General eigenvalues now compose Householder Hessenberg reduction, implicit shifted QR and shared triangular
   substitution. The first rotation case exposed an in-place complex component-order defect: exit0 accompanied
   a56.802 residual. Yielding both typed components in one logical iteration corrects the shared producer; the
   rotation residual is6.384e-8 and full complex QR reconstruction1.082e-7. Mesh a091ae92 also applies paired
-  results to contractions and adds pre-contraction scaling; those subsequent changes await runtime review.
+  results to contractions and adds pre-contraction scaling. Build18 executes these changes through CPU rotation
+  (residual6.384e-8) and GPU full complex QR (reconstruction8.080e-8, orthogonality2.574e-7,2 dispatches).
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
@@ -87,6 +91,9 @@ outstanding, and what of it is outstanding. The standard every change request fo
   smaller initializer chunks and short clauses alone did not fix it. At mesh ba80ddcc, grouping equivalent
   compatible-state transitions into bit sets enables and observes all161 program operations successfully;
   its215 kernel records remain static IR facts. Conditional submission-state emission is still being completed.
+  Build18's fused eig also passes external observation:13 program operations,7 static kernel records,1 image edge
+  and no redundant edges. Compiler controls retain explicit lexical parents and actual entry writer/trip identities
+  through both frontends, artifacts and signature choices; equal dispatch ranges no longer stand in for ancestry.
   A deliberate mismatched existing CPU client/signature could not exercise fail-stop: macOS denied destructive
   DTrace before client execution. No stopped client remained and no machine security configuration was changed.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
