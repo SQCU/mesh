@@ -308,27 +308,63 @@ def trace_groups(machine, labels):
     return list(groups.values())
 
 
-def trace_witness(records, accepting):
+def trace_paths(records, accepting):
     at = collections.defaultdict(list)
     for record in records:
         at[record[0]].append(record)
     steps = max(at, default=-1) + 1
-    target = next((state for count, state in accepting if count == steps), None)
-    if target is None:
+    finals = {state for count, state in accepting if count == steps}
+    if not finals:
         raise ValueError('no accepting compiled control state at observation end')
-    result = []
+    targets, layers = finals, [None] * steps
     for step in reversed(range(steps)):
-        predecessor = next((row for row in at[step] if row[2] == target), None)
-        if predecessor is None:
-            raise ValueError('missing trace predecessor at step %d state %d' % (step, target))
-        result.append(predecessor)
-        target = predecessor[1]
-    if target != 0:
+        layers[step] = [row for row in at[step] if row[2] in targets]
+        targets = {row[1] for row in layers[step]}
+    if 0 not in targets:
         raise ValueError('trace does not start in the compiled initial state')
-    return list(reversed(result))
+    reached = {0}
+    for step in range(steps):
+        layers[step] = [row for row in layers[step] if row[1] in reached]
+        reached = {row[2] for row in layers[step]}
+    finals &= reached
+    target, witness = min(finals), []
+    for layer in reversed(layers):
+        row = next(row for row in layer if row[2] == target)
+        witness.append(row)
+        target = row[1]
+    return list(reversed(witness)), layers, finals
 
 
-def trace_occurrences(tasks, dependences, operations, program, machine, witness):
+def trace_witness(records, accepting):
+    return trace_paths(records, accepting)[0]
+
+
+def trace_activation_join(summaries):
+    summaries = list(summaries)
+    if not summaries:
+        return ()
+    first, end = 0, min(map(len, summaries))
+    while first < end and len({s[first][1] for s in summaries}) == 1:
+        first += 1
+    last = 0
+    while last < end - first and len({s[-last - 1][1] for s in summaries}) == 1:
+        last += 1
+    def joined(index):
+        return frozenset().union(*(s[index][0] for s in summaries)), summaries[0][index][1]
+    result = [joined(k) for k in range(first)]
+    middle = set()
+    for summary in summaries:
+        for possible, exact in summary[first:len(summary) - last]:
+            middle.update(possible)
+            if exact is not None:
+                middle.add(exact)
+    if middle:
+        result.append((frozenset(middle), None))
+    result.extend(joined(k) for k in range(-last, 0))
+    return tuple(result)
+
+
+def trace_occurrences(tasks, dependences, operations, program, machine, witness, paths=None):
     marked = machine.get('marked_tasks', set())
     if not marked:
         return tasks, dependences, [operations[program[row[3]]].vertex if row[3] >= 0 else NONE for row in witness], set(), dict(enumerate(range(len(tasks))))
@@ -360,10 +396,10 @@ def trace_occurrences(tasks, dependences, operations, program, machine, witness)
     def compatible(vertex):
         for control, source in contexts.get(vertex, {}).items():
             current = frames.get(control)
+            if source[2] or (current is not None and current[2]):
+                return None
             if current is None or source == current:
                 continue
-            if source[2] or current[2]:
-                return None
             return False
         return True
     def activate(template, family=False):
@@ -441,18 +477,25 @@ def trace_occurrences(tasks, dependences, operations, program, machine, witness)
             task.place = len(made)
             latest[template] = len(made)
             made.append(task)
-    for row in witness:
+    def key(row):
         _, source, target, index, *_ = row
         kind, token = ('op', index) if index >= 0 else ('leave' if (-index - 1) % 2 else 'enter', (-index - 1) // 2)
-        apply(machine['activations'][(source, target, kind, token)])
+        return source, target, kind, token
+    layers = paths[1] if paths else [[row] for row in witness]
+    for row, layer in zip(witness, layers):
+        index = row[3]
+        apply(trace_activation_join(machine['activations'][key(x)] for x in layer))
         template = operations[program[index]].vertex if index >= 0 else NONE
         if template in symbolic:
             activate(template, family=True)
         if template != NONE and template not in latest:
             raise ValueError('operation references task %d before any retained activation' % template)
-        vertices.append(latest.get(template, NONE))
-    if witness:
-        apply(machine['final_tasks'].get(witness[-1][2], ()))
+        vertex = latest.get(template, NONE)
+        vertices.append(vertex)
+        if len({bytes(operations[program[x[3]]]) if x[3] >= 0 else x[3] for x in layer}) > 1:
+            uncertain.add(vertex)
+    finals = paths[2] if paths else {witness[-1][2]} if witness else {0}
+    apply(trace_activation_join(machine['final_tasks'].get(state, ()) for state in finals))
     for edge in dependences:
         if edge.sink not in marked:
             if edge.source in symbolic or activations[edge.source] > 1:

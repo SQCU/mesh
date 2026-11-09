@@ -483,6 +483,32 @@ def cover(path):
     return 0 if full else 1
 
 
+def trace_log(text):
+    records, accepting, failures = [], [], []
+    for line in text.splitlines():
+        match = re.fullmatch(r'mesh-sync-monitor: transitions (\d+) (\d+) ([0-9a-f]+) ' +
+                             r'(-?\d+) ' * 6 + r'(-?\d+)', line)
+        if match:
+            step, base, mask, delta, offset, primitive, obj, value, execution, thread = match.groups()
+            step, base, delta, offset, primitive, obj, value, execution, thread = map(int,
+                (step, base, delta, offset, primitive, obj, value, execution, thread))
+            bits = int(mask, 16)
+            while bits:
+                bit = (bits & -bits).bit_length() - 1
+                source = base + bit
+                records.append((step, source, source + delta, source + offset, primitive, obj, value, execution, thread))
+                bits &= bits - 1
+        match = re.fullmatch(r'mesh-sync-monitor: accepting (\d+) (\d+)', line)
+        if match:
+            accepting.append(tuple(map(int, match.groups())))
+        if 'mesh-sync-monitor: unexpected' in line:
+            failures.append(line)
+        match = re.fullmatch(r'mesh-sync-monitor: run (-?\d+)', line)
+        if match and int(match.group(1)):
+            failures.append('MetalProgramRun returned %s' % match.group(1))
+    return records, accepting, failures
+
+
 def main(argv):
     if len(argv) < 3 or argv[1] not in ('generate', 'run', 'cover'):
         sys.stderr.write('usage: mesh-sync-monitor.py generate SIGNATURE.record [--observe]\n'
@@ -586,38 +612,19 @@ def main(argv):
                    for line in bridge_text.splitlines()) if m]
     sys.stdout.write(done.stdout)
     sys.stderr.write(done.stderr)
-    observed, failures, walk, records, accepting = [], [], [], [], []
-    for line in done.stdout.splitlines():
-        match = re.fullmatch(r'mesh-sync-monitor: transitions (\d+) (\d+) ([0-9a-f]+) ' +
-                             r'(-?\d+) ' * 6 + r'(-?\d+)', line)
-        if match:
-            step, base, mask, delta, offset, primitive, obj, value, execution, thread = match.groups()
-            step, base, delta, offset, primitive, obj, value, execution, thread = map(int,
-                (step, base, delta, offset, primitive, obj, value, execution, thread))
-            bits = int(mask, 16)
-            while bits:
-                bit = (bits & -bits).bit_length() - 1
-                source = base + bit
-                records.append((step, source, source + delta, source + offset, primitive, obj, value, execution, thread))
-                bits &= bits - 1
-        match = re.fullmatch(r'mesh-sync-monitor: accepting (\d+) (\d+)', line)
-        if match:
-            accepting.append(tuple(map(int, match.groups())))
-        if 'mesh-sync-monitor: unexpected' in line:
-            failures.append(line)
-        match = re.fullmatch(r'mesh-sync-monitor: run (-?\d+)', line)
-        if match and int(match.group(1)):
-            failures.append('MetalProgramRun returned %s' % match.group(1))
+    observed, walk = [], []
+    records, accepting, failures = trace_log(done.stdout)
     if done.returncode:
         failures.append('dtrace exited %d' % done.returncode)
     try:
-        witness = mesh_graph.trace_witness(records, accepting)
+        paths = mesh_graph.trace_paths(records, accepting)
+        witness = paths[0]
     except ValueError as failure:
         failures.append(str(failure))
-        witness = []
+        witness, paths = [], None
     try:
         realized_tasks, realized_dependences, vertices, symbolic_tasks, task_map = mesh_graph.trace_occurrences(tasks, dependences, operations,
-            program, metadata['_machine'], witness)
+            program, metadata['_machine'], witness, paths)
     except ValueError as failure:
         failures.append(str(failure))
         realized_tasks, realized_dependences, vertices, symbolic_tasks, task_map = tasks, dependences, [NONE] * len(witness), set(), dict(enumerate(range(len(tasks))))
@@ -655,7 +662,7 @@ def main(argv):
     expected = mesh_graph.signature(processors, realized_tasks, realized_dependences, expected_ops)
     watched = mesh_graph.signature(processors, realized_tasks, realized_dependences, observed)
     unknown_edges = [(signal, wait) for signal, wait, *_ in expected['synchronized']
-                     if expected_ops[signal].vertex in symbolic_tasks or expected_ops[wait].vertex in symbolic_tasks]
+                     if (signal != NONE and expected_ops[signal].vertex in symbolic_tasks) or expected_ops[wait].vertex in symbolic_tasks]
     known_edges = [edge for edge in expected['synchronized'] if edge[:2] not in unknown_edges]
     false_edges = sum(edge[2] == 'false' for edge in known_edges)
     redundant_edges = sum(edge[3] for edge in known_edges)
