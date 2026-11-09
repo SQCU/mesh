@@ -60,6 +60,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   compiled solve consumes Torch-produced factors. These cases do not establish all shapes, convergence/extreme
   scales or performance. The tiny GPU eig still expands to153 scheduled commands: internal storage consumption
   alone has not completed target-owned control fusion. Its remaining fusion veto is under investigation.
+  General eigenvalues now compose Householder Hessenberg reduction, implicit shifted QR and shared triangular
+  substitution. The first rotation case exposed an in-place complex component-order defect: exit0 accompanied
+  a56.802 residual. Yielding both typed components in one logical iteration corrects the shared producer; the
+  rotation residual is6.384e-8 and full complex QR reconstruction1.082e-7. Mesh a091ae92 also applies paired
+  results to contractions and adds pre-contraction scaling; those subsequent changes await runtime review.
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
@@ -78,8 +83,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   static kernel records,2 image edges and no redundant edges. Retained allocator-completion facts remove the
   GPU fences that duplicated its required completion waits; argmax numerical mismatch counts remain0.
   At metal012f52bd, the GPU eig's CHECK wait consumes the same commit-completion fact as allocator reuse, removing
-  its two redundant synchronization edges. External observation of this161-operation program is still prevented
-  by the generated DTrace program exceeding DIF's size limit; smaller initializer chunks alone did not fix it.
+  its two redundant synchronization edges. External observation initially exceeded macOS's total DOF load limit;
+  smaller initializer chunks and short clauses alone did not fix it. At mesh ba80ddcc, grouping equivalent
+  compatible-state transitions into bit sets enables and observes all161 program operations successfully;
+  its215 kernel records remain static IR facts. Conditional submission-state emission is still being completed.
   A deliberate mismatched existing CPU client/signature could not exercise fail-stop: macOS denied destructive
   DTrace before client execution. No stopped client remained and no machine security configuration was changed.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
