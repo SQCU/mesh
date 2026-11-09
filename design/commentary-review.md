@@ -1,116 +1,102 @@
 # The commentary review
 
-After each commit to mesh or metal-microbench, bin/mesh-commentary-review.py writes commentary on the documents under
-design/ that the commit adds, changes or renames. Writing that commentary is all it can do. It never blocks, delays,
-vetoes or redirects the work that made the commit, and nothing reads what it writes as a gate.
+The change-request, document-commentary and new-file style reviews use bin/mesh_review.py. It runs a tool-using
+Claude Code session, supplies the commit's identity and context locations, and records the investigation and its
+result. The model chooses what evidence to read and how to interpret it. The harness transports that evidence and
+records feedback; it does not decide documentary meaning by parsing sentences, headings or vocabulary overlap.
 
 ## Why
 
-The change-request review it follows (bin/mesh-cr-review.py, deleted by mesh 2d2eefef) exited with status 2. Claude Code
-hands that status back to the committing session as error feedback. The commit has already happened; the hook cannot
-undo it. The review's findings were nevertheless treated as vetoes by the committing agents. The
-operator, 2026-11-07 22:07: "throw out the reviewer if they've been somehow implemented in a manner where they
-rejection-filter requirements that have been literally passed from the user to an implementer". And at 22:10: "have a
-subagent write a post-commit reviewer which isn't given any ability to interrupt integratino work or otherwise act
-beyond writing commentary wrt committed documents s.t. there are no furhter inversions of authority wrt the results of
-the reviewer as a check (rather than you know a line item veto) upon out of order behavior by subagents".
+The earlier change-request reviewer (bin/mesh-cr-review.py, deleted by mesh 2d2eefef) returned status 2. The commit had
+already happened, but agents treated the error feedback as a veto. The operator, 2026-11-07 22:07:
 
-The deleted review's string checks are kept here as observations: quoted turns looked for in the session transcripts,
-and quoted words looked for in the retrieval records. Its authority is not kept.
+> throw out the reviewer if they've been somehow implemented in a manner where they rejection-filter requirements that have been literally passed from the user to an implementer
+
+And at 22:10:
+
+> have a subagent write a post-commit reviewer which isn't given any ability to interrupt integratino work or otherwise act beyond writing commentary wrt committed documents s.t. there are no furhter inversions of authority wrt the results of the reviewer as a check (rather than you know a line item veto) upon out of order behavior by subagents
+
+The operator, 2026-11-08, on the reviewer's treatment of its input documents:
+
+> okay so write the reviewer to be more harness-of-llm-like and less gofai-string-parsing-encoding-as-many-assumptions-as-possible-into-a-broken-ah-ah-parser-forcing-bad-outputs-from-bad-inputs.
+
+On the relation between compiler review and the synchronization mechanism:
+
+> that's a problem for focusd review and revision on compiler lowering strategy; removing duplicate lowerings from the codebase is one of the first basic prerequisites for compiler optimizations to be applied and not regressed later. (the current codebase's design standards cannot protect any optimization from being 'fallbacked' or 'partially called and then never finished in implementatino coverage' later by deviant subagents. hence then eed for the sensitizing mechanism, allowing immediate review and feedback of suspiciously regressive performance without needing to revert days or weeks of all progress.)
+
+## Investigative review
+
+The review adapter supplies the assignment in the system prompt, separately from the evidence. That assignment
+defines scope; the presence of a commit manifest does not assign a broader task. The harness supplies the target
+repository, full commit identity, parents, commit message and changed paths. It also
+names both repositories and their heads when the review starts, the registered context, the invoking session's
+transcript when supplied by the hook, and the two projects' transcript directories with their top-level file lists.
+The existing reviewer style guide (design/review-warnings.md), change-request index, change-request standard, rubrics,
+principles and measurement document are discovery starting points. The style guide is read in its own scope; its
+interpretation is not encoded in a sentence parser or a fixed warning schema.
+
+The reviewer has Read, Grep, Glob, WebFetch and WebSearch, and the read tools of the upstream
+[MCP Git server](https://github.com/modelcontextprotocol/servers/tree/main/src/git). It can inspect a commit or a file
+at a revision with git_show, compare revisions, follow history, read original turns, examine callers and callees,
+and retrieve cited sources. It reads the governing documents as evidence whose meaning and provenance can themselves
+need review. It can consider supporting evidence, counterevidence, inherited defects and companion changes.
+
+The session runs through the existing [Claude Code CLI](https://code.claude.com/docs/en/cli-reference), in restricted
+mode with explicit read tools, no shell or editing tools, no skills, no inherited hooks, and only the two configured
+Git servers. The servers' mutation tools are denied. The Git server is the published mcp-server-git 2026.11.4 package,
+launched through uvx; uv caches it. Claude authentication follows the invoking environment, including
+CLAUDE_CONFIG_DIR and authentication environment variables. The harness removes parent-session identity and cmux
+integration variables. It runs in a temporary directory without repository instruction auto-discovery.
+
+Built-in file reads can see current working files and existing measurement artifacts. The prompt distinguishes those
+from the reviewed revision and asks for committed evidence when making historical claims. Git tools can retrieve
+historical content without checking out, copying or mutating source. Missing evidence is reported as a limitation.
+The prompt directs compiler review toward actual lowering use, duplicate paths, fallback paths and implementation
+coverage, with synchronization and performance observations informing that review. It starts no benchmarks.
+
+The output envelope holds a prose summary, prose findings, prose limitations and the model's assessment of whether
+corrective work is outstanding. There is no prescribed sentence grammar, vocabulary test or PASS token. The program
+does not derive the assessment from a word, a count of observations or the existence of a limitation. No registration does not itself establish a
+defect. The shared registration file remains available as context, without claiming to be a per-agent assignment.
+A registered revision is a pointer the reviewer can investigate, not the exclusive or automatically valid standard.
+
+A review has up to 880 seconds, retaining the existing hook time budget. A reader failure or invalid response is
+recorded as incomplete, with the partial trace retained. The model can conclude with specific limitations when
+evidence is unavailable. Recoverable tool errors remain in the trace; they do not themselves decide the review.
+
+## Scopes and records
+
+- bin/mesh-change-request-review.py reviews the commit's code and documentary changes together. Its register and clear
+  commands maintain context hints. `review-commits <repo>:<revision>[=<document>,...]` runs a historical review; the
+  model reads the commit message itself rather than a parser deciding which documents it is allowed to use.
+- bin/mesh-commentary-review.py reviews changed documents under design/, including deletions and renames. The hook
+  still starts it in the background and returns immediately. `--commit <mesh|metal-microbench|path> <revision>` runs it
+  explicitly. The former --strings mode and its separate interpretation machinery are removed.
+- bin/mesh-style-guide-review.py retains its scope of newly added non-executable files, excluding implementation
+  source and makefiles. Existing files remain grandfathered. The model finds and reads the applicable guides; it is
+  not restricted to Markdown links extracted from the new file. The requested warning accompanies actual findings;
+  an incomplete read is identified as incomplete.
+
+Each run appends its outcome to metal-microbench/output_data/change-request-reviews.jsonl. The record includes the
+review kind, commit, context hints, summary, findings, limitations and trace path. The model sets `outstanding`: true
+for identified corrective work, false when the assigned review finishes without it, and null when it cannot reach a
+conclusion. A transport or reader failure is recorded as null. This is a record of the review, not a proof of implementation compliance. Historical records remain.
+The outstanding command keeps review kinds and historical per-file style records separate.
+
+The complete request manifest, review prompt, model tool calls, tool results and final response are retained in a
+unique `.git/review-commentary/<commit>.<kind>.<run>.jsonl` for each run. Document commentary also updates the existing
+`<commit>.md` view and appends a line to INDEX.md there. Repeated runs retain their individual traces and journal
+records. Background invocation errors go to that directory's log.
 
 ## Post-commit findings
 
-The C9, comment and change-request hooks return their findings with status 0 in
-`hookSpecificOutput.additionalContext`, with `hookEventName` `PostToolUse`, and in `systemMessage` for the user.
-This is the context form of the [Claude Code hook interface](https://code.claude.com/docs/en/hooks#posttooluse-decision-control).
-Findings are work to reconcile with the operator's requirements and cited sources. They do not authorize a rollback,
-deletion of required behavior, or a replacement specification. A failed reader is reported as an incomplete review.
-The comment review's explicit command-line checks retain their diagnostic exit statuses.
+The C9, comment, change-request and style hooks deliver feedback with status 0 through
+`hookSpecificOutput.additionalContext` and `systemMessage`, using the
+[PostToolUse interface](https://code.claude.com/docs/en/hooks#posttooluse-decision-control). Findings are material for
+review and revision. A reviewer finding alone does not authorize rollback, deletion of required behavior or a
+replacement specification. An incomplete review stays visible. The hook's successful exit means feedback delivery,
+not implementation approval. Explicit comment-review commands retain their diagnostic exit statuses.
 
-The change-request reviewer keeps appending every result to
-`metal-microbench/output_data/change-request-reviews.jsonl`: `outstanding` is true for findings, false for a pass,
-and null when the reader failed. Its `outstanding` command lists the latest review for each repository and commit,
-and each file's style finding separately. A style finding cannot replace a change-request review of the same commit.
-The historical records remain intact. The hook's successful exit means its feedback was delivered, not that the
-implementation passed review.
-
-## The hook
-
-Both repositories' .claude/settings.json run it after every Bash call that matches `git *commit*`, beside the C9 and
-comment reviews:
-
-```json
-{
-  "type": "command",
-  "if": "Bash(git *commit*)",
-  "timeout": 10,
-  "statusMessage": "Commentary review of the commit, started in the background",
-  "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-commentary-review.py >/dev/null 2>&1; exit 0"
-}
-```
-
-The hook copies its payload to an unlinked temporary file and starts the review from it as a new session (setsid), its
-output to /dev/null. Then it exits 0. It reads nothing else and prints nothing, so it returns in well under a second.
-The redirection and `exit 0` keep the status 0 and the output empty even if Python itself fails. The background
-process lowers itself to the Darwin background band, then finds the repository and commit the way the C9 review does
-(`made` in bin/mesh-c9-review.py).
-
-## What it reads and writes
-
-It reads only what a commit holds, through git cat-file, ls-tree, show and log, with GIT_OPTIONAL_LOCKS=0. It also reads
-the operator's turns and Claude's text in the top-level transcripts of the two projects,
-~/.claude-personal/projects/-Users-mdot-metal-microbench and -Users-mdot-dox-mesh. It never reads the working tree, so
-untracked files and build products are never read. Nor does it read tailscale.key, NODE-STANDUPS.md, keys/, vendor/
-or docs/facts.md. It runs no git command that writes, and it has no network access except the optional `claude -p`
-read below.
-
-It writes only to its store, review-commentary/ in each repository's git directory:
-
-- `<full sha>.md`: the commentary on one commit;
-- `INDEX.md`: one line for each commit read, newest last;
-- `log`: what failed, with its traceback where there is one. A failure never changes the exit status.
-
-The store is files under .git/ rather than git notes, because a notes write changes the repository the session is
-committing to. It takes the lock of refs/notes/review, writes objects and commits, and can start `git gc --auto`.
-Files under .git/ are outside the working tree, so `git status` never shows them, and no git state changes when they
-are written.
-
-## The observations
-
-Each observation points at a line of the document as the commit has it. Lines the commit changed are marked
-"(this commit)".
-
-1. Quotations. Each quoted span of 20 or more characters, cut at marks of omission, is looked for verbatim. The places
-   are: an operator turn in the two projects' transcripts, the document's own quoted turns, a retrieval record
-   (design/*-sources-*.md, replay-grounding-*.md, packing-and-coflows-*.md), design/change-requests.md, or a tracked
-   source file of either repository. A change request's turns, the block quotes under "## The turns", are looked for
-   among operator turns only. When the time after a turn differs by more than a minute from that turn's time in the
-   transcript, the commentary says so. When a span is found only in Claude's own text in the transcripts, or only in
-   another document under design/, it says where. Quotations in a retrieval record are not looked for, since the
-   record is where they were read.
-2. Statements and the quotations of their section. For a change request, it lists, for each sentence of an item's
-   heading, Write and Written parts and unlabelled paragraphs, the words that no quotation in the same item contains.
-   Common words are left out, and word endings are dropped before comparing. The Replaces, Keeps, Source and Stop
-   parts are not examined. For other documents, one line for each section gives the lines whose sentences have such
-   words. Sections that quote nothing are listed together.
-3. Code locations and commits. It checks file paths, `path:line`, `(:line)` after a backticked name, and commits named
-   with their repository. A path is read at the commit its line names, by repository name or by a hash only one of
-   the two repositories holds ("before" names that commit's parent). Otherwise it is read at the commit the document
-   declares ("Code is cited at mesh … and metal-microbench …"). Otherwise it is read at the reviewed commit, with the
-   other repository at its last commit before that one. The commentary notes a path in
-   neither repository, with the commit that deleted it, and a line past a file's end. It also notes a backticked name
-   that is not at the cited line, with where it is, and a named commit that does not exist.
-4. Requirements and the operator's turns, for change requests. It notes an item of "## Requirements" that quotes
-   operator words "## The turns" does not hold. It also notes an item that quotes no operator turn, with the turn
-   whose words its heading and Write share most.
-5. Model commentary, for change requests up to 200,000 characters. Claude Sonnet reads the standard, the document and
-   the observations above, with a limit of 600 seconds. The call is `claude -p --model sonnet --tools ''
-   --setting-sources user --no-session-persistence --strict-mcp-config`, run in the background process with no Claude
-   Code session variables in its environment. Its text goes into the commentary verbatim, under its own heading. A
-   model's reading differs from run to run.
-
-## Reading it
-
-`.git/review-commentary/INDEX.md` lists the commits read. Each line names the file holding that commit's commentary.
-To write the commentary on any commit by hand: `python3 bin/mesh-commentary-review.py --commit mesh <rev>`. Use
-`metal-microbench` for that repository, and add `--strings` to leave out the model read.
+Both repositories' existing .claude/settings.json entries continue to invoke these scripts. The document-commentary
+hook remains detached; the change-request and style hooks return feedback to the invoking session. C9 and source
+comment review retain their focused implementations.
