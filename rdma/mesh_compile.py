@@ -1950,12 +1950,16 @@ def _apply(r, op, x, y, z, alpha, t, exponent=None):
     # W. Kahan's log1p (D. Goldberg, ACM Comput. Surv. 23(1), 1991, Theorem 4) and expm1 by the same correction
     if op == 'log1p':
         u = r('add', t, c(1), x)
-        return r('select', t, r('eq', BOOL, u, c(1)), x, r('div', t, r('mul', t, r('log', t, u), x), r('sub', t, u, c(1))))
+        corrected = r('mul', t, r('log', t, u), r('div', t, x, r('sub', t, u, c(1))))
+        return r('select', t, r('eq', BOOL, u, c(1)), x,
+                 r('select', t, r('eq', BOOL, u, c(math.inf)), u, corrected))
     if op == 'expm1':
         u = r('exp', t, x)
-        ratio = r('div', t, r('mul', t, r('sub', t, u, c(1)), x), r('log', t, u))
+        difference = r('sub', t, u, c(1))
+        corrected = r('mul', t, difference, r('div', t, x, r('log', t, u)))
         return r('select', t, r('eq', BOOL, u, c(1)), x,
-                 r('select', t, r('eq', BOOL, r('sub', t, u, c(1)), c(-1)), c(-1), ratio))
+                 r('select', t, r('eq', BOOL, u, c(math.inf)), u,
+                   r('select', t, r('eq', BOOL, difference, c(-1)), c(-1), corrected)))
     if op == 'isnan':
         return r('isnan', BOOL, x)
     if op == 'isinf':
