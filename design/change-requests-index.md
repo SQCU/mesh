@@ -66,17 +66,22 @@ outstanding, and what of it is outstanding. The standard every change request fo
   Subsequent checkpoints metal-microbench 94b43623 through ba83b97a and mesh fdae772b through 53bc3b17 restore
   the production build and connect compiler, prepared/native and collective-plan persistence. Saved CPU and CoreML
   projection artifacts execute against fresh storage in the existing diagnostic (relative RMS 0.000276 and
-  0.000204). CoreML's plan reports ANE0/CPU13/GPU0; no ANE execution is established. GPU binary reload remains
-  under repair. Review also found that CPU-only replay bypasses constant initialization and collapses control
-  boundaries; shared assembly and exact compiler-produced predicate access are being revised. These working
+  0.000204). CoreML's plan reports ANE0/CPU13/GPU0; no ANE execution is established. GPU binary restoration now
+  executes at metal-microbench 27beb387 with libraries343e12d5 (relative RMS0.000204, all outputs written). The
+  caller had moved a replay structure after native rows retained its address; that ownership defect is repaired.
+  Shared CPU/GPU scheduling, constant initialization and exact predicate access are connected; preserving CPU
+  replay handles through frontend/native row expansion remains under revision. Fresh provider-once compilation
+  finalizes four E2B stages; decode lowers1118 dispatches then crashes in AGX final target compilation. These working
   records do not close tuned group construction, full-domain lowering or the outstanding execution requirements.
   No E2B or Torch/collective operational run or corresponding performance closure on this replacement is recorded.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
   in the composition implementation. The review records distinguish remaining representation and observation gaps
   from implemented source. The existing external monitor observes the restored CPU projection's one expected
-  host signal at mesh 53bc3b17, with numerical agreement. GPU/bridge and structured-control observation, multi-span
-  identities and fail-stop interception remain open; this limited observation does not close items 1–6.
+  host signal at mesh 53bc3b17, with numerical agreement. The restored GPU projection also passes external
+  observation of five program operations; its three kernel records are static compiler data. Bridge and
+  structured-control observation, multi-span identities and fail-stop interception remain open; these limited
+  observations do not close items1–6.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench 5600d84b, 66a18fab, c0a067fc and 6b8f7c3c, and mesh
     56e33484, e34e7a5e and b482a825. A received operand's reader is masked, the threadgroups whose pages have not
@@ -167,8 +172,8 @@ outstanding, and what of it is outstanding. The standard every change request fo
   superseded by the lowering request's item 1.
   These are historical implementation records, not closure of the replacement's A1–A10 obligations. In particular,
   A1's saved/resumed executable now has compiler, prepared/native and collective-plan artifact producers and
-  consumers in the continuing replacement. CPU and CoreML target restoration have numerical evidence; GPU
-  restoration is still being repaired, and the composed Torch save/load consumer has only compile-time review.
+  consumers in the continuing replacement. CPU, GPU and CoreML target restoration have numerical evidence;
+  the composed Torch save/load consumer has only compile-time review.
   Restoring solved results and relocating current storage is distinct from running analysis again. Full coverage
   and operational evidence for that handoff remain assigned to the representation, Torch and executor owners.
   The composition review's remaining representation, source-domain and execution-path findings still apply.

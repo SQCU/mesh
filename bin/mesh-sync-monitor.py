@@ -488,8 +488,12 @@ def main(argv):
     result = 'fail' if failures else 'pass-scoped' if blind else 'pass'
     for reason in failures:
         sys.stderr.write('mesh-sync-monitor: fail: %s\n' % reason)
-    sys.stderr.write('mesh-sync-monitor: %s; not observed by this run: %s\n' % (result, blind or 'nothing'))
-    record.update(result=result, reasons=failures[:16], blind=blind, observed_sha256=watched['digest'],
+    runtime = {'program': len(walk), 'bridge': len(observed) - len(walk)}
+    static = coverage.get('static', 0)
+    sys.stderr.write('mesh-sync-monitor: %s; runtime-observed operations %s; %d kernel records from compiled IR '
+                     '(not runtime-observed); other unobserved classes %s\n' % (result, runtime, static, blind or 'none'))
+    record.update(result=result, reasons=failures[:16], blind=blind, runtime_observed=runtime, compiled_kernel_records=static,
+                  observed_sha256=watched['digest'],
                   expected_sha256=expected['digest'], counts_differing=len(differing), dtrace_status=done.returncode,
                   bridge=bool(bridge), bridge_raises=len(raised))
     with open(REVIEWS, 'a') as reviews:
