@@ -559,14 +559,23 @@ static double actor_read(const struct mesh_graph_machine *x, uint64_t blocks, co
    CombineComputeAndMemoryAccessTime; gpu_performance_model.cc EstimateRunTimeForInstructionImpl and EstimateRunTimes'
    kKernelLaunchOverhead a launch */
 int mesh_graph_actor_time(const struct mesh_graph_machine *x, const struct mesh_graph_actor *a, double *time){
-  const uint64_t fpus=a->threads<x->fpus?a->threads:x->fpus,cores=a->blocks<x->cores?a->blocks:x->cores;
-  const int computes=a->flops>0,rated=x->peak>0 && x->cores && x->fpus;
+  const uint64_t cores=a->blocks<x->cores?a->blocks:x->cores;
+  int missing=a->work.unknown!=0;
+  double compute=0;
+  for(uint32_t resource=0;resource<MESH_GRAPH_RESOURCES;resource++)
+    for(uint32_t width=0;width<MESH_GRAPH_WIDTHS;width++){
+      const double work=a->work.operations[resource][width];
+      if(!(work>0))continue;
+      const struct mesh_graph_rate *rate=&x->rate[resource][width];
+      if(!(rate->peak>0) || !rate->lanes || !x->cores || !cores || !a->threads){missing=1;continue;}
+      const uint64_t lanes=a->threads<rate->lanes?a->threads:rate->lanes;
+      compute=fmax(compute,work/(rate->peak*(double)cores/x->cores*(double)lanes/rate->lanes));
+    }
   uint64_t moved=a->written;
   for(size_t k=0;k<a->reads;k++)moved+=a->read[k].total;
   const int banded=x->bandwidth>0,capped=x->block_bandwidth>0 || a->blocks>=x->cores;
-  int missing=(computes && !rated) || (moved && !(banded && capped)) || (a->launches && !(x->launch>0)) ||
-              (a->direct && !(x->direct>0)) || (a->blits && !(x->blit>0));
-  const double compute=computes && rated?a->flops/(x->peak*(double)cores/x->cores*(double)fpus/x->fpus):0;
+  missing|=(moved && !(banded && capped)) || (a->launches && !(x->launch>0)) ||
+           (a->direct && !(x->direct>0)) || (a->blits && !(x->blit>0));
   double memory=0;
   if(moved && banded){
     memory=(double)a->written/actor_bandwidth(x,x->bandwidth,a->blocks);
@@ -579,6 +588,32 @@ int mesh_graph_actor_time(const struct mesh_graph_machine *x, const struct mesh_
   const double least=compute<memory?compute:memory;
   *time=compute+memory-least*x->overlap+(double)a->launches*x->launch+(double)a->direct*x->direct+(double)a->blits*x->blit;
   return missing?ENODATA:0;
+}
+
+/* docs/provider.md#composed-resource-costs */
+int mesh_graph_cost_times(const struct mesh_graph_machine *machine,size_t actors,const struct mesh_graph_actor *actor,
+                          size_t nodes,const struct mesh_graph_cost *node,double *value,int *status){
+  if(nodes>UINT32_MAX || (nodes && (!node || !value || !status)))return EINVAL;
+  for(uint32_t i=0;i<nodes;i++){
+    const struct mesh_graph_cost *n=node+i;
+    value[i]=0;status[i]=0;
+    if(n->kind==MESH_GRAPH_COST_ACTOR){
+      status[i]=n->first<actors?mesh_graph_actor_time(machine,actor+n->first,value+i):EINVAL;
+      continue;
+    }
+    if(n->first>=i || (n->kind!=MESH_GRAPH_COST_REPEAT && n->second>=i)){status[i]=EINVAL;continue;}
+    status[i]=status[n->first];
+    if(n->kind==MESH_GRAPH_COST_REPEAT){
+      if(!n->count){value[i]=0;if(!status[i])status[i]=ENODATA;}
+      else value[i]=value[n->first]*(double)n->count;
+    }else{
+      if(status[n->second] && (!status[i] || status[i]==ENODATA))status[i]=status[n->second];
+      if(n->kind==MESH_GRAPH_COST_SUM)value[i]=value[n->first]+value[n->second];
+      else if(n->kind==MESH_GRAPH_COST_MAX)value[i]=fmax(value[n->first],value[n->second]);
+      else status[i]=EINVAL;
+    }
+  }
+  return 0;
 }
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.3; design/rubrics.md:422 (C9) */

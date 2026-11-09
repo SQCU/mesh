@@ -288,7 +288,7 @@ void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
 /* S. Williams, A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009, §3: one resource's recorded operands */
 static int machine_read(id given,struct mesh_graph_machine *x){
   if(![given isKindOfClass:[NSDictionary class]])return EINVAL;
-  double *field[]={&x->peak,&x->bandwidth,&x->block_bandwidth,&x->l2,&x->l1,&x->launch,&x->l2_speedup,&x->l1_speedup,
+  double *field[]={&x->rate[MESH_GRAPH_SCALAR][MESH_GRAPH_BITS32].peak,&x->bandwidth,&x->block_bandwidth,&x->l2,&x->l1,&x->launch,&x->l2_speedup,&x->l1_speedup,
                    &x->overlap,&x->direct,&x->blit};
   NSString *name[]={@"peak",@"bandwidth",@"block_bandwidth",@"l2",@"l1",@"launch",@"l2_speedup",@"l1_speedup",
                     @"overlap",@"direct",@"blit"};
@@ -304,7 +304,28 @@ static int machine_read(id given,struct mesh_graph_machine *x){
   if(!cores && sysctlbyname("hw.physicalcpu",&physical,&size,NULL,0))return errno;
   if((cores && ![cores isKindOfClass:[NSNumber class]]) || (fpus!=[NSNull null] && ![fpus isKindOfClass:[NSNumber class]]))
     return EINVAL;
-  x->cores=cores?[cores unsignedIntValue]:physical;x->fpus=fpus==[NSNull null]?0:[fpus unsignedIntValue];
+  x->cores=cores?[cores unsignedIntValue]:physical;
+  x->rate[MESH_GRAPH_SCALAR][MESH_GRAPH_BITS32].lanes=fpus==[NSNull null]?0:[fpus unsignedIntValue];
+  id compute=((NSDictionary *)given)[@"compute"];
+  if(compute){
+    if(![compute isKindOfClass:[NSDictionary class]])return EINVAL;
+    NSArray *resources=@[@"scalar",@"matrix",@"integer"],*widths=@[@"16",@"32",@"64"];
+    for(uint32_t r=0;r<MESH_GRAPH_RESOURCES;r++){
+      id resource=compute[resources[r]];
+      if(!resource)continue;
+      if(![resource isKindOfClass:[NSDictionary class]])return EINVAL;
+      for(uint32_t w=0;w<MESH_GRAPH_WIDTHS;w++){
+        id rate=resource[widths[w]];
+        if(!rate)continue;
+        if(![rate isKindOfClass:[NSDictionary class]])return EINVAL;
+        id peak=rate[@"peak"],lanes=rate[@"lanes"];
+        if((peak!=[NSNull null] && ![peak isKindOfClass:[NSNumber class]]) ||
+           (lanes!=[NSNull null] && ![lanes isKindOfClass:[NSNumber class]]))return EINVAL;
+        x->rate[r][w].peak=peak==[NSNull null]?0:[peak doubleValue];
+        x->rate[r][w].lanes=lanes==[NSNull null]?0:[lanes unsignedIntValue];
+      }
+    }
+  }
   return 0;
 }
 /* design/torch-capture-change-request.md, 2026-11-09 appendix: this node's model's GPU and CPU records */

@@ -58,36 +58,22 @@ double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate
 /* design/joint-compilation.md §3, row 10 */
 double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t units, const uint64_t *bytes,
                                 uint32_t *machine, uint64_t *carried);
-/* design/torch-capture-change-request.md, "Source for item 2's execution-time estimates"; OpenXLA,
-   xla/service/gpu/model/gpu_performance_model_base.{h,cc} and gpu_performance_model.cc (read 2026-11-09):
-   CalculateEffectiveFlopsPerNs, ComputeTime, ReadTimeWithDRAMHeuristic, AdjustBandwidth, WriteTime,
-   CombineComputeAndMemoryAccessTime, EstimateRunTimeForInstructionImpl (read time summed over the operands) and
-   EstimateRunTimes (a launch overhead a kernel); S. Williams, A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009,
-   §3-4: one machine's operands, from its specifications or measurements, in the measured quantities XLA's products
-   name: `peak` the resource's FP throughput in GFLOP/s (XLA's clock_rate_ghz 2 core_count fpus_per_core) spread over
-   `cores` cores of `fpus` concurrent lanes each (an actor of b blocks of t threads attains peak min(b, cores) / cores
-   min(t, fpus) / fpus), DRAM `bandwidth` in bytes/s, `block_bandwidth` the bytes/s one block attains (XLA's
-   clock_rate_ghz 1e9 memory_transactions_per_clock), L2 bytes, L1 bytes a core, the ns of one kernel launch in each
-   form the program issues it (`launch` a command of an indirect command buffer executed by a compute encoder,
-   `direct` a dispatch encoded directly, `blit` a copy or fill encoded directly; XLA's one kKernelLaunchOverhead),
-   and the rate ratios XLA's model holds as
-   constants (kL2CacheSpeedup, kL1CacheSpeedup: L2 and L1 bandwidth over DRAM's; kMemoryComputeParallelism: the
-   overlapped fraction of the lesser of compute and memory time), whose XLA values are that GPU's, not this fleet's;
-   overlap 1 is Roofline's t = max(compute, memory). An operand not measured is 0 (its record null). An actor's
-   estimate t(v) in ns: its flops over `blocks` concurrent blocks of `threads` lanes each, each operand read `net`
-   distinct and `total` accessed bytes at its coalescing `utilization`, `written` bytes, `launches` indirect commands
-   `direct` direct dispatches and `blits` copies or fills. *time is the estimate over the recorded operands; 0, or ENODATA where the actor
-   needs one that is absent (then *time is a lower bound): peak, cores and fpus for flops; bandwidth for bytes, and
-   block_bandwidth for bytes moved by fewer blocks than the machine's cores (XLA's AdjustBandwidth: few blocks do not
-   attain the DRAM bandwidth; here writes too, where XLA's WriteTime takes the whole bandwidth); launch for launches,
-   direct for direct, blit for blits. Absent cache levels (l2, l1) and their ratios leave reads at DRAM bandwidth times their
-   utilization, XLA's model without its cache heuristic */
-struct mesh_graph_machine { double peak, bandwidth, block_bandwidth, l2, l1, launch, l2_speedup, l1_speedup, overlap;
-                            uint32_t cores, fpus; double direct, blit; };
+/* ../../metal-microbench/docs/provider.md#composed-resource-costs */
+enum { MESH_GRAPH_SCALAR, MESH_GRAPH_MATRIX, MESH_GRAPH_INTEGER, MESH_GRAPH_RESOURCES };
+enum { MESH_GRAPH_BITS16, MESH_GRAPH_BITS32, MESH_GRAPH_BITS64, MESH_GRAPH_WIDTHS };
+struct mesh_graph_rate { double peak; uint32_t lanes, padding; };
+struct mesh_graph_work { double operations[MESH_GRAPH_RESOURCES][MESH_GRAPH_WIDTHS]; uint64_t unknown; };
+struct mesh_graph_machine { struct mesh_graph_rate rate[MESH_GRAPH_RESOURCES][MESH_GRAPH_WIDTHS];
+                            double bandwidth, block_bandwidth, l2, l1, launch, l2_speedup, l1_speedup, overlap;
+                            uint32_t cores, padding; double direct, blit; };
 struct mesh_graph_read { uint64_t net, total; double utilization; };
-struct mesh_graph_actor { double flops; uint64_t blocks, threads, written, launches; size_t reads;
+struct mesh_graph_actor { struct mesh_graph_work work; uint64_t blocks, threads, written, launches; size_t reads;
                           const struct mesh_graph_read *read; uint64_t direct, blits; };
 int mesh_graph_actor_time(const struct mesh_graph_machine *machine, const struct mesh_graph_actor *actor, double *time);
+enum { MESH_GRAPH_COST_ACTOR, MESH_GRAPH_COST_SUM, MESH_GRAPH_COST_MAX, MESH_GRAPH_COST_REPEAT };
+struct mesh_graph_cost { uint32_t kind, first, second, padding; uint64_t count; };
+int mesh_graph_cost_times(const struct mesh_graph_machine *, size_t actors, const struct mesh_graph_actor *,
+                          size_t nodes, const struct mesh_graph_cost *, double *times, int *status);
 /* design/joint-compilation.md §3, row 5 */
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
                     uint64_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,

@@ -386,10 +386,18 @@ class Access(C.Structure):
 
 # mesh-graph.h struct mesh_graph_machine, mesh_graph_read and mesh_graph_actor (mesh_graph_actor_time; design/torch-
 # capture-change-request.md, "Source for item 2's execution-time estimates")
+class Rate(C.Structure):
+    _fields_ = [('peak', C.c_double), ('lanes', C.c_uint32), ('padding', C.c_uint32)]
+
+
+class Work(C.Structure):
+    _fields_ = [('operations', (C.c_double * 3) * 3), ('unknown', C.c_uint64)]
+
+
 class Machine(C.Structure):
-    _fields_ = [(name, C.c_double) for name in ('peak', 'bandwidth', 'block_bandwidth', 'l2', 'l1', 'launch', 'l2_speedup',
-                                                'l1_speedup', 'overlap')] + [('cores', C.c_uint32), ('fpus', C.c_uint32),
-                                                                             ('direct', C.c_double), ('blit', C.c_double)]
+    _fields_ = [('rate', (Rate * 3) * 3)] + [(name, C.c_double) for name in (
+        'bandwidth', 'block_bandwidth', 'l2', 'l1', 'launch', 'l2_speedup', 'l1_speedup', 'overlap')] + [
+        ('cores', C.c_uint32), ('padding', C.c_uint32), ('direct', C.c_double), ('blit', C.c_double)]
 
 
 class Read(C.Structure):
@@ -397,7 +405,7 @@ class Read(C.Structure):
 
 
 class Actor(C.Structure):
-    _fields_ = [('flops', C.c_double), ('blocks', C.c_uint64), ('threads', C.c_uint64), ('written', C.c_uint64),
+    _fields_ = [('work', Work), ('blocks', C.c_uint64), ('threads', C.c_uint64), ('written', C.c_uint64),
                 ('launches', C.c_uint64), ('reads', C.c_size_t), ('read', C.POINTER(Read)), ('direct', C.c_uint64),
                 ('blits', C.c_uint64)]
 
