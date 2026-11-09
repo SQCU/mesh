@@ -1798,13 +1798,33 @@ void mesh_planned_free(struct mesh_planned *planned){
    P. E. McKenney and J. D. Slingwine, PDCS 1998 */
 int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
-              const uint32_t *chains,uint32_t horizon,uint64_t deadline,struct mesh_planned *planned){
+              const uint32_t *chains,uint64_t deadline,struct mesh_planned *planned){
   struct hdr *m=context->M;
   if(!planned)return EINVAL;
   *planned=(struct mesh_planned){0};
-  if(!group || !program || !count || !functions || !ncalls || !calls || (norders && (!orders || !causes)) || !horizon)
-    return EINVAL;
+  if(!group || !program || !count || !functions || !ncalls || !calls || (norders && (!orders || !causes)))return EINVAL;
   for(uint32_t j=0;j<ncalls;j++)if(calls[j]>=count)return EINVAL;
+  /* design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: the horizon and the locations of the
+     values the host writes, Bff of the calls' host -> device edges from their t(v) (mesh_graph_buffer_bound) */
+  uint32_t horizon=1;
+  {
+    double *host=malloc(((size_t)ncalls+1)*sizeof *host),*work=malloc(((size_t)ncalls+1)*sizeof *work);
+    uint64_t *bff=malloc(((size_t)ncalls+1)*sizeof *bff),*lagged=calloc((size_t)count+1,sizeof *lagged);
+    int bounded=host && work && bff && lagged?0:ENOMEM;
+    for(uint32_t j=0;!bounded && j<ncalls;j++){host[j]=functions[calls[j]].host;work[j]=functions[calls[j]].work;}
+    if(!bounded)bounded=mesh_graph_buffer_bound(ncalls,host,work,bff);
+    for(uint32_t j=0;!bounded && j<ncalls;j++){
+      if(bff[j]>=UINT32_MAX)bounded=ENOMEM;
+      else{
+        if(bff[j]>horizon)horizon=(uint32_t)bff[j];
+        if(bff[j]>lagged[calls[j]])lagged[calls[j]]=bff[j];
+      }
+    }
+    for(uint32_t f=0;!bounded && f<count;f++)
+      for(uint32_t j=0;j<functions[f].values;j++)if(functions[f].value[j].lag)functions[f].value[j].lag=(uint32_t)lagged[f];
+    free(host);free(work);free(bff);free(lagged);
+    if(bounded)return bounded;
+  }
   struct plan *plans=calloc(count,sizeof *plans);
   size_t *row=malloc(((size_t)count+1)*sizeof *row),*order=malloc(((size_t)ncalls+1)*sizeof *order),*rows_by=NULL,
          *listed=NULL;
@@ -1830,6 +1850,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
   }
   if((status=plan_graph(plans,count,calls,ncalls,program,nodes.self,row,order,orders,causes,norders,chains,planned)))
     goto done;
+  planned->horizon=horizon;
   uint64_t rows=0;
   for(uint32_t f=0;f<count;f++)for(uint32_t j=0;j<plans[f].givens;j++){
     struct mesh_value *v=plans[f].given+j;

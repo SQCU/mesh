@@ -124,6 +124,28 @@ class Access(C.Structure):
                 ('write', C.c_uint32)]
 
 
+# mesh-graph.h struct mesh_graph_machine, mesh_graph_read and mesh_graph_actor (mesh_graph_actor_time; design/torch-
+# capture-change-request.md, "Source for item 2's execution-time estimates")
+class Machine(C.Structure):
+    _fields_ = [(name, C.c_double) for name in ('clock', 'bandwidth', 'l2', 'l1', 'transactions', 'launch', 'l2_speedup',
+                                                'l1_speedup', 'overlap')] + [('cores', C.c_uint32), ('fpus', C.c_uint32)]
+
+
+class Read(C.Structure):
+    _fields_ = [('net', C.c_uint64), ('total', C.c_uint64), ('utilization', C.c_double)]
+
+
+class Actor(C.Structure):
+    _fields_ = [('flops', C.c_double), ('blocks', C.c_uint64), ('threads', C.c_uint64), ('written', C.c_uint64),
+                ('launches', C.c_uint64), ('reads', C.c_size_t), ('read', C.POINTER(Read))]
+
+
+LIB.mesh_graph_actor_time.restype = C.c_double
+LIB.mesh_graph_actor_time.argtypes = [C.POINTER(Machine), C.POINTER(Actor)]
+LIB.mesh_graph_buffer_bound.restype = C.c_int
+LIB.mesh_graph_buffer_bound.argtypes = [C.c_uint32, C.POINTER(C.c_double), C.POINTER(C.c_double), C.POINTER(C.c_uint64)]
+
+
 # mesh-graph.h struct mesh_graph_processor, mesh_graph_task, mesh_graph_dependence, mesh_graph_operation,
 # mesh_graph_synchronized, mesh_graph_signature
 class Processor(C.Structure):
@@ -192,6 +214,15 @@ def heap_order(priority, edges):
     _check(LIB.mesh_graph_heap_order(count, (C.c_double * max(count, 1))(*priority), len(edges), tails[0], heads[0],
                                      place))
     return list(place[:count])
+
+
+# BSL §4.2-4.3, (6); mesh-graph.h mesh_graph_buffer_bound: Bff of each actor's host -> device edge from its t(v)
+def buffer_bound(host, work):
+    count = len(host)
+    bound = (C.c_uint64 * max(count, 1))()
+    _check(LIB.mesh_graph_buffer_bound(count, (C.c_double * max(count, 1))(*host), (C.c_double * max(count, 1))(*work),
+                                       bound))
+    return list(bound[:count])
 
 
 # BSL §3; R. E. Tarjan, SIAM J. Comput. 1(2), 1972; mesh-graph.h mesh_graph_components: each vertex's strongly

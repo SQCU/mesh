@@ -61,14 +61,17 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
 /* design/torch-capture-change-request.md, "Source for item 2's execution-time estimates"; OpenXLA,
    xla/service/gpu/model/gpu_performance_model_base.{h,cc} and gpu_performance_model.cc (read 2026-11-09):
    CalculateEffectiveFlopsPerNs, ComputeTime, ReadTimeWithDRAMHeuristic, AdjustBandwidth, WriteTime,
-   CombineComputeAndMemoryAccessTime, EstimateRunTimeForInstructionImpl (read time summed over the operands),
-   kL2CacheSpeedup 2.5, kL1CacheSpeedup 8, kMemoryComputeParallelism 0.95, kKernelLaunchOverhead per launch; S. Williams,
-   A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009, §3-4: one machine's operands (a resource's clock in GHz,
-   cores, FPUs a core, DRAM bandwidth in bytes/s, L2 bytes, L1 bytes a core, memory transactions a clock, launch
-   overhead in ns), from its specifications or measurements. An actor's estimate t(v) in ns: its flops over `blocks`
-   blocks of `threads` threads, each operand read `net` distinct and `total` accessed bytes at its coalescing
-   `utilization`, `written` bytes, `launches` kernel launches */
-struct mesh_graph_machine { double clock, bandwidth, l2, l1, transactions, launch; uint32_t cores, fpus; };
+   CombineComputeAndMemoryAccessTime, EstimateRunTimeForInstructionImpl (read time summed over the operands) and
+   EstimateRunTimes (a launch overhead a kernel); S. Williams, A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009,
+   §3-4: one machine's operands, from its specifications or measurements: a resource's clock in GHz, cores, FPUs a
+   core, DRAM bandwidth in bytes/s, L2 bytes, L1 bytes a core, memory transactions a clock, launch overhead in ns, and
+   the rate ratios XLA's model holds as constants (kL2CacheSpeedup, kL1CacheSpeedup: L2 and L1 bandwidth over DRAM's;
+   kMemoryComputeParallelism: the overlapped fraction of the lesser of compute and memory time), whose XLA values are
+   that GPU's, not this fleet's. An actor's estimate t(v) in ns: its flops over `blocks` blocks of `threads` threads,
+   each operand read `net` distinct and `total` accessed bytes at its coalescing `utilization`, `written` bytes,
+   `launches` kernel launches */
+struct mesh_graph_machine { double clock, bandwidth, l2, l1, transactions, launch, l2_speedup, l1_speedup, overlap;
+                            uint32_t cores, fpus; };
 struct mesh_graph_read { uint64_t net, total; double utilization; };
 struct mesh_graph_actor { double flops; uint64_t blocks, threads, written, launches; size_t reads;
                           const struct mesh_graph_read *read; };
@@ -113,6 +116,14 @@ int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, co
 /* design/joint-compilation.md §3, row 6 */
 int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
                           uint32_t *added, uint32_t *added_from, uint32_t *added_to);
+/* design/torch-capture-change-request.md item 2, "The number of locations of a value the host writes", and its
+   2026-11-09 appendix; BSL §4, p. 9, §4.2-4.3, (6) and Lemma 3; M. Lam, PLDI 1988, §7: the node's IPC graph of `actors`
+   actors in issue order on two processors, actor j's host part (its write and encoding, t(v) host[j]) and its device
+   part (t(v) work[j]), each processor's parts one cycle closed with one delay, and the feedforward edges e_j from host
+   part j to device part j. bound[j] is Bff(e_j): the least m for which the reverse edge d_m(device j, host j) leaves
+   lambda_max (mesh_graph_cycle_mean) unchanged, by mesh_graph_min_delay's binary search below (6)'s
+   ceil(sum t / lambda_max); 1 where every t is 0. EINVAL for a time that is negative or not finite */
+int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, uint64_t *bound);
 /* design/joint-compilation.md §3, row 6; lambda is mesh_graph_cycle_mean of (time, edges, from, to, delay), BSL Fig. 8's
    λmax of the graph before the added edges (which enter at infinite delay) */
 int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
@@ -147,13 +158,10 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
 int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
                                unsigned char *redundant, size_t *kept);
 /* design/torch-source-lowering-change-request.md item 3; design/compilation-composition-change-request.md item 6.3:
-   levels and places over the caller's dependence relation (from[e] < to[e]); level is the longest path, with program
-   order (unless self_timed) from the previous vertex in program order to v weighted after[v] (0 or 1); a vertex with
-   after[v] MESH_GRAPH_UNORDERED is a lowered vertex outside program order, placed by its edges alone; place the heap
-   order by -level if self_timed, else identity */
-#define MESH_GRAPH_UNORDERED 2
-int mesh_graph_schedule(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
-                        const unsigned char *after, int self_timed, uint32_t *level, uint32_t *place);
+   levels and places over the caller's dependence relation (from[e] < to[e]); level the longest path to v, place the
+   heap order by -level (mesh_graph_heap_order) */
+int mesh_graph_schedule(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, uint32_t *level,
+                        uint32_t *place);
 /* design/synchronization-signature-change-request.md items 1, 2, 4 and 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee,
    IEEE Trans. Signal Processing 45(6), 1997, §4.1, §5.1 and §7, Fig. 4; E. A. Lee and D. G. Messerschmitt, IEEE Trans.
    Computers C-36(1), 1987; M. Lam, PLDI 1988; L. Lamport, CACM 21(7), 1978 */

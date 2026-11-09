@@ -3,9 +3,11 @@
 import collections
 import ctypes as C
 import errno
+import json
 import math
 import operator
 import os
+import subprocess
 import time
 import weakref
 
@@ -15,7 +17,6 @@ from torch._export.passes.remove_runtime_assertions import _RemoveRuntimeAsserti
 from torch._library._out_variant import _is_functional, get_out_arg_names, to_out_variant
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.node import Node, map_arg
-from torch.fx.passes.split_module import split_module
 
 import mesh
 import mesh_graph
@@ -430,38 +431,45 @@ def _complete(ir, operators, annotated):
 
 
 # GSPMD section 4.5; MPICH allgather_intra_ring.c and alltoall_intra_pairwise.c, MPIR_Localcopy;
-# design/aot-compilation-change-request.md, appendix item 7
+# design/aot-compilation-change-request.md, appendix item 7: a mesh dimension the result does not shard is gathered;
+# one it shards along another dimension moves there by an AllToAll once that dimension is free, a cycle of such moves
+# broken by gathering one of its dimensions, which the final slices shard again
 def _reshard(ir, node, have, want):
     def step(item):
         if item[2] not in ir.made:
             ir.made.add(item[2])
             ir.program.append(item)
+
+    def gather(have, m):
+        after, d, shape = tuple(-1 if s == m else s for s in have), have.index(m), ir.local(node, have)
+        own = (node, after, 'own')
+        ir.shapes[own] = shape
+        ir.inside[own] = ((node, after), d, {e: ir.coords[e][m] * shape[d] for e in ir.coords})
+        step(('copy', ((node, have),), own, None))
+        step(('collective', (own,), (node, after), Collective('all-gather', node, (m,), d, len(ir.program))))
+        return after
+
+    def exchange(have, m):
+        i, j = have.index(m), want.index(m)
+        after, shape = tuple(-1 if k == i else m if k == j else s for k, s in enumerate(have)), ir.local(node, have)
+        own = (node, after, 'own')
+        ir.shapes[own] = tuple(n // ir.shape[m] if k == j else n for k, n in enumerate(shape))
+        ir.inside[own] = ((node, after), i, {e: ir.coords[e][m] * shape[i] for e in ir.coords})
+        step(('copy', ((node, have),), own, (j, m)))
+        step(('collective', ((node, have),), (node, after),
+              Collective('all-to-all', node, (m,), (i, j), len(ir.program))))
+        return after
     if node.op in ('placeholder', 'get_attr'):
         have = (-1,) * len(have)
     for m in range(len(ir.shape)):
         if m in have and m not in want:
-            after, d, shape = tuple(-1 if s == m else s for s in have), have.index(m), ir.local(node, have)
-            own = (node, after, 'own')
-            ir.shapes[own] = shape
-            ir.inside[own] = ((node, after), d, {e: ir.coords[e][m] * shape[d] for e in ir.coords})
-            step(('copy', ((node, have),), own, None))
-            step(('collective', (own,), (node, after), Collective('all-gather', node, (m,), d, len(ir.program))))
-            have = after
-    for m in range(len(ir.shape)):
-        if m in have and have.index(m) != want.index(m):
-            i, j = have.index(m), want.index(m)
-            if have[j] >= 0:
-                raise NotImplementedError('%s: an AllToAll along mesh dimension %d into dimension %d, which mesh '
-                                          'dimension %d holds: refused (GSPMD section 4.5)'
-                                          % (node.name, m, j, have[j]))
-            after, shape = tuple(-1 if k == i else m if k == j else s for k, s in enumerate(have)), ir.local(node, have)
-            own = (node, after, 'own')
-            ir.shapes[own] = tuple(n // ir.shape[m] if k == j else n for k, n in enumerate(shape))
-            ir.inside[own] = ((node, after), i, {e: ir.coords[e][m] * shape[i] for e in ir.coords})
-            step(('copy', ((node, have),), own, (j, m)))
-            step(('collective', ((node, have),), (node, after),
-                  Collective('all-to-all', node, (m,), (i, j), len(ir.program))))
-            have = after
+            have = gather(have, m)
+    while True:
+        moving = [m for m in range(len(ir.shape)) if m in have and m in want and have.index(m) != want.index(m)]
+        if not moving:
+            break
+        free = [m for m in moving if have[want.index(m)] < 0]
+        have = exchange(have, free[0]) if free else gather(have, have[want.index(moving[0])])
     for m in range(len(ir.shape)):
         if m in want and m not in have:
             after = tuple(m if k == want.index(m) else s for k, s in enumerate(have))
@@ -1178,10 +1186,13 @@ def lower(ir):
 # (ir.loads: a constant of f's module, every node's own host copy, placed and written by `make`'s loads as at the source)
 # moves nothing: at each such node it is that load, one INVARIANT value with the source's view, `ir.landed[o]` = (that
 # value, None).  `o` indexes pytree.tree_leaves of f's output node's args.  Called after partition and before lower
-def _deliver(irs, wanted):
+def _deliver(irs, wanted, returned, program):
+    for f, o in returned:
+        wanted.setdefault((f, o), set())
     for (f, o), readers in sorted(wanted.items()):
         ir = irs[f]
-        nodes = sorted({y for k in readers for y in irs[k].map} - set(ir.map))
+        everywhere = {n for n in range(64) if program >> n & 1} if (f, o) in returned else set()
+        nodes = sorted(({y for k in readers for y in irs[k].map} | everywhere) - set(ir.map))
         if not nodes:
             continue
         output = next(item for item in ir.program if item[0] == 'output')[3]
@@ -1513,8 +1524,8 @@ def _recorder():
         lib.MetalReplayNative.restype = C.c_void_p
         lib.MetalReplayNative.argtypes = [C.POINTER(Replay), C.POINTER(mesh.Q)]
         lib.MetalRecorderProgram.restype = C.c_void_p
-        lib.MetalRecorderProgram.argtypes = [C.c_void_p, C.POINTER(Call), mesh.U, mesh.U, C.POINTER(mesh.Planned),
-                                             C.c_char_p, C.c_size_t]
+        lib.MetalRecorderProgram.argtypes = [C.c_void_p, C.POINTER(Call), mesh.U, C.POINTER(C.c_double),
+                                             C.POINTER(mesh.Planned), C.c_char_p, C.c_size_t]
         lib.MetalProgramRun.restype = C.c_int
         lib.MetalProgramRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.Q, mesh.Q, C.c_void_p, C.c_void_p,
                                         C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
@@ -1534,17 +1545,17 @@ def _recorder():
 # MLIR Linalg, linalg.generic; N. D. Jones, C. K. Gomard and P. Sestoft, 1993, Definition 4.1: every static operator,
 # dtype, shape, stride and scalar operand of a Torch call is an instruction, literal or map coefficient of its
 # structured operation, never a metadata vector a generic kernel interprets
-BOOL, I8, U8, I16, U16, I32, U32, I64, U64, F16, BF16, F32 = 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
+BOOL, I8, U8, I16, U16, I32, U32, I64, U64, F16, BF16, F32, F64 = 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16
 SCALAR = {torch.bool: BOOL, torch.int8: I8, torch.uint8: U8, torch.int16: I16, torch.uint16: U16, torch.int32: I32,
           torch.uint32: U32, torch.int64: I64, torch.uint64: U64, torch.float16: F16, torch.bfloat16: BF16,
-          torch.float32: F32}
+          torch.float32: F32, torch.float64: F64}
 # metal_ir.h ComputeType: the kind a region computes a stored kind in
 CLASS = {BOOL: BOOL, I8: I32, I16: I32, I32: I32, U8: U32, U16: U32, U32: U32, I64: I64, U64: U64, F16: F16, BF16: F32,
-         F32: F32}
+         F32: F32, F64: F64}
 STORED = {BOOL: torch.bool, I32: torch.int32, U32: torch.uint32, I64: torch.int64, U64: torch.uint64, F16: torch.float16,
-        F32: torch.float32}
+        F32: torch.float32, F64: torch.float64}
 REAL = tuple(SCALAR)
-FLOATING = (torch.float16, torch.bfloat16, torch.float32)
+FLOATING = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
 INTEGRAL = tuple(dtype for dtype in REAL if dtype not in FLOATING)
 # metal_ir.h: linalg iterator kinds, combiners, starts, precision, placement, Tint core::BinaryOp and core::UnaryOp
 PARALLEL, REDUCTION = 0, 1
@@ -1552,12 +1563,12 @@ ASSIGN, SUM, REGION = 0, 1, 9
 IDENTITY, ACCUMULATE = 0, 1
 REASSOCIATE, CONTRACT = 1, 2
 GPU, CPU = 0, 1
-BINARY = {'and': 0, 'or': 1, 'eq': 5, 'ne': 6, 'lt': 7, 'gt': 8, 'le': 9, 'ge': 10, 'add': 13, 'sub': 14, 'mul': 15,
-          'div': 16, 'rem': 17}
+BINARY = {'and': 0, 'or': 1, 'xor': 2, 'eq': 5, 'ne': 6, 'lt': 7, 'gt': 8, 'le': 9, 'ge': 10, 'shl': 11, 'shr': 12,
+          'add': 13, 'sub': 14, 'mul': 15, 'div': 16, 'rem': 17}
 COMPARE = ('eq', 'ne', 'lt', 'gt', 'le', 'ge')
 NEGATION, NOT = 3, 4
 # WGSL builtin functions by name (metal_ir_builtin_named, Tint core::ParseBuiltinFn)
-BUILTINS = ('exp', 'log', 'sqrt', 'tanh', 'abs', 'trunc', 'floor', 'pow')
+BUILTINS = ('exp', 'log', 'sqrt', 'tanh', 'abs', 'trunc', 'floor', 'pow', 'cos')
 
 
 def _class(value):
@@ -1565,7 +1576,7 @@ def _class(value):
 
 
 def _floating(kind):
-    return kind in (F16, F32)
+    return kind in (F16, F32, F64)
 
 
 # metal_ir.h metal_ir_literal: two's complement, or the IEEE binary16 / binary32 bits in the low bits
@@ -1573,8 +1584,9 @@ def _bits(value, kind):
     if kind == BOOL:
         return int(bool(value))
     if _floating(kind):
-        dtype, word = (torch.float16, torch.int16) if kind == F16 else (torch.float32, torch.int32)
-        return torch.tensor(float(value), dtype=dtype).view(word).item() & ((1 << (16 if kind == F16 else 32)) - 1)
+        dtype, word, bits = {F16: (torch.float16, torch.int16, 16), F32: (torch.float32, torch.int32, 32),
+                             F64: (torch.float64, torch.int64, 64)}[kind]
+        return torch.tensor(float(value), dtype=dtype).view(word).item() & ((1 << bits) - 1)
     return int(value) & ((1 << 64) - 1)
 
 
@@ -1623,7 +1635,11 @@ class _Region:
             return self.add(('yield', x), BOOL)
         raise KeyError(name)
 
+    # WGSL §6.2.1 (and Tint core constants) hold finite values only: an infinity or NaN is its binary32 pattern's bitcast
     def const(self, value, kind):
+        if _floating(kind) and not math.isfinite(value):
+            made = self.add(('bitcast', F32, self.add(('literal', U32, _bits(value, F32)), U32)), F32)
+            return made if kind == F32 else self('cast', kind, made)
         return self.add(('literal', kind, _bits(value, kind)), kind)
 
     def arg(self, k, value):
@@ -1727,6 +1743,7 @@ class _Generic:
         self.accumulator = list(accumulator) if accumulator is not None else [_class(t) for t, _ in self.outputs]
         self.start = list(start) if start is not None else [IDENTITY] * len(self.outputs)
         self.states, self.combine, self.finalize, self.precision = states, combine, finalize, precision
+        self.place = GPU
 
 
 def _rows(dims, picks):
@@ -1767,6 +1784,8 @@ def _typed(target, operands, outs, results=FLOATING):
 
 # torch 2.14.0 aten/src/ATen/OpMathType.h opmath_type: an operation's arithmetic kind
 def _compute(*dtypes):
+    if any(d is torch.float64 for d in dtypes):
+        return F64
     if any(d.is_floating_point for d in dtypes):
         return F32
     kinds = {SCALAR[d] for d in dtypes}
@@ -1864,7 +1883,8 @@ def _elementwise(op, out, a, b=None, c=None, alpha=1):
                                              isinstance(x, (bool, int)) for x in given if x is not None)
     if integral and not isinstance(alpha, (bool, int)):
         raise NotImplementedError('elementwise %s into %s of a scalar no integer holds' % (op, out.dtype))
-    t = _compute(out.dtype, *[x.dtype for x in tensors]) if integral else F32
+    t = _compute(out.dtype, *[x.dtype for x in tensors]) if integral else \
+        _compute(out.dtype, *[x.dtype for x in tensors], torch.float32)
     r, inputs, values = _Region(), [], []
     for x in given:
         if isinstance(x, torch.Tensor):
@@ -1989,9 +2009,9 @@ def _contract(out, operands, labels, output, addend=None, alpha=1, beta=0):
     summed = [label for label in dict.fromkeys(label for own in labels for label in own) if label not in output]
     domain = list(output) + summed
     at = {label: d for d, label in enumerate(domain)}
-    t = F32
+    t = _compute(out.dtype, *[value.dtype for value in operands], torch.float32)
     direct = alpha == 1 and (addend is None or beta == 0)
-    acc = out if direct else _temporary(out.shape)
+    acc = out if direct else _temporary(out.shape, STORED[t])
     r = _Region()
     product = None
     for j, value in enumerate(operands):
@@ -2085,7 +2105,7 @@ def _summation(target, given, outs):
     for j in range(1, len(operands)):
         later = {label for others in labels[j + 1:] for label in others} | set(output)
         kept = output if j == len(operands) - 1 else tuple(dict.fromkeys(l for l in own + labels[j] if l in later))
-        step = out if j == len(operands) - 1 else _temporary([sizes[label] for label in kept])
+        step = out if j == len(operands) - 1 else _temporary([sizes[label] for label in kept], out.dtype)
         ops += _contract(step, [made, operands[j]], [own, labels[j]], kept)
         made, own = step, kept
     return ops
@@ -2138,8 +2158,8 @@ def _convolving(target, given, outs):
     groups = given['groups']
     outputs, inputs = out.shape[1] // groups, x.shape[1] // groups
     sizes = [x.shape[0], groups, outputs, *out.shape[2:], inputs, *w.shape[2:]]
-    t = F32
-    acc = out if bias is None else _temporary(out.shape)
+    t = _compute(out.dtype, x.dtype, w.dtype, torch.float32)
+    acc = out if bias is None else _temporary(out.shape, STORED[t])
     r = _Region()
     o, kk = [r.index(3 + d) for d in range(3)], [r.index(7 + d) for d in range(3)]
     if not transposed and not any(lows):
@@ -2193,7 +2213,7 @@ def _pooled(target, given, outs):
     kernel, stride = (1,) * (3 - k) + kernel, (1,) * (3 - k) + stride
     lows, dilation = (0,) * (3 - k) + lows, (1,) * (3 - k) + dilation
     average = packet in AVERAGE
-    sizes, t, omap = [*os.shape, *kernel], F32, _rows(8, range(5))
+    sizes, t, omap = [*os.shape, *kernel], _compute(out.dtype, x.dtype, torch.float32), _rows(8, range(5))
     r = _Region()
     tests, at = [], []
     for d in range(3):
@@ -2223,7 +2243,7 @@ def _pooled(target, given, outs):
         outputs = [(os, omap)] + ([(shaped(index), omap)] if index is not None else [])
         return [_Generic(sizes, [(xs, None)], outputs, r, iterators, [REGION] * len(outputs), [kind for kind, _ in states],
                          None, states, _joined(states, join), _identities(states), REASSOCIATE)]
-    acc = _temporary(os.shape)
+    acc = _temporary(os.shape, STORED[t])
     r.done(r('select', t, inside, v, r.const(0, t)))
     made = [_Generic(sizes, [(xs, None)], [(acc, omap)], r, iterators, [SUM], [t], precision=REASSOCIATE)]
     override, include = given.get('divisor_override'), given.get('count_include_pad', True)
@@ -2410,8 +2430,9 @@ def _softened(target, given, outs):
     if not x.dim():
         x, out, d = x.view(1), out.view(1), 0
     lines = [x.shape[j] for j in _lines(x, d)[:-1]]
-    m, s = _temporary(lines), _temporary(lines)
-    return [_statistics(x, d, m, s, F32), _normalizing(x, d, m, s, out, F32, SOFTMAX[target.overloadpacket])]
+    t = _compute(out.dtype, x.dtype, torch.float32)
+    m, s = _temporary(lines, STORED[t]), _temporary(lines, STORED[t])
+    return [_statistics(x, d, m, s, t), _normalizing(x, d, m, s, out, t, SOFTMAX[target.overloadpacket])]
 
 
 # PyTorch 2.14 documentation, torch.cumsum: element i of a line the sum of its elements j <= i, the loops
@@ -2481,8 +2502,8 @@ def _ranked(target, given, outs):
 # torch/_refs/__init__.py, native_layer_norm, native_group_norm and _normalize; torch/_decomp/decompositions.py,
 # native_batch_norm_helper: the statistics' groups and the normalized elements both affine loops over x (group norm's
 # channel split into (group, channel of the group)); the mean, then the variance about it, two SUM reductions
-NORMS = (A.layer_norm, A.native_layer_norm, A.group_norm, A.native_group_norm, A.batch_norm,
-         A._native_batch_norm_legit_no_training)
+NORMS = (A.layer_norm, A.native_layer_norm, A.group_norm, A.native_group_norm, A.batch_norm, A.native_batch_norm,
+         A._native_batch_norm_legit, A._native_batch_norm_legit_functional, A._native_batch_norm_legit_no_training)
 
 
 def _flat(value):
@@ -2503,7 +2524,7 @@ def _normalized(target, given, outs):
     packet, x, out = target.overloadpacket, given['input'], outs[0]
     weight, bias = given.get('weight'), given.get('bias')
     _typed(target, [x, weight, bias, given.get('running_mean'), given.get('running_var')], outs[:1])
-    eps, t = float(given['eps']), F32
+    eps, t = float(given['eps']), _compute(out.dtype, x.dtype, torch.float32)
     if packet in (A.layer_norm, A.native_layer_norm):
         lead = x.dim() - len(given['normalized_shape'])
         view, place, group_of = x, out, list(range(lead))
@@ -2513,17 +2534,16 @@ def _normalized(target, given, outs):
         view, place, group_of, channel_of = _grouped(x, count), _grouped(out, count), [0, 1], [1, 2]
         reduced = list(range(2, view.dim()))
     else:
-        if given.get('training'):
-            raise NotImplementedError('%s in training: the lowering of its running statistics\' update in place is '
-                                      'unfinished' % (target,))
         view, place, group_of, channel_of = x, out, [1], [1]
         reduced = [0] + list(range(2, x.dim()))
     dims = view.dim()
     groups, affine = [view.shape[j] for j in group_of], [view.shape[j] for j in channel_of]
     stats = [o.view(groups) for o in outs[1:]] if len(outs) == 3 and outs[1].numel() == math.prod(groups) else \
-        [_temporary(groups), _temporary(groups)]
+        [_temporary(groups, STORED[t]), _temporary(groups, STORED[t])]
     mean, rstd = stats
-    known = packet in (A.batch_norm, A._native_batch_norm_legit_no_training) and given.get('running_mean') is not None
+    training = bool(given.get('training'))
+    known = not training and given.get('running_mean') is not None and packet in (
+        A.batch_norm, A.native_batch_norm, A._native_batch_norm_legit, A._native_batch_norm_legit_no_training)
     g, ops = _same(len(groups)), []
     if known:
         rm, rv = _flat(given['running_mean']).view(groups), _flat(given['running_var']).view(groups)
@@ -2537,7 +2557,7 @@ def _normalized(target, given, outs):
         domain = group_of + reduced
         loops, iterators = [view.shape[j] for j in domain], [PARALLEL] * len(group_of) + [REDUCTION] * len(reduced)
         vmap, gmap = _rows(dims, [domain.index(j) for j in range(dims)]), _rows(dims, range(len(group_of)))
-        sums, squares = _temporary(groups), _temporary(groups)
+        sums, squares = _temporary(groups, STORED[t]), _temporary(groups, STORED[t])
         r = _Region()
         r.done(_load(r, 0, view, t))
         ops.append(_Generic(loops, [(view, vmap)], [(sums, gmap)], r, iterators, [SUM], [t], precision=REASSOCIATE))
@@ -2551,6 +2571,21 @@ def _normalized(target, given, outs):
         f.done(_store(f, f('div', t, f.arg(0, sums), f.const(total, t)), t, mean),
                _store(f, f('div', t, f.const(1, t), f('sqrt', t, f('add', t, variance, f.const(eps, t)))), t, rstd))
         ops.append(_Generic(groups, [(sums, g), (squares, g)], [(mean, g), (rstd, g)], f))
+        if training and given.get('running_mean') is not None:
+            # torch 2.14.0 torch/_decomp/decompositions.py, native_batch_norm_helper: the running statistics' update,
+            # into the functional variant's results or the running statistics' own storage
+            rm, rv = _flat(given['running_mean']).view(groups), _flat(given['running_var']).view(groups)
+            updated = [o.view(groups) for o in outs[3:5]] if len(outs) == 5 else [rm, rv]
+            momentum = float(given['momentum'])
+            u = _Region()
+
+            def moved(old, new):
+                return u('add', t, u('mul', t, u.const(1 - momentum, t), old), u('mul', t, u.const(momentum, t), new))
+            unbiased = u('div', t, u.arg(1, squares), u.const(max(total - 1, 1), t))
+            u.done(_store(u, moved(_load(u, 2, rm, t), u('div', t, u.arg(0, sums), u.const(total, t))), t, updated[0]),
+                   _store(u, moved(_load(u, 3, rv, t), unbiased), t, updated[1]))
+            ops.append(_Generic(groups, [(sums, g), (squares, g), (rm, g), (rv, g)], [(updated[0], g), (updated[1], g)],
+                                u))
     e = _Region()
     y = e('mul', t, e('sub', t, _load(e, 0, view, t), _load(e, 1, mean, t)), _load(e, 2, rstd, t))
     inputs = [(view, _same(dims)), (mean, _rows(dims, group_of)), (rstd, _rows(dims, group_of))]
@@ -2730,8 +2765,7 @@ def _scattered(target, given, outs):
 # PyTorch 2.14 documentation, torch.nn.functional.scaled_dot_product_attention; Milakov and Gimelshein 2018; T. Dao et
 # al., FlashAttention, NeurIPS 2022, section 3.1 and Algorithm 1, lines 10 to 13: the scores one SUM over the head
 # dimension, loops (lead..., kv head, group, l, t | f), then the output's states (m, s, acc) one REDUCTION over the
-# keys t, each key contributing (score, 1, v), joined by Algorithm 1's rescaling, finalized to acc / s; `start`
-# ACCUMULATE and `states` the (m, s, acc) values for a paged part continuing the earlier parts
+# keys t, each key contributing (score, 1, v), joined by Algorithm 1's rescaling, finalized to acc / s
 def _heads(x, group, kv):
     if x.dim() < 3:
         return x.unsqueeze(0).unsqueeze(0)
@@ -2741,50 +2775,47 @@ def _heads(x, group, kv):
     return x.as_strided(shape, stride, x.storage_offset())
 
 
-def _attention(q, k, v, mask, out, causal, scale, group, partial=None):
+def _attention(q, k, v, mask, out, causal, scale, group):
     length, size, other, value = q.shape[-2], q.shape[-1], k.shape[-2], v.shape[-1]
+    t = _compute(q.dtype, k.dtype, v.dtype, torch.float32)
     qs, ks, vs = _heads(q, group, False), _heads(k, group, True), _heads(v, group, True)
     b = len(qs.shape) - 2
-    scores = _temporary([*qs.shape[:-2], length, other])
+    scores = _temporary([*qs.shape[:-2], length, other], STORED[t])
     domain = [*qs.shape[:-2], length, other, size]
     r = _Region()
-    r.done(r('mul', F32, _load(r, 0, qs, F32), _load(r, 1, ks, F32)))
+    r.done(r('mul', t, _load(r, 0, qs, t), _load(r, 1, ks, t)))
     ops = [_Generic(domain, [(qs, _rows(b + 3, [*range(b), b, b + 2])), (ks, _onto(ks, [*range(b), b + 1, b + 2], domain))],
                     [(scores, _rows(b + 3, [*range(b), b, b + 1]))], r, [PARALLEL] * (b + 2) + [REDUCTION], [SUM],
-                    [F32], precision=REASSOCIATE | CONTRACT)]
+                    [t], precision=REASSOCIATE | CONTRACT)]
     shape = [*qs.shape[:-2], length, value, other]
     r = _Region()
-    score = r('mul', F32, r.arg(0, scores), r.const(scale, F32))
+    score = r('mul', t, r.arg(0, scores), r.const(scale, t))
     inputs = [(scores, _rows(b + 3, [*range(b), b, b + 2])), (vs, _onto(vs, [*range(b), b + 2, b + 1], shape))]
     if mask is not None:
         ms = _heads(mask, group, False)
         inputs.append((ms, _onto(ms, [*range(b), b, b + 2], shape)))
         given = r.arg(2, ms)
-        score = r('select', F32, given, score, r.const(-math.inf, F32)) if mask.dtype is torch.bool else \
-            r('add', F32, score, _convert(r, given, _class(mask), F32))
+        score = r('select', t, given, score, r.const(-math.inf, t)) if mask.dtype is torch.bool else \
+            r('add', t, score, _convert(r, given, _class(mask), t))
     if causal:
-        score = r('select', F32, r('gt', BOOL, r.index(b + 2), r.index(b)), r.const(-math.inf, F32), score)
-    r.done(score, r.const(1, F32), _load(r, 1, vs, F32))
-    states = [(F32, -math.inf), (F32, 0), (F32, 0)]
+        score = r('select', t, r('gt', BOOL, r.index(b + 2), r.index(b)), r.const(-math.inf, t), score)
+    r.done(score, r.const(1, t), _load(r, 1, vs, t))
+    states = [(t, -math.inf), (t, 0), (t, 0)]
 
     def join(c, a, b):
-        top = c('select', F32, c('gt', BOOL, b[0], a[0]), b[0], a[0])
-        e1, e2 = c('exp', F32, c('sub', F32, a[0], top)), c('exp', F32, c('sub', F32, b[0], top))
-        joined = [top, c('add', F32, c('mul', F32, a[1], e1), c('mul', F32, b[1], e2)),
-                  c('add', F32, c('mul', F32, a[2], e1), c('mul', F32, b[2], e2))]
-        absent_a, absent_b = c('eq', BOOL, a[0], c.const(-math.inf, F32)), c('eq', BOOL, b[0], c.const(-math.inf, F32))
-        return [c('select', F32, absent_b, x, c('select', F32, absent_a, y, z)) for x, y, z in zip(a, b, joined)]
+        top = c('select', t, c('gt', BOOL, b[0], a[0]), b[0], a[0])
+        e1, e2 = c('exp', t, c('sub', t, a[0], top)), c('exp', t, c('sub', t, b[0], top))
+        joined = [top, c('add', t, c('mul', t, a[1], e1), c('mul', t, b[1], e2)),
+                  c('add', t, c('mul', t, a[2], e1), c('mul', t, b[2], e2))]
+        absent_a, absent_b = c('eq', BOOL, a[0], c.const(-math.inf, t)), c('eq', BOOL, b[0], c.const(-math.inf, t))
+        return [c('select', t, absent_b, x, c('select', t, absent_a, y, z)) for x, y, z in zip(a, b, joined)]
     smap = _rows(b + 3, range(b + 2))
-    if partial is not None:
-        return ops + [_Generic(shape, inputs, [(p, smap) for p in partial], r, [PARALLEL] * (b + 2) + [REDUCTION],
-                               [REGION] * 3, [F32] * 3, [ACCUMULATE] * 3, states, _joined(states, join),
-                               _identities(states), REASSOCIATE)]
     f = _Region()
-    total = f('arg', F32, integer=1)
-    f.done(f('select', F32, f('eq', BOOL, total, f.const(0, F32)), f.const(math.nan, F32),
-             f('div', F32, f('arg', F32, integer=2), total)))
+    total = f('arg', t, integer=1)
+    f.done(f('select', t, f('eq', BOOL, total, f.const(0, t)), f.const(math.nan, t),
+             f('div', t, f('arg', t, integer=2), total)))
     ops.append(_Generic(shape, inputs, [(_heads(out, group, False), smap)], r, [PARALLEL] * (b + 2) + [REDUCTION],
-                        [REGION], [F32], None, states, _joined(states, join), f, REASSOCIATE))
+                        [REGION], [t], None, states, _joined(states, join), f, REASSOCIATE))
     return ops
 
 
@@ -2805,6 +2836,118 @@ def _attended(target, given, outs):
                                   % (target, given['dropout_p']))
     operands, causal, scale, group = _attending(given)
     return _attention(*operands, outs[0], causal, scale, group)
+
+
+# J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw, Parallel random numbers: as easy as 1, 2, 3, SC 2011, §3.1 and
+# §4.2 (Philox4x32-10: its multipliers, Weyl key increments, ten rounds): each draw a counter-based function of its key
+# and counter, the key the program's seed, the counter (element, execution, draw site, stream); the generator a STATE
+# value {seed low, seed high, execution, 0} the program advances once an execution
+PHILOX = (0xD2511F53, 0xCD9E8D57, 0x9E3779B9, 0xBB67AE85)
+RANDOM = {'state': None, 'sites': 0, 'stream': 0}
+GENERATORS = set()
+
+
+def _generator():
+    if RANDOM['state'] is None:
+        seed = torch.initial_seed() ^ (RANDOM['stream'] << 32)
+        words = [seed & 0xFFFFFFFF, (seed >> 32) & 0xFFFFFFFF, 0, 0]
+        RANDOM['state'] = torch.tensor([w - (1 << 32) if w >= 1 << 31 else w for w in words], dtype=torch.int32)
+        GENERATORS.add(_key(RANDOM['state']))
+    RANDOM['sites'] += 1
+    return RANDOM['state'], RANDOM['sites']
+
+
+def _mulhilo(r, a, m):
+    def c(v):
+        return r.const(v, U32)
+    low, high = c(m & 0xFFFF), c(m >> 16)
+    al, ah = r('and', U32, a, c(0xFFFF)), r('shr', U32, a, c(16))
+    t0, t1, t2, t3 = r('mul', U32, al, low), r('mul', U32, ah, low), r('mul', U32, al, high), r('mul', U32, ah, high)
+    middle = r('add', U32, r('add', U32, r('shr', U32, t0, c(16)), r('and', U32, t1, c(0xFFFF))),
+               r('and', U32, t2, c(0xFFFF)))
+    hi = r('add', U32, r('add', U32, r('add', U32, t3, r('shr', U32, t1, c(16))), r('shr', U32, t2, c(16))),
+           r('shr', U32, middle, c(16)))
+    return hi, r('mul', U32, a, c(m))
+
+
+def _philox(r, counter, key):
+    c0, c1, c2, c3 = counter
+    k0, k1 = key
+    for round in range(10):
+        hi0, lo0 = _mulhilo(r, c0, PHILOX[0])
+        hi1, lo1 = _mulhilo(r, c2, PHILOX[1])
+        c0, c1, c2, c3 = r('xor', U32, r('xor', U32, hi1, c1), k0), lo1, r('xor', U32, r('xor', U32, hi0, c3), k1), lo0
+        if round < 9:
+            k0, k1 = r('add', U32, k0, r.const(PHILOX[2], U32)), r('add', U32, k1, r.const(PHILOX[3], U32))
+    return c0, c1, c2, c3
+
+
+# the draws of operation `out`'s elements: the generator's words as inputs (their constant maps), the element's row-major
+# index the counter's first word
+def _draws(r, out, inputs):
+    state, site = _generator()
+    for word in range(3):
+        inputs.append((state, _rows(out.dim(), [{None: word}])))
+    k0, k1, execution = [r('bitcast', U32, r.arg(len(inputs) - 3 + word, state)) for word in range(3)]
+    element = r('bitcast', U32, _linear(r, out.shape))
+    return _philox(r, (element, execution, r.const(site, U32), r.const(0, U32)), (k0, k1))
+
+
+def _uniform(r, word):
+    return r('mul', F32, r('cast', F32, r('shr', U32, word, r.const(8, U32))), r.const(2.0 ** -24, F32))
+
+
+# PyTorch 2.14 documentation, torch.rand, torch.randn, torch.randint, torch.bernoulli, Tensor.uniform_ and
+# torch.nn.functional.dropout (torch 2.14.0 aten native_dropout: mask = U < 1 - p, out = x mask / (1 - p)); the normal
+# draws by G. E. P. Box and M. E. Muller, Ann. Math. Statist. 29(2), 1958
+DRAWS = (A.rand, A.rand_like, A.randn, A.randn_like, A.randint, A.randint_like, A.bernoulli, A.uniform, A.native_dropout)
+
+
+def _random(target, given, outs):
+    packet, out = target.overloadpacket, outs[0]
+    _typed(target, [], outs[:1], REAL)
+    r, inputs = _Region(), []
+    if packet is A.native_dropout:
+        x, p, train = given['input'], float(given['p']), given['train']
+        inputs.append((x, _same(x.dim())))
+        v = _load(r, 0, x, F32)
+        if train is False:
+            r.done(_store(r, v, F32, out), r.const(True, BOOL))
+        else:
+            keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs)[0]), r.const(1 - p, F32))
+            scaled = r('mul', F32, v, r.const(1 / (1 - p) if p < 1 else 0, F32))
+            r.done(_store(r, r('select', F32, keep, scaled, r.const(0, F32)), F32, out), keep)
+        return [_Generic(out.shape, inputs, [(out, _same(out.dim())), (outs[1], _same(out.dim()))], r)]
+    if packet is A.bernoulli and given.get('p') is None:
+        inputs.append((given['self'], _same(out.dim())))
+    words = _draws(r, out, inputs)
+    u = _uniform(r, words[0])
+    if packet in (A.randn, A.randn_like):
+        first = r('add', F32, u, r.const(2.0 ** -24, F32))
+        radius = r('sqrt', F32, r('mul', F32, r.const(-2, F32), r('log', F32, first)))
+        made = r('mul', F32, radius, r('cos', F32, r('mul', F32, r.const(2 * math.pi, F32), _uniform(r, words[1]))))
+    elif packet in (A.randint, A.randint_like):
+        low, high = given.get('low') or 0, given['high']
+        made = r('add', I32, r.const(low, I32), r('bitcast', I32, r('rem', U32, words[0], r.const(high - low, U32))))
+        r.done(_store(r, made, I32, out))
+        return [_Generic(out.shape, inputs, [(out, _same(out.dim()))], r)]
+    elif packet is A.bernoulli:
+        p = given.get('p')
+        made = r('cast', F32, r('lt', BOOL, u, _load(r, 0, given['self'], F32) if p is None else r.const(p, F32)))
+    elif packet is A.uniform:
+        low, high = float(given.get('from', 0)), float(given.get('to', 1))
+        made = r('add', F32, r.const(low, F32), r('mul', F32, u, r.const(high - low, F32)))
+    else:
+        made = u
+    r.done(_store(r, made, F32, out))
+    return [_Generic(out.shape, inputs, [(out, _same(out.dim()))], r)]
+
+
+# the generator's advance: its execution word incremented once an execution, after the program's draws
+def _stepped(state):
+    r = _Region()
+    r.done(r('add', I32, r.arg(0, state), r.const(1, I32)))
+    return _Generic((1,), [(state, _rows(1, [{None: 2}]))], [(state, _rows(1, [{None: 2}]))], r)
 
 
 # PyTorch 2.14 documentation, torch.cat
@@ -2832,7 +2975,7 @@ SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A.
            **dict.fromkeys((A.gather, A.index_select, A.embedding, A.index), _taken),
            **dict.fromkeys((A.scatter, A.scatter_add, A.scatter_reduce, A.index_put, A.index_add, A.index_copy,
                             A.index_fill), _scattered),
-           A.scaled_dot_product_attention: _attended, A.cat: _concatenated}
+           A.scaled_dot_product_attention: _attended, A.cat: _concatenated, **dict.fromkeys(DRAWS, _random)}
 # PyTorch 2.14 documentation, Tensor Views
 VIEWS = {A.as_strided, A.detach, A.diagonal, A.expand, A.expand_as, A.movedim, A.narrow, A.permute, A.select,
          A.squeeze, A.transpose, A.t, A.adjoint, A.real, A.imag, A.view_as_real, A.unflatten, A.unfold, A.unsqueeze,
@@ -2848,111 +2991,6 @@ def _lowering(local):
         return lambda args, kwargs, outs: _copy(outs[0], _call(local, args, kwargs))
     raise NotImplementedError('%s: its lowering into the structured basis is unfinished '
                               '(design/torch-source-lowering-change-request.md item 1)' % (local.target,))
-
-
-def _devices(node):
-    values = [v for n in [node, *node.all_input_nodes] for v in pytree.tree_leaves(n.meta.get('val'))]
-    return {v.device.type for v in values if isinstance(v, torch.Tensor)}
-
-
-def _sourced(gm):
-    moves = False
-    for node in gm.graph.nodes:
-        if node.op == 'call_function':
-            _lowering(Local(node.op, node.target, node.args, node.kwargs))
-            moves = moves or len(_devices(node)) > 1
-    return moves
-
-
-# design/aot-compilation-change-request.md A2; design/torch-source-lowering-change-request.md items 1 and 3; torch 2.14.0
-# torch/fx/passes/split_module.py, split_module
-def _parts(gm):
-    def device(node):
-        found = [v.device.type for v in pytree.tree_leaves(node.meta.get('val')) if isinstance(v, torch.Tensor)]
-        return found[0] if found else None
-    stages = mesh_graph.forward(list(gm.graph.nodes), lambda node: node.all_input_nodes,
-                                lambda node, stages: max(stages, default=0)
-                                + (node.op == 'call_function' and len(_devices(node)) > 1))
-    keys = {}
-    for node in gm.graph.nodes:
-        if node.op not in ('placeholder', 'get_attr', 'output'):
-            keys[node] = (stages[node], device(node) or next((keys[i][1] for i in node.all_input_nodes if i in keys),
-                                                             None))
-    ids = {key: j for j, key in enumerate(dict.fromkeys(keys.values()))}
-    return {node: ids[key] for node, key in keys.items()}, {j: key[1] for key, j in ids.items()}
-
-
-def _restricted(placement):
-    def placed(gm, examples):
-        made = placement(gm, examples)
-        names = {node.name for node in gm.graph.nodes if node.op == 'placeholder'}
-        return made._replace(splits={k: v for k, v in made.splits.items() if k in names}) \
-            if isinstance(made, Placement) else made
-    return placed
-
-
-def _replaced(graph, node, value):
-    values = {node: value}
-
-    def taken(at):
-        users = [user for user in at.users if user.op == 'call_function' and user.target is operator.getitem
-                 and isinstance(values[at], (tuple, list))]
-        values.update({user: values[at][user.args[1]] for user in users})
-        return users
-    order = mesh_graph.walk([node], taken)
-    for at in order:
-        for user in [user for user in at.users if user not in values]:
-            if isinstance(values[at], Node):
-                user.replace_input_with(at, values[at])
-            else:
-                user.args = pytree.tree_map(lambda a: values[at] if a is at else a, user.args)
-                user.kwargs = pytree.tree_map(lambda a: values[at] if a is at else a, user.kwargs)
-    for at in reversed(order):
-        graph.erase_node(at)
-
-
-def _split(gm, exporter):
-    made = {}
-    for n in list(gm.graph.nodes):
-        k = exporter.of.get(n)
-        if k is None or not exporter.compiled[k].moves:
-            continue
-        record = exporter.compiled[k]
-        if k not in made:
-            assignment, devices = _parts(record.gm)
-            parent = split_module(record.gm, record.gm, lambda node: assignment.get(node, 0), keep_original_order=True)
-            for p in [p for p in parent.graph.nodes if p.op == 'call_module']:
-                part, held = getattr(parent, p.target), [a for a in p.args if isinstance(a, Node) and a.op == 'get_attr']
-                inputs = [q for q in part.graph.nodes if q.op == 'placeholder']
-                for a, q in zip(p.args, inputs):
-                    if a in held:
-                        setattr(part, 'held_' + a.target.replace('.', '_'), operator.attrgetter(a.target)(parent))
-                        with part.graph.inserting_before(next(r for r in part.graph.nodes if r.op != 'placeholder')):
-                            q.replace_all_uses_with(part.graph.get_attr('held_' + a.target.replace('.', '_')))
-                        part.graph.erase_node(q)
-                p.args = tuple(a for a in p.args if a not in held)
-                part.recompile()
-            names = {}
-            for name, part in parent.named_children():
-                names[name] = '%s_%d_%s' % (n.target.replace('.', '_'), k, name)
-                gm.add_submodule(names[name], Function(part, _restricted(record.function.placement),
-                                                       record.function.weights, devices[int(name.split('_')[-1])]))
-            made[k] = parent, names
-        parent, names = made[k]
-        env = dict(zip([p for p in parent.graph.nodes if p.op == 'placeholder'],
-                       pytree.tree_flatten((n.args, n.kwargs))[0]))
-        with gm.graph.inserting_before(n):
-            for p in parent.graph.nodes:
-                if p.op == 'call_module':
-                    env[p] = gm.graph.call_module(names[p.target], map_arg(p.args, env.__getitem__),
-                                                  map_arg(p.kwargs, env.__getitem__))
-                elif p.op == 'call_function':
-                    env[p] = gm.graph.call_function(p.target, map_arg(p.args, env.__getitem__),
-                                                    map_arg(p.kwargs, env.__getitem__))
-                elif p.op == 'output':
-                    result = pytree.tree_unflatten(list(map_arg(p.args[0], env.__getitem__)), record.spec)
-        _replaced(gm.graph, n, result)
-    gm.recompile()
 
 
 # dlpack.h DLManagedTensorVersioned `deleter`; torch v2.14.0 torch/csrc/utils/tensor_new.cpp tensor_fromDLPackImpl,
@@ -3236,14 +3274,23 @@ def _specialized(ir, placed, item, operands, ops, given):
 
 
 # a call's structured operations in the function's program order and its result over the placed stand-ins `tensors`
-def _instantiate(ir, tensors, given, spec):
+def _instantiate(ir, tensors, given, spec, stream=0):
     ops = []
+    RANDOM.update(state=None, sites=0, stream=stream)
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
 
     def placed(key):
         return tensors[key][0] if key in tensors else None
-    values = mesh_graph.forward(list(items), lambda key: items[key][1],
-                                lambda key, operands: _specialized(ir, placed, items[key], operands, ops, given))
+
+    def specialized(key, operands):
+        first = len(ops)
+        value = _specialized(ir, placed, items[key], operands, ops, given)
+        for g in ops[first:]:
+            g.place = CPU if _device(ir, key) == 'cpu' else GPU
+        return value
+    values = mesh_graph.forward(list(items), lambda key: items[key][1], specialized)
+    if RANDOM['state'] is not None:
+        ops.append(_stepped(RANDOM['state']))
     node, keys = next(item[3] for item in ir.program if item[0] == 'output')
     return ops, pytree.tree_unflatten(list(map_arg(node.args[0], lambda n: values[keys[n]])), spec)
 
@@ -3334,7 +3381,8 @@ class _Builder:
         base = t.tensor if isinstance(t, _Words) else t
         numel = base.untyped_storage().nbytes() // base.element_size()
         owner = self.owners.get(key)
-        role = self.role(owner) if owner is not None else CONSTANT if base.device.type != 'meta' else TEMPORARY
+        role = self.role(owner) if owner is not None else STATE if key in GENERATORS else \
+            CONSTANT if base.device.type != 'meta' else TEMPORARY
         v = self.lib.metal_ir_value(self.p, role, SCALAR[base.dtype], 1, _array(mesh.Q, [numel]), 1,
                                     _array(Term, [Term(0, 0, 1, 1, 0)]), 0, self.identity)
         if owner is not None:
@@ -3399,7 +3447,7 @@ class _Builder:
                 lib.metal_ir_yield(p, r, len(record[1]), given)
                 h.append(None)
 
-    def generic(self, g, place):
+    def generic(self, g):
         lib, p = self.lib, self.p
         inputs, outputs = [self.value(t) for t, _ in g.inputs], [self.value(t) for t, _ in g.outputs]
         exprs, terms, loops = [], [], len(g.sizes)
@@ -3412,7 +3460,7 @@ class _Builder:
         op = lib.metal_ir_generic(p, loops, _array(mesh.Q, g.sizes), _array(mesh.U, g.iterators), len(inputs),
                                   _array(mesh.U, inputs), len(outputs), _array(mesh.U, outputs),
                                   _array(mesh.U, g.combiner), _array(mesh.U, g.start), _array(mesh.U, g.accumulator),
-                                  _array(Expr, exprs), len(terms), _array(Term, terms), g.precision, place,
+                                  _array(Expr, exprs), len(terms), _array(Term, terms), g.precision, g.place,
                                   self.identity)
         if g.states:
             lib.metal_ir_states(p, op, len(g.states), _array(mesh.U, [kind for kind, _ in g.states]),
@@ -3445,13 +3493,37 @@ class Range(C.Structure):
 
 
 class Release(C.Structure):
-    _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('contribution', mesh.Q),
-                ('transfer', mesh.U), ('padding', mesh.U)]
+    _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('transfer', mesh.U), ('padding', mesh.U)]
 
 
 class Sending(C.Structure):
     _fields_ = [('sent', MetalSent), ('extent', C.POINTER(mesh_graph.Access)), ('extents', C.c_size_t),
                 ('transfer', mesh.U), ('padding', mesh.U)]
+
+
+# metal_ir.h struct metal_ir_dispatch
+class Dispatch(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('kind', 'kernel', 'binding', 'bindings', 'effect', 'effects', 'source',
+                                            'sources', 'allocation', 'allocations', 'arguments', 'later', 'flags',
+                                            'fill')] + [('groups', mesh.U * 3), ('threads', mesh.U * 3)]
+
+
+TASK_DISPATCH = 1
+MACHINES = []
+
+
+# Roofline (S. Williams, A. Waterman and D. Patterson, CACM 52(4), 2009, §3) operands of this node's resources as
+# configuration (etc/mesh-capacity.json, its model's "machines" {"gpu": {...}, "cpu": {...}} with struct
+# mesh_graph_machine's fields), read once; none recorded: no estimate
+def _machines():
+    if not MACHINES:
+        model = subprocess.run(['/usr/sbin/sysctl', '-n', 'hw.model'], capture_output=True, text=True).stdout.strip()
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'etc', 'mesh-capacity.json')
+        with open(path) as records:
+            given = json.load(records).get('models', {}).get(model, {}).get('machines', {})
+        MACHINES.append({resource: mesh_graph.Machine(**given[name]) for resource, name in ((GPU, 'gpu'), (CPU, 'cpu'))
+                         if name in given})
+    return MACHINES[0]
 
 
 COMPILER = []
@@ -3484,7 +3556,9 @@ def _compiler():
                 ('metal_ir_extract', U, [P, U, U, U, C.POINTER(U)]), ('metal_ir_builtin_named', U, [C.c_char_p]),
                 ('metal_ir_yield', None, [P, U, U, C.POINTER(U)]),
                 ('metal_ir_lower', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
-                ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]), ('metal_ir_values', U, [P])):
+                ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]), ('metal_ir_values', U, [P]),
+                ('metal_ir_dispatches', U, [P, C.POINTER(C.POINTER(Dispatch))]),
+                ('metal_ir_dispatch_actor', None, [P, U, C.POINTER(mesh_graph.Actor)])):
             function = getattr(lib, name)
             function.restype, function.argtypes = result, arguments
         COMPILER.append(lib)
@@ -3565,12 +3639,11 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             result = pytree.tree_unflatten(leaves, compiled[k].spec) if any(x is not None for x in leaves) else None
             rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': None})
             return result
-        ops, result = _instantiate(ir, instance(k, j)[0], inputs, compiled[k].spec)
+        ops, result = _instantiate(ir, instance(k, j)[0], inputs, compiled[k].spec, row)
         builder = _Builder(compiler, owners, role, row, (k << 48) | (j << 32))
         owned[id(builder)] = lambda p=builder.p: compiler.metal_ir_program_free(p)
-        place = GPU if 'mps' in {layout[2] for layout in ir.layouts} else CPU
         for g in ops:
-            builder.generic(g, place)
+            builder.generic(g)
         receives, sends = _endpoints(ir)
         marks = {'received': [], 'sent': [], 'sending': {}}
         # 6's stage A: each received range (this call's own transfer i landing in its value v; a result of call r of
@@ -3587,7 +3660,7 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             marks['received'].append((value, f, v, declared))
         for i in sends:
             whole = storage(k, ir.declared[i].value, j)
-            release, value = Release(total=whole.untyped_storage().nbytes(), transfer=i), builder.root(whole)
+            release, value = Release(transfer=i), builder.root(whole)
             compiler.metal_ir_value_sends(builder.p, value, C.byref(release))
             marks['sent'].append((value, release))
         for i in receives + sends:
@@ -3595,17 +3668,53 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
         if compiler.metal_ir_lower(builder.p, device, error, len(error)):
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its lowering: %s'
                           % (node.name, k, error.value.decode()))
+        rows_work = _work(compiler, builder.p)
         prepared = _owned(owned, lib.MetalRecorderPrepare(recorder, builder.p, error, len(error)))
         if not prepared:
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its preparation: %s'
                           % (node.name, k, error.value.decode()))
         rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': builder, 'prepared': prepared,
-                     'marks': marks, 'receives': receives, 'sends': sends})
+                     'marks': marks, 'receives': receives, 'sends': sends, 'work': rows_work[0],
+                     'launches': rows_work[1]})
         return result
     _Program(gm, call).run(*[instance(k, 0)[1][i][0] if k is not None else constant
                              for i, (constant, k) in enumerate(zip(constants, holders))])
     return {'lib': lib, 'recorder': recorder, 'owners': owners, 'rated': rated, 'rows': rows, 'compiler': compiler,
             'device': device}
+
+
+# mesh-graph.h mesh_graph_actor_time over each dispatch's actor facts (metal_ir_dispatch_actor), on the machine of its
+# resource: a row's device part in ns, and its GPU launches
+def _work(compiler, p):
+    machines, made = _machines(), C.POINTER(Dispatch)()
+    count = compiler.metal_ir_dispatches(p, C.byref(made))
+    total = launches = 0
+    for d in range(count):
+        resource = CPU if made[d].kind == TASK_DISPATCH else GPU
+        launches += resource == GPU
+        if resource in machines:
+            actor = mesh_graph.Actor()
+            compiler.metal_ir_dispatch_actor(p, d, C.byref(actor))
+            total += mesh_graph.LIB.mesh_graph_actor_time(C.byref(machines[resource]), C.byref(actor))
+    return total, launches
+
+
+def _times(programs, irs):
+    machines, made = _machines(), [[] for _ in irs]
+    for row in programs['rows']:
+        if row['builder'] is not None:
+            made[row['k']].append((row['work'], row['launches']))
+    times = []
+    for k, ir in enumerate(irs):
+        work = sum(w for w, _ in made[k]) / max(len(made[k]), 1)
+        host = 0.0
+        if CPU in machines:
+            written = sum(ir.values[v].section.bytes for v, _ in ir.inputs.values())
+            launches = sum(n for _, n in made[k]) / max(len(made[k]), 1)
+            host = mesh_graph.LIB.mesh_graph_actor_time(C.byref(machines[CPU]), C.byref(mesh_graph.Actor(
+                0.0, 1, 1, written, int(math.ceil(launches)), 0, None)))
+        times.append((host, work))
+    return times
 
 
 # M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; metal_recording.h levels: and
@@ -3709,7 +3818,7 @@ def _expanded(selection, owned, reader, addresses, base):
 # replay and compiled CPU entries the row (MetalCall `call` = j + 1) of the one native program, prepared with the
 # plan's results (mesh-collective.h struct mesh_planned) and retained by it until retirement
 def _replays(programs, context, irs, planned, horizon, values, addresses, base, buffer, period, owned, made, steps,
-             every):
+             every, times):
     lib, recorder, error = programs['lib'], programs['recorder'], C.create_string_buffer(4096)
     queue, rows, selection = OBJECT(recorder, _SEL(b'queue')), [], {'every': every, 'rated': programs['rated']}
 
@@ -3748,7 +3857,8 @@ def _replays(programs, context, irs, planned, horizon, values, addresses, base, 
     calls = (Call * len(rows))(*[Call(C.pointer(r[0]) if r is not None and r[0].commands else None, row + 1,
                                       r[1] if r is not None else None, r[2] if r is not None else 0)
                                  for row, r in enumerate(rows)])
-    program = _owned(owned, lib.MetalRecorderProgram(recorder, calls, len(calls), horizon, C.byref(planned), error,
+    spans = (C.c_double * max(2 * len(rows), 1))(*[t for row in programs['rows'] for t in times[row['k']]])
+    program = _owned(owned, lib.MetalRecorderProgram(recorder, calls, len(calls), spans, C.byref(planned), error,
                                                      len(error)))
     if not program:
         raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
@@ -3764,6 +3874,15 @@ def _replays(programs, context, irs, planned, horizon, values, addresses, base, 
         signed = dict(mesh_graph.forms(replayed), record=mesh_graph.record(replayed))
     finally:
         mesh_graph.free(replayed)
+    # tools/e2b_replay.m signature_write: the record and its three printed forms beside the prefix MESH_SIGNATURE names,
+    # the mesh-sync-monitor.py operand
+    prefix = os.environ.get('MESH_SIGNATURE')
+    if prefix:
+        for suffix, data in (('.record', signed['record']), ('.mtx', signed['matrix_market'].encode()),
+                             ('.dot', signed['dot'].encode()), ('.txt', signed['space_time'].encode())):
+            with open(prefix + suffix, 'wb') as written:
+                written.write(data)
+        print('prepared signature %s digest %s' % (prefix, signed['digest']), flush=True)
     gpu = OBJECT(queue, _SEL(b'device'))
     allocators = (C.c_void_p * horizon)(*[_owned(owned, OBJECT(gpu, _SEL(b'newCommandAllocator')))
                                           for _ in range(horizon)])
@@ -3992,7 +4111,7 @@ class _Program(torch.fx.Interpreter):
 # effects that persist from one execution to the next), `mutated` the flat input leaves it writes; `passed` its result
 # leaves that are its own inputs, {flat output leaf: flat input leaf} (an output that is placeholder q, the
 # placeholders being the flat input leaves in order)
-Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec moves written read mutated '
+Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec written read mutated '
                                               'passed')
 
 
@@ -4106,16 +4225,12 @@ class _Export(torch.fx.Interpreter):
             gm = exported.module(check_guards=False)
             _RemoveRuntimeAssertionsPass()(gm)
             _static(gm)
-            moves = _sourced(gm)
-            if moves and function.device is not None:
-                raise NotImplementedError('%s: a part of a split function still moves a value between backends'
-                                          % (n.name,))
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
             result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
             given, inputs = exported.graph_signature, [node for node in gm.graph.nodes if node.op == 'placeholder']
             mutated = set(given.user_inputs_to_mutate.values())
             self.compiled.append(Compiled(function, signature, gm, pytree.tree_flatten((args, kwargs))[0], result,
-                                          exported.call_spec.out_spec, moves,
+                                          exported.call_spec.out_spec,
                                           _storages(function.module, [*given.buffers_to_mutate.values(),
                                                                       *given.parameters_to_mutate.values()]),
                                           _storages(function.module, [*given.inputs_to_buffers.values(),
@@ -4149,11 +4264,12 @@ def program(block, *example_inputs, horizon=HOST_LAG):
     gm = torch.fx.GraphModule(tracer.root, graph)
     exporter = _Export(gm, FakeTensorMode())
     exporter.run(*[exporter.fake(x) for x in example_inputs])
-    if any(record.moves for record in exporter.compiled):
-        _split(gm, exporter)
-        exporter = _Export(gm, FakeTensorMode())
-        exporter.run(*[exporter.fake(x) for x in example_inputs])
     compiled, of, calls, sources = exporter.compiled, exporter.of, exporter.calls, exporter.sources
+    # the block's returned leaves (_Export `marks` of its output's arguments): a call's result leaf the caller receives
+    # at every node of the program, delivered where its function has no section (_deliver)
+    returned = {(calls[leaf.call], leaf.leaf) for leaf in pytree.tree_leaves(map_arg(
+        next(n for n in gm.graph.nodes if n.op == 'output').args, lambda a: exporter.marks.get(a)))
+        if isinstance(leaf, _Produced) and leaf.call is not None}
     # the traced block's calls of each function (`every`) and each call's ordinal among them (`place`): the static
     # call identities the analysis's bound, the capture's generations, step words and block-copy selection take
     # (mesh_plan receives `calls` and publishes the same, planned.call)
@@ -4172,7 +4288,7 @@ def program(block, *example_inputs, horizon=HOST_LAG):
     given = [(x.dtype, x.numel(), x.device.type, tuple(x.shape)) if isinstance(x, torch.Tensor) else None
              for x in example_inputs]
     constants = [None if isinstance(x, torch.Tensor) else x for x in example_inputs]
-    context, state = _context(), {'stale': True, 'mapping': None, 'devices': (), 'executions': 0,
+    context, state = _context(), {'stale': True, 'mapping': None, 'devices': (), 'executions': 0, 'horizon': 1,
                                   'inputs': [None] * len(given), 'timeout': None, 'replay': None, 'owned': {}}
 
     def make():
@@ -4191,7 +4307,7 @@ def program(block, *example_inputs, horizon=HOST_LAG):
         for j, _, leaf in reads:
             if leaf.call is not None:
                 wanted.setdefault((calls[leaf.call], leaf.leaf), set()).add(calls[j])
-        _deliver(irs, wanted)
+        _deliver(irs, wanted, returned, _program())
         for ir, record in zip(irs, compiled):
             lower(ir)
             ir.weights = _weighed(ir, record.function)
@@ -4214,7 +4330,7 @@ def program(block, *example_inputs, horizon=HOST_LAG):
         for i, (x, functions) in enumerate(zip(given, readers)):
             k = next((k for k in functions if irs[k].device is not None), None)
             if x is not None and k is not None:
-                irs[k].inputs[i] = (irs[k].value(*x[:3], 0, 0, 0, lag=horizon), x[3])
+                irs[k].inputs[i] = (irs[k].value(*x[:3], 0, 0, 0, lag=1), x[3])
             holders.append(k if x is not None else None)
         # design/torch-capture-change-request.md item 9: "every node runs its captured program by replay, its
         # collectives included"; design/aot-compilation-change-request.md, appendix item 6
@@ -4232,16 +4348,19 @@ def program(block, *example_inputs, horizon=HOST_LAG):
             steps = {}
             for k in dict.fromkeys(row['k'] for row in programs['rows'] if row['builder'] is not None):
                 steps[k] = len(irs[k].values) + len(own[k])
-                own[k].append(mesh.Value(section=mesh.Section(bytes=8), kind=mesh.EXECUTION,
-                                         lag=horizon * every[k], run=1))
+                own[k].append(mesh.Value(section=mesh.Section(bytes=8), kind=mesh.EXECUTION, lag=1, run=1))
             arrays = [((mesh.Declared * len(ir.declared))(*ir.declared),
                        (mesh.Weight * len(ir.weights))(*ir.weights),
                        (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
                        (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir, mine in zip(irs, own)]
+            # design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: each function's t(v) at this
+            # node a call, its device part (_work) and its host part, the host's writes of its block inputs and its
+            # launches' encoding as a CPU actor; mesh_plan's Bff of their edges the horizon and host copies
+            times = _times(programs, irs)
             functions = (mesh.Function * len(irs))(*[
                 mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
                               C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
-                              len(e), 0, analysed.outstanding[k], 0)
+                              len(e), 0, analysed.outstanding[k], 0, *times[k])
                 for k, (d, w, v, e) in enumerate(arrays)])
             # design/compilation-composition-change-request.md item 6, unit 6D: the plan's results for native
             # preparation (mesh-collective.h struct mesh_planned), each call's plan, lead, ordinal and every the
@@ -4249,7 +4368,7 @@ def program(block, *example_inputs, horizon=HOST_LAG):
             planned = mesh.Planned()
             mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
                                           (mesh.U * len(calls))(*calls), len(calls), analysed.orders,
-                                          analysed.causes, analysed.norders, analysed.chains, horizon, deadline,
+                                          analysed.causes, analysed.norders, analysed.chains, deadline,
                                           C.byref(planned)))
             state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
             state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
@@ -4267,10 +4386,12 @@ def program(block, *example_inputs, horizon=HOST_LAG):
                 bound = [_bind(ir, values, at, buffer, hull.address, page, state['mapping'])
                          for ir, values, at in zip(irs, listed, addresses)]
                 state['inputs'] = [next((b[2][i] for b in bound if i in b[2]), None) for i in range(len(given))]
-                outputs = _specialize(programs, horizon, bound, gm, constants, state['inputs'], every)
+                state['horizon'] = planned.horizon
+                outputs = _specialize(programs, planned.horizon, bound, gm, constants, state['inputs'], every)
                 # 6's stage E: each row bound to its placed storage and replayed into the one native program
-                state['replay'] = _replays(programs, context, irs, planned, horizon, listed, addresses, hull.address,
-                                           buffer, len(outputs), state['owned'], made, steps, every)
+                state['replay'] = _replays(programs, context, irs, planned, planned.horizon, listed, addresses,
+                                           hull.address, buffer, len(outputs), state['owned'], made, steps, every,
+                                           times)
                 state['replay'].update(outputs=outputs)
             finally:
                 if buffer:
@@ -4315,8 +4436,8 @@ def program(block, *example_inputs, horizon=HOST_LAG):
         if state['stale']:
             make()
         b = state['executions']
-        _wait(lambda: ended() + horizon > b, ended, 'execution %d of the program: execution %d not ended, no end for '
-              'MESH_PLATFORM_NS, so its inputs\' copy is not free (D.3.3)' % (b, b - horizon))
+        _wait(lambda: ended() + state['horizon'] > b, ended, 'execution %d of the program: execution %d not ended, no '
+              'end for MESH_PLATFORM_NS, so its inputs\' copy is not free (D.3.3)' % (b, b - state['horizon']))
         return tuple(None if placed is None else placed[1][b % len(placed[1])] for placed in state['inputs'])
 
     # design/compilation-composition-change-request.md item 5

@@ -14,7 +14,10 @@ import mesh_graph
 REVIEWS = os.path.join(HERE, '..', '..', '..', 'metal-microbench', 'output_data', 'change-request-reviews.jsonl')
 KINDS, PRIMITIVES = mesh_graph.KINDS, mesh_graph.PRIMITIVES
 NONE = 0xFFFFFFFF
-OBJC = [
+ROLES = {'submit': 'queue', 'queue_signal': 'queue', 'queue_wait': 'queue', 'fence_update': 'queue', 'fence_wait': 'queue',
+         'pass_barrier': 'queue', 'queue_barrier': 'queue', 'producer_barrier': 'queue', 'host_notify': 'listener'}
+# the program thread's synchronization calls: primitive, probe, the call's object, its value, its queue (D expressions)
+PROBES = [
     ('submit', 'objc$target::-commit?count?options?:', None, 'arg3', 'arg0'),
     ('queue_signal', 'objc$target::-signalEvent?value?:', 'arg2', 'arg3', 'arg0'),
     ('queue_wait', 'objc$target::-waitForEvent?value?:', 'arg2', 'arg3', 'arg0'),
@@ -25,87 +28,177 @@ OBJC = [
     ('producer_barrier', 'objc$target::-barrierAfterStages?beforeQueueStages?visibilityOptions?:', None, None, None),
     ('host_wait', 'pid$target::MetalEventWait:', 'arg0', 'arg1', None),
     ('host_notify', 'objc$target::-notifyListener?atValue?block?:', 'arg0', 'arg3', None),
-    ('bridge_start', 'pid$target::mesh_transfers_start:', None, 'arg2', None),
-    ('host_publish', 'pid$target::mesh_host_publish:', None, 'arg3 + 1', None),
+    ('host_publish', 'pid$target::mesh_host_publish:', '(arg1 << 20) + arg2', 'arg3 + 1', None),
     ('host_signal', 'objc$target::-setSignaledValue?:', 'arg0', 'arg2', None),
-    ('host_wait', 'pid$target::MetalNativeWait:', None, 'arg4 + 1', None),
-    ('host_wait', 'pid$target::MetalSentWait:', None, 'arg1 + 1', None),
+    ('host_wait', 'pid$target::MetalNativeWait:', '(arg2 << 20) + *(uint32_t *)copyin(arg3 + 4, 4)', 'arg4 + 1', None),
+    ('host_wait', 'pid$target::MetalSentWait:', 'arg0', 'arg1 + 1', None),
 ]
+# mesh-dataflow.c mesh_transfers_start: the submission, checked at its return (after the plan's count waits it holds)
+START = ('bridge_start', 'pid$target::mesh_transfers_start:', 'arg1', 'arg2')
 UNLISTED = [
     'objc$target::-waitUntilCompleted:entry',
     'objc$target::-waitUntilScheduled:entry',
+    'objc$target::-waitUntilSignaledValue?timeoutMS?:entry',
     'pid$target::dispatch_semaphore_wait:entry',
     'pid$target::os_sync_wait_on_address:entry',
     'pid$target::os_sync_wait_on_address_with_timeout:entry',
     'pid$target::pthread_cond_wait:entry',
     'pid$target::pthread_cond_timedwait:entry',
+    'pid$target::nanosleep:entry',
+    'pid$target::usleep:entry',
 ]
-VALUED = {'submit', 'queue_signal', 'queue_wait', 'host_wait', 'host_notify', 'bridge_start', 'host_publish', 'host_signal'}
+# mesh-bridge.h enum COUNT, struct mesh_count (group at 0, count at 40, node/sink/function/entry at 48..60)
+COUNT_KIND = 9
+# where each compiled operation is established: `program` by this node's program-thread probes in the record's issue
+# order, `static` by the compiled kernels' IR (item 6), `bridge` by this node's bridge raises (read-only, --bridge),
+# `implied` the plan's count waits held inside mesh_transfers_start, `initial` the plan's cleared count words,
+# `elsewhere` another node's processors (that node's monitor)
+CLASSES = ('program', 'static', 'bridge', 'implied', 'initial', 'elsewhere')
 
 
-def observed_here(processors, o):
-    node = {p.index % mesh_graph.NODES for p in processors if KINDS[p.kind] == 'queue'}
-    kind = KINDS[processors[o.processor].kind]
-    return kind in ('queue', 'host') and processors[o.processor].index % mesh_graph.NODES in node and \
-        PRIMITIVES[o.primitive] != 'initial' and not mesh_graph.PLAN_COUNT <= o.object < mesh_graph.PLAN_SUBMISSION
+def load(path):
+    made = mesh_graph.from_record(open(path, 'rb').read())
+    try:
+        compiled = mesh_graph.forms(made)
+        processors = [mesh_graph.Processor.from_buffer_copy(p) for p in made.processor[:made.processors]]
+        tasks = [mesh_graph.Task.from_buffer_copy(t) for t in made.task[:made.tasks]]
+        dependences = [mesh_graph.Dependence.from_buffer_copy(d) for d in made.dependence[:made.dependences]]
+        operations = [mesh_graph.Operation.from_buffer_copy(o) for o in made.operation[:made.operations]]
+        lane = {p: [made.order[k] for k in range(made.first[p], made.first[p + 1])] for p in range(made.processors)}
+    finally:
+        mesh_graph.free(made)
+    return compiled, processors, tasks, dependences, operations, lane
 
 
-# mesh-graph.h struct mesh_graph_signature `first`/`order`: each processor's operations in its compiled order
-def lanes(processors, rows):
-    lane, order = {}, {}
-    for p, ops in sorted(rows.items()):
-        mine = [o for o in ops if observed_here(processors, o)]
-        if mine:
-            order[len(order)] = mine
-    for p, ops in order.items():
-        for o in ops:
-            lane.setdefault(PRIMITIVES[o.primitive], set()).add(p)
-    return order, lane
+def classify(processors, operations):
+    queues = {p.index % mesh_graph.NODES for p in processors if KINDS[p.kind] == 'queue'}
+    if len(queues) > 1:
+        raise ValueError('the record holds queues of nodes %s: one node\'s program a record' % sorted(queues))
+    node = queues.pop() if queues else None
+
+    def which(o):
+        p, name = processors[o.processor], PRIMITIVES[o.primitive]
+        if KINDS[p.kind] == 'kernel':
+            return 'static'
+        if name == 'initial':
+            return 'initial'
+        if p.index % mesh_graph.NODES != node:
+            return 'elsewhere'
+        if KINDS[p.kind] == 'bridge':
+            return 'bridge'
+        if name == 'host_wait' and mesh_graph.PLAN_COUNT <= o.object < mesh_graph.PLAN_SUBMISSION:
+            return 'implied'
+        return 'program'
+    return node, [which(o) for o in operations]
 
 
-def generate(processors, rows, window, runs, observe):
-    order, home = lanes(processors, rows)
-    notes = ['%s is on lanes %s: the monitor orders it on %d only' % (name, sorted(places), min(places))
-             for name, places in sorted(home.items()) if len(places) > 1]
-    lines = ['#pragma D option quiet', '#pragma D option strsize=256'] + ([] if observe else ['#pragma D option destructive'])
-    lines.append('BEGIN { armed = 0; runs = 0; }')
-    for p, ops in sorted(order.items()):
-        lines.append('BEGIN { n[%d] = %d; cur[%d] = 0; }' % (p, len(ops), p))
-        for start in range(0, len(ops), 96):
-            body = ['e[%d, %d] = %d; o[%d, %d] = %d; v[%d, %d] = %d; q[%d, %d] = %d;' % (
-                p, i, ops[i].primitive, p, i, ops[i].object, p, i, ops[i].value, p, i, ops[i].processor)
-                for i in range(start, min(start + 96, len(ops)))]
-            lines.append('BEGIN { %s }' % ' '.join(body))
-    lines.append('pid$target::%s:entry /runs < %d/ { armed = 1; self->inrun = 1; }' % (window, runs))
-    lines.append('pid$target::%s:return /self->inrun/ { self->inrun = 0; runs++; armed = runs < %d; }' % (window, runs))
-    entries = []
-    for name, probe, obj, val, queue in OBJC:
-        p = min(home[name]) if name in home else -1
-        entries.append(probe + 'entry')
-        lines.append('%sentry /armed/ { self->inapi++; this->p = %d; this->c = %d; this->ob = %s; this->hasob = %d; '
-                     'this->va = %s; this->hasva = %d; this->qu = %s; this->hasqu = %d; }' % (
-                         probe, p, PRIMITIVES.index(name), obj or '0', obj is not None, val or '0', name in VALUED,
-                         queue or '0', queue is not None))
-        lines.append('%sreturn /self->inapi/ { self->inapi--; }' % probe)
-    shared = ',\n'.join(entries)
-    lines.append('%s /armed/ { this->i = this->p < 0 ? 0 : cur[this->p]; this->ok = this->p >= 0 && this->i < n[this->p] && '
-                 'e[this->p, this->i] == this->c && (!this->hasva || v[this->p, this->i] == this->va) && (!this->hasob || '
-                 'om[this->ob] == 0 || om[this->ob] == o[this->p, this->i] + 1) && (!this->hasqu || qm[this->qu] == 0 || '
-                 'qm[this->qu] == q[this->p, this->i] + 1); }' % shared)
-    lines.append('%s /armed && this->ok/ { om[this->hasob ? this->ob : 0] = this->hasob ? o[this->p, this->i] + 1 : om[0]; '
-                 'qm[this->hasqu ? this->qu : 0] = this->hasqu ? q[this->p, this->i] + 1 : qm[0]; cur[this->p]++; '
-                 'printf("mesh-sync-monitor: observed %%d %%d %%d %%d %%d %%d\\n", q[this->p, this->i], this->c, this->i, '
-                 'this->hasob ? o[this->p, this->i] : -1, this->va, tid); }' % shared)
+def role(processors, node, name):
+    want = ROLES.get(name, 'host')
+    for q, p in enumerate(processors):
+        if p.index % mesh_graph.NODES != node:
+            continue
+        if want == 'queue' and KINDS[p.kind] == 'queue' or want == 'host' and KINDS[p.kind] == 'host' and \
+                p.index < mesh_graph.NODES or want == 'listener' and KINDS[p.kind] == 'host' and p.index >= mesh_graph.NODES:
+            return q
+    raise ValueError('no %s processor of node %s in the record' % (want, node))
+
+
+def generate(operations, program, observe):
+    total, executions = len(program), 1 + max((operations[i].execution for i in program), default=0)
+    lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
+             '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])
+    lines += ['self int inrun, inapi, bs;', 'self uint64_t exec, ended, bsob, bsva;', 'int64_t cur;',
+              'int64_t e[int64_t], o[int64_t], v[int64_t], x[int64_t], q[int64_t];',
+              'int64_t om[uint64_t], ko[int64_t], lm[uint64_t], kl[int64_t];', 'BEGIN { cur = 0; }']
+    for start in range(0, total, 64):
+        lines.append('BEGIN { %s }' % ' '.join(
+            'e[%d] = %d; o[%d] = %d; v[%d] = %d; x[%d] = %d; q[%d] = %d;' % (
+                k, operations[i].primitive, k, operations[i].object, k, operations[i].value, k, operations[i].execution, k,
+                operations[i].processor) for k, i in enumerate(program[start:start + 64], start)))
+    lines.append('pid$target::MetalProgramRun:entry { self->inrun = 1; self->exec = arg2; self->ended = arg4; }')
+    lines.append('pid$target::MetalProgramRun:return /self->inrun/ { self->inrun = 0; '
+                 'printf("mesh-sync-monitor: run %d\\n", (int)arg1); }')
     act = 'ustack(); exit(1);' if observe else 'ustack(); stop(); exit(1);'
-    lines.append('%s /armed && !this->ok/ { printf("mesh-sync-monitor: unexpected primitive %%d on lane %%d at position %%d '
-                 '(expected primitive %%d value %%d, given value %%d) thread %%d\\n", this->c, this->p, this->i, '
-                 'this->p >= 0 ? e[this->p, this->i] : -1, this->p >= 0 ? v[this->p, this->i] : -1, this->va, tid); %s }'
-                 % (shared, act))
-    lines.append('%s /armed && self->inrun && !self->inapi/ { printf("mesh-sync-monitor: unexpected %%s %%s thread %%d\\n", '
-                 'probeprov, probefunc, tid); %s }' % (',\n'.join(UNLISTED), act))
-    lines.append('END { %s }' % ' '.join('printf("mesh-sync-monitor: lane %d observed %%d of %d\\n", cur[%d]);'
-                                         % (p, len(ops), p) for p, ops in sorted(order.items())))
-    return '\n'.join(lines) + '\n', notes
+    ended = (PRIMITIVES.index('queue_signal'), PRIMITIVES.index('host_signal'))
+
+    def check(probe, name, obj, val, lane, point, predicate):
+        guard = '/this->checked && %s/'
+        lines.append('%s%s %s { this->checked = 1; this->c = %d; this->ob = %s; this->hasob = %d; this->va = %s; '
+                     'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->ok = this->i < %d && '
+                     'e[this->i] == this->c && x[this->i] == self->exec && (!this->hasva || v[this->i] == this->va) && '
+                     '(!this->hasob || ((om[this->ob] == 0 || om[this->ob] == o[this->i] + 1) && (ko[o[this->i]] == 0 || '
+                     'ko[o[this->i]] == this->ob + 1))) && (!this->hasln || ((lm[this->ln] == 0 || lm[this->ln] == '
+                     'q[this->i] + 1) && (kl[q[this->i]] == 0 || kl[q[this->i]] == this->ln + 1)))%s; }' % (
+                         probe, point, predicate, PRIMITIVES.index(name), obj or '0', obj is not None, val or '0', val is not None,
+                         lane or '0', lane is not None, total, ' && arg1 == 0' if name == 'bridge_start' else ''))
+        lines.append('%s %s { om[this->hasob ? this->ob : 0] = this->hasob ? o[this->i] + 1 : om[0]; '
+                     'ko[this->hasob ? o[this->i] : -1] = this->hasob ? this->ob + 1 : ko[-1]; '
+                     'lm[this->hasln ? this->ln : 0] = this->hasln ? q[this->i] + 1 : lm[0]; '
+                     'kl[this->hasln ? q[this->i] : -1] = this->hasln ? this->ln + 1 : kl[-1]; cur++; '
+                     'printf("mesh-sync-monitor: observed %%d %%d %%d %%d %%d %%d\\n", this->i, this->c, this->hasob ? '
+                     'o[this->i] : -1, this->hasva ? (int64_t)this->va : -1, self->exec, tid); '
+                     'self->exec += this->hasob && this->ob == self->ended && (this->c == %d || this->c == %d) ? 1 : 0; }'
+                     % (probe + point, guard % 'this->ok', ended[0], ended[1]))
+        lines.append('%s %s { printf("mesh-sync-monitor: unexpected %s at operation %%d of %d, execution %%d (compiled '
+                     'primitive %%d value %%d execution %%d; called value %%d) thread %%d\\n", this->i, self->exec, '
+                     'this->i < %d ? e[this->i] : -1, this->i < %d ? v[this->i] : -1, this->i < %d ? x[this->i] : -1, '
+                     'this->hasva ? (int64_t)this->va : -1, tid); %s }' % (probe + point, guard % '!this->ok', name, total,
+                                                                          total, total, total, act))
+
+    for name, probe, obj, val, lane in PROBES:
+        check(probe, name, obj, val, lane, 'entry', '/self->inrun && self->inapi == 0 && self->exec < %d/' % executions)
+        lines.append('%sentry /self->inrun/ { self->inapi++; }' % probe)
+        lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
+    name, probe, obj, val = START
+    lines.append('%sentry /self->inrun && self->inapi == 0 && self->exec < %d/ { self->bs = 1; self->bsob = %s; '
+                 'self->bsva = %s; }' % (probe, executions, obj, val))
+    lines.append('%sentry /self->inrun/ { self->inapi++; }' % probe)
+    lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
+    check(probe, name, 'self->bsob', 'self->bsva', None, 'return', '/self->bs/')
+    lines.append('%sreturn /self->bs/ { self->bs = 0; }' % probe)
+    lines.append('%s /self->inrun && self->inapi == 0 && self->exec < %d/ { printf("mesh-sync-monitor: unexpected %%s %%s '
+                 'execution %%d thread %%d\\n", probeprov, probefunc, self->exec, tid); %s }' % (
+                     ',\n'.join(UNLISTED), executions, act))
+    lines.append('END { printf("mesh-sync-monitor: program %%d of %d\\n", cur); }' % total)
+    return '\n'.join(lines) + '\n', executions
+
+
+def bridge_program(group):
+    return '\n'.join([
+        '#pragma D option quiet', '#pragma D option bufsize=16m',
+        'pid$1::tree_toward:entry /arg0 == %d/ { this->m = (uint64_t *)copyin(arg1, 64); }' % COUNT_KIND,
+        'pid$1::tree_toward:entry /arg0 == %d && this->m[0] == %d/ { this->w = (uint32_t *)this->m; '
+        'printf("mesh-sync-monitor: raise %%d %%d %%d %%d %%d\\n", this->m[5], this->w[12], this->w[13], this->w[14], '
+        'this->w[15]); }' % (COUNT_KIND, group)]) + '\n'
+
+
+# the bridge's raises against its compiled order: a count word is monotone (mesh-records.c counts_tell sends the
+# plan's submissions), so one raise of count c answers every pending raise of its word up to c; a raise's word is its
+# (node, sink, function, entry), bound one to one to the compiled object
+def bridge_match(expected, operations, raises):
+    bound, back, pending, made, missing = {}, {}, {}, [], []
+    for i in expected:
+        pending.setdefault(operations[i].object, []).append(i)
+    seen = set()
+    for count, *word in raises:
+        key = tuple(word)
+        if (key, count) in seen:
+            continue
+        seen.add((key, count))
+        candidates = [obj for obj, rows in pending.items() if rows and operations[rows[0]].value <= count]
+        obj = bound.get(key)
+        if obj is None:
+            free = [c for c in candidates if c not in back]
+            if len(free) != 1:
+                continue
+            obj = free[0]
+            bound[key], back[obj] = obj, key
+        rows = pending.get(obj, [])
+        while rows and operations[rows[0]].value <= count:
+            made.append((rows.pop(0), count))
+    for rows in pending.values():
+        missing += rows
+    return made, missing
 
 
 def verbs_owners():
@@ -115,95 +208,165 @@ def verbs_owners():
     return owners
 
 
+def cover(path):
+    compiled, processors, _, _, operations, _ = load(path)
+    nodes = {p.index % mesh_graph.NODES for p in processors if KINDS[p.kind] != 'kernel'}
+    runs = [json.loads(line) for line in open(REVIEWS)] if os.path.exists(REVIEWS) else []
+    runs = [r for r in runs if r.get('kind') == 'synchronization-monitor' and r.get('sha256') == compiled['digest'] and
+            r.get('result') in ('pass', 'pass-scoped')]
+    covered = {r.get('node') for r in runs}
+    blind = {}
+    for r in runs:
+        for name, n in (r.get('blind') or {}).items():
+            if name != 'elsewhere':
+                blind['node %s %s' % (r.get('node'), name)] = n
+    remaining = sorted(nodes - covered)
+    print('mesh-sync-monitor: %s: nodes %s, observed on %s, not observed on %s, unobserved classes %s' % (
+        compiled['digest'], sorted(nodes), sorted(covered), remaining, blind or 'none'))
+    full = not remaining and not blind
+    print('mesh-sync-monitor: %s' % ('full coverage' if full else 'scoped coverage only'))
+    return 0 if full else 1
+
+
 def main(argv):
-    if len(argv) < 3 or argv[1] not in ('generate', 'run'):
-        sys.stderr.write('usage: mesh-sync-monitor.py generate SIGNATURE.record [--window FUNCTION] [--runs N] [--observe]\n'
-                         '       mesh-sync-monitor.py run SIGNATURE.record [--window FUNCTION] [--runs N] [--observe] '
-                         '(-p PID | -- COMMAND ...)\n')
+    if len(argv) < 3 or argv[1] not in ('generate', 'run', 'cover'):
+        sys.stderr.write('usage: mesh-sync-monitor.py generate SIGNATURE.record [--observe]\n'
+                         '       mesh-sync-monitor.py run SIGNATURE.record [--observe] [--bridge PID --group GROUP] '
+                         '(-p PID | -- COMMAND ...)\n'
+                         '       (pid probes are made when dtrace attaches: a program that loads libmetal_recording and '
+                         'libmesh after it starts is attached with -p once loaded)\n'
+                         '       mesh-sync-monitor.py cover SIGNATURE.record\n')
         return 2
     mode, path, rest = argv[1], argv[2], argv[3:]
-    window, runs, pid, command, observe = 'MetalProgramRun', None, None, None, False
+    if mode == 'cover':
+        return cover(path)
+    pid, command, observe, bridge, group = None, None, False, None, None
     while rest:
-        if rest[0] == '--window': window, rest = rest[1], rest[2:]
-        elif rest[0] == '--runs': runs, rest = int(rest[1]), rest[2:]
-        elif rest[0] == '-p': pid, rest = rest[1], rest[2:]
+        if rest[0] == '-p': pid, rest = rest[1], rest[2:]
         elif rest[0] == '--observe': observe, rest = True, rest[1:]
+        elif rest[0] == '--bridge': bridge, rest = rest[1], rest[2:]
+        elif rest[0] == '--group': group, rest = int(rest[1], 0), rest[2:]
         elif rest[0] == '--': command, rest = rest[1:], []
         else:
             sys.stderr.write('mesh-sync-monitor: unknown argument %s\n' % rest[0])
             return 2
-    signature = mesh_graph.from_record(open(path, 'rb').read())
-    rebuilt = mesh_graph.forms(signature)
-    compiled = rebuilt['digest']
-    processors = [mesh_graph.Processor.from_buffer_copy(p) for p in signature.processor[:signature.processors]]
-    operations = [mesh_graph.Operation.from_buffer_copy(o) for o in signature.operation[:signature.operations]]
-    rows = {p: [operations[signature.order[k]] for k in range(signature.first[p], signature.first[p + 1])]
-            for p in range(signature.processors)}
-    mesh_graph.free(signature)
-    if rebuilt.get('unknown'):
-        sys.stderr.write('mesh-sync-monitor: unknown kernel synchronization %s (no recorded source or entry)\n'
-                         % (rebuilt['unknown'],))
-    executions = 1 + max((o.execution for o in operations), default=0)
-    runs = runs or 1
-    program, notes = generate(processors, rows, window, runs, observe)
-    for note in notes:
-        sys.stderr.write('mesh-sync-monitor: %s\n' % note)
-    kernel = [o for o in operations if KINDS[processors[o.processor].kind] == 'kernel']
-    sys.stderr.write('mesh-sync-monitor: %d kernel counts are static (item 6) and not observed by DTrace\n' % len(kernel))
-    unobserved = {}
-    for o in operations:
-        if KINDS[processors[o.processor].kind] != 'kernel' and not observed_here(processors, o):
-            unobserved[(o.processor, PRIMITIVES[o.primitive])] = unobserved.get((o.processor, PRIMITIVES[o.primitive]), 0) + 1
-    if unobserved:
-        sys.stderr.write('mesh-sync-monitor: compiled, outside these probes (other nodes, the bridge, initial counts, the '
-                         'plan\'s count waits inside mesh_transfers_start): %s\n' % sorted(unobserved.items()))
-    script = os.path.splitext(path)[0] + '.monitor.d'
-    open(script, 'w').write(program)
-    sys.stderr.write('mesh-sync-monitor: %s written, digest %s, %d executions in %d calls of %s\n' % (
-        script, compiled, executions, runs, window))
+    compiled, processors, tasks, dependences, operations, lane = load(path)
+    node, which = classify(processors, operations)
+    program = [i for i, c in enumerate(which) if c == 'program']
+    coverage = {c: which.count(c) for c in CLASSES if c in which}
+    script, executions = generate(operations, program, observe)
+    target_path = os.path.splitext(path)[0] + '.monitor.d'
+    open(target_path, 'w').write(script)
+    # item 4: every compiled edge the image of a dependence and none redundant, before anything runs; item 6: every
+    # kernel's synchronization known from its compiled IR
+    before = []
+    if compiled['states'].get('false'):
+        before.append('%d synchronization edges with no dependence under them' % compiled['states']['false'])
+    if compiled['redundant']:
+        before.append('%d redundant synchronization edges' % compiled['redundant'])
+    if compiled['unknown']:
+        before.append('kernel synchronization not known from the compiled IR: %s' % sorted(compiled['unknown'].items()))
+    sys.stderr.write('mesh-sync-monitor: %s written, digest %s, node %s, %d executions; operations by class %s; edge '
+                     'states %s\n' % (target_path, compiled['digest'], node, executions, coverage, compiled['states']))
+    for reason in before:
+        sys.stderr.write('mesh-sync-monitor: fails before running: %s\n' % reason)
     if mode == 'generate':
-        return 0
+        return 1 if before else 0
+    record = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+              'kind': 'synchronization-monitor', 'signature': os.path.abspath(path), 'sha256': compiled['digest'],
+              'node': node, 'executions': executions, 'coverage': coverage, 'destructive': not observe}
+    if before:
+        record.update(result='fail', reasons=before)
+        with open(REVIEWS, 'a') as reviews:
+            reviews.write(json.dumps(record) + '\n')
+        return 1
     owners = verbs_owners()
     if (pid and pid in owners) or (command and any('mesh-flow' in c for c in command)):
         sys.stderr.write('mesh-sync-monitor: the target holds the verbs device; a stopped verbs owner wedges the node '
                          'until a person pulls its power (AGENTS.md, The kill guard). Observe the program, not the '
                          'bridge.\n')
         return 2
+    if bridge and (bridge not in owners or group is None):
+        sys.stderr.write('mesh-sync-monitor: --bridge names this node\'s running bridge (%s) and needs --group, the '
+                         'program\'s group\n' % sorted(owners))
+        return 2
+    # dtrace(1) -c splits its command on blanks with no quoting, so an argument holding one is not representable
+    if command and any(not c or re.search(r'\s', c) for c in command):
+        sys.stderr.write('mesh-sync-monitor: dtrace -c cannot pass an empty argument or one holding whitespace: %r\n'
+                         % [c for c in command if not c or re.search(r'\s', c)])
+        return 2
+    watcher = None
+    if bridge:
+        bridge_path = os.path.splitext(path)[0] + '.bridge.d'
+        open(bridge_path, 'w').write(bridge_program(group))
+        watcher = subprocess.Popen(['sudo', 'dtrace', '-q', '-s', bridge_path, bridge], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
     target = ['-p', pid] if pid else ['-c', ' '.join(command)]
-    done = subprocess.run(['sudo', 'dtrace'] + ([] if observe else ['-w']) + ['-Z', '-s', script] + target,
+    done = subprocess.run(['sudo', 'dtrace'] + ([] if observe else ['-w']) + ['-Z', '-s', target_path] + target,
                           capture_output=True, text=True)
+    raised, bridge_text = [], ''
+    if watcher:
+        watcher.send_signal(2)
+        bridge_text = watcher.communicate()[0]
+        raised = [tuple(map(int, m.groups())) for m in
+                  (re.match(r'mesh-sync-monitor: raise (\d+) (\d+) (\d+) (\d+) (\d+)$', line)
+                   for line in bridge_text.splitlines()) if m]
     sys.stdout.write(done.stdout)
     sys.stderr.write(done.stderr)
-    observed = []
+    observed, failures = [], []
     for line in done.stdout.splitlines():
-        m = re.match(r'mesh-sync-monitor: observed (-?\d+) (\d+) \d+ (-?\d+) (\d+) \d+$', line)
+        m = re.match(r'mesh-sync-monitor: observed (\d+) (\d+) (-?\d+) (-?\d+) (\d+) \d+$', line)
         if m:
-            p, c, obj, value = map(int, m.groups())
-            observed.append(mesh_graph.Operation(p, c, NONE, NONE if obj < 0 else obj, 0, value))
+            k, c, obj, value, execution = map(int, m.groups())
+            compiled_op = operations[program[k]]
+            observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[c]), c, compiled_op.vertex,
+                                                 NONE if obj < 0 else obj, execution,
+                                                 compiled_op.value if value < 0 else value))
+        if 'mesh-sync-monitor: unexpected' in line:
+            failures.append(line)
+        m = re.match(r'mesh-sync-monitor: run (-?\d+)$', line)
+        if m and int(m.group(1)):
+            failures.append('MetalProgramRun returned %s' % m.group(1))
+    if done.returncode:
+        failures.append('dtrace exited %d' % done.returncode)
+    if len(observed) != len(program):
+        failures.append('%d of %d compiled program operations observed' % (len(observed), len(program)))
+    blind = {c: n for c, n in coverage.items() if c not in ('program', 'static')}
+    if bridge:
+        made, missing = bridge_match([i for i, c in enumerate(which) if c == 'bridge'], operations, raised)
+        if missing:
+            failures.append('%d compiled bridge raises not observed (%d observed)' % (len(missing), len(made)))
+        blind.pop('bridge', None)
+        observed += [mesh_graph.Operation(operations[i].processor, operations[i].primitive, operations[i].vertex,
+                                          operations[i].object, operations[i].execution, count) for i, count in made]
+    expected_ops = [operations[i] for i in program] + (
+        [operations[i] for i, c in enumerate(which) if c == 'bridge'] if bridge else [])
+    expected = mesh_graph.signature(processors, tasks, dependences, expected_ops)
+    watched = mesh_graph.signature(processors, tasks, dependences, observed)
+    if expected['digest'] != watched['digest']:
+        failures.append('observed graph %s differs from the compiled graph %s over the observed scope'
+                        % (watched['digest'], expected['digest']))
+    differing = sorted(k for k in set(expected['counts']) | set(watched['counts'])
+                       if expected['counts'].get(k, 0) != watched['counts'].get(k, 0))
+    for key in differing:
+        print('mesh-sync-monitor: count %s %s compiled %d observed %d' % (key[0], key[1], expected['counts'].get(key, 0),
+                                                                          watched['counts'].get(key, 0)))
+    for name in ('matrix_market', 'dot', 'space_time'):
+        print('mesh-sync-monitor: compiled %s\n%s' % (name, compiled[name]))
+        print('mesh-sync-monitor: observed %s\n%s' % (name, watched[name]))
     if observe:
         sys.stderr.write('mesh-sync-monitor: --observe: no destructive action; an unexpected operation ends the trace '
-                         '(exit) and fails the run, but the process is not stopped at the call (item 4 not exercised)\n')
-    unexpected = [line for line in done.stdout.splitlines() if 'unexpected' in line]
-    watched = mesh_graph.signature(processors, [], [], observed) if observed else None
-    expected = {key: n - unobserved.get(key, 0) for key, n in rebuilt['counts'].items()
-                if KINDS[processors[key[0]].kind] != 'kernel' and n > unobserved.get(key, 0)}
-    seen = watched['counts'] if watched else {}
-    differing = sorted(k for k in set(expected) | set(seen) if expected.get(k, 0) != seen.get(k, 0))
-    for key in differing:
-        print('mesh-sync-monitor: count %s %s compiled %d observed %d' % (key[0], key[1], expected.get(key, 0),
-                                                                          seen.get(key, 0)))
-    for name in ('matrix_market', 'dot', 'space_time'):
-        print('mesh-sync-monitor: compiled %s\n%s' % (name, rebuilt[name]))
-        print('mesh-sync-monitor: observed %s\n%s' % (name, watched[name] if watched else '(no operation observed)'))
-    failed = bool(done.returncode or unexpected or differing)
-    record = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
-              'kind': 'synchronization-monitor', 'signature': os.path.abspath(path), 'sha256': compiled,
-              'observed_sha256': watched['digest'] if watched else None, 'executions': executions, 'window': window,
-              'result': 'fail' if failed else 'pass', 'unexpected': unexpected[:8], 'counts_differing': len(differing),
-              'dtrace_status': done.returncode, 'destructive': not observe}
+                         'and fails the run, the process is not stopped at the call (item 4 not exercised)\n')
+    result = 'fail' if failures else 'pass-scoped' if blind else 'pass'
+    for reason in failures:
+        sys.stderr.write('mesh-sync-monitor: fail: %s\n' % reason)
+    sys.stderr.write('mesh-sync-monitor: %s; not observed by this run: %s\n' % (result, blind or 'nothing'))
+    record.update(result=result, reasons=failures[:16], blind=blind, observed_sha256=watched['digest'],
+                  expected_sha256=expected['digest'], counts_differing=len(differing), dtrace_status=done.returncode,
+                  bridge=bool(bridge), bridge_raises=len(raised))
     with open(REVIEWS, 'a') as reviews:
         reviews.write(json.dumps(record) + '\n')
-    return 1 if failed else 0
+    return 1 if failures else 0
 
 
 if __name__ == '__main__':

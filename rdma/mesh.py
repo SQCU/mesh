@@ -86,7 +86,7 @@ class Dependence(C.Structure):
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
                 ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
-                ('padding', U), ('outstanding', Q), ('plan', Q)]
+                ('padding', U), ('outstanding', Q), ('plan', Q), ('host', C.c_double), ('work', C.c_double)]
 
 
 class View(C.Structure):
@@ -109,7 +109,7 @@ class PlannedCause(C.Structure):
 class Planned(C.Structure):
     _fields_ = [('call', C.POINTER(PlannedCall)), ('signature', C.POINTER(mesh_graph.Signature)),
                 ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('padding', U), ('orders', Z),
-                ('cause', C.POINTER(PlannedCause))]
+                ('cause', C.POINTER(PlannedCause)), ('horizon', Q)]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
@@ -231,12 +231,15 @@ CONTEXT = C.POINTER(Context)
 # 2026-11-09 (design/compilation-composition-change-request.md, "Complete replacement workgroup", program relations):
 # mesh_plan takes each order pair's cause after `orders` (ORDER_FLOW, ORDER_CONFLICT) and gives each planned edge's
 # cause (Planned `cause`).  What must stay: each binding the header's declaration
+# 2026-11-09 (design/torch-capture-change-request.md item 2 and its appendix): mesh_plan takes no horizon; it derives
+# it from each Function's `host` and `work` estimates and gives it as Planned `horizon`.  What must stay: each binding
+# the header's declaration
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_nodes_read', C.c_int, [CONTEXT, C.POINTER(Nodes)]),
         ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
-                                C.POINTER(U), U, Q, C.POINTER(Planned)]),
+                                C.POINTER(U), Q, C.POINTER(Planned)]),
         ('mesh_planned_free', None, [C.POINTER(Planned)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),

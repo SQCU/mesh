@@ -51,13 +51,16 @@ struct mesh_weight { double produced,consumed,read,page; };
 #define MESH_TO_SOURCE_READ 8u
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
 /* design/aot-compilation-change-request.md A8, A10 ("Its output") and appendix items 2 and 6;
-   S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (1) */
+   S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (1);
+   design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: `host` and `work` the estimates t(v), in
+   ns, of one call's host part at this node (its writes of host inputs and its encoding, a CPU actor) and of its device
+   part (its compiled dispatches), mesh-graph.h mesh_graph_actor_time over the compiled actors */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
-                       uint64_t outstanding,plan; };
-_Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function,count)==32 &&
-               offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56,
-               "mesh_function: rdma/mesh.py Function");
+                       uint64_t outstanding,plan; double host,work; };
+_Static_assert(sizeof(struct mesh_function)==80 && offsetof(struct mesh_function,count)==32 &&
+               offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56 &&
+               offsetof(struct mesh_function,host)==64,"mesh_function: rdma/mesh.py Function");
 /* design/aot-compilation-change-request.md A7, A10 ("Its output" and "The calls' graph") and appendix items 2 and 6;
    design/plan-to-bridge-change-request.md R2; S. S. Bhattacharyya, S. Sriram and E. A. Lee,
    IEEE Trans. Signal Processing 45(6), 1997, §4.1, §4.3 (5), §9, Figs. 6 and 8, and Lemma 1;
@@ -70,8 +73,11 @@ _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function
    IEEE Trans. Electronic Computers EC-15(5), 1966; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997): `orders`
    norders pairs (a, b), a < b, call a before call b; `chains[j]` the first call of call j's commuting chain;
    struct mesh_function `outstanding` A10's bound on the function's calls outstanding at once (the issue bound);
-   `horizon` the block executions the program issues ahead of their ends (its native lag), which with each function's
-   calls a block sizes the copies of its values (mesh-collective.c plan_unroll) */
+   the horizon, the block executions the program issues ahead of their ends (its native lag), which with each
+   function's calls a block sizes the copies of its values (mesh-collective.c plan_unroll), is the largest Bff of the
+   calls' host -> device edges (mesh-graph.h mesh_graph_buffer_bound over the calls' `host` and `work`; design/torch-
+   capture-change-request.md item 2), given as `planned->horizon`; each function's values its host writes (`lag`
+   nonzero) take its calls' largest Bff as their lag, the number of their locations */
 /* design/compilation-composition-change-request.md item 6, unit 6D; design/aot-compilation-change-request.md, appendix
    item 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1: the plan's
    results for the program's native preparation, the caller's to free by mesh_planned_free. `call[j]` for call j of
@@ -104,14 +110,15 @@ struct mesh_planned_cause { uint32_t kind,pair; };
 struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,padding; };
 struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signature *signature;
                       struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
-                      struct mesh_planned_cause *cause; };
+                      struct mesh_planned_cause *cause; uint64_t horizon; };
 _Static_assert(sizeof(struct mesh_planned_call)==32 && offsetof(struct mesh_planned_call,function)==16 &&
-               sizeof(struct mesh_planned)==48 && offsetof(struct mesh_planned,calls)==24 &&
+               sizeof(struct mesh_planned)==56 && offsetof(struct mesh_planned,calls)==24 &&
                offsetof(struct mesh_planned,orders)==32 && offsetof(struct mesh_planned,cause)==40 &&
+               offsetof(struct mesh_planned,horizon)==48 &&
                sizeof(struct mesh_planned_cause)==8,"mesh_planned: rdma/mesh.py Planned");
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
-              const uint32_t *chains,uint32_t horizon,uint64_t deadline,struct mesh_planned *planned);
+              const uint32_t *chains,uint64_t deadline,struct mesh_planned *planned);
 void mesh_planned_free(struct mesh_planned *);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */

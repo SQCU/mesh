@@ -541,8 +541,8 @@ static double actor_bandwidth(const struct mesh_graph_machine *x, double bandwid
 static double actor_read(const struct mesh_graph_machine *x, uint64_t blocks, const struct mesh_graph_read *r){
   double dram=x->bandwidth*r->utilization,rest=x->bandwidth;
   if((double)r->net<x->l2){
-    rest*=2.5;
-    if((double)r->net<x->l1*x->cores)rest*=8;
+    rest*=x->l2_speedup;
+    if((double)r->net<x->l1*x->cores)rest*=x->l1_speedup;
   }
   else rest*=r->utilization;
   dram=actor_bandwidth(x,dram,blocks);rest=actor_bandwidth(x,rest,blocks);
@@ -560,7 +560,7 @@ double mesh_graph_actor_time(const struct mesh_graph_machine *x, const struct me
   for(size_t k=0;k<a->reads;k++)memory+=actor_read(x,a->blocks,a->read+k);
   memory*=1.0e9;
   const double least=compute<memory?compute:memory;
-  return compute+memory-least*0.95+(double)a->launches*x->launch;
+  return compute+memory-least*x->overlap+(double)a->launches*x->launch;
 }
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.3; design/rubrics.md:422 (C9) */
@@ -1391,6 +1391,38 @@ int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, co
   scratch_free(&s); free(changed);
   return result;
 }
+/* BSL §4.2-4.3, (6): Bff of each feedforward edge of the two-processor IPC graph */
+int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, uint64_t *bound) {
+  if (!actors || actors >= UINT32_MAX / 2) return EINVAL;
+  for (uint32_t j = 0; j < actors; j++)
+    if (!(host[j] >= 0 && host[j] <= DBL_MAX) || !(work[j] >= 0 && work[j] <= DBL_MAX)) return EINVAL;
+  const uint32_t V = 2 * actors;
+  const size_t E = 3 * (size_t)actors;
+  double *time = malloc(((size_t)V + 1) * sizeof *time);
+  uint32_t *from = malloc((E + 2) * sizeof *from), *to = malloc((E + 2) * sizeof *to);
+  uint64_t *delay = malloc((E + 2) * sizeof *delay);
+  int result = time && from && to && delay ? 0 : ENOMEM;
+  for (uint32_t j = 0; !result && j < actors; j++) {
+    const uint32_t next = j + 1 == actors ? 0 : j + 1;
+    time[j] = host[j]; time[actors + j] = work[j];
+    from[3 * j] = j; to[3 * j] = next; delay[3 * j] = next == 0;
+    from[3 * j + 1] = actors + j; to[3 * j + 1] = actors + next; delay[3 * j + 1] = next == 0;
+    from[3 * j + 2] = j; to[3 * j + 2] = actors + j; delay[3 * j + 2] = 0;
+  }
+  double lambda = 0, sum = 0;
+  if (!result) result = mesh_graph_cycle_mean(V, time, E, from, to, delay, &lambda);
+  for (uint32_t v = 0; !result && v < V; v++) sum += time[v];
+  for (uint32_t j = 0; !result && j < actors; j++) {
+    if (!(lambda > 0)) { bound[j] = 1; continue; }
+    const double most = ceil(sum / lambda);
+    from[E] = actors + j; to[E] = j; delay[E] = 0;
+    uint64_t least = 0;
+    result = mesh_graph_min_delay(V, time, E + 1, from, to, delay, E, lambda, most >= 1 ? (uint64_t)most : 1, &least);
+    bound[j] = least ? least : 1;
+  }
+  free(time); free(from); free(to); free(delay);
+  return result;
+}
 /* BSL §3, §9, Fig. 6 (Convert-to-SC-graph) and Theorem 4 */
 int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
                           uint32_t *added, uint32_t *added_from, uint32_t *added_to) {
@@ -1613,29 +1645,24 @@ int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *
 }
 
 /* design/torch-source-lowering-change-request.md item 3; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
-int mesh_graph_schedule(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
-                        const unsigned char *after, int self_timed, uint32_t *level, uint32_t *place) {
+int mesh_graph_schedule(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, uint32_t *level,
+                        uint32_t *place) {
   for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
   if (vertices == UINT32_MAX || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
   size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
   double *priority = malloc(((size_t)vertices + 1) * sizeof *priority);
   int result = first && order && priority ? 0 : ENOMEM;
   if (!result) mesh_graph_rows(vertices, edges, depth_head, to, first, order);
-  uint32_t chained = UINT32_MAX;
   for (uint32_t v = 0; !result && v < vertices; v++) {
-    const unsigned char a = after ? after[v] : 0;
-    const int ordered = !self_timed && a != MESH_GRAPH_UNORDERED;
-    level[v] = ordered && chained != UINT32_MAX ? chained + (a == 1) : 0;
+    level[v] = 0;
     for (size_t k = first[v]; !result && k < first[v + 1]; k++) {
       const uint32_t u = from[order[k]];
       if (u >= v) result = EDEADLK;
       else if (level[u] + 1 > level[v]) level[v] = level[u] + 1;
     }
-    if (ordered) chained = level[v];
     priority[v] = -(double)level[v];
   }
-  if (!result && self_timed) result = mesh_graph_heap_order(vertices, priority, edges, from, to, place);
-  for (uint32_t v = 0; !result && !self_timed && v < vertices; v++) place[v] = v;
+  if (!result) result = mesh_graph_heap_order(vertices, priority, edges, from, to, place);
   free(first); free(order); free(priority);
   return result;
 }

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/sysctl.h>
 #include "mesh-metal.h"
 #include "mesh-collective.h"
 
@@ -54,16 +55,15 @@ int mesh_metal_transport_create(struct mesh_ctx *context,const struct mesh_plann
   return 0;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.7 */
-int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
-  uint32_t transfer,struct mesh_metal_input *input){
+/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.7: a received range's words */
+static void receive_words(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,uint32_t transfer,
+  struct mesh_metal_input *input){
   const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
   const uint64_t at=transport->offset;
   *input=(struct mesh_metal_input){.phases=entry->phases-at,.group=mesh_group_bytes(entry->pages),.count=entry->count-at,
     .pages=entry->pages,.copies=words->copies,
     .time=((const double *)(const void *)((const char *)context->M+words->times))[transfer]};
-  return 0;
 }
 
 /* design/torch-capture-change-request.md item 3; mesh.h struct mesh_hop, mesh_hops; mesh-call.h mesh_section_address */
@@ -79,48 +79,37 @@ static uint64_t *rows_sorted(struct mesh_ctx *context,struct mesh_section sectio
   if(rows)qsort(rows,section.stride,2*sizeof *rows,row_order);
   return rows;
 }
-/* the copy-0 row whose block holds the hop's byte data_off + page x pgsz + offset, *at the byte's place in it */
-static const uint64_t *row_of(const struct hdr *m,const uint64_t *rows,uint32_t count,const struct mesh_hop *hop,
-  uint64_t *at){
-  const uint64_t landed=m->data_off+(uint64_t)hop->page*m->pgsz+hop->offset;
-  const uint64_t key=landed-(landed-m->data_off)%((uint64_t)m->block*m->pgsz);
-  *at=landed-key;
-  return bsearch(&key,rows,count,2*sizeof *rows,row_order);
-}
 /* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3: the plan's hops of `direction` whose
-   count word is `word`, each one struct mesh_graph_access of its bytes in the copy-0 rows of `section` (mesh-metal.h
-   mesh_metal_sent_extents), `vertex` its transport field where `phases` is the range's phase fields (else 0) */
+   count word is `word`, each one struct mesh_graph_access of its bytes in the copy-0 rows of `section`, row q at q x
+   block (mesh-metal.h struct mesh_metal_sending `extent`), `vertex` its transport field where `phases` is the range's
+   phase fields (else 0); ERANGE with *made the number needed past `room`, EINVAL for a hop in no copy-0 row */
 static int hop_extents(struct mesh_ctx *context,uint64_t plan,uint32_t direction,uint64_t word,uint64_t phases,
-  struct mesh_section section,const uint32_t *members,uint32_t count,struct mesh_graph_access *extents,size_t room,
-  size_t *made){
+  struct mesh_section section,struct mesh_graph_access *extents,size_t room,size_t *made){
   struct hdr *m=context->M;
   const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_hop *hops=mesh_hops(m,words);
   const uint64_t block=(uint64_t)m->block*m->pgsz;
-  uint64_t *rows=rows_sorted(context,section),at;
-  uint32_t *member=count?malloc((section.stride?section.stride:1)*sizeof *member):NULL;
-  if(!rows || (count && !member)){free(rows);free(member);return ENOMEM;}
-  for(uint32_t q=0;member && q<section.stride;q++)member[q]=UINT32_MAX;
-  for(uint32_t n=0;n<count;n++)if(members[n]<section.stride)member[members[n]]=n;
+  uint64_t *rows=rows_sorted(context,section);
+  if(!rows)return ENOMEM;
   size_t found=0;
   int status=0;
   for(uint64_t e=0;e<words->entries && !status;e++){
     const struct mesh_hop *hop=hops+e;
     if(hop->direction!=direction || hop->count!=word)continue;
-    const uint64_t *row=row_of(m,rows,section.stride,hop,&at);
-    const uint32_t key=row && member?member[row[1]]:0;
-    if(!row || key==UINT32_MAX){status=EINVAL;break;}
-    const uint64_t base=member?0:row[1]*block;
+    const uint64_t landed=m->data_off+(uint64_t)hop->page*m->pgsz+hop->offset,key=landed-(landed-m->data_off)%block;
+    const uint64_t *row=bsearch(&key,rows,section.stride,2*sizeof *rows,row_order);
+    if(!row){status=EINVAL;break;}
+    const uint64_t start=row[1]*block+landed-key;
     const uint32_t field=phases?(uint32_t)((hop->word-phases)/sizeof(uint64_t)*32+hop->field/2):0;
-    if(found<room)extents[found]=(struct mesh_graph_access){.key=key,.start=base+at,.end=base+at+hop->bytes,.vertex=field};
+    if(found<room)extents[found]=(struct mesh_graph_access){.start=start,.end=start+hop->bytes,.vertex=field};
     found++;
   }
-  free(rows);free(member);
+  free(rows);
   *made=found;
   return status?status:found>room?ERANGE:0;
 }
 /* design/torch-capture-change-request.md item 3; MPI 4.1 §4.2.2 MPI_PARRIVED: each RECEIVE hop's field names its row */
-int mesh_metal_receive_fields(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+static int receive_fields(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
   const struct mesh_metal_input *input,struct mesh_section section,uint32_t *fields){
   const uint64_t block=(uint64_t)((struct hdr *)context->M)->block*((struct hdr *)context->M)->pgsz;
   size_t made=input->pages,room=0;
@@ -131,7 +120,7 @@ int mesh_metal_receive_fields(struct mesh_ctx *context,struct mesh_metal_transpo
     room=made;
     if(!(extents=malloc((room+1)*sizeof *extents)))return ENOMEM;
     status=hop_extents(context,plan,MESH_RECEIVE,transport->offset+input->count,transport->offset+input->phases,section,
-                       NULL,0,extents,room,&made);
+                       extents,room,&made);
   }
   memset(fields,0,(size_t)input->pages*sizeof *fields);
   for(size_t k=0;!status && k<made;k++)
@@ -139,15 +128,6 @@ int mesh_metal_receive_fields(struct mesh_ctx *context,struct mesh_metal_transpo
     else status=EINVAL;
   free(extents);
   return status;
-}
-/* design/problems-of-14b9a757-change-request.md, third stops 7; rdma/mesh-collective.c mesh_plan's SEND hops (count
-   the transfer's completion word of the hop's copy) */
-int mesh_metal_sent_extents(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
-  uint32_t transfer,struct mesh_section section,const uint32_t *members,uint32_t count,struct mesh_graph_access *extents,
-  size_t room,size_t *made){
-  (void)transport;
-  return hop_extents(context,plan,MESH_SEND,mesh_transfer_at(context->M,mesh_state_at(context->M,plan),transfer)->completion,
-                     0,section,members,count,extents,room,made);
 }
 
 /* J. Lee, Ph.D. dissertation, University of Michigan, 2015, §3.2.2: threadgroup g's footprint, its terms evaluated at
@@ -232,23 +212,6 @@ int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh
   return 0;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
-int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
-  uint32_t transfer,struct mesh_metal_publication *publication){
-  publication->supplied=mesh_transfer_at(context->M,mesh_state_at(context->M,plan),transfer)->targets[0].word-transport->offset;
-  return 0;
-}
-
-/* design/problems-of-14b9a757-change-request.md, third stops 7; rdma/mesh-collective.c mesh_host_sent */
-int mesh_metal_sent_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
-  uint32_t transfer,struct mesh_metal_sent *sent){
-  (void)transport;
-  const struct mesh_state *words=mesh_state_at(context->M,plan);
-  const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
-  *sent=(struct mesh_metal_sent){.counter=(char *)context->M+entry->completion,.sends=entry->sends,.copies=words->copies};
-  return 0;
-}
-
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1; metal_recording.h state:buffer:status: */
 int mesh_metal_status_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
   uint64_t *status){
@@ -280,28 +243,28 @@ int mesh_metal_range_prepare(struct mesh_ctx *context,struct mesh_metal_transpor
   if(range->owner>=planned->calls || range->partitions!=section.stride)return EINVAL;
   const uint64_t plan=planned->call[range->owner].plan;
   range->field=field;
-  int status=mesh_metal_receive_prepare(context,transport,plan,range->transfer,&range->input);
-  if(!status && range->input.pages>room)status=ERANGE;
-  return status?status:mesh_metal_receive_fields(context,transport,plan,&range->input,section,field);
+  receive_words(context,transport,plan,range->transfer,&range->input);
+  return range->input.pages>room?ERANGE:receive_fields(context,transport,plan,&range->input,section,field);
 }
 int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_planned *planned,uint32_t call,struct mesh_metal_release *release){
   if(call>=planned->calls)return EINVAL;
-  struct mesh_metal_publication publication;
-  int status=mesh_metal_publication_prepare(context,transport,planned->call[call].plan,release->transfer,&publication);
-  if(!status)status=mesh_metal_status_prepare(context,transport,planned->call[call].plan,&release->status);
-  release->supplied=publication.supplied;
-  return status;
+  const uint64_t plan=planned->call[call].plan;
+  release->supplied=mesh_transfer_at(context->M,mesh_state_at(context->M,plan),release->transfer)->targets[0].word-
+                    transport->offset;
+  return mesh_metal_status_prepare(context,transport,plan,&release->status);
 }
 int mesh_metal_sending_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_planned *planned,uint32_t call,uint32_t transfer,struct mesh_section section,
   struct mesh_graph_access *extent,size_t room,struct mesh_metal_sending *sending){
+  (void)transport;
   if(call>=planned->calls)return EINVAL;
-  *sending=(struct mesh_metal_sending){.extent=extent,.transfer=transfer};
-  int status=mesh_metal_sent_prepare(context,transport,planned->call[call].plan,transfer,&sending->sent);
-  if(status || !sending->sent.sends)return status;
-  return mesh_metal_sent_extents(context,transport,planned->call[call].plan,transfer,section,NULL,0,extent,room,
-                                 &sending->extents);
+  const uint64_t plan=planned->call[call].plan;
+  const struct mesh_state *words=mesh_state_at(context->M,plan);
+  const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
+  *sending=(struct mesh_metal_sending){.sent={.counter=(char *)context->M+entry->completion,.sends=entry->sends,
+                                              .copies=words->copies},.extent=extent,.transfer=transfer};
+  return entry->sends?hop_extents(context,plan,MESH_SEND,entry->completion,0,section,extent,room,&sending->extents):0;
 }
 int mesh_metal_status(struct mesh_ctx *context,uint64_t plan,int cause,uint64_t *first){
   if(first)*first=UINT64_MAX;
@@ -319,4 +282,41 @@ int mesh_metal_status(struct mesh_ctx *context,uint64_t plan,int cause,uint64_t 
 void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
   [(id)transport->state release];
   *transport=(struct mesh_metal_transport){0};
+}
+
+/* S. Williams, A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009, §3: one resource's recorded operands */
+static int machine_read(id given,struct mesh_graph_machine *x){
+  if(![given isKindOfClass:[NSDictionary class]])return EINVAL;
+  double *field[]={&x->clock,&x->bandwidth,&x->l2,&x->l1,&x->transactions,&x->launch,&x->l2_speedup,&x->l1_speedup,
+                   &x->overlap};
+  NSString *name[]={@"clock",@"bandwidth",@"l2",@"l1",@"transactions",@"launch",@"l2_speedup",@"l1_speedup",@"overlap"};
+  for(int k=0;k<9;k++){
+    id number=((NSDictionary *)given)[name[k]];
+    if(![number isKindOfClass:[NSNumber class]])return EINVAL;
+    *field[k]=[number doubleValue];
+  }
+  id cores=((NSDictionary *)given)[@"cores"],fpus=((NSDictionary *)given)[@"fpus"];
+  if(![cores isKindOfClass:[NSNumber class]] || ![fpus isKindOfClass:[NSNumber class]])return EINVAL;
+  x->cores=[cores unsignedIntValue];x->fpus=[fpus unsignedIntValue];
+  return 0;
+}
+/* design/torch-capture-change-request.md, 2026-11-09 appendix: this node's model's GPU and CPU records */
+int mesh_metal_machines(const char *path,struct mesh_graph_machine *gpu,struct mesh_graph_machine *cpu){
+  char model[256];
+  size_t size=sizeof model;
+  if(sysctlbyname("hw.model",model,&size,NULL,0))return errno;
+  int status=ENOENT;
+  @autoreleasepool{
+    NSData *data=[NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
+    id records=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL]:nil;
+    id models=[records isKindOfClass:[NSDictionary class]]?((NSDictionary *)records)[@"models"]:nil;
+    id entry=[models isKindOfClass:[NSDictionary class]]?((NSDictionary *)models)[[NSString stringWithUTF8String:model]]:nil;
+    id machines=[entry isKindOfClass:[NSDictionary class]]?((NSDictionary *)entry)[@"machines"]:nil;
+    if(data && !records)status=EINVAL;
+    else if([machines isKindOfClass:[NSDictionary class]]){
+      status=machine_read(((NSDictionary *)machines)[@"gpu"],gpu);
+      if(!status)status=machine_read(((NSDictionary *)machines)[@"cpu"],cpu);
+    }
+  }
+  return status;
 }
