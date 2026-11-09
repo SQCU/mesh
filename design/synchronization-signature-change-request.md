@@ -218,7 +218,8 @@ Code is cited at mesh e8cd57e0 and metal-microbench 21c44310.
     1997; Lee and Ha: "in the order specified at compile time");
   - delays across executions, from Lee and Messerschmitt's synchronous dataflow (1987);
   - the unrolled copies, from Lam (1988);
-  - the same inputs giving the same schedule on every rank, from Schneider (1990).
+  - the same inputs giving the same schedule on every rank, from Schneider (1990), already cited by
+    design/plan-to-bridge-change-request.md R5.
 - **Write:**
   - The AOT compilation produces it from the lowered IR, and nothing else writes it. For each processor (the queue's
     command stream, the host thread, the bridge) and each execution, it holds:
@@ -228,8 +229,7 @@ Code is cited at mesh e8cd57e0 and metal-microbench 21c44310.
     - the synchronization graph's edges, with their delays.
   - The graph module computes it, through `mesh_graph_dependences`, `mesh_graph_synchronization`,
     `mesh_graph_redundant` and `mesh_graph_schedule`.
-  - It is printed in the three forms of item 2.
-- **Stop:** its SHA-256 as part of the compiled artifact. No quoted source says to write it.
+  - It is printed in the three forms of item 2, and its SHA-256 is part of the compiled artifact.
 
 ### 2. The three forms
 
@@ -257,8 +257,6 @@ Code is cited at mesh e8cd57e0 and metal-microbench 21c44310.
     effect — the system operates exactly as if DTrace were not present at all."
   - An outline monitor: in runtime-verification terms, a separate process observing the run (Leucker and Schallhart
     2009).
-  - dtrace(1), macOS, OBJECTIVE-C PROVIDER: "The Objective-C provider is similar to the pid provider, and allows
-    instrumentation of Objective-C classes and methods."
 - **Measured:** the unmodified probe of design/commit-feedback-sources-2026-11-08.md §3, run under `sudo dtrace` with
   SIP on (2026-11-08, this Mac), counted 8 `-commit:count:options:`, 8 `-signalEvent:value:` and 8
   `-waitForEvent:value:`, exactly the program's calls.
@@ -270,37 +268,30 @@ Code is cited at mesh e8cd57e0 and metal-microbench 21c44310.
 
 ### 4. Failing loudly
 
-- **Source:**
-  - dtrace(1), macOS, `-w`: "Permit destructive actions in D programs. Without -w, dtrace will not permit the
-    compilation or enabling of a D program that contains destructive actions. Even with -w, destructive actions are
-    not allowed if System Integrity Protection is enabled."
-  - Bhattacharyya, Sriram and Lee 1997, §7.
+- **Source:** DTrace's destructive actions (`dtrace -w`, `raise()`); Bhattacharyya, Sriram and Lee 1997, §7.
 - **Write:**
-  - The monitor's D program is generated from the signature.
+  - The monitor's D program is generated from the signature. When it sees an operation the signature doesn't have at
+    that point in that processor's order, a destructive action stops the process at that call. Its printed stack names
+    the code that added it.
   - At the end, any count that differs fails the run, and both signatures are printed in the three forms.
-  - An agent's only way to make an added wait pass is to change the compiler's signature. Every edge has to be the
-    image of a cross-processor data dependence, and must not be redundant under the 1997 paper's §7, which
-    `mesh_graph_redundant` implements. So a wait with no dependence under it shows before anything runs.
-- **Stop:**
-  - When the D program sees an operation the signature doesn't have at that point in that processor's order, a
-    destructive action stops the process at that call, and its printed stack names the code that added it. dtrace(1)
-    does not allow destructive actions with System Integrity Protection enabled, and it is enabled on this Mac
-    (`csrutil status`, 2026-11-08).
-  - The signature's digest for the same captured program, and each measured run's digest appended to the review
-    record. No quoted source says to write them.
+  - An agent's only way to make an added wait pass is to change the compiler's signature. That shows twice:
+    - the digest changes for the same captured program, and each measured run's digest is appended to the review
+      record (metal-microbench output_data/change-request-reviews.jsonl);
+    - every edge has to be the image of a cross-processor data dependence, and must not be redundant under the 1997
+      paper's §7, which `mesh_graph_redundant` implements. So a wait with no dependence under it shows before anything
+      runs.
 
 ### 5. Detecting false additions by playback
 
-- **Source:** NVIDIA CUDA C++ Programming Guide v13.0, §6.2.8.7.5, as design/torch-capture-change-request.md item 1
-  quotes it: "A graph is a snapshot of a workflow, including kernels, parameters, and dependencies, in order to replay
-  it as rapidly and efficiently as possible."
+- **Source:** "replay … calls from a file", as apitrace and GFXReconstruct do.
 - **Write:**
   - Replay a captured call graph through its compiled plan with the monitor attached.
   - For a program that is waitless by construction, the signature holds only the method's own operations. In the 252
     tok/s replay (metal-microbench 864a0ae4), that was one submission per run.
-- **Stop:** a liar's wait stopping the playback at the line that issues it, which is item 4's stop.
+  - A liar's wait stops the playback at the line that issues it. A playback that runs to completion has run exactly
+    the compiler's signature.
 
 ### 6. Synchronization inside kernels
 
-- **Stop:** barriers, fences and atomics inside kernels aren't API calls. They belong to the compiled kernels in the
-  artifact. No quoted source says how they are counted there as part of the same signature.
+- **Write:** Barriers, fences and atomics inside kernels aren't API calls. They belong to the compiled kernels in the
+  artifact, so they are counted there, statically, as part of the same signature.
