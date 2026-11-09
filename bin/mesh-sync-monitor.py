@@ -291,15 +291,15 @@ def generate(operations, program, observe, point=None, metadata=None):
               'uint64_t epoch, invocation, objectcount, lanecount;',
               'uint64_t active[uint64_t, uint64_t], stamp[uint64_t, uint64_t], om[uint64_t], lm[uint64_t], signals[uint64_t];',
               'uint64_t spanEvent[uint64_t], spanFirst[uint64_t], spanEnd[uint64_t];',
-              'BEGIN { epoch = 1; active[1, 0] = 1; stamp[1, 0] = 1; }']
+              'BEGIN { epoch = 1, active[1, 0] = 1, stamp[1, 0] = 1; }']
     trip, wait, signal = (PRIMITIVES.index(name) for name in ('trip_test', 'host_wait', 'queue_signal'))
 
     def check(probe, point, predicate, kind, name=None, obj=None, val=None, lane=None):
         at = probe + point
         primitive = PRIMITIVES.index(name) if name else -1
         lines.append('%s { this->checked = 0; }' % at)
-        lines.append('%s %s { this->checked = 1; this->ok = 0; this->ordinary = 0; '
-                     'this->ob = %s; this->va = %s; this->ln = %s; this->completion = 0; }' %
+        lines.append('%s %s { this->checked = 1, this->ok = 0, this->ordinary = 0, '
+                     'this->ob = %s, this->va = %s, this->ln = %s, this->completion = 0; }' %
                      (at, predicate, obj or '0', val or '0', lane or '0'))
         if obj is not None:
             lines.append('%s /this->checked/ { this->obid = om[this->ob] ? om[this->ob] : objectcount + 1; }' % at)
@@ -346,8 +346,8 @@ def generate(operations, program, observe, point=None, metadata=None):
                     clause.append('arg1 == 0')
                 value_clause, printed = '1', (-1 - index * 2 - (kind == 'leave'), -1, -1, span.first)
             lines.append('%s /this->checked/ { this->sources = stamp[epoch %% 2, %d] == epoch ? '
-                         '(active[epoch %% 2, %d] & 0x%xULL) : 0; }' % (at, source // 64, source // 64, mask))
-            lines.append('%s /this->checked/ { this->matching = %s; this->tally = 0; }' % (at, ' && '.join(clause)))
+                         '(active[epoch %% 2, %d] & 0x%xULL) : 0, this->matching = %s, this->tally = 0; }' %
+                         (at, source // 64, source // 64, mask, ' && '.join(clause)))
             if family:
                 bindings = machine['states'][source][4]
                 for logical, ordinal in zip(machine['objects'], bindings):
@@ -356,24 +356,23 @@ def generate(operations, program, observe, point=None, metadata=None):
                                      '{ this->tally = signals[%d]; }' % (at, ordinal, ordinal))
             shift = target % 64 - source % 64
             shifted = 'this->sources %s %d' % ('<<' if shift >= 0 else '>>', abs(shift))
-            lines.append('%s /this->checked && this->matching && (%s)/ { this->ok = 1; '
+            lines.append('%s /this->checked && this->matching && (%s)/ { this->ok = 1, '
                 'active[(epoch + 1) %% 2, %d] = (stamp[(epoch + 1) %% 2, %d] == epoch + 1 ? '
-                'active[(epoch + 1) %% 2, %d] : 0) | (%s); stamp[(epoch + 1) %% 2, %d] = epoch + 1; '
-                'this->ordinary = this->ordinary || %d; }' %
-                (at, value_clause, target // 64, target // 64, target // 64, shifted, target // 64, bool(ob)))
-            lines.append('%s /this->checked && this->matching && (%s)/ { '
+                'active[(epoch + 1) %% 2, %d] : 0) | (%s), stamp[(epoch + 1) %% 2, %d] = epoch + 1, '
+                'this->ordinary = this->ordinary || %d; '
                 'printf("mesh-sync-monitor: transitions %%d %d %%x %d %d %d %d %%d %d %%d\\n", '
                 'epoch - 1, this->sources, %s, tid); }' %
-                (at, value_clause, source // 64 * 64, target - source, index - source if kind == 'op' else printed[0] - source,
+                (at, value_clause, target // 64, target // 64, target // 64, shifted, target // 64, bool(ob),
+                 source // 64 * 64, target - source, index - source if kind == 'op' else printed[0] - source,
                  printed[1], printed[2], printed[3], 'this->va' if val is not None else '-1'))
         if obj is not None:
             lines.append('%s /this->checked && this->ok && this->ordinary/ '
-                '{ om[this->ob] = this->obid; objectcount = this->obid > objectcount ? this->obid : objectcount; }' % at)
+                '{ om[this->ob] = this->obid, objectcount = this->obid > objectcount ? this->obid : objectcount; }' % at)
             if primitive == signal:
                 lines.append('%s /this->checked && this->ok && this->ordinary/ { signals[this->obid] = this->va; }' % at)
         if lane is not None:
             lines.append('%s /this->checked && this->ok/ '
-                '{ lm[this->ln] = this->lnid; lanecount = this->lnid > lanecount ? this->lnid : lanecount; }' % at)
+                '{ lm[this->ln] = this->lnid, lanecount = this->lnid > lanecount ? this->lnid : lanecount; }' % at)
         lines.append('%s /this->checked && !this->ok/ '
             '{ printf("mesh-sync-monitor: unexpected %s at trace step %%d invocation %%d value %%d thread %%d\\n", '
             'epoch - 1, invocation, this->va, tid); %s }' % (at, name or kind, act))
@@ -381,14 +380,14 @@ def generate(operations, program, observe, point=None, metadata=None):
 
     check('pid$target::MetalProgramRun:', 'entry', '/1/', 'enter')
     argument = completion.argument if completion else 4
-    lines.append('pid$target::MetalProgramRun:entry { self->inrun = 1; self->exec = arg2; self->ended = arg%d; '
-                 'self->spanfirst = arg2; self->spanend = arg2 + arg3; }' % argument)
+    lines.append('pid$target::MetalProgramRun:entry { self->inrun = 1, self->exec = arg2, self->ended = arg%d, '
+                 'self->spanfirst = arg2, self->spanend = arg2 + arg3; }' % argument)
     check('pid$target::MetalProgramRun:', 'return', '/self->inrun/', 'leave')
     if completion:
         for back in range(slots):
             lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && self->spanend - self->spanfirst > %d/ '
-                '{ this->slot = (self->spanend - 1 - %d) %% %d; spanEvent[this->slot] = self->ended; '
-                'spanFirst[this->slot] = self->spanfirst; spanEnd[this->slot] = self->spanend; }' % (back, back, slots))
+                '{ this->slot = (self->spanend - 1 - %d) %% %d, spanEvent[this->slot] = self->ended, '
+                'spanFirst[this->slot] = self->spanfirst, spanEnd[this->slot] = self->spanend; }' % (back, back, slots))
     lines.append('pid$target::MetalProgramRun:return /self->inrun/ { self->inrun = 0; invocation++; '
                  'printf("mesh-sync-monitor: run %d\\n", (int)arg1); }')
     for name, probe, obj, val, lane in PROBES:
@@ -396,7 +395,7 @@ def generate(operations, program, observe, point=None, metadata=None):
         lines.append('%sentry /self->inrun/ { self->inapi++; }' % probe)
         lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
     name, probe, obj, val = START
-    lines.append('%sentry /self->inrun && self->inapi == 0/ { self->bs = 1; self->bsob = %s; '
+    lines.append('%sentry /self->inrun && self->inapi == 0/ { self->bs = 1, self->bsob = %s, '
                  'self->bsva = %s; }' % (probe, obj, val))
     lines.append('%sentry /self->inrun/ { self->inapi++; }' % probe)
     lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
