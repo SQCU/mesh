@@ -130,7 +130,8 @@ def _layout(ir, key):
 
 
 def _device(ir, key):
-    return (key[0].meta['val'][key[3]] if key in ir.results else _value(key[0])).device.type
+    value = key[0].meta['val'][key[3]] if key in ir.results else key[0].meta.get('val')
+    return next((v.device.type for v in pytree.tree_leaves(value) if isinstance(v, torch.Tensor)), 'cpu')
 
 
 # GSPMD section 3.1; Alpa section 4.1; design/aot-compilation-change-request.md A10, "Its graph operations are the graph
@@ -1982,6 +1983,11 @@ def _apply(r, op, x, y, z, alpha, t, exponent=None):
 # PyTorch 2.14 documentation, Broadcasting semantics and Type promotion: tensor operands broadcast by their maps' zero
 # rows, scalars the region's literals
 def _elementwise(op, out, a, b=None, c=None, alpha=1):
+    if any(isinstance(x, torch.Tensor) and x.is_complex() or isinstance(x, complex) for x in (out, a, b, c)):
+        if op == 'where':
+            return [g for k in (0, 1) for g in _elementwise(op, _component(out, k), a,
+                                                            _component(b, k), _component(c, k), alpha)]
+        return _complex(op, out, a, b, alpha)
     given = [a, b, c]
     tensors = [x for x in given if isinstance(x, torch.Tensor)]
     integral = out.dtype in INTEGRAL and all(x.dtype in INTEGRAL if isinstance(x, torch.Tensor) else
@@ -2771,6 +2777,604 @@ def _summation(target, given, outs):
         step = out if j == len(operands) - 1 else _temporary([sizes[label] for label in kept], out.dtype)
         ops += _contract(step, [made, operands[j]], [own, labels[j]], kept)
         made, own = step, kept
+    return ops
+
+
+# Reference-LAPACK SRC/dgetf2.f, zgetf2.f, dgetrs.f, zgetrs.f, dpotf2.f and zpotf2.f;
+# torch 2.14.0 aten/src/ATen/native/BatchLinearAlgebra.cpp
+def _linalg_transpose(x, ops, transpose=True, conjugate=False):
+    x = x.transpose(-2, -1) if transpose else x
+    if conjugate and x.is_complex():
+        made = _temporary(x.shape, x.dtype)
+        ops += _complex('conj', made, x)
+        return made
+    return x
+
+
+def _linalg_identity(out):
+    r = _Region()
+    target = torch.view_as_real(out) if out.is_complex() else out
+    row = out.dim() - 2
+    equal = r('eq', BOOL, r.index(row), r.index(row + 1))
+    if out.is_complex():
+        equal = r('and', BOOL, equal, r('eq', BOOL, r.index(out.dim()), r.const(0, I32)))
+    r.done(r('cast', _class(target), equal))
+    return [_Generic(target.shape, [], [(target, _same(target.dim()))], r)]
+
+
+def _linalg_swap(x, pivot, row, ops):
+    made, r = _temporary(x.shape, x.dtype), _Region()
+    source = torch.view_as_real(x) if x.is_complex() else x
+    target = torch.view_as_real(made) if made.is_complex() else made
+    axis, t = x.dim() - 2, _class(source)
+    index = pivot.reshape(*pivot.shape, *([1] * (source.dim() - pivot.dim())))
+    selected = r('sub', I32, _load(r, 1, index, I32), r.const(1, I32))
+    at, own = [r.index(d) for d in range(source.dim())], r.index(axis)
+    at[axis] = r('select', I32, r('eq', BOOL, own, r.const(row, I32)), selected,
+                 r('select', I32, r('eq', BOOL, own, selected), r.const(row, I32), own))
+    r.done(r('extract', t, *at, integer=0))
+    ops.append(_Generic(target.shape, [(source, None), (index, _aligned(index, target.shape))],
+                        [(target, _same(target.dim()))], r))
+    return made
+
+
+def _linalg_lu(a, lu, pivots, info, pivot=True):
+    ops, current = [], a
+    ops += _fill(info, 0)
+    m, n = a.shape[-2:]
+    for j in range(min(m, n)):
+        column, p = current[..., j:, j], pivots[..., j]
+        if pivot:
+            scores = _temporary(column.shape, column.real.dtype)
+            if column.is_complex():
+                imaginary = _temporary(column.shape, column.real.dtype)
+                ops += _elementwise('abs', scores, column.real)
+                ops += _elementwise('abs', imaginary, column.imag)
+                ops += _elementwise('add', scores, scores, imaginary)
+            else:
+                ops += _elementwise('abs', scores, column)
+            ops += _extreme(A.argmax.default, {'self': scores, 'dim': -1, 'keepdim': False}, [p])
+            ops += _elementwise('add', p, p, j + 1)
+            current = _linalg_swap(current, p, j, ops)
+        else:
+            ops += _fill(p, j + 1)
+            if current is a:
+                current = _temporary(a.shape, a.dtype)
+                ops += _copy(current, a)
+        diagonal = current[..., j, j]
+        zero, first = _temporary(info.shape, torch.bool), _temporary(info.shape, torch.bool)
+        ops += _elementwise('eq', zero, diagonal, 0)
+        ops += _elementwise('eq', first, info, 0)
+        ops += _elementwise('logical_and', first, first, zero)
+        ops += _elementwise('where', info, first, j + 1, info)
+        if j + 1 < m:
+            safe = _temporary(diagonal.shape, diagonal.dtype)
+            ops += _elementwise('where', safe, zero, 1, diagonal)
+            below = current[..., j + 1:, j]
+            ops += _elementwise('div', below, below, safe.unsqueeze(-1))
+            if j + 1 < n:
+                block = current[..., j + 1:, j + 1:]
+                change = _temporary(block.shape, block.dtype)
+                ops += _product(A.matmul.default, {'self': below.unsqueeze(-1),
+                                                    'other': current[..., j, j + 1:].unsqueeze(-2)}, [change])
+                ops += _elementwise('sub', block, block, change)
+    return ops + _copy(lu, current)
+
+
+def _linalg_triangular(a, b, out, upper, unit=False):
+    ops = []
+    n = a.shape[-1]
+    for j in range(n - 1, -1, -1) if upper else range(n):
+        start, end = (j + 1, n) if upper else (0, j)
+        result = out[..., j:j + 1, :]
+        if start != end:
+            dot = _temporary(result.shape, result.dtype)
+            ops += _product(A.matmul.default, {'self': a[..., j:j + 1, start:end],
+                                                'other': out[..., start:end, :]}, [dot])
+            ops += _elementwise('sub', result, b[..., j:j + 1, :], dot)
+        else:
+            ops += _assign(result, b[..., j:j + 1, :])
+        if not unit:
+            ops += _elementwise('div', result, result, a[..., j:j + 1, j:j + 1])
+    return ops
+
+
+def _linalg_lu_solve(lu, pivots, b, out, left=True, adjoint=False):
+    ops = []
+    target = out if left else out.transpose(-2, -1)
+    rhs = (b if left else b.transpose(-2, -1)).expand(target.shape)
+    transposed = left == adjoint
+    factor = _linalg_transpose(lu, ops, transposed, adjoint)
+    if not transposed:
+        for j in range(pivots.shape[-1]):
+            rhs = _linalg_swap(rhs, pivots[..., j], j, ops)
+        middle = _temporary(target.shape, target.dtype)
+        ops += _linalg_triangular(factor, rhs, middle, False, True)
+        ops += _linalg_triangular(factor, middle, target, True)
+    else:
+        middle, result = _temporary(target.shape, target.dtype), _temporary(target.shape, target.dtype)
+        ops += _linalg_triangular(factor, rhs, middle, False)
+        ops += _linalg_triangular(factor, middle, result, True, True)
+        for j in reversed(range(pivots.shape[-1])):
+            result = _linalg_swap(result, pivots[..., j], j, ops)
+        ops += _copy(target, result)
+    return ops
+
+
+def _linalg_cholesky(a, out, info, upper=False):
+    ops, n = [], a.shape[-1]
+    source = _linalg_transpose(a, ops, upper, upper)
+    work, factor = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
+    ops += _copy(work, source) + _fill(factor, 0) + _fill(info, 0)
+    for j in range(n):
+        diagonal = work[..., j, j].real
+        bad, first = _temporary(info.shape, torch.bool), _temporary(info.shape, torch.bool)
+        root = _temporary(diagonal.shape, diagonal.dtype)
+        ops += _elementwise('gt', bad, diagonal, 0)
+        ops += _elementwise('logical_not', bad, bad)
+        ops += _elementwise('eq', first, info, 0)
+        ops += _elementwise('logical_and', first, first, bad)
+        ops += _elementwise('where', info, first, j + 1, info)
+        ops += _elementwise('sqrt', root, diagonal)
+        ops += _elementwise('where', root, bad, diagonal, root)
+        ops += _copy(factor[..., j, j], root)
+        if j + 1 < n:
+            column = factor[..., j + 1:, j:j + 1]
+            ops += _elementwise('div', column, work[..., j + 1:, j:j + 1], root[..., None, None])
+            row = _linalg_transpose(column, ops, True, True)
+            change = _temporary(work[..., j + 1:, j + 1:].shape, a.dtype)
+            ops += _product(A.matmul.default, {'self': column, 'other': row}, [change])
+            ops += _elementwise('sub', work[..., j + 1:, j + 1:], work[..., j + 1:, j + 1:], change)
+    return ops + _copy(out, _linalg_transpose(factor, ops, upper, upper))
+
+
+FACTORIZATIONS = (A.linalg_lu_factor_ex, A._linalg_solve_ex, A.linalg_solve_ex, A.linalg_inv_ex,
+                  A.linalg_cholesky_ex, A.linalg_solve_triangular, A.triangular_solve, A.linalg_lu_solve,
+                  A.cholesky_solve, A.cholesky_inverse)
+
+
+def _factorized(target, given, outs):
+    packet, ops = target.overloadpacket, []
+    a = given.get('A', given.get('self'))
+    if packet is A.linalg_lu_factor_ex:
+        return _linalg_lu(a, *outs, given['pivot'])
+    if packet is A.linalg_cholesky_ex:
+        return _linalg_cholesky(a, *outs, given['upper'])
+    if packet is A.linalg_lu_solve:
+        return _linalg_lu_solve(given['LU'], given['pivots'], given['B'], outs[0], given['left'], given['adjoint'])
+    if packet in (A.linalg_solve_triangular, A.triangular_solve):
+        b = given['B'] if packet is A.linalg_solve_triangular else given['self']
+        left, upper = given.get('left', True), given['upper']
+        transpose = given.get('transpose', False) != (not left)
+        factor = a.transpose(-2, -1) if transpose else a
+        ops += _linalg_triangular(factor, b if left else b.transpose(-2, -1),
+                                  outs[0] if left else outs[0].transpose(-2, -1), upper != transpose,
+                                  given['unitriangular'])
+        return ops + (_copy(outs[1], a) if len(outs) > 1 else [])
+    if packet in (A.cholesky_solve, A.cholesky_inverse):
+        factor = given['input2'] if packet is A.cholesky_solve else a
+        b = given['self'] if packet is A.cholesky_solve else _temporary(outs[0].shape, outs[0].dtype)
+        if packet is A.cholesky_inverse:
+            ops += _linalg_identity(b)
+        lower = _linalg_transpose(factor, ops, given['upper'], given['upper'])
+        middle = _temporary(outs[0].shape, outs[0].dtype)
+        ops += _linalg_triangular(lower, b, middle, False)
+        ops += _linalg_triangular(_linalg_transpose(lower, ops, True, True), middle, outs[0], True)
+        return ops
+    result, info = outs[0], outs[-1]
+    lu, pivots = outs[1:3] if packet is A._linalg_solve_ex else \
+        (_temporary(a.shape, a.dtype), _temporary(a.shape[:-1], torch.int32))
+    ops += _linalg_lu(a, lu, pivots, info)
+    b = given.get('B')
+    if b is None:
+        b = _temporary(result.shape, result.dtype)
+        ops += _linalg_identity(b)
+    vector = b.dim() == 1 or b.dim() == a.dim() - 1 and b.shape == a.shape[:-1]
+    ops += _linalg_lu_solve(lu, pivots, b.unsqueeze(-1) if vector else b,
+                           result.unsqueeze(-1) if vector else result, given.get('left', True))
+    return ops
+
+
+# Reference-LAPACK SRC/dlarfg.f, zlarfg.f, dgeqr2.f, zgeqr2.f, dorg2r.f and zung2r.f
+def _linalg_reflector(column, tau, beta, ops):
+    real, batch = column.real.dtype, column.shape[:-1]
+    magnitudes, scale = _temporary(column.shape, real), _temporary(batch, real)
+    ops += _elementwise('abs', magnitudes, column)
+    ops += _reduced(A.amax.default, {'self': magnitudes, 'dim': [-1], 'keepdim': False}, [scale])
+    zero, safe = _temporary(batch, torch.bool), _temporary(batch, real)
+    ops += _elementwise('eq', zero, scale, 0)
+    ops += _elementwise('where', safe, zero, 1, scale)
+    normalized = _temporary(column.shape, column.dtype)
+    ops += _elementwise('div', normalized, column, safe.unsqueeze(-1))
+    ops += _elementwise('div', magnitudes, magnitudes, safe.unsqueeze(-1))
+    squares, norm = _temporary(column.shape, real), _temporary(batch, real)
+    ops += _elementwise('mul', squares, magnitudes, magnitudes)
+    ops += _reduced(A.sum.dim_IntList, {'self': squares, 'dim': [-1], 'keepdim': False}, [norm])
+    ops += _elementwise('sqrt', norm, norm)
+    alpha, signed, negative = normalized[..., 0], _temporary(batch, real), _temporary(batch, torch.bool)
+    ops += _elementwise('lt', negative, alpha.real, 0)
+    ops += _elementwise('neg', signed, norm)
+    ops += _elementwise('where', signed, negative, norm, signed)
+    inactive = _temporary(batch, torch.bool)
+    if column.shape[-1] > 1:
+        tail = _temporary(batch, real)
+        ops += _reduced(A.amax.default, {'self': magnitudes[..., 1:], 'dim': [-1], 'keepdim': False}, [tail])
+        ops += _elementwise('eq', inactive, tail, 0)
+    else:
+        ops += _fill(inactive, True)
+    if column.is_complex():
+        real_alpha = _temporary(batch, torch.bool)
+        ops += _elementwise('eq', real_alpha, alpha.imag, 0)
+        ops += _elementwise('logical_and', inactive, inactive, real_alpha)
+    denominator = _temporary(batch, column.dtype)
+    ops += _elementwise('sub', denominator, alpha, signed)
+    ops += _elementwise('where', denominator, inactive, 1, denominator)
+    v = _temporary(column.shape, column.dtype)
+    ops += _elementwise('div', v, normalized, denominator.unsqueeze(-1))
+    ops += _fill(v[..., 0], 1)
+    ops += _elementwise('where', safe, inactive, 1, signed)
+    ops += _elementwise('sub', tau, signed, alpha)
+    ops += _elementwise('div', tau, tau, safe)
+    ops += _elementwise('where', tau, inactive, 0, tau)
+    ops += _elementwise('mul', beta, signed, scale)
+    ops += _elementwise('where', beta, inactive, column[..., 0].real, beta)
+    return v.unsqueeze(-1)
+
+
+def _linalg_reflect(block, v, tau, ops, left=True, adjoint=False):
+    vh = _linalg_transpose(v, ops, True, True)
+    scalar = _linalg_transpose(tau[..., None, None], ops, False, adjoint)
+    dot = _temporary((*block.shape[:-2], 1, block.shape[-1]) if left else
+                     (*block.shape[:-2], block.shape[-2], 1), block.dtype)
+    ops += _product(A.matmul.default, {'self': vh if left else block, 'other': block if left else v}, [dot])
+    ops += _elementwise('mul', dot, dot, scalar)
+    change = _temporary(block.shape, block.dtype)
+    ops += _product(A.matmul.default, {'self': v if left else dot, 'other': dot if left else vh}, [change])
+    ops += _elementwise('sub', block, block, change)
+
+
+def _linalg_geqrf(a, packed, tau):
+    ops = _copy(packed, a)
+    m, n = a.shape[-2:]
+    for j in range(min(m, n)):
+        beta = _temporary(a.shape[:-2], a.real.dtype)
+        v = _linalg_reflector(packed[..., j:, j], tau[..., j], beta, ops)
+        if j + 1 < n:
+            _linalg_reflect(packed[..., j:, j + 1:], v, tau[..., j], ops, adjoint=True)
+        ops += _copy(packed[..., j, j], beta)
+        if j + 1 < m:
+            ops += _copy(packed[..., j + 1:, j], v[..., 1:, 0])
+    return ops
+
+
+def _linalg_householder(packed, tau, out, b=None, left=True, adjoint=False):
+    ops = _linalg_identity(out) if b is None else _copy(out, b)
+    order = range(tau.shape[-1]) if left == adjoint else reversed(range(tau.shape[-1]))
+    for j in order:
+        v = _temporary((*packed.shape[:-2], packed.shape[-2] - j, 1), packed.dtype)
+        ops += _fill(v[..., 0, 0], 1)
+        if v.shape[-2] > 1:
+            ops += _copy(v[..., 1:, 0], packed[..., j + 1:, j])
+        _linalg_reflect(out[..., j:, :] if left else out[..., :, j:], v, tau[..., j], ops, left, adjoint)
+    return ops
+
+
+def _triangular_part(target, given, outs):
+    x, (out,), r = given['self'], outs, _Region()
+    source = torch.view_as_real(x) if x.is_complex() else x
+    made = torch.view_as_real(out) if out.is_complex() else out
+    diagonal, t = given.get('diagonal', 0), _class(source)
+    distance = r('sub', I32, r.index(out.dim() - 1), r.index(out.dim() - 2))
+    keep = r('ge' if target.overloadpacket is A.triu else 'le', BOOL, distance, r.const(diagonal, I32))
+    r.done(r('select', t, keep, r.arg(0, source), r.const(0, t)))
+    return [_Generic(made.shape, [(source, _same(source.dim()))], [(made, _same(made.dim()))], r)]
+
+
+ORTHOGONAL = (A.linalg_qr, A.geqrf, A.linalg_householder_product, A.ormqr)
+
+
+def _orthogonal(target, given, outs):
+    packet = target.overloadpacket
+    if packet is A.geqrf:
+        return _linalg_geqrf(given['self'], *outs)
+    if packet is A.linalg_householder_product:
+        return _linalg_householder(given['input'], given['tau'], outs[0])
+    if packet is A.ormqr:
+        return _linalg_householder(given['self'], given['input2'], outs[0], given['input3'], given['left'],
+                                   given['transpose'])
+    a, (q, r) = given['A'], outs
+    packed, tau = _temporary(a.shape, a.dtype), _temporary((*a.shape[:-2], min(a.shape[-2:])), a.dtype)
+    ops = _linalg_geqrf(a, packed, tau)
+    if q.numel():
+        ops += _linalg_householder(packed, tau, q)
+    return ops + _triangular_part(A.triu.default, {'self': packed[..., :r.shape[-2], :]}, [r])
+
+
+# N. J. Higham, SIAM J. Matrix Anal. Appl. 26(4), 2005, Algorithm 2.3, equations 2.8 and 2.9, Table 2.3
+def _linalg_linear(out, terms):
+    ops = _elementwise('mul', out, terms[0][1], terms[0][0])
+    for scale, value in terms[1:]:
+        ops += _elementwise('add', out, out, value, alpha=scale)
+    return ops
+
+
+def _matrix_exp(target, given, outs):
+    a, (out,), ops = given['self'], outs, []
+    batch, real = a.shape[:-2], a.real.dtype
+    if not a.numel():
+        return _copy(out, a)
+    magnitude, largest = _temporary(a.shape, real), _temporary(batch, real)
+    ops += _elementwise('abs', magnitude, a)
+    ops += _reduced(A.amax.default, {'self': magnitude, 'dim': [-2, -1], 'keepdim': False}, [largest])
+    zero, safe = _temporary(batch, torch.bool), _temporary(batch, real)
+    ops += _elementwise('eq', zero, largest, 0)
+    ops += _elementwise('where', safe, zero, 1, largest)
+    ops += _elementwise('div', magnitude, magnitude, safe[..., None, None])
+    column, norm = _temporary(a.shape[:-2] + a.shape[-1:], real), _temporary(batch, real)
+    ops += _reduced(A.sum.dim_IntList, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [column])
+    ops += _reduced(A.amax.default, {'self': column, 'dim': [-1], 'keepdim': False}, [norm])
+    ops += _elementwise('log2', norm, norm)
+    ops += _elementwise('log2', safe, safe)
+    ops += _elementwise('add', norm, norm, safe)
+    ops += _elementwise('sub', norm, norm, math.log2(5.371920351148152))
+    ops += _elementwise('ceil', norm, norm)
+    ops += _elementwise('maximum', norm, norm, 0)
+    ops += _elementwise('neg', safe, norm)
+    ops += _elementwise('exp2', safe, safe)
+    scaled = _temporary(a.shape, a.dtype)
+    ops += _elementwise('mul', scaled, a, safe[..., None, None])
+    powers = {0: _temporary(a.shape, a.dtype)}
+    ops += _linalg_identity(powers[0])
+    for degree, left, right in ((2, scaled, scaled), (4, None, None), (6, None, None)):
+        if degree > 2:
+            left, right = powers[2], powers[degree - 2]
+        powers[degree] = _temporary(a.shape, a.dtype)
+        ops += _product(A.matmul.default, {'self': left, 'other': right}, [powers[degree]])
+    coefficients = (64764752532480000, 32382376266240000, 7771770303897600, 1187353796428800,
+                    129060195264000, 10559470521600, 670442572800, 33522128640, 1323241920,
+                    40840800, 960960, 16380, 182, 1)
+    coefficients = [x / coefficients[0] for x in coefficients]
+    u, v = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
+    for parity, polynomial in ((1, u), (0, v)):
+        high, low = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
+        ops += _linalg_linear(high, [(coefficients[degree + parity], powers[degree - 6]) for degree in (12, 10, 8)])
+        ops += _product(A.matmul.default, {'self': powers[6], 'other': high}, [polynomial])
+        ops += _linalg_linear(low, [(coefficients[degree + parity], powers[degree]) for degree in (6, 4, 2, 0)])
+        ops += _elementwise('add', polynomial, polynomial, low)
+    odd = _temporary(a.shape, a.dtype)
+    ops += _product(A.matmul.default, {'self': scaled, 'other': u}, [odd])
+    denominator, numerator = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
+    ops += _elementwise('sub', denominator, v, odd)
+    ops += _elementwise('add', numerator, v, odd)
+    info = _temporary(batch, torch.int32)
+    ops += _factorized(A.linalg_solve_ex.default, {'A': denominator, 'B': numerator, 'left': True}, [out, info])
+    maximum, count = _temporary((), real), _temporary((), real)
+    predicate, active = _temporary((), torch.bool), _temporary(batch, torch.bool)
+    ops += _reduced(A.amax.default, {'self': norm, 'dim': None, 'keepdim': False}, [maximum])
+    ops += _fill(count, 0) + _elementwise('lt', predicate, count, maximum)
+    square = _temporary(a.shape, a.dtype)
+    body = _product(A.matmul.default, {'self': out, 'other': out}, [square])
+    body += _elementwise('lt', active, count, norm)
+    body += _elementwise('where', out, active[..., None, None], square, out)
+    body += _elementwise('add', count, count, 1)
+    body += _elementwise('lt', predicate, count, maximum)
+    return ops + [_Control(WHILE, [body], predicate)]
+
+
+# G. H. Golub and C. F. Van Loan, Matrix Computations, 3rd ed., section 8.4, Algorithms 8.4.1 and 8.4.3;
+# Z. Drmac and K. Veselic, LAPACK Working Note 196, sections 2 and 3; Reference-LAPACK SRC/dgesvj.f
+def _linalg_rotation(app, aqq, apq, ops):
+    batch, real = app.shape, app.dtype
+    magnitude, delta = _temporary(batch, real), _temporary(batch, real)
+    d, g, scale = (_temporary(batch, real) for _ in range(3))
+    ops += _elementwise('abs', magnitude, apq)
+    ops += _elementwise('mul', d, aqq, 0.5)
+    ops += _elementwise('mul', g, app, 0.5)
+    ops += _elementwise('sub', delta, d, g)
+    ops += _elementwise('abs', scale, delta)
+    ops += _elementwise('maximum', scale, scale, magnitude)
+    zero, active = _temporary(batch, torch.bool), _temporary(batch, torch.bool)
+    ops += _elementwise('eq', zero, scale, 0)
+    ops += _elementwise('where', scale, zero, 1, scale)
+    ops += _elementwise('div', d, delta, scale)
+    ops += _elementwise('div', g, magnitude, scale)
+    square, tangent, cosine = (_temporary(batch, real) for _ in range(3))
+    ops += _elementwise('mul', square, d, d)
+    ops += _elementwise('mul', tangent, g, g)
+    ops += _elementwise('add', square, square, tangent)
+    ops += _elementwise('sqrt', square, square)
+    ops += _elementwise('abs', tangent, d)
+    ops += _elementwise('add', square, square, tangent)
+    ops += _elementwise('where', square, zero, 1, square)
+    ops += _elementwise('div', tangent, g, square)
+    ops += _elementwise('lt', zero, delta, 0)
+    ops += _elementwise('neg', square, tangent)
+    ops += _elementwise('where', tangent, zero, square, tangent)
+    ops += _elementwise('abs', d, app)
+    ops += _elementwise('sqrt', d, d)
+    ops += _elementwise('abs', g, aqq)
+    ops += _elementwise('sqrt', g, g)
+    ops += _elementwise('mul', d, d, torch.finfo(real).eps)
+    ops += _elementwise('mul', d, d, g)
+    ops += _elementwise('gt', active, magnitude, d)
+    ops += _elementwise('where', tangent, active, tangent, 0)
+    ops += _elementwise('mul', cosine, tangent, tangent)
+    ops += _elementwise('add', cosine, cosine, 1)
+    ops += _elementwise('rsqrt', cosine, cosine)
+    sine = _temporary(batch, apq.dtype)
+    ops += _elementwise('eq', zero, magnitude, 0)
+    ops += _elementwise('where', scale, zero, 1, magnitude)
+    ops += _elementwise('div', sine, apq, scale)
+    ops += _elementwise('mul', sine, sine, tangent)
+    ops += _elementwise('mul', sine, sine, cosine)
+    return cosine, sine, tangent, magnitude, active
+
+
+def _linalg_rotate_columns(matrix, p, q, cosine, sine, ops):
+    first, second = matrix[..., :, p], matrix[..., :, q]
+    a, b, term = (_temporary(first.shape, first.dtype) for _ in range(3))
+    ops += _copy(a, first) + _copy(b, second)
+    conjugate = _linalg_transpose(sine[..., None, None], ops, False, True)[..., 0]
+    ops += _elementwise('mul', first, a, cosine.unsqueeze(-1))
+    ops += _elementwise('mul', term, b, conjugate)
+    ops += _elementwise('sub', first, first, term)
+    ops += _elementwise('mul', second, b, cosine.unsqueeze(-1))
+    ops += _elementwise('mul', term, a, sine.unsqueeze(-1))
+    ops += _elementwise('add', second, second, term)
+
+
+def _linalg_columns(source, indices, out):
+    given = {'self': source, 'dim': -1, 'index': indices.unsqueeze(-2).expand(out.shape)}
+    return _lifted(A.gather.default, _taken, given, [out]) if source.is_complex() else \
+        _taken(A.gather.default, given, [out])
+
+
+def _eigen_hermitian(target, given, outs):
+    a, (values, vectors), ops = given['A'], outs, []
+    batch, n = a.shape[:-2], a.shape[-1]
+    matrix = _temporary(a.shape, a.dtype)
+    upper = given.get('UPLO', 'L').upper() == 'U'
+    opposite = _linalg_transpose(a, ops, True, True)
+    other = _temporary(a.shape, a.dtype)
+    ops += _triangular_part(A.triu.default if upper else A.tril.default, {'self': a}, [matrix])
+    ops += _triangular_part(A.tril.default if upper else A.triu.default,
+                            {'self': opposite, 'diagonal': -1 if upper else 1}, [other])
+    ops += _elementwise('add', matrix, matrix, other)
+    if a.is_complex():
+        ops += _fill(matrix.diagonal(dim1=-2, dim2=-1).imag, 0)
+    rotations = _temporary(a.shape, a.dtype) if vectors.numel() else None
+    if rotations is not None:
+        ops += _linalg_identity(rotations)
+    predicate, changed = _temporary((), torch.bool), _temporary(batch, torch.bool)
+    ops += _fill(predicate, n > 1)
+    body = _fill(changed, False)
+    for p in range(n):
+        for q in range(p + 1, n):
+            app, aqq = _temporary(batch, a.real.dtype), _temporary(batch, a.real.dtype)
+            apq = _temporary(batch, a.dtype)
+            body += _copy(app, matrix[..., p, p].real) + _copy(aqq, matrix[..., q, q].real)
+            body += _copy(apq, matrix[..., p, q])
+            c, s, t, magnitude, active = _linalg_rotation(app, aqq, apq, body)
+            body += _elementwise('logical_or', changed, changed, active)
+            _linalg_rotate_columns(matrix, p, q, c, s, body)
+            conjugate = _linalg_transpose(s[..., None, None], body, False, True)[..., 0, 0]
+            _linalg_rotate_columns(matrix.transpose(-2, -1), p, q, c, conjugate, body)
+            if rotations is not None:
+                _linalg_rotate_columns(rotations, p, q, c, s, body)
+            shift = _temporary(batch, a.real.dtype)
+            body += _elementwise('mul', shift, t, magnitude)
+            body += _elementwise('sub', matrix[..., p, p], app, shift)
+            body += _elementwise('add', matrix[..., q, q], aqq, shift)
+            body += _fill(matrix[..., p, q], 0) + _fill(matrix[..., q, p], 0)
+    body += _fold(A.any.default, {'self': changed, 'dim': None, 'keepdim': False}, [predicate])
+    if n > 1:
+        ops.append(_Control(WHILE, [body], predicate))
+    indices = _temporary(values.shape, torch.int64)
+    ops.append(_Sort(matrix.diagonal(dim1=-2, dim2=-1).real, values.dim() - 1, n, False, values, indices))
+    if rotations is not None:
+        ops += _linalg_columns(rotations, indices, vectors)
+    return ops
+
+
+def _linalg_lengths(matrix, lengths, ops):
+    real = matrix.real.dtype
+    magnitude, maximum = _temporary(matrix.shape, real), _temporary(lengths.shape, real)
+    ops += _elementwise('abs', magnitude, matrix)
+    ops += _reduced(A.amax.default, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [maximum])
+    zero, safe = _temporary(lengths.shape, torch.bool), _temporary(lengths.shape, real)
+    ops += _elementwise('eq', zero, maximum, 0)
+    ops += _elementwise('where', safe, zero, 1, maximum)
+    ops += _elementwise('div', magnitude, magnitude, safe.unsqueeze(-2))
+    ops += _elementwise('mul', magnitude, magnitude, magnitude)
+    ops += _reduced(A.sum.dim_IntList, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [lengths])
+    ops += _elementwise('sqrt', lengths, lengths)
+    ops += _elementwise('mul', lengths, lengths, maximum)
+    ops += _elementwise('eq', zero, lengths, 0)
+    ops += _elementwise('where', safe, zero, 1, lengths)
+    normalized = _temporary(matrix.shape, matrix.dtype)
+    ops += _elementwise('div', normalized, matrix, safe.unsqueeze(-2))
+    return normalized
+
+
+def _linalg_complete_columns(columns, lengths, out, ops):
+    m, k = columns.shape[-2:]
+    projector = _temporary((*columns.shape[:-2], m, m), columns.dtype)
+    ops += _linalg_identity(projector)
+    for j in range(out.shape[-1]):
+        diagonal = projector.diagonal(dim1=-2, dim2=-1).real
+        index = _temporary((*columns.shape[:-2], 1), torch.int64)
+        ops += _extreme(A.argmax.default, {'self': diagonal, 'dim': -1, 'keepdim': True}, [index])
+        candidate = _temporary((*columns.shape[:-2], m, 1), columns.dtype)
+        ops += _linalg_columns(projector, index, candidate)
+        norm = _temporary((*columns.shape[:-2], 1), lengths.dtype)
+        unit = _linalg_lengths(candidate, norm, ops)
+        destination = out[..., :, j:j + 1]
+        if j < k:
+            zero = _temporary((*columns.shape[:-2], 1), torch.bool)
+            ops += _elementwise('eq', zero, lengths[..., j:j + 1], 0)
+            ops += _elementwise('where', destination, zero.unsqueeze(-2), unit, columns[..., :, j:j + 1])
+        else:
+            ops += _copy(destination, unit)
+        row = _linalg_transpose(destination, ops, True, True)
+        change = _temporary(projector.shape, projector.dtype)
+        ops += _product(A.matmul.default, {'self': destination, 'other': row}, [change])
+        ops += _elementwise('sub', projector, projector, change)
+
+
+# Z. Drmac and K. Veselic, LAPACK Working Note 196, one-sided Jacobi; Reference-LAPACK SRC/dgesvj.f and zgesvj.f
+def _singular(target, given, outs):
+    a, (u, singular, vh), ops = given['A'], outs, []
+    wide = a.shape[-2] < a.shape[-1]
+    source = _linalg_transpose(a, ops, wide, wide)
+    matrix = _temporary(source.shape, source.dtype)
+    ops += _copy(matrix, source)
+    batch, (m, n), real = source.shape[:-2], source.shape[-2:], source.real.dtype
+    if not n:
+        return ops + (_linalg_identity(u) if u.numel() else []) + (_linalg_identity(vh) if vh.numel() else [])
+    vectors = _temporary((*batch, n, n), a.dtype) if given.get('compute_uv', True) else None
+    if vectors is not None:
+        ops += _linalg_identity(vectors)
+    predicate, changed = _temporary((), torch.bool), _temporary(batch, torch.bool)
+    ops += _fill(predicate, n > 1)
+    body = _fill(changed, False)
+    for p in range(n):
+        for q in range(p + 1, n):
+            lp, lq = _temporary((*batch, 1), real), _temporary((*batch, 1), real)
+            up = _linalg_lengths(matrix[..., :, p:p + 1], lp, body)
+            uq = _linalg_lengths(matrix[..., :, q:q + 1], lq, body)
+            correlation = _temporary((*batch, 1, 1), a.dtype)
+            body += _product(A.matmul.default, {'self': _linalg_transpose(up, body, True, True), 'other': uq},
+                              [correlation])
+            app, aqq, apq = _temporary(batch, real), _temporary(batch, real), _temporary(batch, a.dtype)
+            scale, zero = _temporary(batch, real), _temporary(batch, torch.bool)
+            body += _elementwise('maximum', scale, lp[..., 0], lq[..., 0])
+            body += _elementwise('eq', zero, scale, 0)
+            body += _elementwise('where', scale, zero, 1, scale)
+            body += _elementwise('div', app, lp[..., 0], scale)
+            body += _elementwise('div', aqq, lq[..., 0], scale)
+            body += _elementwise('mul', apq, correlation[..., 0, 0], app)
+            body += _elementwise('mul', apq, apq, aqq)
+            body += _elementwise('mul', app, app, app)
+            body += _elementwise('mul', aqq, aqq, aqq)
+            c, s, _, _, active = _linalg_rotation(app, aqq, apq, body)
+            body += _elementwise('logical_or', changed, changed, active)
+            _linalg_rotate_columns(matrix, p, q, c, s, body)
+            if vectors is not None:
+                _linalg_rotate_columns(vectors, p, q, c, s, body)
+    body += _fold(A.any.default, {'self': changed, 'dim': None, 'keepdim': False}, [predicate])
+    if n > 1:
+        ops.append(_Control(WHILE, [body], predicate))
+    lengths = _temporary(singular.shape, real)
+    unit = _linalg_lengths(matrix, lengths, ops)
+    indices = _temporary(singular.shape, torch.int64)
+    ops.append(_Sort(lengths, lengths.dim() - 1, n, True, singular, indices))
+    if vectors is not None:
+        columns, right = _temporary(unit.shape, unit.dtype), _temporary(vectors.shape, vectors.dtype)
+        ops += _linalg_columns(unit, indices, columns) + _linalg_columns(vectors, indices, right)
+        left = _temporary((*batch, m, vh.shape[-2] if wide else u.shape[-1]), a.dtype)
+        _linalg_complete_columns(columns, singular, left, ops)
+        ops += _copy(u, right if wide else left)
+        ops += _copy(vh, _linalg_transpose(left if wide else right, ops, True, True))
     return ops
 
 
@@ -4600,6 +5204,11 @@ def _trips(test, body, carried, additional):
 SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A._to_copy, A._unsafe_view, A.copy,
                                                                      A.copy_), _copying),
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
+           **dict.fromkeys(FACTORIZATIONS, _factorized),
+           **dict.fromkeys(ORTHOGONAL, _orthogonal), A.triu: _triangular_part, A.tril: _triangular_part,
+           A.linalg_matrix_exp: _matrix_exp,
+           A._linalg_eigh: _eigen_hermitian,
+           A._linalg_svd: _singular,
            **dict.fromkeys((*CONVOLUTION, *TRANSPOSED, A.convolution), _convolving),
            **dict.fromkeys((*MAXIMUM, *AVERAGE, *INDEXED), _pooled), **dict.fromkeys(PAD, _padded),
            **dict.fromkeys((*FILLS, *EMPTY, A.arange), _factory), **dict.fromkeys(REDUCTIONS, _reduced),
@@ -5621,15 +6230,12 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
         if status:
             raise OSError(status, 'call %s of compiled function %d: the replay: %s'
                           % (entry['node'].name, k, error.value.decode()))
-        residues = mesh.Q()
-        native = lib.MetalReplayNative(C.byref(replay), C.byref(residues))
         if replay.commands:
             SET(queue, _SEL(b'addResidencySet:'), replay.residency)
         owned[id(replay)] = lambda replay=replay: (SET(queue, _SEL(b'removeResidencySet:'), replay.residency)
                                                    if replay.commands else None, lib.MetalReplayDestroy(C.byref(replay)))
-        rows.append((replay, native, residues.value))
-    calls = (Call * len(rows))(*[Call(C.pointer(r[0]) if r is not None and r[0].commands else None, row + 1,
-                                      r[1] if r is not None else None, r[2] if r is not None else 0)
+        rows.append(replay)
+    calls = (Call * len(rows))(*[Call(C.pointer(r) if r is not None else None, row + 1, None, 0)
                                  for row, r in enumerate(rows)])
     # metal_recording.h MetalRecorderProgram: this node's machines (GPU, CPU), the executor's estimate of a span the plan
     # gives no horizon; none recorded: the plan's horizon alone
