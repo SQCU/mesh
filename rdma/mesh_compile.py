@@ -5954,7 +5954,7 @@ def _fragment(target, given, outs):
     lane = op('or', op('or', op('and', op('div', rr, c(8)), c(1)), op('shl', op('and', cc, c(3)), c(1))),
               op('or', op('shl', op('and', op('div', rr, c(8)), c(2)), c(2)),
                  op('shl', op('and', cc, c(4)), c(2))))
-    pair = op('add', op('mul', op('and', rr, c(7)), c(2)), op('div', cc, c(8)))
+    pair = op('add', op('mul', op('and', rr, c(6)), c(2)), op('div', cc, c(8)))
     bit = op('mul', pair, width)
     shift, half = op('rem', bit, c(16)), op('mul', op('and', rr, c(1)), c(16))
     base = op('add', op('and', read(3, tr), c(0x0fffffff)), op('and', word, c(0xfff)))
