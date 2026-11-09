@@ -33,7 +33,8 @@ struct mesh_metal_sent { void *counter; uint64_t sends,copies; };
 /* S. Williams, A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009, §3 ("created once per multicore computer");
    design/torch-capture-change-request.md, 2026-11-09 appendix: this node's GPU and CPU operands (mesh-graph.h struct
    mesh_graph_machine) from the configuration at `path` (etc/mesh-capacity.json): models[sysctl hw.model].machines.gpu
-   and .cpu, each with every field of the struct by its name; ENOENT where the model or its machines are not recorded,
+   and .cpu, each with every field of the struct by its name, a record without `cores` (the CPU's: its peak is the
+   whole CPU's) taking this node's sysctl hw.physicalcpu; ENOENT where the model or its machines are not recorded,
    EINVAL where a field is missing or not a number */
 int mesh_metal_machines(const char *path,struct mesh_graph_machine *gpu,struct mesh_graph_machine *cpu);
 /* the plan's status word relative to the view: a capture's state:buffer:status: offset (its own call's plan) */

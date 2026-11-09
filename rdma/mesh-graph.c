@@ -534,8 +534,8 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
 
 /* OpenXLA gpu_performance_model_base.cc: AdjustBandwidth */
 static double actor_bandwidth(const struct mesh_graph_machine *x, double bandwidth, uint64_t blocks){
-  const double most=(double)blocks*x->clock*1.0e9*x->transactions;
-  return bandwidth<most?bandwidth:most;
+  const double most=(double)blocks*x->block_bandwidth;
+  return x->block_bandwidth>0 && most<bandwidth?most:bandwidth;
 }
 /* OpenXLA gpu_performance_model_base.cc: ReadTimeWithDRAMHeuristic, in seconds */
 static double actor_read(const struct mesh_graph_machine *x, uint64_t blocks, const struct mesh_graph_read *r){
@@ -554,7 +554,7 @@ static double actor_read(const struct mesh_graph_machine *x, uint64_t blocks, co
    kKernelLaunchOverhead a launch */
 double mesh_graph_actor_time(const struct mesh_graph_machine *x, const struct mesh_graph_actor *a){
   const uint64_t fpus=a->threads<x->fpus?a->threads:x->fpus,cores=a->blocks<x->cores?a->blocks:x->cores;
-  const double per_ns=x->clock*2*(double)cores*(double)fpus;
+  const double per_ns=x->cores && x->fpus?x->peak*(double)cores/x->cores*(double)fpus/x->fpus:0;
   const double compute=a->flops>0?a->flops/per_ns:0;
   double memory=(double)a->written/x->bandwidth;
   for(size_t k=0;k<a->reads;k++)memory+=actor_read(x,a->blocks,a->read+k);
@@ -1392,12 +1392,14 @@ int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, co
   return result;
 }
 /* BSL §4.2-4.3, (6): Bff of each feedforward edge of the two-processor IPC graph */
-int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, uint64_t *bound) {
-  if (!actors || actors >= UINT32_MAX / 2) return EINVAL;
+int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, size_t edges,
+                            const struct mesh_graph_dependence *edge, uint64_t *bound) {
+  if (!actors || actors >= UINT32_MAX / 2 || edges >= SIZE_MAX / sizeof(uint64_t) - 3 * (size_t)actors - 2) return EINVAL;
   for (uint32_t j = 0; j < actors; j++)
     if (!(host[j] >= 0 && host[j] <= DBL_MAX) || !(work[j] >= 0 && work[j] <= DBL_MAX)) return EINVAL;
   const uint32_t V = 2 * actors;
-  const size_t E = 3 * (size_t)actors;
+  for (size_t e = 0; e < edges; e++) if (edge[e].from >= V || edge[e].to >= V) return EINVAL;
+  const size_t E = 3 * (size_t)actors + edges;
   double *time = malloc(((size_t)V + 1) * sizeof *time);
   uint32_t *from = malloc((E + 2) * sizeof *from), *to = malloc((E + 2) * sizeof *to);
   uint64_t *delay = malloc((E + 2) * sizeof *delay);
@@ -1409,8 +1411,13 @@ int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *w
     from[3 * j + 1] = actors + j; to[3 * j + 1] = actors + next; delay[3 * j + 1] = next == 0;
     from[3 * j + 2] = j; to[3 * j + 2] = actors + j; delay[3 * j + 2] = 0;
   }
+  for (size_t e = 0; !result && e < edges; e++) {
+    const size_t k = 3 * (size_t)actors + e;
+    from[k] = edge[e].from; to[k] = edge[e].to; delay[k] = edge[e].delay;
+  }
   double lambda = 0, sum = 0;
   if (!result) result = mesh_graph_cycle_mean(V, time, E, from, to, delay, &lambda);
+  if (!result && lambda == INFINITY) result = EINVAL;
   for (uint32_t v = 0; !result && v < V; v++) sum += time[v];
   for (uint32_t j = 0; !result && j < actors; j++) {
     if (!(lambda > 0)) { bound[j] = 1; continue; }
@@ -1540,6 +1547,129 @@ int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, si
   }
   if (!result) { *edges = count; if (count > room) result = ERANGE; }
   free(pair);
+  return result;
+}
+
+/* W. Pugh, CACM 35(8), 1992: a view's dimensions [first, last) placed at `offset` (relative positions are signed) */
+struct view_part { __int128 offset; uint64_t element; const uint64_t *pairs; uint32_t first, last; };
+static __int128 view_floor(__int128 a, uint64_t s) {
+  const __int128 q = a / (__int128)s;
+  return a % (__int128)s && a < 0 ? q - 1 : q;
+}
+/* a dimension of one index or stride 0 adds no byte; an innermost one of the element's stride lengthens the element */
+static void view_normal(struct view_part *v) {
+  while (v->first < v->last && (v->pairs[2 * v->first] <= 1 || !v->pairs[2 * v->first + 1])) v->first++;
+  while (v->last > v->first) {
+    const uint64_t n = v->pairs[2 * (v->last - 1)], s = v->pairs[2 * (v->last - 1) + 1];
+    if (n > 1 && s && s != v->element) break;
+    if (n > 1 && s) v->element *= n;
+    v->last--;
+  }
+}
+static __int128 view_width(const struct view_part *v) {
+  __int128 w = v->element;
+  for (uint32_t d = v->first; d < v->last; d++)
+    if (v->pairs[2 * d]) w += (__int128)(v->pairs[2 * d] - 1) * v->pairs[2 * d + 1];
+  return w;
+}
+static int view_meets(struct view_part a, struct view_part b) {
+  view_normal(&a); view_normal(&b);
+  const __int128 wa = view_width(&a), wb = view_width(&b);
+  if (a.offset >= b.offset + wb || b.offset >= a.offset + wa) return 0;
+  if (a.first == a.last && b.first == b.last) return 1;
+  const uint64_t sa = a.first < a.last ? a.pairs[2 * a.first + 1] : 0, sb = b.first < b.last ? b.pairs[2 * b.first + 1] : 0;
+  if (sa == sb) {
+    const uint64_t na = a.pairs[2 * a.first], nb = b.pairs[2 * b.first];
+    struct view_part ia = a, ib = b;
+    ia.first++; ib.first++;
+    const __int128 d = b.offset - a.offset, wia = view_width(&ia), wib = view_width(&ib);
+    __int128 lo = view_floor(-wib - d, sa) + 1, hi = -view_floor(-(wia - d), sa) - 1;
+    if (lo < -(__int128)(na - 1)) lo = -(__int128)(na - 1);
+    if (hi > (__int128)(nb - 1)) hi = (__int128)(nb - 1);
+    ia.offset = 0;
+    for (__int128 t = lo; t <= hi; t++) {
+      ib.offset = d + t * (__int128)sa;
+      if (view_meets(ia, ib)) return 1;
+    }
+    return 0;
+  }
+  const struct view_part x = sa > sb ? a : b, y = sa > sb ? b : a;
+  const uint64_t n = x.pairs[2 * x.first], s = x.pairs[2 * x.first + 1];
+  struct view_part ix = x;
+  ix.first++;
+  const __int128 wix = view_width(&ix), wy = sa > sb ? wb : wa;
+  __int128 lo = view_floor(y.offset - x.offset - wix, s) + 1, hi = -view_floor(-(y.offset + wy - x.offset), s) - 1;
+  if (lo < 0) lo = 0;
+  if (hi > (__int128)(n - 1)) hi = (__int128)(n - 1);
+  for (__int128 i = lo; i <= hi; i++) {
+    ix.offset = x.offset + i * (__int128)s;
+    if (view_meets(ix, y)) return 1;
+  }
+  return 0;
+}
+struct view_hull { uint64_t key; __int128 start, end; size_t index; };
+static int view_hull_before(const void *a, const void *b) {
+  const struct view_hull *x = a, *y = b;
+  if (x->key != y->key) return x->key < y->key ? -1 : 1;
+  return (x->start > y->start) - (x->start < y->start);
+}
+struct view_edge { uint32_t from, to, kind, given; uint64_t key; };
+static int view_edge_before(const void *a, const void *b) {
+  const struct view_edge *x = a, *y = b;
+  if (x->from != y->from) return x->from < y->from ? -1 : 1;
+  if (x->to != y->to) return x->to < y->to ? -1 : 1;
+  if (x->kind != y->kind) return x->kind < y->kind ? -1 : 1;
+  if (x->key != y->key) return x->key < y->key ? -1 : 1;
+  return (x->given > y->given) - (x->given < y->given);
+}
+int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
+                                 const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
+                                 uint32_t *to, struct mesh_graph_cause *cause, size_t *edges) {
+  for (size_t e = 0; e < supplied; e++) if (supplied_from[e] >= supplied_to[e]) return EINVAL;
+  if (supplied >= SIZE_MAX / sizeof(struct view_edge) - 64 || views >= SIZE_MAX / sizeof(struct view_hull)) return ENOMEM;
+  struct view_hull *hull = malloc((views + 1) * sizeof *hull);
+  size_t made = supplied, held = supplied + 64, count = 0;
+  struct view_edge *edge = malloc(held * sizeof *edge);
+  int result = hull && edge ? 0 : ENOMEM;
+  for (size_t e = 0; !result && e < supplied; e++)
+    edge[e] = (struct view_edge){supplied_from[e], supplied_to[e], MESH_GRAPH_GIVEN, (uint32_t)e, 0};
+  for (size_t v = 0; !result && v < views; v++) {
+    const struct mesh_strided *s = &view[v].view;
+    const struct view_part p = {s->offset, s->element, s->pairs, 0, s->dims};
+    hull[v] = (struct view_hull){view[v].key, (__int128)s->offset, (__int128)s->offset + view_width(&p), v};
+  }
+  if (!result && views) qsort(hull, views, sizeof *hull, view_hull_before);
+  for (size_t i = 0; !result && i < views; i++)
+    for (size_t j = i + 1; !result && j < views && hull[j].key == hull[i].key && hull[j].start < hull[i].end; j++) {
+      const struct mesh_graph_view *a = view + hull[i].index, *b = view + hull[j].index;
+      if (a->vertex == b->vertex || !(a->write || b->write) || (a->write == 2 && b->write == 2)) continue;
+      const struct view_part pa = {a->view.offset, a->view.element, a->view.pairs, 0, a->view.dims},
+                             pb = {b->view.offset, b->view.element, b->view.pairs, 0, b->view.dims};
+      int empty = !a->view.element || !b->view.element;
+      for (uint32_t d = 0; d < a->view.dims; d++) empty |= !a->view.pairs[2 * d];
+      for (uint32_t d = 0; d < b->view.dims; d++) empty |= !b->view.pairs[2 * d];
+      if (empty || !view_meets(pa, pb)) continue;
+      if (made == held) {
+        struct view_edge *more = realloc(edge, 2 * held * sizeof *more);
+        if (!more) { result = ENOMEM; break; }
+        edge = more; held *= 2;
+      }
+      const struct mesh_graph_view *lo = a->vertex < b->vertex ? a : b, *hi = a->vertex < b->vertex ? b : a;
+      const uint32_t kind = lo->write && hi->write ? MESH_GRAPH_WRITE_AFTER_WRITE :
+                            lo->write ? MESH_GRAPH_READ_AFTER_WRITE : MESH_GRAPH_WRITE_AFTER_READ;
+      edge[made++] = (struct view_edge){lo->vertex, hi->vertex, kind, 0, a->key};
+    }
+  if (!result && made) qsort(edge, made, sizeof *edge, view_edge_before);
+  for (size_t k = 0; !result && k < made; k++) {
+    if (k && !view_edge_before(edge + k, edge + k - 1)) continue;
+    if (count < room) {
+      from[count] = edge[k].from; to[count] = edge[k].to;
+      cause[count] = (struct mesh_graph_cause){edge[k].key, edge[k].kind, edge[k].given};
+    }
+    count++;
+  }
+  if (!result) { *edges = count; if (count > room) result = ERANGE; }
+  free(hull); free(edge);
   return result;
 }
 

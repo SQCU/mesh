@@ -1,6 +1,7 @@
 #!/usr/bin/env mesh-python
 """design/synchronization-signature-change-request.md items 3, 4 and 5"""
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -56,6 +57,45 @@ COUNT_KIND = 9
 CLASSES = ('program', 'static', 'bridge', 'implied', 'initial', 'elsewhere')
 
 
+LIBMESH = os.path.join(HERE, '..', 'rdma', 'libmesh.dylib')
+
+
+# mesh-dataflow.c mesh_transfers_start's wait for each edge of its row, as the built libmesh compiled it: the block an
+# edge's test branches to once its count has reached its need (`cmp seen, need`; `ngcs xzr, need_high`; `b.ge`), whose
+# first instruction steps the edge index (`add edge, edge, #0x1`). A pid probe at that instruction's offset observes
+# each satisfied wait with its edge, count seen and need in registers, before the submission's release store
+def count_wait_point(library):
+    listing = subprocess.run(['otool', '-tV', '-p', '_mesh_transfers_start', library], capture_output=True, text=True).stdout
+    code, started = [], False
+    for line in listing.splitlines():
+        if line.startswith('_mesh_transfers_start:'):
+            started = True
+            continue
+        if started and re.match(r'^_\w+:', line):
+            break
+        m = re.match(r'^([0-9a-f]+)\t(\S+)\t?(.*)$', line) if started else None
+        if m:
+            code.append((int(m.group(1), 16), m.group(2), m.group(3).split(';')[0].strip()))
+    at = {address: (op, args) for address, op, args in code}
+    found = set()
+    for k in range(len(code) - 2):
+        a, b, c = code[k], code[k + 1], code[k + 2]
+        test = re.match(r'^x(\d+), x(\d+)$', a[2]) if a[1] == 'cmp' else None
+        high = re.match(r'^xzr, x(\d+)$', b[2]) if b[1] == 'ngcs' else None
+        if not (test and high and c[1] in ('b.ge', 'b.hs')):
+            continue
+        target = int(c[2], 16)
+        step = re.match(r'^x(\d+), x(\d+), #0x1$', at.get(target, ('', ''))[1]) if at.get(target, ('',))[0] == 'add' else None
+        if step and step.group(1) == step.group(2):
+            found.add((target - code[0][0], int(step.group(1)), int(test.group(1)), int(test.group(2)), int(high.group(1))))
+    if len(found) != 1:
+        return None, '%d candidate wait points in %s mesh_transfers_start' % (len(found), library)
+    offset, edge, seen, need, high = found.pop()
+    digest = hashlib.sha256(open(library, 'rb').read()).hexdigest()
+    return {'offset': offset, 'edge': edge, 'seen': seen, 'need': need, 'high': high, 'library': library,
+            'sha256': digest}, None
+
+
 def load(path):
     made = mesh_graph.from_record(open(path, 'rb').read())
     try:
@@ -70,7 +110,7 @@ def load(path):
     return compiled, processors, tasks, dependences, operations, lane
 
 
-def classify(processors, operations):
+def classify(processors, operations, waits=True):
     queues = {p.index % mesh_graph.NODES for p in processors if KINDS[p.kind] == 'queue'}
     if len(queues) > 1:
         raise ValueError('the record holds queues of nodes %s: one node\'s program a record' % sorted(queues))
@@ -86,7 +126,7 @@ def classify(processors, operations):
             return 'elsewhere'
         if KINDS[p.kind] == 'bridge':
             return 'bridge'
-        if name == 'host_wait' and mesh_graph.PLAN_COUNT <= o.object < mesh_graph.PLAN_SUBMISSION:
+        if name == 'host_wait' and mesh_graph.PLAN_COUNT <= o.object < mesh_graph.PLAN_SUBMISSION and not waits:
             return 'implied'
         return 'program'
     return node, [which(o) for o in operations]
@@ -103,7 +143,7 @@ def role(processors, node, name):
     raise ValueError('no %s processor of node %s in the record' % (want, node))
 
 
-def generate(operations, program, observe):
+def generate(operations, program, observe, point=None):
     total, executions = len(program), 1 + max((operations[i].execution for i in program), default=0)
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
              '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])
@@ -154,6 +194,11 @@ def generate(operations, program, observe):
                  'self->bsva = %s; }' % (probe, executions, obj, val))
     lines.append('%sentry /self->inrun/ { self->inapi++; }' % probe)
     lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
+    if point:
+        need = 'uregs[R_X%d]' % point['need']
+        check('pid$target:libmesh.dylib:mesh_transfers_start:', 'host_wait', '(self->bsob << 20) + uregs[R_X%d]' %
+              point['edge'], '((int64_t)uregs[R_X%d] < 0 ? 0 : uregs[R_X%d] ? -1 : %s)' % (point['high'], point['high'], need),
+              None, '%x' % point['offset'], '/self->bs/')
     check(probe, name, 'self->bsob', 'self->bsva', None, 'return', '/self->bs/')
     lines.append('%sreturn /self->bs/ { self->bs = 0; }' % probe)
     lines.append('%s /self->inrun && self->inapi == 0 && self->exec < %d/ { printf("mesh-sync-monitor: unexpected %%s %%s '
@@ -251,10 +296,13 @@ def main(argv):
             sys.stderr.write('mesh-sync-monitor: unknown argument %s\n' % rest[0])
             return 2
     compiled, processors, tasks, dependences, operations, lane = load(path)
-    node, which = classify(processors, operations)
+    point, unpointed = count_wait_point(LIBMESH)
+    if unpointed:
+        sys.stderr.write('mesh-sync-monitor: the plan\'s count waits stay unobserved (implied): %s\n' % unpointed)
+    node, which = classify(processors, operations, point is not None)
     program = [i for i, c in enumerate(which) if c == 'program']
     coverage = {c: which.count(c) for c in CLASSES if c in which}
-    script, executions = generate(operations, program, observe)
+    script, executions = generate(operations, program, observe, point)
     target_path = os.path.splitext(path)[0] + '.monitor.d'
     open(target_path, 'w').write(script)
     # item 4: every compiled edge the image of a dependence and none redundant, before anything runs; item 6: every
@@ -274,7 +322,8 @@ def main(argv):
         return 1 if before else 0
     record = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
               'kind': 'synchronization-monitor', 'signature': os.path.abspath(path), 'sha256': compiled['digest'],
-              'node': node, 'executions': executions, 'coverage': coverage, 'destructive': not observe}
+              'node': node, 'executions': executions, 'coverage': coverage, 'destructive': not observe,
+              'count_wait_point': point}
     if before:
         record.update(result='fail', reasons=before)
         with open(REVIEWS, 'a') as reviews:

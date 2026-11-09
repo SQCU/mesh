@@ -9,7 +9,35 @@
       "gpu_bf16_gflops": 59054,
       "cpu_gflops": 1695,
       "memory_gbs": 362,
-      "fabric_gbs": 8.7
+      "fabric_gbs": 8.7,
+      "machines": {
+        "source": "metal-microbench docs/hardware_roofline.md#machine-operands-of-the-actor-cost-model",
+        "gpu": {
+          "peak": 11540.44,
+          "cores": 40,
+          "fpus": 128,
+          "bandwidth": 532100000000.0,
+          "block_bandwidth": 0,
+          "l2": 0,
+          "l1": 0,
+          "launch": 0,
+          "l2_speedup": 1,
+          "l1_speedup": 1,
+          "overlap": 1
+        },
+        "cpu": {
+          "peak": 1695,
+          "fpus": 1,
+          "bandwidth": 362000000000.0,
+          "block_bandwidth": 0,
+          "l2": 0,
+          "l1": 0,
+          "launch": 0,
+          "l2_speedup": 1,
+          "l1_speedup": 1,
+          "overlap": 1
+        }
+      }
     },
     "Mac16,11": {
       "chip": "Apple M4 Pro",
@@ -18,7 +46,35 @@
       "gpu_bf16_gflops": 6047,
       "cpu_gflops": 3488.27664,
       "memory_gbs": 238,
-      "fabric_gbs": 8.7
+      "fabric_gbs": 8.7,
+      "machines": {
+        "source": "metal-microbench docs/hardware_roofline.md#machine-operands-of-the-actor-cost-model",
+        "gpu": {
+          "peak": 6023.09,
+          "cores": 16,
+          "fpus": 128,
+          "bandwidth": 264400000000.0,
+          "block_bandwidth": 0,
+          "l2": 0,
+          "l1": 0,
+          "launch": 0,
+          "l2_speedup": 1,
+          "l1_speedup": 1,
+          "overlap": 1
+        },
+        "cpu": {
+          "peak": 3488.27664,
+          "fpus": 1,
+          "bandwidth": 238000000000.0,
+          "block_bandwidth": 0,
+          "l2": 0,
+          "l1": 0,
+          "launch": 0,
+          "l2_speedup": 1,
+          "l1_speedup": 1,
+          "overlap": 1
+        }
+      }
     }
   }
 }

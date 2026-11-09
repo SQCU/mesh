@@ -1805,24 +1805,52 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
   if(!group || !program || !count || !functions || !ncalls || !calls || (norders && (!orders || !causes)))return EINVAL;
   for(uint32_t j=0;j<ncalls;j++)if(calls[j]>=count)return EINVAL;
   /* design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: the horizon and the locations of the
-     values the host writes, Bff of the calls' host -> device edges from their t(v) (mesh_graph_buffer_bound) */
+     values the host writes, Bff of the host -> device edges of the calls' compiled parts in program order from their
+     t(v), with each call's own dependences between its parts (mesh_graph_buffer_bound) */
   uint32_t horizon=1;
   {
-    double *host=malloc(((size_t)ncalls+1)*sizeof *host),*work=malloc(((size_t)ncalls+1)*sizeof *work);
-    uint64_t *bff=malloc(((size_t)ncalls+1)*sizeof *bff),*lagged=calloc((size_t)count+1,sizeof *lagged);
-    int bounded=host && work && bff && lagged?0:ENOMEM;
-    for(uint32_t j=0;!bounded && j<ncalls;j++){host[j]=functions[calls[j]].host;work[j]=functions[calls[j]].work;}
-    if(!bounded)bounded=mesh_graph_buffer_bound(ncalls,host,work,bff);
+    uint64_t actors=0,dependences=0;
+    for(uint32_t j=0;j<ncalls;j++){
+      const struct mesh_function *f=functions+calls[j];
+      if(f->parts && (!f->host || !f->work))return EINVAL;
+      if(f->edges && !f->edge)return EINVAL;
+      for(uint32_t e=0;e<f->edges;e++)if(f->edge[e].from>=2*(uint64_t)f->parts || f->edge[e].to>=2*(uint64_t)f->parts)return EINVAL;
+      actors+=f->parts?f->parts:1;dependences+=f->edges;
+    }
+    if(actors>=UINT32_MAX/2 || dependences>=SIZE_MAX/sizeof(struct mesh_graph_dependence))return ENOMEM;
+    const uint32_t A=(uint32_t)actors;
+    double *host=calloc((size_t)A+1,sizeof *host),*work=calloc((size_t)A+1,sizeof *work);
+    uint64_t *bff=malloc(((size_t)A+1)*sizeof *bff),*lagged=calloc((size_t)count+1,sizeof *lagged);
+    uint32_t *of=malloc(((size_t)A+1)*sizeof *of);
+    struct mesh_graph_dependence *edge=malloc(((size_t)dependences+1)*sizeof *edge);
+    int bounded=host && work && bff && lagged && of && edge?0:ENOMEM;
+    uint32_t base=0;
+    size_t made=0;
     for(uint32_t j=0;!bounded && j<ncalls;j++){
-      if(bff[j]>=UINT32_MAX)bounded=ENOMEM;
+      const struct mesh_function *f=functions+calls[j];
+      const uint32_t parts=f->parts?f->parts:1;
+      for(uint32_t q=0;q<parts;q++){
+        if(f->parts){host[base+q]=f->host[q];work[base+q]=f->work[q];}
+        of[base+q]=calls[j];
+      }
+      for(uint32_t e=0;e<f->edges;e++){
+        const uint32_t x=f->edge[e].from,y=f->edge[e].to;
+        edge[made++]=(struct mesh_graph_dependence){x<parts?base+x:A+base+x-parts,y<parts?base+y:A+base+y-parts,
+                                                    f->edge[e].delay};
+      }
+      base+=parts;
+    }
+    if(!bounded)bounded=mesh_graph_buffer_bound(A,host,work,made,edge,bff);
+    for(uint32_t q=0;!bounded && q<A;q++){
+      if(bff[q]>=UINT32_MAX)bounded=ENOMEM;
       else{
-        if(bff[j]>horizon)horizon=(uint32_t)bff[j];
-        if(bff[j]>lagged[calls[j]])lagged[calls[j]]=bff[j];
+        if(bff[q]>horizon)horizon=(uint32_t)bff[q];
+        if(bff[q]>lagged[of[q]])lagged[of[q]]=bff[q];
       }
     }
     for(uint32_t f=0;!bounded && f<count;f++)
       for(uint32_t j=0;j<functions[f].values;j++)if(functions[f].value[j].lag)functions[f].value[j].lag=(uint32_t)lagged[f];
-    free(host);free(work);free(bff);free(lagged);
+    free(host);free(work);free(bff);free(lagged);free(of);free(edge);
     if(bounded)return bounded;
   }
   struct plan *plans=calloc(count,sizeof *plans);

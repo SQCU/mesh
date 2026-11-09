@@ -60,7 +60,7 @@ class Value(C.Structure):
 
 
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The
-# revisions of 14b9a757"): mesh-collective.h struct mesh_strided (Strided), a view of a value's bytes, offset and strides
+# revisions of 14b9a757"): mesh-graph.h struct mesh_strided (Strided), a view of a value's bytes, offset and strides
 # in bytes, and Declared's `from` and `to` views where `first` and `bytes` were (88 bytes); struct mesh_share (Share)
 # and Function's `share` and `shares` gone (64 bytes).  What must stay: the fields in the headers' order and of their
 # types
@@ -86,7 +86,8 @@ class Dependence(C.Structure):
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
                 ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
-                ('padding', U), ('outstanding', Q), ('plan', Q), ('host', C.c_double), ('work', C.c_double)]
+                ('padding', U), ('outstanding', Q), ('plan', Q), ('host', C.POINTER(C.c_double)),
+                ('work', C.POINTER(C.c_double)), ('edge', C.POINTER(mesh_graph.Dependence)), ('parts', U), ('edges', U)]
 
 
 class View(C.Structure):

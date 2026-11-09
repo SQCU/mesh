@@ -1,6 +1,7 @@
 #ifndef MESH_COLLECTIVE_H
 #define MESH_COLLECTIVE_H
 #include "mesh-call.h"
+#include "mesh-graph.h"
 
 /* design/page-queue-change-request.md, "What the collective decides, and what the bridge decides" and "The functions";
    design/disjoint-pages-change-request.md, Appendix C, C3.1 to C3.7, and D.3.3 and D.3.6;
@@ -27,13 +28,8 @@ _Static_assert(sizeof(struct mesh_value)==64 && offsetof(struct mesh_value,run)=
                "mesh_value: rdma/mesh.py Value");
 /* design/plan-to-bridge-change-request.md R4 */
 enum { MESH_JOIN, MESH_PAGES };
-/* design/plan-to-bridge-change-request.md R1;
-   torch 2.14.0 c10/core/TensorImpl.h, storage_offset_ and sizes_and_strides_;
-   MPI 4.1 §6.1.3, MPI_TYPE_CREATE_SUBARRAY */
-struct mesh_strided { uint64_t offset,element; uint32_t dims,padding; const uint64_t *pairs; };
-_Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,dims)==16 &&
-               offsetof(struct mesh_strided,pairs)==24,"mesh_strided: rdma/mesh.py Strided");
-/* design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3, MPI_TYPE_CREATE_SUBARRAY: the view's maximal contiguous
+/* design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3, MPI_TYPE_CREATE_SUBARRAY: struct mesh_strided (mesh-graph.h),
+   the view's maximal contiguous
    byte ranges in order, each `visit(context, offset, length)`, the innermost dimensions contiguous with their
    elements merged into one run */
 void mesh_strided_extents(const struct mesh_strided *view,void (*visit)(void *context,uint64_t offset,uint64_t length),
@@ -52,15 +48,19 @@ struct mesh_weight { double produced,consumed,read,page; };
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
 /* design/aot-compilation-change-request.md A8, A10 ("Its output") and appendix items 2 and 6;
    S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (1);
-   design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: `host` and `work` the estimates t(v), in
-   ns, of one call's host part at this node (its writes of host inputs and its encoding, a CPU actor) and of its device
-   part (its compiled dispatches), mesh-graph.h mesh_graph_actor_time over the compiled actors */
+   design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: one call's compiled parts at this node in
+   program order, `parts` of them (none: one part of no time), part p's host part (its CPU tasks, host-input writes and
+   encoding) of estimate t(v) host[p] ns and its device part (its GPU dispatches) of work[p] ns, mesh-graph.h
+   mesh_graph_actor_time over the compiled actors, and the `edges` dependences `edge` between them inside one call
+   (host part p vertex p, device part p vertex parts + p: mesh_graph_buffer_bound's numbering) */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
-                       uint64_t outstanding,plan; double host,work; };
-_Static_assert(sizeof(struct mesh_function)==80 && offsetof(struct mesh_function,count)==32 &&
+                       uint64_t outstanding,plan; const double *host,*work; const struct mesh_graph_dependence *edge;
+                       uint32_t parts,edges; };
+_Static_assert(sizeof(struct mesh_function)==96 && offsetof(struct mesh_function,count)==32 &&
                offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56 &&
-               offsetof(struct mesh_function,host)==64,"mesh_function: rdma/mesh.py Function");
+               offsetof(struct mesh_function,host)==64 && offsetof(struct mesh_function,parts)==88,
+               "mesh_function: rdma/mesh.py Function");
 /* design/aot-compilation-change-request.md A7, A10 ("Its output" and "The calls' graph") and appendix items 2 and 6;
    design/plan-to-bridge-change-request.md R2; S. S. Bhattacharyya, S. Sriram and E. A. Lee,
    IEEE Trans. Signal Processing 45(6), 1997, §4.1, §4.3 (5), §9, Figs. 6 and 8, and Lemma 1;

@@ -287,17 +287,21 @@ void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
 /* S. Williams, A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009, §3: one resource's recorded operands */
 static int machine_read(id given,struct mesh_graph_machine *x){
   if(![given isKindOfClass:[NSDictionary class]])return EINVAL;
-  double *field[]={&x->clock,&x->bandwidth,&x->l2,&x->l1,&x->transactions,&x->launch,&x->l2_speedup,&x->l1_speedup,
+  double *field[]={&x->peak,&x->bandwidth,&x->block_bandwidth,&x->l2,&x->l1,&x->launch,&x->l2_speedup,&x->l1_speedup,
                    &x->overlap};
-  NSString *name[]={@"clock",@"bandwidth",@"l2",@"l1",@"transactions",@"launch",@"l2_speedup",@"l1_speedup",@"overlap"};
+  NSString *name[]={@"peak",@"bandwidth",@"block_bandwidth",@"l2",@"l1",@"launch",@"l2_speedup",@"l1_speedup",
+                    @"overlap"};
   for(int k=0;k<9;k++){
     id number=((NSDictionary *)given)[name[k]];
     if(![number isKindOfClass:[NSNumber class]])return EINVAL;
     *field[k]=[number doubleValue];
   }
   id cores=((NSDictionary *)given)[@"cores"],fpus=((NSDictionary *)given)[@"fpus"];
-  if(![cores isKindOfClass:[NSNumber class]] || ![fpus isKindOfClass:[NSNumber class]])return EINVAL;
-  x->cores=[cores unsignedIntValue];x->fpus=[fpus unsignedIntValue];
+  uint32_t physical=0;
+  size_t size=sizeof physical;
+  if(!cores && sysctlbyname("hw.physicalcpu",&physical,&size,NULL,0))return errno;
+  if((cores && ![cores isKindOfClass:[NSNumber class]]) || ![fpus isKindOfClass:[NSNumber class]])return EINVAL;
+  x->cores=cores?[cores unsignedIntValue]:physical;x->fpus=[fpus unsignedIntValue];
   return 0;
 }
 /* design/torch-capture-change-request.md, 2026-11-09 appendix: this node's model's GPU and CPU records */

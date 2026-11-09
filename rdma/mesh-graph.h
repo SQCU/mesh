@@ -63,14 +63,19 @@ double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t 
    CalculateEffectiveFlopsPerNs, ComputeTime, ReadTimeWithDRAMHeuristic, AdjustBandwidth, WriteTime,
    CombineComputeAndMemoryAccessTime, EstimateRunTimeForInstructionImpl (read time summed over the operands) and
    EstimateRunTimes (a launch overhead a kernel); S. Williams, A. Waterman and D. Patterson, Roofline, CACM 52(4), 2009,
-   §3-4: one machine's operands, from its specifications or measurements: a resource's clock in GHz, cores, FPUs a
-   core, DRAM bandwidth in bytes/s, L2 bytes, L1 bytes a core, memory transactions a clock, launch overhead in ns, and
-   the rate ratios XLA's model holds as constants (kL2CacheSpeedup, kL1CacheSpeedup: L2 and L1 bandwidth over DRAM's;
+   §3-4: one machine's operands, from its specifications or measurements, in the measured quantities XLA's products
+   name: `peak` the resource's FP throughput in GFLOP/s (XLA's clock_rate_ghz 2 core_count fpus_per_core) spread over
+   `cores` cores of `fpus` concurrent lanes each (an actor of b blocks of t threads attains peak min(b, cores) / cores
+   min(t, fpus) / fpus), DRAM `bandwidth` in bytes/s, `block_bandwidth` the bytes/s one block attains (XLA's
+   clock_rate_ghz 1e9 memory_transactions_per_clock), L2 bytes, L1 bytes a core, `launch` ns a kernel launch, and the
+   rate ratios XLA's model holds as constants (kL2CacheSpeedup, kL1CacheSpeedup: L2 and L1 bandwidth over DRAM's;
    kMemoryComputeParallelism: the overlapped fraction of the lesser of compute and memory time), whose XLA values are
-   that GPU's, not this fleet's. An actor's estimate t(v) in ns: its flops over `blocks` blocks of `threads` threads,
+   that GPU's, not this fleet's. Unrecorded refinements are 0: no cache level (l2, l1: every read at DRAM bandwidth
+   times its utilization), no per-block bandwidth limit (block_bandwidth), no launch overhead; overlap 1 is Roofline's
+   t = max(compute, memory). An actor's estimate t(v) in ns: its flops over `blocks` blocks of `threads` threads,
    each operand read `net` distinct and `total` accessed bytes at its coalescing `utilization`, `written` bytes,
    `launches` kernel launches */
-struct mesh_graph_machine { double clock, bandwidth, l2, l1, transactions, launch, l2_speedup, l1_speedup, overlap;
+struct mesh_graph_machine { double peak, bandwidth, block_bandwidth, l2, l1, launch, l2_speedup, l1_speedup, overlap;
                             uint32_t cores, fpus; };
 struct mesh_graph_read { uint64_t net, total; double utilization; };
 struct mesh_graph_actor { double flops; uint64_t blocks, threads, written, launches; size_t reads;
@@ -118,12 +123,16 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
                           uint32_t *added, uint32_t *added_from, uint32_t *added_to);
 /* design/torch-capture-change-request.md item 2, "The number of locations of a value the host writes", and its
    2026-11-09 appendix; BSL §4, p. 9, §4.2-4.3, (6) and Lemma 3; M. Lam, PLDI 1988, §7: the node's IPC graph of `actors`
-   actors in issue order on two processors, actor j's host part (its write and encoding, t(v) host[j]) and its device
-   part (t(v) work[j]), each processor's parts one cycle closed with one delay, and the feedforward edges e_j from host
-   part j to device part j. bound[j] is Bff(e_j): the least m for which the reverse edge d_m(device j, host j) leaves
-   lambda_max (mesh_graph_cycle_mean) unchanged, by mesh_graph_min_delay's binary search below (6)'s
-   ceil(sum t / lambda_max); 1 where every t is 0. EINVAL for a time that is negative or not finite */
-int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, uint64_t *bound);
+   actors in issue order on two processors, actor j's host part (its CPU work and encoding, t(v) host[j]) vertex j and
+   its device part (t(v) work[j]) vertex actors + j, each processor's parts one cycle closed with one delay, the
+   feedforward edges e_j from host part j to device part j, and the `edges` dependences `edge` between parts the
+   compiled program adds (a CPU part reading a device part's results). bound[j] is Bff(e_j): the least m for which the
+   reverse edge d_m(device j, host j) leaves lambda_max (mesh_graph_cycle_mean) unchanged, by mesh_graph_min_delay's
+   binary search below (6)'s ceil(sum t / lambda_max); 1 where every t is 0. EINVAL for a time that is negative or not
+   finite, an edge outside the graph, or a cycle of no delay */
+struct mesh_graph_dependence;
+int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, size_t edges,
+                            const struct mesh_graph_dependence *edge, uint64_t *bound);
 /* design/joint-compilation.md §3, row 6; lambda is mesh_graph_cycle_mean of (time, edges, from, to, delay), BSL Fig. 8's
    λmax of the graph before the added edges (which enter at infinite delay) */
 int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
@@ -149,6 +158,31 @@ _Static_assert(sizeof(struct mesh_graph_term) == 32 && sizeof(struct mesh_graph_
 int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, size_t supplied,
                            const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
                            uint32_t *to, size_t *edges);
+/* design/plan-to-bridge-change-request.md R1; torch 2.14.0 c10/core/TensorImpl.h, storage_offset_ and
+   sizes_and_strides_; MPI 4.1 §6.1.3, MPI_TYPE_CREATE_SUBARRAY: the bytes [offset + sum_d i_d stride_d, + element) for
+   every index i_d < size_d, `pairs` {size, stride} a dimension in bytes, outermost first */
+struct mesh_strided { uint64_t offset,element; uint32_t dims,padding; const uint64_t *pairs; };
+_Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,dims)==16 &&
+               offsetof(struct mesh_strided,pairs)==24,"mesh_strided: rdma/mesh.py Strided");
+/* design/compilation-composition-change-request.md, "Complete replacement workgroup" (exact effects without
+   enumeration); W. Pugh, The Omega Test, CACM 35(8), 1992 (integer feasibility of the meeting of two views): an access
+   of vertex `vertex` to the view's bytes of storage `key`, `write` as struct mesh_graph_access's. Two views of one key,
+   of different vertices, at least one written (both 2 do not conflict), conflict exactly where some byte is in both:
+   decided over their dimensions without enumerating their bytes (a dimension of one stride at a time; two outermost
+   dimensions of equal stride by the few relative offsets their slices can meet at). The relation keeps each edge's
+   causes (design/compilation-composition-change-request.md, "Retain the value/effect/transfer cause of an edge"):
+   one record {from, to} a distinct (from, to, cause), sorted by from, to, kind, key, given, `from` < `to`; a
+   conflict's cause its key and hazard (the lower vertex's access before the higher's: READ_AFTER_WRITE,
+   WRITE_AFTER_READ, WRITE_AFTER_WRITE), supplied edge g's (supplied_from[g] < supplied_to[g], EINVAL otherwise)
+   GIVEN with `given` g; ERANGE with *edges the count past `room`. The pure relation is its distinct (from, to) */
+struct mesh_graph_view { uint64_t key; struct mesh_strided view; uint32_t vertex, write; };
+_Static_assert(sizeof(struct mesh_graph_view) == 48, "mesh_graph_view");
+enum { MESH_GRAPH_READ_AFTER_WRITE, MESH_GRAPH_WRITE_AFTER_READ, MESH_GRAPH_WRITE_AFTER_WRITE, MESH_GRAPH_GIVEN };
+struct mesh_graph_cause { uint64_t key; uint32_t kind, given; };
+_Static_assert(sizeof(struct mesh_graph_cause) == 16, "mesh_graph_cause");
+int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
+                                 const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
+                                 uint32_t *to, struct mesh_graph_cause *cause, size_t *edges);
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §7, Fig. 4 */
 int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
                          const unsigned char *synchronization, unsigned char *redundant);

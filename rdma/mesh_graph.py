@@ -127,7 +127,7 @@ class Access(C.Structure):
 # mesh-graph.h struct mesh_graph_machine, mesh_graph_read and mesh_graph_actor (mesh_graph_actor_time; design/torch-
 # capture-change-request.md, "Source for item 2's execution-time estimates")
 class Machine(C.Structure):
-    _fields_ = [(name, C.c_double) for name in ('clock', 'bandwidth', 'l2', 'l1', 'transactions', 'launch', 'l2_speedup',
+    _fields_ = [(name, C.c_double) for name in ('peak', 'bandwidth', 'block_bandwidth', 'l2', 'l1', 'launch', 'l2_speedup',
                                                 'l1_speedup', 'overlap')] + [('cores', C.c_uint32), ('fpus', C.c_uint32)]
 
 
@@ -143,7 +143,8 @@ class Actor(C.Structure):
 LIB.mesh_graph_actor_time.restype = C.c_double
 LIB.mesh_graph_actor_time.argtypes = [C.POINTER(Machine), C.POINTER(Actor)]
 LIB.mesh_graph_buffer_bound.restype = C.c_int
-LIB.mesh_graph_buffer_bound.argtypes = [C.c_uint32, C.POINTER(C.c_double), C.POINTER(C.c_double), C.POINTER(C.c_uint64)]
+LIB.mesh_graph_buffer_bound.argtypes = [C.c_uint32, C.POINTER(C.c_double), C.POINTER(C.c_double), C.c_size_t,
+                                        C.c_void_p, C.POINTER(C.c_uint64)]
 
 
 # mesh-graph.h struct mesh_graph_processor, mesh_graph_task, mesh_graph_dependence, mesh_graph_operation,
@@ -216,12 +217,14 @@ def heap_order(priority, edges):
     return list(place[:count])
 
 
-# BSL §4.2-4.3, (6); mesh-graph.h mesh_graph_buffer_bound: Bff of each actor's host -> device edge from its t(v)
-def buffer_bound(host, work):
+# BSL §4.2-4.3, (6); mesh-graph.h mesh_graph_buffer_bound: Bff of each actor's host -> device edge from its t(v),
+# `edges` (from, to, delay) between parts (host part p vertex p, device part p len(host) + p)
+def buffer_bound(host, work, edges=()):
     count = len(host)
     bound = (C.c_uint64 * max(count, 1))()
+    edge = (Dependence * max(len(edges), 1))(*[Dependence(a, b, d) for a, b, d in edges])
     _check(LIB.mesh_graph_buffer_bound(count, (C.c_double * max(count, 1))(*host), (C.c_double * max(count, 1))(*work),
-                                       bound))
+                                       len(edges), C.cast(edge, C.c_void_p), bound))
     return list(bound[:count])
 
 
