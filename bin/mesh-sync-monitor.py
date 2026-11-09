@@ -206,6 +206,7 @@ def generate(operations, program, observe, point=None):
 
     def check(probe, name, obj, val, lane, point, predicate):
         guard = '/this->checked && %s/'
+        lines.append('%s%s { this->checked = 0; }' % (probe, point))
         lines.append('%s%s %s { this->checked = 1; this->c = %d; this->ob = %s; this->hasob = %d; this->va = %s; '
                      'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->ok = %s%s; }' % (
                          probe, point, predicate, PRIMITIVES.index(name), obj or '0', obj is not None, val or '0', val is not None,
@@ -231,12 +232,12 @@ def generate(operations, program, observe, point=None):
                                                                           total, total, total, act))
 
     for name, probe, obj, val, lane in PROBES:
-        check(probe, name, obj, val, lane, 'entry', '/self->inrun && self->inapi == 0 && self->exec < %d/' % executions)
+        check(probe, name, obj, val, lane, 'entry', '/self->inrun && self->inapi == 0/')
         lines.append('%sentry /self->inrun/ { self->inapi++; }' % probe)
         lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
     name, probe, obj, val = START
-    lines.append('%sentry /self->inrun && self->inapi == 0 && self->exec < %d/ { self->bs = 1; self->bsob = %s; '
-                 'self->bsva = %s; }' % (probe, executions, obj, val))
+    lines.append('%sentry /self->inrun && self->inapi == 0/ { self->bs = 1; self->bsob = %s; '
+                 'self->bsva = %s; }' % (probe, obj, val))
     lines.append('%sentry /self->inrun/ { self->inapi++; }' % probe)
     lines.append('%sreturn /self->inrun && self->inapi/ { self->inapi--; }' % probe)
     if point:
@@ -246,9 +247,9 @@ def generate(operations, program, observe, point=None):
               None, '%x' % point['offset'], '/self->bs/')
     check(probe, name, 'self->bsob', 'self->bsva', None, 'return', '/self->bs/')
     lines.append('%sreturn /self->bs/ { self->bs = 0; }' % probe)
-    lines.append('%s /self->inrun && self->inapi == 0 && self->exec < %d/ { printf("mesh-sync-monitor: unexpected %%s %%s '
+    lines.append('%s /self->inrun && self->inapi == 0/ { printf("mesh-sync-monitor: unexpected %%s %%s '
                  'execution %%d thread %%d\\n", probeprov, probefunc, self->exec, tid); %s }' % (
-                     ',\n'.join(UNLISTED), executions, act))
+                     ',\n'.join(UNLISTED), act))
     lines.append('END { printf("mesh-sync-monitor: program %%d of %d\\n", cur); printf("mesh-sync-monitor: shifted %%d\\n", '
                  'shifted); }' % total)
     return '\n'.join(lines) + '\n', executions
