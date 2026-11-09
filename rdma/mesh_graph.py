@@ -399,7 +399,8 @@ class Guard(C.Structure):
 
 
 class Choice(C.Structure):
-    _fields_ = [('parent', C.c_uint32), ('control', C.c_uint32), ('execution', C.c_uint64), ('call', C.c_uint64)]
+    _fields_ = [('parent', C.c_uint32), ('control', C.c_uint32), ('execution', C.c_uint64), ('call', C.c_uint64),
+                ('entry', C.c_uint32), ('trip', C.c_uint32)]
 
 
 class Signature(C.Structure):

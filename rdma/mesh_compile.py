@@ -6522,15 +6522,22 @@ class _Builder:
                         self.value(g.indices), g.place, self.identity)
         if isinstance(g, _Control):
             bounds = [self.lib.metal_ir_operations(self.p)]
+            children = []
             for arm in g.arms:
                 for inner in arm:
-                    self.generic(inner)
+                    handle = self.generic(inner)
+                    if isinstance(inner, _Control):
+                        children.append(handle)
                 bounds.append(self.lib.metal_ir_operations(self.p))
             first, middle, last = bounds if g.kind == IF else (bounds[0], bounds[1], bounds[1])
             control = self.lib.metal_ir_control
-            control.restype, control.argtypes = None, [C.c_void_p, mesh.U, mesh.U, mesh.U, mesh.U, mesh.U, mesh.Q]
-            control(self.p, g.kind, first, middle, last, self.value(g.predicate), g.bound)
-            return None
+            control.restype, control.argtypes = mesh.U, [C.c_void_p, mesh.U, mesh.U, mesh.U, mesh.U, mesh.U, mesh.Q]
+            handle = control(self.p, g.kind, first, middle, last, self.value(g.predicate), g.bound)
+            parent = self.lib.metal_ir_control_parent
+            parent.restype, parent.argtypes = None, [C.c_void_p, mesh.U, mesh.U]
+            for child in children:
+                parent(self.p, child, handle)
+            return handle
         self.identity = self.base | g.node
         lib, p = self.lib, self.p
         inputs, outputs = [self.value(t) for t, _ in g.inputs], [self.value(t) for t, _ in g.outputs]

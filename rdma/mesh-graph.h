@@ -252,7 +252,7 @@ struct mesh_graph_scope { uint32_t once, counter; int64_t delta; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };
 struct mesh_graph_selection { uint32_t argument, bytes; uint64_t table, index; };
 struct mesh_graph_guard { uint64_t operation; uint32_t selection, taken; };
-struct mesh_graph_choice { uint32_t parent, control; uint64_t execution, call; };
+struct mesh_graph_choice { uint32_t parent, control; uint64_t execution, call; uint32_t entry, trip; };
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
                               struct mesh_graph_processor *processor; struct mesh_graph_task *task;
