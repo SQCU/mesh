@@ -41,9 +41,18 @@ outstanding, and what of it is outstanding. The standard every change request fo
   the actual provider, compiler, recorder and E2B caller link. The existing native diagnostic executes split-K
   projection, subgroup-matrix projection and parallel argmax; its numerical records are under the new run's
   `8_runs`. This is development evidence, not the complete replacement landing.
-  Outstanding work includes complete frontend/target coverage, exact compact access relations, paged native CPU
-  and write-ahead bindings, compiled per-execution inputs/publication, and displacement of unjustified
-  per-execution host waits/submissions. Sourced actor costs and the observation handoffs are still being revised.
+  Subsequent working checkpoints metal-microbench caf49366 and mesh f30bf845 carry compact access views,
+  separate read/write page tables and compiled E2B input operations. The continuing work replaces compact-view
+  intersection with ISL's exact integer feasibility calculation and gives kernel insertion/merging one identity
+  remapping owner. These source changes still need their complete consumer and operational evidence.
+  CPU projection and normalization-to-projection now execute in the existing numerical diagnostic; the latter
+  fuses the normalization map into projection (relative RMS error 0.000216). Three E2B stages complete lowering
+  and emission. Full prefill/decode exposed symbol, epilogue-operand and value-scope defects being repaired; graph
+  publication alone did not establish successful compilation.
+  Outstanding work includes complete frontend/target coverage, control-flow and native-program execution,
+  paged native CPU/write-ahead behavior, preservation of the supplied execution index through compiled inputs,
+  and displacement of unjustified per-execution host waits/submissions. Sourced actor costs, whole-group fusion
+  choices, persisted executable artifacts and the observation handoffs are still being revised.
   No E2B or Torch/collective operational run or corresponding performance closure on this replacement is recorded.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
@@ -132,6 +141,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   integration-finishing item 3 writes it (mesh 01632014), and its appendix's departures were addressed in commits of
   2026-11-05. Appendix item 7, the torch path on torch's existing kernels, is
   superseded by the lowering request's item 1.
+  These are historical implementation records, not closure of the replacement's A1–A10 obligations. In particular,
+  A1's saved/resumed executable without repeated compilation has no complete save/load consumer in the current
+  Torch/native path. Publishing the bridge's serialized plan and retaining a live compiled function do not by
+  themselves provide that artifact. This handoff is assigned to the representation, Torch and executor owners.
   The composition review's remaining representation, source-domain and execution-path findings still apply.
 
 ## Superseded or closed
