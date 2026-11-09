@@ -335,6 +335,56 @@ The operator, during the structural review, verbatim:
   these representation and ownership requirements were followed. Review the actual dataflow, then use the existing
   numerical and performance measurements to evaluate its execution.
 
+### Performance correction: compile the transformations, not their textual symptoms
+
+The operator, 2026-11-09, verbatim:
+
+> " Recovering measured performance justified restoring useful behavior;" put even 10 minutes of analysis into why this stringly typed edit was being used as a performance strategy, and how the performance gains accomplished by stringly typed reads and writes can be had by *nay other means*, once you're willing to like actually compile shit instead of chickening out?
+
+- **Applies to:** the preceding correction and items 1–6. Retaining the performance mechanisms and replacing
+  their representation are the same implementation assignment.
+- **Sources and roles:**
+  - Dawn/Tint's [Metal shader translation](https://github.com/google/dawn/blob/main/src/dawn/native/metal/ShaderModuleMTL.mm)
+    obtains a program, converts it to an IR module and invokes its MSL writer. The
+    [writer](https://github.com/google/dawn/blob/main/src/tint/lang/msl/writer/writer.cc), `Generate`, transforms the
+    module with `Raise` before `Print`. This supplies an actual producer/transform/emission boundary, including
+    for the compiler family whose emitted identifiers the recorder currently matches. These are reference source
+    interfaces, not a claim that the installed LiteRT binary exports its internal IR through its public C API.
+  - MLIR's [elementwise fusion implementation](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/Linalg/Transforms/ElementwiseOpFusion.cpp)
+    composes operand indexing maps and remaps operation operands/results. Its
+    [bufferization](https://mlir.llvm.org/docs/Bufferization/) uses tensor use-def, alias and equivalence relations
+    to determine storage. These supply fusion and intermediate-storage elimination, rather than rediscovery of
+    those relations from buffer names or shader text.
+  - MLIR's [SCCP pass](https://mlir.llvm.org/docs/Passes/#-sccp), based on Wegman and Zadeck (1991), propagates
+    known constants through IR. S6 supplies the specialization equation. Static operation, dtype, shape, stride
+    and configuration operands become the residual program's instructions/constants; they are not repeatedly
+    interpreted by generic shaders merely because their representation fits in a metadata buffer.
+  - MLIR's [workgroup reduction lowering](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/GPU/Transforms/AllReduceLowering.cpp)
+    constructs subgroup reductions and workgroup exchanges from reduction operations. Apple's
+    [MLX reduction](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/rms_norm.metal),
+    [packed arithmetic](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/quantized.h) and
+    [system-scope access](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal)
+    provide concrete target mechanisms. S4 supplies composition of computation and communication. Their roles
+    do not authorize copying unrelated execution policies or narrowing the assigned domain.
+- **Replaces:** the preceding recorder bodies, `MetalNativeProjection`/`MetalNativeArgmax`'s source-based
+  identification and extraction, and `_pointwise`/`_reduced`/`_contract`'s premature commitment to generic
+  dispatches where the static program still requires specialization, fusion and parallel scheduling.
+- **Write:** preserve the numerical operations and their permitted precision/rounding, express maps and epilogues
+  as operation regions, retain values across their uses, and lower reductions and packed data to the selected
+  target operations. Preserve each actual effect and observable result while removing unnecessary materialization.
+  Compile producer publication and consumer acquisition from the same range/page dependencies used by transport
+  scheduling. Retain the existing tuned numerical bodies where they implement these operations; supply their
+  parameters and bindings from typed operands before emission. Operation equivalence and applicability follow
+  the structured operands and effects, not an entry-point name, generated variable name or operator spelling.
+  Carry static facts as compiler operands and keep genuinely varying values as runtime inputs.
+- **Performance obligation:** complete the execution mapping as well as operation coverage. Fusion removes
+  launches and sometimes memory traffic; promotion removes materialization; subgroup lowering removes shared
+  exchanges; publication fusion removes separate visibility/publication work. They are distinct transformations.
+  Fusion must account for repeated producer evaluation, live registers and synchronization scope. Typing alone,
+  compiling a generic interpreter of metadata, or replaying unchanged per-operation kernels does not accomplish
+  these transformations. The same final kernel, bindings and execution schedule can be emitted from structured
+  operations; source matching adds no execution capability. The existing measurement standard remains applicable.
+
 ## Reusable form
 
 The same change-request form can name several existing requests in one requirement:

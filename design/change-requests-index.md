@@ -25,7 +25,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   the recorder, beyond the three previously listed parsers. Generated target source must become the final mesh
   emission; the producers' annotations must reach those lowerings. E2B still selects the recorder's non-self-timed
   mode, which omits replay footprints and bypasses native dependency/fence preparation. Sharing the emitter has
-  not completed that synchronization-policy handoff.
+  not completed that synchronization-policy handoff. The performance follow-up also identifies static operation,
+  dtype and layout facts interpreted by the Torch path's generic shaders, serial reduction bodies, and native
+  projection facts emitted as defines then read back despite their presence in `MetalNativePlan`. Completing
+  source coverage alone has not completed specialization, fusion or the required execution mapping.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
   in the composition implementation. The review records distinguish remaining representation and observation gaps
