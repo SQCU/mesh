@@ -2988,6 +2988,18 @@ class _Check:
 
 def _factorized(target, given, outs):
     ops = _factorization(target, given, outs)
+    if target.overloadpacket is A.cholesky_inverse and given['self'].shape[-1]:
+        diagonal = given['self'].diagonal(dim1=-2, dim2=-1)
+        zero = _temporary(diagonal.shape, torch.bool)
+        scores = _temporary(diagonal.shape, torch.int32)
+        any_zero, info = _temporary(diagonal.shape[:-1], torch.bool), _temporary(diagonal.shape[:-1], torch.int32)
+        check = _elementwise('eq', zero, diagonal, 0)
+        check += _copy(scores, zero)
+        check += _extreme(A.argmax.default, {'self': scores, 'dim': -1, 'keepdim': False}, [info])
+        check += _elementwise('add', info, info, 1)
+        check += _fold(A.any.dim, {'self': zero, 'dim': -1, 'keepdim': False}, [any_zero])
+        check += _elementwise('where', info, any_zero, info, 0)
+        ops = check + [_Check(info, 2, 'cholesky_inverse')] + ops
     if given.get('check_errors'):
         ops.append(_Check(outs[-1], 2 if target.overloadpacket is A.linalg_cholesky_ex else 1))
     return ops
@@ -3212,7 +3224,18 @@ def _matrix_exp(target, given, outs):
 
 # G. H. Golub and C. F. Van Loan, Matrix Computations, 3rd ed., section 8.4, Algorithms 8.4.1 and 8.4.3;
 # Z. Drmac and K. Veselic, LAPACK Working Note 196, sections 2 and 3; Reference-LAPACK SRC/dgesvj.f
-def _linalg_rotation(app, aqq, apq, ops):
+def _linalg_active(app, aqq, magnitude, tolerance, ops):
+    left, right = (_temporary(magnitude.shape, magnitude.dtype) for _ in range(2))
+    active = _temporary(magnitude.shape, torch.bool)
+    ops += _elementwise('abs', left, app) + _elementwise('sqrt', left, left)
+    ops += _elementwise('abs', right, aqq) + _elementwise('sqrt', right, right)
+    ops += _elementwise('mul', left, left, tolerance)
+    ops += _elementwise('mul', left, left, right)
+    ops += _elementwise('gt', active, magnitude, left)
+    return active
+
+
+def _linalg_rotation(app, aqq, apq, ops, tolerance=None):
     batch, real = app.shape, app.dtype
     magnitude, delta = _temporary(batch, real), _temporary(batch, real)
     d, g, scale = (_temporary(batch, real) for _ in range(3))
@@ -3222,7 +3245,7 @@ def _linalg_rotation(app, aqq, apq, ops):
     ops += _elementwise('sub', delta, d, g)
     ops += _elementwise('abs', scale, delta)
     ops += _elementwise('maximum', scale, scale, magnitude)
-    zero, active = _temporary(batch, torch.bool), _temporary(batch, torch.bool)
+    zero = _temporary(batch, torch.bool)
     ops += _elementwise('eq', zero, scale, 0)
     ops += _elementwise('where', scale, zero, 1, scale)
     ops += _elementwise('div', d, delta, scale)
@@ -3239,13 +3262,7 @@ def _linalg_rotation(app, aqq, apq, ops):
     ops += _elementwise('lt', zero, delta, 0)
     ops += _elementwise('neg', square, tangent)
     ops += _elementwise('where', tangent, zero, square, tangent)
-    ops += _elementwise('abs', d, app)
-    ops += _elementwise('sqrt', d, d)
-    ops += _elementwise('abs', g, aqq)
-    ops += _elementwise('sqrt', g, g)
-    ops += _elementwise('mul', d, d, torch.finfo(real).eps)
-    ops += _elementwise('mul', d, d, g)
-    ops += _elementwise('gt', active, magnitude, d)
+    active = _linalg_active(app, aqq, magnitude, tolerance or torch.finfo(real).eps, ops)
     ops += _elementwise('where', tangent, active, tangent, 0)
     ops += _elementwise('mul', cosine, tangent, tangent)
     ops += _elementwise('add', cosine, cosine, 1)
@@ -3276,6 +3293,23 @@ def _linalg_columns(source, indices, out):
     given = {'self': source, 'dim': -1, 'index': indices.unsqueeze(-2).expand(out.shape)}
     return _lifted(A.gather.default, _taken, given, [out]) if source.is_complex() else \
         _taken(A.gather.default, given, [out])
+
+
+def _jacobi_sweeps(body, predicate, n):
+    if n < 2:
+        return []
+    count, remaining = _temporary((), torch.int32), _temporary((), torch.bool)
+    finish = _elementwise('add', count, count, 1) + _elementwise('lt', remaining, count, 30)
+    finish += _elementwise('logical_and', predicate, predicate, remaining)
+    return _fill(count, 0) + [_Control(WHILE, [body + finish], predicate, 30)]
+
+
+def _linalg_converged(active, ops, message):
+    failed = _temporary(active.shape[:-2], torch.bool)
+    info = _temporary(failed.shape, torch.int32)
+    ops += _fold(A.any.dims, {'self': active, 'dim': [-2, -1], 'keepdim': False}, [failed])
+    ops += _elementwise('where', info, failed, 1, 0)
+    ops.append(_Check(info, 3, message))
 
 
 def _eigen_hermitian(target, given, outs):
@@ -3314,10 +3348,19 @@ def _eigen_hermitian(target, given, outs):
             body += _elementwise('mul', shift, t, magnitude)
             body += _elementwise('sub', matrix[..., p, p], app, shift)
             body += _elementwise('add', matrix[..., q, q], aqq, shift)
-            body += _fill(matrix[..., p, q], 0) + _fill(matrix[..., q, p], 0)
+            body += _elementwise('where', matrix[..., p, q], active, 0, apq)
+            body += _copy(matrix[..., q, p],
+                           _linalg_transpose(matrix[..., p:p + 1, q:q + 1], body, False, True)[..., 0, 0])
     body += _fold(A.any.default, {'self': changed, 'dim': None, 'keepdim': False}, [predicate])
+    ops += _jacobi_sweeps(body, predicate, n)
     if n > 1:
-        ops.append(_Control(WHILE, [body], predicate))
+        magnitude = _temporary(matrix.shape, a.real.dtype)
+        ops += _elementwise('abs', magnitude, matrix)
+        ops += _fill(magnitude.diagonal(dim1=-2, dim2=-1), 0)
+        diagonal = matrix.diagonal(dim1=-2, dim2=-1).real
+        active = _linalg_active(diagonal.unsqueeze(-1), diagonal.unsqueeze(-2), magnitude,
+                                 torch.finfo(a.real.dtype).eps, ops)
+        _linalg_converged(active, ops, 'linalg.eigh Jacobi convergence')
     indices = _temporary(values.shape, torch.int64)
     ops.append(_Sort(matrix.diagonal(dim1=-2, dim2=-1).real, values.dim() - 1, n, False, values, indices))
     if rotations is not None:
@@ -3355,6 +3398,15 @@ def _linalg_complete_columns(columns, lengths, out, ops):
         ops += _extreme(A.argmax.default, {'self': diagonal, 'dim': -1, 'keepdim': True}, [index])
         candidate = _temporary((*columns.shape[:-2], m, 1), columns.dtype)
         ops += _linalg_columns(projector, index, candidate)
+        if j:
+            previous = out[..., :, :j]
+            row = _linalg_transpose(previous, ops, True, True)
+            coefficient = _temporary((*columns.shape[:-2], j, 1), columns.dtype)
+            projection = _temporary(candidate.shape, columns.dtype)
+            for _ in range(2):
+                ops += _product(A.matmul.default, {'self': row, 'other': candidate}, [coefficient])
+                ops += _product(A.matmul.default, {'self': previous, 'other': coefficient}, [projection])
+                ops += _elementwise('sub', candidate, candidate, projection)
         norm = _temporary((*columns.shape[:-2], 1), lengths.dtype)
         unit = _linalg_lengths(candidate, norm, ops)
         destination = out[..., :, j:j + 1]
@@ -3378,6 +3430,7 @@ def _singular(target, given, outs):
     matrix = _temporary(source.shape, source.dtype)
     ops += _copy(matrix, source)
     batch, (m, n), real = source.shape[:-2], source.shape[-2:], source.real.dtype
+    tolerance = math.sqrt(m) * torch.finfo(real).eps
     if not n:
         return ops + (_linalg_identity(u) if u.numel() else []) + (_linalg_identity(vh) if vh.numel() else [])
     vectors = _temporary((*batch, n, n), a.dtype) if given.get('compute_uv', True) else None
@@ -3405,16 +3458,23 @@ def _singular(target, given, outs):
             body += _elementwise('mul', apq, apq, aqq)
             body += _elementwise('mul', app, app, app)
             body += _elementwise('mul', aqq, aqq, aqq)
-            c, s, _, _, active = _linalg_rotation(app, aqq, apq, body)
+            c, s, _, _, active = _linalg_rotation(app, aqq, apq, body, tolerance)
             body += _elementwise('logical_or', changed, changed, active)
             _linalg_rotate_columns(matrix, p, q, c, s, body)
             if vectors is not None:
                 _linalg_rotate_columns(vectors, p, q, c, s, body)
     body += _fold(A.any.default, {'self': changed, 'dim': None, 'keepdim': False}, [predicate])
-    if n > 1:
-        ops.append(_Control(WHILE, [body], predicate))
+    ops += _jacobi_sweeps(body, predicate, n)
     lengths = _temporary(singular.shape, real)
     unit = _linalg_lengths(matrix, lengths, ops)
+    if n > 1:
+        gram = _temporary((*batch, n, n), a.dtype)
+        ops += _product(A.matmul.default, {'self': _linalg_transpose(unit, ops, True, True), 'other': unit}, [gram])
+        magnitude, active = _temporary(gram.shape, real), _temporary(gram.shape, torch.bool)
+        ops += _elementwise('abs', magnitude, gram)
+        ops += _fill(magnitude.diagonal(dim1=-2, dim2=-1), 0)
+        ops += _elementwise('gt', active, magnitude, tolerance)
+        _linalg_converged(active, ops, 'linalg.svd Jacobi convergence')
     indices = _temporary(singular.shape, torch.int64)
     ops.append(_Sort(lengths, lengths.dim() - 1, n, True, singular, indices))
     if vectors is not None:
