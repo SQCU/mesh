@@ -69,6 +69,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   rotation residual is6.384e-8 and full complex QR reconstruction1.082e-7. Mesh a091ae92 also applies paired
   results to contractions and adds pre-contraction scaling. Build18 executes these changes through CPU rotation
   (residual6.384e-8) and GPU full complex QR (reconstruction8.080e-8, orthogonality2.574e-7,2 dispatches).
+  Mesh5b61507c adds fixed-output least-squares driver composition through the existing QR/LQ, pivoted QR/RZ and
+  SVD lowerings, with original driver and output-layout metadata. Its same-driver numerical checks remain pending.
+  Metal9dc15107 supplies eighteen authored binary64 elementary functions through SoftFloat pairs and sourced
+  FDlibm range reduction and approximations. Tint reads that library into IR; connected target compilation and
+  numerical range/ULP evidence are pending. Neither source checkpoint closes the assigned numerical domain.
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
