@@ -244,18 +244,28 @@ _Static_assert(sizeof(struct mesh_graph_processor) == 8 && sizeof(struct mesh_gr
    MetalPlannedOrder), so every copy pair is its own output */
 int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
                         const unsigned char *kept, size_t room, struct mesh_graph_dependence *contracted, size_t *made);
+enum { MESH_GRAPH_WHILE = 1, MESH_GRAPH_OPTIONAL = 2 };
+enum { MESH_GRAPH_COMPLETION_EVENT = 1, MESH_GRAPH_COUNTER_EVENT = 2 };
+struct mesh_graph_control { uint32_t kind, parent; uint64_t entry, body, retest, end, execution; };
+struct mesh_graph_event { uint32_t object, role, counter, argument; uint64_t lookback; };
+struct mesh_graph_scope { uint32_t once, counter; int64_t delta; };
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
                               struct mesh_graph_processor *processor; struct mesh_graph_task *task;
                               struct mesh_graph_operation *operation; struct mesh_graph_dependence *dependence;
                               struct mesh_graph_synchronized *edge; uint64_t *position, *count, *least;
                               size_t *previous, *waited, *first, *order; uint64_t *unknown; uint32_t *alias;
-                              unsigned char digest[32]; };
+                              unsigned char digest[32]; size_t controls, events;
+                              struct mesh_graph_control *control; struct mesh_graph_event *event;
+                              struct mesh_graph_scope *scope; };
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
                          const struct mesh_graph_operation *operation, struct mesh_graph_signature *signature);
 void mesh_graph_signature_free(struct mesh_graph_signature *signature);
+int mesh_graph_signature_program(struct mesh_graph_signature *, size_t controls, const struct mesh_graph_control *,
+                                 size_t events, const struct mesh_graph_event *, const struct mesh_graph_scope *);
+
 /* design/synchronization-signature-change-request.md item 1, "its SHA-256 is part of the compiled artifact": the
    signature's one serialized form, its header then processor, task, dependence, operation, edge, least and alias in
    that order; mesh_graph_record_read derives the rest as mesh_graph_signature does */

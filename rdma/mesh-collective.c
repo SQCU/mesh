@@ -1081,6 +1081,17 @@ static int plan_signature(struct plan *plans,uint32_t count,const uint32_t *call
   if(!status && (status=mesh_graph_resynchronized(&signature,time,built,from,to,delay,added,from+built,to+built,
                                                   added_delay,lambda,offset)))
     mesh_graph_signature_free(&signature);
+  if(!status){
+    struct mesh_graph_scope *scope=calloc(o.count+1,sizeof *scope);
+    if(!scope)status=ENOMEM;
+    else{
+      for(size_t k=0;k<o.count;k++)if(o.operation[k].vertex<V &&
+        (o.operation[k].primitive==MESH_GRAPH_HOST_WAIT || o.operation[k].primitive==MESH_GRAPH_BRIDGE_START))
+        scope[k].once=task[o.operation[k].vertex].label+1;
+      status=mesh_graph_signature_program(&signature,0,NULL,0,NULL,scope);free(scope);
+    }
+    if(status)mesh_graph_signature_free(&signature);
+  }
   if(!status)**kept=signature;
   free(dependence);free(offset);free(key);free(first);free(tell);free(o.operation);
   return status;

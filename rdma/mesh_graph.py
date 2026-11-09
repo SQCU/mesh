@@ -173,6 +173,18 @@ class Synchronized(C.Structure):
                 ('dependence', C.c_uint32), ('witness', C.c_uint32), ('delay', C.c_uint64)]
 
 
+class Control(C.Structure):
+    _fields_ = [('kind', C.c_uint32), ('parent', C.c_uint32)] + [(n, C.c_uint64) for n in ('entry', 'body', 'retest', 'end', 'execution')]
+
+
+class Event(C.Structure):
+    _fields_ = [(n, C.c_uint32) for n in ('object', 'role', 'counter', 'argument')] + [('lookback', C.c_uint64)]
+
+
+class Scope(C.Structure):
+    _fields_ = [('once', C.c_uint32), ('counter', C.c_uint32), ('delta', C.c_int64)]
+
+
 class Signature(C.Structure):
     _fields_ = [('processors', C.c_uint32), ('tasks', C.c_uint32), ('operations', C.c_size_t),
                 ('dependences', C.c_size_t), ('synchronized', C.c_size_t), ('uncovered', C.c_size_t),
@@ -182,7 +194,8 @@ class Signature(C.Structure):
                 ('position', C.POINTER(C.c_uint64)), ('count', C.POINTER(C.c_uint64)),
                 ('least', C.POINTER(C.c_uint64)), ('previous', C.POINTER(C.c_size_t)),
                 ('waited', C.POINTER(C.c_size_t)), ('first', C.POINTER(C.c_size_t)), ('order', C.POINTER(C.c_size_t)),
-                ('unknown', C.POINTER(C.c_uint64)), ('alias', C.POINTER(C.c_uint32)), ('digest', C.c_ubyte * 32)]
+                ('unknown', C.POINTER(C.c_uint64)), ('alias', C.POINTER(C.c_uint32)), ('digest', C.c_ubyte * 32), ('controls', C.c_size_t), ('events', C.c_size_t),
+                ('control', C.POINTER(Control)), ('event', C.POINTER(Event)), ('scope', C.POINTER(Scope))]
 
 
 PRINTERS = ('mesh_graph_matrix_market', 'mesh_graph_dot', 'mesh_graph_space_time')
