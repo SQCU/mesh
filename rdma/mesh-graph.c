@@ -42,15 +42,15 @@ int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(co
   return 0;
 }
 
-static int graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                          const void *context, uint32_t root, int tree,
-                          int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
+int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                        const void *context, uint32_t root,
+                        int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
   if (root >= vertices) return EINVAL;
   uint32_t *parent = malloc(((size_t)vertices + 1) * sizeof *parent);
   uint32_t *order = malloc(((size_t)vertices + 1) * sizeof *order);
   size_t *next = malloc(((size_t)vertices + 1) * sizeof *next);
   unsigned char *color = calloc((size_t)vertices + 1, 1);
-  int status = !parent || !order || !next || !color ? ENOMEM : 0, crossed = 0;
+  int status = !parent || !order || !next || !color ? ENOMEM : 0;
   uint32_t count = 0;
   if (!status) parent[root] = UINT32_MAX;
   for (uint32_t v = root; !status && v != UINT32_MAX;) {
@@ -58,23 +58,37 @@ static int graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*hea
     if (next[v] == first[v + 1]) { color[v] = 2; v = parent[v]; continue; }
     const uint32_t w = head(context, next[v]++);
     if (color[w] == 1) status = EDEADLK;
-    else if (color[w] == 2) crossed = 1;
-    else { parent[w] = v; v = w; }
+    else if (!color[w]) { parent[w] = v; v = w; }
   }
-  if (!status && tree && crossed) status = EINVAL;
   for (uint32_t k = 0; !status && k < count; k++) status = visit(consumer, order[k], parent[order[k]]);
   free(parent); free(order); free(next); free(color);
   return status;
 }
-int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                          const void *context, uint32_t root,
-                          int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
-  return graph_preorder(vertices, first, head, context, root, 1, visit, consumer);
-}
-int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                        const void *context, uint32_t root,
-                        int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
-  return graph_preorder(vertices, first, head, context, root, 0, visit, consumer);
+/* T. H. Cormen et al., 3rd ed., §22.3 without the visited set; A. V. Aho, M. S. Lam, R. Sethi and J. D. Ullman,
+   Compilers, 2nd ed., §7.2.1, activation trees: the path stack marks its vertices open, so a vertex recurs once per
+   path and never twice on one */
+int mesh_graph_unfold(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                      const void *context, uint32_t root, uint32_t limit,
+                      int (*visit)(void *consumer, uint32_t vertex, size_t k, uint32_t parent), void *consumer) {
+  if (root >= vertices) return EINVAL;
+  uint32_t *at = malloc(((size_t)vertices + 1) * sizeof *at), *instance = malloc(((size_t)vertices + 1) * sizeof *instance);
+  size_t *next = malloc(((size_t)vertices + 1) * sizeof *next);
+  unsigned char *open = calloc((size_t)vertices + 1, 1);
+  int status = at && instance && next && open ? 0 : ENOMEM;
+  uint32_t depth = 0, made = 0;
+  if (!status) status = limit ? visit(consumer, root, SIZE_MAX, UINT32_MAX) : ENOMEM;
+  if (!status) { at[0] = root; next[0] = first[root]; instance[0] = made++; open[root] = 1; depth = 1; }
+  while (!status && depth) {
+    const uint32_t v = at[depth - 1];
+    if (next[depth - 1] == first[v + 1]) { open[v] = 0; depth--; continue; }
+    const size_t k = next[depth - 1]++;
+    const uint32_t w = head(context, k);
+    status = w >= vertices ? EINVAL : open[w] ? EDEADLK : made == limit ? ENOMEM : visit(consumer, w, k, instance[depth - 1]);
+    if (status) break;
+    at[depth] = w; next[depth] = first[w]; instance[depth] = made++; open[w] = 1; depth++;
+  }
+  free(at); free(instance); free(next); free(open);
+  return status;
 }
 
 struct within { uint32_t N,root,depth; const uint32_t *from,*order,*into; const uint32_t *in; const double *weight,*rest;

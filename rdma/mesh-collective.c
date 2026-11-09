@@ -135,7 +135,7 @@ struct plan {
   double *completed;
   /* design/aot-compilation-change-request.md A10 */
   uint64_t deliveries,submits,syncs,rows,room,outstanding,submit_room,spanned,nodes,forwarded;
-  uint32_t waits,tells,calls,*wait_row;
+  uint32_t waits,tells,calls,horizon,*wait_row;
   struct plan_sync *sync;
   double time[MESH_NODES_MOST];
   uint32_t *item,state;
@@ -342,18 +342,20 @@ static void plan_name(const struct plan *p,uint32_t v,const char *what,uint64_t 
 
 /* design/disjoint-pages-change-request.md C3.3; M. Lam, PLDI 1988; B. R. Rau, MICRO 1994;
    design/aot-compilation-change-request.md, appendix item 1 */
-/* design/aot-compilation-change-request.md A10, "Its output" (`outstanding`, the most executions of the function the
-   program issues ahead, "which bounds how many the program issues ahead"): an EXECUTION value of execution e is live
-   from its writer to its last reader, all in e's block (other functions' calls read it there, outside this plan's
-   graph), so `outstanding` executions are live at once and each takes its own copy (Lam's modulo variable expansion);
-   e + copies is then at least `outstanding` executions on, past the block the program's `ended` wait has closed.
-   The graph's lags raise it where a read reaches a later write farther on; a read reaching none (a delivery to a node
-   where its function has no section, BSL's feedforward edge) adds nothing, its reuse held at run time: the bridge
-   serves execution t only below `executions`, which mesh_host_started raises after the block that read copy
-   t - copies ended (mesh-flow.c, mesh-dataflow.c mesh_host_started) */
+/* design/aot-compilation-change-request.md, appendix item 6 (block execution b runs the function's executions
+   b every + ordinal); M. Lam, PLDI 1988, modulo variable expansion: an EXECUTION value of execution e is live from its
+   writer to its last reader, all in e's block b (other functions' calls read it there, outside this plan's graph), and
+   the program issues `horizon` block executions ahead of their ends (mesh_plan's operand, the native program's lag), so
+   horizon x every executions are live at once, each with its own copy: e + copies is then in block b + horizon or
+   later, which the program's `ended` wait opens only after block b ended. A10's `outstanding` (the calls the program
+   may have outstanding at once) is the issue bound plan_graph lowers, not this lifetime. The graph's lags raise the
+   copies where a read reaches a later write farther on; a read reaching none (a delivery to a node where its function
+   has no section, BSL's feedforward edge) adds nothing, its reuse held at run time: the bridge serves execution t only
+   below `executions`, which mesh_host_started raises after the block that read copy t - copies ended (mesh-flow.c,
+   mesh-dataflow.c mesh_host_started) */
 static int plan_unroll(struct plan *p){
   const uint32_t values=p->values;
-  p->copies=(uint32_t)p->outstanding;
+  p->copies=p->horizon*p->calls;
   if(!values)return 0;
   const struct plan_value *last=p->value+values-1;
   const uint32_t sources=last->source+1+last->reads;
@@ -1102,10 +1104,7 @@ static int plan_graph(struct plan *plans,uint32_t count,const uint32_t *calls,ui
   size_t *first=NULL,*rows=NULL,*wait_first=NULL,*wait_order=NULL,*tell_first=NULL,*tell_order=NULL;
   int status=!place || !actor?ENOMEM:0;
   if(status)goto done;
-  for(uint32_t f=0;f<count;f++){
-    plans[f].calls=(uint32_t)(row[f+1]-row[f]);
-    for(size_t q=row[f];q<row[f+1];q++)place[order[q]]=(uint32_t)(q-row[f]);
-  }
+  for(uint32_t f=0;f<count;f++)for(size_t q=row[f];q<row[f+1];q++)place[order[q]]=(uint32_t)(q-row[f]);
   for(uint32_t j=0;j<J && vertices<UINT32_MAX;j++){
     const struct plan *p=plans+calls[j];
     const uint64_t parts=(uint64_t)__builtin_popcountll(p->nodes),
@@ -1771,11 +1770,11 @@ void mesh_planned_free(struct mesh_planned *planned){
    P. E. McKenney and J. D. Slingwine, PDCS 1998 */
 int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,uint32_t norders,const uint32_t *chains,
-              uint64_t deadline,struct mesh_planned *planned){
+              uint32_t horizon,uint64_t deadline,struct mesh_planned *planned){
   struct hdr *m=context->M;
   if(!planned)return EINVAL;
   *planned=(struct mesh_planned){0};
-  if(!group || !program || !count || !functions || !ncalls || !calls || (norders && !orders))return EINVAL;
+  if(!group || !program || !count || !functions || !ncalls || !calls || (norders && !orders) || !horizon)return EINVAL;
   for(uint32_t j=0;j<ncalls;j++)if(calls[j]>=count)return EINVAL;
   struct plan *plans=calloc(count,sizeof *plans);
   size_t *row=malloc(((size_t)count+1)*sizeof *row),*order=malloc(((size_t)ncalls+1)*sizeof *order),*rows_by=NULL,
@@ -1796,6 +1795,8 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     struct plan *p=plans+f;
     p->context=context;p->n=nodes.count;p->self=nodes.self;
     p->view=(struct mesh_view_id){.id=nodes.serial,.sequencer=nodes.sequencer,.boot=nodes.boot};
+    p->calls=(uint32_t)(row[f+1]-row[f]);p->horizon=horizon;
+    if((uint64_t)horizon*p->calls>=UINT32_MAX){status=ENOMEM;goto done;}
     if((status=plan_function(p,functions+f,&nodes,program)))goto done;
   }
   if((status=plan_graph(plans,count,calls,ncalls,program,nodes.self,row,order,orders,norders,chains,planned)))goto done;

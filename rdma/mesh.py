@@ -215,6 +215,9 @@ CONTEXT = C.POINTER(Context)
 # A10, "Its output"): mesh_plan takes, after the calls, A10's order constraints between calls (`orders`, pairs of call
 # indices) and each call's commuting chain (`chains`, its chain's first call), before the deadline.  What must stay:
 # each binding the header's declaration
+# 2026-11-09 (design/compilation-composition-change-request.md item 6, unit 6D, root's postcommit review): mesh_plan
+# takes the program's issue `horizon` (block executions) before the deadline, the copies' lifetime operand apart from
+# A10's `outstanding`.  What must stay: each binding the header's declaration
 # 2026-11-09 (design/compilation-composition-change-request.md item 6, unit 6D): mesh_plan gives, last, the plan's
 # results for native preparation (Planned), which mesh_planned_free releases.  What must stay: each binding the header's
 # declaration
@@ -223,7 +226,7 @@ for name, result, arguments in (
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_nodes_read', C.c_int, [CONTEXT, C.POINTER(Nodes)]),
         ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), U, C.POINTER(U),
-                                Q, C.POINTER(Planned)]),
+                                U, Q, C.POINTER(Planned)]),
         ('mesh_planned_free', None, [C.POINTER(Planned)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),

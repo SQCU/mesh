@@ -37,12 +37,16 @@ struct mesh_metal_sent { void *counter; uint64_t sends,copies; };
 int mesh_metal_sent_prepare(struct mesh_ctx *,struct mesh_metal_transport *,uint64_t plan,uint32_t transfer,
                             struct mesh_metal_sent *);
 /* MPI 4.1 §3.7.3 (a send reads its source from its release until its completion): the bytes transfer `transfer`'s
-   sends at this node read of copy 0 of `section`, the same of every copy: one mesh-graph.h struct mesh_graph_access a
-   SEND hop (mesh.h struct mesh_hop) whose count word is the transfer's copy-0 completion word, `key` the copy-0 row
-   q < section.stride whose block holds it, [start, end) its bytes within that block, `vertex` and `write` 0;
-   ERANGE with *count the number needed where it exceeds `room`; EINVAL where a hop reads no copy-0 row */
+   sends at this node read of a copy of `section`, the same of every copy, in the capture's members (metal_recording.h
+   sent:operand:counter:extents:): one mesh-graph.h struct mesh_graph_access a SEND hop (mesh.h struct mesh_hop) whose
+   count word is the transfer's copy-0 completion word, `vertex` and `write` 0. Row q is the copy-0 row q <
+   section.stride whose block (block x pgsz bytes) holds the hop. `members` NULL (`count` 0): one buffer holds the
+   copy, row q at q x block: `key` 0, [q x block + start, q x block + end); else member n holds row members[n] alone:
+   `key` n, [start, end) within its block. ERANGE with *made the number needed where it exceeds `room`; EINVAL where a
+   hop reads no copy-0 row or a row no member holds */
 int mesh_metal_sent_extents(struct mesh_ctx *,struct mesh_metal_transport *,uint64_t plan,uint32_t transfer,
-                            struct mesh_section section,struct mesh_graph_access *extents,size_t room,size_t *count);
+                            struct mesh_section section,const uint32_t *members,uint32_t count,
+                            struct mesh_graph_access *extents,size_t room,size_t *made);
 /* the plan's status word relative to the view: a capture's state:buffer:status: offset (its own call's plan) */
 int mesh_metal_status_prepare(struct mesh_ctx *,struct mesh_metal_transport *,uint64_t plan,uint64_t *status);
 int mesh_metal_status(struct mesh_ctx *,uint64_t plan,int cause,uint64_t *first);

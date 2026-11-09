@@ -1436,8 +1436,9 @@ class Replay(C.Structure):
 
 
 # design/aot-compilation-change-request.md, appendix item 6: "have each call launch one execution of its function";
-# metal_recording.h struct MetalCall: call `ordinal` of its function's `every` calls in a block runs plan execution
-# b every + ordinal at block execution b
+# metal_recording.h struct MetalCall: the row's plan call `call` - 1 (mesh-collective.h planned->call, 0 a planless
+# row), whose `ordinal` of its function's `every` calls in a block runs plan execution b every + ordinal at block
+# execution b
 # design/torch-source-lowering-change-request.md item 1, "on whichever Apple silicon backend it is placed, the CPU
 # included"; design/compilation-composition-change-request.md item 5; metal_recording.h struct MetalNativeTask, struct
 # MetalNative and struct MetalCall `native`, `residues`: a row's native tasks at block execution t are
@@ -1456,8 +1457,7 @@ TASK, ARRIVED, PUBLISH, SENT_TASK = 0, 1, 2, 3
 
 
 class Call(C.Structure):
-    _fields_ = [('replay', C.POINTER(Replay)), ('plan', mesh.Q), ('lead', mesh.Q), ('every', mesh.Q),
-                ('ordinal', mesh.Q), ('native', C.POINTER(Native)), ('residues', mesh.Q)]
+    _fields_ = [('replay', C.POINTER(Replay)), ('call', mesh.Q), ('native', C.POINTER(Native)), ('residues', mesh.Q)]
 
 
 class MetalValue(C.Structure):
@@ -1521,7 +1521,8 @@ def _transport():
                 ('mesh_metal_receive_fields', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, C.POINTER(Remote),
                                                         mesh.Section, C.POINTER(mesh.U)]),
                 ('mesh_metal_sent_extents', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, mesh.U, mesh.Section,
-                                                      C.POINTER(mesh_graph.Access), C.c_size_t, C.POINTER(C.c_size_t)]),
+                                                      C.POINTER(mesh.U), mesh.U, C.POINTER(mesh_graph.Access), C.c_size_t,
+                                                      C.POINTER(C.c_size_t)]),
                 ('mesh_metal_status_prepare', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q,
                                                         C.POINTER(mesh.Q)])):
             function = getattr(lib, name)
@@ -1695,7 +1696,7 @@ def _dispatch(name, count, *arguments):
 # its maximal contiguous ranges (_access, mesh-collective.h mesh_strided_extents) from its storage's start
 def _launch(kernel, arguments, **dispatched):
     named = [extent for j, value in enumerate(arguments) if isinstance(value, torch.Tensor) and value.numel()
-             for extent in _access(value, 0, j, value.untyped_storage().data_ptr())]
+             for extent in _access(_strided_of(value), 0, j, value.untyped_storage().data_ptr())]
     _recorder()[0].MetalRecorderEffects((mesh_graph.Access * max(len(named), 1))(*named), len(named))
     kernel(*arguments, **dispatched)
 
@@ -2794,7 +2795,7 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
         for i, (received, j) in listed:
             pages = list(_received(placed(received), j, flat.numel(), row))
             steps += [_Bridge(ARRIVED, i, _count(context, state, _entry(context, state, i).count, c),
-                              [page for _, _, page in pages])] if state is not None else []
+                              [_strided_of(page) for _, _, page in pages])] if state is not None else []
             steps += _once([thunk for a, b, page in pages for thunk in _pointwise(0, flat[a:b], flat[a:b], page)])
         return steps
     places = ir.places[ir.device]
@@ -2810,20 +2811,19 @@ def _filled(part, fill):
 
 # mesh-collective.h struct mesh_declared `value` and its `to`/`from` view (design/compilation-composition-change-request.md
 # item 6.4): the placed bytes of execution c's copy a declared transfer lands in or sends from, the bytes its arrival
-# writes and its publication and send read: of a paged value the pages its view touches (_touched), of a run value the
-# view itself over the value's own storage (torch 2.14.0 torch/_torch_docs.py as_strided: storage-relative, no copy).
-# The value placed for `ir.at[i]` is its owner's home, offset 0 of the value, in the owner's dtype, whose element the
-# view's byte offset and strides are multiples of (_strided)
+# writes and its publication and send read, as absolute mesh.Strided views (_access's operand): of a paged value each
+# page its view touches (_touched), of a run value the declared view itself rebased to the placed value's address (its
+# owner's home, byte 0 of the value)
 def _ranges(ir, placed, i):
     value = placed(ir.at[i]) if i in ir.at else None
     if isinstance(value, _Paged):
-        return [value.pages[q] for q in _touched(ir, i, ir.page)]
+        return [_strided_of(value.pages[q]) for q in _touched(ir, i, ir.page)]
     if not isinstance(value, torch.Tensor):
         return []
-    declared, size = ir.declared[i], value.element_size()
+    declared = ir.declared[i]
     view = declared.to if declared.destination == ir.index else declared.from_
-    dims = [(view.pairs[2 * d], view.pairs[2 * d + 1] // size) for d in range(view.dims)]
-    return [value.as_strided([n for n, _ in dims], [s for _, s in dims], value.storage_offset() + view.offset // size)]
+    return [mesh.Strided(offset=value.data_ptr() + view.offset, element=view.element, dims=view.dims,
+                         pairs=(mesh.Q * max(2 * view.dims, 1))(*view.pairs[:2 * view.dims]))]
 
 
 def _completed(ir, context, plan, state, c, collective, placed=lambda key: None):
@@ -2947,11 +2947,14 @@ def _instantiate(ir, context, plan, devices, tensors, c, spec):
 
 # design/disjoint-pages-change-request.md C3.4; design/aot-compilation-change-request.md, appendix item 7; P. E.
 # McKenney and J. D. Slingwine, Read-copy update, PDCS 1998; mesh-dataflow.h mesh_retire; mesh-collective.h mesh_plan
+# metal_recording.h MetalProgramEnd: 0 ended, EIO a commit's error (ended), ECANCELED stalled with its cancelled work
+# and callbacks drained — the operands are released, then the status raised; ETIMEDOUT the drain did not finish, so
+# the operands stay live
 def _retire(context, state):
-    replay = state['replay']
+    replay, status = state['replay'], 0
     if replay is not None:
         status = replay['lib'].MetalProgramEnd(replay['program'], replay['ended'], replay['error'], len(replay['error']))
-        if status:
+        if status == errno.ETIMEDOUT:
             raise OSError(status, replay['error'].value.decode())
     mesh.LIB.mesh_retire(context.M, context.client)
     _released(state['owned'])
@@ -2960,6 +2963,8 @@ def _retire(context, state):
     if mapping is not None:
         mapping.retired = True
         mapping.release()
+    if status:
+        raise OSError(status, replay['error'].value.decode())
 
 
 # the preparation's resources, each with its release, made in order and released in the reverse order, on retirement
@@ -3183,9 +3188,9 @@ def _expanded(captured, owned, reader, addresses, base):
 # index in the buffer it lands in, UINT32_MAX in every other member buffer; a sent range's supplied word is given once,
 # with its first buffer; every range a send of this node reads (its sent ranges and the received ranges it forwards)
 # has its completion counter, so a later overlapping writer follows the send's read (problems-of-14b9a757, third
-# stops 7), and the bytes its SEND hops read (mesh-metal.h mesh_metal_sent_extents, copy-0 rows: a paged value's row
-# its member in the range's touched pages, a run value's its block in the one buffer; design/compilation-composition-
-# change-request.md item 6.4)
+# stops 7), and the bytes its SEND hops read, member-relative (mesh-metal.h mesh_metal_sent_extents: the members a
+# paged range's touched pages, none for a run value's one buffer; design/compilation-composition-change-request.md
+# item 6.4)
 def _transfers(captured, context, transports, owned, plan, handle, ir, k, j, values):
     receives, sends = _endpoints(ir)
     delivered = captured['delivered'].get((k, j), ())
@@ -3234,17 +3239,14 @@ def _transfers(captured, context, transports, owned, plan, handle, ir, k, j, val
                 counter, section, touched = MetalSent(), values[k][ir.declared[i].value].section, captured['pages'][k, j, i]
                 mesh.check(metal.mesh_metal_sent_prepare(C.byref(context), C.byref(transport), plan, i,
                                                          C.byref(counter)))
-                count = C.c_size_t()
-                status = metal.mesh_metal_sent_extents(C.byref(context), C.byref(transport), plan, i, section, None, 0,
-                                                       C.byref(count))
+                count, members = C.c_size_t(), (mesh.U * len(touched))(*touched) if touched is not None else None
+                rows = len(touched) if touched is not None else 0
+                status = metal.mesh_metal_sent_extents(C.byref(context), C.byref(transport), plan, i, section, members,
+                                                       rows, None, 0, C.byref(count))
                 mesh.check(0 if status == errno.ERANGE else status)
-                read, member = (mesh_graph.Access * max(count.value, 1))(), {q: n for n, q in enumerate(touched or ())}
-                mesh.check(metal.mesh_metal_sent_extents(C.byref(context), C.byref(transport), plan, i, section, read,
-                                                         count.value, C.byref(count)))
-                for extent in read[:count.value]:
-                    at = 0 if touched is not None else extent.key * ir.page
-                    extent.key, extent.start, extent.end = (member[extent.key] if touched is not None else 0,
-                                                            extent.start + at, extent.end + at)
+                read = (mesh_graph.Access * max(count.value, 1))()
+                mesh.check(metal.mesh_metal_sent_extents(C.byref(context), C.byref(transport), plan, i, section, members,
+                                                         rows, read, count.value, C.byref(count)))
                 extents = DATA(OBJECT(OBJC.objc_getClass(b'NSData'), _SEL(b'alloc')), _SEL(b'initWithBytes:length:'),
                                C.addressof(read), C.sizeof(mesh_graph.Access) * count.value)
                 SENT(recorder, _SEL(b'sent:operand:counter:extents:'), handle, captured['groups'][k, j, i], counter,
@@ -3261,9 +3263,10 @@ def _transfers(captured, context, transports, owned, plan, handle, ir, k, j, val
 # metal_recording.h place:value:; mesh-collective.h mesh_view_values; MTL4CommandQueue.h addResidencySet:; mesh.h struct
 # mesh_state; design/torch-capture-change-request.md items 3, 6 and 9; design/torch-source-lowering-change-request.md
 # item 1; design/aot-compilation-change-request.md, appendix item 6; design/compilation-composition-change-request.md
-# item 6, units 6C and 6D: row j is the plan's call j, its plan, lead, every and ordinal `planned.call[j]`'s, and the
-# plan's results (mesh-collective.h struct mesh_planned: its calls, tasks and order at this node) the operand of the
-# program's preparation (metal_recording.h MetalRecorderProgram)
+# item 6, units 6C and 6D: row j names the plan's call j (MetalCall `call` = j + 1), whose plan, lead, every and
+# ordinal the program reads from `planned.call[j]`; the plan's results (mesh-collective.h struct mesh_planned: its
+# calls, signature and order at this node) the operand of the program's preparation (metal_recording.h
+# MetalRecorderProgram), retained by it until retirement
 def _replays(captured, context, irs, planned, horizon, values, addresses, base, buffer, natives, period, owned):
     lib, recorder, error = captured['lib'], captured['recorder'], C.create_string_buffer(4096)
     queue, replays, transports = OBJECT(recorder, _SEL(b'queue')), [], {}
@@ -3297,12 +3300,10 @@ def _replays(captured, context, irs, planned, horizon, values, addresses, base, 
         owned[id(replay)] = lambda replay=replay: (SET(queue, _SEL(b'removeResidencySet:'), replay.residency),
                                                    lib.MetalReplayDestroy(C.byref(replay)))
         replays.append(replay)
-    identities = [planned.call[row] for row in range(planned.calls)]
-    calls = (Call * len(replays))(*[Call(C.pointer(replay) if replay is not None else None, identity.plan,
-                                         identity.lead, identity.every, identity.ordinal,
+    calls = (Call * len(replays))(*[Call(C.pointer(replay) if replay is not None else None, row + 1,
                                          C.cast(natives[row], C.POINTER(Native)) if row in natives else None,
                                          len(natives[row]) if row in natives else 0)
-                                    for row, (replay, identity) in enumerate(zip(replays, identities))])
+                                    for row, replay in enumerate(replays)])
     program = _owned(owned, lib.MetalRecorderProgram(recorder, calls, len(calls), horizon, C.byref(planned), error,
                                                      len(error)))
     if not program:
@@ -3528,8 +3529,9 @@ def _commutes(module, k):
 
 
 # design/aot-compilation-change-request.md A10, "Its bound", and appendix item 6; A. J. Bernstein, Analysis of programs
-# for parallel processing, IEEE Trans. Electronic Computers EC-15(5), 1966; Rinard and Diniz, section 2;
-# `sources[j]` call j's flat input leaves' producers, `every[f]` the block's calls of function f
+# for parallel processing, IEEE Trans. Electronic Computers EC-15(5), 1966; Rinard and Diniz, section 2; R. P. Dilworth,
+# Annals of Math., 1950; D. R. Fulkerson, Proc. AMS, 1956; `sources[j]` call j's flat input leaves' producers,
+# `every[f]` the block's calls of function f
 # (_Export), `horizon` the block executions the program issues ahead
 def _analyse(gm, of, compiled, sources, every, horizon):
     modules = [record.function.module for record in compiled]
@@ -3582,17 +3584,28 @@ def _analyse(gm, of, compiled, sources, every, horizon):
     for j, c in enumerate(label):
         least.setdefault(c, j)
     head = [least[c] for c in label]
-    # A10, "Its output": the calls of a function the program issues ahead: `horizon` block executions, each all
-    # `every` calls of the function, so horizon x every. It is an issue capacity and also the lifetime bound of a
-    # result read outside its function's plan (another function's call, a delivery, the block's outputs): such a read
-    # has no later write in the plan's graph, so mesh_plan sizes its copies by this bound (mesh-collective.c
-    # plan_unroll), and the native program lets the bridge land execution e only after the block that read copy
-    # e - copies ended (MetalProgramExecute's `started` notice, mesh_host_started): with copies >= horizon x every
-    # that block is at least horizon blocks earlier, which the program's own `ended` wait already requires. A smaller
-    # bound (the block order's width, or 1 for a chain) would put e and e - copies in one block, its landing waiting
-    # for its own block's end. The orders the calls' effects impose (A10's pairs, the chains above, persistent
-    # storage's placed effects across executions in the native program) are edges, not this bound
-    outstanding = {f: horizon * count for f, count in every.items()}
+    # A10, "Its bound": the most calls of a function outstanding at once is the width (Dilworth and Fulkerson,
+    # mesh_graph.width) of its calls in the order the program issues them over its `horizon` block executions:
+    # vertices (b, j), b < horizon; inside a block A10's pairs and each chain's successive calls; across blocks each
+    # closed chain's (two calls or more, or calls writing persistent state) last call of block b before its first of
+    # block b + 1, as mesh_plan closes chains; that order's transitive closure by mesh_graph.closure. Storage for the
+    # executions in flight is mesh_plan's from `horizon` (plan_unroll), not this bound
+    members = {}
+    for j, h in enumerate(head):
+        members.setdefault(h, []).append(j)
+    before = {j: {a for a, b in pairs if b == j} for j in range(len(calls))}
+    for chain in members.values():
+        for a, b in zip(chain, chain[1:]):
+            before[b].add(a)
+    closed = {h: chain[-1] for h, chain in members.items()
+              if len(chain) > 1 or any(compiled[callee[calls[j]]].written for j in chain)}
+    unrolled = [(b, j) for b in range(horizon) for j in range(len(calls))]
+    after = mesh_graph.closure(unrolled, lambda v: [(v[0], a) for a in before[v[1]]] +
+                               ([(v[0] - 1, closed[v[1]])] if v[0] and v[1] in closed else []))
+    outstanding = {}
+    for f in every:
+        mine = [v for v in unrolled if callee[calls[v[1]]] == f]
+        outstanding[f] = mesh_graph.width(mine, lambda a: [x for x in mine if a in after[x]])
     return Calls(outstanding, (mesh.U * max(2 * len(pairs), 1))(*[j for pair in pairs for j in pair]), len(pairs),
                  (mesh.U * max(len(calls), 1))(*head))
 
@@ -3894,7 +3907,7 @@ def program(block, *example_inputs, horizon=HOST_LAG):
             planned = mesh.Planned()
             mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
                                           (mesh.U * len(calls))(*calls), len(calls), analysed.orders,
-                                          analysed.norders, analysed.chains, deadline, C.byref(planned)))
+                                          analysed.norders, analysed.chains, horizon, deadline, C.byref(planned)))
             state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
             captured['every'] = every
             captured['planned'] = planned

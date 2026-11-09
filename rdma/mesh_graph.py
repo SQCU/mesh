@@ -2,6 +2,7 @@
 import collections
 import ctypes as C
 import errno
+import math
 import os
 
 
@@ -63,6 +64,48 @@ def ends(order, uses):
 def paths(vertices, neighbours):
     entered = {u for v in vertices for u in neighbours(v)}
     return [walk([v], neighbours) for v in vertices if v not in entered and list(neighbours(v))]
+
+
+# J. E. Hopcroft and R. M. Karp, An n^5/2 algorithm for maximum matchings in bipartite graphs, SIAM J. Comput. 2, 1973
+def matching(left, neighbours):
+    nil = object()
+    mate, partner, depth = {a: nil for a in left}, {}, {}
+
+    def layer():
+        queue = [a for a in left if mate[a] is nil]
+        for a in left:
+            depth[a] = 0 if mate[a] is nil else math.inf
+        depth[nil] = math.inf
+        for a in queue:
+            if depth[a] < depth[nil]:
+                for b in neighbours(a):
+                    c = partner.get(b, nil)
+                    if depth[c] == math.inf:
+                        depth[c] = depth[a] + 1
+                        if c is not nil:
+                            queue.append(c)
+        return depth[nil] != math.inf
+
+    def augment(a):
+        if a is nil:
+            return True
+        for b in neighbours(a):
+            c = partner.get(b, nil)
+            if depth[c] == depth[a] + 1 and augment(c):
+                mate[a], partner[b] = b, a
+                return True
+        depth[a] = math.inf
+        return False
+    while layer():
+        for a in left:
+            if mate[a] is nil:
+                augment(a)
+    return {a: b for a, b in mate.items() if b is not nil}
+
+
+# design/joint-compilation.md §3, row 2
+def width(vertices, neighbours):
+    return len(vertices) - len(matching(vertices, neighbours))
 
 
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))

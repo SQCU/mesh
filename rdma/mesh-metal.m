@@ -110,26 +110,33 @@ int mesh_metal_receive_fields(struct mesh_ctx *context,struct mesh_metal_transpo
 /* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3; rdma/mesh-collective.c mesh_plan's
    SEND hops (count the transfer's completion word of the hop's copy) */
 int mesh_metal_sent_extents(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
-  uint32_t transfer,struct mesh_section section,struct mesh_graph_access *extents,size_t room,size_t *count){
+  uint32_t transfer,struct mesh_section section,const uint32_t *members,uint32_t count,struct mesh_graph_access *extents,
+  size_t room,size_t *made){
   (void)transport;
   struct hdr *m=context->M;
   const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_hop *hops=mesh_hops(m,words);
-  const uint64_t completion=mesh_transfer_at(m,words,transfer)->completion;
+  const uint64_t completion=mesh_transfer_at(m,words,transfer)->completion,block=(uint64_t)m->block*m->pgsz;
   uint64_t *rows=rows_sorted(context,section),at;
-  if(!rows)return ENOMEM;
-  size_t made=0;
-  for(uint64_t e=0;e<words->entries;e++){
+  uint32_t *member=count?malloc((section.stride?section.stride:1)*sizeof *member):NULL;
+  if(!rows || (count && !member)){free(rows);free(member);return ENOMEM;}
+  for(uint32_t q=0;member && q<section.stride;q++)member[q]=UINT32_MAX;
+  for(uint32_t n=0;n<count;n++)if(members[n]<section.stride)member[members[n]]=n;
+  size_t found=0;
+  int status=0;
+  for(uint64_t e=0;e<words->entries && !status;e++){
     const struct mesh_hop *hop=hops+e;
     if(hop->direction!=MESH_SEND || hop->count!=completion)continue;
-    const uint64_t *found=row_of(m,rows,section.stride,hop,&at);
-    if(!found){free(rows);return EINVAL;}
-    if(made<room)extents[made]=(struct mesh_graph_access){.key=found[1],.start=at,.end=at+hop->bytes};
-    made++;
+    const uint64_t *row=row_of(m,rows,section.stride,hop,&at);
+    const uint32_t key=row && member?member[row[1]]:0;
+    if(!row || key==UINT32_MAX){status=EINVAL;break;}
+    const uint64_t base=member?0:row[1]*block;
+    if(found<room)extents[found]=(struct mesh_graph_access){.key=key,.start=base+at,.end=base+at+hop->bytes};
+    found++;
   }
-  free(rows);
-  *count=made;
-  return made>room?ERANGE:0;
+  free(rows);free(member);
+  *made=found;
+  return status?status:found>room?ERANGE:0;
 }
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */

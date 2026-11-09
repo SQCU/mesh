@@ -12,16 +12,19 @@ uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(con
 int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                      const void *context, uint32_t *indegree, uint32_t *ordinal);
 /* T. H. Cormen, C. E. Leiserson, R. L. Rivest and C. Stein, Introduction to Algorithms, 3rd ed., MIT Press, 2009,
-   §22.3 and §22.4, Lemma 22.11 */
-int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                          const void *context, uint32_t root,
-                          int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer);
-/* the same depth-first search over rows (first, head) from `root`, each reachable vertex visited once in preorder with
-   its tree parent (root's UINT32_MAX) after the search; cross and forward edges allowed (a callee of two callers is
-   visited once), EDEADLK on a back edge (a cycle); mesh_graph_tree_visit is this with EINVAL on a cross edge */
+   §22.3 and §22.4, Lemma 22.11: depth-first search over rows (first, head) from `root`, each reachable vertex visited
+   once in preorder with its tree parent (root's UINT32_MAX) after the search; cross and forward edges allowed (a callee
+   of two callers is visited once), EDEADLK on a back edge (a cycle) */
 int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                         const void *context, uint32_t root,
                         int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer);
+/* the depth-first unfolding of rows (first, head) from `root`: each path from root is one instance, visited in preorder
+   with its vertex, the row entry k it was reached by (SIZE_MAX for the root) and its parent instance (UINT32_MAX for the
+   root); instances are numbered in visit order from 0; a vertex reached by several paths is visited once per path;
+   EDEADLK on a back edge (a cycle), ENOMEM past `limit` instances, the visit's nonzero return ends the search with it */
+int mesh_graph_unfold(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                      const void *context, uint32_t root, uint32_t limit,
+                      int (*visit)(void *consumer, uint32_t vertex, size_t k, uint32_t parent), void *consumer);
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Y. J. Chu and T. H. Liu, Scientia Sinica 14, 1965; J. Edmonds, J. Res. Nat. Bur. Standards 71B, 1967 */
 int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,

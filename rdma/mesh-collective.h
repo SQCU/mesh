@@ -68,7 +68,10 @@ _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function
    os/os_sync_wait_on_address.h:268 os_sync_wait_on_address_with_timeout; _time.h:185 clock_gettime_nsec_np */
 /* design/aot-compilation-change-request.md A10 ("Its output": "the order constraints between calls"; A. J. Bernstein,
    IEEE Trans. Electronic Computers EC-15(5), 1966; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997): `orders`
-   norders pairs (a, b), a < b, call a before call b; `chains[j]` the first call of call j's commuting chain */
+   norders pairs (a, b), a < b, call a before call b; `chains[j]` the first call of call j's commuting chain;
+   struct mesh_function `outstanding` A10's bound on the function's calls outstanding at once (the issue bound);
+   `horizon` the block executions the program issues ahead of their ends (its native lag), which with each function's
+   calls a block sizes the copies of its values (mesh-collective.c plan_unroll) */
 /* design/compilation-composition-change-request.md item 6, unit 6D; design/aot-compilation-change-request.md, appendix
    item 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1: the plan's
    results for the program's native preparation, the caller's to free by mesh_planned_free. `call[j]` for call j of
@@ -95,7 +98,7 @@ _Static_assert(sizeof(struct mesh_planned_call)==32 && offsetof(struct mesh_plan
                offsetof(struct mesh_planned,orders)==32,"mesh_planned: rdma/mesh.py Planned");
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,uint32_t norders,const uint32_t *chains,
-              uint64_t deadline,struct mesh_planned *planned);
+              uint32_t horizon,uint64_t deadline,struct mesh_planned *planned);
 void mesh_planned_free(struct mesh_planned *);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
