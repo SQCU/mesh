@@ -33,7 +33,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
   not establish Neural Engine execution. The composed Torch save/load consumer still needs operational evidence.
 
   The production dependency chain builds. All five E2B stage graphs publish/lower/finalize in the latest compile-only
-  record: 3/7/20/618/1068 dispatches. An earlier decode finalization crash in AGX does not reproduce after the changed
+  record (build22): 3/7/20/602/1068 dispatches. An earlier decode finalization crash in AGX does not reproduce after the changed
   member emission; its cause is unproven. These are compilation records, not full-model numerical or throughput
   evidence. Commands, revisions, binary hashes, observations and superseded development findings are retained in
   metal-microbench `output_data/claude-typed-replacement-20261109T085408Z`.
@@ -96,8 +96,19 @@ outstanding, and what of it is outstanding. The standard every change request fo
   five-node E2B execution with the required transport overhead/bandwidth and decode throughput after prefill.
   Source review also identifies specific performance mechanisms still to preserve: typed native CPU SGEMM/BNNS
   contractions replacing the old Accelerate path; submission of independent GPU work before synchronous CPU/ANE
-  computation where the compiled schedule requires overlap; and efficient typed indexed updates replacing Torch's
-  current output-by-update scan. Restored CP/EP/mixed-engine callers do not by themselves close those obligations.
+  computation where the compiled schedule requires overlap; and efficient typed indexed updates. Build22 connects
+  typed BLAS/BNNS calls inside the existing native member body, with retained layout/workspace and shared contraction
+  facts consumed by CPU, GPU and Core ML. Restored F64 transposed and F32 single-row BLAS cases agree exactly with
+  Torch. BNNS descriptor emission, staged-storage binding and CPU struct-constant emission still expose concrete
+  integration failures; corrective checkpoint metalaa0dc393 awaits linked verification.
+  The output-by-update scan is replaced by stable key sorting, shared segmented scans and canonical typed scatter.
+  The shared lowerer now suppresses ordinary mapped writes for explicitly scattered outputs. Build22 GPU execution
+  covers all eleven update variants, duplicate keys, include-self/alpha, I64/complex128/Bool values, noncontiguous
+  advanced indices, scalar/empty cases and histogram. The largest relative difference is 2.558e-8; the other checked
+  results are exact. Alpha is applied before reduction, preserving the finite 1.5e38 overflow-sensitive case.
+  Invalid negative scatter indices and an index-add coordinate of 2**32 report the intended typed check. CPU update
+  execution remains blocked by the struct-constant emitter defect above. This does not establish performance or
+  distributed EP execution. Restored CP/EP/mixed-engine callers do not by themselves close those obligations.
   Core ML invocation also rebuilds fixed feature providers, array views, options and output bindings on every call;
   the existing `CoreMLFunction` prepared these once. That preparation must survive in the native artifact and its
   relocated replay bindings. A Core ML preferred-device plan reports intended placement, not observed device use.
@@ -145,6 +156,13 @@ outstanding, and what of it is outstanding. The standard every change request fo
   external observation passes the untaken and zero-trip executions. The three-trip execution still fails because
   its realized graph reports three redundant synchronization edges. This failure remains assigned; numerical
   correctness and the successful alternatives do not close repeated-trip observation.
+  Build22 retains task-activation markers in the compiled instruction stream and materializes distinct task
+  occurrences from observable transitions. Shared dominator/SCC analysis retains silent optional/repeated
+  activations symbolically; affected synchronization classifications remain unproved rather than selecting an
+  arbitrary hidden path. The fresh three-trip, untaken and zero-trip cases now pass numerical execution and external
+  observation; the three-trip trace observes 37 program operations. General nested activation frames and named-control
+  trip-distance feedback are still missing handoffs. The currently unconsumed anonymous compiler control-edge
+  relation is being replaced by that consumed relation; the concrete three-trip success does not close it.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
   bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
   the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
