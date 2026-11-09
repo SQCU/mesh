@@ -7353,11 +7353,9 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             return result
         ops, result = _instantiate(ir, instance(k, j)[0], inputs, compiled[k].spec, row)
         # docs/provider.md#fragment-coded-weights
-        target = compiled[k].function.device
-        if target is not None:
-            place = ANE if target == 'ane' else CPU if torch.device(target).type == 'cpu' else GPU
+        if compiled[k].target is not None:
             for g in ops:
-                _placed([g], place, g.node)
+                _placed([g], compiled[k].target, g.node)
         builder = _Builder(compiler, owners, role, row, (k << 48) | (j << 32))
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[GPU]), C.byref(machines[CPU]))
@@ -7888,7 +7886,7 @@ class _Program(torch.fx.Interpreter):
 # effects that persist from one execution to the next), `mutated` the flat input leaves it writes; `passed` its result
 # leaves that are its own inputs, {flat output leaf: flat input leaf} (an output that is placeholder q, the
 # placeholders being the flat input leaves in order)
-Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec written read mutated '
+Compiled = collections.namedtuple('Compiled', 'function signature target source_device gm examples result spec written read mutated '
                                               'passed')
 
 
@@ -8066,12 +8064,15 @@ class _Export(torch.fx.Interpreter):
         storages = {}
         aliases = tuple(storages.setdefault(v.untyped_storage()._cdata, len(storages))
                         if isinstance(v, torch.Tensor) else None for v in flat)
-        signature = (spec, tuple(_metadata(v) for v in flat), aliases)
+        device = function.device
+        target = None if device is None else ANE if device == 'ane' else CPU if torch.device(device).type == 'cpu' else GPU
+        source = function.source_device or ('cpu' if device == 'ane' else device)
+        source = torch.device(source) if source is not None else None
+        signature = (spec, tuple(_metadata(v) for v in flat), aliases, target, source)
         found = [k for k, c in enumerate(self.compiled) if c.function is function and c.signature == signature]
         if not found:
-            if function.source_device is not None or function.device is not None:
-                held = function.source_device or ('cpu' if function.device == 'ane' else function.device)
-                args, kwargs = pytree.tree_map(lambda v: self.fake(v, held), (args, kwargs))
+            if source is not None:
+                args, kwargs = pytree.tree_map(lambda v: self.fake(v, source), (args, kwargs))
             exported = _exported(function, args, kwargs)
             gm = exported.module(check_guards=False)
             _static(gm)
@@ -8079,7 +8080,7 @@ class _Export(torch.fx.Interpreter):
             result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
             given, inputs = exported.graph_signature, [node for node in gm.graph.nodes if node.op == 'placeholder']
             mutated = set(given.user_inputs_to_mutate.values())
-            self.compiled.append(Compiled(function, signature, gm, pytree.tree_flatten((args, kwargs))[0], result,
+            self.compiled.append(Compiled(function, signature, target, source, gm, pytree.tree_flatten((args, kwargs))[0], result,
                                           exported.call_spec.out_spec,
                                           _storages(function.module, [*given.buffers_to_mutate.values(),
                                                                       *given.parameters_to_mutate.values()]),
