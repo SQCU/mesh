@@ -2540,6 +2540,12 @@ static uint32_t compose_processor(struct mesh_graph_signature *s, struct mesh_gr
   s->processor[s->processors] = p;
   return s->processors++;
 }
+struct compose_instruction { struct mesh_graph_instruction instruction; size_t ordinal; };
+static int compose_instruction_before(const void *a,const void *b){
+  const struct compose_instruction *x=a,*y=b;
+  if(x->instruction.position!=y->instruction.position)return x->instruction.position<y->instruction.position?-1:1;
+  return (x->ordinal>y->ordinal)-(x->ordinal<y->ordinal);
+}
 int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_graph_signature *b,
                        struct mesh_graph_signature *s) {
   memset(s, 0, sizeof *s);
@@ -2687,10 +2693,12 @@ int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_g
   }
   if(!result && (a->instructions || b->instructions)){
     s->submissions=a->submissions+b->submissions;s->actions=a->actions+b->actions;s->conditions=a->conditions+b->conditions;
+    const size_t room=a->instructions+b->instructions+a->operations+b->operations+2*(a->spans+b->spans)+1;
     s->submission=malloc((s->submissions+1)*sizeof *s->submission);s->action=malloc((s->actions+1)*sizeof *s->action);
-    s->condition=malloc((s->conditions+1)*sizeof *s->condition);
-    s->instruction=malloc((a->instructions+b->instructions+1)*sizeof *s->instruction);
-    if(!s->submission || !s->action || !s->condition || !s->instruction)result=ENOMEM;
+    s->condition=malloc((s->conditions+a->guards+b->guards+1)*sizeof *s->condition);
+    s->instruction=malloc(room*sizeof *s->instruction);
+    struct compose_instruction *joined=malloc(room*sizeof *joined);
+    if(!s->submission || !s->action || !s->condition || !s->instruction || !joined)result=ENOMEM;
     for(int side=0;!result && side<2;side++){
       const struct mesh_graph_signature *g=side?b:a;const size_t *map=side?ib:ia;const uint32_t *processors=side?pb:pa;
       const size_t machines=side?a->submissions:0,actions=side?a->actions:0,conditions=side?a->conditions:0;
@@ -2700,20 +2708,46 @@ int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_g
       }
       for(size_t k=0;k<g->actions;k++){
         struct mesh_graph_action x=g->action[k];x.submission+=(uint32_t)machines;if(x.vertex!=MESH_GRAPH_NONE)x.vertex+=side?a->tasks:0;
-        x.begin=x.begin?map[x.begin-1]+1:0;x.end=x.end?map[x.end-1]+1:0;s->action[actions+k]=x;
+        x.begin=x.begin<g->operations?map[x.begin]:g->operations?map[g->operations-1]+1:0;
+        x.end=x.end?map[x.end-1]+1:x.begin;s->action[actions+k]=x;
       }
       for(size_t k=0;k<g->conditions;k++){
         struct mesh_graph_condition x=g->condition[k];x.choice+=side?(uint32_t)a->choices:0;s->condition[conditions+k]=x;
       }
+#define COMPOSE_INSTRUCTION(X) do { struct mesh_graph_instruction x_=(X); \
+        x_.position=x_.position<g->operations?map[x_.position]:g->operations?map[g->operations-1]+1:0; \
+        if(x_.kind==MESH_GRAPH_OPERATION)x_.index=(uint32_t)map[x_.index]; \
+        else if(x_.kind==MESH_GRAPH_ACTION)x_.index+=(uint32_t)actions; \
+        else if(x_.kind>=MESH_GRAPH_LOOP_ENTRY && x_.kind<=MESH_GRAPH_LOOP_END)x_.index+=side?(uint32_t)a->controls:0; \
+        joined[s->instructions]=(struct compose_instruction){x_,s->instructions};s->instructions++; } while(0)
       for(size_t k=0;k<g->instructions;k++){
         struct mesh_graph_instruction x=g->instruction[k];x.condition+=(uint32_t)conditions;
-        x.position=x.position?map[x.position-1]+1:0;
-        if(x.kind==MESH_GRAPH_OPERATION)x.index=(uint32_t)map[x.index];
-        else if(x.kind==MESH_GRAPH_ACTION)x.index+=(uint32_t)actions;
-        else if(x.kind>=MESH_GRAPH_LOOP_ENTRY && x.kind<=MESH_GRAPH_LOOP_END)x.index+=side?(uint32_t)a->controls:0;
-        s->instruction[s->instructions++]=x;
+        if(!side && ((x.kind==MESH_GRAPH_OPERATION && taken[x.index]) ||
+          (b->spans && (x.kind==MESH_GRAPH_SPAN_ENTRY || x.kind==MESH_GRAPH_SPAN_END))))continue;
+        COMPOSE_INSTRUCTION(x);
       }
+      if(!g->instructions)for(size_t at=0;at<=g->operations;at++){
+        for(size_t span=0;span<g->spans && (side || !b->spans);span++)if(g->span[span].begin==at){
+          const struct mesh_graph_instruction x={.kind=MESH_GRAPH_SPAN_ENTRY,.index=(uint32_t)span,.position=at};COMPOSE_INSTRUCTION(x);
+        }
+        for(size_t span=0;span<g->spans && (side || !b->spans);span++)if(g->span[span].end==at){
+          const struct mesh_graph_instruction x={.kind=MESH_GRAPH_SPAN_END,.index=(uint32_t)span,.position=at};COMPOSE_INSTRUCTION(x);
+        }
+        if(at==g->operations || (!side && taken[at]))continue;
+        struct mesh_graph_instruction x={.kind=MESH_GRAPH_OPERATION,.index=(uint32_t)at,.position=at,
+          .condition=(uint32_t)s->conditions,.once=g->scope?g->scope[at].once:0,.execution=g->operation[at].execution};
+        for(size_t guard=0;guard<g->guards;guard++)if(g->guard[guard].operation==at){
+          s->condition[s->conditions++]=(struct mesh_graph_condition){g->guard[guard].selection+(side?(uint32_t)a->choices:0),g->guard[guard].taken};x.conditions++;
+        }
+        COMPOSE_INSTRUCTION(x);
+      }
+#undef COMPOSE_INSTRUCTION
     }
+    if(!result){
+      qsort(joined,s->instructions,sizeof *joined,compose_instruction_before);
+      for(size_t k=0;k<s->instructions;k++)s->instruction[k]=joined[k].instruction;
+    }
+    free(joined);
   }
   if (!result) result = signature_derive(s);
   free(pa); free(pb); free(ia); free(ib); free(matched); free(cursor); free(key); free(taken);

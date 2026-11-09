@@ -27,7 +27,7 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
     if instructions and action_owner is None:
         raise ValueError('retained submission instructions require their compiled owner')
     spans = metadata.get('spans') or [Span(0, 1 + max((operations[i].execution for i in program), default=0), 0, len(operations))]
-    groups, last, code, children, bounds = {}, {}, [], collections.defaultdict(list), {}
+    groups, last, code, children, bounds, loop_conditions = {}, {}, [], collections.defaultdict(list), {}, {}
     def token(kind, value, conditions=(), owner=0, execution=0):
         group = groups.setdefault((execution, owner), len(groups)) if owner else None
         if group is not None:
@@ -48,9 +48,13 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
                 token('enter' if kind == 6 else 'leave', instruction.index)
             else:
                 points[instruction.index][kind] = index
+                if kind == 3:
+                    loop_conditions[instruction.index] = conditions
                 token('skip', None)
+        positions = [instruction.position for instruction in instructions]
         for c, control in enumerate(controls):
-            bounds[c] = tuple(points[c][kind] for kind in (2, 3, 4, 5))
+            bounds[c] = (tuple(points[c][kind] for kind in (2, 3, 4, 5)) if c in points else
+                         tuple(bisect.bisect_left(positions, getattr(control, name)) for name in ('entry', 'body', 'retest', 'end')))
     else:
         guards = collections.defaultdict(list)
         for guard in metadata.get('guards', ()):
@@ -93,6 +97,7 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
                 tail = leaf(k, tail)
             if controls[c].kind == 1 and b != z:
                 decision = node('decide', c)
+                requirements[decision] = loop_conditions.get(c, ())
                 retest = sequence(r, z, decision, c, [])
                 after = node('bound', c, (tail, retest))
                 body = sequence(b, r, after, c)
@@ -180,7 +185,10 @@ def trace_machine(operations, program, metadata, objects, lanes, action_owner=No
             return result
         if kind == 'install':
             return [move(state, targets[0], native=value[0], seen=seen | value[1])]
-        if kind in ('optional', 'decide'):
+        if kind == 'decide':
+            selected = assign(state, requirements.get(cursor, ()))
+            return [move(state, targets[0])] + ([] if selected is None else [move(state, targets[1], selected=selected)])
+        if kind == 'optional':
             return [move(state, target) for target in targets]
         if kind == 'init':
             changed = list(trips)

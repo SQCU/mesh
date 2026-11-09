@@ -640,6 +640,11 @@ def main(argv):
         expected_ops += [operations[i] for i, c in enumerate(which) if c == 'bridge']
     expected = mesh_graph.signature(processors, tasks, dependences, expected_ops)
     watched = mesh_graph.signature(processors, tasks, dependences, observed)
+    if expected['states'].get('false'):
+        failures.append('realized compiled alternative has %d synchronization edges with no dependence under them' %
+                        expected['states']['false'])
+    if expected['redundant']:
+        failures.append('realized compiled alternative has %d redundant synchronization edges' % expected['redundant'])
     if expected['digest'] != watched['digest']:
         failures.append('observed graph %s differs from the compiled graph %s over the observed scope'
                         % (watched['digest'], expected['digest']))
