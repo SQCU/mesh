@@ -74,17 +74,21 @@ outstanding, and what of it is outstanding. The standard every change request fo
   Mesh5b61507c adds fixed-output least-squares driver composition through the existing QR/LQ, pivoted QR/RZ and
   SVD lowerings, with original driver and output-layout metadata. Build19 same-driver solution errors are 3.589e-7
   for native CPU tall GELS, 4.300e-7 for GPU wide complex GELS and 9.644e-8 for native CPU rank-deficient GELSY;
-  residual/rank fields agree. GPU wide GELSD has a close solution but incorrectly reports rank two instead of one.
-  Compiler review found fusion typing a physical F32 input from a later BOOL semantic parameter after composing
-  a comparison prologue. This shared type-handoff defect remains under repair; numerical success is not inferred
-  from process exit or the solution alone.
+  residual/rank fields agree. Build19 GPU wide GELSD had a close solution but incorrectly reported rank two instead
+  of one. Compiler review found fusion typing a physical F32 input from a later BOOL semantic parameter after
+  composing a comparison prologue. Metal0204b00b corrects both fusion interfaces to consume the physical input's
+  reader type. A fresh build20 GPU artifact restores with rank one and solution error 1.287e-7; fusion stays enabled.
   Metal9dc15107 supplies eighteen authored binary64 elementary functions through SoftFloat pairs and sourced
   FDlibm range reduction and approximations. Build19 exports, compiles and restores these plus shared log1p/expm1
   as one GPU dispatch. A 32-lane extreme/special-value vector differs from Torch CPU by at most two ULPs, including
   huge trigonometric arguments through maxdouble; the tiny negative log1p result agrees with libm where Torch
   rounds it to zero. These finite examples do not establish a full-domain accuracy bound. The restored training
-  and collective callers now use upstream joint forward/backward export and current public program/save/load;
-  their capture and partition checks are exposing additional producer/consumer gaps, and runtime remains pending.
+  and collective callers now use upstream joint forward/backward export and current public program/save/load.
+  Build20 executes the canonical transformer's retained joint graph through saved native artifacts: one layer,
+  width eight, two heads, four sequence positions, nine parameter gradients and an input gradient. Its 119 typed
+  operations become five GPU dispatches or one native CPU task. Forward relative errors are 8.270e-8 and 7.236e-8;
+  all gradient errors are below 2.020e-7 and the loss error is 2.362e-7. The artifacts are 521,972 and 378,827 bytes.
+  This establishes those joint numerical paths and restoration, not distributed public-program execution.
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
@@ -116,6 +120,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
   external observation of 12 program operations and seven static kernel records, with one image edge and no
   redundant edges. Conditional thresholds, nested guards, composed instruction order and realized-alternative
   validation still require their corresponding operational evidence.
+  Build20 executes a nested Torch conditional and nonunrolled GPU WHILE over 4,096 elements: the taken three-trip
+  result has relative error 3.585e-8 and the untaken branch is exact. The first diagnostic input omitted padding
+  for the compiled Boolean storage word; its producer now consumes finalized physical byte sizes. External
+  observation then refuses both signatures before client execution because two trip-test waits have no dependency
+  image. Review finds that the host predicate read was attributed to the preceding GPU task instead of represented
+  as its own computation. That handoff and the fences made redundant by a completed drain remain under repair.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
   bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
   the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
@@ -163,10 +173,13 @@ outstanding, and what of it is outstanding. The standard every change request fo
     scope through the lowering request's item 1 and in LiteRT through torch-capture item 3. In the replacement,
     build19 carries per-group footprints/page masks into native first-pass, compaction and deferred work, and
     retains a shared CPU/GPU dispatch order. Received IF/unrolled-trip selections use that same construction.
-    Direct received predicates at nonunrolled WHILE entry still need a scoped acquisition handoff. Removing the
-    replay scheduling solve also dropped its prepared receive-completion priority; the compiler-owned late
-    specialization must preserve that operand and the already planned lifetimes. Transport/overlap evidence
-    remains pending, so these source changes do not close R4.
+    Metaleb9826a3 adds scoped acquisition for direct received predicates at nonunrolled WHILE entry; its next linked
+    build and runtime evidence remain pending. Build20 restores the prepared receive-completion priority through
+    compiler-owned legal insertion bounds and a final permutation over the retained relation. Recorder lifetimes
+    use stable preparation anchors, extending every movable pass operand over its permitted interval; normal load
+    restores the permutation without another solve. Metale1791a34 also persists last-use handover records and orders
+    a shared-cut handover after all deferred passes at that cut. Transport/overlap evidence remains pending, so these
+    source changes do not close R4.
 
 ## Implemented
 
