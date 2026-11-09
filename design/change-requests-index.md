@@ -132,8 +132,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
     read of `removed` in `plans_load`; that implementation remains in the current source. The former no-commit
     statement was stale. This structural review did not perform a link-loss workload.
 - [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md): outstanding in part.
-  - R4's consumption of a received operand one partition at a time: implemented, in the torch scope by the lowering
-    request's item 1 and in the LiteRT scope by the torch-capture request's item 3.
+  - R4's consumption of a received operand one partition at a time has historical implementations in the torch
+    scope through the lowering request's item 1 and in LiteRT through torch-capture item 3. In the replacement,
+    native CPU work executes, but its received-operand acquisition still covers whole transfer ranges before
+    entry. The compiler must carry the existing per-member/group footprints and page masks into the compiled
+    CPU iteration, including its branches and loops. This readiness granularity remains open.
 
 ## Implemented
 
