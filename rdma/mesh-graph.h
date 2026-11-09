@@ -264,6 +264,8 @@ struct mesh_graph_record { unsigned char digest[32]; uint64_t bytes; uint32_t pr
 _Static_assert(sizeof(struct mesh_graph_record) == 72, "mesh_graph_record");
 int mesh_graph_record(const struct mesh_graph_signature *signature, void *record, size_t room, size_t *made);
 int mesh_graph_record_read(const void *record, struct mesh_graph_signature *signature);
+int mesh_graph_archive(const struct mesh_graph_signature *, void *bytes, size_t room, size_t *made);
+int mesh_graph_archive_read(const void *bytes, size_t length, struct mesh_graph_signature *);
 /* design/synchronization-signature-change-request.md item 1; L. Lamport, CACM 21(7), 1978: one program's signature from
    two producers' (a: the plan's, b: the replay's). Processors are united by identity, a's tasks and dependences come
    first and b's after, each producer's pairs keep their states, witnesses and dependences, and a native operation

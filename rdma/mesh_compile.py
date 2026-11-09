@@ -2,11 +2,15 @@
 # design/plan-to-bridge-change-request.md R1; Y. Xu et al., GSPMD, arXiv 2105.04663, 2021
 import collections
 import ctypes as C
+import ctypes.util
 import errno
 import math
 import operator
 import os
+import pickle
+import sys
 import time
+import types
 import weakref
 
 import torch
@@ -17,6 +21,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.node import Node, map_arg
 
 import mesh
+import mesh_disk
 import mesh_graph
 
 # torch 2.14.0 torch/export/__init__.py, export; torch/_ops.py, OpOverload
@@ -69,10 +74,11 @@ class IR:
         self.attributes, self.loads, self.kinds, self.page, self.hull = {}, set(), {}, None, None
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
         self.given, self.landed = None, {}
+        self.trims = {}
 
     # GSPMD section 3.1
     def local(self, node, sharding):
-        return tuple(s // self.shape[m] if m >= 0 else s for s, m in zip(_value(node).shape, sharding))
+        return tuple(-(-s // self.shape[m]) if m >= 0 else s for s, m in zip(_value(node).shape, sharding))
 
     # mesh-collective.h struct mesh_declared; design/plan-to-bridge-change-request.md R2 and R4;
     # design/aot-compilation-change-request.md, appendix item 5; design/compilation-composition-change-request.md item
@@ -407,8 +413,6 @@ def _merged(pad, padding, slicing):
 # design/joint-compilation.md §3, row 1
 def _complete(ir, operators, annotated):
     def refine(node, candidate):
-        candidate = tuple(m if m < 0 or size and size % ir.shape[m] == 0 else -1
-                          for m, size in zip(candidate, _value(node).shape))
         merged = _merge(ir.sharding[node], candidate)
         if node in annotated or merged is None or merged == ir.sharding[node]:
             return False
@@ -432,6 +436,18 @@ def _complete(ir, operators, annotated):
 # design/aot-compilation-change-request.md, appendix item 7: a mesh dimension the result does not shard is gathered;
 # one it shards along another dimension moves there by an AllToAll once that dimension is free, a cycle of such moves
 # broken by gathering one of its dimensions, which the final slices shard again
+def _partition_pad(ir, key, dimension, extent):
+    shape = _shape(ir, key)
+    if shape[dimension] == extent:
+        return key
+    made = key + ('padded', dimension, extent)
+    if made not in ir.made:
+        ir.made.add(made)
+        ir.shapes[made] = shape[:dimension] + (extent,) + shape[dimension + 1:]
+        ir.program.append(('pad', (key,), made, (dimension, extent)))
+    return made
+
+
 def _reshard(ir, node, have, want):
     def step(item):
         if item[2] not in ir.made:
@@ -440,22 +456,38 @@ def _reshard(ir, node, have, want):
 
     def gather(have, m):
         after, d, shape = tuple(-1 if s == m else s for s in have), have.index(m), ir.local(node, have)
+        target = (node, after)
+        size = ir.local(node, after)[d]
+        padded = shape[d] * ir.shape[m]
+        made = target if padded == size else target + ('gather', m)
+        if made != target:
+            ir.shapes[made] = shape[:d] + (padded,) + shape[d + 1:]
         own = (node, after, 'own')
         ir.shapes[own] = shape
-        ir.inside[own] = ((node, after), d, {e: ir.coords[e][m] * shape[d] for e in ir.coords})
+        ir.inside[own] = (made, d, {e: ir.coords[e][m] * shape[d] for e in ir.coords})
         step(('copy', ((node, have),), own, None))
-        step(('collective', (own,), (node, after), Collective('all-gather', node, (m,), d, len(ir.program))))
+        step(('collective', (own,), made, Collective('all-gather', node, (m,), d, len(ir.program))))
+        if made != target:
+            step(('narrow', (made,), target, (d, 0, size)))
         return after
 
     def exchange(have, m):
         i, j = have.index(m), want.index(m)
         after, shape = tuple(-1 if k == i else m if k == j else s for k, s in enumerate(have)), ir.local(node, have)
+        source = _partition_pad(ir, (node, have), j, -(-shape[j] // ir.shape[m]) * ir.shape[m])
+        padded = shape[i] * ir.shape[m]
+        target, size = (node, after), ir.local(node, after)[i]
+        made = target if padded == size else target + ('exchange', m)
+        ir.shapes[made] = tuple(padded if k == i else -(-n // ir.shape[m]) if k == j else n
+                               for k, n in enumerate(shape))
         own = (node, after, 'own')
-        ir.shapes[own] = tuple(n // ir.shape[m] if k == j else n for k, n in enumerate(shape))
-        ir.inside[own] = ((node, after), i, {e: ir.coords[e][m] * shape[i] for e in ir.coords})
-        step(('copy', ((node, have),), own, (j, m)))
-        step(('collective', ((node, have),), (node, after),
+        ir.shapes[own] = tuple(-(-n // ir.shape[m]) if k == j else n for k, n in enumerate(shape))
+        ir.inside[own] = (made, i, {e: ir.coords[e][m] * shape[i] for e in ir.coords})
+        step(('copy', (source,), own, (j, m)))
+        step(('collective', (source,), made,
               Collective('all-to-all', node, (m,), (i, j), len(ir.program))))
+        if made != target:
+            step(('narrow', (made,), target, (i, 0, size)))
         return after
     if node.op in ('placeholder', 'get_attr'):
         have = (-1,) * len(have)
@@ -471,7 +503,9 @@ def _reshard(ir, node, have, want):
     for m in range(len(ir.shape)):
         if m in want and m not in have:
             after = tuple(m if k == want.index(m) else s for k, s in enumerate(have))
-            step(('slice', ((node, have),), (node, after), (want.index(m), m)))
+            d = want.index(m)
+            source = _partition_pad(ir, (node, have), d, -(-ir.local(node, have)[d] // ir.shape[m]) * ir.shape[m])
+            step(('slice', (source,), (node, after), (d, m)))
             have = after
     return node, have
 
@@ -604,12 +638,18 @@ def _partition(ir, operators):
                 reads = ((rule.merged, 'merged', node),)
             key = (node, local, 'partial') if partial else (node, local)
             made = [key + ('cut', j) for j in range(len(cuts))] + [key]
+            ir.trims[made[0]] = [(k, own.index(label), m, _value(rule.operands[k]).shape[own.index(label)])
+                                 for label, m in contracted.items() if m >= 0
+                                 for k, own in enumerate(labels) if label in own
+                                 and _value(rule.operands[k]).shape[own.index(label)] % ir.shape[m]]
             ir.program.append(('call', reads, made[0], node))
             for j, (at, m, after, o) in enumerate(cuts):
                 ir.program.append(('window', (made[j],), made[j + 1], (at, m, after, o, None, None, None)))
             if any(m in used for m in partial):
                 (m,) = partial
-                ir.program.append(('collective', (key,), (node, target),
+                d = target.index(m)
+                source = _partition_pad(ir, key, d, -(-_shape(ir, key)[d] // ir.shape[m]) * ir.shape[m])
+                ir.program.append(('collective', (source,), (node, target),
                                    Collective('reduce-scatter', node, (m,), target.index(m), len(ir.program))))
             elif partial:
                 ir.program.append(('collective', (key,), (node, target),
@@ -652,11 +692,6 @@ def partition(gm, placement, nodes, page):
                                     and bool(operands) and all(operands) and _aliases(ir.locals[node]))
     annotated |= {node for node, whole in replicated.items() if whole and ir.sharding[node] is not None}
     _complete(ir, operators, annotated)
-    for node, sharding in ir.sharding.items():
-        for size, m in zip(_value(node).shape if sharding is not None else (), sharding or ()):
-            if m >= 0 and size % ir.shape[m]:
-                raise NotImplementedError('%s: a dimension of %d over a mesh dimension of %d (GSPMD section 4.1 pads '
-                                          'it, which the contract does not give)' % (node.name, size, ir.shape[m]))
     _partition(ir, operators)
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
@@ -744,7 +779,7 @@ def _viewed(item):
 
 
 def _sliced(item):
-    return item[0] in ('slice', 'narrow') or _viewed(item)
+    return item[0] in ('slice', 'narrow', 'pad') or _viewed(item)
 
 
 # GSPMD section 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram
@@ -885,7 +920,7 @@ def _part(ir, key, j):
 def _cut(ir, kind, operand, sizes, device):
     if kind == 'slice':
         d, m = operand
-        n = sizes[d] // ir.shape[m]
+        n = -(-sizes[d] // ir.shape[m])
         return d, ir.coords[device][m] * n, n
     if kind == 'narrow':
         return operand
@@ -901,6 +936,8 @@ def _inside_of(ir, key, device):
 # MPI 4.1 section 7.8; torch 2.14.0 torch/_tensor_docs.py, view
 def _placement(ir, item, reads, device, added):
     kind, _, key, operand = item
+    if kind == 'pad':
+        return None if key in ir.attributes and key not in ir.loads else _own(ir, key)
     if key in ir.inside:
         place = _inside_of(ir, key, device)
         if kind != 'copy' or reads[0] is None:
@@ -1490,27 +1527,28 @@ def _transport():
     return TRANSPORT[0]
 
 
-# dyld include/mach-o/dyld-interposing.h, DYLD_INTERPOSE; torch 2.14.0 aten/src/ATen/mps/MPSDevice.mm
+# dlfcn.h dladdr; metal-microbench metal_recording.h
 RECORDER = []
 
 
-def _inserted():
-    path = next((p for p in os.environ.get('DYLD_INSERT_LIBRARIES', '').split(':')
-                 if os.path.basename(p) == 'libmetal_recording.dylib'), None)
-    if path is None:
-        raise OSError(errno.ENOENT, 'no recorder in the process: the program starts with DYLD_INSERT_LIBRARIES='
-                                    '<metal-microbench>/.build/libmetal_recording.dylib, whose repository holds the '
-                                    'operators\' sources')
-    return path
+class _LibraryInfo(C.Structure):
+    _fields_ = [('path', C.c_char_p), ('base', C.c_void_p), ('symbol', C.c_char_p), ('address', C.c_void_p)]
 
 
 def _repository():
-    return os.path.dirname(os.path.dirname(os.path.abspath(_inserted())))
+    info = _LibraryInfo()
+    locate = C.CDLL(None).dladdr
+    locate.argtypes, locate.restype = [C.c_void_p, C.POINTER(_LibraryInfo)], C.c_int
+    if not locate(_recorder()[0].MetalRecorderOpen, C.byref(info)):
+        raise OSError(errno.ENOENT, 'the loaded recorder has no library path')
+    return os.path.dirname(os.path.dirname(os.path.realpath(os.fsdecode(info.path))))
 
 
 def _recorder():
     if not RECORDER:
-        path = _inserted()
+        path = next((p for p in os.environ.get('DYLD_INSERT_LIBRARIES', '').split(':')
+                     if os.path.basename(p) == 'libmetal_recording.dylib'), None) \
+            or ctypes.util.find_library('metal_recording') or 'libmetal_recording.dylib'
         lib, metal = C.CDLL(path), C.CDLL('/System/Library/Frameworks/Metal.framework/Metal')
         lib.MetalRecorderOpen.restype, lib.MetalRecorderOpen.argtypes = C.c_void_p, [C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalRecorderPrepare.restype = C.c_void_p
@@ -1522,6 +1560,15 @@ def _recorder():
         lib.MetalRecorderProgram.restype = C.c_void_p
         lib.MetalRecorderProgram.argtypes = [C.c_void_p, C.POINTER(Call), mesh.U, C.POINTER(mesh_graph.Machine),
                                              C.POINTER(mesh.Planned), C.c_char_p, C.c_size_t]
+        for name in ('MetalRecorderSave', 'MetalProgramSave'):
+            function = getattr(lib, name)
+            function.restype = C.c_int
+            function.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), C.POINTER(C.c_size_t), C.c_char_p, C.c_size_t]
+        lib.MetalRecorderLoad.restype = C.c_void_p
+        lib.MetalRecorderLoad.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p, C.c_size_t, C.c_char_p, C.c_size_t]
+        lib.MetalProgramLoad.restype = C.c_void_p
+        lib.MetalProgramLoad.argtypes = lib.MetalRecorderProgram.argtypes[:-2] + [C.c_void_p, C.c_size_t,
+                                                                               C.c_char_p, C.c_size_t]
         lib.MetalProgramRun.restype = C.c_int
         lib.MetalProgramRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.Q, mesh.Q, C.c_void_p, C.c_void_p,
                                         C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
@@ -4897,9 +4944,14 @@ def _hosted(ir, item, values):
     if kind == 'call':
         given, local = iter(values), ir.locals[operand]
         return _call(local, *map_arg((local.args, local.kwargs), lambda n: next(given)))
+    if kind == 'pad':
+        dim, extent = operand
+        padding = [0] * (2 * values[0].dim())
+        padding[2 * (values[0].dim() - dim) - 1] = extent - values[0].shape[dim]
+        return A.constant_pad_nd.default(values[0], padding, 0)
     if kind == 'slice':
         (partition_dim, m), world_size = operand, ir.shape[operand[1]]
-        weight_list = torch.split(values[0], _layout(ir, reads[0])[1][partition_dim] // world_size, dim=partition_dim)
+        weight_list = torch.split(values[0], -(-_layout(ir, reads[0])[1][partition_dim] // world_size), dim=partition_dim)
         (piece,) = weight_list[ir.coords[ir.device][m]::world_size]
         return piece
     return values[0].narrow(*_cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device))
@@ -4918,12 +4970,18 @@ def _copied(ir, read, key, cut, source, target):
 def _specialized(ir, placed, item, operands, ops, given):
     kind, reads, key, operand = item
     value = placed(key)
+    if key in ir.attributes:
+        return value
     if kind == 'input':
         value = given[operand]
     elif kind == 'constant' and value is None:
         value = operator.attrgetter(operand)(ir.gm)
     elif kind == 'copy':
         ops += _copied(ir, reads[0], key, operand, operands[0], value)
+    elif kind == 'pad' and key not in ir.loads:
+        source = operands[0]
+        ops += _fill(value, 0)
+        ops += _assign(value.narrow(operand[0], 0, source.shape[operand[0]]), source)
     elif kind == 'window' and key in ir.inside:
         dim, m, _, length, starts, size, fill = operand
         q = ir.coords[ir.device][m]
@@ -4933,6 +4991,11 @@ def _specialized(ir, placed, item, operands, ops, given):
     elif kind in ('slice', 'narrow', 'window') and value is None:
         value = operands[0].narrow(*_cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device))
     elif kind == 'call':
+        operands = list(operands)
+        for at, dim, m, size in ir.trims.get(key, ()):
+            extent = -(-size // ir.shape[m])
+            valid = max(0, min(extent, size - ir.coords[ir.device][m] * extent))
+            operands[at] = operands[at].narrow(dim, 0, valid)
         value, made = _called(ir, key, operands, ir.locals[operand], ir.forms.get(key), placed)
         ops += made
     elif kind == 'collective':
@@ -5193,6 +5256,14 @@ class Sending(C.Structure):
                 ('transfer', mesh.U), ('padding', mesh.U)]
 
 
+class ValueInfo(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('role', 'scalar', 'storage', 'function', 'index', 'word', 'of', 'range',
+                                          'received', 'sent', 'zeroed', 'sendings')] + [
+        (name, mesh.Q) for name in ('identity', 'bytes', 'offset', 'at', 'data_bytes')] + [
+        ('data', C.c_void_p), ('buffer', C.c_void_p), ('release', Release), ('page_bytes', mesh.Q),
+        ('pages', mesh.U), ('source', mesh.U)]
+
+
 MACHINES = []
 
 
@@ -5218,9 +5289,15 @@ def _compiler():
         P, U, Q = C.c_void_p, mesh.U, mesh.Q
         for name, result, arguments in (
                 ('metal_ir_program_new', P, []), ('metal_ir_program_free', None, [P]),
+                ('metal_ir_save', C.c_int, [P, C.POINTER(P), C.POINTER(C.c_size_t), C.c_char_p, C.c_size_t]),
+                ('metal_ir_load', P, [P, C.c_size_t, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
                 ('metal_ir_value', U, [P, U, U, U, C.POINTER(Q), U, C.POINTER(Term), C.c_int64, Q]),
                 ('metal_ir_value_view', None, [P, U, U]),
                 ('metal_ir_value_data', None, [P, U, P, C.c_size_t, P, Q, P, RELEASE]),
+                ('metal_ir_value_storage', None, [P, U, P, Q]),
+                ('metal_ir_step_value', U, [P]), ('metal_ir_step_state', U, [P]),
                 ('metal_ir_value_planned', None, [P, U, U, U, Q]), ('metal_ir_value_paged', None, [P, U, Q, U]),
                 ('metal_ir_value_receives', None, [P, U, C.POINTER(Range)]),
                 ('metal_ir_value_sends', None, [P, U, C.POINTER(Release)]),
@@ -5356,6 +5433,7 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             marks['sent'].append((value, release))
         for i in receives + sends:
             marks['sending'][i] = builder.root(storage(k, ir.declared[i].value, j))
+        builder.source_values = compiler.metal_ir_values(builder.p)
         if compiler.metal_ir_lower(builder.p, device, error, len(error)):
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its lowering: %s'
                           % (node.name, k, error.value.decode()))
@@ -5369,7 +5447,7 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
     _Program(gm, call).run(*[instance(k, 0)[1][i][0] if k is not None else constant
                              for i, (constant, k) in enumerate(zip(constants, holders))])
     return {'lib': lib, 'recorder': recorder, 'owners': owners, 'rated': rated, 'rows': rows, 'compiler': compiler,
-            'device': device}
+            'device': device, 'inputs': [ir.inputs for ir in irs]}
 
 
 # design/torch-capture-change-request.md, appendix (actor costs); metal_recording.h MetalRecorderActors: each
@@ -5389,15 +5467,18 @@ def _actors(programs, irs):
                                             C.POINTER(C.c_double), C.POINTER(C.c_double), mesh.U, C.POINTER(mesh.U),
                                             C.POINTER(mesh_graph.Dependence), C.c_size_t, C.POINTER(C.c_size_t)]
         status = lib.MetalRecorderActors(row['prepared'], gpu, cpu, None, None, 0, C.byref(parts), None, 0, C.byref(count))
-        if status not in (0, errno.ERANGE):
+        if status not in (0, errno.ERANGE, errno.ENODATA):
             mesh.check(status)
         host, work = (C.c_double * max(parts.value, 1))(), (C.c_double * max(parts.value, 1))()
         edges = (mesh_graph.Dependence * max(count.value, 1))()
-        mesh.check(lib.MetalRecorderActors(row['prepared'], gpu, cpu, host, work, parts.value, C.byref(parts), edges,
-                                           count.value, C.byref(count)))
-        written, complete = sum(irs[k].values[v].section.bytes for v, _ in irs[k].inputs.values()), True
+        status = lib.MetalRecorderActors(row['prepared'], gpu, cpu, host, work, parts.value, C.byref(parts), edges,
+                                        count.value, C.byref(count))
+        if status not in (0, errno.ENODATA):
+            mesh.check(status)
+        written, complete = sum(irs[k].values[v].section.bytes for v, _ in irs[k].inputs.values()), status == 0
         if parts.value and written:
-            spent, complete = mesh_graph.actor_time(machines[CPU], mesh_graph.Actor(0.0, 1, 1, written, 0, 0, None))
+            spent, measured = mesh_graph.actor_time(machines[CPU], mesh_graph.Actor(0.0, 1, 1, written, 0, 0, None))
+            complete &= measured
             host[0] += spent
         made[k] = host, work, edges, parts.value, count.value, complete
     return made
@@ -5476,9 +5557,18 @@ def _finalized(programs, context, irs, planned, values, owned):
                                                        C.byref(word)))
         compiler.metal_ir_transport(p, word.value)
         row['status'] = word.value
-        if compiler.metal_ir_finalize(p, error, len(error)):
+        status = compiler.metal_ir_loaded(p, error, len(error)) if 'prepared_record' in row else \
+            compiler.metal_ir_finalize(p, error, len(error))
+        if status:
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its emission: %s'
                           % (row['node'].name, k, error.value.decode()))
+        if 'prepared_record' in row:
+            record = row['prepared_record']
+            row['prepared'] = _owned(owned, programs['lib'].MetalRecorderLoad(
+                programs['recorder'], p, record, len(record), error, len(error)))
+            if not row['prepared']:
+                raise OSError(errno.EINVAL, 'call %s: its saved preparation: %s'
+                              % (row['node'].name, error.value.decode()))
     return made
 
 
@@ -5521,13 +5611,13 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
             value = values[k][index]
             PLACE_VALUE(recorder, _SEL(b'place:value:in:offsets:copies:ahead:shares:'), prepared, vi, buffer,
                         offsets(addresses[k][index]), value.section.count, 0, bool(value.shares))
-        step = values[k][steps[k]]
-        PLACE_STEP(recorder, _SEL(b'place:step:offsets:copies:shares:'), prepared, buffer,
-                   offsets(addresses[k][steps[k]]), step.section.count, bool(step.shares))
+        if k in steps:
+            step = values[k][steps[k]]
+            PLACE_STEP(recorder, _SEL(b'place:step:offsets:copies:shares:'), prepared, buffer,
+                       offsets(addresses[k][steps[k]]), step.section.count, bool(step.shares))
         STATE_BUFFER(recorder, _SEL(b'state:buffer:status:'), prepared, made.state, entry['status'])
         replay = Replay()
         status = lib.MetalRecorderReplay(recorder, prepared, C.byref(replay), error, len(error))
-        owned.pop(prepared)()
         if status:
             raise OSError(status, 'call %s of compiled function %d: the replay: %s'
                           % (entry['node'].name, k, error.value.decode()))
@@ -5545,8 +5635,10 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
     # gives no horizon; none recorded: the plan's horizon alone
     machines = _machines()
     given = (mesh_graph.Machine * 2)(machines[GPU], machines[CPU]) if machines else None
-    program = _owned(owned, lib.MetalRecorderProgram(recorder, calls, len(calls), given, C.byref(planned), error,
-                                                     len(error)))
+    arguments = (recorder, calls, len(calls), given, C.byref(planned))
+    program = _owned(owned, lib.MetalProgramLoad(*arguments, programs['native_record'],
+        len(programs['native_record']), error, len(error)) if 'native_record' in programs else
+        lib.MetalRecorderProgram(*arguments, error, len(error)))
     if not program:
         raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
     # metal_recording.h MetalProgramHorizon: the program's lag (the plan's horizon, else its spans' buffer bound), the
@@ -5556,24 +5648,28 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
     # design/synchronization-signature-change-request.md items 1 and 2: the compiled program's one signature over its
     # warm-up and one period of its residues, the plan's composed in by its producer (MetalProgramSignature), kept with
     # the compiled program as the graph module's forms and its record's bytes
-    replayed = mesh_graph.Signature()
-    status = lib.MetalProgramSignature(program, C.addressof(context), horizon + period, C.byref(replayed), error,
-                                       len(error))
-    if status:
-        raise OSError(status, 'the program\'s signature: %s' % error.value.decode())
-    try:
-        signed = dict(mesh_graph.forms(replayed), record=mesh_graph.record(replayed))
-    finally:
-        mesh_graph.free(replayed)
+    if 'signature' in programs:
+        signed = programs['signature']
+    else:
+        replayed = mesh_graph.Signature()
+        status = lib.MetalProgramSignature(program, C.addressof(context), horizon + period, C.byref(replayed), error,
+                                           len(error))
+        if status:
+            raise OSError(status, 'the program\'s signature: %s' % error.value.decode())
+        try:
+            signed = dict(mesh_graph.forms(replayed), record=mesh_graph.record(replayed))
+        finally:
+            mesh_graph.free(replayed)
     # tools/e2b_replay.m signature_write: the record and its three printed forms beside the prefix MESH_SIGNATURE names,
     # the mesh-sync-monitor.py operand
     prefix = os.environ.get('MESH_SIGNATURE')
     if prefix:
+        written = True
         for suffix, data in (('.record', signed['record']), ('.mtx', signed['matrix_market'].encode()),
                              ('.dot', signed['dot'].encode()), ('.txt', signed['space_time'].encode())):
-            with open(prefix + suffix, 'wb') as written:
-                written.write(data)
-        print('prepared signature %s digest %s' % (prefix, signed['digest']), flush=True)
+            written = mesh_disk.write(prefix + suffix, data, 'a MESH_SIGNATURE artifact', 'w') and written
+        if written:
+            print('prepared signature %s digest %s' % (prefix, signed['digest']), flush=True)
     gpu = OBJECT(queue, _SEL(b'device'))
     allocators = (C.c_void_p * horizon)(*[_owned(owned, OBJECT(gpu, _SEL(b'newCommandAllocator')))
                                           for _ in range(horizon)])
@@ -5591,7 +5687,26 @@ def _period(copies, horizon):
 # item 6; torch 2.14.0 torch/_inductor/cudagraph_trees.py: the block's outputs specialized once to each block execution
 # residue p, each call's results the placed tensors of their stand-ins at the copies of its execution p every + ordinal
 # (a block input's at p)
-def _specialize(programs, horizon, bound, gm, constants, inputs, every):
+class _TensorLocation:
+    __slots__ = ('function', 'value', 'copy', 'shape', 'stride', 'offset', 'dtype')
+
+    def __init__(self, function, value, copy, shape, stride, offset, dtype):
+        self.function, self.value, self.copy = function, value, copy
+        self.shape, self.stride, self.offset, self.dtype = tuple(shape), tuple(stride), offset, dtype
+
+
+def _outputs(recipe, bound):
+    def tensor(x):
+        if not isinstance(x, _TensorLocation):
+            return x
+        copy = bound[x.function][3][x.value][x.copy]
+        if copy.dtype != x.dtype:
+            copy = copy.view(x.dtype)
+        return copy.as_strided(x.shape, x.stride, copy.storage_offset() + x.offset)
+    return pytree.tree_map(tensor, recipe)
+
+
+def _specialize(programs, horizon, bound, gm, constants, holders, every):
     copies = {k: b[3] for k, b in enumerate(bound)}
     results = {row['node']: row['result'] for row in programs['rows']}
     owners, rated = programs['owners'], programs['rated']
@@ -5599,12 +5714,21 @@ def _specialize(programs, horizon, bound, gm, constants, inputs, every):
     def leaf(x, p):
         if not isinstance(x, torch.Tensor):
             return x
+        if _key(x) not in owners:
+            return x
         k, v, j = owners[_key(x)][:3]
         at = copies[k][v]
-        copy = at[(p if v in rated[k] else p * every[k] + j) % len(at)]
-        return copy.as_strided(x.shape, x.stride(), copy.storage_offset() + x.storage_offset())
+        return _TensorLocation(k, v, (p if v in rated[k] else p * every[k] + j) % len(at),
+                               x.shape, x.stride(), x.storage_offset(), x.dtype)
+    def input(i, p):
+        k = holders[i]
+        if k is None:
+            return constants[i]
+        value, shape = programs['inputs'][k][i]
+        return _TensorLocation(k, value, p % len(copies[k][value]), shape,
+                               [math.prod(shape[d + 1:]) for d in range(len(shape))], 0, copies[k][value][0].dtype)
     return [_Program(gm, lambda node, args, kwargs, p=p: pytree.tree_map(lambda x: leaf(x, p), results[node])).run(
-        *[placed[0][p % len(placed[0])] if placed is not None else constant for constant, placed in zip(constants, inputs)])
+        *[input(i, p) for i in range(len(constants))])
         for p in range(_period(copies, horizon))]
 
 
@@ -5973,6 +6097,100 @@ class _Export(torch.fx.Interpreter):
         return record.result
 
 
+def _bound(context, state, retained, deadline):
+    calls, every, given = retained['calls'], retained['every'], retained['given']
+    nodes, page, irs, programs = retained['nodes'], retained['page'], retained['irs'], retained['programs']
+    steps, arrays, actors, analysed = retained['steps'], retained['arrays'], retained['actors'], retained['analysed']
+    functions = (mesh.Function * len(irs))(*[
+        mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
+                      C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
+                      len(e), 0, analysed.outstanding[k], 0,
+                      *((C.cast(actors[k][0], C.POINTER(C.c_double)), C.cast(actors[k][1], C.POINTER(C.c_double)),
+                         C.cast(actors[k][2], C.POINTER(mesh_graph.Dependence)), actors[k][3], actors[k][4])
+                        if k in actors else (None, None, None, 0, 0)))
+        for k, (d, w, v, e) in enumerate(arrays)])
+    # design/compilation-composition-change-request.md item 6, unit 6D: the plan's results for native
+    # preparation (mesh-collective.h struct mesh_planned), each call's plan, lead, ordinal and every the
+    # identities the specialization and the program's rows take, kept until the program is retired
+    planned = mesh.Planned()
+    arguments = (C.byref(context), _group(), _program(), functions, len(irs),
+                 (mesh.U * len(calls))(*calls), len(calls), analysed.orders, analysed.causes,
+                 analysed.norders, analysed.chains, deadline)
+    if 'saved_plan' in retained:
+        record = retained['saved_plan']
+        mesh.check(mesh.LIB.mesh_plan_load(*arguments, record, len(record), C.byref(planned)))
+    else:
+        mesh.check(mesh.LIB.mesh_plan(*arguments, C.byref(planned)))
+    retained['functions'], retained['planned'] = functions, planned
+    state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
+    state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
+    # JGroups ViewId.java
+    views = [mesh.State.from_address(context.M + f.plan) for f in functions]
+    if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
+        raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
+    listed = [values for _, _, values, _ in arrays]
+    # 6's stage D: the plan's transport words into each row's program, then its final emission
+    made = _finalized(programs, context, irs, planned, listed, state['owned'])
+    view, addresses = _mapped(context, functions, len(irs), listed, page)
+    state['mapping'].view, hull = view, _hull(listed, addresses, page)
+    buffer = _placed_buffer(hull)
+    try:
+        bound = [_bind(ir, values, at, buffer, hull.address, page, state['mapping'])
+                 for ir, values, at in zip(irs, listed, addresses)]
+        state['inputs'] = [next((b[2][i] for b in bound if i in b[2]), None) for i in range(len(given))]
+        # 6's stage E: each row bound to its placed storage and replayed into the one native program, its
+        # outputs specialized over the program's horizon
+        state['replay'] = _replays(programs, context, irs, planned, listed, addresses, hull.address, buffer,
+                                   bound, state['owned'], made, steps, every)
+        state['horizon'] = state['replay']['horizon']
+        if 'output_recipe' not in retained:
+            retained['output_recipe'] = _specialize(programs, state['horizon'], bound, *retained['capture'],
+                                                     retained['holders'], every)
+        state['replay']['outputs'] = _outputs(retained['output_recipe'], bound)
+        retained['bound'], retained['addresses'] = bound, addresses
+    finally:
+        if buffer:
+            PUT(buffer, SELECTOR[b'release'])
+    # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5; Megatron-LM
+    # core_r0.12.0 megatron/core/tensor_parallel/layers.py:156–165; design/problems-of-14b9a757-change-
+    # request.md, "Sources for the second stops", 8, and "Sources for the third stops", 8;
+    # design/torch-source-lowering-change-request.md item 1
+    if 'initial' in retained:
+        for k, v, copies in retained['initial']:
+            value = listed[k][v]
+            for at, data in zip(addresses[k][v], copies):
+                if isinstance(at, list):
+                    for page_index, address in enumerate(at):
+                        piece = data[page_index * page:(page_index + 1) * page]
+                        C.memmove(address, piece, len(piece))
+                else:
+                    C.memmove(at, data, value.section.bytes)
+        return
+    launched = False
+    for ir, (places, _, _, _) in zip(irs, bound):
+        loaded = ir.loads & places.keys()
+        needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
+        host = mesh_graph.forward([key for key in ir.attributes if key in needed],
+                                  lambda key: ir.attributes[key][1],
+                                  lambda key, values: _hosted(ir, ir.attributes[key], values))
+        for key in loaded:
+            places[key][0].copy_(host[key])
+            launched = launched or places[key][0].device.type == 'mps'
+    if launched:
+        torch.mps.synchronize()
+    retained['initial'] = _initial(retained)
+    programs['state_data'] = {}
+    for row in programs['rows']:
+        if row['builder'] is None:
+            continue
+        for v in range(row['builder'].source_values):
+            info = ValueInfo()
+            programs['compiler'].metal_ir_value_info(row['builder'].p, v, C.byref(info))
+            if info.role == STATE and info.storage == v and (info.data or info.buffer):
+                key, address, length = _constant_storage(info)
+                programs['state_data'][key] = C.string_at(address, length)
+
+
 # design/aot-compilation-change-request.md A1 to A3, A8 to A10 and appendix item 7;
 # design/disjoint-pages-change-request.md C3.1, D.3.2 and D.3.3; mesh-collective.h mesh_plan, struct mesh_function and
 # struct mesh_value; mesh-dataflow.h mesh_nodes_read, mesh_retire and struct mesh_ctx
@@ -6065,7 +6283,9 @@ def program(block, *example_inputs):
         # executions in flight owns copy e mod copies; 8 bytes, e's 64 bits as the host's executions,
         # generations and count targets are
         steps = {}
-        for k in dict.fromkeys(row['k'] for row in programs['rows'] if row['builder'] is not None):
+        for k in dict.fromkeys(row['k'] for row in programs['rows'] if row['builder'] is not None
+                                and programs['compiler'].metal_ir_step_value(row['builder'].p) != NONE
+                                and programs['compiler'].metal_ir_step_state(row['builder'].p) == NONE):
             steps[k] = len(irs[k].values) + len(own[k])
             own[k].append(mesh.Value(section=mesh.Section(bytes=8), kind=mesh.EXECUTION, lag=1, run=1))
         arrays = [((mesh.Declared * len(ir.declared))(*ir.declared),
@@ -6080,81 +6300,248 @@ def program(block, *example_inputs):
         state['incomplete'] = sorted(k for k, actor in actors.items() if not actor[5])
         analysed = _analyse(gm, of, compiled, sources, every)
         return {'nodes': nodes, 'page': page, 'irs': irs, 'holders': holders, 'programs': programs, 'steps': steps,
-                'arrays': arrays, 'actors': actors, 'analysed': analysed}
+                'arrays': arrays, 'actors': actors, 'analysed': analysed, 'calls': calls, 'every': every,
+                'given': given, 'constants': constants, 'capture': (gm, constants)}
 
-    def _bound(retained, deadline):
-        nodes, page, irs, programs = retained['nodes'], retained['page'], retained['irs'], retained['programs']
-        steps, arrays, actors, analysed = retained['steps'], retained['arrays'], retained['actors'], retained['analysed']
-        functions = (mesh.Function * len(irs))(*[
-            mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
-                          C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
-                          len(e), 0, analysed.outstanding[k], 0,
-                          *((C.cast(actors[k][0], C.POINTER(C.c_double)), C.cast(actors[k][1], C.POINTER(C.c_double)),
-                             C.cast(actors[k][2], C.POINTER(mesh_graph.Dependence)), actors[k][3], actors[k][4])
-                            if k in actors else (None, None, None, 0, 0)))
-            for k, (d, w, v, e) in enumerate(arrays)])
-        # design/compilation-composition-change-request.md item 6, unit 6D: the plan's results for native
-        # preparation (mesh-collective.h struct mesh_planned), each call's plan, lead, ordinal and every the
-        # identities the specialization and the program's rows take, kept until the program is retired
-        planned = mesh.Planned()
-        mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
-                                      (mesh.U * len(calls))(*calls), len(calls), analysed.orders,
-                                      analysed.causes, analysed.norders, analysed.chains, deadline,
-                                      C.byref(planned)))
-        state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
-        state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
-        # JGroups ViewId.java
-        views = [mesh.State.from_address(context.M + f.plan) for f in functions]
-        if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
-            raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
-        listed = [values for _, _, values, _ in arrays]
-        # 6's stage D: the plan's transport words into each row's program, then its final emission
-        made = _finalized(programs, context, irs, planned, listed, state['owned'])
-        view, addresses = _mapped(context, functions, len(irs), listed, page)
-        state['mapping'].view, hull = view, _hull(listed, addresses, page)
-        buffer = _placed_buffer(hull)
-        try:
-            bound = [_bind(ir, values, at, buffer, hull.address, page, state['mapping'])
-                     for ir, values, at in zip(irs, listed, addresses)]
-            state['inputs'] = [next((b[2][i] for b in bound if i in b[2]), None) for i in range(len(given))]
-            # 6's stage E: each row bound to its placed storage and replayed into the one native program, its
-            # outputs specialized over the program's horizon
-            state['replay'] = _replays(programs, context, irs, planned, listed, addresses, hull.address, buffer,
-                                       bound, state['owned'], made, steps, every)
-            state['horizon'] = state['replay']['horizon']
-            state['replay'].update(outputs=_specialize(programs, state['horizon'], bound, gm, constants,
-                                                       state['inputs'], every))
-        finally:
-            if buffer:
-                PUT(buffer, SELECTOR[b'release'])
-        # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5; Megatron-LM
-        # core_r0.12.0 megatron/core/tensor_parallel/layers.py:156–165; design/problems-of-14b9a757-change-
-        # request.md, "Sources for the second stops", 8, and "Sources for the third stops", 8;
-        # design/torch-source-lowering-change-request.md item 1
-        launched = False
-        for ir, (places, _, _, _) in zip(irs, bound):
-            loaded = ir.loads & places.keys()
-            needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
-            host = mesh_graph.forward([key for key in ir.attributes if key in needed],
-                                      lambda key: ir.attributes[key][1],
-                                      lambda key, values: _hosted(ir, ir.attributes[key], values))
-            for key in loaded:
-                places[key][0].copy_(host[key])
-                launched = launched or places[key][0].device.type == 'mps'
-        if launched:
-            torch.mps.synchronize()
     def make():
         deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
         if state['mapping'] is not None or state['owned']:
             _retire(context, state)
         try:
             state['built'] = _built()
-            _bound(state['built'], deadline)
+            _bound(context, state, state['built'], deadline)
         except BaseException:
             _retire(context, state)
             raise
         state.update(stale=False)
 
+    return _runner(context, state, make)
+
+
+# design/aot-compilation-change-request.md A1; metal_ir.h metal_ir_save/load; metal_recording.h
+# MetalRecorderSave/Load and MetalProgramSave/Load; mesh-collective.h mesh_plan_save/load
+_FREE = C.CDLL(None).free
+_FREE.restype, _FREE.argtypes = None, [C.c_void_p]
+_NEW_BUFFER = _message(C.c_void_p, C.c_ulong, C.c_ulong)
+
+
+def _saved_bytes(function, *arguments, diagnostic=True):
+    data, size, error = C.c_void_p(), C.c_size_t(), C.create_string_buffer(4096)
+    status = function(*arguments, C.byref(data), C.byref(size), *([error, len(error)] if diagnostic else []))
+    try:
+        if status:
+            raise OSError(status, error.value.decode() if diagnostic else function.__name__)
+        return C.string_at(data, size.value)
+    finally:
+        _FREE(data)
+
+
+def _records(kind, data):
+    return (kind * (len(data) // C.sizeof(kind))).from_buffer_copy(data)
+
+
+def _declared_record(value):
+    record = mesh.Declared.from_buffer_copy(bytes(value))
+    pairs = [tuple(view.pairs[:2 * view.dims]) for view in (value.from_, value.to)]
+    record.from_.pairs, record.to.pairs = None, None
+    return bytes(record), pairs
+
+
+def _declared_restore(saved):
+    values = []
+    for data, pairs in saved:
+        value = mesh.Declared.from_buffer_copy(data)
+        value.from_.pairs = _array(mesh.Q, pairs[0])
+        value.to.pairs = _array(mesh.Q, pairs[1])
+        values.append(value)
+    return (mesh.Declared * len(values))(*values)
+
+
+def _initial(retained):
+    records = []
+    for k, ((_, _, values, _), addresses) in enumerate(zip(retained['arrays'], retained['addresses'])):
+        for v, (value, copies) in enumerate(zip(values, addresses)):
+            if value.kind != mesh.INVARIANT and not value.lag:
+                continue
+            contents = []
+            for at in copies:
+                if isinstance(at, list):
+                    data = b''.join(C.string_at(address, min(retained['page'], value.section.bytes - j * retained['page']))
+                                    for j, address in enumerate(at))
+                else:
+                    data = C.string_at(at, value.section.bytes)
+                contents.append(data)
+            records.append((k, v, contents))
+    return records
+
+
+def _artifact_header():
+    machines = _machines()
+    return (1, sys.byteorder, C.sizeof(C.c_void_p), torch.__version__,
+            tuple(C.sizeof(t) for t in (mesh.Declared, mesh.Weight, mesh.Value, mesh.Dependence, Range, Release,
+                                       ValueInfo, mesh_graph.Dependence)),
+            tuple((k, bytes(v)) for k, v in sorted(machines.items())))
+
+
+def _constant_storage(info):
+    return (('buffer', info.buffer), OBJECT(info.buffer, _SEL(b'contents')), VALUE(info.buffer, _SEL(b'length'))) \
+        if info.buffer else (('data', info.data, info.data_bytes), info.data, info.data_bytes)
+
+
+def _save_program(context, state, path):
+    retained, replay = state['built'], state['replay']
+    programs, analysed, calls = retained['programs'], retained['analysed'], retained['calls']
+    error = C.create_string_buffer(4096)
+    status = replay['lib'].MetalProgramEnd(replay['program'], replay['ended'], error, len(error))
+    if status:
+        raise OSError(status, error.value.decode())
+    plan = _saved_bytes(mesh.LIB.mesh_plan_save, C.byref(context), _program(), retained['functions'],
+                       len(retained['functions']), _array(mesh.U, calls), len(calls), analysed.orders, analysed.causes,
+                       analysed.norders, analysed.chains, C.byref(retained['planned']), diagnostic=False)
+    arrays = [([_declared_record(v) for v in d], bytes(w), bytes(v), bytes(e))
+              for d, w, v, e in retained['arrays']]
+    actors = {k: (bytes(host), bytes(work), bytes(edges), parts, count, complete)
+              for k, (host, work, edges, parts, count, complete) in retained['actors'].items()}
+    rows, storage, unique = [], [], {}
+    for row in programs['rows']:
+        record = {key: row[key] for key in ('k', 'j')}
+        record['node'] = row['node'].name
+        if row['builder'] is not None:
+            p, constants = row['builder'].p, []
+            for v in range(row['builder'].source_values):
+                info = ValueInfo()
+                programs['compiler'].metal_ir_value_info(p, v, C.byref(info))
+                if info.storage != v or (not info.data and not info.buffer):
+                    continue
+                key, address, size = _constant_storage(info)
+                if key not in unique:
+                    unique[key] = len(storage)
+                    data = programs.get('state_data', {}).get(key)
+                    storage.append((bool(info.buffer), data if data is not None else C.string_at(address, size)))
+                constants.append((v, unique[key], info.at, info.data_bytes,
+                                  info.data - address if info.data else None))
+            received = []
+            for v, f, value, declared in row['marks']['received']:
+                declaration = Range.from_buffer_copy(bytes(declared))
+                declaration.field, declaration.input = None, Remote()
+                received.append((v, f, value, bytes(declaration)))
+            sent = []
+            for v, release in row['marks']['sent']:
+                declaration = Release.from_buffer_copy(bytes(release))
+                declaration.supplied = declaration.status = 0
+                sent.append((v, bytes(declaration)))
+            record.update(program=_saved_bytes(programs['compiler'].metal_ir_save, p),
+                          prepared=_saved_bytes(programs['lib'].MetalRecorderSave, row['prepared']), constants=constants,
+                          source_values=row['builder'].source_values,
+                          planned=row['builder'].planned, own=row['own'], receives=row['receives'], sends=row['sends'],
+                          marks={'received': received, 'sent': sent, 'sending': row['marks']['sending']})
+        rows.append(record)
+    payload = {key: retained[key] for key in ('page', 'holders', 'steps', 'calls', 'every', 'given', 'constants',
+                                             'output_recipe', 'initial')}
+    payload.update(header=_artifact_header(), plan=plan, arrays=arrays, actors=actors, rows=rows, storage=storage,
+                   irs=[(ir.layouts, ir.inputs, ir.device) for ir in retained['irs']],
+                   analysed=(analysed.outstanding, bytes(analysed.orders), bytes(analysed.causes), analysed.norders,
+                             bytes(analysed.chains)),
+                   native=_saved_bytes(programs['lib'].MetalProgramSave, replay['program']), signature=replay['signature'])
+    return mesh_disk.write(path, b'MESH-AOT\0' + pickle.dumps(payload, protocol=5), 'a compiled mesh program', 'w')
+
+
+def _restore_programs(saved, owned):
+    lib, made = _recorder()
+    compiler, error, device = _compiler(), C.create_string_buffer(4096), made()
+    recorder = _owned(owned, lib.MetalRecorderOpen(device, error, len(error)))
+    PUT(device, SELECTOR[b'release'])
+    if not recorder:
+        raise OSError(errno.ENODEV, error.value.decode())
+    storage = []
+    for fixed, data in saved['storage']:
+        blob = C.create_string_buffer(data, max(len(data), 1))
+        if fixed:
+            buffer = _owned(owned, _NEW_BUFFER(device, _SEL(b'newBufferWithLength:options:'), max(len(data), 1), SHARED))
+            if not buffer:
+                raise OSError(errno.ENOMEM, 'saved constant storage')
+            address = OBJECT(buffer, _SEL(b'contents'))
+            C.memmove(address, data, len(data))
+        else:
+            owned[id(blob)] = lambda blob=blob: None
+            address, buffer = C.addressof(blob), None
+        storage.append((address, buffer))
+    rows, state_data = [], {}
+    for source in saved['rows']:
+        row = {key: source[key] for key in ('k', 'j')}
+        row.update(node=types.SimpleNamespace(name=source['node']), builder=None)
+        if 'program' in source:
+            data = source['program']
+            p = compiler.metal_ir_load(data, len(data), device, error, len(error))
+            if not p:
+                raise OSError(errno.EINVAL, 'saved call %s: %s' % (source['node'], error.value.decode()))
+            builder = types.SimpleNamespace(p=p, planned=source['planned'], source_values=source['source_values'])
+            owned[id(builder)] = lambda p=p: compiler.metal_ir_program_free(p)
+            for v, index, at, count, offset in source['constants']:
+                info = ValueInfo()
+                compiler.metal_ir_value_info(p, v, C.byref(info))
+                if info.data:
+                    continue
+                address, buffer = storage[index]
+                if offset is not None:
+                    compiler.metal_ir_value_data(p, v, address + offset, count, buffer, at, None, RELEASE())
+                else:
+                    compiler.metal_ir_value_storage(p, v, buffer, at)
+                if info.role == STATE:
+                    key = ('buffer', buffer) if buffer else ('data', address + (offset or 0), count)
+                    state_data[key] = saved['storage'][index][1]
+            row.update(builder=builder, prepared_record=source['prepared'], own=source['own'],
+                       receives=source['receives'], sends=source['sends'],
+                       marks={'received': [(v, f, value, Range.from_buffer_copy(data))
+                                           for v, f, value, data in source['marks']['received']],
+                              'sent': [(v, Release.from_buffer_copy(data)) for v, data in source['marks']['sent']],
+                              'sending': source['marks']['sending']})
+        rows.append(row)
+    return {'lib': lib, 'compiler': compiler, 'device': device, 'recorder': recorder, 'rows': rows,
+            'rated': {k: {v for v, _ in inputs.values()} for k, (_, inputs, _) in enumerate(saved['irs'])},
+            'native_record': saved['native'], 'signature': saved['signature'], 'state_data': state_data}
+
+
+def load(path):
+    with open(path, 'rb') as stream:
+        if stream.read(9) != b'MESH-AOT\0':
+            raise ValueError('not a mesh compiled artifact')
+        saved = pickle.load(stream)
+    if saved['header'] != _artifact_header():
+        raise ValueError('the saved program has different Torch, record layout, or machine configuration; compile '
+                         'for the current configuration')
+    context, state = _context(), {'stale': True, 'mapping': None, 'devices': (), 'executions': 0, 'horizon': 1,
+                                  'inputs': [None] * len(saved['given']), 'timeout': None, 'replay': None, 'owned': {}}
+
+    def make():
+        if state['mapping'] is not None or state['owned']:
+            _retire(context, state)
+        try:
+            nodes = mesh.Nodes()
+            mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
+            arrays = [(_declared_restore(d), _records(mesh.Weight, w), _records(mesh.Value, v),
+                       _records(mesh.Dependence, e)) for d, w, v, e in saved['arrays']]
+            actors = {k: (_records(C.c_double, host), _records(C.c_double, work),
+                          _records(mesh_graph.Dependence, edges), parts, count, complete)
+                      for k, (host, work, edges, parts, count, complete) in saved['actors'].items()}
+            outstanding, orders, causes, count, chains = saved['analysed']
+            irs = [types.SimpleNamespace(layouts=layout, inputs=inputs, device=device, declared=d, values=v, homes={})
+                   for (layout, inputs, device), (d, _, v, _) in zip(saved['irs'], arrays)]
+            retained = {key: saved[key] for key in ('page', 'holders', 'steps', 'calls', 'every', 'given', 'constants',
+                                                   'output_recipe', 'initial')}
+            retained.update(nodes=nodes, irs=irs, arrays=arrays, actors=actors, saved_plan=saved['plan'],
+                            analysed=Calls(outstanding, _records(mesh.U, orders), _records(mesh.U, causes), count,
+                                           _records(mesh.U, chains)), programs=_restore_programs(saved, state['owned']))
+            state['built'] = retained
+            _bound(context, state, retained, time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS)
+            state.update(stale=False)
+        except BaseException:
+            _retire(context, state)
+            raise
+    return _runner(context, state, make)
+
+
+def _runner(context, state, make):
     def timed(work):
         if state['timeout'] is not None:
             raise OSError(errno.ETIMEDOUT, 'the program\'s run ended at its first ETIMEDOUT (R-7): %s'
@@ -6198,6 +6585,11 @@ def program(block, *example_inputs):
         return timed(execution)
     # MTL4CommandQueue.h signalEvent:value:
     run.inputs, run.ended = inputs, ended
+    def save(path):
+        if state['stale']:
+            timed(make)
+        return timed(lambda: _save_program(context, state, path))
+    run.save = save
     run.signature = lambda: state['replay']['signature'] if state['replay'] is not None else None
     weakref.finalize(run, _dropped, context, state)
     return run
