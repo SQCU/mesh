@@ -56,14 +56,78 @@ Rule = collections.namedtuple('Rule', 'kind level operands labels out propagate 
                                       'configure')
 # GSPMD sections 4.1 and 4.3, Appendix A.2
 Window = collections.namedtuple('Window', 'label operand dim extent stride low transposed fill')
+Port = collections.namedtuple('Port', 'scope node index value storage')
+Link = collections.namedtuple('Link', 'source target kind')
+TransferSite = collections.namedtuple('TransferSite', 'position port', defaults=(None,))
+
+
+# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
+class Region:
+    def __init__(self, gm, parent=None, control=None, role='root', path=''):
+        self.regions = [] if parent is None else parent.regions
+        self.id, self.parent, self.control, self.role, self.path = len(self.regions), parent, control, role, path
+        self.gm, self.ports, self.inputs, self.outputs = gm, {}, (), ()
+        self.links, self.children, self.ir = [], [], None
+        self.regions.append(self)
+        for node in gm.graph.nodes:
+            self.ports[node] = tuple(self.port(node, k, value)
+                                     for k, value in enumerate(pytree.tree_leaves(node.meta.get('val'))))
+            if node.op == 'placeholder':
+                self.inputs += self.ports[node]
+            elif node.op == 'output':
+                self.outputs = self.leaves(node.args[0])
+            elif node.op == 'call_function' and node.target in CONTROL:
+                conditional = node.target is torch.ops.higher_order.cond
+                graphs, roles = (node.args[1:3], ('then', 'else')) if conditional \
+                    else (node.args[:2], ('test', 'body'))
+                children = []
+                for graph, own in zip(graphs, roles):
+                    name = graph.target if isinstance(graph, Node) else ''
+                    module = operator.attrgetter(name)(gm) if name else graph
+                    child = Region(module, self, node, own, '.'.join(p for p in (path, name) if p))
+                    self.children.append(child)
+                    children.append(child)
+                initial = self.leaves(node.args[3] if conditional else node.args[2])
+                borrowed = () if conditional else self.leaves(node.args[3])
+                for child in children:
+                    self.links += [Link(source, target, 'borrowed' if conditional else 'initial')
+                                   for source, target in zip(initial, child.inputs)]
+                    self.links += [Link(source, target, 'borrowed')
+                                   for source, target in zip(borrowed, child.inputs[len(initial):])]
+                for child in children if conditional else children[1:]:
+                    self.links += [Link(source, target, 'yield')
+                                   for source, target in zip(child.outputs, self.ports[node])]
+                if not conditional:
+                    self.links += [Link(source, target, 'zero-exit')
+                                   for source, target in zip(initial, self.ports[node])]
+                    self.links += [Link(source, target, 'carried') for child in children
+                                   for source, target in zip(children[1].outputs, child.inputs)]
+
+    def port(self, node, index, value):
+        storage = (self.id, value.untyped_storage()._cdata) if isinstance(value, torch.Tensor) else None
+        return Port(self.id, node, index, value, storage)
+
+    def leaves(self, value):
+        leaves = []
+        for leaf in pytree.tree_leaves(value):
+            if isinstance(leaf, Node):
+                leaves.extend(self.ports[leaf])
+            else:
+                literals = self.ports.setdefault(None, [])
+                port = self.port(None, len(literals), leaf)
+                literals.append(port)
+                leaves.append(port)
+        return tuple(leaves)
 
 
 # design/aot-compilation-change-request.md A2 to A4, A8, A10 and appendix item 7;
 # design/plan-to-bridge-change-request.md R3 and R4; M. Cowan et al., MSCCLang, ASPLOS 2023, sections 4 and 5; GSPMD
 # section 3.1; NCCL User Guide, Collective Operations
 class IR:
-    def __init__(self, gm, placement, nodes):
+    def __init__(self, gm, placement, nodes, region=None):
         self.gm, self.placement, self.weights = gm, placement, None
+        self.region = Region(gm) if region is None else region
+        self.region.ir = self
         self.order = list(gm.graph.nodes)
         self.shape, self.coords, self.map = _mesh(placement, nodes.count)
         here = [d for d, index in enumerate(self.map) if index == nodes.self]
@@ -79,6 +143,7 @@ class IR:
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
         self.given, self.landed = None, {}
         self.trims = {}
+        self.transfer_sites = {}
 
     def emit(self, item):
         self.program.append(item)
@@ -1365,6 +1430,7 @@ def lower(ir):
                 raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
             LOWERINGS[collective.kind](ir, collective, _groups(ir, collective.dims), item[1][0], item[2])
             ir.declares[collective] = range(first, len(ir.declared))
+            ir.transfer_sites.update(dict.fromkeys(ir.declares[collective], TransferSite(collective.position)))
     firsts = mesh_graph.ends(range(len(ir.program))[::-1], lambda g: ir.program[g][1])
     for kind, _, key, collective in ir.program:
         if kind == 'collective' and key in firsts:
@@ -1392,7 +1458,7 @@ def _deliver(irs, wanted, returned, program):
         nodes = sorted(({y for k in readers for y in irs[k].map} | everywhere) - set(ir.map))
         if not nodes:
             continue
-        output = next(item for item in ir.program if item[0] == 'output')[3]
+        position, output = next((g, item[3]) for g, item in enumerate(ir.program) if item[0] == 'output')
         key, source = output[1][pytree.tree_leaves(output[0].args)[o]], min(ir.coords)
         place = ir.places[source][key]
         dtype, shape = _layout(ir, place.owner)
@@ -1403,6 +1469,7 @@ def _deliver(irs, wanted, returned, program):
             continue
         view = _strided(ir, place)
         transfers = ir.transfer(source, nodes, mesh.JOIN, view, dict.fromkeys(nodes, view), at={y: y for y in nodes})
+        ir.transfer_sites.update(dict.fromkeys(transfers.values(), TransferSite(position, ir.region.outputs[o])))
         ir.events += _produced(ir, source, min(transfers.values()), key, 3 * len(ir.program))
         if ir.device == source:
             ir.at.update(dict.fromkeys(transfers.values(), place.owner))
