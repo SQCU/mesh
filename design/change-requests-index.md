@@ -1,11 +1,12 @@
 # Change requests: which are outstanding
 
-As of 2026-11-08, after mesh 792cbb7c and metal-microbench faa18aba. Each entry names a change request, whether it is
+As of 2026-11-08, after mesh e8cd57e0 and metal-microbench 21c44310. Each entry names a change request, whether it is
 outstanding, and what of it is outstanding. The standard every change request follows is
 [change-requests.md](change-requests.md).
 
 ## Outstanding
 
+- [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding, items 1–6.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench 5600d84b, 66a18fab, c0a067fc and 6b8f7c3c, and mesh
     56e33484, e34e7a5e and b482a825. A received operand's reader is masked, the threadgroups whose pages have not

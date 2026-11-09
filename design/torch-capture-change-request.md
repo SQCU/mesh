@@ -556,8 +556,7 @@ Each requirement names the code it replaces, the quoted source, and what is writ
       compute dispatch command with a grid that aligns to threadgroup boundaries, using an indirect buffer for
       arguments." "This method allows you to supply the threadgroups-per-grid counts indirectly via an ``MTLBuffer``
       index. This enables you to calculate this value in the GPU timeline from a shader function, enabling GPU-driven
-      workflows." Its wait, MTL4CommandQueue.h:269 (CS §10–12, as item 1 quotes it): "Schedules an operation to wait
-      for a GPU event of a specific value before continuing to execute any future GPU work."
+      workflows."
     - The later passes' order (LS §1 and §2): L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res.
       22(3), 1997, §2.1, p. 5 of the preprint: "first, we obtain an optimal solution to the linear program,
       C̄1, ..., C̄n; and then we schedule the jobs in order of non-decreasing C̄j, where ties are broken by choosing an
@@ -580,9 +579,8 @@ Each requirement names the code it replaces, the quoted source, and what is writ
     - A compaction after the first pass packs the flagged threadgroups into a dense list by a scan and a scatter, and
       writes the list's length as the later pass's threadgroup count (Harris, Sengupta and Owens; Blelloch). The list is
       the worklist of a data-driven pass (Nasre, Burtscher and Pingali).
-    - The later pass runs the list by a dispatch with an indirect buffer (MTL4ComputeCommandEncoder.h:90–112), after the
-      queue's wait for the event that the landings raise (MTL4CommandQueue.h:269). Each of its threadgroups tests its
-      fields again. It waits for the ranges that land a page some threadgroup of the dispatch reads, and for no other.
+    - The later pass runs the list by a dispatch with an indirect buffer (MTL4ComputeCommandEncoder.h:90–112). Each of
+      its threadgroups tests its fields again.
     - The later passes are a task list (Graham) in the order of non-decreasing completion times of the transfers they
       read, the times mesh_plan's linear program computes and publishes. Ties are broken by the order the capture
       records the passes in (Hall et al.). The recorded calls keep the order they were recorded in (item 1).

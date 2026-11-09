@@ -838,8 +838,7 @@ This section is Claude's. It consolidates the review in C1 into one proposal. It
 - **State lives apart from the data,** in the landed list's own section. Each state word has one writer, and no state
   word is reset while its plan stands.
 - **Everything is placed once, at compile time,** by one allocator, and a program holds exactly what its plan uses.
-- **No lane waits.** Read-after-write is a mask and a later pass. The only waits left are one per pass, held by the
-  command queue, and each ends in bounded time.
+- **No lane waits.** Read-after-write is a mask and a later pass.
 
 1. **Read-after-write by mask and a later pass.**
    - A step's first pass loads its receives' phases from the landed list, `MESH_LANE_BYTES` (a compile-time 16) per
@@ -849,23 +848,12 @@ This section is Claude's. It consolidates the review in C1 into one proposal. It
      models for data-parallel computing, 1990) and writes the later pass's threadgroup count.
      `dispatchThreadgroups(indirectBuffer:)` reads that count when the later pass starts, so the later pass is empty
      when everything has landed.
-   - The later pass is held at the queue by `encodeWaitForEvent:value:` until the node's landed count reaches
-     execution t's target, (t + 1) × the node's receives per execution. This is counted completion: Portals 4
-     counting events (R. Brightwell, B. Barrett et al., The Portals 4.0 network programming interface,
-     SAND2012-10087), which count successes and failures apart; CUDA's `cuStreamWaitValue32`; Metal's
-     `MTLSharedEvent`. The event's value only rises: execution t's later pass waits for t + 1.
    - Landings and cancellations both arrive on the count, as arrivals do on an mbarrier. A cancelled receive arrives
      without changing its phase, so the later pass finds it one phase behind. Its lanes end as an error that the later
      pass writes into the step's status, a word only the GPU writes, which the host reads after the run. No cancel
      word is needed. A link loss is such a cancellation.
-   - The client alone signals the event: when the count reaches the step's target, or at the step's deadline. Its host
-     thread waits on the count's address with a timeout (`os_sync_wait_on_address`, woken by the bridge's arrivals),
-     so that wait is bounded too.
    - Both lane waits in `mesh_read_N` go: the remote wait on the step's mask, and the local countdown. A producer on
-     the same queue comes before its consumer by the command buffer's order or a memory barrier. A host producer is
-     ordered by the event.
-   - This is not waitless. There is one wait per pass, held by the queue, and no lane waits. Concurrent compute
-     encoders with memory barriers let independent work run in the gap.
+     the same queue comes before its consumer by the command buffer's order or a memory barrier.
 2. **The allocator places every value.** Weights, the KV cache, pooled intermediates, exchanges, the GPU's publication
    records, the landed list and the supplied words are all placed by `mesh_plan`'s allocator, in the pages it computes.
    Values written before the first execution and read by every execution (weights; the KV cache as one array) are
@@ -1516,17 +1504,11 @@ throughout.
      the weights, that write is the load: one copy from the buffer the delegate loaded, at the bind. C3.7 allows it,
      because the producer is writing its own value.
    - After the bind, no command reads a delegate buffer.
-3. **Host inputs in copies, ordered by events.** (Departure D12.)
+3. **Host inputs in copies.** (Departure D12.)
    - The per-step host inputs (positions, masks, cache parameters, the schedule's per-step values, the token stream)
      are execution values with copies, not one instance per step. The program declares the host's lag, and the
      allocator gives them copies by it, as modulo variable expansion does for any value. With the host writing step
      t + 1 while the GPU runs step t, the lag is 2.
-   - The host writes step t's inputs into copy t mod k (k being their copies) once the queue has signalled that step
-     t − k is done, then sets its input event to t + 1. Step t's commands that read them are committed after the queue's
-     `waitForEvent:value:` on that event at t + 1. The queue signals each step's end with `signalEvent:value:` after its
-     last commit. The host's wait on that is bounded by MESH_PLATFORM_NS and ends as an error value.
-   - Each event has one writer: the host sets the input event, the queue sets the step event, and the client's waiter
-     sets the landed event. This is C3.1's "A host producer is ordered by the event".
    - Nothing the run binds grows with its steps.
 4. **Metal 4 submission. No Metal 3 command buffers.** (Departure D7.)
    - Every command buffer this code makes is an MTL4CommandBuffer from an MTL4CommandAllocator, committed to an

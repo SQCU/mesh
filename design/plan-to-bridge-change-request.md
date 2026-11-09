@@ -2101,8 +2101,8 @@ code, and each method is used as its source states it.
       - An invariant, written before the first execution and read by every one (C3.2: "placed once, for the plan's
         whole life"), is placed in the registered window when a transfer names it. Every execution's send reads its
         one copy, and its supplied word is raised once.
-      - A program's input is placed per execution, and its caller writes it there as a host producer (C3.1: "A host
-        producer is ordered by the event"). It is sent from those pages.
+      - A program's input is placed per execution, and its caller writes it there as a host producer. It is sent from
+        those pages.
       - The plan call's rules that a lag-k value is "named by no declared transfer", that a transfer's value is
         "MESH_EXECUTION and wire", and that a share's two values have "the same copies" are the coordination's
         contract, not a requirement, and they go. A share whose operand is an invariant names the operand's one copy
