@@ -77,6 +77,11 @@ class IR:
         self.given, self.landed = None, {}
         self.trims = {}
 
+    def emit(self, item):
+        self.program.append(item)
+        if item[2] is not None:
+            self.made.add(item[2])
+
     # GSPMD section 3.1
     def local(self, node, sharding):
         return tuple(-(-s // self.shape[m]) if m >= 0 else s for s, m in zip(_value(node).shape, sharding))
@@ -391,9 +396,7 @@ def _operator(node, local):
         rule = _einsum(local, operands, shapes, out)
     elif packet is A.sum and len(operands) == 1:
         given, rank = _given(local, _names(local)), len(shapes[0])
-        dimensions = given.get('dim')
-        dimensions = tuple(range(rank)) if not rank or dimensions is None or dimensions == [] \
-            else tuple(d % rank for d in _ints(dimensions, 1))
+        dimensions = tuple(_dims(given, _value(operands[0])))
         labels = tuple(('reduced', d) if d in dimensions else d for d in range(rank)) \
             if given.get('keepdim', False) else tuple(d for d in range(rank) if d not in dimensions)
         rule = Rule('reduction', 1, operands, [tuple(range(rank))], labels, (0,), dimensions, (), False, None,
@@ -463,21 +466,21 @@ def _partition_pad(ir, key, dimension, extent):
         return key
     made = key + ('padded', dimension, extent)
     if made not in ir.made:
-        ir.made.add(made)
         ir.shapes[made] = shape[:dimension] + (extent,) + shape[dimension + 1:]
-        ir.program.append(('pad', (key,), made, (dimension, extent)))
+        ir.emit(('pad', (key,), made, (dimension, extent)))
     return made
 
 
 def _reshard(ir, node, have, want):
     def step(item):
         if item[2] not in ir.made:
-            ir.made.add(item[2])
-            ir.program.append(item)
+            ir.emit(item)
 
     def gather(have, m):
         after, d, shape = tuple(-1 if s == m else s for s in have), have.index(m), ir.local(node, have)
         target = (node, after)
+        if target in ir.made:
+            return after
         size = ir.local(node, after)[d]
         padded = shape[d] * ir.shape[m]
         made = target if padded == size else target + ('gather', m)
@@ -495,9 +498,11 @@ def _reshard(ir, node, have, want):
     def exchange(have, m):
         i, j = have.index(m), want.index(m)
         after, shape = tuple(-1 if k == i else m if k == j else s for k, s in enumerate(have)), ir.local(node, have)
-        source = _partition_pad(ir, (node, have), j, -(-shape[j] // ir.shape[m]) * ir.shape[m])
         padded = shape[i] * ir.shape[m]
         target, size = (node, after), ir.local(node, after)[i]
+        if target in ir.made:
+            return after
+        source = _partition_pad(ir, (node, have), j, -(-shape[j] // ir.shape[m]) * ir.shape[m])
         made = target if padded == size else target + ('exchange', m)
         ir.shapes[made] = tuple(padded if k == i else -(-n // ir.shape[m]) if k == j else n
                                for k, n in enumerate(shape))
@@ -510,6 +515,8 @@ def _reshard(ir, node, have, want):
         if made != target:
             step(('narrow', (made,), target, (i, 0, size)))
         return after
+    if (node, want) in ir.made:
+        return node, want
     if node.op in ('placeholder', 'get_attr'):
         have = (-1,) * len(have)
     for m in range(len(ir.shape)):
@@ -563,7 +570,7 @@ def _region(ir, consumer, key, window, m, o, whole):
     reads = [key]
     if left or right:
         ir.shapes[middle], reads = shape, [middle]
-        ir.program.append(('copy', (key,), middle, None))
+        ir.emit(('copy', (key,), middle, None))
     for side, width in () if whole else (('left', left), ('right', right)):
         pieces = []
         for j in range(1, -(-width // n) + 1):
@@ -571,9 +578,9 @@ def _region(ir, consumer, key, window, m, o, whole):
             piece, arrival = (node, key[1], 'halo', consumer, dim, side, j), (node, key[1], 'arrival', consumer, dim,
                                                                                side, j)
             ir.shapes[piece] = ir.shapes[arrival] = tuple(part if i == dim else s for i, s in enumerate(shape))
-            ir.program.append(('narrow', (middle,), piece, (dim, n - part if side == 'left' else 0, part)))
+            ir.emit(('narrow', (middle,), piece, (dim, n - part if side == 'left' else 0, part)))
             pairs = tuple((p, p + j) if side == 'left' else (p + j, p) for p in range(parts - j))
-            ir.program.append(('collective', (piece,), arrival,
+            ir.emit(('collective', (piece,), arrival,
                                Collective('collective-permute', node, (m,), pairs, len(ir.program))))
             pieces.append(arrival)
         reads = pieces[::-1] + reads if side == 'left' else reads + pieces
@@ -585,7 +592,7 @@ def _region(ir, consumer, key, window, m, o, whole):
             ir.inside[k] = (landed, dim, dict.fromkeys(ir.coords, at))
             at += ir.shapes[k][dim]
         ir.inside[region] = (landed, dim, {e: offsets[ir.coords[e][m]] for e in ir.coords})
-    ir.program.append(('window', tuple(reads), region, (dim, m, offsets, length, tuple(starts), size, fill)))
+    ir.emit(('window', tuple(reads), region, (dim, m, offsets, length, tuple(starts), size, fill)))
     return region, after
 
 
@@ -597,9 +604,8 @@ def _partition(ir, operators):
         if node.op in ('placeholder', 'get_attr'):
             sharding = ir.sharding[node]
             whole = None if sharding is None else (-1,) * len(sharding)
-            ir.program.append(('input', (), (node, whole), inputs) if node.op == 'placeholder'
+            ir.emit(('input', (), (node, whole), inputs) if node.op == 'placeholder'
                               else ('constant', (), (node, whole), node.target))
-            ir.made.add((node, whole))
             if sharding is not None:
                 _reshard(ir, node, whole, sharding)
             inputs += node.op == 'placeholder'
@@ -607,14 +613,14 @@ def _partition(ir, operators):
             keys = {value: (value, None) if ir.sharding[value] is None
                     else _reshard(ir, value, ir.sharding[value], (-1,) * len(ir.sharding[value]))
                     for value in node.all_input_nodes}
-            ir.program.append(('output', tuple(keys.values()), None, (node, keys)))
+            ir.emit(('output', tuple(keys.values()), None, (node, keys)))
         elif operators.get(node) is not None:
             rule, sharding = operators[node], ir.sharding[node]
             if rule.labels is None:
                 keys = [(o, None) if ir.sharding[o] is None
                         else _reshard(ir, o, ir.sharding[o], (-1,) * len(ir.sharding[o])) for o in rule.operands]
                 whole = None if sharding is None else (-1,) * len(sharding)
-                ir.program.append(('call', tuple(keys), (node, whole), node))
+                ir.emit(('call', tuple(keys), (node, whole), node))
                 if sharding is not None:
                     _reshard(ir, node, whole, sharding)
                 continue
@@ -655,7 +661,7 @@ def _partition(ir, operators):
                 ir.locals[n] = configured
             reads = tuple(keys)
             if rule.merged is not None:
-                ir.program.append(('call', reads, (rule.merged, 'merged', node), rule.merged))
+                ir.emit(('call', reads, (rule.merged, 'merged', node), rule.merged))
                 reads = ((rule.merged, 'merged', node),)
             key = (node, local, 'partial') if partial else (node, local)
             made = [key + ('cut', j) for j in range(len(cuts))] + [key]
@@ -663,17 +669,17 @@ def _partition(ir, operators):
                                  for label, m in contracted.items() if m >= 0
                                  for k, own in enumerate(labels) if label in own
                                  and _value(rule.operands[k]).shape[own.index(label)] % ir.shape[m]]
-            ir.program.append(('call', reads, made[0], node))
+            ir.emit(('call', reads, made[0], node))
             for j, (at, m, after, o) in enumerate(cuts):
-                ir.program.append(('window', (made[j],), made[j + 1], (at, m, after, o, None, None, None)))
+                ir.emit(('window', (made[j],), made[j + 1], (at, m, after, o, None, None, None)))
             if any(m in used for m in partial):
                 (m,) = partial
                 d = target.index(m)
                 source = _partition_pad(ir, key, d, -(-_shape(ir, key)[d] // ir.shape[m]) * ir.shape[m])
-                ir.program.append(('collective', (source,), (node, target),
+                ir.emit(('collective', (source,), (node, target),
                                    Collective('reduce-scatter', node, (m,), target.index(m), len(ir.program))))
             elif partial:
-                ir.program.append(('collective', (key,), (node, target),
+                ir.emit(('collective', (key,), (node, target),
                                    Collective('all-reduce', node, tuple(partial), None, len(ir.program))))
             if target != sharding:
                 _reshard(ir, node, target, sharding)
@@ -4876,7 +4882,7 @@ def _embedded(target, given, outs):
 FILLS = {A.full: 'fill_value', A.full_like: 'fill_value', A.new_full: 'fill_value', A.scalar_tensor: 's',
          A.fill: 'value', A.zeros: 0, A.zeros_like: 0, A.new_zeros: 0, A.zero: 0, A.ones: 1, A.ones_like: 1,
          A.new_ones: 1}
-EMPTY = (A.empty, A.empty_like, A.new_empty, A.empty_strided)
+EMPTY = (A.empty, A.empty_like, A.new_empty, A.empty_strided, A.empty_permuted)
 
 
 def _factory(target, given, outs):
@@ -4930,7 +4936,8 @@ def _reduction(packet, x, dims, kept, t, start=IDENTITY):
 
 def _dims(given, x):
     dims = given.get('dim')
-    return sorted({d % max(x.dim(), 1) for d in _ints(dims, 1)}) if dims not in (None, []) else list(range(x.dim()))
+    dims = () if dims is None else _ints(dims, 1)
+    return sorted({d % max(x.dim(), 1) for d in dims}) if dims else list(range(x.dim()))
 
 
 def _reduced(target, given, outs):
@@ -7701,13 +7708,16 @@ def _metadata(value):
 
 
 # torch 2.14.0 torch/export/experimental/__init__.py _export_forward_backward;
-# torch/export/exported_program.py _decompose_and_get_gm_with_new_signature_constants, ModuleCallSignature
+# torch/export/exported_program.py _decompose_and_get_gm_with_new_signature_constants, ModuleCallSignature;
+# torch/nn/attention/__init__.py sdpa_kernel, SDPBackend.MATH
 def _exported(function, args, kwargs):
     exported = torch.export.export(function.module, tuple(args), dict(kwargs), strict=False)
     forward = exported.call_spec.out_spec
     if function.loss is not None:
         from torch.export.experimental import _export_forward_backward
-        exported = _export_forward_backward(exported, joint_loss_index=function.loss)
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+        with sdpa_kernel(SDPBackend.MATH):
+            exported = _export_forward_backward(exported, joint_loss_index=function.loss)
     exported = _decomposed(exported)
     if function.loss is not None:
         backward = exported.graph_signature.backward_signature
@@ -7739,11 +7749,11 @@ class _Export(torch.fx.Interpreter):
     def fake(self, value, device=None):
         if not isinstance(value, torch.Tensor):
             return value
-        device = torch.device(device or value.device)
-        converter = self.converters.setdefault(device, MetaConverter())
-        def make(meta, original_device):
+        placed = torch.device(device or value.device)
+        converter = self.converters.setdefault(placed, MetaConverter())
+        def make(meta, device):
             with no_dispatch():
-                return FakeTensor(self.mode, meta(), device)
+                return FakeTensor(self.mode, meta(), placed)
         return converter(value, callback=make)
 
     def run_node(self, n):
