@@ -6,6 +6,9 @@ outstanding, and what of it is outstanding. The standard every change request fo
 
 ## Outstanding
 
+- [compilation-composition-change-request.md](compilation-composition-change-request.md): outstanding, items 1–4.
+  Composes the nine requests below through cited compiler roles, complete lowering, shared representations and
+  module ownership. Their individual implementation records do not establish that this composition is complete.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding, items 1–6.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench 5600d84b, 66a18fab, c0a067fc and 6b8f7c3c, and mesh

@@ -5,3 +5,6 @@ cites the reference authors, theory, papers, books or source code that say exact
 written as that source states it. Code already in these repositories and documents Claude wrote are not sources, since a
 change request exists to replace idiomatic or incomplete code with the cited method. Its body is the turns that led to
 it, quoted verbatim, and where no source says what to write it says so and invents nothing.
+
+For a request composing other requests in externally cited roles, see the
+[example and reusable form](compilation-composition-change-request.md#reusable-form).
